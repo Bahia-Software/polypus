@@ -1,0 +1,2 @@
+include *.json
+recursive-include polypus_python *.json

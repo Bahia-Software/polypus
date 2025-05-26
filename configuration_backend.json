@@ -1,0 +1,5 @@
+{
+    "backend_name": "statevector",
+    "n_qubits": 30,
+    "n_shots": 1000   
+}
