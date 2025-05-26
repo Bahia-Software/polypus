@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/LogoPolypus.png" alt="Logo">
+  <img src="docs/Logo.png" alt="Logo" style="max-width: 300px; height: auto;">
 </p>
 
 
