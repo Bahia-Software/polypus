@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="docs/LogoPolypus.png" alt="Logo">
+</p>
+
+
 # Polypus
 Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation across available hardware resources. The core of the library is written in Rust, while Python bindings are provided to make it more accessible to a broader range of users.
 
