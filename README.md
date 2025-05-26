@@ -49,6 +49,7 @@ result = polypus.run_quantum_circuit(qc, shots=N_SHOTS, n_qpus = N_QPUS, expecta
 - Víctor Sóñora Pombo 
 - Sergio Figueiras Gómez
 - Miguel Boubeta Martínez
+- Galicia Supercomputing Center (CESGA)
 
 ## Dependencies
 Polypus relies on the following Python Packages:
