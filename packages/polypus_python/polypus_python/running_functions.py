@@ -1,6 +1,6 @@
 from qiskit_aer import AerSimulator
 import json
-import os
+import os, sys
 import time
 import random
 from qiskit import QuantumCircuit
@@ -10,6 +10,7 @@ from qiskit.qpy import load
 from qiskit.exceptions import QiskitError, MissingOptionalLibraryError
 import logging
 import shutil
+from cunqa import getQPUs
 
 def get_logger():
     """Get or create the module logger that logs only to a file."""
@@ -26,7 +27,7 @@ def get_logger():
     logger.setLevel(logging.DEBUG)
     return logger
 
-def log_message(message, level="debug"):
+def log_message(message, level="error"):
     logger = get_logger()
     if level == "debug":
         logger.debug(message)
@@ -122,6 +123,7 @@ def serialize_quantum_circuit(qc):
         with open(temp_file, "wb") as f:
             # Serialize the quantum circuit to a file
             dump(qc, f)
+            log_message(f"Quantum circuit serialized successfully to {temp_file}.", "info")
     except QpyError as e:
         log_message(f"QPY serialization error: {e}", "error")
         raise
@@ -140,7 +142,51 @@ def serialize_quantum_circuit(qc):
     
     return True
 
+def run_qc_in_qpu(qpu_id, shots):
+
+    # Get the QPU
+    tic_total = time.time()
+    log_message(f"Running quantum circuit on QPU with ID {qpu_id} and {shots} shots.", "info")
+    sys.path.append(os.getenv("HOME"))
+    
+    tic = time.time()
+    qpus = getQPUs(local=False)
+    log_message(f"Time to get QPUs: {time.time() - tic}s", "debug")
+    qpu = qpus[qpu_id]
+    if qpu is None:
+        log_message(f"QPU with ID {qpu_id} not found.", "error")
+        raise ValueError(f"QPU with ID {qpu_id} not found.")
+
+    # Load the serialized quantum circuit
+    qc = _deserialize_quantum_circuit()
+    if qc is None:
+        log_message("Failed to deserialize the quantum circuit.", "error")
+        raise ValueError("Failed to deserialize the quantum circuit.")
+
+    # Run the quantum circuit on the specified QPU
+    tic = time.time()
+    qjob = qpu.run(qc, shots = shots, transpile=False)
+
+    # Get the counts
+    counts = qjob.result.counts
+    log_message(f"Time to call run :{time.time() - tic}s", "debug")
+    log_message(f"Time to run from QPU: {qjob.result.time_taken}", "info")
+
+    try:
+        print(json.dumps(counts))  # Send to stdout
+    except TypeError as e:
+        log_message(f"Type error during JSON serialization: {e}", "error")
+        raise
+    except Exception as e:
+        log_message(f"Unexpected error during JSON serialization: {e}", "error")
+        raise
+    
+    log_message(f"Total run time taken: {time.time() - tic_total}s", "info")
+    return True
+
 def run_qc(**kwargs):
+    
+    tic_total = time.time()
 
     # Load the configuration
     configuration = _load_configuration()
@@ -196,4 +242,6 @@ def run_qc(**kwargs):
         log_message(f"Unexpected error during JSON serialization: {e}", "error")
         raise
     
+    log_message(f"Time to run the quantum circuit: {result.time_taken}s", "debug")
+    log_message(f"Total run time taken: {time.time() - tic_total}s", "info")
     return True
