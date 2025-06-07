@@ -17,11 +17,13 @@ use rand::distributions::Bernoulli;
 use log::{debug, error};
 use std::io::ErrorKind;
 use std::{thread, time};
+use std::time::Instant;
 
 pub mod algorithms {
    use super::*; 
 
    pub struct AlgorithmArgs<'py> {
+      pub id: String,
       pub qc: Bound<'py, PyAny>,
       pub shots: Option<Bound<'py, PyInt>>,
       pub n_qpus: Option<Bound<'py, PyInt>>,
@@ -102,6 +104,8 @@ pub mod algorithms {
       fn run<'py>(&self, args: AlgorithmArgs<'py>) -> Self::AlgorithmReturnType {
          
          // Process input arguments
+         let start_prepare_running = Instant::now();
+         let id = args.id.clone();
          let qc = args.qc;
          let n_shots = match args.shots.as_ref() {
             Some(val) => val,
@@ -133,11 +137,14 @@ pub mod algorithms {
          debug!("Infraestructure: {}", infraestructure);
          debug!("Number of QPUs: {}", n_qpus_val);
          debug!("Number of cores {}", num_cores);
+         let duration_prepare_running = start_prepare_running.elapsed(); 
+         debug!("Prepare running took {:?}", duration_prepare_running);
 
          // 1. Serialize the quantum circuit
+         let time_serialize = Instant::now();
          Python::with_gil(|py| {
             let module = PyModule::import(py, "polypus_python").unwrap();
-            let running_result = module.call_method("serialize_quantum_circuit", (&qc,), None);
+            let running_result = module.call_method("serialize_quantum_circuit", (id.clone(), &qc,), None);
             match running_result {
                Ok(result) => result,
                Err(e) => {
@@ -146,10 +153,13 @@ pub mod algorithms {
                },
             };
          });
+         let duration_serialize = time_serialize.elapsed();
+         debug!("Quantum circuit serialized in {:?}", duration_serialize);
 
          // 2. Create a number of processes based on the number of QPUs and run the quantum circuits
          let mut handles = Vec::new();
          for i in 0..n_qpus_val {
+            let start_process = Instant::now();
             let start_core = i * cores_per_worker;
             let mut end_core = start_core + cores_per_worker - 1;
             if i == n_qpus_val - 1 {
@@ -167,6 +177,8 @@ pub mod algorithms {
                   .arg(format!("{}", shots_per_qpu))
                   .arg("--max_parallel_threads")
                   .arg(format!("{}", cores_per_worker))
+                  .arg("--id")
+                  .arg(format!("{}", id))
                   .stdout(Stdio::piped())
                   .spawn()
                   .expect("Failed to start worker process");
@@ -187,11 +199,15 @@ pub mod algorithms {
                error!("Unknown infrastructure: {}", infraestructure);
                panic!("Unknown infrastructure: {}", infraestructure);
             }
+            let duration_process = start_process.elapsed();
+            debug!("Process {i} started in {:?}", duration_process);
          }
 
          // 3. Collect outputs
+         let start_collecting_total = Instant::now();
          let mut parsed_outputs = Vec::new();
          for (i, process) in handles {
+            let start_collecting = Instant::now();
             let output = match process.wait_with_output() {
                Ok(output) => output,
                Err(e) => {
@@ -217,9 +233,14 @@ pub mod algorithms {
                   error!("Process {i} output does not contain JSON:\n{stdout}");
                   panic!("Process {i} output does not contain JSON:\n{stdout}");
             }
+            let duration_collecting = start_collecting.elapsed();
+            debug!("Collected output from process {} in {:?}", i, duration_collecting);
          }
+         let duration_collecting = start_collecting_total.elapsed();
+         debug!("Collected outputs from all processes in {:?}", duration_collecting);
 
          // Sum the counts from all dictionaries to aggregate results
+         let start_summing = Instant::now();
          let mut total_counts: HashMap<String, u64> = HashMap::new();
          for dict in &parsed_outputs {
             if let Some(obj) = dict.as_object() {
@@ -230,8 +251,11 @@ pub mod algorithms {
                }
             }
          }
+         let duration_summing = start_summing.elapsed();
+         debug!("Summed counts from all dictionaries in {:?}", duration_summing);
 
          // 4. Convert the dictionary to a PyObject
+         let start_converting = Instant::now();
          let py_dict = Python::with_gil(|py| -> PyObject {
             let dict = PyDict::new(py);
             for (key, value) in total_counts {
@@ -239,6 +263,8 @@ pub mod algorithms {
             }
             dict.unbind().into()
          });
+         let duration_converting = start_converting.elapsed();
+         debug!("Converted dictionary to PyObject in {:?}", duration_converting);
 
          // 5. Return the result
          return py_dict;
@@ -349,6 +375,7 @@ pub mod algorithms {
          let mut rng = thread_rng();
          for generation in 0..its {
             for i in 0..popsize {
+               let start_individual = Instant::now();
                let ids: Vec<usize> = (0..popsize).filter(|&idx| idx != i).collect();
                let selected_ids: Vec<usize> = ids.choose_multiple(&mut rng, 3).cloned().collect();
                let c1 = pop.row(selected_ids[0]).to_owned();
@@ -360,8 +387,11 @@ pub mod algorithms {
                let trial = cross_points.iter().zip(mutant.iter()).zip(pop.row(i).iter()).map(|((cp, m), p)| if *cp { *m } else { *p }).collect::<Array1<f64>>();
                let trial_denorm = trial.clone();
                let trial_denorm: Vec<f64> = trial_denorm.to_vec();
+               let duration_select_trial = start_individual.elapsed();
+               debug!("Generation: {}, Individual: {}, Trial selected in {:?}", generation, i, duration_select_trial);
 
                // Assign parameters to the quantum circuit
+               let start_assign_params = Instant::now();
                let qc_assigned = Python::with_gil(|py| {
                   let params_py = trial_denorm.clone();
                   let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
@@ -374,15 +404,19 @@ pub mod algorithms {
                       },
                   }
                });
+               let duration_assign_params = start_assign_params.elapsed();
+               debug!("Generation: {}, Individual: {}, Parameters assigned in {:?}", generation, i, duration_assign_params);
                
                // Compute expectation value
                let infraestructure_to_run = infraestructure.clone();
                let expectation = Python::with_gil(|py| {
+                  let start_prepare_running = Instant::now();
                   let shots_py = PyInt::new(py, shots_val);
                   let n_qpus_py = PyInt::new(py, n_qpus_val);
                   let qc_bound = qc_assigned.into_bound(py); 
 
                   let args = algorithms::AlgorithmArgs {
+                     id: args.base.id.clone(),
                      qc: qc_bound,
                      shots: Some(shots_py),
                      n_qpus: Some(n_qpus_py),
@@ -391,16 +425,23 @@ pub mod algorithms {
                   
                   // Run
                   let distribute_algo = algorithms::AlgorithmDistributeByShots;
+                  let duration_prepare_running = start_prepare_running.elapsed();
+                  debug!("Generation: {}, Individual: {}, Prepare running took {:?}", generation, i, duration_prepare_running);
+
+                  let start_run = Instant::now();
                   let result = distribute_algo.run(args);
+                  let duration_run = start_run.elapsed();
+                  debug!("Generation: {}, Individual: {}, Running took {:?}", generation, i, duration_run);
 
                   // Compute extpectation value
-                    let qaoa_utils = match PyModule::import(py, "polypus_python") {
-                      Ok(module) => module,
-                      Err(e) => {
+                  let start_compute_expectation = Instant::now();
+                  let qaoa_utils = match PyModule::import(py, "polypus_python") {
+                     Ok(module) => module,
+                     Err(e) => {
                         error!("Failed to import polypus_python: {e}");
                         panic!("Failed to import polypus_python: {e}");
-                      }
-                    };
+                     }
+                  };
                   let expectation = qaoa_utils.call_method("expectation_value", (result, &expectation_function), None);
                   let expectation_value = match expectation{
                      Ok(result) => result,
@@ -416,10 +457,13 @@ pub mod algorithms {
                         panic!("Failed to extract float from expectation_value: {e}");
                      }
                   };
+                  let duration_compute_expectation = start_compute_expectation.elapsed();
+                  debug!("Generation: {}, Individual: {}, Expectation value computed in {:?}", generation, i, duration_compute_expectation);
                   expectation_value
                });
 
                // Update fitness and population
+               let start_update_fitness = Instant::now();
                if expectation > fitness[i] {
                   fitness[i] = expectation;
                   pop.row_mut(i).assign(&trial);
@@ -428,7 +472,11 @@ pub mod algorithms {
                      best = trial_denorm.clone();
                   }
                }
+               let duration_update_fitness = start_update_fitness.elapsed();
+               debug!("Generation: {}, Individual: {}, Fitness updated in {:?}", generation, i, duration_update_fitness);
                debug!("Generation: {}, Individual: {}, Params: {:?}, Fitness: {}", generation, i, trial_denorm, fitness[i]);
+               let duration_individual = start_individual.elapsed();
+               debug!("Individual {} in generation {} took {:?} to evaluate", i, generation, duration_individual);
             };
          };
          let result = Python::with_gil(|py| {
@@ -463,6 +511,7 @@ pub mod algorithms {
 
       // Process input arguments
       let args = AlgorithmArgs {
+         id : "default_id".to_string(), // Default ID, can be changed later
          qc,
          shots,
          n_qpus,
@@ -481,7 +530,7 @@ pub mod algorithms {
       debug!("raise_qpus function called, but not implemented yet.");
    }
 
-   #[pyfunction(signature = (qc, shots=None, n_qpus=None, expectation_function=None, generations=None, population_size=None, dimensions=None, infraestructure=None))]
+   #[pyfunction(signature = (qc, shots=None, n_qpus=None, expectation_function=None, generations=None, population_size=None, dimensions=None, infraestructure=None, id=None))]
    pub fn differential_evolution<'py>(
       qc: Bound<'py, PyAny>,
       shots: Option<Bound<'py, PyInt>>,
@@ -491,10 +540,16 @@ pub mod algorithms {
       population_size: Option<usize>,
       dimensions: Option<usize>,
       infraestructure: Option<String>, 
+      id: Option<String>,
    ) -> PyObject {
+
+      // Create logger
+      setup_logger(&format!("logger_{}.log", id.as_ref().unwrap())).unwrap_or_else(|e| panic!("Failed to set up logger: {}", e));
+
 
       // Process input arguments
       let args = AlgorithmArgs {
+         id: id.unwrap_or_else(|| "default_id".to_string()), 
          qc,
          shots,
          n_qpus,
@@ -516,7 +571,6 @@ pub mod algorithms {
 
 #[pymodule]
 fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
-   setup_logger("polypus.log").unwrap_or_else(|e| panic!("Failed to set up logger: {}", e));
 
    use algorithms::*;
    m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
@@ -533,20 +587,20 @@ fn setup_logger(log_path: &str) -> Result<(), fern::InitError> {
         }
    }
 
-   // Remove temp directory if it exists
-   let temp_dir = "temp";
-   if std::fs::remove_dir_all(temp_dir).is_err() {
-      // Ignore error if the directory does not exist
-      if std::fs::metadata(temp_dir).is_ok() {
-         panic!("Failed to remove temp directory '{}'", temp_dir);
-      }
-   }
+   // // Remove temp directory if it exists
+   // let temp_dir = "temp";
+   // if std::fs::remove_dir_all(temp_dir).is_err() {
+   //    // Ignore error if the directory does not exist
+   //    if std::fs::metadata(temp_dir).is_ok() {
+   //       panic!("Failed to remove temp directory '{}'", temp_dir);
+   //    }
+   // }
 
    fern::Dispatch::new()
       .format(|out, message, record| {
          out.finish(format_args!(
             "[{} {} {}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.f"),
             record.level(),
             record.target(),
             message
@@ -556,4 +610,5 @@ fn setup_logger(log_path: &str) -> Result<(), fern::InitError> {
       .chain(fern::log_file(log_path)?)
       .apply()?;
    Ok(())
+
 }
