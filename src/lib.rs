@@ -1,7 +1,7 @@
 
 // Description: This module provides the main functionalities for running quantum circuits.
 // Created: 05-26-2025
-// Last Modified: 06-05-2025
+// Last Modified: 11-05-2025
 
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyDict, IntoPyDict};
@@ -9,15 +9,16 @@ use std::fmt;
 use std::process::{Command, Stdio};
 use serde_json::Value;
 use std::collections::HashMap;
-use ndarray::{Array1,Array2};
+use ndarray::{Array1,Array2, Axis};
 use rand::Rng;
 use rand::prelude::SliceRandom;
 use rand::thread_rng;
 use rand::distributions::Bernoulli;
-use log::{debug, error};
+use log::{debug, error, info};
 use std::io::ErrorKind;
 use std::{thread, time};
 use std::time::Instant;
+use ndarray_stats::SummaryStatisticsExt;
 
 pub mod algorithms {
    use super::*; 
@@ -28,6 +29,7 @@ pub mod algorithms {
       pub shots: Option<Bound<'py, PyInt>>,
       pub n_qpus: Option<Bound<'py, PyInt>>,
       pub infraestructure: String,
+      pub nodes: u32
    }
 
    pub struct AlgorithmDifferentialEvolutionArgs<'py> {
@@ -36,6 +38,7 @@ pub mod algorithms {
       pub generations: Option<usize>,
       pub dimensions: Option<usize>,
       pub expectation_function: Option<Bound<'py, PyAny>>,
+      pub tolerance: Option<f64>,
    }
 
    // Algorithm Trait Definition
@@ -321,7 +324,7 @@ pub mod algorithms {
                panic!("{}", err_msg);
             }
           };
-         let its = match args.generations {
+         let max_generations = match args.generations {
             Some(val) => val,
             None => {
                let err_msg = "generations is required";
@@ -333,6 +336,14 @@ pub mod algorithms {
             Some(val) => val,
             None => {
                let err_msg = "dimensions is required";
+               error!("{}", err_msg);
+               panic!("{}", err_msg);
+            }
+         };
+         let tolerance = match args.tolerance {
+            Some(val) => val,
+            None => {
+               let err_msg = "tolerance is required";
                error!("{}", err_msg);
                panic!("{}", err_msg);
             }
@@ -357,25 +368,173 @@ pub mod algorithms {
 
          // If infraestructure is qmio, raise QPUs with CUNQA
          if infraestructure == "qmio" {
-            debug!("Raising QPUs for qmio infrastructure");
+            
+            debug!("Raising QPUs for qmio infrastructure id family: {}", args.base.id.clone());
             let n_qpus_val = n_qpus_val as usize;  
             let _raise_qpus = Command::new("qraise")
                .arg("-n")
                .arg(format!("{}", n_qpus_val))
+               .arg("-N")
+               .arg(format!("{}", args.base.nodes.clone()))
                .arg("-t")
                .arg("10:00:00")
+               .arg("--fam")
+               .arg(format!("{}", args.base.id.clone()))
                .arg("--cloud")
                .spawn()
                .expect("Failed to start qraise command");
-            thread::sleep(time::Duration::from_secs(20));
+            thread::sleep(time::Duration::from_secs(30));
             debug!("qraise command executed");
+
+            let shots_py = Python::with_gil(|py| {            
+               PyInt::new(py, shots_val);
+            });
+            for generation in 0..max_generations {
+               for i in (0..popsize).step_by(n_qpus_val) {
+                  let end = (i + n_qpus_val).min(popsize);
+                  let batch_ids = i..end;
+                  debug!("Generation: {}, Processing batch of individuals: {:?}", generation, batch_ids);
+
+                  // Create trial for each individual in the batch and assign parameters to the quantum circuits
+                  let mut qcs: Vec<PyObject> = Vec::new();
+                  let mut trials_batch: Vec<Array1<f64>> = Vec::new();
+                  let mut trials_denorms_batch: Vec<Vec<f64>> = Vec::new();
+                  for trial_id in batch_ids.clone() {
+                  
+                     debug!("Processing individual: {}", trial_id);
+                     let ids: Vec<usize> = (0..popsize).filter(|&idx| idx != trial_id).collect();
+                     let selected_ids: Vec<usize> = ids.choose_multiple(&mut rng, 3).cloned().collect();
+                     let c1 = pop.row(selected_ids[0]).to_owned();
+                     let c2 = pop.row(selected_ids[1]).to_owned();
+                     let c3 = pop.row(selected_ids[2]).to_owned();
+                     let mut mutant = &c1 + mut_factor * (&c2 - &c3);
+                     mutant.mapv_inplace(|x| x.max(0.0).min(1.0));
+                     let cross_points: Array1<bool> = Array1::from_shape_fn(dimensions,|_| rng.sample(Bernoulli::new(crossp).unwrap()));
+                     let trial = cross_points.iter().zip(mutant.iter()).zip(pop.row(trial_id).iter()).map(|((cp, m), p)| if *cp { *m } else { *p }).collect::<Array1<f64>>();
+                     trials_batch.push(trial.clone());
+                     let trial_denorm = trial.clone();
+                     let trial_denorm: Vec<f64> = trial_denorm.to_vec();
+                     trials_denorms_batch.push(trial_denorm.clone());
+
+                     // Assign parameters to the quantum circuit
+                     let start_assign_params = Instant::now();
+                     let qc_assigned = Python::with_gil(|py| {
+                        let params_py = trial_denorm.clone();
+                        let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+                        let qc_assigned = qc.call_method("assign_parameters", (params_py,), Some(&kwargs));
+                        match qc_assigned {
+                           Ok(bound) => bound.unbind(),
+                           Err(e) => {
+                              error!("Error assigning parameters: {e}");
+                              panic!("Error assigning parameters: {e}");
+                           },
+                        }
+                     });
+                     qcs.push(qc_assigned);
+
+                  }
+                  debug!("qcs: {:?}", qcs);
+
+                  // Compute expectation values for the batch
+                  let results = Python::with_gil(|py| -> PyObject {
+                     let module = PyModule::import(py, "polypus_python").unwrap();
+                     let running_result = module.call_method("run_qcs_in_qpu", (args.base.id.clone(), qcs,shots_val,), None);
+                     debug!("CALLING PYTHON!");
+
+                     match running_result{
+                        Ok(results) => results.unbind(),
+                        Err(e) => {
+                           error!("Error running run_qc: {e}");
+                           panic!("{e}, Error running run_qc")
+                        },
+                     }
+                  });
+
+                  let expectation = Python::with_gil(|py| {
+
+                     let qaoa_utils = match PyModule::import(py, "polypus_python") {
+                        Ok(module) => module,
+                        Err(e) => {
+                           error!("Failed to import polypus_python: {e}");
+                           panic!("Failed to import polypus_python: {e}");
+                        }
+                     };
+                     let expectations = qaoa_utils.call_method("expectation_values", (results, &expectation_function), None);
+
+                     let expectation_values = match expectations{
+                        Ok(result) => result,
+                        Err(e) => {
+                           error!("Error calling expectation_value: {e}");
+                           panic!("{e}, Error serializing qc");
+                        },
+                     };
+                     let expectation_values = match expectation_values.extract::<Vec<f64>>() {
+                        Ok(val) => val,
+                        Err(e) => {
+                           error!("Failed to extract float from expectation_value: {e}");
+                           panic!("Failed to extract float from expectation_value: {e}");
+                        }
+                     };
+
+                     debug!("Expectation values: {:?}", expectation_values);
+
+                     // Update fitness and population
+                     for (idx, trial_id) in batch_ids.clone().enumerate() {
+                        debug!("Current Expectation value for individual {}: {}", trial_id, fitness[trial_id]);
+                        if expectation_values[idx] > fitness[trial_id] {
+                           fitness[trial_id] = expectation_values[idx];
+                           pop.row_mut(trial_id).assign(&trials_batch[idx]);
+                           if expectation_values[idx] > fitness[best_idx] {
+                              best_idx = trial_id;
+                              best = trials_denorms_batch[idx].clone();
+                           }
+                        }
+                        debug!("Updated fitness for individual {}: {}", trial_id, fitness[trial_id]);
+
+                     }
+                  });
+
+               }
+
+               info!("Generation {} completed. Best fitness: {}", generation, fitness[best_idx]);
+
+               let mean = pop.mean_axis(Axis(0)).expect("Failed to compute mean");
+               let mean = mean.sum();
+               let std = pop.std_axis(Axis(0), 0.0);
+               let std: f64 = std.iter().sum();
+               debug!("Generation {}: Mean: {:?}, Std: {:?}", generation, mean, std);
+               
+               let converged = std < (tolerance * mean);
+
+               if converged {
+                  info!("Stopping early at generation {} due to convergence", generation);
+                  break; 
+               } 
+
+            }
+
+            let result = Python::with_gil(|py| {
+            match best.into_pyobject(py) {
+               Ok(obj) => obj.unbind(),
+               Err(e) => {
+                 error!("Error converting best to result: {}", e);
+                 panic!("Error converting best to result: {}", e);
+               }
+            }
+         });
+   
+         return result;
+
+         } else {
+            debug!("Running on local infrastructure, no need to raise QPUs");
          }
 
          // Train
          let mut rng = thread_rng();
-         for generation in 0..its {
+         for generation in 0..max_generations {
             for i in 0..popsize {
                let start_individual = Instant::now();
+               
                let ids: Vec<usize> = (0..popsize).filter(|&idx| idx != i).collect();
                let selected_ids: Vec<usize> = ids.choose_multiple(&mut rng, 3).cloned().collect();
                let c1 = pop.row(selected_ids[0]).to_owned();
@@ -421,6 +580,7 @@ pub mod algorithms {
                      shots: Some(shots_py),
                      n_qpus: Some(n_qpus_py),
                      infraestructure: infraestructure_to_run,
+                     nodes: args.base.nodes.clone(),
                   };
                   
                   // Run
@@ -516,6 +676,7 @@ pub mod algorithms {
          shots,
          n_qpus,
          infraestructure: infraestructure.unwrap_or_else(|| "local".to_string()),
+         nodes: 1, 
       };
 
       // Run
@@ -530,7 +691,7 @@ pub mod algorithms {
       debug!("raise_qpus function called, but not implemented yet.");
    }
 
-   #[pyfunction(signature = (qc, shots=None, n_qpus=None, expectation_function=None, generations=None, population_size=None, dimensions=None, infraestructure=None, id=None))]
+   #[pyfunction(signature = (qc, shots=None, n_qpus=None, expectation_function=None, generations=None, population_size=None, dimensions=None, infraestructure=None, nodes=None, id=None, tolerance=0.01))]
    pub fn differential_evolution<'py>(
       qc: Bound<'py, PyAny>,
       shots: Option<Bound<'py, PyInt>>,
@@ -540,12 +701,13 @@ pub mod algorithms {
       population_size: Option<usize>,
       dimensions: Option<usize>,
       infraestructure: Option<String>, 
+      nodes: Option<u32>,
       id: Option<String>,
+      tolerance: Option<f64>,
    ) -> PyObject {
 
       // Create logger
       setup_logger(&format!("logger_{}.log", id.as_ref().unwrap())).unwrap_or_else(|e| panic!("Failed to set up logger: {}", e));
-
 
       // Process input arguments
       let args = AlgorithmArgs {
@@ -554,6 +716,7 @@ pub mod algorithms {
          shots,
          n_qpus,
          infraestructure: infraestructure.unwrap_or_else(|| "local".to_string()),
+         nodes: nodes.unwrap_or(1),
       };
       let differential_evolution_args = AlgorithmDifferentialEvolutionArgs {
          base: args,
@@ -561,6 +724,7 @@ pub mod algorithms {
          generations,
          dimensions,
          expectation_function,
+         tolerance,
       };
 
       // Run
@@ -606,7 +770,7 @@ fn setup_logger(log_path: &str) -> Result<(), fern::InitError> {
             message
          ))
       })
-      .level(log::LevelFilter::Debug)
+      .level(log::LevelFilter::Info)
       .chain(fern::log_file(log_path)?)
       .apply()?;
    Ok(())
