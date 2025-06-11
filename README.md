@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/Logo.png" alt="Logo" style="max-height: 50px; width: auto;">
+  <img src="docs/Logo.png" alt="Logo" width="50">
 </p>
 
 
@@ -31,22 +31,23 @@ maturin develop --release
 **Examples**
 Check the *examples* section for complete running examples.
 
-**Distribute By Shots**
-
-In this version, all available functions can be accessed directly by importing them from the Polypus module. For example, a quantum circuit can be executed by distributing its shots across the available QPUs. Polypus handles the aggregation of partial results and returns the combined output. Although Polypus has its core written in Rust, the Python bindings allow the library to be imported and used just like any standard Python package.
-
-```python
-import polypus
-result = polypus.run_quantum_circuit(qft_circuit, shots=N_SHOTS, n_qpus = N_QPUS)
-```
-
 **Differential Evolution**
-
 We can also directly import an optimization algorithm. For example, if we define a QAOA circuit and specify how to compute its expectation value, we can optimize this circuit using differential evolution. Polypus takes care of optimizing the execution by distributing the shots across the available hardware resources.
 
 ```python
 import polypus
-result = polypus.run_quantum_circuit(qc, shots=N_SHOTS, n_qpus = N_QPUS, expectation_function=expectation_fun,  generations=MAX_GENERATIONS, population_size=POPULATION_SIZE, dimensions=DIMENSIONS)
+polypus.differential_evolution(
+    qc=qc, 
+    shots=N_SHOTS, 
+    n_qpus = N_QPUS, 
+    expectation_function=bitstring_to_obj, 
+    generations=MAX_GENERATIONS, 
+    population_size=POPULATION_SIZE, 
+    dimensions=2*layers, 
+    infraestructure="qmio", 
+    id=id,
+    tolerance=TOL,
+    nodes=N)
 ```
 
 ## Credits
@@ -63,6 +64,7 @@ Polypus relies on the following Python Packages:
 - numpy==2.2.6
 - qiskit==2.0.1
 - qiskit_aer==0.17.0
+- cunqa==0.2.0
 
 ## License
 Polypus is **Licensed under the EUPL**. Check the *License.txt* file for more details.
