@@ -18,7 +18,8 @@ use log::{debug, error, info};
 use std::io::ErrorKind;
 use std::{thread, time};
 use std::time::Instant;
-use ndarray_stats::SummaryStatisticsExt;
+use std::fs;
+use std::sync::Once;
 
 pub mod algorithms {
    use super::*; 
@@ -27,7 +28,7 @@ pub mod algorithms {
       pub id: String,
       pub qc: Bound<'py, PyAny>,
       pub shots: Option<Bound<'py, PyInt>>,
-      pub n_qpus: Option<Bound<'py, PyInt>>,
+      pub n_qpus: u32,
       pub infraestructure: String,
       pub nodes: u32
    }
@@ -74,19 +75,76 @@ pub mod algorithms {
       fn run<'py>(&self, args: AlgorithmArgs<'py>) -> Self::AlgorithmReturnType {
          // Call the run_qc method from the polypus_python module
          let qc = args.qc;
-         let result = Python::with_gil(|py| -> PyObject {
+         let infraestructure = args.infraestructure;
+         let shots = match args.shots.as_ref() {
+               Some(val) => val,
+               None => {
+                  error!("shots is required");
+                  panic!("shots is required");
+               }
+            };
+
+         let shots = shots.extract::<u32>().unwrap_or(1);
+
+         if infraestructure == "local" {
+            debug!("Running local infraestructure for shots={}", shots);
+            let result = Python::with_gil(|py| -> PyObject {
             let module = PyModule::import(py, "polypus_python").unwrap();
-            let running_result = module.call_method("run_qc", (qc,), None);
+            let running_result = module.call_method("run_qc", (args.id.clone(), qc,args.shots,), None);
 
             match running_result{
                Ok(result) => result.unbind(),
-                  Err(e) => {
-                    error!("Error running run_qc: {e}");
-                    panic!("{e}, Error running run_qc")
-                  },
+               Err(e) => {
+                  error!("Error running run_qc: {e}");
+                  panic!("{e}, Error running run_qc")
+               },
             }
          });
          result
+
+         } else if infraestructure == "qmio" {
+            debug!("Raising QPUs for qmio infrastructure id family: {}", args.id.clone());
+            let _raise_qpus = Command::new("qraise")
+               .arg("-n")
+               .arg(format!("{}", args.n_qpus))
+               .arg("-N")
+               .arg(format!("{}", args.nodes))
+               .arg("-t")
+               .arg("10:00:00")
+               .arg("--fam")
+               .arg(format!("{}", args.id))
+               .arg("--cloud")
+               .spawn()
+               .expect("Failed to start qraise command");
+            thread::sleep(time::Duration::from_secs(30));
+            debug!("qraise command executed");
+
+            let shots_per_qpu = shots / args.n_qpus;
+            debug!("Running {} shots per qpu", shots_per_qpu);
+
+            let result = Python::with_gil(|py| -> PyObject {
+               let module = PyModule::import(py, "polypus_python").unwrap();
+               let running_result = module.call_method("run_qc_in_qpu", (args.id.clone(), qc, shots,), None);
+               debug!("CALLING PYTHON!");
+
+               match running_result{
+                  Ok(results) => results.unbind(),
+                  Err(e) => {
+                     error!("Error running run_qc: {e}");
+                     panic!("{e}, Error running run_qc")
+                  },
+               }
+            });
+
+            result 
+
+
+         } else {
+            error!("Infraestructure {} not valid!", infraestructure);
+            panic!("Infraestructure {} not valid!", infraestructure)
+         }
+
+         
       }
 
       fn name(&self) -> String {
@@ -118,14 +176,15 @@ pub mod algorithms {
             }
           };
          let n_shots_val = n_shots.extract::<i64>().unwrap_or(1);
-         let n_qpus = match args.n_qpus.as_ref() {
-            Some(val) => val,
-            None => {
-               error!("n_qpus is required");
-               panic!("n_qpus is required");
-            }
-          };
-         let n_qpus_val = n_qpus.extract::<i64>().unwrap_or(1);
+         // let n_qpus = match args.n_qpus.as_ref() {
+         //    Some(val) => val,
+         //    None => {
+         //       error!("n_qpus is required");
+         //       panic!("n_qpus is required");
+         //    }
+         // };
+         let n_qpus_val: i64 = args.n_qpus.clone() as i64;
+         // let n_qpus_val = n_qpus.extract::<i64>().unwrap_or(1);
          let infraestructure = args.infraestructure;
          
          // Compute number of shots per QPU
@@ -301,15 +360,16 @@ pub mod algorithms {
             }
          };
          let shots_val = shots.extract::<i64>().unwrap_or(1);
-         let n_qpus = match args.base.n_qpus.as_ref() {
-            Some(val) => val,
-            None => {
-               let err_msg = "n_qpus is required";
-               error!("{}", err_msg);
-               panic!("{}", err_msg);
-            }
-         };
-         let n_qpus_val = n_qpus.extract::<i64>().unwrap_or(1);
+         // let n_qpus = match args.base.n_qpus.as_ref() {
+         //    Some(val) => val,
+         //    None => {
+         //       let err_msg = "n_qpus is required";
+         //       error!("{}", err_msg);
+         //       panic!("{}", err_msg);
+         //    }
+         // };
+         // let n_qpus_val = n_qpus.extract::<i64>().unwrap_or(1);
+         let n_qpus_val: i64 = args.base.n_qpus.clone() as i64;
          let expectation_function = args.expectation_function;
          let infraestructure = args.base.infraestructure;
 
@@ -574,11 +634,19 @@ pub mod algorithms {
                   let n_qpus_py = PyInt::new(py, n_qpus_val);
                   let qc_bound = qc_assigned.into_bound(py); 
 
+                  // let args = algorithms::AlgorithmArgs {
+                  //    id: args.base.id.clone(),
+                  //    qc: qc_bound,
+                  //    shots: Some(shots_py),
+                  //    n_qpus: Some(n_qpus_py),
+                  //    infraestructure: infraestructure_to_run,
+                  //    nodes: args.base.nodes.clone(),
+                  // };
                   let args = algorithms::AlgorithmArgs {
                      id: args.base.id.clone(),
                      qc: qc_bound,
                      shots: Some(shots_py),
-                     n_qpus: Some(n_qpus_py),
+                     n_qpus: args.base.n_qpus.clone(),
                      infraestructure: infraestructure_to_run,
                      nodes: args.base.nodes.clone(),
                   };
@@ -661,21 +729,28 @@ pub mod algorithms {
       }
    }
 
-   #[pyfunction(signature = (qc, shots=None, n_qpus=None, infraestructure=None))]
+   #[pyfunction(signature = (qc, shots=None, infraestructure=None, n_qpus=1))]
    pub fn run_quantum_circuit<'py>(
       qc: Bound<'py, PyAny>,
       shots: Option<Bound<'py, PyInt>>,
-      n_qpus: Option<Bound<'py, PyInt>>,
       infraestructure: Option<String>,
+      n_qpus: u32,
    ) -> PyObject {
+
+      // Id
+      let infraestructure = infraestructure.unwrap_or_else(|| "local".to_string());
+      let id:String = format!("run_{}_{}", n_qpus, infraestructure);
+
+      // Create logger
+      setup_logger(&format!("logger_{}.log", id));
 
       // Process input arguments
       let args = AlgorithmArgs {
-         id : "default_id".to_string(), // Default ID, can be changed later
+         id: id.clone(),
          qc,
          shots,
          n_qpus,
-         infraestructure: infraestructure.unwrap_or_else(|| "local".to_string()),
+         infraestructure,
          nodes: 1, 
       };
 
@@ -695,7 +770,7 @@ pub mod algorithms {
    pub fn differential_evolution<'py>(
       qc: Bound<'py, PyAny>,
       shots: Option<Bound<'py, PyInt>>,
-      n_qpus: Option<Bound<'py, PyInt>>,
+      n_qpus: Option<u32>,
       expectation_function: Option<Bound<'py, PyAny>>,
       generations: Option<usize>,
       population_size: Option<usize>,
@@ -707,14 +782,14 @@ pub mod algorithms {
    ) -> PyObject {
 
       // Create logger
-      setup_logger(&format!("logger_{}.log", id.as_ref().unwrap())).unwrap_or_else(|e| panic!("Failed to set up logger: {}", e));
+      setup_logger(&format!("logger_{}.log", id.as_ref().unwrap()));
 
       // Process input arguments
       let args = AlgorithmArgs {
          id: id.unwrap_or_else(|| "default_id".to_string()), 
          qc,
          shots,
-         n_qpus,
+         n_qpus: n_qpus.expect("nqpus required"),
          infraestructure: infraestructure.unwrap_or_else(|| "local".to_string()),
          nodes: nodes.unwrap_or(1),
       };
@@ -743,24 +818,19 @@ fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
    Ok(())
 }
 
-fn setup_logger(log_path: &str) -> Result<(), fern::InitError> {
 
-   if let Err(e) = std::fs::remove_file(log_path) {
-        if e.kind() != ErrorKind::NotFound {
+static INIT_LOGGER: Once = Once::new();
+
+fn setup_logger(log_path: &str) {
+
+   INIT_LOGGER.call_once(|| { 
+      if let Err(e) = fs::remove_file(log_path) {
+         if e.kind() != ErrorKind::NotFound {
             panic!("Failed to remove log file '{}': {}", log_path, e);
-        }
-   }
+         }
+      }
 
-   // // Remove temp directory if it exists
-   // let temp_dir = "temp";
-   // if std::fs::remove_dir_all(temp_dir).is_err() {
-   //    // Ignore error if the directory does not exist
-   //    if std::fs::metadata(temp_dir).is_ok() {
-   //       panic!("Failed to remove temp directory '{}'", temp_dir);
-   //    }
-   // }
-
-   fern::Dispatch::new()
+   let logger = fern::Dispatch::new()
       .format(|out, message, record| {
          out.finish(format_args!(
             "[{} {} {}] {}",
@@ -770,9 +840,9 @@ fn setup_logger(log_path: &str) -> Result<(), fern::InitError> {
             message
          ))
       })
-      .level(log::LevelFilter::Info)
-      .chain(fern::log_file(log_path)?)
-      .apply()?;
-   Ok(())
+      .level(log::LevelFilter::Debug)
+      .chain(fern::log_file(log_path).expect("Failed to open log file"));
+   logger.apply().expect("Failed to initialize logger");
+   });
 
 }
