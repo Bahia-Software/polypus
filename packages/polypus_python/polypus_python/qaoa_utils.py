@@ -62,6 +62,31 @@ def expectation_value(counts, bitstring_to_obj):
         return 0.0
     return avg / sum_count
 
+def expectation_values(array_counts, bitstring_to_obj):
+    """
+    Compute the expectation value from an array of measurement counts and a user-defined objective function.
+    Args:
+        array_counts (list): List of measurement results as [{bitstring: count}, ...].
+        bitstring_to_obj (callable): Function that takes a bitstring and returns its objective value.
+    Returns:
+        float: The average expectation value across all counts.
+    """
+
+    expectation_values = []
+    for counts in array_counts:
+        avg = 0
+        sum_count = 0
+        for bitstring, count in counts.items():
+            obj = bitstring_to_obj(bitstring)
+            avg += obj * count
+            sum_count += count
+        if sum_count == 0:
+            expectation_values.append(0.0)
+        else:
+            expectation_values.append(avg / sum_count)
+    
+    return expectation_values
+
 def assign_parameters(qc, params):
     """
     Assign parameters to the QAOA circuit.
