@@ -86,11 +86,13 @@ pub mod algorithms {
 
          let shots = shots.extract::<u32>().unwrap_or(1);
 
+         let shots_per_qpu = shots / args.n_qpus;
+
          if infraestructure == "local" {
             debug!("Running local infraestructure for shots={}", shots);
             let result = Python::with_gil(|py| -> PyObject {
             let module = PyModule::import(py, "polypus_python").unwrap();
-            let running_result = module.call_method("run_qc", (args.id.clone(), qc,args.shots,), None);
+            let running_result = module.call_method("run_qc", (args.id.clone(), qc,args.shots,args.n_qpus), None);
 
             match running_result{
                Ok(result) => result.unbind(),
@@ -119,7 +121,7 @@ pub mod algorithms {
             thread::sleep(time::Duration::from_secs(30));
             debug!("qraise command executed");
 
-            let shots_per_qpu = shots / args.n_qpus;
+            
             debug!("Running {} shots per qpu", shots_per_qpu);
 
             let result = Python::with_gil(|py| -> PyObject {
@@ -729,13 +731,21 @@ pub mod algorithms {
       }
    }
 
-   #[pyfunction(signature = (qc, shots=None, infraestructure=None, n_qpus=1))]
+   #[pyfunction(signature=(qc, shots, infraestructure, n_qpus=1))]
    pub fn run_quantum_circuit<'py>(
       qc: Bound<'py, PyAny>,
       shots: Option<Bound<'py, PyInt>>,
       infraestructure: Option<String>,
-      n_qpus: u32,
+      n_qpus: Option<u32>,
    ) -> PyObject {
+
+      // n_qpus
+      let n_qpus = match n_qpus {
+         Some(val) => val,
+         None => {
+            1
+         }
+      };
 
       // Id
       let infraestructure = infraestructure.unwrap_or_else(|| "local".to_string());
