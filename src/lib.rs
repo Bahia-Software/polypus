@@ -654,7 +654,7 @@ pub mod algorithms {
                   };
                   
                   // Run
-                  let distribute_algo = algorithms::AlgorithmDistributeByShots;
+                  let distribute_algo = algorithms::AlgorithmSingleRun;
                   let duration_prepare_running = start_prepare_running.elapsed();
                   debug!("Generation: {}, Individual: {}, Prepare running took {:?}", generation, i, duration_prepare_running);
 
