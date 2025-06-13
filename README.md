@@ -13,6 +13,12 @@ Polypus is a distributed quantum computing library designed to optimize the exec
 
 First, build the polypus-python package:
 
+*If cunqa is not available comment this line in packages/polypus_python/polypus_python/running_functions.py*
+
+```python
+from cunqa import getQPUs, gather
+```
+
 ```python
 python -m build packages/polypus_python/
 ```
