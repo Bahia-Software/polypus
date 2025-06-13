@@ -448,7 +448,7 @@ pub mod algorithms {
             thread::sleep(time::Duration::from_secs(30));
             debug!("qraise command executed");
 
-            let shots_py = Python::with_gil(|py| {            
+            let _shots_py = Python::with_gil(|py| {            
                PyInt::new(py, shots_val);
             });
             for generation in 0..max_generations {
@@ -479,7 +479,7 @@ pub mod algorithms {
                      trials_denorms_batch.push(trial_denorm.clone());
 
                      // Assign parameters to the quantum circuit
-                     let start_assign_params = Instant::now();
+                     let _start_assign_params = Instant::now();
                      let qc_assigned = Python::with_gil(|py| {
                         let params_py = trial_denorm.clone();
                         let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
@@ -512,7 +512,7 @@ pub mod algorithms {
                      }
                   });
 
-                  let expectation = Python::with_gil(|py| {
+                  let _expectation = Python::with_gil(|py| {
 
                      let qaoa_utils = match PyModule::import(py, "polypus_python") {
                         Ok(module) => module,
@@ -633,7 +633,7 @@ pub mod algorithms {
                let expectation = Python::with_gil(|py| {
                   let start_prepare_running = Instant::now();
                   let shots_py = PyInt::new(py, shots_val);
-                  let n_qpus_py = PyInt::new(py, n_qpus_val);
+                  let _n_qpus_py = PyInt::new(py, n_qpus_val);
                   let qc_bound = qc_assigned.into_bound(py); 
 
                   // let args = algorithms::AlgorithmArgs {
