@@ -78,6 +78,13 @@ polypus.differential_evolution(
 
 If cunqa is not available, set **infraestructure="local"**
 
+## Performance
+As an initial validation, we conducted a performance comparison on solving various randomly generated Max-Cut problems across different qubit counts using differential evolution. We measured and compared the execution time of Polypus against Scipy. While *more comprehensive evaluations and benchmarking are planned for the near future*, the preliminary results are very promising, as illustrated in the following chart.
+
+<p align="center">
+  <img src="docs/performance_example.png" alt="Logo" width="650">
+</p>
+
 ## Credits
 - Diego Beltrán Fernández Prada
 - Víctor Sóñora Pombo 
