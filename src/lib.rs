@@ -1,7 +1,54 @@
 
 // Description: This module provides the main functionalities for running quantum circuits.
 // Created: 05-26-2025
-// Last Modified: 11-05-2025
+// Last Modified: 06-19-2025
+
+//! # Polypus
+//!
+//! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation 
+//! across available hardware resources.
+//!
+//! ## Features
+//! - Run a quantum circuit.
+//! - Run a quantum circuit using multiple QPUs.
+//! - Train a QAOA using differential evolution.
+//!
+//! ## Examples
+//! Polypus is directly imported from Python. 
+//! ```python
+//! import polypus
+//! ```
+//!
+//! To run a quantum circuit, you can use the `run_quantum_circuit` function:
+//! ```python
+//! result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local")
+//! ```
+//!
+//! We can distribute the quantum circuit shots using multiple QPUs:
+//! ```python
+//! result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local", n_qpus=10)
+//! ```
+//! We can directly import an optimization algorithm. For example, if we define a QAOA circuit and specify how to compute its expectation value, 
+//! we can optimize this circuit using differential evolution. Polypus takes care of optimizing the execution by distributing the shots across 
+//! the available hardware resources.
+//! ```python
+//!polypus.differential_evolution(
+//!   qc=qc, 
+//!   shots=N_SHOTS, 
+//!   n_qpus = N_QPUS, 
+//!   expectation_function=bitstring_to_obj, 
+//!   generations=MAX_GENERATIONS, 
+//!   population_size=POPULATION_SIZE, 
+//!   dimensions=2*layers, 
+//!   infraestructure="qmio", 
+//!   id=id,
+//!   tolerance=TOL,
+//!   nodes=N)
+//! ```
+//! # Authors 
+//! Diego Beltran Fernandez Prada (<diego.fernandez@bahiasoftware.es>), Victor Soñora Pombo, Sergio Figueiras Gomez, Miguel Boubeta Martinez, Galicia Supercomputing Center (CESGA)
+//! # License:
+//! European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyDict, IntoPyDict};
@@ -24,6 +71,13 @@ use std::sync::Once;
 pub mod algorithms {
    use super::*; 
 
+   /// Base arguments for all algorithms.
+   /// - id: Unique identifier for the algorithm run.
+   /// - qc: The quantum circuit. 
+   /// - shots: Number of shots to run the quantum circuit.
+   /// - n_qpus: Number of QPUs to use.
+   /// - infraestructure: Hardware infraestructure to use. Use "local" if no specific infraestructure is available. 
+   /// - nodes: Number of nodes to use in HPC infraestructure. If infraestructure is "local", this value is ignored.
    pub struct AlgorithmArgs<'py> {
       pub id: String,
       pub qc: Bound<'py, PyAny>,
@@ -33,6 +87,13 @@ pub mod algorithms {
       pub nodes: u32
    }
 
+   /// Arguments for the Differential Evolution algorithm.
+   /// - base: Base arguments for the algorithm.
+   /// - population_size: Size of the population for the DE algorithm.
+   /// - generations: Number of generations to run the DE algorithm.
+   /// - dimensions: Number of dimensions for the DE algorithm.
+   /// - expectation_function: Function to compute the expectation value of the quantum circuit.
+   /// - tolerance: Tolerance for convergence of the DE algorithm (early stop).
    pub struct AlgorithmDifferentialEvolutionArgs<'py> {
       pub base: AlgorithmArgs<'py>,
       pub population_size: Option<usize>,
@@ -42,7 +103,13 @@ pub mod algorithms {
       pub tolerance: Option<f64>,
    }
 
-   // Algorithm Trait Definition
+   /// Algorithm Trait Definition
+   /// This trait defines the interface for all algorithms in Polypus.
+   /// - Args: Type of arguments the algorithm accepts.
+   /// - AlgorithmReturnType: Type of the return value of the algorithm.
+   /// - run: Method to execute the algorithm with the provided arguments.
+   /// - name: Method to get the name of the algorithm.
+   /// - description: Method to get the description of the algorithm.
    pub trait AlgorithmTrait {
       type Args<'py>;
       type AlgorithmReturnType: fmt::Display;
@@ -65,7 +132,7 @@ pub mod algorithms {
       }
    }
 
-   // Single Run 
+   /// Single run of a quantum circuit.
    pub struct AlgorithmSingleRun;
 
    impl AlgorithmTrait for AlgorithmSingleRun {
@@ -158,6 +225,7 @@ pub mod algorithms {
       }
    }
 
+   /// Algorithm to distribute the exectuion of a quantum circuit by shots.
    pub struct AlgorithmDistributeByShots;
 
    impl AlgorithmTrait for AlgorithmDistributeByShots {
@@ -344,6 +412,7 @@ pub mod algorithms {
       }
    }
    
+   /// Algorithm to optimize a QAOA using differential evolution.
    pub struct AlgorithmDifferentialEvolution;
 
    impl AlgorithmTrait for AlgorithmDifferentialEvolution {
@@ -731,6 +800,25 @@ pub mod algorithms {
       }
    }
 
+   /// Function to run a quantum circuit called from Python.
+   /// ## Arguments
+   /// - qc: Quantum Circuit.
+   /// - shots: Number of shots to run the quantum circuit.
+   /// - infraestructure: Hardware infraestructure to use. Use "local" if no specific infraestructure is available.
+   /// - n_qpus: Number of QPUs to use.
+   /// ## Returns
+   /// - PyObject: Counts of the quantum circuit execution.
+   /// ## Examples
+   /// We can run a single quantum circuit:
+   /// ```python
+   /// import polypus
+   /// result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local")
+   /// ```
+   /// We can also run that circuit and distribute the execution accross multiple QPUs:
+   /// ```python
+   /// import polypus
+   /// result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local",  n_qpus=10)
+   /// ```
    #[pyfunction(signature=(qc, shots, infraestructure, n_qpus=1))]
    pub fn run_quantum_circuit<'py>(
       qc: Bound<'py, PyAny>,
@@ -769,12 +857,50 @@ pub mod algorithms {
       return algorithm.run(args);
    }
 
+   /// Function to raise QPUs in an infrastructure called from Python.
+   ///
+   /// *This function is not implemented yet.*
    #[pyfunction]
    pub fn raise_qpus() {
       // This function is a placeholder for raising QPUs if needed.
       // It can be implemented later if required.
       debug!("raise_qpus function called, but not implemented yet.");
    }
+
+   /// Function to train a QAOA using differnetial evolution called from Python. 
+   /// ## Arguments
+   /// - qc: Quantum Circuit.
+   /// - shots: Number of shots to run the quantum circuit.
+   /// - n_qpus: Number of QPUs to use.
+   /// - expectation_function: Expectation function to use. This function must be defined in Python.
+   /// - generations: Number of max generations to run the differential evolution.
+   /// - population_size: Size of the population (number of individuals).
+   /// - dimensions: Number of dimensions of the problem to solve.
+   /// - infraestructure: Hardware infraestructure to use. Use "local" if no specific infraestructure is available.
+   /// - nodes: Number of nodes to use in the infrastructure. If infraestructure is "local", this parameter is ignored.
+   /// - id: Identifier for the algoirthm run. If multiples instances of polypus are used for different runs, use different ids to handle different log and temporary files.
+   /// - tolerance: Tolerance for the convergence of the algorithm (early stop).
+   ///
+   /// ## Returns
+   /// - PyObject: Best individual parameters found by the differential evolution algorithm.
+   ///
+   /// ## Examples
+   /// ```python
+   /// import polypus
+   /// # def bitstring_to_obj(bitstring):
+   /// best_parameters = polypus.differential_evolution(
+   ///   qc=qc, 
+   ///   shots=N_SHOTS, 
+   ///   n_qpus = N_QPUS, 
+   ///   expectation_function=bitstring_to_obj, 
+   ///   generations=MAX_GENERATIONS, 
+   ///   population_size=POPULATION_SIZE, 
+   ///   dimensions=2*layers, 
+   ///   infraestructure="qmio", 
+   ///   id=id,
+   ///   tolerance=TOL,
+   ///   nodes=N)
+   /// ```
 
    #[pyfunction(signature = (qc, shots=None, n_qpus=None, expectation_function=None, generations=None, population_size=None, dimensions=None, infraestructure=None, nodes=None, id=None, tolerance=0.01))]
    pub fn differential_evolution<'py>(
@@ -831,6 +957,7 @@ fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 static INIT_LOGGER: Once = Once::new();
 
+// Initializes the logger for the Polypus library.
 fn setup_logger(log_path: &str) {
 
    INIT_LOGGER.call_once(|| { 
