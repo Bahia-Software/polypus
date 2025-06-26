@@ -7,6 +7,11 @@
 //!
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation 
 //! across available hardware resources.
+//! 
+//! Polypus is desgined to be agnostic to the underlying hardware infrastructure. Currently, it support two infraestructures:
+//! - **local**: Runs on local infraestructure (e.g. a local server).
+//! - **qmio**: Platform to simulate distributed quantum computing using multiple emulated QPUs. This infraestructure is desgined by CESGA (<https://github.com/CESGA-Quantum-Spain/cunqa>)
+//!
 //!
 //! ## Features
 //! - Run a quantum circuit.

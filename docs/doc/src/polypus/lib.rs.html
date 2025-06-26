@@ -983,7 +983,12 @@
 <a href="#982" id="982">982</a>
 <a href="#983" id="983">983</a>
 <a href="#984" id="984">984</a>
-<a href="#985" id="985">985</a></pre></div><pre class="rust"><code>
+<a href="#985" id="985">985</a>
+<a href="#986" id="986">986</a>
+<a href="#987" id="987">987</a>
+<a href="#988" id="988">988</a>
+<a href="#989" id="989">989</a>
+<a href="#990" id="990">990</a></pre></div><pre class="rust"><code>
 <span class="comment">// Description: This module provides the main functionalities for running quantum circuits.
 // Created: 05-26-2025
 // Last Modified: 06-19-2025
@@ -992,6 +997,11 @@
 //!
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation 
 //! across available hardware resources.
+//! 
+//! Polypus is desgined to be agnostic to the underlying hardware infrastructure. Currently, it support two infraestructures:
+//! - **local**: Runs on local infraestructure (e.g. a local server).
+//! - **qmio**: Platform to simulate distributed quantum computing using multiple emulated QPUs. This infraestructure is desgined by CESGA (&lt;https://github.com/CESGA-Quantum-Spain/cunqa&gt;)
+//!
 //!
 //! ## Features
 //! - Run a quantum circuit.
