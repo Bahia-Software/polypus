@@ -3,6 +3,8 @@ from .local import Local
 def connect_to_infrastructure(infrastructure: str):
     if infrastructure == "local":
         return "local"
+    elif infrastructure == "cunqa":
+        return "cunqa"
     else:
         raise ValueError(f"Unknown infrastructure: {infrastructure}")
     
