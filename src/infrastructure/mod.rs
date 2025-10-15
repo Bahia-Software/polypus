@@ -9,7 +9,7 @@ impl Infrastructure {
 	pub fn from_str(s: &str) -> Self {
 		match s {
 			"local" => Infrastructure::Local,
-			"Cunqa" => Infrastructure::Cunqa,
+			"cunqa" => Infrastructure::Cunqa,
 			_ => panic!("Unknown infrastructure: {}", s),
 		}
 	}
