@@ -126,37 +126,3 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 		String::from("This algorithm is designed to train a QAOA circuit using differential evolution.")
 	}
 }
-// // use pyo3::prelude::*;
-// // use pyo3::types::{PyInt, PyDict, PyAny, PyModule};
-// // use std::process::Command;
-// // use ndarray::{Array1, Array2, Axis};
-// // use rand::Rng;
-// // use rand::prelude::SliceRandom;
-// // use rand::thread_rng;
-// // use rand::distributions::Bernoulli;
-// // use std::{thread, time};
-// // use std::time::Instant;
-// // use log::{debug, error, info};
-// // use crate::algorithms::{AlgorithmTrait, AlgorithmDifferentialEvolutionArgs};
-
-// // pub struct AlgorithmDifferentialEvolution;
-
-// // impl AlgorithmTrait for AlgorithmDifferentialEvolution {
-// // 	type Args<'py> = AlgorithmDifferentialEvolutionArgs<'py>;
-// // 	type AlgorithmReturnType = pyo3::PyObject;
-
-// // 	fn run<'py>(&self, args: AlgorithmDifferentialEvolutionArgs<'py>) -> Self::AlgorithmReturnType {
-// // 		// ...existing code from lib.rs implementation...
-// // 		// (Paste the full run method implementation here)
-// // 		// ...
-// // 		// For brevity, see lib.rs for full code. If you want the full code pasted, let me know!
-// // 	}
-
-// // 	fn name(&self) -> String {
-// // 		String::from("Differential Evolution")
-// // 	}
-
-// // 	fn description(&self) -> String {
-// // 		String::from("This algorithm is designed to train a QAOA circuit using differential evolution.")
-// // 	}
-// // }
