@@ -275,7 +275,7 @@ if __name__ == "__main__":
             generations=MAX_GENERATIONS, 
             population_size=POPULATION_SIZE, 
             dimensions=2*layers, 
-            infrastructure="qmio", 
+            infrastructure="cunqa", 
             id=id,
             tolerance=TOL,
             nodes=N)
