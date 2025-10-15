@@ -206,7 +206,7 @@ if __name__ == "__main__":
             generations=MAX_GENERATIONS, 
             population_size=POPULATION_SIZE, 
             dimensions=2*layers, 
-            infraestructure="local", 
+            infrastructure="local", 
             id=id,
             tolerance=TOL,
             nodes=N)

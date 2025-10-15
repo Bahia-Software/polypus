@@ -11,7 +11,7 @@ from qiskit.exceptions import QiskitError, MissingOptionalLibraryError
 import logging
 import shutil
 from collections import Counter
-from cunqa import getQPUs, gather
+#from cunqa import getQPUs, gather
 
 def get_logger(id):
     """Get or create the module logger that logs only to a file."""
