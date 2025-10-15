@@ -36,6 +36,12 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 		let mut fitness = vec![f64::MIN; popsize];
 		let mut best_idx = 0;
 		let mut best = vec![0.0; dimensions];
+		println!("Running with infrastructure: {}", &base.infrastructure);
+		let infra = Infrastructure::from_str(&base.infrastructure);
+		let runner: Box<dyn QuantumRunner> = match infra {
+			Infrastructure::Local => Box::new(LocalRunner),
+			Infrastructure::Cunqa => Box::new(CunqaRunner),
+		};
 		for _generation in 0..max_generations {
 			for i in 0..popsize {
 				let ids: Vec<usize> = (0..popsize).filter(|&idx| idx != i).collect();
@@ -74,12 +80,7 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 					};
 					// let single_run_algo = crate::algorithms::AlgorithmSingleRun;
 					// let result = single_run_algo.run(args);
-
-                    let infra = Infrastructure::from_str(&args.infrastructure);
-                    let runner: Box<dyn QuantumRunner> = match infra {
-                        Infrastructure::Local => Box::new(LocalRunner),
-                        Infrastructure::Cunqa => Box::new(CunqaRunner),
-                    };
+					
                     let result = runner.run(&args);
 
 

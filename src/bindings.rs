@@ -65,6 +65,7 @@ pub fn differential_evolution<'py>(
 		backend: "AerSimulator".to_string(),
 		nodes: nodes.unwrap_or(1),
 	};
+
 	let differential_evolution_args = AlgorithmDifferentialEvolutionArgs {
 		base: args,
 		population_size,
