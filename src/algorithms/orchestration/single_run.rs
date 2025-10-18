@@ -1,17 +1,19 @@
 use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
-use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
+// use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
+use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner};
+
 
 pub struct AlgorithmSingleRun;
 
 impl AlgorithmTrait for AlgorithmSingleRun {
-	type Args<'py> = AlgorithmArgs<'py>;
+	type Args = AlgorithmArgs;
 	type AlgorithmReturnType = pyo3::PyObject;
 
-    fn run<'py>(&self, args: AlgorithmArgs<'py>) -> Self::AlgorithmReturnType {
+    fn run(&self, args: AlgorithmArgs) -> Self::AlgorithmReturnType {
         let infra = Infrastructure::from_str(&args.infrastructure);
         let runner: Box<dyn QuantumRunner> = match infra {
             Infrastructure::Local => Box::new(LocalRunner),
-            Infrastructure::Cunqa => Box::new(CunqaRunner),
+            // Infrastructure::Cunqa => Box::new(CunqaRunner),
         };
         runner.run(&args)
     }

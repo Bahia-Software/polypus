@@ -2,19 +2,28 @@ use crate::infrastructure::{QuantumRunner};
 use crate::algorithms::AlgorithmArgs;
 
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict};
+use pyo3::types::{IntoPyDict, PyDict,PyList};
 pub struct LocalRunner;
 
 impl QuantumRunner for LocalRunner {
 
 	/// Run the quantum circuit locally using the provided arguments.
-	fn run<'py>(&self, args: &AlgorithmArgs<'py>) -> pyo3::PyObject {
+	fn run<'py>(&self, args: &AlgorithmArgs) -> pyo3::PyObject {
 		let id = args.id.clone();
-		let qc = args.qc.clone();
+		
+
+		println!("Running qcs: {:?}", args.qcs);
+		println!("Running first qcs: {:?}", args.qcs[0]);
 		let backend = String::from("AerSimulator");
 		let shots = args.shots.clone();
 
 		Python::with_gil(|py| {
+			// build Python list with all qcs
+			let qcs_pylist = PyList::empty(py);
+			for qc in &args.qcs {
+				qcs_pylist.append(qc.clone_ref(py)).unwrap();
+			}
+
 			let module = PyModule::import(py, "polypus_python").unwrap();
 			let connection = module.call_method("connect_to_infrastructure", ("local", ), None);
 			let connection_str = match connection {
@@ -27,16 +36,16 @@ impl QuantumRunner for LocalRunner {
 			let kwargs = PyDict::new(py);
         	kwargs.set_item("id", id);
         	kwargs.set_item("backend", backend);
-			kwargs.set_item("qc", qc);
+			kwargs.set_item("qcs", qcs_pylist);
 			kwargs.set_item("shots", shots);
 
-
-			let running_result = module.call_method("run_qc", (connection_str,), Some(&kwargs));
+			println!("Running locall with kwargs: {:?}", kwargs);
+			let running_result = module.call_method("run_qcs", (connection_str,), Some(&kwargs));
 			match running_result {
 				Ok(result) => result.unbind(),
 				Err(e) => {
 					// error!("Error running run_qc: {e}");
-					panic!("{e}, Error running run_qc");
+					panic!("{e}, Error running run_qcs");
 				},
 			}
 		})

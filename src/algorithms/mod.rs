@@ -13,11 +13,11 @@ use std::fmt;
 /// Each algorithm should implement this trait for its argument and output types.
 pub trait AlgorithmTrait{
 
-    type Args<'py>;
+    type Args;
     type AlgorithmReturnType: fmt::Display;
 
 	/// Run the algorithm with the given arguments.
-	fn run<'py>(&self, args: Self::Args<'py>) -> Self::AlgorithmReturnType;
+	fn run(&self, args: Self::Args) -> Self::AlgorithmReturnType;
 
 	/// Get the algorithm's name.
 	fn name(&self) -> String;
@@ -27,12 +27,12 @@ pub trait AlgorithmTrait{
 }
 
 /// Arguments required to run any quantum algorithm.
-#[derive(Debug, Clone)]
-pub struct AlgorithmArgs<'py> {
+#[derive(Debug)]
+pub struct AlgorithmArgs {
 	pub id: String,
-	pub qc: Bound<'py, PyAny>,
-	pub shots: Option<Bound<'py, PyInt>>,
-	pub n_qpus: Option<u32>,
+	pub qcs: Vec<Py<PyAny>>,
+	pub shots: u32,
+	pub n_qpus: u32,
 	pub infrastructure: String,
     pub backend: String,
 	pub nodes: u32,
