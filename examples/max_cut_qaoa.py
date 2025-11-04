@@ -98,11 +98,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run QAOA for MaxCut")
     parser.add_argument('--method', type=str, required=True, help='Method to use (scipy, polypus_local, polypus_cunqa)') 
     parser.add_argument('--qubits', type=int, default=4, help='Number of qubits for the QAOA circuit')
+    parser.add_argument('--experiment_id', type=int, default=0, help='Experiment ID for logging purposes')
     args = parser.parse_args()
     method = args.method
     n_qubits = args.qubits
-    GENERATIONS_FACTOR = 40
-    POPULATION_FACTOR = 4
+    experiment_id = args.experiment_id
+    GENERATIONS_FACTOR = 10
+    POPULATION_FACTOR = 40
+    LAYERS_FACTOR = 1
     TOL = 0.00001
     print(f"Selected method: {method}")
 
@@ -110,13 +113,14 @@ if __name__ == "__main__":
     BEST_SOLUTION = maxcut_bruteforce(graph)
     n_qubits = graph.number_of_nodes()
     layers = n_qubits // 2
+    layers *= LAYERS_FACTOR
     cost_layers = [maxcut_cost_layer(graph) for _ in range(layers)]
     mixer_layers = [standard_mixer_layer(graph.number_of_nodes()) for _ in range(layers)]
     qc = build_qaoa_circuit(graph, layers, cost_layers, mixer_layers)
     POPULATION_SIZE = (2 * layers) * POPULATION_FACTOR
     MAX_GENERATIONS = n_qubits * (GENERATIONS_FACTOR)
     qc = build_qaoa_circuit(graph, layers, cost_layers, mixer_layers)
-    id = f"{n_qubits}_{method}"
+    id = f"{n_qubits}_{method}_{experiment_id}"
 
     if method not in ['scipy', 'polypus_local', 'polypus_cunqa']:
         raise ValueError("Method must be one of: 'scipy', 'polypus_local', 'polypus_cunqa'")

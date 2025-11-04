@@ -54,6 +54,7 @@ def expectation_value(counts, bitstring_to_obj):
     """
     avg = 0
     sum_count = 0
+    # print(counts)
     for bitstring, count in counts.items():
         obj = bitstring_to_obj(bitstring)
         avg += obj * count
@@ -73,6 +74,7 @@ def expectation_values(array_counts, bitstring_to_obj):
     """
 
     expectation_values = []
+    # print(array_counts)
     for counts in array_counts:
         avg = 0
         sum_count = 0

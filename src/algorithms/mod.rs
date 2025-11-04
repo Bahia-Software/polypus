@@ -1,12 +1,9 @@
-// Additional shared helpers/utilities can be added here
 pub mod orchestration;
-pub mod vcq;
-
+pub mod vqc;
 pub use crate::algorithms::orchestration::*;
-pub use crate::algorithms::vcq::*;
+pub use crate::algorithms::vqc::*;
 
 use pyo3::prelude::*;
-use pyo3::types::PyInt;
 use std::fmt;
 
 /// Trait for all quantum algorithms in Polypus.

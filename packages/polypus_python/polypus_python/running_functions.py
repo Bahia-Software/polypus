@@ -11,7 +11,8 @@ from qiskit.exceptions import QiskitError, MissingOptionalLibraryError
 import logging
 import shutil
 from collections import Counter
-#from cunqa import getQPUs, gather
+sys.path.append(os.getenv("HOME"))
+from cunqa import get_QPUs, gather
 
 def get_logger(id):
     """Get or create the module logger that logs only to a file."""
@@ -152,12 +153,12 @@ def run_qcs_in_qpu(id, qcs, shots):
 
     # # Get the QPUs
     tic_total = time.time()
-    sys.path.append(os.getenv("HOME"))
+    # sys.path.append(os.getenv("HOME"))
     try:
-        qpus = getQPUs(local=False, family=id)
-        log_message(id,f"Time to get QPUs: {time.time() - tic_total}s", "debug")
+        qpus = get_QPUs(local=False, family=id)
+        # log_message(id,f"Time to get QPUs: {time.time() - tic_total}s", "debug")
     except Exception as e:
-        log_message(id,f"Error getting QPUs: {e}", "error")
+        # log_message(id,f"Error getting QPUs: {e}", "error")
         raise
     
     # Asynchronously run the quantum circuits on the QPUs
@@ -166,10 +167,10 @@ def run_qcs_in_qpu(id, qcs, shots):
         for i in range(len(qcs)):
             qjob = qpus[i].run(qcs[i], shots = shots, transpile=False)
             qjobs.append(qjob)
-            log_message(id,f"Running qpu: {qpus[i]}", "info")
+            # log_message(id,f"Running qpu: {qpus[i]}", "info")
         
         results = gather(qjobs)
-        log_message(id, f"Results: {results}", "debug")
+        # log_message(id, f"Results: {results}", "debug")
         counts = [result.counts for result in results]
         return counts
     except Exception as e:
