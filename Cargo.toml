@@ -1,6 +1,6 @@
 [package]
 name = "polypus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
 license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."

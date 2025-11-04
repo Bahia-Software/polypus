@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["algorithms"]};
+window.SIDEBAR_ITEMS = {"mod":["algorithms","infrastructure"]};
