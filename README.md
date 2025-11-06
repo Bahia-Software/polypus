@@ -4,7 +4,7 @@
 
 
 # Polypus
-Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation across available hardware resources. The core of the library is written in Rust, while Python bindings are provided to make it more accessible to a broader range of users.
+Polypus is an open-source distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation across available hardware resources. The core of the library is written in Rust, while Python bindings are provided to make it more accessible to a broader range of users.
 
 ## How to use Polypus?
 *Polypus is a library currently under development* 
@@ -12,12 +12,6 @@ Polypus is a distributed quantum computing library designed to optimize the exec
 **Instalation**
 
 First, build the polypus-python package:
-
-*If cunqa is not available comment this line in packages/polypus_python/polypus_python/running_functions.py*
-
-```python
-from cunqa import getQPUs, gather
-```
 
 ```python
 python -m build packages/polypus_python/
@@ -45,21 +39,20 @@ Check the *examples* section for complete running examples.
 
 **Run a Quantum Circuit**
 
-We just need to Polypus the Quantum Circuit, the number of shots and the infraestructure *(qmio if cunqa is available)*
+We just need to send to Polypus the Quantum Circuit, the number of shots, the infraestructure and the number of qpus:
 ```python
-result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local")
+result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=1)
 ```
 
 **Run a Quantum Circuit and distribute shots**
-
-We can distribute the Quantum Circuit shots to reduce the running time. We just need to specify the number of qpus. *(Set infraestructure to qmio if cunqa is available)*
+We can distribute the Quantum Circuit shots to reduce the running time. We just need to specify the number of qpus. 
 ```python
-result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local",  n_qpus=10)
+result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
 **Differential Evolution**
 
-We can directly import an optimization algorithm. For example, if we define a QAOA circuit and specify how to compute its expectation value, we can optimize this circuit using differential evolution. Polypus takes care of optimizing the execution by distributing the shots across the available hardware resources.
+We can directly import an optimization algorithm. For example, if we define a QAOA circuit and specify how to compute its expectation value, we can optimize this circuit using differential evolution. Polypus takes care of optimizing the execution by distributing the inviduals of the population across the available hardware resources.
 
 ```python
 polypus.differential_evolution(
@@ -70,10 +63,11 @@ polypus.differential_evolution(
     generations=MAX_GENERATIONS, 
     population_size=POPULATION_SIZE, 
     dimensions=2*layers, 
-    infraestructure="qmio", 
+    infrastructure="cunqa", 
     id=id,
     tolerance=TOL,
-    nodes=N)
+    nodes=N
+)
 ```
 
 If cunqa is not available, set **infraestructure="local"**
@@ -99,7 +93,7 @@ Polypus relies on the following Python Packages:
 - numpy==2.2.6
 - qiskit==2.0.1
 - qiskit_aer==0.17.0
-- cunqa==0.2.0
+- cunqa==0.3.0
 
 ## License
 Polypus is **Licensed under the EUPL**. Check the *License.txt* file for more details.
