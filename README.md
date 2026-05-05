@@ -94,7 +94,7 @@ result_params = polypus.particle_swarm_optimization(
 )
 ```
 
-### NQG
+### QNG
 
 As default parameters we can use:
 
