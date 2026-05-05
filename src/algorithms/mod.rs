@@ -33,4 +33,5 @@ pub struct AlgorithmArgs {
 	pub infrastructure: String,
     pub backend: String,
 	pub nodes: u32,
+	pub cores_per_qpu: u32,
 }
