@@ -50,27 +50,79 @@ We can distribute the Quantum Circuit shots to reduce the running time. We just 
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
-**Differential Evolution**
+## Algorithms
+We can directly import an optimization algorithm. Polypus takes care of optimizing the execution by distributing the inviduals of the population across the available hardware resources. For example, if we define a QAOA circuit and specify how to compute its expectation value. We can optimize this circuit using differential evolution, PSO or Quantum Natural Gradient
 
-We can directly import an optimization algorithm. For example, if we define a QAOA circuit and specify how to compute its expectation value, we can optimize this circuit using differential evolution. Polypus takes care of optimizing the execution by distributing the inviduals of the population across the available hardware resources.
+If cunqa is not available, set **infraestructure="local"**
+
+### Differential Evolution
 
 ```python
-polypus.differential_evolution(
-    qc=qc, 
-    shots=N_SHOTS, 
-    n_qpus = N_QPUS, 
-    expectation_function=bitstring_to_obj, 
-    generations=MAX_GENERATIONS, 
-    population_size=POPULATION_SIZE, 
-    dimensions=2*layers, 
-    infrastructure="cunqa", 
+result_params = polypus.differential_evolution(
+    qc=qc,
+    shots=N_SHOTS,
+    n_qpus=N_QPUS,
+    expectation_function=bitstring_to_obj,
+    generations=MAX_GENERATIONS,
+    population_size=POPULATION_SIZE,
+    dimensions=2 * layers,
+    infrastructure=infrastructure,
     id=id,
     tolerance=TOL,
-    nodes=N
+    nodes=NUM_NODES,
+    cores_per_qpu=CORES_PER_QPU
 )
 ```
 
-If cunqa is not available, set **infraestructure="local"**
+### PSO
+
+```python
+result_params = polypus.particle_swarm_optimization(
+    qc=qc,
+    shots=N_SHOTS,
+    n_qpus=N_QPUS,
+    expectation_function=bitstring_to_obj,
+    generations=MAX_GENERATIONS,
+    population_size=POPULATION_SIZE,
+    dimensions=2 * layers,
+    bounds=(0.0, np.pi),
+    infrastructure=infrastructure,
+    id=id,
+    tolerance=TOL,
+    nodes=NUM_NODES,
+    cores_per_qpu=CORES_PER_QPU
+)
+```
+
+### NQG
+
+As default parameters we can use:
+
+- QNG_LEARNING_RATE = 0.1
+
+- QNG_STEP_SIZE     = 0.1
+
+- QNG_TIKHONOV_REG  = 0.05
+
+```python
+result_params = polypus.quantum_natural_gradient(
+    qc=qc_qng,
+    shots=N_SHOTS,
+    n_qpus=N_QPUS,
+    expectation_function=bitstring_to_obj,
+    variance_function=variance_fn,
+    max_iters=MAX_GENERATIONS,
+    dimensions=2 * layers,
+    bounds=(0.0, np.pi),
+    infrastructure=infrastructure,
+    id=id,
+    learning_rate=QNG_LEARNING_RATE,
+    finite_difference_step=QNG_STEP_SIZE,
+    tikhonov_reg=QNG_TIKHONOV_REG,
+    nodes=NUM_NODES,
+    cores_per_qpu=CORES_PER_QPU
+)
+```
 
 ## Performance
 As an initial validation, we conducted a performance comparison on solving various randomly generated Max-Cut problems across different qubit counts using differential evolution. We measured and compared the execution time of Polypus against Scipy. While *more comprehensive evaluations and benchmarking are planned for the near future*, the preliminary results are very promising, as illustrated in the following chart.
@@ -93,7 +145,7 @@ Polypus relies on the following Python Packages:
 - numpy==2.2.6
 - qiskit==2.0.1
 - qiskit_aer==0.17.0
-- cunqa==0.3.0
+- cunqa==2.3.0
 
 ## License
 Polypus is **Licensed under the EUPL**. Check the *License.txt* file for more details.
