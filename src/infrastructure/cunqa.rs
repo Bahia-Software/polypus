@@ -5,7 +5,7 @@ use pyo3::types::{PyList,PyDict};
 
 /// CunqaRunner struct to run quantum circuits on CUNQA infrastructure.
 pub struct CunqaRunner{
-	slurm_job_id: String,
+	family: Option<Py<PyAny>>,
 }
 
 impl QuantumRunner for CunqaRunner {
@@ -41,15 +41,15 @@ impl QuantumRunner for CunqaRunner {
 
 impl CunqaRunner {
 
-	pub fn new(n_qpus: u32, nodes: u32, id: &str) -> Self {
+	pub fn new(n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) -> Self {
 		let mut runner = CunqaRunner{
-			slurm_job_id: String::new(),
+			family: None,
 		};
-		runner.raise_qpus(n_qpus, nodes, id);
+		runner.raise_qpus(n_qpus, nodes, id, cores_per_qpu);
 		runner
 	}
 
-	pub fn raise_qpus(&mut self, n_qpus: u32, nodes: u32, id: &str) {
+	pub fn raise_qpus(&mut self, n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) {
 		println!("Calling python cunqa qraise");
 		Python::with_gil(|py| {
 			let kwargs = PyDict::new(py);
@@ -57,15 +57,16 @@ impl CunqaRunner {
         	kwargs.set_item("t", "10:00:00");
 			kwargs.set_item("n_nodes", nodes);
 			kwargs.set_item("family_name", id);
+			kwargs.set_item("cores_per_qpu", cores_per_qpu);
 
 			let module = PyModule::import(py, "polypus_python").unwrap();
+			println!("Raising QPUs in cunqa with n_qpus: {n_qpus}, nodes: {nodes}, id: {id}, cores_per_qpu: {cores_per_qpu}");
 			let connection = module.call_method("connect_to_infrastructure", ("cunqa", ), Some(&kwargs));
 			match connection {
 				Ok(obj) => {
-					let (_family, slurm_job_id): (Py<PyAny>, String) = obj.extract().expect("Error extracting return values from cunqa qraise");
-					println!("QPUs raised successfully with Slurm Job ID: {}", slurm_job_id);
-					self.slurm_job_id = slurm_job_id;
-					println!("Cunqa slurm job id: {}", self.slurm_job_id);
+						let family: Py<PyAny> = obj.extract().expect("Error extracting family from cunqa qraise");
+						println!("QPUs raised successfully");
+						self.family = Some(family);
 				},
 				Err(e) => {
 					panic!("{e}, Error raising QPUs in cunqa");
@@ -75,15 +76,15 @@ impl CunqaRunner {
 	}
 
 	pub fn drop_qpus(&self) {
-		println!("Dropping QPUs for Slurm Job ID: {}", self.slurm_job_id);
+		println!("Dropping QPUs");
 		Python::with_gil(|py| {
 			let module = PyModule::import(py, "polypus_python").unwrap();
 			let kwargs = PyDict::new(py);
-			kwargs.set_item("slurm_job_id", &self.slurm_job_id);
+			kwargs.set_item("family", self.family.as_ref().expect("family not initialised").clone_ref(py));
 			let drop_result = module.call_method("disconnect_from_infrastructure", ("cunqa", ), Some(&kwargs));
 			match drop_result {
 				Ok(_) => {
-					println!("QPUs dropped successfully for Slurm Job ID: {}", self.slurm_job_id);
+					println!("QPUs dropped successfully");
 				},
 				Err(e) => {
 					panic!("{e}, Error dropping QPUs in cunqa");
