@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule, IntoPyDict};
 use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
 use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
+use std::f64::consts::PI;
 
 pub struct AlgorithmDifferentialEvolution;
 
@@ -37,9 +38,11 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 		let expectation_function = expectation_function;
 		let mut rng = thread_rng();
 		let mut pop = ndarray::Array2::<f64>::zeros((popsize, dimensions));
+		// Initialize population with angles in [-PI, PI)
+		// This is more natural for angular parameters (e.g. QAOA angles)
 		for mut row in pop.outer_iter_mut() {
 			for elem in row.iter_mut() {
-				*elem = rng.gen_range(0.0..1.0);
+				*elem = rng.gen_range(0.0..2.0*PI);
 			}
 		}
 		let pop_denorm = pop.clone();
@@ -55,7 +58,7 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 		let infra = Infrastructure::from_str(&base.infrastructure);
 		let runner: Box<dyn QuantumRunner> = match infra {
 			Infrastructure::Local => Box::new(LocalRunner),
-			Infrastructure::Cunqa => Box::new(CunqaRunner::new(base.n_qpus, base.nodes, &base.id)),
+			Infrastructure::Cunqa => Box::new(CunqaRunner::new(base.n_qpus, base.nodes, &base.id, base.cores_per_qpu)),
 		};
 		for generation in 0..max_generations {
 			for i in (0..popsize).step_by(base.n_qpus as usize) {
@@ -73,7 +76,8 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 					let c2 = pop.row(selected_ids[1]).to_owned();
 					let c3 = pop.row(selected_ids[2]).to_owned();
 					let mut mutant = &c1 + 0.8 * (&c2 - &c3);
-					mutant.mapv_inplace(|x| x.max(0.0).min(1.0));
+					// mutant.mapv_inplace(|x| x.max(0.0).min(1.0));
+					mutant.mapv_inplace(|x| x.rem_euclid(2.0 * PI));
 					let cross_points: Array1<bool> = Array1::from_shape_fn(dimensions, |_| rng.gen_bool(0.7));
 					let trial = cross_points.iter().zip(mutant.iter()).zip(pop.row(i).iter()).map(|((cp, m), p)| if *cp { *m } else { *p }).collect::<Array1<f64>>();
 					trials_batch.push(trial.clone());
@@ -108,6 +112,7 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 					infrastructure: base.infrastructure.clone(),
 					backend: "AerSimulator".to_string(),
 					nodes: base.nodes,
+					cores_per_qpu: base.cores_per_qpu,
 				};
 
 				let running_result = runner.run(&args);

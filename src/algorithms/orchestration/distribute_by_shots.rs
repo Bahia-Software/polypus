@@ -16,7 +16,7 @@ impl AlgorithmTrait for DistributeByShotsRun {
         let infra = Infrastructure::from_str(&args.infrastructure);
         let runner: Box<dyn QuantumRunner> = match infra {
             Infrastructure::Local => Box::new(LocalRunner),
-            Infrastructure::Cunqa => Box::new(CunqaRunner::new(args.n_qpus, args.nodes, &args.id)),
+            Infrastructure::Cunqa => Box::new(CunqaRunner::new(args.n_qpus, args.nodes, &args.id, args.cores_per_qpu)),
         };
 
         // Update number of shots based on number of QPUs
