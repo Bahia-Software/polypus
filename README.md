@@ -39,97 +39,92 @@ Check the *examples* section for complete running examples.
 
 **Run a Quantum Circuit**
 
-We just need to send to Polypus the Quantum Circuit, the number of shots, the infraestructure and the number of qpus:
+Pass the circuit, the number of shots, the infrastructure and the number of QPUs:
 ```python
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=1)
 ```
 
-**Run a Quantum Circuit and distribute shots**
-We can distribute the Quantum Circuit shots to reduce the running time. We just need to specify the number of qpus. 
+**Distribute shots across multiple QPUs**
+
+Set `n_qpus > 1` to split the shots across available QPUs and reduce execution time:
 ```python
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
-## Algorithms
-We can directly import an optimization algorithm. Polypus takes care of optimizing the execution by distributing the inviduals of the population across the available hardware resources. For example, if we define a QAOA circuit and specify how to compute its expectation value. We can optimize this circuit using differential evolution, PSO or Quantum Natural Gradient
+## Training variational circuits
 
-If cunqa is not available, set **infraestructure="local"**
+Polypus optimizes variational quantum circuits via `polypus.train()`. The optimizer is selected by passing a method object as the second argument. Polypus distributes the population individuals across the available QPUs automatically.
+
+The common parameters for all methods are:
+
+| Parameter | Description |
+|---|---|
+| `qc` | Parameterized quantum circuit |
+| `shots` | Number of shots per circuit execution |
+| `n_qpus` | Number of QPUs to use |
+| `dimensions` | Number of variational parameters |
+| `expectation_function` | Python callable that maps a bitstring to a cost value |
+| `infrastructure` | `"local"` or `"cunqa"` |
+| `nodes` | Number of nodes (CUNQA only) |
+| `cores_per_qpu` | Cores per QPU (CUNQA only) |
+| `id` | Experiment identifier for logging |
+
+If CUNQA is not available, set `infrastructure="local"`.
 
 ### Differential Evolution
 
 ```python
-result_params = polypus.differential_evolution(
-    qc=qc,
+result_params = polypus.train(
+    qc,
+    polypus.DE(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE, tolerance=TOL),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
-    expectation_function=bitstring_to_obj,
-    generations=MAX_GENERATIONS,
-    population_size=POPULATION_SIZE,
     dimensions=2 * layers,
+    expectation_function=bitstring_to_obj,
     infrastructure=infrastructure,
-    id=id,
-    tolerance=TOL,
     nodes=NUM_NODES,
-    cores_per_qpu=CORES_PER_QPU
+    cores_per_qpu=CORES_PER_QPU,
+    id=id
 )
 ```
 
-### PSO
+### Particle Swarm Optimization
 
 ```python
-result_params = polypus.particle_swarm_optimization(
-    qc=qc,
+result_params = polypus.train(
+    qc,
+    polypus.PSO(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE,
+                bounds=(0.0, np.pi), tolerance=TOL),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
-    expectation_function=bitstring_to_obj,
-    generations=MAX_GENERATIONS,
-    population_size=POPULATION_SIZE,
     dimensions=2 * layers,
-    bounds=(0.0, np.pi),
+    expectation_function=bitstring_to_obj,
     infrastructure=infrastructure,
-    id=id,
-    tolerance=TOL,
     nodes=NUM_NODES,
-    cores_per_qpu=CORES_PER_QPU
+    cores_per_qpu=CORES_PER_QPU,
+    id=id
 )
 ```
 
-### QNG
+### Quantum Natural Gradient
 
-As default parameters we can use:
-
-- QNG_LEARNING_RATE = 0.1
-
-- QNG_STEP_SIZE     = 0.1
-
-- QNG_TIKHONOV_REG  = 0.05
+`QNG` requires a `variance_function` callable that estimates the diagonal quantum Fisher information matrix element for each parameter. Default hyperparameters: `learning_rate=0.1`, `finite_difference_step=0.1`, `tikhonov_reg=0.05`.
 
 ```python
-result_params = polypus.quantum_natural_gradient(
-    qc=qc_qng,
+result_params = polypus.train(
+    qc,
+    polypus.QNG(variance_fn, max_iters=MAX_GENERATIONS, bounds=(0.0, np.pi),
+                learning_rate=0.1, finite_difference_step=0.1, tikhonov_reg=0.05),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
-    expectation_function=bitstring_to_obj,
-    variance_function=variance_fn,
-    max_iters=MAX_GENERATIONS,
     dimensions=2 * layers,
-    bounds=(0.0, np.pi),
+    expectation_function=bitstring_to_obj,
     infrastructure=infrastructure,
-    id=id,
-    learning_rate=QNG_LEARNING_RATE,
-    finite_difference_step=QNG_STEP_SIZE,
-    tikhonov_reg=QNG_TIKHONOV_REG,
     nodes=NUM_NODES,
-    cores_per_qpu=CORES_PER_QPU
+    cores_per_qpu=CORES_PER_QPU,
+    id=id
 )
 ```
-
-## Performance
-As an initial validation, we conducted a performance comparison on solving various randomly generated Max-Cut problems across different qubit counts using differential evolution. We measured and compared the execution time of Polypus against Scipy. While *more comprehensive evaluations and benchmarking are planned for the near future*, the preliminary results are very promising, as illustrated in the following chart.
-
-<p align="center">
-  <img src="docs/performance_example.png" alt="Logo" width="650">
-</p>
 
 ## Credits
 - Diego Beltrán Fernández Prada
