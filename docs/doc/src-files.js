@@ -1,2 +1,0 @@
-createSrcSidebar('[["polypus",["",[["algorithms",[["orchestration",[],["distribute_by_shots.rs","mod.rs","single_run.rs"]],["vqc",[],["differential_evolution.rs","mod.rs"]]],["mod.rs"]],["infrastructure",[],["cunqa.rs","local.rs","mod.rs"]]],["bindings.rs","lib.rs"]]]]');
-//{"start":19,"fragment_lengths":[249]}
