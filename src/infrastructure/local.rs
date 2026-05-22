@@ -31,10 +31,10 @@ impl QuantumRunner for LocalRunner {
 			};
 			
 			let kwargs = PyDict::new(py);
-        	kwargs.set_item("id", id);
-        	kwargs.set_item("backend", backend);
-			kwargs.set_item("qcs", qcs_pylist);
-			kwargs.set_item("shots", shots);
+        	let _ = kwargs.set_item("id", id);
+        	let _ = kwargs.set_item("backend", backend);
+			let _ = kwargs.set_item("qcs", qcs_pylist);
+			let _ = kwargs.set_item("shots", shots);
 			let running_result = module.call_method("run_qcs", (connection_str,), Some(&kwargs));
 			match running_result {
 				Ok(result) => result.unbind(),
