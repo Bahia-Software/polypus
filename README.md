@@ -7,31 +7,50 @@
 Polypus is an open-source distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation across available hardware resources. The core of the library is written in Rust, while Python bindings are provided to make it more accessible to a broader range of users.
 
 ## How to use Polypus?
-*Polypus is a library currently under development* 
+*Polypus is a library currently under development*
 
-**Instalation**
+### Installation
 
-First, build the polypus-python package:
+The recommended way to install Polypus is using the provided script:
 
-```python
-python -m build packages/polypus_python/
+```bash
+bash install.sh
 ```
 
-Next, install the package:
+This will interactively guide you through installing dependencies, building the wheel, and optionally running the test suite. For non-interactive environments (CI/CD):
 
-```python
+```bash
+bash install.sh --yes        # all defaults, run all tests
+bash install.sh --no-tests   # skip tests
+```
+
+<details>
+<summary>Manual installation</summary>
+
+Install development dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Build and install the `polypus_python` package:
+
+```bash
+python -m build packages/polypus_python/
 pip install packages/polypus_python/
 ```
 
-Finally, build Polypus
+Build the Rust extension:
 
 ```bash
-maturin develop --release
+maturin develop --release --features extension-module
 ```
+
+</details>
 
 **CUNQA**
 
-To instal cunqa please refer to cunqa github.
+To install CUNQA please refer to the [CUNQA GitHub repository](https://github.com/CESGA-Quantum-Spain/cunqa).
 
 **Examples**
 
@@ -134,13 +153,20 @@ result_params = polypus.train(
 - Galicia Supercomputing Center (CESGA)
 
 ## Dependencies
-Polypus relies on the following Python Packages:
-- matplotlib==3.10.3
-- networkx==3.2.1
-- numpy==2.2.6
-- qiskit==2.0.1
-- qiskit_aer==0.17.0
-- cunqa==2.3.0
+
+Polypus relies on the following Python packages:
+
+| Package | Version |
+|---|---|
+| `qiskit` | ≥ 2.0 |
+| `qiskit-aer` | ≥ 0.17 |
+| `numpy` | ≥ 2.0 |
+| `scipy` | ≥ 1.13 |
+| `matplotlib` | ≥ 3.9 |
+| `networkx` | ≥ 3.2 |
+| `cunqa` | ≥ 2.3 (optional) |
+
+See `requirements-dev.txt` and `requirements-examples.txt` for the full pinned dependency lists.
 
 ## License
 Polypus is **Licensed under the EUPL**. Check the *License.txt* file for more details.
