@@ -1,0 +1,21 @@
+# Rust build output
+target/
+Cargo.lock
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Benchmark results (generated at runtime)
+benchmarks/bench_*.csv
+
+# Experiment outputs
+qaoa_results.csv
+examples/qaoa_results.csv
+examples/plots_maxcut/

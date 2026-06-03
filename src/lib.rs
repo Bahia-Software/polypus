@@ -1,6 +1,6 @@
 // Polypus
 
-//! # Polypus Version 0.4.0
+//! # Polypus
 //!
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation
 //! across available hardware resources. The core is written in Rust; Python bindings are provided via PyO3.

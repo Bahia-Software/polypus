@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # install.sh — Build and install polypus (Rust extension + Python wrapper),
-#              then optionally run the test suite to verify the installation.
+#              then optionally run the test suite and benchmark to verify the installation.
 #
 # Usage:
 #   ./install.sh              # interactive prompts (when run from a terminal)
 #   ./install.sh --yes        # accept all defaults, no prompts  (CI / scripts)
 #   ./install.sh --no-tests   # accept all defaults, skip tests  (CI / scripts)
+#   ./install.sh --benchmark  # accept all defaults + run quick benchmark
 
 set -euo pipefail
 
@@ -59,6 +60,9 @@ ask_tests() {
     done
 }
 
+# ── Version (read from Cargo.toml) ──────────────────────────────────────────
+VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 print_banner() {
     echo ""
@@ -70,29 +74,35 @@ print_banner() {
     echo '  ██║      ╚██████╔╝ ███████╗   ██║    ██║      ╚██████╔╝  ███████║'
     echo '  ╚═╝       ╚═════╝  ╚══════╝   ╚═╝    ╚═╝       ╚═════╝   ╚══════╝'
     printf "${NC}\n"
-    echo -e "\t${BOLD}A Distributed Quantum Computing Library${NC}  ·  v0.4.0"
+    echo -e "\t${BOLD}A Distributed Quantum Computing Library${NC}  ·  v${VERSION}"
     echo ""
 }
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 YES=0
 EXPLICIT_NO_TESTS=0
+EXPLICIT_BENCHMARK=0
 for arg in "$@"; do
     case "$arg" in
-        --yes|-y)    YES=1               ;;
-        --no-tests)  EXPLICIT_NO_TESTS=1 ;;
-        *) error "Unknown argument: '$arg'. Use --yes or --no-tests." ;;
+        --yes|-y)       YES=1                ;;
+        --no-tests)     EXPLICIT_NO_TESTS=1  ;;
+        --benchmark)    EXPLICIT_BENCHMARK=1 ;;
+        *) error "Unknown argument: '$arg'. Use --yes, --no-tests or --benchmark." ;;
     esac
 done
 # --no-tests implies non-interactive (backward compat)
 [[ $EXPLICIT_NO_TESTS == 1 ]] && YES=1
+# --benchmark implies non-interactive
+[[ $EXPLICIT_BENCHMARK == 1 ]] && YES=1
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 INSTALL_DEV="y"
 INSTALL_EXAMPLES="n"
 BUILD_MODE="release"
 RUN_TESTS="all"
+RUN_BENCHMARK="n"
 [[ $EXPLICIT_NO_TESTS == 1 ]] && RUN_TESTS="none"
+[[ $EXPLICIT_BENCHMARK == 1 ]] && RUN_BENCHMARK="y"
 
 # ── Locate script root ────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,6 +118,7 @@ if [[ $YES == 0 ]] && [[ -t 0 ]]; then
     ask_yn    INSTALL_EXAMPLES "Install example dependencies (numpy, scipy, matplotlib, networkx)?" "n"
     ask_build BUILD_MODE       "release"
     ask_tests RUN_TESTS        "all"
+    ask_yn    RUN_BENCHMARK    "Run system benchmark after install? (time + RAM sweep)"            "n"
 
     echo ""
     echo -e "  ${BOLD}Summary:${NC}"
@@ -115,6 +126,7 @@ if [[ $YES == 0 ]] && [[ -t 0 ]]; then
     echo "    Example deps:  $INSTALL_EXAMPLES"
     echo "    Build mode:    $BUILD_MODE"
     echo "    Tests:         $RUN_TESTS"
+    echo "    Benchmark:     $RUN_BENCHMARK"
     echo ""
     read -r -p "$(echo -e "  ${CYAN}?${NC} Proceed? [${BOLD}Y${NC}/n] ")" confirm
     confirm="${confirm:-y}"
@@ -127,6 +139,7 @@ else
     echo "    Example deps:  $INSTALL_EXAMPLES"
     echo "    Build mode:    $BUILD_MODE"
     echo "    Tests:         $RUN_TESTS"
+    echo "    Benchmark:     $RUN_BENCHMARK"
     echo ""
 fi
 
@@ -226,10 +239,19 @@ elif [[ "$RUN_TESTS" == "all" ]]; then
     cargo test
 fi
 
+# ── 10. Benchmark ────────────────────────────────────────────────────────────
+if [[ "$RUN_BENCHMARK" == "y" ]]; then
+    echo ""
+    info "Running system benchmark (--quick mode)..."
+    python benchmarks/run_benchmarks.py --quick \
+        || warn "Benchmark finished with errors — results may be incomplete."
+fi
+
 echo ""
 info "Re-run options:"
 echo "   ./install.sh --yes        # non-interactive with defaults"
 echo "   ./install.sh --no-tests   # non-interactive, skip tests"
+echo "   ./install.sh --benchmark  # non-interactive + quick benchmark"
 
 echo ""
 success "All done."
