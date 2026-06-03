@@ -6,9 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "polypus_python"
 version = "0.0.2"
 dependencies = [
-    "requests",
+    "qiskit>=2.0",
+    "qiskit-aer>=0.17",
     'importlib-metadata; python_version<"3.10"',
 ]
+
+[project.optional-dependencies]
+cunqa = ["cunqa"]
 
 [tool.setuptools]
 include-package-data = true

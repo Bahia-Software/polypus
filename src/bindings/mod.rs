@@ -51,14 +51,16 @@ pub fn run_quantum_circuit<'py>(
 ///
 /// `method` must be an instance of `DE`, `PSO`, or `QNG`.
 ///
-/// Example::
+/// Example:
 ///
+/// ```ignore
 ///     result = polypus.train(
 ///         qc, polypus.DE(generations=200, population_size=50),
 ///         shots=1024, n_qpus=1, dimensions=4,
 ///         expectation_function=my_cost,
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
+/// ```
 #[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id))]
 pub fn train<'py>(
 	qc: Bound<'py, PyAny>,

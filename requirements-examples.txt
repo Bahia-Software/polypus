@@ -1,0 +1,7 @@
+# Optional dependencies for running the polypus examples.
+# Install with: pip install -r requirements-examples.txt
+
+numpy>=2.0
+scipy>=1.13
+matplotlib>=3.9
+networkx>=3.2

@@ -12,4 +12,11 @@ classifiers = [
 ]
 dynamic = ["version"]
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+markers = [
+    "integration: tests that execute real quantum circuits (require AerSimulator)",
+    "vqc: tests that train variational quantum circuits (slow)",
+]
