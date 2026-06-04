@@ -2,7 +2,7 @@ use ndarray::{Array1, Axis};
 use rand::{thread_rng, seq::SliceRandom, Rng};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule, IntoPyDict};
-use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
+use crate::algorithms::{AlgorithmTrait, AlgorithmArgs, TrainMode};
 use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
 use std::f64::consts::PI;
 
@@ -22,15 +22,71 @@ pub struct AlgorithmDifferentialEvolutionArgs{
 	pub dimensions: u32,
 	pub expectation_function: Py<PyAny>,
 	pub tolerance: f64,
+	pub mode: TrainMode,
 }
-	
+
+/// QML mode: bind `theta` to every pre-bound training circuit in `base.qcs`,
+/// run them (batched by `n_qpus`), and return the mean expectation value.
+fn evaluate_qml_candidate(
+	base: &AlgorithmArgs,
+	runner: &dyn QuantumRunner,
+	expectation_function: &Py<PyAny>,
+	theta: &[f64],
+) -> f64 {
+	let bound_qcs: Vec<Py<PyAny>> = base.qcs.iter().map(|qc_xi| {
+		Python::with_gil(|py| {
+			let qc = qc_xi.clone_ref(py).into_pyobject(py)
+				.expect("Failed to get training circuit as PyObject");
+			let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+			qc.call_method("assign_parameters", (theta.to_vec(),), Some(&kwargs))
+				.expect("Error assigning ansatz parameters to training circuit")
+				.unbind()
+		})
+	}).collect();
+
+	let n_samples = bound_qcs.len();
+	let n_qpus = base.n_qpus as usize;
+	let mut all_expectations: Vec<f64> = Vec::with_capacity(n_samples);
+
+	for i in (0..n_samples).step_by(n_qpus) {
+		let end = (i + n_qpus).min(n_samples);
+		let batch_qcs: Vec<Py<PyAny>> = bound_qcs[i..end].iter()
+			.map(|qc| Python::with_gil(|py| qc.clone_ref(py)))
+			.collect();
+		let batch_args = AlgorithmArgs {
+			id: base.id.clone(),
+			qcs: batch_qcs,
+			shots: base.shots,
+			n_qpus: base.n_qpus,
+			infrastructure: base.infrastructure.clone(),
+			backend: base.backend.clone(),
+			nodes: base.nodes,
+			cores_per_qpu: base.cores_per_qpu,
+			sim_method: base.sim_method.clone(),
+			noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+		};
+		let running_result = runner.run(&batch_args);
+		let batch_expectations: Vec<f64> = Python::with_gil(|py| {
+			PyModule::import(py, "polypus_python")
+				.expect("Failed to import polypus_python")
+				.call_method("expectation_values", (running_result, expectation_function), None)
+				.expect("Error computing expectation values")
+				.extract::<Vec<f64>>()
+				.expect("Failed to extract expectation values")
+		});
+		all_expectations.extend(batch_expectations);
+	}
+
+	all_expectations.iter().sum::<f64>() / all_expectations.len() as f64
+}
+
 impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 
     type Args = AlgorithmDifferentialEvolutionArgs;
     type AlgorithmReturnType = PyObject;
 
     fn run(&self, args: AlgorithmDifferentialEvolutionArgs) -> Self::AlgorithmReturnType {
-		let AlgorithmDifferentialEvolutionArgs {base, population_size, generations, dimensions, expectation_function, tolerance } = args;
+		let AlgorithmDifferentialEvolutionArgs {base, population_size, generations, dimensions, expectation_function, tolerance, mode } = args;
 		let popsize = population_size as usize;
 		let max_generations = generations as usize;
 		let dimensions = dimensions as usize;
@@ -65,8 +121,7 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 				let end = (i + base.n_qpus as usize).min(popsize);
 				let batch_ids = i..end;
 
-				// Create trial for each individual in the batch and assign parameters to the quantum circuits
-				let mut qcs_individuals: Vec<Py<PyAny>> = Vec::new();
+				// Create trial for each individual in the batch
 				let mut trials_batch: Vec<Array1<f64>> = Vec::new();
 				let mut trials_denorms_batch: Vec<Vec<f64>> = Vec::new();
 				for _trial_id in batch_ids.clone() {					
@@ -83,72 +138,66 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
 					trials_batch.push(trial.clone());
 					let trial_denorm: Vec<f64> = trial.to_vec();
 					trials_denorms_batch.push(trial_denorm.clone());
-					let qc_assigned = Python::with_gil(|py| {
-						let qc_any = match base.qcs[0].clone_ref(py).into_pyobject(py) {
-							Ok(obj) => obj,
-							Err(e) => {
-								panic!("Error converting QC to PyObject: {e}");
-							}
-						};
-						let params_py = trial_denorm.clone();
-						let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
-						let qc_assigned = qc_any.call_method("assign_parameters", (params_py,), Some(&kwargs));
-						match qc_assigned {
-							Ok(bound) => bound.unbind(),
-							Err(e) => {
-								panic!("Error assigning parameters: {e}");
-							},
-						}
-					});
-					qcs_individuals.push(qc_assigned);
 				}
 
-				// Run
-				let args = AlgorithmArgs {
-					id: base.id.clone(),
-					qcs: qcs_individuals,
-					shots: base.shots,
-					n_qpus: base.n_qpus,
-					infrastructure: base.infrastructure.clone(),
-					backend: "AerSimulator".to_string(),
-					nodes: base.nodes,
-					cores_per_qpu: base.cores_per_qpu,
+				// Evaluate trials — VQC: run as a batch; QML: evaluate each trial individually.
+				let expectation_values: Vec<f64> = match mode {
+					TrainMode::Vqc => {
+						let mut qcs_individuals: Vec<Py<PyAny>> = Vec::new();
+						for trial_denorm in &trials_denorms_batch {
+							let qc_assigned = Python::with_gil(|py| {
+								let qc_any = match base.qcs[0].clone_ref(py).into_pyobject(py) {
+									Ok(obj) => obj,
+									Err(e) => panic!("Error converting QC to PyObject: {e}"),
+								};
+								let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+								match qc_any.call_method("assign_parameters", (trial_denorm.clone(),), Some(&kwargs)) {
+									Ok(bound) => bound.unbind(),
+									Err(e) => panic!("Error assigning parameters: {e}"),
+								}
+							});
+							qcs_individuals.push(qc_assigned);
+						}
+						let run_args = AlgorithmArgs {
+							id: base.id.clone(),
+							qcs: qcs_individuals,
+							shots: base.shots,
+							n_qpus: base.n_qpus,
+							infrastructure: base.infrastructure.clone(),
+							backend: "AerSimulator".to_string(),
+							nodes: base.nodes,
+							cores_per_qpu: base.cores_per_qpu,
+							sim_method: base.sim_method.clone(),
+							noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+						};
+						let running_result = runner.run(&run_args);
+						Python::with_gil(|py| {
+							PyModule::import(py, "polypus_python")
+								.expect("Failed to import polypus_python")
+								.call_method("expectation_values", (running_result, &expectation_function), None)
+								.expect("Error computing expectation values")
+								.extract::<Vec<f64>>()
+								.expect("Failed to extract expectation values")
+						})
+					},
+					TrainMode::Qml => {
+						trials_denorms_batch.iter()
+							.map(|theta| evaluate_qml_candidate(&base, runner.as_ref(), &expectation_function, theta))
+							.collect()
+					},
 				};
 
-				let running_result = runner.run(&args);
-				let _expectation = Python::with_gil(|py| {
-					let qaoa_utils = match PyModule::import(py, "polypus_python") {
-						Ok(module) => module,
-						Err(e) => {
-							panic!("Failed to import polypus_python: {e}");
-						}
-					};
-					let expectations = qaoa_utils.call_method("expectation_values", (running_result, &expectation_function), None);
-					let expectation_values = match expectations{
-						Ok(result) => result,
-						Err(e) => {
-							panic!("{e}, Error serializing qc");
-						},
-					};
-					let expectation_values = match expectation_values.extract::<Vec<f64>>() {
-						Ok(val) => val,
-						Err(e) => {
-							panic!("Failed to extract float from expectation_value: {e}");
-						}
-					};
-					// Update fitness and population
-					for (idx, trial_id) in batch_ids.clone().enumerate() {
-						if expectation_values[idx] > fitness[trial_id] {
-							fitness[trial_id] = expectation_values[idx];
-							pop.row_mut(trial_id).assign(&trials_batch[idx]);
-							if expectation_values[idx] > fitness[best_idx] {
-								best_idx = trial_id;
-								best = trials_denorms_batch[idx].clone();
-							}
-						}
+				// Update fitness and population
+			for (idx, trial_id) in batch_ids.clone().enumerate() {
+				if expectation_values[idx] > fitness[trial_id] {
+					fitness[trial_id] = expectation_values[idx];
+					pop.row_mut(trial_id).assign(&trials_batch[idx]);
+					if expectation_values[idx] > fitness[best_idx] {
+						best_idx = trial_id;
+						best = trials_denorms_batch[idx].clone();
 					}
-				});
-
+				}
+			}
 			}
 			let mean = pop.mean_axis(Axis(0)).expect("Failed to compute mean");
 			let mean = mean.sum();

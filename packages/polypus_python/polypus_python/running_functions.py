@@ -12,7 +12,7 @@ import logging
 import shutil
 from collections import Counter
 sys.path.append(os.getenv("HOME"))
-from cunqa import get_QPUs, gather
+# from cunqa import get_QPUs, gather
 
 def get_logger(id):
     """Get or create the module logger that logs only to a file."""

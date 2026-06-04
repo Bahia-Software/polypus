@@ -213,30 +213,26 @@ print('  polypus_python: OK')
 success "All symbols present."
 
 # ── 9. Tests ─────────────────────────────────────────────────────────────────
-if [[ "$RUN_TESTS" == "none" ]]; then
-    echo ""
-    success "Installation complete."
-    exit 0
-fi
+if [[ "$RUN_TESTS" != "none" ]]; then
+    # Ensure pytest is available
+    if ! python -m pytest --version &>/dev/null; then
+        warn "pytest not found — installing..."
+        pip install pytest --quiet || error "Failed to install pytest."
+    fi
 
-# Ensure pytest is available
-if ! python -m pytest --version &>/dev/null; then
-    warn "pytest not found — installing..."
-    pip install pytest --quiet || error "Failed to install pytest."
-fi
-
-echo ""
-if [[ "$RUN_TESTS" == "smoke" ]]; then
-    info "Running smoke tests (no hardware required)..."
-    python -m pytest tests/python/ -m "not integration" -v
-elif [[ "$RUN_TESTS" == "all" ]]; then
-    info "Running full Python test suite..."
-    python -m pytest tests/python/ -v
     echo ""
-    info "Running Rust tests..."
-    PYTHON_LIBDIR=$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
-    export LD_LIBRARY_PATH="${PYTHON_LIBDIR}:${LD_LIBRARY_PATH:-}"
-    cargo test
+    if [[ "$RUN_TESTS" == "smoke" ]]; then
+        info "Running smoke tests (no hardware required)..."
+        python -m pytest tests/python/ -m "not integration" -v
+    elif [[ "$RUN_TESTS" == "all" ]]; then
+        info "Running full Python test suite..."
+        python -m pytest tests/python/ -v
+        echo ""
+        info "Running Rust tests..."
+        PYTHON_LIBDIR=$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
+        export LD_LIBRARY_PATH="${PYTHON_LIBDIR}:${LD_LIBRARY_PATH:-}"
+        cargo test
+    fi
 fi
 
 # ── 10. Benchmark ────────────────────────────────────────────────────────────

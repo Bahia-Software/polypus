@@ -22,6 +22,7 @@ impl QuantumRunner for CunqaRunner {
         	let _ = kwargs.set_item("backend", args.backend.clone());
 			let _ = kwargs.set_item("qcs", qcs_pylist);
 			let _ = kwargs.set_item("shots", shots);
+			let _ = kwargs.set_item("sim_method", args.sim_method.clone());
 
 			let running_result = module.call_method("run_qcs", ("cunqa",), Some(&kwargs));
 			match running_result {

@@ -2,7 +2,7 @@ use ndarray::{Array2, Axis};
 use rand::{thread_rng, Rng};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule, IntoPyDict};
-use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
+use crate::algorithms::{AlgorithmTrait, AlgorithmArgs, TrainMode};
 use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
 
 pub struct AlgorithmPSO;
@@ -29,6 +29,7 @@ pub struct AlgorithmPSOArgs {
     pub social_weight: f64,
     pub expectation_function: Py<PyAny>,
     pub tolerance: f64,
+    pub mode: TrainMode,
 }
 
 /// Assign `params` to the template circuit and run a batch of particles through the runner.
@@ -70,6 +71,8 @@ fn evaluate_batch(
         backend: base.backend.clone(),
         nodes: base.nodes,
         cores_per_qpu: base.cores_per_qpu,
+        sim_method: base.sim_method.clone(),
+        noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
     };
 
     let running_result = runner.run(&batch_args);
@@ -94,7 +97,74 @@ fn evaluate_batch(
     })
 }
 
-/// Evaluate all particles in `positions` in batches of `n_qpus`.
+/// QML mode: bind `theta` to every pre-bound training circuit in `base.qcs`,
+/// run them (batched by `n_qpus`), and return the mean expectation value.
+fn evaluate_qml_candidate(
+    base: &AlgorithmArgs,
+    runner: &dyn QuantumRunner,
+    expectation_function: &Py<PyAny>,
+    theta: &[f64],
+) -> f64 {
+    let bound_qcs: Vec<Py<PyAny>> = base.qcs.iter().map(|qc_xi| {
+        Python::with_gil(|py| {
+            let qc = qc_xi.clone_ref(py).into_pyobject(py)
+                .expect("Failed to get training circuit as PyObject");
+            let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+            qc.call_method("assign_parameters", (theta.to_vec(),), Some(&kwargs))
+                .expect("Error assigning ansatz parameters to training circuit")
+                .unbind()
+        })
+    }).collect();
+
+    let n_samples = bound_qcs.len();
+    let n_qpus = base.n_qpus as usize;
+    let mut all_expectations: Vec<f64> = Vec::with_capacity(n_samples);
+
+    for i in (0..n_samples).step_by(n_qpus) {
+        let end = (i + n_qpus).min(n_samples);
+        let batch_qcs: Vec<Py<PyAny>> = bound_qcs[i..end].iter()
+            .map(|qc| Python::with_gil(|py| qc.clone_ref(py)))
+            .collect();
+        let batch_args = AlgorithmArgs {
+            id: base.id.clone(),
+            qcs: batch_qcs,
+            shots: base.shots,
+            n_qpus: base.n_qpus,
+            infrastructure: base.infrastructure.clone(),
+            backend: base.backend.clone(),
+            nodes: base.nodes,
+            cores_per_qpu: base.cores_per_qpu,
+            sim_method: base.sim_method.clone(),
+            noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+        };
+        let running_result = runner.run(&batch_args);
+        let batch_expectations: Vec<f64> = Python::with_gil(|py| {
+            PyModule::import(py, "polypus_python")
+                .expect("Failed to import polypus_python")
+                .call_method("expectation_values", (running_result, expectation_function), None)
+                .expect("Error computing expectation values")
+                .extract::<Vec<f64>>()
+                .expect("Failed to extract expectation values")
+        });
+        all_expectations.extend(batch_expectations);
+    }
+
+    all_expectations.iter().sum::<f64>() / all_expectations.len() as f64
+}
+
+/// QML mode: evaluate all particles in `positions`, one by one.
+fn evaluate_qml_population(
+    base: &AlgorithmArgs,
+    runner: &dyn QuantumRunner,
+    expectation_function: &Py<PyAny>,
+    positions: &Array2<f64>,
+) -> Vec<f64> {
+    positions.outer_iter()
+        .map(|row| evaluate_qml_candidate(base, runner, expectation_function, row.as_slice().unwrap()))
+        .collect()
+}
+
+/// VQC mode: evaluate all particles in `positions` in batches of `n_qpus`.
 /// Returns a Vec<f64> of expectation values indexed by particle.
 fn evaluate_population(
     base: &AlgorithmArgs,
@@ -133,6 +203,7 @@ impl AlgorithmTrait for AlgorithmPSO {
             social_weight,
             expectation_function,
             tolerance,
+            mode,
         } = args;
 
         let popsize = population_size as usize;
@@ -168,8 +239,10 @@ impl AlgorithmTrait for AlgorithmPSO {
         };
 
         // --- Evaluate initial population to seed personal bests ---
-        let initial_fitness =
-            evaluate_population(&base, runner.as_ref(), &expectation_function, &positions);
+        let initial_fitness = match mode {
+            TrainMode::Vqc => evaluate_population(&base, runner.as_ref(), &expectation_function, &positions),
+            TrainMode::Qml => evaluate_qml_population(&base, runner.as_ref(), &expectation_function, &positions),
+        };
 
         let mut personal_best_positions = positions.clone();
         let mut personal_best_fitness = initial_fitness;
@@ -207,8 +280,10 @@ impl AlgorithmTrait for AlgorithmPSO {
             }
 
             // Evaluate the updated swarm
-            let new_fitness =
-                evaluate_population(&base, runner.as_ref(), &expectation_function, &new_positions);
+            let new_fitness = match mode {
+                TrainMode::Vqc => evaluate_population(&base, runner.as_ref(), &expectation_function, &new_positions),
+                TrainMode::Qml => evaluate_qml_population(&base, runner.as_ref(), &expectation_function, &new_positions),
+            };
 
             // Update personal bests
             for i in 0..popsize {

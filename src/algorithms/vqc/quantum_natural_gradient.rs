@@ -1,7 +1,7 @@
 use rand::{thread_rng, Rng};
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, IntoPyDict};
-use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
+use crate::algorithms::{AlgorithmTrait, AlgorithmArgs, TrainMode};
 use crate::infrastructure::{Infrastructure, QuantumRunner, LocalRunner, CunqaRunner};
 
 pub struct AlgorithmQNG;
@@ -33,6 +33,7 @@ pub struct AlgorithmQNGArgs {
     pub expectation_function: Py<PyAny>,
     pub variance_function: Py<PyAny>,
     pub tikhonov_reg: f64,
+    pub mode: TrainMode,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +83,8 @@ fn run_circuits_batched(
             backend: base.backend.clone(),
             nodes: base.nodes,
             cores_per_qpu: base.cores_per_qpu,
+            sim_method: base.sim_method.clone(),
+            noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
         };
 
         let running_result = runner.run(&batch_args);
@@ -190,6 +193,8 @@ fn evaluate_single(
         backend: base.backend.clone(),
         nodes: base.nodes,
         cores_per_qpu: base.cores_per_qpu,
+        sim_method: base.sim_method.clone(),
+        noise_model: base.noise_model.as_ref().map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
     };
     let result = runner.run(&batch_args);
     Python::with_gil(|py| {
@@ -201,6 +206,50 @@ fn evaluate_single(
             .extract::<Vec<f64>>()
             .expect("Failed to extract expectation value")[0]
     })
+}
+
+/// QML mode: bind `theta` to every pre-bound training circuit in `base.qcs`,
+/// run them via `run_circuits_batched`, and return the mean expectation value.
+fn evaluate_qml_candidate(
+    base: &AlgorithmArgs,
+    runner: &dyn QuantumRunner,
+    expectation_function: &Py<PyAny>,
+    theta: &[f64],
+) -> f64 {
+    let bound_qcs: Vec<Py<PyAny>> = base.qcs.iter().map(|qc_xi| {
+        Python::with_gil(|py| {
+            let qc = qc_xi.clone_ref(py).into_pyobject(py)
+                .expect("Failed to get training circuit as PyObject");
+            let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+            qc.call_method("assign_parameters", (theta.to_vec(),), Some(&kwargs))
+                .expect("Error assigning ansatz parameters to training circuit")
+                .unbind()
+        })
+    }).collect();
+    let expectations = run_circuits_batched(base, runner, expectation_function, bound_qcs);
+    expectations.iter().sum::<f64>() / expectations.len() as f64
+}
+
+/// QML mode: parameter-shift gradient using `evaluate_qml_candidate`.
+fn compute_gradient_qml(
+    base: &AlgorithmArgs,
+    runner: &dyn QuantumRunner,
+    expectation_function: &Py<PyAny>,
+    theta: &[f64],
+    h: f64,
+) -> Vec<f64> {
+    let dims = theta.len();
+    let mut grad = vec![0.0f64; dims];
+    for i in 0..dims {
+        let mut theta_plus = theta.to_vec();
+        let mut theta_minus = theta.to_vec();
+        theta_plus[i] += h;
+        theta_minus[i] -= h;
+        let e_plus  = evaluate_qml_candidate(base, runner, expectation_function, &theta_plus);
+        let e_minus = evaluate_qml_candidate(base, runner, expectation_function, &theta_minus);
+        grad[i] = (e_minus - e_plus) / (2.0 * h);
+    }
+    grad
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +271,7 @@ impl AlgorithmTrait for AlgorithmQNG {
             expectation_function,
             variance_function,
             tikhonov_reg,
+            mode,
         } = args;
 
         let dims = dimensions as usize;
@@ -242,13 +292,14 @@ impl AlgorithmTrait for AlgorithmQNG {
 
         for iteration in 0..max_iters as usize {
             // ── 1. Gradient of -E via parameter-shift rule ───────────────────
-            let grad = compute_gradient(
-                &base,
-                runner.as_ref(),
-                &expectation_function,
-                &theta,
-                finite_difference_step,
-            );
+            let grad = match mode {
+                TrainMode::Vqc => compute_gradient(
+                    &base, runner.as_ref(), &expectation_function, &theta, finite_difference_step,
+                ),
+                TrainMode::Qml => compute_gradient_qml(
+                    &base, runner.as_ref(), &expectation_function, &theta, finite_difference_step,
+                ),
+            };
 
             // ── 2. Diagonal QFIM with Tikhonov regularisation ────────────────
             let qfim_diag = compute_qfim_diagonal(
@@ -265,12 +316,10 @@ impl AlgorithmTrait for AlgorithmQNG {
             }
 
             // ── 4. Evaluate energy and track best solution ────────────────────
-            let energy = evaluate_single(
-                &base,
-                runner.as_ref(),
-                &expectation_function,
-                &theta,
-            );
+            let energy = match mode {
+                TrainMode::Vqc => evaluate_single(&base, runner.as_ref(), &expectation_function, &theta),
+                TrainMode::Qml => evaluate_qml_candidate(&base, runner.as_ref(), &expectation_function, &theta),
+            };
             println!("Iteration {}: Energy: {:.4}", iteration, energy);
 
             if energy > best_energy {

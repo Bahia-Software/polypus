@@ -301,6 +301,9 @@ if __name__ == "__main__":
     elif method in ('polypus_local', 'polypus_cunqa'):
 
         infrastructure = "local" if method == 'polypus_local' else "cunqa"
+        # MPS gives per-shot QPU parallelism on distributed backends; for local
+        # runs the automatic method (statevector) is ~19x faster on small circuits.
+        de_sim_method = "matrix_product_state" if infrastructure == "cunqa" else "automatic"
 
         tic = time.time()
         result_params = polypus.train(
@@ -313,7 +316,8 @@ if __name__ == "__main__":
             infrastructure=infrastructure,
             nodes=NUM_NODES,
             cores_per_qpu=CORES_PER_QPU,
-            id=id)
+            id=id,
+            sim_method=de_sim_method)
         elapsed = time.time() - tic
 
         counts, best_bitstring, cut, approximation_ratio = final_evaluation(

@@ -35,6 +35,10 @@ impl QuantumRunner for LocalRunner {
         	let _ = kwargs.set_item("backend", backend);
 			let _ = kwargs.set_item("qcs", qcs_pylist);
 			let _ = kwargs.set_item("shots", shots);
+			let _ = kwargs.set_item("sim_method", args.sim_method.clone());
+			if let Some(nm) = &args.noise_model {
+				let _ = kwargs.set_item("noise_model", nm.clone_ref(py));
+			}
 			let running_result = module.call_method("run_qcs", (connection_str,), Some(&kwargs));
 			match running_result {
 				Ok(result) => result.unbind(),

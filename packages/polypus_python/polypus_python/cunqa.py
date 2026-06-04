@@ -29,6 +29,7 @@ class Cunqa(Infraestructure):
         backend = args["backend"] 
         qcs = args["qcs"]
         shots = args["shots"]
+        sim_method = args.get("sim_method", "automatic")
 
         sys.path.append(os.getenv("HOME"))
         try:
