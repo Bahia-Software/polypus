@@ -1,96 +1,130 @@
-use crate::infrastructure::{QuantumRunner};
-use crate::algorithms::AlgorithmArgs;
+use crate::infrastructure::{QuantumBackend, ExecutionConfig};
 use pyo3::prelude::*;
-use pyo3::types::{PyList,PyDict};
+use pyo3::types::{PyDict, PyList};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// CunqaRunner struct to run quantum circuits on CUNQA infrastructure.
-pub struct CunqaRunner{
-	family: Option<Py<PyAny>>,
+/// CunqaBackend: runs quantum circuits on the CUNQA distributed QPU platform.
+pub struct CunqaBackend {
+    family: Option<Py<PyAny>>,
+    /// Guards against double-release of the QPU allocation (explicit `close()`
+    /// followed by `Drop`, or vice versa).
+    closed: AtomicBool,
+    /// Backend/device class name forwarded to CUNQA.
+    backend: String,
+    /// Simulation method for CUNQA's simulated QPUs.
+    sim_method: String,
+    /// Number of physical QPUs in the allocation. Bounds how many circuits can
+    /// be dispatched per `run_circuits` call (one circuit per QPU).
+    n_qpus: u32,
 }
 
-impl QuantumRunner for CunqaRunner {
-	fn run(&self, args: &AlgorithmArgs) -> pyo3::PyObject {
-		let shots = args.shots.clone();
-		Python::with_gil(|py| {
+impl QuantumBackend for CunqaBackend {
+    fn run_circuits(&self, qcs: &[Py<PyAny>], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
+        Python::with_gil(|py| {
             let qcs_pylist = PyList::empty(py);
-			for qc in &args.qcs {
-				qcs_pylist.append(qc.clone_ref(py)).unwrap();
-			}
-			let module = PyModule::import(py, "polypus_python").unwrap();
-			let kwargs = PyDict::new(py);
-        	let _ = kwargs.set_item("family_id", args.id.clone());
-        	let _ = kwargs.set_item("backend", args.backend.clone());
-			let _ = kwargs.set_item("qcs", qcs_pylist);
-			let _ = kwargs.set_item("shots", shots);
-			let _ = kwargs.set_item("sim_method", args.sim_method.clone());
+            for qc in qcs {
+                qcs_pylist.append(qc.clone_ref(py)).unwrap();
+            }
 
-			let running_result = module.call_method("run_qcs", ("cunqa",), Some(&kwargs));
-			match running_result {
-				Ok(results) => results.unbind(),
-				Err(e) => {
-					// error!("Error running run_qc: {e}");
-					panic!("{e}, Error running run_qc");
-				},
-			}
-		})
-	}
+            let module = PyModule::import(py, "polypus_python").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("family_id", &config.id).unwrap();
+            kwargs.set_item("backend", &self.backend).unwrap();
+            kwargs.set_item("qcs", qcs_pylist).unwrap();
+            kwargs.set_item("shots", config.shots).unwrap();
+            kwargs.set_item("sim_method", &self.sim_method).unwrap();
 
-	fn close(&self) {
-		self.drop_qpus();
-	}
+            module
+                .call_method("run_qcs", ("cunqa",), Some(&kwargs))
+                .expect("Error running circuits on CUNQA")
+                .extract::<Vec<HashMap<String, u64>>>()
+                .expect("run_qcs must return list[dict[str, int]]")
+        })
+    }
+
+    fn max_batch_size(&self, _total: usize) -> usize {
+        // CUNQA dispatches one circuit per QPU, so a single call can carry at
+        // most `n_qpus` circuits.
+        self.n_qpus as usize
+    }
+
+    fn close(&self) {
+        // Idempotent: only the first call actually releases the allocation.
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.drop_qpus();
+    }
 }
 
-impl CunqaRunner {
+/// RAII guarantee: QPUs are released even if the algorithm panics or returns
+/// early. This is essential for the HPC use case, where leaking a SLURM
+/// allocation would keep nodes reserved for the full requested walltime.
+impl Drop for CunqaBackend {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
 
-	pub fn new(n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) -> Self {
-		let mut runner = CunqaRunner{
-			family: None,
-		};
-		runner.raise_qpus(n_qpus, nodes, id, cores_per_qpu);
-		runner
-	}
+impl CunqaBackend {
+    pub fn new(
+        n_qpus: u32,
+        nodes: u32,
+        id: &str,
+        cores_per_qpu: u32,
+        backend: String,
+        sim_method: String,
+    ) -> Self {
+        let mut backend = CunqaBackend {
+            family: None,
+            closed: AtomicBool::new(false),
+            backend,
+            sim_method,
+            n_qpus,
+        };
+        backend.raise_qpus(n_qpus, nodes, id, cores_per_qpu);
+        backend
+    }
 
-	pub fn raise_qpus(&mut self, n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) {
-		println!("Calling python cunqa qraise");
-		Python::with_gil(|py| {
-			let kwargs = PyDict::new(py);
-        	let _ = kwargs.set_item("n", n_qpus);
-        	let _ = kwargs.set_item("t", "10:00:00");
-			let _ = kwargs.set_item("n_nodes", nodes);
-			let _ = kwargs.set_item("family_name", id);
-			let _ = kwargs.set_item("cores_per_qpu", cores_per_qpu);
+    fn raise_qpus(&mut self, n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) {
+        println!("Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}");
+        Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("n", n_qpus).unwrap();
+            kwargs.set_item("t", "10:00:00").unwrap();
+            kwargs.set_item("n_nodes", nodes).unwrap();
+            kwargs.set_item("family_name", id).unwrap();
+            kwargs.set_item("cores_per_qpu", cores_per_qpu).unwrap();
 
-			let module = PyModule::import(py, "polypus_python").unwrap();
-			println!("Raising QPUs in cunqa with n_qpus: {n_qpus}, nodes: {nodes}, id: {id}, cores_per_qpu: {cores_per_qpu}");
-			let connection = module.call_method("connect_to_infrastructure", ("cunqa", ), Some(&kwargs));
-			match connection {
-				Ok(obj) => {
-						let family: Py<PyAny> = obj.extract().expect("Error extracting family from cunqa qraise");
-						println!("QPUs raised successfully");
-						self.family = Some(family);
-				},
-				Err(e) => {
-					panic!("{e}, Error raising QPUs in cunqa");
-				},
-			}
-		});
-	}
+            let module = PyModule::import(py, "polypus_python").unwrap();
+            let connection = module
+                .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
+                .expect("Error raising QPUs in CUNQA");
+            let family: Py<PyAny> = connection.extract().expect("Error extracting family from CUNQA");
+            println!("QPUs raised successfully");
+            self.family = Some(family);
+        });
+    }
 
-	pub fn drop_qpus(&self) {
-		println!("Dropping QPUs");
-		Python::with_gil(|py| {
-			let module = PyModule::import(py, "polypus_python").unwrap();
-			let kwargs = PyDict::new(py);
-			let _ = kwargs.set_item("family", self.family.as_ref().expect("family not initialised").clone_ref(py));
-			let drop_result = module.call_method("disconnect_from_infrastructure", ("cunqa", ), Some(&kwargs));
-			match drop_result {
-				Ok(_) => {
-					println!("QPUs dropped successfully");
-				},
-				Err(e) => {
-					panic!("{e}, Error dropping QPUs in cunqa");
-				},
-			}
-		});
-	}	
+    fn drop_qpus(&self) {
+        // Nothing to release if the allocation was never established. Guarding
+        // here is important because `drop_qpus` runs from `Drop`, and a panic
+        // while unwinding would abort the entire process.
+        let Some(family) = self.family.as_ref() else {
+            return;
+        };
+        println!("Dropping QPUs");
+        Python::with_gil(|py| {
+            let module = PyModule::import(py, "polypus_python").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("family", family.clone_ref(py))
+                .unwrap();
+            module
+                .call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))
+                .expect("Error dropping QPUs in CUNQA");
+            println!("QPUs dropped successfully");
+        });
+    }
 }

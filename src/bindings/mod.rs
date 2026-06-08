@@ -12,10 +12,38 @@ use de::DE;
 use pso::PSO;
 use qng::QNG;
 
-use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, DistributeByShotsRun, TrainMode};
+use std::sync::Arc;
+use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, DistributeByShotsRun};
 use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDifferentialEvolution};
 use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
 use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
+use crate::infrastructure::{ExecutionConfig, BackendConfig, Infrastructure};
+use crate::evaluation::{EvaluationOracle, VqcOracle, QmlOracle};
+
+/// Map the public `infrastructure` string + provider parameters into a typed
+/// [`BackendConfig`]. Centralising this keeps the string→variant mapping in one
+/// place and guarantees the config matches the selected backend.
+fn build_backend_config(
+	infrastructure: &str,
+	sim_method: &str,
+	noise_model: Option<Py<PyAny>>,
+	nodes: u32,
+	cores_per_qpu: u32,
+) -> BackendConfig {
+	match Infrastructure::from_str(infrastructure) {
+		Infrastructure::Local => BackendConfig::Local {
+			backend: "AerSimulator".to_string(),
+			sim_method: sim_method.to_string(),
+			noise_model,
+		},
+		Infrastructure::Cunqa => BackendConfig::Cunqa {
+			backend: "AerSimulator".to_string(),
+			sim_method: sim_method.to_string(),
+			nodes,
+			cores_per_qpu,
+		},
+	}
+}
 
 /// Function to run a quantum circuit called from Python.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None))]
@@ -28,18 +56,24 @@ pub fn run_quantum_circuit<'py>(
 	noise_model: Option<Bound<'py, PyAny>>,
 ) -> pyo3::PyObject {
 	println!("run_quantum_circuit called with qc: {:?}, shots: {}, infrastructure: {}, n_qpus: {}", qc, shots, infrastructure, n_qpus);
-	let id: String = format!("run_{}_{}", n_qpus, infrastructure);
-	let args = AlgorithmArgs {
-		id: id.clone(),
-		qcs: vec![qc.unbind()],
+	let id = format!("run_{}_{}", n_qpus, infrastructure);
+	let backend_config = build_backend_config(
+		&infrastructure,
+		sim_method,
+		noise_model.map(|nm| nm.unbind()),
+		1,
+		2,
+	);
+	let config = ExecutionConfig {
+		id,
 		shots,
 		n_qpus,
 		infrastructure,
-		backend: "AerSimulator".to_string(),
-		nodes: 1,
-		cores_per_qpu: 2,
-		sim_method: sim_method.to_string(),
-		noise_model: noise_model.map(|nm| nm.unbind()),
+		backend_config,
+	};
+	let args = AlgorithmArgs {
+		qcs: vec![qc.unbind()],
+		config,
 	};
 
 	let algorithm: Box<dyn AlgorithmTrait<Args=AlgorithmArgs, AlgorithmReturnType=PyObject>> = if n_qpus == 1 {
@@ -80,35 +114,42 @@ pub fn train<'py>(
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
 ) -> PyResult<PyObject> {
-	let base = AlgorithmArgs {
+	let backend_config = build_backend_config(
+		&infrastructure,
+		sim_method,
+		noise_model.map(|nm| nm.unbind()),
+		nodes,
+		cores_per_qpu,
+	);
+	let config = Arc::new(ExecutionConfig {
 		id: id.clone(),
-		qcs: vec![qc.unbind()],
 		shots,
 		n_qpus,
 		infrastructure: infrastructure.clone(),
-		backend: "AerSimulator".to_string(),
-		nodes,
-		cores_per_qpu,
-		sim_method: sim_method.to_string(),
-		noise_model: noise_model.map(|nm| nm.unbind()),
-	};
+		backend_config,
+	});
+	let backend = Infrastructure::create_backend(&config);
+	let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
+		circuit: qc.unbind(),
+		config: Arc::clone(&config),
+		backend,
+		expectation_fn: expectation_function.unbind(),
+	});
 
 	if let Ok(de) = method.extract::<PyRef<DE>>() {
 		let args = AlgorithmDifferentialEvolutionArgs {
-			base,
+			oracle,
 			population_size: de.population_size,
 			generations: de.generations,
 			dimensions,
-			expectation_function: expectation_function.unbind(),
 			tolerance: de.tolerance,
-			mode: TrainMode::Vqc,
 		};
 		return Ok(AlgorithmDifferentialEvolution.run(args));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
 		let args = AlgorithmPSOArgs {
-			base,
+			oracle,
 			population_size: pso.population_size,
 			generations: pso.generations,
 			dimensions,
@@ -116,25 +157,21 @@ pub fn train<'py>(
 			inertia_weight: pso.inertia_weight,
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
-			expectation_function: expectation_function.unbind(),
 			tolerance: pso.tolerance,
-			mode: TrainMode::Vqc,
 		};
 		return Ok(AlgorithmPSO.run(args));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
 		let args = AlgorithmQNGArgs {
-			base,
+			oracle,
 			max_iters: qng.max_iters,
 			learning_rate: qng.learning_rate,
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			expectation_function: expectation_function.unbind(),
 			variance_function: qng.variance_function.clone_ref(method.py()),
 			tikhonov_reg: qng.tikhonov_reg,
-			mode: TrainMode::Vqc,
 		};
 		return Ok(AlgorithmQNG.run(args));
 	}
@@ -224,35 +261,42 @@ pub fn qml_train<'py>(
 		));
 	}
 
-	let base = AlgorithmArgs {
+	let backend_config = build_backend_config(
+		&infrastructure,
+		sim_method,
+		noise_model.map(|nm| nm.unbind()),
+		nodes,
+		cores_per_qpu,
+	);
+	let config = Arc::new(ExecutionConfig {
 		id: id.clone(),
-		qcs,
 		shots,
 		n_qpus,
 		infrastructure: infrastructure.clone(),
-		backend: "AerSimulator".to_string(),
-		nodes,
-		cores_per_qpu,
-		sim_method: sim_method.to_string(),
-		noise_model: noise_model.map(|nm| nm.unbind()),
-	};
+		backend_config,
+	});
+	let backend = Infrastructure::create_backend(&config);
+	let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
+		training_circuits: qcs,
+		config: Arc::clone(&config),
+		backend,
+		expectation_fn: expectation_function.unbind(),
+	});
 
 	if let Ok(de) = method.extract::<PyRef<DE>>() {
 		let args = AlgorithmDifferentialEvolutionArgs {
-			base,
+			oracle,
 			population_size: de.population_size,
 			generations: de.generations,
 			dimensions,
-			expectation_function: expectation_function.unbind(),
 			tolerance: de.tolerance,
-			mode: TrainMode::Qml,
 		};
 		return Ok(AlgorithmDifferentialEvolution.run(args));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
 		let args = AlgorithmPSOArgs {
-			base,
+			oracle,
 			population_size: pso.population_size,
 			generations: pso.generations,
 			dimensions,
@@ -260,25 +304,21 @@ pub fn qml_train<'py>(
 			inertia_weight: pso.inertia_weight,
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
-			expectation_function: expectation_function.unbind(),
 			tolerance: pso.tolerance,
-			mode: TrainMode::Qml,
 		};
 		return Ok(AlgorithmPSO.run(args));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
 		let args = AlgorithmQNGArgs {
-			base,
+			oracle,
 			max_iters: qng.max_iters,
 			learning_rate: qng.learning_rate,
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			expectation_function: expectation_function.unbind(),
 			variance_function: qng.variance_function.clone_ref(py),
 			tikhonov_reg: qng.tikhonov_reg,
-			mode: TrainMode::Qml,
 		};
 		return Ok(AlgorithmQNG.run(args));
 	}

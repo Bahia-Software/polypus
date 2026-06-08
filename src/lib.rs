@@ -64,5 +64,7 @@
 mod bindings;
 pub mod infrastructure;
 pub mod algorithms;
+pub mod evaluation;
+pub mod utils;
 
 pub use crate::algorithms::*;

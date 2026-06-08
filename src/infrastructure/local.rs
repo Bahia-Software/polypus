@@ -1,52 +1,53 @@
-use crate::infrastructure::{QuantumRunner};
-use crate::algorithms::AlgorithmArgs;
+use crate::infrastructure::{QuantumBackend, ExecutionConfig};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict,PyList};
+use pyo3::types::{PyDict, PyList};
+use std::collections::HashMap;
 
-/// LocalRunner struct to run quantum circuits on local infrastructure.
-pub struct LocalRunner;
+/// LocalBackend: runs quantum circuits on the local machine using Qiskit AerSimulator.
+pub struct LocalBackend {
+    /// Backend/device class name forwarded to Python (e.g. `"AerSimulator"`).
+    backend: String,
+    /// Aer simulation method.
+    sim_method: String,
+    /// Optional Qiskit `NoiseModel`.
+    noise_model: Option<Py<PyAny>>,
+}
 
-impl QuantumRunner for LocalRunner {
+impl LocalBackend {
+    pub fn new(backend: String, sim_method: String, noise_model: Option<Py<PyAny>>) -> Self {
+        LocalBackend { backend, sim_method, noise_model }
+    }
+}
 
-	/// Run the quantum circuit locally using the provided arguments.
-	fn run(&self, args: &AlgorithmArgs) -> pyo3::PyObject {
-		let id = args.id.clone();
-		let backend = String::from("AerSimulator");
-		let shots = args.shots.clone();
+impl QuantumBackend for LocalBackend {
+    fn run_circuits(&self, qcs: &[Py<PyAny>], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
+        Python::with_gil(|py| {
+            let qcs_pylist = PyList::empty(py);
+            for qc in qcs {
+                qcs_pylist.append(qc.clone_ref(py)).unwrap();
+            }
 
-		Python::with_gil(|py| {
-			// build Python list with all qcs
-			let qcs_pylist = PyList::empty(py);
-			for qc in &args.qcs {
-				qcs_pylist.append(qc.clone_ref(py)).unwrap();
-			}
+            let module = PyModule::import(py, "polypus_python").unwrap();
+            let connection = module
+                .call_method("connect_to_infrastructure", ("local",), None)
+                .expect("Error connecting to local infrastructure");
+            let connection_str = connection.extract::<String>().unwrap();
 
-			let module = PyModule::import(py, "polypus_python").unwrap();
-			let connection = module.call_method("connect_to_infrastructure", ("local", ), None);
-			let connection_str = match connection {
-				Ok(conn) => conn.extract::<String>().unwrap(),
-				Err(e) => {
-					panic!("{e}, Error connecting to infrastructure");
-				},
-			};
-			
-			let kwargs = PyDict::new(py);
-        	let _ = kwargs.set_item("id", id);
-        	let _ = kwargs.set_item("backend", backend);
-			let _ = kwargs.set_item("qcs", qcs_pylist);
-			let _ = kwargs.set_item("shots", shots);
-			let _ = kwargs.set_item("sim_method", args.sim_method.clone());
-			if let Some(nm) = &args.noise_model {
-				let _ = kwargs.set_item("noise_model", nm.clone_ref(py));
-			}
-			let running_result = module.call_method("run_qcs", (connection_str,), Some(&kwargs));
-			match running_result {
-				Ok(result) => result.unbind(),
-				Err(e) => {
-					// error!("Error running run_qc: {e}");
-					panic!("{e}, Error running run_qcs");
-				},
-			}
-		})
-	}
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("id", &config.id).unwrap();
+            kwargs.set_item("backend", &self.backend).unwrap();
+            kwargs.set_item("qcs", qcs_pylist).unwrap();
+            kwargs.set_item("shots", config.shots).unwrap();
+            kwargs.set_item("sim_method", &self.sim_method).unwrap();
+            if let Some(nm) = &self.noise_model {
+                kwargs.set_item("noise_model", nm.clone_ref(py)).unwrap();
+            }
+
+            module
+                .call_method("run_qcs", (connection_str,), Some(&kwargs))
+                .expect("Error running run_qcs")
+                .extract::<Vec<HashMap<String, u64>>>()
+                .expect("run_qcs must return list[dict[str, int]]")
+        })
+    }
 }
