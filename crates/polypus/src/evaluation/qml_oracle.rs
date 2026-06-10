@@ -1,8 +1,7 @@
 use std::sync::Arc;
 use pyo3::prelude::*;
-use pyo3::types::IntoPyDict;
-use crate::infrastructure::{QuantumBackend, ExecutionConfig};
-use crate::evaluation::{EvaluationOracle, run_and_expect};
+use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
+use crate::evaluation::{assign_parameters_qiskit, EvaluationOracle, run_and_expect};
 
 /// Oracle for QML training with feature-map encoding.
 ///
@@ -74,20 +73,11 @@ fn evaluate_qml_single(
     expectation_fn: &Py<PyAny>,
     theta: &[f64],
 ) -> f64 {
-    let bound: Vec<Py<PyAny>> = training_circuits
+    // Training circuits are Qiskit objects (feature-map pre-binding is
+    // Qiskit-specific); native QML circuits arrive with a later phase.
+    let bound: Vec<BoundCircuit> = training_circuits
         .iter()
-        .map(|qc_xi| {
-            Python::with_gil(|py| {
-                let qc = qc_xi
-                    .clone_ref(py)
-                    .into_pyobject(py)
-                    .expect("Failed to get training circuit as PyObject");
-                let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
-                qc.call_method("assign_parameters", (theta.to_vec(),), Some(&kwargs))
-                    .expect("Error assigning ansatz parameters to training circuit")
-                    .unbind()
-            })
-        })
+        .map(|qc_xi| BoundCircuit::Qiskit(assign_parameters_qiskit(qc_xi, theta)))
         .collect();
 
     let batch_size = backend.max_batch_size(bound.len()).max(1);

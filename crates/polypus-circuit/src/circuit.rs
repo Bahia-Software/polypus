@@ -53,27 +53,83 @@ impl ParameterizedCircuit {
 
     // ── Internal validation helpers ──────────────────────────────────────
 
-    fn check_qubit(&self, qubit: usize) {
-        assert!(
-            qubit < self.num_qubits,
-            "qubit index {qubit} out of range for circuit with {} qubits",
-            self.num_qubits
-        );
+    fn check_qubit(&self, qubit: usize) -> Result<(), CircuitError> {
+        if qubit >= self.num_qubits {
+            return Err(CircuitError::QubitOutOfRange {
+                qubit,
+                num_qubits: self.num_qubits,
+            });
+        }
+        Ok(())
     }
 
-    fn check_pair(&self, q0: usize, q1: usize) {
-        self.check_qubit(q0);
-        self.check_qubit(q1);
-        assert!(
-            q0 != q1,
-            "two-qubit gate requires distinct qubits, got ({q0}, {q1})"
-        );
+    fn check_pair(&self, q0: usize, q1: usize) -> Result<(), CircuitError> {
+        self.check_qubit(q0)?;
+        self.check_qubit(q1)?;
+        if q0 == q1 {
+            return Err(CircuitError::IdenticalQubits { qubit: q0 });
+        }
+        Ok(())
     }
 
     fn track_param(&mut self, param: &GateParam) {
         if let GateParam::Param(i) = param {
             self.num_params = self.num_params.max(i + 1);
         }
+    }
+
+    /// Fallible version of [`push`](Self::push): append a raw
+    /// [`GateInstruction`], validating qubit indices and keeping `num_params`
+    /// in sync. Use this from host languages (e.g. Python bindings) where
+    /// invalid input must surface as a recoverable error, not a panic.
+    pub fn try_push(&mut self, gate: GateInstruction) -> Result<(), CircuitError> {
+        match &gate {
+            GateInstruction::H(q)
+            | GateInstruction::X(q)
+            | GateInstruction::Y(q)
+            | GateInstruction::Z(q)
+            | GateInstruction::S(q)
+            | GateInstruction::T(q)
+            | GateInstruction::Sdg(q)
+            | GateInstruction::Tdg(q) => self.check_qubit(*q)?,
+            GateInstruction::Rx { qubit, theta }
+            | GateInstruction::Ry { qubit, theta }
+            | GateInstruction::Rz { qubit, theta } => {
+                self.check_qubit(*qubit)?;
+                let theta = *theta;
+                self.track_param(&theta);
+            }
+            GateInstruction::Cx(q0, q1) | GateInstruction::Cz(q0, q1) => {
+                self.check_pair(*q0, *q1)?
+            }
+            GateInstruction::Rzz { q0, q1, theta }
+            | GateInstruction::Rxx { q0, q1, theta } => {
+                self.check_pair(*q0, *q1)?;
+                let theta = *theta;
+                self.track_param(&theta);
+            }
+            GateInstruction::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => {
+                self.check_qubit(*qubit)?;
+                let (theta, phi, lam) = (*theta, *phi, *lam);
+                self.track_param(&theta);
+                self.track_param(&phi);
+                self.track_param(&lam);
+            }
+            GateInstruction::Barrier(qubits) => {
+                for q in qubits {
+                    self.check_qubit(*q)?;
+                }
+            }
+            GateInstruction::Measure { qubit, .. } => self.check_qubit(*qubit)?,
+            GateInstruction::MeasureAll => {}
+        }
+        self.gates.push(gate);
+        Ok(())
     }
 
     /// Append a raw [`GateInstruction`], validating qubit indices and keeping
@@ -84,51 +140,12 @@ impl ParameterizedCircuit {
     /// # Panics
     ///
     /// Panics on out-of-range qubit indices or a two-qubit gate whose qubits
-    /// coincide (see type-level docs).
+    /// coincide (see type-level docs). For a fallible variant, use
+    /// [`try_push`](Self::try_push).
     pub fn push(mut self, gate: GateInstruction) -> Self {
-        match &gate {
-            GateInstruction::H(q)
-            | GateInstruction::X(q)
-            | GateInstruction::Y(q)
-            | GateInstruction::Z(q)
-            | GateInstruction::S(q)
-            | GateInstruction::T(q)
-            | GateInstruction::Sdg(q)
-            | GateInstruction::Tdg(q) => self.check_qubit(*q),
-            GateInstruction::Rx { qubit, theta }
-            | GateInstruction::Ry { qubit, theta }
-            | GateInstruction::Rz { qubit, theta } => {
-                self.check_qubit(*qubit);
-                self.track_param(theta);
-            }
-            GateInstruction::Cx(q0, q1) | GateInstruction::Cz(q0, q1) => {
-                self.check_pair(*q0, *q1)
-            }
-            GateInstruction::Rzz { q0, q1, theta }
-            | GateInstruction::Rxx { q0, q1, theta } => {
-                self.check_pair(*q0, *q1);
-                self.track_param(theta);
-            }
-            GateInstruction::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                self.check_qubit(*qubit);
-                self.track_param(theta);
-                self.track_param(phi);
-                self.track_param(lam);
-            }
-            GateInstruction::Barrier(qubits) => {
-                for q in qubits {
-                    self.check_qubit(*q);
-                }
-            }
-            GateInstruction::Measure { qubit, .. } => self.check_qubit(*qubit),
-            GateInstruction::MeasureAll => {}
+        if let Err(e) = self.try_push(gate) {
+            panic!("{e}");
         }
-        self.gates.push(gate);
         self
     }
 

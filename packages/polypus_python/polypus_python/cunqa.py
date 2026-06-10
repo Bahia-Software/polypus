@@ -1,4 +1,5 @@
 
+from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 import os, sys
 sys.path.append(os.getenv("HOME"))
@@ -27,7 +28,12 @@ class Cunqa(Infraestructure):
 
         family_id = args["family_id"]
         backend = args["backend"] 
-        qcs = args["qcs"]
+        # Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
+        # currently consume QuantumCircuit objects, so parse here.
+        qcs = [
+            QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+            for qc in args["qcs"]
+        ]
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")
 

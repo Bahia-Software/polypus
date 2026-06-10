@@ -1,7 +1,23 @@
 
+from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 
 from .infrastructure import Infraestructure
+
+
+def _ensure_quantum_circuits(qcs):
+    """Accept both Qiskit ``QuantumCircuit`` objects and OpenQASM 2.0 strings.
+
+    Circuits built with the native Rust layer (``polypus.Circuit``) cross the
+    FFI boundary as QASM text; they are parsed here, at the last possible
+    moment, because AerSimulator needs ``QuantumCircuit`` instances. Future
+    backends that speak QASM natively can skip this step entirely.
+    """
+    return [
+        QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+        for qc in qcs
+    ]
+
 
 class Local(Infraestructure):
     """Local AerSimulator backend.
@@ -20,7 +36,7 @@ class Local(Infraestructure):
         pass
 
     def run_qcs(self, **args) -> object:
-        qcs = args["qcs"]
+        qcs = _ensure_quantum_circuits(args["qcs"])
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")
         noise_model = args.get("noise_model", None)

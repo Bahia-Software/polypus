@@ -14,7 +14,7 @@ pub struct QNG {
 #[pymethods]
 impl QNG {
 	#[new]
-	#[pyo3(signature = (variance_function, max_iters = 100, bounds = (-3.141592653589793, 3.141592653589793), learning_rate = 0.1, finite_difference_step = 0.1, tikhonov_reg = 0.05))]
+	#[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, finite_difference_step = 0.1, tikhonov_reg = 0.05))]
 	pub fn new(
 		variance_function: Py<PyAny>,
 		max_iters: u32,

@@ -15,7 +15,7 @@ pub struct PSO {
 #[pymethods]
 impl PSO {
 	#[new]
-	#[pyo3(signature = (generations = 100, population_size = 50, bounds = (-3.141592653589793, 3.141592653589793), inertia_weight = 0.5, cognitive_weight = 1.0, social_weight = 1.0, tolerance = 0.01))]
+	#[pyo3(signature = (generations = 100, population_size = 50, bounds = (-std::f64::consts::PI, std::f64::consts::PI), inertia_weight = 0.5, cognitive_weight = 1.0, social_weight = 1.0, tolerance = 0.01))]
 	pub fn new(
 		generations: u32,
 		population_size: u32,

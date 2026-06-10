@@ -4,10 +4,12 @@ use pyo3::Bound;
 use pyo3::wrap_pyfunction;
 use pyo3::PyResult;
 
+pub mod circuit;
 pub mod de;
 pub mod pso;
 pub mod qng;
 
+use circuit::{Circuit, Param};
 use de::DE;
 use pso::PSO;
 use qng::QNG;
@@ -17,8 +19,8 @@ use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, Distr
 use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDifferentialEvolution};
 use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
 use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
-use crate::infrastructure::{ExecutionConfig, BackendConfig, Infrastructure};
-use crate::evaluation::{EvaluationOracle, VqcOracle, QmlOracle};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure};
+use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
 
 /// Map the public `infrastructure` string + provider parameters into a typed
 /// [`BackendConfig`]. Centralising this keeps the string→variant mapping in one
@@ -45,7 +47,43 @@ fn build_backend_config(
 	}
 }
 
+/// Interpret the `qc` argument of an entry point as a parameterised circuit
+/// template. A `polypus.Circuit` becomes [`CircuitSource::Native`] (binding
+/// will run GIL-free); any other object is assumed to be a Qiskit
+/// `QuantumCircuit`, preserving the original behaviour.
+fn extract_circuit_source(qc: &Bound<'_, PyAny>) -> CircuitSource {
+	if let Ok(native) = qc.extract::<PyRef<'_, Circuit>>() {
+		CircuitSource::Native(native.native().clone())
+	} else {
+		CircuitSource::Qiskit(qc.clone().unbind())
+	}
+}
+
+/// Interpret the `qc` argument of `run_quantum_circuit` as a fully bound,
+/// executable circuit:
+/// - `polypus.Circuit` → native OpenQASM 2.0 (must have no free parameters),
+/// - `str` → raw OpenQASM 2.0 program,
+/// - anything else → Qiskit `QuantumCircuit` (original behaviour).
+fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
+	if let Ok(native) = qc.extract::<PyRef<'_, Circuit>>() {
+		let qasm = native.native().to_qasm2_with_params(&[]).map_err(|e| {
+			pyo3::exceptions::PyValueError::new_err(format!(
+				"circuit has unbound parameters and cannot be executed directly: {e}. \
+				 Bind values first via to_qasm2(params) or use polypus.train"
+			))
+		})?;
+		return Ok(BoundCircuit::Qasm2(qasm));
+	}
+	if let Ok(qasm) = qc.extract::<String>() {
+		return Ok(BoundCircuit::Qasm2(qasm));
+	}
+	Ok(BoundCircuit::Qiskit(qc.clone().unbind()))
+}
+
 /// Function to run a quantum circuit called from Python.
+///
+/// `qc` may be a Qiskit `QuantumCircuit`, a `polypus.Circuit` (fully bound),
+/// or an OpenQASM 2.0 string.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None))]
 pub fn run_quantum_circuit<'py>(
 	qc: Bound<'py, PyAny>,
@@ -54,8 +92,9 @@ pub fn run_quantum_circuit<'py>(
 	n_qpus: u32,
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
-) -> pyo3::PyObject {
+) -> PyResult<pyo3::PyObject> {
 	println!("run_quantum_circuit called with qc: {:?}, shots: {}, infrastructure: {}, n_qpus: {}", qc, shots, infrastructure, n_qpus);
+	let bound_qc = extract_bound_circuit(&qc)?;
 	let id = format!("run_{}_{}", n_qpus, infrastructure);
 	let backend_config = build_backend_config(
 		&infrastructure,
@@ -72,7 +111,7 @@ pub fn run_quantum_circuit<'py>(
 		backend_config,
 	};
 	let args = AlgorithmArgs {
-		qcs: vec![qc.unbind()],
+		qcs: vec![bound_qc],
 		config,
 	};
 
@@ -82,7 +121,7 @@ pub fn run_quantum_circuit<'py>(
 		Box::new(DistributeByShotsRun)
 	};
 
-	algorithm.run(args)
+	Ok(algorithm.run(args))
 }
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
@@ -114,6 +153,16 @@ pub fn train<'py>(
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
 ) -> PyResult<PyObject> {
+	// Native circuits know their parameter count — catch a mismatch with the
+	// requested optimisation dimensions before any QPU work starts.
+	let circuit_source = extract_circuit_source(&qc);
+	if let Some(num_params) = circuit_source.num_params() {
+		if num_params != dimensions as usize {
+			return Err(pyo3::exceptions::PyValueError::new_err(format!(
+				"dimensions ({dimensions}) does not match the circuit's free parameters ({num_params})"
+			)));
+		}
+	}
 	let backend_config = build_backend_config(
 		&infrastructure,
 		sim_method,
@@ -130,7 +179,7 @@ pub fn train<'py>(
 	});
 	let backend = Infrastructure::create_backend(&config);
 	let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
-		circuit: qc.unbind(),
+		circuit: circuit_source,
 		config: Arc::clone(&config),
 		backend,
 		expectation_fn: expectation_function.unbind(),
@@ -333,6 +382,8 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_class::<DE>()?;
 	m.add_class::<PSO>()?;
 	m.add_class::<QNG>()?;
+	m.add_class::<Circuit>()?;
+	m.add_class::<Param>()?;
 	m.add_function(wrap_pyfunction!(train, m)?)?;
 	m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
 

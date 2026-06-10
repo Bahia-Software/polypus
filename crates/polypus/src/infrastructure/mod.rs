@@ -56,6 +56,51 @@ impl Infrastructure {
     }
 }
 
+/// A fully bound (parameter-free) circuit ready for execution, in one of the
+/// representations Polypus supports.
+///
+/// Backends receive a slice of these and decide how to consume each variant:
+/// Python-based backends convert `Qasm2` to a `QuantumCircuit` inside the
+/// Python layer; future native or wire-protocol backends can submit the QASM
+/// text directly without ever touching the GIL.
+///
+/// Being an enum (rather than `Py<PyAny>`) makes the contract explicit: adding
+/// a new circuit representation is a compile-time-checked change in every
+/// backend, not a runtime surprise.
+pub enum BoundCircuit {
+    /// A bound Qiskit `QuantumCircuit` (Python object).
+    Qiskit(Py<PyAny>),
+    /// An OpenQASM 2.0 program produced by the native Rust circuit layer.
+    Qasm2(String),
+}
+
+impl BoundCircuit {
+    /// Convert to the Python object expected by `polypus_python.run_qcs`:
+    /// the Qiskit circuit as-is, or the QASM program as a `str` (the Python
+    /// layer parses/forwards it per infrastructure).
+    pub fn to_py_object(&self, py: Python<'_>) -> Py<PyAny> {
+        match self {
+            BoundCircuit::Qiskit(qc) => qc.clone_ref(py),
+            BoundCircuit::Qasm2(qasm) => qasm
+                .into_pyobject(py)
+                .expect("Failed to convert QASM string to Python")
+                .into_any()
+                .unbind(),
+        }
+    }
+
+    /// Cheap copy. Only the `Qiskit` variant needs the GIL (reference-count
+    /// bump); the `Qasm2` variant is a plain string clone.
+    pub fn duplicate(&self) -> BoundCircuit {
+        match self {
+            BoundCircuit::Qiskit(qc) => {
+                Python::with_gil(|py| BoundCircuit::Qiskit(qc.clone_ref(py)))
+            }
+            BoundCircuit::Qasm2(qasm) => BoundCircuit::Qasm2(qasm.clone()),
+        }
+    }
+}
+
 /// Contract for quantum circuit execution backends.
 ///
 /// A backend is completely agnostic to the algorithm calling it; it only knows
@@ -71,7 +116,7 @@ pub trait QuantumBackend: Send + Sync {
     /// circuit. Keeping the return type native (rather than a Python object)
     /// means non-Python backends (IBM, IQM, a future native MPI scheduler) never
     /// have to touch the GIL, which is essential for HPC-scale distribution.
-    fn run_circuits(&self, qcs: &[Py<PyAny>], config: &ExecutionConfig) -> Vec<HashMap<String, u64>>;
+    fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>>;
 
     /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
     /// call, given the `total` circuits to evaluate.

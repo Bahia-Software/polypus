@@ -3,9 +3,8 @@ pub mod vqc;
 pub use crate::algorithms::orchestration::*;
 pub use crate::algorithms::vqc::*;
 
-use pyo3::prelude::*;
 use std::fmt;
-use crate::infrastructure::ExecutionConfig;
+use crate::infrastructure::{BoundCircuit, ExecutionConfig};
 
 /// Trait for all quantum algorithms in Polypus.
 /// Each algorithm should implement this trait for its argument and output types.
@@ -26,11 +25,12 @@ pub trait AlgorithmTrait {
 /// Arguments for orchestration algorithms (single run, distribute-by-shots).
 ///
 /// Orchestration algorithms operate directly on circuits + infrastructure and
-/// do not need an optimisation loop. VQC optimisation algorithms (DE, PSO, QNG)
+/// do not need an optimisation loop. Circuits arrive as [`BoundCircuit`]s
+/// (fully bound Qiskit objects or native OpenQASM 2.0), so orchestration is
+/// representation-agnostic. VQC optimisation algorithms (DE, PSO, QNG)
 /// use their own `Args` structs that contain an
 /// [`crate::evaluation::EvaluationOracle`] instead.
-#[derive(Debug)]
 pub struct AlgorithmArgs {
     pub config: ExecutionConfig,
-    pub qcs: Vec<Py<PyAny>>,
+    pub qcs: Vec<BoundCircuit>,
 }

@@ -1,0 +1,19 @@
+# Polypus Cargo workspace.
+#
+# Crates:
+#   - crates/polypus-circuit : pure-Rust quantum circuit representation + OpenQASM 2.0 export
+#                              (no PyO3, no Python — usable from any Rust project)
+#   - crates/polypus         : the Polypus library and Python extension module (PyO3)
+[workspace]
+members = ["crates/polypus", "crates/polypus-circuit"]
+resolver = "2"
+
+# Shared package metadata, inherited by member crates via `<key>.workspace = true`.
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
+license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
+
+[workspace.dependencies]
+polypus-circuit = { path = "crates/polypus-circuit", version = "0.4.0" }

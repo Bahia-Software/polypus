@@ -5,8 +5,74 @@ pub use vqc_oracle::VqcOracle;
 pub use qml_oracle::QmlOracle;
 
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
-use crate::infrastructure::{QuantumBackend, ExecutionConfig};
+use pyo3::types::{IntoPyDict, PyModule};
+use polypus_circuit::ParameterizedCircuit;
+use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
+
+/// A parameterised circuit template, in one of the representations Polypus
+/// supports as optimisation targets.
+///
+/// The variant determines *where* per-candidate parameter binding happens:
+///
+/// - [`Qiskit`](CircuitSource::Qiskit): `assign_parameters` is called on the
+///   Python object — requires the GIL for every candidate.
+/// - [`Native`](CircuitSource::Native): binding + OpenQASM 2.0 generation run
+///   in pure Rust — **no GIL**, so candidates can be bound truly in parallel
+///   and the only remaining Python touchpoint is the simulator call itself.
+pub enum CircuitSource {
+    /// A Qiskit `QuantumCircuit` with unbound `Parameter`s.
+    Qiskit(Py<PyAny>),
+    /// A native Rust circuit from `polypus-circuit`.
+    Native(ParameterizedCircuit),
+}
+
+impl CircuitSource {
+    /// Bind one candidate parameter vector, producing an executable circuit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if binding fails (wrong number of parameters, Python error).
+    /// Entry points validate `dimensions` against the template up front, so a
+    /// failure here is a programming error, consistent with the rest of the
+    /// evaluation layer.
+    pub fn bind(&self, params: &[f64]) -> BoundCircuit {
+        match self {
+            CircuitSource::Qiskit(circuit) => {
+                BoundCircuit::Qiskit(assign_parameters_qiskit(circuit, params))
+            }
+            // Pure Rust: no GIL anywhere on this path.
+            CircuitSource::Native(circuit) => BoundCircuit::Qasm2(
+                circuit
+                    .to_qasm2_with_params(params)
+                    .unwrap_or_else(|e| panic!("Error binding native circuit: {e}")),
+            ),
+        }
+    }
+
+    /// Number of free parameters, when it can be known without Python
+    /// (`None` for Qiskit circuits — querying them needs the GIL and is done
+    /// at the entry points instead).
+    pub fn num_params(&self) -> Option<usize> {
+        match self {
+            CircuitSource::Qiskit(_) => None,
+            CircuitSource::Native(c) => Some(c.num_params),
+        }
+    }
+}
+
+/// Bind `params` to a copy of a Qiskit `circuit` and return the bound circuit.
+pub(crate) fn assign_parameters_qiskit(circuit: &Py<PyAny>, params: &[f64]) -> Py<PyAny> {
+    Python::with_gil(|py| {
+        let qc = circuit
+            .clone_ref(py)
+            .into_pyobject(py)
+            .expect("Failed to get circuit as PyObject");
+        let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
+        qc.call_method("assign_parameters", (params.to_vec(),), Some(&kwargs))
+            .expect("Error assigning parameters to circuit")
+            .unbind()
+    })
+}
 
 /// Contract between optimization algorithms and quantum circuit evaluation.
 ///
@@ -35,7 +101,7 @@ pub trait EvaluationOracle: Send + Sync {
 /// previously existed across DE, PSO, QNG, and the orchestration layer.
 pub(crate) fn run_and_expect(
     backend: &dyn QuantumBackend,
-    qcs: &[Py<PyAny>],
+    qcs: &[BoundCircuit],
     config: &ExecutionConfig,
     expectation_fn: &Py<PyAny>,
 ) -> Vec<f64> {

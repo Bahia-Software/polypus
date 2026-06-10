@@ -154,6 +154,33 @@ The repository is a Cargo workspace with two crates:
 
 Qiskit circuits remain fully supported; the Rust API is an additional, high-performance path.
 
+### From Python
+
+`polypus.Circuit` is accepted by `run_quantum_circuit` and `train` exactly like a Qiskit `QuantumCircuit` (an OpenQASM 2.0 string also works for `run_quantum_circuit`):
+
+```python
+import polypus
+
+# Fully bound circuit → run directly
+bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+counts = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+
+# Parameterized ansatz → train (binding happens in Rust, GIL-free)
+qaoa = (polypus.Circuit(4)
+        .h(0).h(1).h(2).h(3)
+        .rzz(0, 1, polypus.Param(0)).rzz(1, 2, polypus.Param(0))
+        .rzz(2, 3, polypus.Param(0)).rzz(3, 0, polypus.Param(0))
+        .rx(0, polypus.Param(1)).rx(1, polypus.Param(1))
+        .rx(2, polypus.Param(1)).rx(3, polypus.Param(1))
+        .measure_all())
+params = polypus.train(qaoa, polypus.DE(generations=100, population_size=50),
+                       shots=1024, n_qpus=1, dimensions=2,
+                       expectation_function=my_cost, infrastructure="local",
+                       nodes=1, cores_per_qpu=1, id="qaoa")
+```
+
+### From Rust
+
 ```rust
 use polypus_circuit::{ParameterizedCircuit, Param};
 
@@ -167,6 +194,10 @@ let qasm: String = qc.to_qasm2_with_params(&[0.4, 0.8])?; // OpenQASM 2.0
 ```
 
 The generated OpenQASM 2.0 uses standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
+
+### Performance notes
+
+Per-candidate parameter binding is ~3x faster than Qiskit's `assign_parameters` and, crucially, **does not touch the GIL** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`). On the local Aer backend the end-to-end wall-clock is dominated by the simulator itself (the QASM is parsed back into a `QuantumCircuit` before simulation), so native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA) and with multi-threaded evaluation.
 
 ## Credits
 - Diego Beltrán Fernández Prada

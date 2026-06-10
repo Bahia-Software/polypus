@@ -18,16 +18,10 @@ impl AlgorithmTrait for DistributeByShotsRun {
         // Divide shots across QPUs
         args.config.shots /= args.config.n_qpus;
 
-        // Replicate the circuit once per QPU
-        let qcs: Vec<pyo3::PyObject> = Python::with_gil(|py| {
-            let qc_any = args.qcs[0]
-                .clone_ref(py)
-                .into_pyobject(py)
-                .expect("Error converting QC to PyObject");
-            (0..args.config.n_qpus)
-                .map(|_| qc_any.clone().unbind())
-                .collect()
-        });
+        // Replicate the circuit once per QPU (cheap: refcount bump or string clone)
+        let qcs: Vec<_> = (0..args.config.n_qpus)
+            .map(|_| args.qcs[0].duplicate())
+            .collect();
 
         // Run — native counts, one dict per QPU
         let counts_vec = backend.run_circuits(&qcs, &args.config);
