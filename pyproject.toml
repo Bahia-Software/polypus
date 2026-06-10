@@ -13,6 +13,8 @@ classifiers = [
 dynamic = ["version"]
 [tool.maturin]
 features = ["extension-module"]
+# The repo is a Cargo workspace; the PyO3 extension crate lives here.
+manifest-path = "crates/polypus/Cargo.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

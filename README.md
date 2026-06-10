@@ -145,6 +145,29 @@ result_params = polypus.train(
 )
 ```
 
+## Rust-native circuits (`polypus-circuit`)
+
+The repository is a Cargo workspace with two crates:
+
+- `crates/polypus-circuit` — pure-Rust quantum circuit representation with OpenQASM 2.0 export. No PyO3/Python dependency, so circuits can be built and serialized without the GIL.
+- `crates/polypus` — the Polypus library and Python extension module (re-exports the circuit API as `polypus::circuit`).
+
+Qiskit circuits remain fully supported; the Rust API is an additional, high-performance path.
+
+```rust
+use polypus_circuit::{ParameterizedCircuit, Param};
+
+let qc = ParameterizedCircuit::new(4)
+    .h(0).h(1).h(2).h(3)
+    .rzz(0, 1, Param(0)).rzz(1, 2, Param(0)).rzz(2, 3, Param(0)).rzz(3, 0, Param(0))
+    .rx(0, Param(1)).rx(1, Param(1)).rx(2, Param(1)).rx(3, Param(1))
+    .measure_all();
+
+let qasm: String = qc.to_qasm2_with_params(&[0.4, 0.8])?; // OpenQASM 2.0
+```
+
+The generated OpenQASM 2.0 uses standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
+
 ## Credits
 - Diego Beltrán Fernández Prada
 - Víctor Sóñora Pombo 
