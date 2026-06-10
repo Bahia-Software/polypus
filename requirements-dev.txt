@@ -3,6 +3,8 @@
 
 # Rust/Python build
 maturin>=1.8,<2.0
+build>=1.0
 
 # Testing
 pytest>=8.0
+
