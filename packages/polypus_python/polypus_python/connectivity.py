@@ -1,12 +1,12 @@
 from .local import Local
-from .cunqa import Cunqa
+# from .cunqa import Cunqa
 
 def connect_to_infrastructure(infrastructure: str, **kwargs):
     if infrastructure == "local":
         return "local"
-    elif infrastructure == "cunqa":
-        # Reserve qpus in slurm
-        return Cunqa().get_qpus(**kwargs)
+    # elif infrastructure == "cunqa":
+    #     # Reserve qpus in slurm
+    #     return Cunqa().get_qpus(**kwargs)
     else:
         raise ValueError(f"Unknown infrastructure: {infrastructure}")
 
