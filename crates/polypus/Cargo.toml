@@ -1,9 +1,9 @@
 [package]
 name = "polypus"
-version = "0.4.0"
-edition = "2021"
-authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
-license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+polypus-circuit = { workspace = true }
 pyo3 = { version = "0.24.2" }
 rand = "0.8"
 ndarray = "0.16"
