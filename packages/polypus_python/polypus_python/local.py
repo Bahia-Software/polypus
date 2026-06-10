@@ -49,6 +49,6 @@ class Local(Infraestructure):
             noise_model=noise_model,
             max_parallel_experiments=0,
         )
-        result = sim.run(qcs, shots=shots, transpile=False).result()
+        result = sim.run(qcs, shots=shots).result()
         return [result.get_counts(i) for i in range(len(qcs))]
 

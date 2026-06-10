@@ -37,6 +37,7 @@ mod circuit;
 mod error;
 mod gate;
 mod qasm;
+mod qasm_import;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
 pub use error::CircuitError;

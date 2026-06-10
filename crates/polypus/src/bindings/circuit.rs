@@ -114,6 +114,24 @@ impl Circuit {
         }
     }
 
+    /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
+    ///
+    /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output
+    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to 3×`cx`, `id` is
+    /// dropped; multiple registers are flattened in declaration order). The
+    /// result is fully concrete (`num_params == 0`); builder methods can keep
+    /// extending it.
+    ///
+    /// ```python
+    /// qc = polypus.Circuit.from_qasm2(qiskit.qasm2.dumps(qiskit_circuit))
+    /// ```
+    #[staticmethod]
+    fn from_qasm2(source: &str) -> PyResult<Self> {
+        Ok(Circuit {
+            inner: ParameterizedCircuit::from_qasm2(source).map_err(to_py_err)?,
+        })
+    }
+
     /// Number of qubits in the quantum register.
     #[getter]
     fn num_qubits(&self) -> usize {

@@ -195,9 +195,26 @@ let qasm: String = qc.to_qasm2_with_params(&[0.4, 0.8])?; // OpenQASM 2.0
 
 The generated OpenQASM 2.0 uses standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
 
+### QASM 2.0 import (round-trip)
+
+`Circuit.from_qasm2` is the inverse of `to_qasm2` — it accepts the QASM this library exports **and** Qiskit's `qasm2.dumps` output (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to its `cx` decomposition; multiple registers are flattened; constant expressions like `pi/2` are evaluated). Parse errors raise `ValueError` with the offending line number.
+
+```python
+import polypus
+from qiskit import qasm2
+
+qc = polypus.Circuit.from_qasm2(qasm2.dumps(qiskit_circuit))  # interop
+qc = polypus.Circuit.from_qasm2(open("ansatz.qasm").read())   # persistence
+qc.rz(1, 0.5).measure_all()        # imported circuits are regular builders
+```
+
+Round-trip guarantee (verified by tests): for any circuit produced by this library, export → import → export is byte-identical. The same API exists in Rust as `ParameterizedCircuit::from_qasm2`.
+
 ### Performance notes
 
-Per-candidate parameter binding is ~3x faster than Qiskit's `assign_parameters` and, crucially, **does not touch the GIL** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`). On the local Aer backend the end-to-end wall-clock is dominated by the simulator itself (the QASM is parsed back into a `QuantumCircuit` before simulation), so native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA) and with multi-threaded evaluation.
+- **Parameter binding**: ~3x faster than Qiskit's `assign_parameters` and, crucially, **GIL-free** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`).
+- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call with `max_parallel_experiments=0`, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released. Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each call at `n_qpus` via `QuantumBackend::max_batch_size`.
+- Native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA), where the Qiskit re-parse disappears entirely.
 
 ## Credits
 - Diego Beltrán Fernández Prada

@@ -2,9 +2,10 @@
 
 use std::fmt;
 
-/// Errors that can occur when building a circuit or binding parameter values
-/// to a [`ParameterizedCircuit`](crate::ParameterizedCircuit).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Errors that can occur when building a circuit, binding parameter values
+/// to a [`ParameterizedCircuit`](crate::ParameterizedCircuit), or importing
+/// OpenQASM 2.0.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CircuitError {
     /// The number of values passed to `assign_parameters` does not match the
     /// number of free parameters declared by the circuit.
@@ -17,6 +18,14 @@ pub enum CircuitError {
     QubitOutOfRange { qubit: usize, num_qubits: usize },
     /// A two-qubit gate was given the same qubit twice.
     IdenticalQubits { qubit: usize },
+    /// The OpenQASM 2.0 source could not be parsed
+    /// (see [`ParameterizedCircuit::from_qasm2`](crate::ParameterizedCircuit::from_qasm2)).
+    Parse {
+        /// 1-based source line where the error was detected.
+        line: usize,
+        /// Human-readable description of the problem.
+        message: String,
+    },
 }
 
 impl fmt::Display for CircuitError {
@@ -38,6 +47,9 @@ impl fmt::Display for CircuitError {
                 f,
                 "two-qubit gate requires distinct qubits, got ({qubit}, {qubit})"
             ),
+            CircuitError::Parse { line, message } => {
+                write!(f, "QASM parse error at line {line}: {message}")
+            }
         }
     }
 }

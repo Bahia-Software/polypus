@@ -4,6 +4,7 @@
 use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
 use crate::qasm;
+use crate::qasm_import;
 
 /// A quantum circuit that may contain free parameters ([`GateParam::Param`]).
 ///
@@ -49,6 +50,36 @@ impl ParameterizedCircuit {
             num_params: 0,
             gates: Vec::new(),
         }
+    }
+
+    /// Import an OpenQASM 2.0 program (the inverse of
+    /// [`to_qasm2_with_params`](Self::to_qasm2_with_params)).
+    ///
+    /// Supports the gate vocabulary emitted by this crate plus the common
+    /// `qelib1.inc` names produced by Qiskit's `qasm2.dumps` (`u`, `p`, `u1`,
+    /// `u2`, `swap`, `id`, …), multiple `qreg`/`creg` declarations (flattened
+    /// in declaration order), register broadcasting, and constant angle
+    /// expressions such as `pi/2`.
+    ///
+    /// Since OpenQASM 2.0 has no free parameters, the result is always fully
+    /// concrete (`num_params == 0`). Round-trip guarantee: for any circuit
+    /// `qc` produced by this crate,
+    /// `from_qasm2(&qc.to_qasm2_with_params(&p)?)?` exports byte-identical
+    /// QASM again.
+    ///
+    /// Known model differences (semantics-preserving):
+    /// - `p`/`u1`/`u2`/`u` are canonicalised to `u3`, `swap` to its standard
+    ///   3×`cx` decomposition, and `id` is dropped.
+    /// - The classical register is implicit (sized by the measurements), so
+    ///   trailing *unmeasured* classical bits are not preserved.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Parse`] (with a 1-based line number) on malformed
+    /// input, undeclared registers, out-of-range indices, or unsupported
+    /// statements (`gate` definitions, `opaque`, `if`, `reset`).
+    pub fn from_qasm2(source: &str) -> Result<Self, CircuitError> {
+        qasm_import::parse_qasm2(source)
     }
 
     // ── Internal validation helpers ──────────────────────────────────────
