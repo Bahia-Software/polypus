@@ -48,3 +48,62 @@ fn test_copy() {
     assert_eq!(p1, p2);
 }
 
+// GateInstruction
+
+#[test]
+fn test_single_qubit_gates_creation() {
+    let h = GateInstruction::H(0);
+    let x = GateInstruction::X(1);
+    let y = GateInstruction::Y(2);
+    let z = GateInstruction::Z(3);
+
+    assert_eq!(h, GateInstruction::H(0));
+    assert_eq!(x, GateInstruction::X(1));
+    assert_eq!(y, GateInstruction::Y(2));
+    assert_eq!(z, GateInstruction::Z(3));
+}
+
+#[test]
+fn test_rotation_gates_creation() {
+    let rx = GateInstruction::Rx {
+        qubit: 0,
+        theta: GateParam::Fixed(1.0),
+    };
+
+    match rx {
+        GateInstruction::Rx { qubit, theta } => {
+            assert_eq!(qubit, 0);
+            assert_eq!(theta, GateParam::Fixed(1.0));
+        }
+        _ => panic!("Expected Rx"),
+    }
+}
+
+#[test]
+fn test_two_qubit_gates() {
+    let cx = GateInstruction::Cx(0, 1);
+    let cz = GateInstruction::Cz(2, 3);
+
+    assert_eq!(cx, GateInstruction::Cx(0, 1));
+    assert_eq!(cz, GateInstruction::Cz(2, 3));
+}
+
+#[test]
+fn test_u_gate() {
+    let u = GateInstruction::U {
+        qubit: 0,
+        theta: GateParam::Fixed(1.0),
+        phi: GateParam::Fixed(2.0),
+        lam: GateParam::Fixed(3.0),
+    };
+
+    match u {
+        GateInstruction::U { qubit, theta, phi, lam } => {
+            assert_eq!(qubit, 0);
+            assert_eq!(theta, GateParam::Fixed(1.0));
+            assert_eq!(phi, GateParam::Fixed(2.0));
+            assert_eq!(lam, GateParam::Fixed(3.0));
+        }
+        _ => panic!("Expected U gate"),
+    }
+}
