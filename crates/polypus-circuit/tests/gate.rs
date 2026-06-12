@@ -107,3 +107,46 @@ fn test_u_gate() {
         _ => panic!("Expected U gate"),
     }
 }
+
+#[test]
+fn test_barrier() {
+    let barrier = GateInstruction::Barrier(vec![0, 1, 2]);
+
+    match barrier {
+        GateInstruction::Barrier(qubits) => {
+            assert_eq!(qubits, vec![0, 1, 2]);
+        }
+        _ => panic!("Expected Barrier"),
+    }
+}
+
+#[test]
+fn test_empty_barrier() {
+    let barrier = GateInstruction::Barrier(vec![]);
+
+    match barrier {
+        GateInstruction::Barrier(qubits) => {
+            assert!(qubits.is_empty());
+        }
+        _ => panic!("Expected Barrier"),
+    }
+}
+
+#[test]
+fn test_measure() {
+    let measure = GateInstruction::Measure { qubit: 1, cbit: 2 };
+
+    match measure {
+        GateInstruction::Measure { qubit, cbit } => {
+            assert_eq!(qubit, 1);
+            assert_eq!(cbit, 2);
+        }
+        _ => panic!("Expected Measure"),
+    }
+}
+
+#[test]
+fn test_measure_all() {
+    let measure_all = GateInstruction::MeasureAll;
+    assert_eq!(measure_all, GateInstruction::MeasureAll);
+}
