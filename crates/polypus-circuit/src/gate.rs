@@ -108,3 +108,93 @@ impl GateInstruction {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_param_eval_integration(){
+        let param_fixed = GateParam::Fixed(1.5);
+        let param_variable = GateParam::Param(0);
+        let external_values = vec![3.0];
+
+        let fixed_instruction = GateInstruction::Rx { qubit: 0, theta: param_fixed };
+        let variable_instruction = GateInstruction::Rx { qubit: 0, theta: param_variable };
+
+        let fixed_result = match fixed_instruction {
+            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            _ => panic!("Expected Rx"),
+        };
+
+        let variable_result = match variable_instruction {
+            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            _ => panic!("Expected Rx"),
+        };
+
+        assert_eq!(fixed_result.unwrap(), 1.5);
+        assert_eq!(variable_result.unwrap(), 3.0);
+    }
+
+    #[test]
+    fn test_param_multiple_index() {
+        let params = vec![10.0, 20.0, 30.0];
+
+        assert_eq!(GateParam::Param(0).resolve(&params).unwrap(), 10.0);
+        assert_eq!(GateParam::Param(1).resolve(&params).unwrap(), 20.0);
+        assert_eq!(GateParam::Param(2).resolve(&params).unwrap(), 30.0);
+    }
+
+    #[test]
+    fn test_param_eval_out_of_bounds(){
+        let param_variable = GateParam::Param(1);
+        let external_values = vec![3.0];
+
+        let variable_instruction = GateInstruction::Rx { qubit: 0, theta: param_variable };
+        
+        let variable_result = match variable_instruction {
+            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            _ => panic!("Expected Rx"),
+        };
+
+
+        match variable_result {
+            Err(CircuitError::ParamIndexOutOfBounds { index, num_params }) => {
+                assert_eq!(index, 1);
+                assert_eq!(num_params, 1);
+            }
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[test]
+    fn test_param_resolve_empty_params() {
+        let param = GateParam::Param(0);
+        let params = vec![];
+
+        let result = param.resolve(&params);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_keeps_original_values() {
+        let param = GateParam::Param(0);
+        let params = vec![42.3];
+
+        let _ = param.resolve(&params);
+
+        assert_eq!(params, vec![42.3]);
+    }
+
+    #[test]
+    fn test_resolve_special_values() {
+        let params = vec![f64::INFINITY, f64::NAN];
+
+        let inf = GateParam::Param(0).resolve(&params).unwrap();
+        let nan = GateParam::Param(1).resolve(&params).unwrap();
+
+        assert!(inf.is_infinite());
+        assert!(nan.is_nan());
+    }
