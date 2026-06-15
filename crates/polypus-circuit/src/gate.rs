@@ -198,3 +198,31 @@ mod tests {
         assert!(inf.is_infinite());
         assert!(nan.is_nan());
     }
+
+    #[test]
+    fn test_max_cbit_measure() {
+        let instruction = GateInstruction::Measure { qubit: 0, cbit: 5 };
+
+        let result = instruction.max_cbit();
+
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_max_cbit_non_measure() {
+        let instruction = GateInstruction::H(0);
+
+        let result = instruction.max_cbit();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_max_cbit_measure_all() {
+        let instruction = GateInstruction::MeasureAll;
+
+        let result = instruction.max_cbit();
+
+        assert_eq!(result, None);
+    }
+}
