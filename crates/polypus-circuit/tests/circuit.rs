@@ -73,3 +73,45 @@ fn test_gate_assign_parameters_wrong_number_of_params(){
     let result = qc.assign_parameters(&[0.1]);
     assert_eq!(result, Err(CircuitError::WrongNumberOfParams { expected: 2, got: 1 }));
 }
+
+#[test]
+fn test_num_clbits_no_measurements() {
+    let qc = ParameterizedCircuit::new(2);
+
+    assert_eq!(qc.num_clbits(), 0);
+}
+
+#[test]
+fn test_num_clbits_single_measurement() {
+    let qc = ParameterizedCircuit::new(4).measure(0, 3);
+
+    assert_eq!(qc.num_clbits(), 4);
+}
+
+#[test]
+fn test_num_clbits_multiple_measurements() {
+    let qc = ParameterizedCircuit::new(6).measure(0, 3).measure(1, 5);
+
+    assert_eq!(qc.num_clbits(), 6);
+}
+
+#[test]
+fn test_num_clbits_measure_all() {
+    let qc = ParameterizedCircuit::new(3).measure_all();
+
+    assert_eq!(qc.num_clbits(), 3);
+}
+
+#[test]
+fn test_num_clbits_measure_all_after_measurement() {
+    let qc = ParameterizedCircuit::new(3).measure(0, 1).measure_all();
+
+    assert_eq!(qc.num_clbits(), 3);
+}
+
+#[test]
+fn test_num_clbits_single_zero() {
+    let qc = ParameterizedCircuit::new(3).measure(0, 0);
+
+    assert_eq!(qc.num_clbits(), 1);
+}
