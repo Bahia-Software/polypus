@@ -115,3 +115,73 @@ fn test_num_clbits_single_zero() {
 
     assert_eq!(qc.num_clbits(), 1);
 }
+
+#[test]
+fn test_to_qasm2_basic() {
+    let qc = ParameterizedCircuit::new(1).h(0);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+
+
+    assert!(qasm.starts_with("OPENQASM 2.0;"));
+    assert!(qasm.contains("qreg q[1];"));
+    assert!(qasm.contains("h q[0];"));
+    assert!(!qasm.contains("creg"))
+}
+
+#[test]
+fn test_to_qasm2_with_params_basic() {
+    let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
+    let qasm = qc.to_qasm2_with_params(&[0.5]).unwrap();
+
+    assert!(qasm.starts_with("OPENQASM 2.0;"));
+    assert!(qasm.contains("qreg q[1];"));
+    assert!(qasm.contains("rx("));
+    assert!(qasm.contains("0.5"));
+    assert!(qasm.contains("q[0];"));
+    assert!(!qasm.contains("creg"));
+}
+
+#[test]
+fn test_to_qasm2_multiple_gates_measure() {
+    let qc = ParameterizedCircuit::new(2).h(0).rx(0, Param(0)).ry(1, Param(1)).measure_all();
+    let qasm = qc.to_qasm2_with_params(&[0.5, 1.0]).unwrap();
+
+    assert!(qasm.starts_with("OPENQASM 2.0;"));
+    assert!(qasm.contains("qreg q[2];"));
+    assert!(qasm.contains("h q[0];"));
+    assert!(qasm.contains("rx("));
+    assert!(qasm.contains("0.5"));
+    assert!(qasm.contains("q[0];"));
+    assert!(qasm.contains("ry("));
+    assert!(qasm.contains("1.0"));
+    assert!(qasm.contains("q[1];"));
+    assert!(qasm.contains("creg c[2];")); 
+    assert!(qasm.contains("measure q -> c;"));
+}
+
+#[test]
+fn test_to_qasm2_multiple_gates_and_parameters() {
+    let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
+    let qasm = qc.to_qasm2_with_params(&[0.1, 0.2]).unwrap();
+
+    assert!(qasm.starts_with("OPENQASM 2.0;"));
+    assert!(qasm.contains("qreg q[2];"));
+    assert!(qasm.contains("rx("));
+    assert!(qasm.contains("0.1"));
+    assert!(qasm.contains("q[0];"));
+    assert!(qasm.contains("ry("));
+    assert!(qasm.contains("0.2"));
+    assert!(qasm.contains("q[1];"));
+    assert!(!qasm.contains("creg"));
+}
+
+#[test]
+fn test_to_qasm2_wrong_number_of_param() {
+    
+    let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
+    let result = qc.to_qasm2_with_params(&[]);
+
+    assert_eq!(result,
+        Err(CircuitError::WrongNumberOfParams { expected: 1, got: 0 })
+    );
+}
