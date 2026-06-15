@@ -1,0 +1,14 @@
+[package]
+name = "polypus-circuit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pure-Rust quantum circuit representation with OpenQASM 2.0 export, used by Polypus. No PyO3 / Python dependency."
+
+[lib]
+name = "polypus_circuit"
+
+# Intentionally dependency-free: this crate must stay lightweight and usable
+# from any Rust project without pulling in PyO3, Qiskit or async runtimes.
+[dependencies]

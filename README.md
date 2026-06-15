@@ -145,6 +145,77 @@ result_params = polypus.train(
 )
 ```
 
+## Rust-native circuits (`polypus-circuit`)
+
+The repository is a Cargo workspace with two crates:
+
+- `crates/polypus-circuit` — pure-Rust quantum circuit representation with OpenQASM 2.0 export. No PyO3/Python dependency, so circuits can be built and serialized without the GIL.
+- `crates/polypus` — the Polypus library and Python extension module (re-exports the circuit API as `polypus::circuit`).
+
+Qiskit circuits remain fully supported; the Rust API is an additional, high-performance path.
+
+### From Python
+
+`polypus.Circuit` is accepted by `run_quantum_circuit` and `train` exactly like a Qiskit `QuantumCircuit` (an OpenQASM 2.0 string also works for `run_quantum_circuit`):
+
+```python
+import polypus
+
+# Fully bound circuit → run directly
+bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+counts = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+
+# Parameterized ansatz → train (binding happens in Rust, GIL-free)
+qaoa = (polypus.Circuit(4)
+        .h(0).h(1).h(2).h(3)
+        .rzz(0, 1, polypus.Param(0)).rzz(1, 2, polypus.Param(0))
+        .rzz(2, 3, polypus.Param(0)).rzz(3, 0, polypus.Param(0))
+        .rx(0, polypus.Param(1)).rx(1, polypus.Param(1))
+        .rx(2, polypus.Param(1)).rx(3, polypus.Param(1))
+        .measure_all())
+params = polypus.train(qaoa, polypus.DE(generations=100, population_size=50),
+                       shots=1024, n_qpus=1, dimensions=2,
+                       expectation_function=my_cost, infrastructure="local",
+                       nodes=1, cores_per_qpu=1, id="qaoa")
+```
+
+### From Rust
+
+```rust
+use polypus_circuit::{ParameterizedCircuit, Param};
+
+let qc = ParameterizedCircuit::new(4)
+    .h(0).h(1).h(2).h(3)
+    .rzz(0, 1, Param(0)).rzz(1, 2, Param(0)).rzz(2, 3, Param(0)).rzz(3, 0, Param(0))
+    .rx(0, Param(1)).rx(1, Param(1)).rx(2, Param(1)).rx(3, Param(1))
+    .measure_all();
+
+let qasm: String = qc.to_qasm2_with_params(&[0.4, 0.8])?; // OpenQASM 2.0
+```
+
+The generated OpenQASM 2.0 uses standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
+
+### QASM 2.0 import (round-trip)
+
+`Circuit.from_qasm2` is the inverse of `to_qasm2` — it accepts the QASM this library exports **and** Qiskit's `qasm2.dumps` output (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to its `cx` decomposition; multiple registers are flattened; constant expressions like `pi/2` are evaluated). Parse errors raise `ValueError` with the offending line number.
+
+```python
+import polypus
+from qiskit import qasm2
+
+qc = polypus.Circuit.from_qasm2(qasm2.dumps(qiskit_circuit))  # interop
+qc = polypus.Circuit.from_qasm2(open("ansatz.qasm").read())   # persistence
+qc.rz(1, 0.5).measure_all()        # imported circuits are regular builders
+```
+
+Round-trip guarantee (verified by tests): for any circuit produced by this library, export → import → export is byte-identical. The same API exists in Rust as `ParameterizedCircuit::from_qasm2`.
+
+### Performance notes
+
+- **Parameter binding**: ~3x faster than Qiskit's `assign_parameters` and, crucially, **GIL-free** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`).
+- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call with `max_parallel_experiments=0`, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released. Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each call at `n_qpus` via `QuantumBackend::max_batch_size`.
+- Native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA), where the Qiskit re-parse disappears entirely.
+
 ## Credits
 - Diego Beltrán Fernández Prada
 - Víctor Sóñora Pombo 

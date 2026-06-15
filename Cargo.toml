@@ -1,26 +1,22 @@
-[package]
-name = "polypus"
+# Polypus Cargo workspace.
+#
+# Crates:
+#   - crates/polypus-circuit : pure-Rust quantum circuit representation + OpenQASM 2.0 export
+#                              (no PyO3, no Python — usable from any Rust project)
+#   - crates/polypus-physics : pure-Rust particle-physics layer (classical Monte Carlo
+#                              transport + quantum Hamiltonians as Pauli sums; no PyO3)
+#   - crates/polypus         : the Polypus library and Python extension module (PyO3)
+[workspace]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics"]
+resolver = "2"
+
+# Shared package metadata, inherited by member crates via `<key>.workspace = true`.
+[workspace.package]
 version = "0.4.0"
 edition = "2021"
 authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
 license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-[lib]
-name = "polypus"
-crate-type = ["cdylib", "rlib"]
-
-[features]
-extension-module = ["pyo3/extension-module"]
-
-[dependencies]
-pyo3 = { version = "0.24.2" }
-rand = "0.8"
-ndarray = "0.16"
-chrono = "0.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-log = "0.4"
-fern = "0.6"
-humantime = "2.1"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+[workspace.dependencies]
+polypus-circuit = { path = "crates/polypus-circuit", version = "0.4.0" }
+polypus-physics = { path = "crates/polypus-physics", version = "0.4.0" }

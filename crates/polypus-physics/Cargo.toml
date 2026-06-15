@@ -1,0 +1,19 @@
+[package]
+name              = "polypus-physics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description       = "Pure-Rust particle-physics simulation layer for Polypus: classical Monte Carlo transport and quantum Hamiltonian definitions as Pauli sums. No Python, no external physics framework."
+
+[lib]
+name = "polypus_physics"
+
+[dependencies]
+rand    = { version = "0.8", features = ["std_rng"] }
+ndarray = "0.16"
+serde   = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde   = ["dep:serde"]    # opt-in serialization of histories / results
