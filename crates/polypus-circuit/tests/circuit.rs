@@ -1,10 +1,10 @@
 //! Integration tests for polypus-circuit: circuit
-// ParametrizedCircuit
+// ParameterizedCircuit
 
 use polypus_circuit::{ CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParameterizedCircuit };
 
 #[test]
-fn test_basic_creation(){
+fn test_parameterized_circuit_basic_creation(){
     let qc = ParameterizedCircuit::new(3);
 
     assert_eq!(qc.num_qubits, 3);
@@ -13,7 +13,7 @@ fn test_basic_creation(){
 }
 
 #[test]
-fn test_gate_basic_creation(){
+fn test_parameterized_circuit_gate_basic_creation(){
     let qc = ParameterizedCircuit::new(2).h(0);
 
     assert_eq!(qc.num_qubits, 2);
@@ -27,7 +27,7 @@ fn test_gate_basic_creation(){
 }
 
 #[test]
-fn test_gate_param_basic_creation(){
+fn test_parameterized_circuit_gate_param_basic_creation(){
     let qc = ParameterizedCircuit::new(2).rx(0, GateParam::Param(3));
 
     assert_eq!(qc.num_qubits, 2);
@@ -45,18 +45,18 @@ fn test_gate_param_basic_creation(){
 
 #[test]
 #[should_panic]
-fn test_gate_basic_qubit_out_of_range(){
+fn test_parameterized_circuit_gate_basic_qubit_out_of_range(){
     let _qc = ParameterizedCircuit::new(2).h(5);
 }
 
 #[test]
 #[should_panic]
-fn test_gate_basic_two_same_qubit(){
+fn test_parameterized_circuit_gate_basic_two_same_qubit(){
     let _qc = ParameterizedCircuit::new(2).cx(0, 0);
 }
 
 #[test]
-fn test_gate_assign_parameters(){
+fn test_parameterized_circuit_gate_assign_parameters(){
     let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
     assert_eq!(qc.num_params, 2);
 
@@ -66,7 +66,7 @@ fn test_gate_assign_parameters(){
 }
 
 #[test]
-fn test_gate_assign_parameters_wrong_number_of_params(){
+fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params(){
     let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
     assert_eq!(qc.num_params, 2);
 
@@ -75,49 +75,49 @@ fn test_gate_assign_parameters_wrong_number_of_params(){
 }
 
 #[test]
-fn test_num_clbits_no_measurements() {
+fn test_parameterized_circuit_num_clbits_no_measurements() {
     let qc = ParameterizedCircuit::new(2);
 
     assert_eq!(qc.num_clbits(), 0);
 }
 
 #[test]
-fn test_num_clbits_single_measurement() {
+fn test_parameterized_circuit_num_clbits_single_measurement() {
     let qc = ParameterizedCircuit::new(4).measure(0, 3);
 
     assert_eq!(qc.num_clbits(), 4);
 }
 
 #[test]
-fn test_num_clbits_multiple_measurements() {
+fn test_parameterized_circuit_num_clbits_multiple_measurements() {
     let qc = ParameterizedCircuit::new(6).measure(0, 3).measure(1, 5);
 
     assert_eq!(qc.num_clbits(), 6);
 }
 
 #[test]
-fn test_num_clbits_measure_all() {
+fn test_parameterized_circuit_num_clbits_measure_all() {
     let qc = ParameterizedCircuit::new(3).measure_all();
 
     assert_eq!(qc.num_clbits(), 3);
 }
 
 #[test]
-fn test_num_clbits_measure_all_after_measurement() {
+fn test_parameterized_circuit_num_clbits_measure_all_after_measurement() {
     let qc = ParameterizedCircuit::new(3).measure(0, 1).measure_all();
 
     assert_eq!(qc.num_clbits(), 3);
 }
 
 #[test]
-fn test_num_clbits_single_zero() {
+fn test_parameterized_circuit_num_clbits_single_zero() {
     let qc = ParameterizedCircuit::new(3).measure(0, 0);
 
     assert_eq!(qc.num_clbits(), 1);
 }
 
 #[test]
-fn test_to_qasm2_basic() {
+fn test_parameterized_circuit_to_qasm2_basic() {
     let qc = ParameterizedCircuit::new(1).h(0);
     let qasm = qc.to_qasm2_with_params(&[]).unwrap();
 
@@ -129,7 +129,7 @@ fn test_to_qasm2_basic() {
 }
 
 #[test]
-fn test_to_qasm2_with_params_basic() {
+fn test_parameterized_circuit_to_qasm2_with_params_basic() {
     let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
     let qasm = qc.to_qasm2_with_params(&[0.5]).unwrap();
 
@@ -142,7 +142,7 @@ fn test_to_qasm2_with_params_basic() {
 }
 
 #[test]
-fn test_to_qasm2_multiple_gates_measure() {
+fn test_parameterized_circuit_to_qasm2_multiple_gates_measure() {
     let qc = ParameterizedCircuit::new(2).h(0).rx(0, Param(0)).ry(1, Param(1)).measure_all();
     let qasm = qc.to_qasm2_with_params(&[0.5, 1.0]).unwrap();
 
@@ -160,7 +160,7 @@ fn test_to_qasm2_multiple_gates_measure() {
 }
 
 #[test]
-fn test_to_qasm2_multiple_gates_and_parameters() {
+fn test_parameterized_circuit_to_qasm2_multiple_gates_and_parameters() {
     let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
     let qasm = qc.to_qasm2_with_params(&[0.1, 0.2]).unwrap();
 
@@ -176,7 +176,7 @@ fn test_to_qasm2_multiple_gates_and_parameters() {
 }
 
 #[test]
-fn test_to_qasm2_wrong_number_of_param() {
+fn test_parameterized_circuit_to_qasm2_wrong_number_of_param() {
     
     let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
     let result = qc.to_qasm2_with_params(&[]);
@@ -184,4 +184,64 @@ fn test_to_qasm2_wrong_number_of_param() {
     assert_eq!(result,
         Err(CircuitError::WrongNumberOfParams { expected: 1, got: 0 })
     );
+}
+
+// ConcreteCircuit
+#[test]
+fn test_concrete_circuit_num_clbits_no_measurements() {
+    let qc = ConcreteCircuit {
+        num_qubits: 2,
+        gates: vec![],
+    };
+
+    assert_eq!(qc.num_clbits(), 0);
+}
+
+#[test]
+fn test_concrete_circuit_num_clbits_single_measurement() {
+    let qc = ConcreteCircuit {
+        num_qubits: 2,
+        gates: vec![
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(1.0),
+            },
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+        ],
+    };
+
+    assert_eq!(qc.num_clbits(), 1);
+}
+
+#[test]
+fn test_concrete_circuit_num_clbits_multiple_measurements() {
+    let qc = ConcreteCircuit {
+        num_qubits: 5,
+        gates: vec![
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(1.0),
+            },
+            GateInstruction::Measure { qubit: 0, cbit: 2 },
+            GateInstruction::Measure { qubit: 4, cbit: 5 },
+        ],
+    };
+
+    assert_eq!(qc.num_clbits(), 6);
+}
+
+#[test]
+fn test_concrete_circuit_num_clbits_measure_all() {
+    let qc = ConcreteCircuit {
+        num_qubits: 5,
+        gates: vec![
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(1.0),
+            },
+            GateInstruction::MeasureAll,
+        ],
+    };
+
+    assert_eq!(qc.num_clbits(), 5);
 }
