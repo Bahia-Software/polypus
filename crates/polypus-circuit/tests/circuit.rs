@@ -251,6 +251,28 @@ fn test_parameterized_circuit_try_push_track_params() {
     assert_eq!(qc.num_params, 4);
 }
 
+#[test]
+fn test_parameterized_circuit_push_basic() {
+    let qc = ParameterizedCircuit::new(2).push(GateInstruction::H(1));
+
+    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(qc.gates[0], GateInstruction::H(1));
+}
+
+#[test]
+#[should_panic]
+fn test_parameterized_circuit_push_out_of_range() {
+    let _qc = ParameterizedCircuit::new(2).push(GateInstruction::H(5));
+}
+
+
+#[test]
+#[should_panic]
+fn test_parameterized_circuit_push_same_qubits() {
+    let _qc = ParameterizedCircuit::new(2).push(GateInstruction::Cx(0, 0));
+}
+
+
 // ConcreteCircuit
 #[test]
 fn test_concrete_circuit_num_clbits_no_measurements() {
