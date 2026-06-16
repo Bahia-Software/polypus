@@ -202,6 +202,51 @@ fn test_parameterized_circuit_to_qasm2_parser() {
 }
 
 #[test]
+fn test_parameterized_circuit_from_qasm2_invalid_syntax() {
+    let result = ParameterizedCircuit::from_qasm2("not valid qasm");
+
+    assert!(matches!(result, Err(CircuitError::Parse { .. })));
+}
+
+#[test]
+fn test_parameterized_circuit_from_qasm2_qubit_out_of_range() {
+    let qasm = r#"
+    OPENQASM 2.0;
+    qreg q[1];
+    h q[5];
+    "#;
+
+    let result = ParameterizedCircuit::from_qasm2(qasm);
+
+    assert!(matches!(result, Err(CircuitError::Parse { .. })));
+}
+
+#[test]
+fn test_parameterized_circuit_from_qasm2_undeclared_register() {
+    let qasm = r#"
+    OPENQASM 2.0;
+    h q[0];
+    "#;
+
+    let result = ParameterizedCircuit::from_qasm2(qasm);
+
+    assert!(matches!(result, Err(CircuitError::Parse { .. })));
+}
+
+#[test]
+fn test_parameterized_circuit_from_qasm2_unsupported_statement() {
+    let qasm = r#"
+    OPENQASM 2.0;
+    qreg q[1];
+    reset q[0];
+    "#;
+
+    let result = ParameterizedCircuit::from_qasm2(qasm);
+
+    assert!(matches!(result, Err(CircuitError::Parse { .. })));
+}
+
+#[test]
 fn test_parameterized_circuit_barrier_creation() {
     let qc = ParameterizedCircuit::new(3)
         .barrier()
