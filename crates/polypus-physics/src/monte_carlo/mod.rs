@@ -6,14 +6,18 @@
 //! same model works for any material. Adding a new particle species requires
 //! zero changes to this file.
 
+pub mod geometry;
 pub mod history;
 pub mod sampler;
 pub mod spectrum;
+pub mod voxel;
 
+pub use geometry::Geometry;
 pub use history::{ParticleHistory, TrackPoint};
 pub use spectrum::{
     EnergySpectrum, KramersSpectrum, Monoenergetic, TabulatedSpectrum, UniformSpectrum,
 };
+pub use voxel::VoxelGrid;
 
 use crate::error::PhysicsError;
 use crate::interactions::{InteractionEvent, InteractionModel};
@@ -75,6 +79,11 @@ where
     pub model: I,
     /// Run configuration.
     pub config: RunConfig,
+    /// Spatial boundary of the simulation volume. Defaults to
+    /// [`Geometry::Unbounded`] (infinite medium), so the legacy `run` /
+    /// `run_with_spectrum` behaviour is preserved unless a finite geometry is
+    /// installed with [`with_geometry`](Self::with_geometry).
+    pub geometry: Geometry,
 }
 
 impl<P, M, I> MonteCarloEngine<P, M, I>
@@ -84,13 +93,28 @@ where
     I: InteractionModel<P = P, M = dyn Medium>,
 {
     /// Construct a new engine from its components.
+    ///
+    /// The geometry defaults to [`Geometry::Unbounded`]; attach a bounded
+    /// volume with [`with_geometry`](Self::with_geometry).
     pub fn new(particle: P, medium: M, model: I, config: RunConfig) -> Self {
         MonteCarloEngine {
             particle,
             medium,
             model,
             config,
+            geometry: Geometry::default(),
         }
+    }
+
+    /// Install a spatial [`Geometry`] (e.g. a finite water cube) and return the
+    /// engine, enabling a builder-style call:
+    /// `MonteCarloEngine::new(..).with_geometry(Geometry::Box { .. })`.
+    ///
+    /// A particle that steps outside the geometry **escapes**: it deposits
+    /// nothing on that step and its remaining energy is not counted.
+    pub fn with_geometry(mut self, geometry: Geometry) -> Self {
+        self.geometry = geometry;
+        self
     }
 
     /// Transport a single particle to absorption, energy cutoff, or
@@ -112,6 +136,11 @@ where
     /// leaves carry zero additional deposit to avoid double counting. Full
     /// multi-species transport is a future enhancement.
     ///
+    /// If `voxels` is `Some`, every local energy deposit is also scored into
+    /// the [`VoxelGrid`] at the interaction point, building a spatial dose
+    /// tally. When the engine has a bounded [`Geometry`], a particle that steps
+    /// outside it **escapes**: the step deposits nothing and the history ends.
+    ///
     /// # Errors
     ///
     /// Propagates any [`PhysicsError`] from cross-section evaluation or
@@ -120,6 +149,7 @@ where
         &self,
         mut state: ParticleState,
         rng: &mut impl Rng,
+        mut voxels: Option<&mut VoxelGrid>,
     ) -> Result<ParticleHistory, PhysicsError> {
         let medium: &dyn Medium = &self.medium;
         let mut history = ParticleHistory::new(self.particle.pdg_id());
@@ -150,6 +180,16 @@ where
             let step = sampler::sample_step_length(mean_free_path, rng);
             sampler::advance(&mut state, step);
 
+            // Boundary check: if the particle stepped outside a bounded
+            // geometry it escapes — it deposits nothing on this step and its
+            // remaining energy is not counted. `Geometry::Unbounded` (the
+            // default) always reports "inside", so this is a no-op for the
+            // legacy infinite-medium behaviour.
+            if !self.geometry.contains(state.position) {
+                state.alive = false;
+                break;
+            }
+
             // d. Record the track point.
             history.track.push(TrackPoint {
                 position: state.position,
@@ -169,6 +209,9 @@ where
                     secondaries,
                 } => {
                     history.total_deposit_mev += energy_deposit_mev;
+                    if let Some(grid) = voxels.as_deref_mut() {
+                        grid.score(state.position, energy_deposit_mev);
+                    }
                     record_secondaries(&mut history, secondaries);
                     state.alive = false;
                 }
@@ -178,6 +221,9 @@ where
                     secondaries,
                 } => {
                     history.total_deposit_mev += energy_deposit_mev;
+                    if let Some(grid) = voxels.as_deref_mut() {
+                        grid.score(state.position, energy_deposit_mev);
+                    }
                     record_secondaries(&mut history, secondaries);
                     state = new_state;
                 }
@@ -215,10 +261,42 @@ where
     ) -> Result<SimulationResult, PhysicsError> {
         let mut histories = Vec::with_capacity(self.config.n_histories);
         for _ in 0..self.config.n_histories {
-            let primary = self.transport_one(initial_state.clone(), rng)?;
+            let primary = self.transport_one(initial_state.clone(), rng, None)?;
             histories.push(primary);
         }
         Ok(finalize(histories))
+    }
+
+    /// Run all primary histories from a fixed `initial_state` while tallying
+    /// every local energy deposit into `grid`, returning both the aggregated
+    /// [`SimulationResult`] and the filled [`VoxelGrid`].
+    ///
+    /// This is the spatial-dose counterpart of [`run`](Self::run): identical
+    /// transport, plus a per-voxel energy tally that
+    /// [`VoxelGrid::dose_gy`] / [`VoxelGrid::relative_pdd`] turn into dose and
+    /// depth-dose curves. Pair it with a bounded
+    /// [`Geometry`](Self::with_geometry) (e.g. a finite water cube) for a
+    /// phantom experiment.
+    ///
+    /// Conservation: `grid.total_energy_mev() + grid.overflow_mev()` equals the
+    /// sum of every history's `total_deposit_mev` (escaping particles deposit
+    /// nothing).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`PhysicsError`] raised during transport.
+    pub fn run_with_voxels(
+        &self,
+        initial_state: ParticleState,
+        mut grid: VoxelGrid,
+        rng: &mut impl Rng,
+    ) -> Result<(SimulationResult, VoxelGrid), PhysicsError> {
+        let mut histories = Vec::with_capacity(self.config.n_histories);
+        for _ in 0..self.config.n_histories {
+            let primary = self.transport_one(initial_state.clone(), rng, Some(&mut grid))?;
+            histories.push(primary);
+        }
+        Ok((finalize(histories), grid))
     }
 
     /// Run all primary histories, drawing each primary's initial energy from an
@@ -259,7 +337,7 @@ where
                 alive: true,
             };
             self.particle.validate_state(&state)?;
-            let primary = self.transport_one(state, rng)?;
+            let primary = self.transport_one(state, rng, None)?;
             histories.push(primary);
         }
         Ok(finalize(histories))
@@ -329,6 +407,7 @@ fn record_secondaries(parent: &mut ParticleHistory, secondaries: Vec<ParticleSta
 mod tests {
     use super::*;
     use crate::interactions::photon::PhotonInteractionModel;
+    use crate::interactions::InteractionModel;
     use crate::medium::HomogeneousMedium;
     use crate::particle::photon::Photon;
     use rand::rngs::StdRng;
@@ -424,5 +503,182 @@ mod tests {
             .run_with_spectrum(spec.as_ref(), Position([0.0; 3]), [0.0, 0.0, 1.0], &mut rng)
             .unwrap();
         assert_eq!(result.histories.len(), 10);
+    }
+
+    /// The 10 cm water cube used by the depth-dose experiment.
+    fn water_cube() -> Geometry {
+        Geometry::Box {
+            min: [-0.05, -0.05, 0.0],
+            max: [0.05, 0.05, 0.10],
+        }
+    }
+
+    /// Linear attenuation coefficient μ (m⁻¹) of 100 keV photons in water.
+    fn mu_100kev_water() -> f64 {
+        PhotonInteractionModel
+            .total_cross_section_per_m(
+                &Photon,
+                &Photon::state_along_z(0.1),
+                &HomogeneousMedium::water(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn box_geometry_leaves_unbounded_runs_unchanged() {
+        // An engine with the default (Unbounded) geometry must reproduce the
+        // legacy infinite-medium result bit-for-bit.
+        let cfg = RunConfig {
+            n_histories: 200,
+            seed: 3,
+            ..Default::default()
+        };
+        let base = MonteCarloEngine::new(
+            Photon,
+            HomogeneousMedium::water(),
+            PhotonInteractionModel,
+            cfg.clone(),
+        );
+        let explicit = MonteCarloEngine::new(
+            Photon,
+            HomogeneousMedium::water(),
+            PhotonInteractionModel,
+            cfg,
+        )
+        .with_geometry(Geometry::Unbounded);
+
+        let mut r1 = StdRng::seed_from_u64(3);
+        let mut r2 = StdRng::seed_from_u64(3);
+        let a = base.run(Photon::state_along_z(0.1), &mut r1).unwrap();
+        let b = explicit.run(Photon::state_along_z(0.1), &mut r2).unwrap();
+        assert_eq!(a.mean_deposit_mev, b.mean_deposit_mev);
+    }
+
+    #[test]
+    fn escape_fraction_through_box_matches_exp_attenuation() {
+        // 10 cm water cube, entrance face at z = 0, monoenergetic 100 keV pencil
+        // beam along +z. A primary that never interacts crosses the exit face
+        // and escapes; the un-interacted surviving fraction is exp(-μ·d). The
+        // boundary check fires before any interaction point is recorded, so an
+        // escaped-without-interacting primary has exactly one track point.
+        let mu = mu_100kev_water();
+        let depth = 0.10;
+        let expected = (-mu * depth).exp();
+
+        let n = 40_000;
+        let eng = MonteCarloEngine::new(
+            Photon,
+            HomogeneousMedium::water(),
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: n,
+                seed: 2024,
+                ..Default::default()
+            },
+        )
+        .with_geometry(water_cube());
+
+        let mut rng = StdRng::seed_from_u64(2024);
+        let result = eng.run(Photon::state_along_z(0.1), &mut rng).unwrap();
+        let escaped = result
+            .histories
+            .iter()
+            .filter(|h| h.track.len() == 1)
+            .count() as f64
+            / n as f64;
+        assert!(
+            (escaped - expected).abs() < 0.01,
+            "escape fraction {escaped:.4} vs exp(-mu*d) {expected:.4} (mu={mu:.2}/m)"
+        );
+    }
+
+    #[test]
+    fn voxel_tally_conserves_total_deposit() {
+        // Unbounded medium + a finite 10 cm grid: photons deposit at all depths,
+        // many beyond the grid, so both the in-grid tally and the overflow are
+        // exercised. Sum of voxel energy + overflow must equal the summed
+        // per-history deposit (escaping particles deposit nothing).
+        let n = 5_000;
+        let eng = MonteCarloEngine::new(
+            Photon,
+            HomogeneousMedium::water(),
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: n,
+                seed: 11,
+                ..Default::default()
+            },
+        );
+        let grid = VoxelGrid::new([-0.05, -0.05, 0.0], 0.01, [10, 10, 10]).unwrap();
+        let mut rng = StdRng::seed_from_u64(11);
+        let (result, grid) = eng
+            .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
+            .unwrap();
+
+        let summed_deposit: f64 = result.histories.iter().map(|h| h.total_deposit_mev).sum();
+        let tallied = grid.total_energy_mev() + grid.overflow_mev();
+        assert!(
+            grid.overflow_mev() > 0.0,
+            "the overflow path should be exercised by a finite grid in an infinite medium"
+        );
+        assert!(
+            (tallied - summed_deposit).abs() < 1e-6 * summed_deposit.max(1.0),
+            "tallied {tallied} vs deposited {summed_deposit}"
+        );
+    }
+
+    #[test]
+    fn depth_profile_log_slope_approximates_mu() {
+        // Depth-dose validation. A monoenergetic 100 keV pencil beam in the
+        // 10 cm water cube. A log-linear fit of the central slices of the depth
+        // profile recovers an effective attenuation of the same order as
+        // μ(100 keV, water) ≈ 16.7 m⁻¹, but distinctly shallower.
+        //
+        // Why shallower than -μ: at 100 keV in water Compton scattering is the
+        // dominant process and transfers only ~15 % of each photon's energy to
+        // the recoil electron (deposited locally); the ~85 %-energy scattered
+        // photon travels predominantly forward and deposits downstream. This
+        // forward-scatter "build-up" flattens the depth-dose curve well below
+        // the primary-only exp(-μz). Measured here: the central-region slope is
+        // ≈ 0.55 μ (≈ -9 m⁻¹). The test brackets |slope| to (0.4 μ, 1.0 μ):
+        // unambiguously negative, the right order of magnitude, yet below the
+        // pure-primary μ — the documented scatter margin.
+        let mu = mu_100kev_water();
+        let n = 200_000;
+        let eng = MonteCarloEngine::new(
+            Photon,
+            HomogeneousMedium::water(),
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: n,
+                seed: 7,
+                ..Default::default()
+            },
+        )
+        .with_geometry(water_cube());
+        let grid = VoxelGrid::new([-0.05, -0.05, 0.0], 0.01, [10, 10, 10]).unwrap();
+        let mut rng = StdRng::seed_from_u64(7);
+        let (_r, grid) = eng
+            .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
+            .unwrap();
+
+        // Log-linear fit over the central slices [1, 6) → z-centres 1.5–5.5 cm.
+        let profile = grid.depth_profile_mev();
+        let voxel = grid.voxel_size_m();
+        let (mut sx, mut sy, mut sxx, mut sxy, mut count) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for (i, &e) in profile.iter().enumerate().take(6).skip(1) {
+            let z = (i as f64 + 0.5) * voxel;
+            let l = e.ln();
+            sx += z;
+            sy += l;
+            sxx += z * z;
+            sxy += z * l;
+            count += 1.0;
+        }
+        let slope = (count * sxy - sx * sy) / (count * sxx - sx * sx);
+        assert!(
+            slope < -0.4 * mu && slope > -mu,
+            "fitted depth-profile slope {slope:.2}/m outside (-mu, -0.4*mu) with mu = {mu:.2}/m"
+        );
     }
 }

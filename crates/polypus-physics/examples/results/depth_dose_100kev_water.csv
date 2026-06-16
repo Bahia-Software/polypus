@@ -1,0 +1,26 @@
+# polypus-physics depth-dose experiment — numerical results
+# beam: monoenergetic 100 keV photon pencil beam along +z from (0,0,0)
+# medium: water (rho = 1000.0 kg/m^3)
+# beam_energy_mev: 0.100000
+# n_primaries: 20000
+# seed: 2026
+# geometry_box_min_cm: [-5.000, -5.000, 0.000]
+# geometry_box_max_cm: [5.000, 5.000, 10.000]
+# voxel_size_cm: 1.000
+# dims_nx_ny_nz: [10, 10, 10]
+# mu_100kev_water_per_m: 16.6780
+# total_deposit_in_grid_mev: 463.684314
+# overflow_mev: 0.000000
+# note: dose_gy is absolute for n_primaries; dose_gy_per_primary = dose_gy / n_primaries
+# note: local deposition is valid at 100 keV (e- range < 0.2 mm << 1 cm voxel)
+z_min_cm,z_max_cm,z_center_cm,deposit_mev,rel_pdd,dose_gy,dose_gy_per_primary
+0.000,1.000,0.500,6.634687e1,1.000000,1.062994e-10,5.314970e-15
+1.000,2.000,1.500,6.295496e1,0.948876,1.008650e-10,5.043248e-15
+2.000,3.000,2.500,5.969284e1,0.899708,9.563847e-11,4.781924e-15
+3.000,4.000,3.500,5.550339e1,0.836564,8.892623e-11,4.446312e-15
+4.000,5.000,4.500,5.230773e1,0.788398,8.380623e-11,4.190311e-15
+5.000,6.000,5.500,4.489845e1,0.676723,7.193525e-11,3.596762e-15
+6.000,7.000,6.500,3.851298e1,0.580479,6.170460e-11,3.085230e-15
+7.000,8.000,7.500,3.314479e1,0.499568,5.310380e-11,2.655190e-15
+8.000,9.000,8.500,2.762015e1,0.416299,4.425236e-11,2.212618e-15
+9.000,10.000,9.500,2.270215e1,0.342174,3.637286e-11,1.818643e-15
