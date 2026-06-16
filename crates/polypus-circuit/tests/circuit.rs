@@ -212,6 +212,45 @@ fn test_parameterized_circuit_barrier_creation() {
     assert_eq!(qc.gates[1], GateInstruction::Barrier(vec![0, 2]));
 }
 
+#[test]
+fn test_parameterized_circuit_try_push_basic() {
+    let mut qc = ParameterizedCircuit::new(2);
+    assert_eq!(qc.gates.len(), 0);
+
+    let result = qc.try_push(GateInstruction::T(1));
+    assert_eq!(qc.gates[0], GateInstruction::T(1));
+    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
+fn test_parameterized_circuit_try_push_out_of_range() {
+    let mut qc = ParameterizedCircuit::new(1);
+    let result = qc.try_push(GateInstruction::Sdg(5));
+
+    assert_eq!(result,Err(CircuitError::QubitOutOfRange { qubit: 5, num_qubits: 1 }));
+}
+
+#[test]
+fn test_parameterized_circuit_try_push_same_qubits() {
+    let mut qc = ParameterizedCircuit::new(1);
+    let result = qc.try_push(GateInstruction::Cz(0, 0));
+
+    assert_eq!(result,Err(CircuitError::IdenticalQubits{ qubit: 0 }));
+}
+
+#[test]
+fn test_parameterized_circuit_try_push_track_params() {
+    let mut qc = ParameterizedCircuit::new(2);
+    let result = qc.try_push(GateInstruction::Rx {
+        qubit: 0,
+        theta: GateParam::Param(3),
+    });
+    
+    assert_eq!(result, Ok(()));
+    assert_eq!(qc.num_params, 4);
+}
+
 // ConcreteCircuit
 #[test]
 fn test_concrete_circuit_num_clbits_no_measurements() {
