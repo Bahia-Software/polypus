@@ -69,6 +69,24 @@ fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params(){
 }
 
 #[test]
+fn test_parameterized_circuit_assign_parameters_param_index_out_of_bounds() {
+    let qc = ParameterizedCircuit {
+        num_qubits: 1,
+        num_params: 1,
+        gates: vec![
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Param(5),
+            },
+        ],
+    };
+
+    let result = qc.assign_parameters(&[0.1]);
+
+    assert_eq!(result,Err(CircuitError::ParamIndexOutOfBounds { index: 5, num_params: 1 }));
+}
+
+#[test]
 fn test_parameterized_circuit_num_clbits_no_measurements() {
     let qc = ParameterizedCircuit::new(2);
 
@@ -376,6 +394,19 @@ fn test_concrete_circuit_num_clbits_measure_all() {
     };
 
     assert_eq!(qc.num_clbits(), 5);
+}
+
+#[test]
+fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
+    let qc = ConcreteCircuit {
+        num_qubits: 3,
+        gates: vec![
+            GateInstruction::Measure { qubit: 0, cbit: 10 },
+            GateInstruction::MeasureAll,
+        ],
+    };
+
+    assert_eq!(qc.num_clbits(), 11);
 }
 
 #[test]
