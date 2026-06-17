@@ -1,0 +1,100 @@
+# ============================================================================
+# TOPAS reference simulation for the polypus-physics depth-dose experiment.
+#
+#   100 keV photon pencil beam into a 10 x 10 x 10 cm liquid-water cube,
+#   scored on a 10 x 10 x 10 grid of 1 cm cubic voxels.
+#
+# This reproduces the geometry/binning of the polypus example so the output is
+# directly comparable to:
+#   crates/polypus-physics/examples/results/voxel_dose_100kev_water.csv
+# Collapse the TOPAS per-voxel CSV over x and y to obtain the depth-dose / PDD
+# and compare against the `rel_pdd` / `dose_gy_per_primary` columns there.
+#
+# TOPAS is free for research but requires a (free) license + registration:
+#   https://topasmc.org   (download is license-gated)
+# Docs (parameter syntax, scorers): https://topas.readthedocs.io
+#
+# Run:  topas topas_100kev_water.txt
+# ============================================================================
+
+# ---- Physics: low-energy EM models (recommended below ~1 MeV) --------------
+# Penelope (or "g4em-livermore") models photoelectric, Compton WITH electron
+# binding, Rayleigh/coherent scatter and fluorescence -- precisely the effects
+# polypus does NOT yet model (it uses free-electron Klein-Nishina, no Rayleigh,
+# no binding). That is why this TOPAS run is the "ground truth" to validate
+# against: any structured difference vs polypus is expected to be Rayleigh +
+# Compton binding, largest below ~30 keV and small (but non-zero) at 100 keV.
+sv:Ph/Default/Modules = 1 "g4em-penelope"
+
+# ---- World -----------------------------------------------------------------
+d:Ge/World/HLX        = 8.  cm
+d:Ge/World/HLY        = 8.  cm
+d:Ge/World/HLZ        = 12. cm
+s:Ge/World/Material   = "Air"
+b:Ge/World/Invisible  = "True"
+
+# ---- Water phantom ---------------------------------------------------------
+# Full size 10x10x10 cm => half-lengths 5 cm. Shifted to z = +5 cm so the
+# entrance face sits at z = 0 (where the beam starts), spanning z in [0, 10] cm,
+# x and y in [-5, +5] cm -- identical to the polypus Geometry::Box.
+s:Ge/Phantom/Type     = "TsBox"
+s:Ge/Phantom/Parent   = "World"
+s:Ge/Phantom/Material = "G4_WATER"
+d:Ge/Phantom/HLX      = 5. cm
+d:Ge/Phantom/HLY      = 5. cm
+d:Ge/Phantom/HLZ      = 5. cm
+d:Ge/Phantom/TransZ   = 5. cm
+# Voxelize into 10 x 10 x 10 bins of 1 cm each.
+i:Ge/Phantom/XBins    = 10
+i:Ge/Phantom/YBins    = 10
+i:Ge/Phantom/ZBins    = 10
+
+# ---- Source: monoenergetic 100 keV gamma pencil beam at (0,0,0) along +z ----
+s:Ge/BeamPos/Type     = "Group"
+s:Ge/BeamPos/Parent   = "World"
+d:Ge/BeamPos/TransZ   = 0. cm
+# (No rotation: a TOPAS "Beam" is emitted along the +z axis of its component,
+#  and World +z points into the phantom. VERIFY once with the visualization --
+#  see the note at the bottom -- since this is the one convention worth a check.)
+
+s:So/PencilBeam/Type                     = "Beam"
+s:So/PencilBeam/Component                = "BeamPos"
+s:So/PencilBeam/BeamParticle             = "gamma"
+d:So/PencilBeam/BeamEnergy               = 100. keV
+u:So/PencilBeam/BeamEnergySpread         = 0.0
+s:So/PencilBeam/BeamPositionDistribution = "None"   # point source (pencil)
+s:So/PencilBeam/BeamAngularDistribution  = "None"   # perfectly parallel
+i:So/PencilBeam/NumberOfHistoriesInRun   = 1000000  # lower to ~1e5 for a quick test
+
+# ---- Scorer: absorbed dose per voxel, written to CSV -----------------------
+# DoseToWater accumulates total dose over the whole run; divide by
+# NumberOfHistoriesInRun to get dose-per-primary (the run-independent quantity
+# to compare with polypus `dose_gy_per_primary`). "DoseToMedium" is equivalent
+# here because the medium already IS water.
+s:Sc/VoxelDose/Quantity                  = "DoseToWater"
+s:Sc/VoxelDose/Component                 = "Phantom"
+s:Sc/VoxelDose/OutputType                = "CSV"
+s:Sc/VoxelDose/OutputFile                = "topas_voxel_dose_100kev_water"
+s:Sc/VoxelDose/IfOutputFileAlreadyExists = "Overwrite"
+b:Sc/VoxelDose/OutputToConsole           = "False"
+b:Sc/VoxelDose/ReportStandardDeviation   = "True"   # per-voxel sigma for error bars
+
+# ---- Run control -----------------------------------------------------------
+i:Ts/ShowHistoryCountAtInterval = 100000
+b:Ts/PauseBeforeQuit            = "False"
+
+# ============================================================================
+# After the run you get topas_voxel_dose_100kev_water.csv with one row per
+# voxel (bin indices + dose [+ sigma]). To compare with polypus:
+#   1. Sum dose over x,y for each z bin  -> depth-dose profile.
+#   2. Normalize to its maximum          -> relative PDD (compare to rel_pdd).
+#   3. Or divide total dose by 1e6       -> dose per primary (absolute compare).
+#
+# ONE THING TO VERIFY (first run only): enable the Qt viewer to confirm the
+# beam enters at z=0 and travels +z through the phantom. Add these lines and
+# launch interactively:
+#   s:Gr/view/Type        = "OpenGL"
+#   b:Gr/view/IncludeAxes = "True"
+# If the beam points the wrong way in your TOPAS version, rotate the source
+# component 180 deg about y:  d:Ge/BeamPos/RotY = 180. deg
+# ============================================================================

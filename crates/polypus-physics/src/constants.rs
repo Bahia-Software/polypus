@@ -27,6 +27,13 @@ pub const PROTON_MASS_MEV: f64 = 938.272_088_16;
 /// Elementary charge (C).
 pub const ELECTRON_CHARGE_C: f64 = 1.602_176_634e-19;
 
+/// Energy conversion factor from megaelectronvolts to joules (J/MeV).
+///
+/// One electronvolt is `e` joules, so `1 MeV = 1e6 · e = 1.602_176_634e-13 J`.
+/// Used to convert a voxel's deposited energy (MeV) into an absorbed dose in
+/// gray (J/kg).
+pub const MEV_TO_JOULE: f64 = 1.602_176_634e-13;
+
 /// Classical electron radius r_e (m).
 pub const CLASSICAL_ELECTRON_RADIUS_M: f64 = 2.817_940_3e-15;
 
@@ -61,5 +68,11 @@ mod tests {
     #[test]
     fn fine_structure_matches_reference() {
         assert!(rel_diff(FINE_STRUCTURE, 1.0 / 137.036) < 1e-5);
+    }
+
+    #[test]
+    fn mev_to_joule_matches_elementary_charge() {
+        // 1 MeV = 1e6 eV = 1e6 · e joules.
+        assert!(rel_diff(MEV_TO_JOULE, 1e6 * ELECTRON_CHARGE_C) < 1e-9);
     }
 }
