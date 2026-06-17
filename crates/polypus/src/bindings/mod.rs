@@ -9,7 +9,7 @@ pub mod de;
 pub mod pso;
 pub mod qng;
 
-use circuit::{Circuit, Param};
+use circuit::{statevector, Circuit, Param};
 use de::DE;
 use pso::PSO;
 use qng::QNG;
@@ -22,29 +22,55 @@ use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure};
 use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
 
-/// Map the public `infrastructure` string + provider parameters into a typed
-/// [`BackendConfig`]. Centralising this keeps the string→variant mapping in one
-/// place and guarantees the config matches the selected backend.
+/// Map the public `infrastructure` + `backend` strings and provider parameters
+/// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
+/// mapping in one place and guarantees the config matches the selected backend.
+///
+/// `backend` selects the *device* within an infrastructure. For `local`:
+/// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
+/// statevector simulator. The choice is ignored for CUNQA, which manages its
+/// own simulated QPUs.
 fn build_backend_config(
 	infrastructure: &str,
+	backend: &str,
 	sim_method: &str,
 	noise_model: Option<Py<PyAny>>,
 	nodes: u32,
 	cores_per_qpu: u32,
-) -> BackendConfig {
+) -> PyResult<BackendConfig> {
 	match Infrastructure::from_str(infrastructure) {
-		Infrastructure::Local => BackendConfig::Local {
-			backend: "AerSimulator".to_string(),
-			sim_method: sim_method.to_string(),
-			noise_model,
+		Infrastructure::Local => match backend {
+			"aer" | "AerSimulator" => Ok(BackendConfig::Local {
+				backend: "AerSimulator".to_string(),
+				sim_method: sim_method.to_string(),
+				noise_model,
+			}),
+			"polypus" | "statevector" | "polypus_statevector" => {
+				if noise_model.is_some() {
+					return Err(pyo3::exceptions::PyValueError::new_err(
+						"the native 'polypus' backend is a noiseless statevector simulator \
+						 and does not accept a noise_model; use backend=\"aer\"",
+					));
+				}
+				Ok(BackendConfig::LocalNative)
+			}
+			other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+				"unknown local backend '{other}'; expected \"aer\" or \"polypus\""
+			))),
 		},
-		Infrastructure::Cunqa => BackendConfig::Cunqa {
+		Infrastructure::Cunqa => Ok(BackendConfig::Cunqa {
 			backend: "AerSimulator".to_string(),
 			sim_method: sim_method.to_string(),
 			nodes,
 			cores_per_qpu,
-		},
+		}),
 	}
+}
+
+/// Whether `backend` selects the pure-Rust native statevector simulator, which
+/// (unlike Aer) cannot consume a Qiskit `QuantumCircuit`.
+fn is_native_backend(backend: &str) -> bool {
+	matches!(backend, "polypus" | "statevector" | "polypus_statevector")
 }
 
 /// Interpret the `qc` argument of an entry point as a parameterised circuit
@@ -61,18 +87,18 @@ fn extract_circuit_source(qc: &Bound<'_, PyAny>) -> CircuitSource {
 
 /// Interpret the `qc` argument of `run_quantum_circuit` as a fully bound,
 /// executable circuit:
-/// - `polypus.Circuit` → native OpenQASM 2.0 (must have no free parameters),
+/// - `polypus.Circuit` → native circuit (must have no free parameters),
 /// - `str` → raw OpenQASM 2.0 program,
 /// - anything else → Qiskit `QuantumCircuit` (original behaviour).
 fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 	if let Ok(native) = qc.extract::<PyRef<'_, Circuit>>() {
-		let qasm = native.native().to_qasm2_with_params(&[]).map_err(|e| {
+		let concrete = native.native().assign_parameters(&[]).map_err(|e| {
 			pyo3::exceptions::PyValueError::new_err(format!(
 				"circuit has unbound parameters and cannot be executed directly: {e}. \
 				 Bind values first via to_qasm2(params) or use polypus.train"
 			))
 		})?;
-		return Ok(BoundCircuit::Qasm2(qasm));
+		return Ok(BoundCircuit::Native(concrete));
 	}
 	if let Ok(qasm) = qc.extract::<String>() {
 		return Ok(BoundCircuit::Qasm2(qasm));
@@ -83,8 +109,9 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// Function to run a quantum circuit called from Python.
 ///
 /// `qc` may be a Qiskit `QuantumCircuit`, a `polypus.Circuit` (fully bound),
-/// or an OpenQASM 2.0 string.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None))]
+/// or an OpenQASM 2.0 string. `backend` selects the local device: `"aer"`
+/// (default) or the pure-Rust `"polypus"` statevector simulator.
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None, backend="aer"))]
 pub fn run_quantum_circuit<'py>(
 	qc: Bound<'py, PyAny>,
 	shots: u32,
@@ -92,17 +119,27 @@ pub fn run_quantum_circuit<'py>(
 	n_qpus: u32,
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
+	backend: &str,
 ) -> PyResult<pyo3::PyObject> {
-	println!("run_quantum_circuit called with qc: {:?}, shots: {}, infrastructure: {}, n_qpus: {}", qc, shots, infrastructure, n_qpus);
+	println!("run_quantum_circuit called with qc: {:?}, shots: {}, infrastructure: {}, n_qpus: {}, backend: {}", qc, shots, infrastructure, n_qpus, backend);
 	let bound_qc = extract_bound_circuit(&qc)?;
+	if is_native_backend(backend) {
+		if let BoundCircuit::Qiskit(_) = &bound_qc {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
+				 pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
+			));
+		}
+	}
 	let id = format!("run_{}_{}", n_qpus, infrastructure);
 	let backend_config = build_backend_config(
 		&infrastructure,
+		backend,
 		sim_method,
 		noise_model.map(|nm| nm.unbind()),
 		1,
 		2,
-	);
+	)?;
 	let config = ExecutionConfig {
 		id,
 		shots,
@@ -138,7 +175,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer"))]
 pub fn train<'py>(
 	qc: Bound<'py, PyAny>,
 	method: Bound<'py, PyAny>,
@@ -152,6 +189,7 @@ pub fn train<'py>(
 	id: String,
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
+	backend: &str,
 ) -> PyResult<PyObject> {
 	// Native circuits know their parameter count — catch a mismatch with the
 	// requested optimisation dimensions before any QPU work starts.
@@ -163,13 +201,24 @@ pub fn train<'py>(
 			)));
 		}
 	}
+	// The native statevector backend runs pure-Rust circuits only; a Qiskit
+	// template can't be simulated without the interpreter.
+	if is_native_backend(backend) {
+		if let CircuitSource::Qiskit(_) = &circuit_source {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the native 'polypus' backend requires a native polypus.Circuit; \
+				 got a Qiskit circuit. Build it with polypus.Circuit or use backend=\"aer\"",
+			));
+		}
+	}
 	let backend_config = build_backend_config(
 		&infrastructure,
+		backend,
 		sim_method,
 		noise_model.map(|nm| nm.unbind()),
 		nodes,
 		cores_per_qpu,
-	);
+	)?;
 	let config = Arc::new(ExecutionConfig {
 		id: id.clone(),
 		shots,
@@ -253,7 +302,7 @@ pub fn train<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="qml_run",
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer"))]
 pub fn qml_train<'py>(
 	feature_map: Bound<'py, PyAny>,
 	ansatz: Bound<'py, PyAny>,
@@ -269,7 +318,17 @@ pub fn qml_train<'py>(
 	id: String,
 	sim_method: &str,
 	noise_model: Option<Bound<'py, PyAny>>,
+	backend: &str,
 ) -> PyResult<PyObject> {
+	// QML composes Qiskit feature maps and ansätze, so it is inherently a
+	// Qiskit path; the native statevector backend cannot consume a Qiskit
+	// `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
+	if is_native_backend(backend) {
+		return Err(pyo3::exceptions::PyValueError::new_err(
+			"the native 'polypus' backend is not supported for qml.train (feature maps \
+			 and ansätze are Qiskit circuits); use backend=\"aer\"",
+		));
+	}
 	let py = feature_map.py();
 
 	// 1. Compose feature_map + ansatz
@@ -310,13 +369,17 @@ pub fn qml_train<'py>(
 		));
 	}
 
+	// QML composes Qiskit feature maps and ansätze, so it is inherently a
+	// Qiskit path (native backend already rejected above): `backend` can only be
+	// an Aer variant here.
 	let backend_config = build_backend_config(
 		&infrastructure,
+		backend,
 		sim_method,
 		noise_model.map(|nm| nm.unbind()),
 		nodes,
 		cores_per_qpu,
-	);
+	)?;
 	let config = Arc::new(ExecutionConfig {
 		id: id.clone(),
 		shots,
@@ -386,6 +449,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_class::<Param>()?;
 	m.add_function(wrap_pyfunction!(train, m)?)?;
 	m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
+	m.add_function(wrap_pyfunction!(statevector, m)?)?;
 
 	// qml submodule — exposes polypus.qml.train()
 	let py = m.py();

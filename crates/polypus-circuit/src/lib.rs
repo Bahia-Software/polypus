@@ -1,11 +1,14 @@
 //! # polypus-circuit
 //!
-//! Pure-Rust quantum circuit representation with OpenQASM 2.0 export.
+//! Pure-Rust quantum circuit representation with OpenQASM 2.0 and QIR Base
+//! Profile export.
 //!
 //! This crate is the GIL-free circuit layer of Polypus: circuits can be
 //! defined, parameterized and serialized entirely in Rust, with no PyO3 or
 //! Qiskit dependency. The resulting OpenQASM 2.0 can be sent to any simulator
-//! or backend that accepts it (e.g. Qiskit Aer, CUNQA).
+//! or backend that accepts it (e.g. Qiskit Aer, CUNQA), and the QIR Base
+//! Profile output (LLVM IR) targets QIR-consuming providers (Azure Quantum,
+//! Quantinuum, and other QIR Alliance adopters).
 //!
 //! ## Example: QAOA MaxCut ansatz
 //!
@@ -38,6 +41,7 @@ mod error;
 mod gate;
 mod qasm;
 mod qasm_import;
+mod qir;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
 pub use error::CircuitError;

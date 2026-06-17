@@ -15,7 +15,8 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 polypus-circuit = { workspace = true }
-pyo3 = { version = "0.24.2" }
+polypus-sim = { workspace = true, features = ["parallel"] }
+pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"
 ndarray = "0.16"
 chrono = "0.4"
