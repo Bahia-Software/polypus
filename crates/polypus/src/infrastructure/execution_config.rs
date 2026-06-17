@@ -43,6 +43,13 @@ pub enum BackendConfig {
         /// Optional Qiskit `NoiseModel` forwarded to the Aer backend.
         noise_model: Option<Py<PyAny>>,
     },
+    /// Local pure-Rust statevector simulator (`polypus-sim`).
+    ///
+    /// Selected with `backend="polypus"`. Runs entirely in Rust (no GIL, no
+    /// Qiskit) on a [`crate::infrastructure::NativeStatevectorBackend`]. It is
+    /// noiseless by construction, so it carries no provider-specific fields; the
+    /// shot count and run id travel in [`ExecutionConfig`].
+    LocalNative,
     /// CUNQA distributed QPU platform (SLURM-managed HPC).
     Cunqa {
         /// Backend/device class name forwarded to CUNQA.

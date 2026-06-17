@@ -5,9 +5,11 @@
 #                              (no PyO3, no Python — usable from any Rust project)
 #   - crates/polypus-physics : pure-Rust particle-physics layer (classical Monte Carlo
 #                              transport + quantum Hamiltonians as Pauli sums; no PyO3)
+#   - crates/polypus-sim     : pure-Rust statevector simulator consuming polypus-circuit's
+#                              ConcreteCircuit directly (no OpenQASM round-trip; no PyO3)
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim"]
 resolver = "2"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
@@ -20,3 +22,4 @@ license = "European Union Public Licence (EUPL), version 1.2 or – as soon they
 [workspace.dependencies]
 polypus-circuit = { path = "crates/polypus-circuit", version = "0.4.0" }
 polypus-physics = { path = "crates/polypus-physics", version = "0.4.0" }
+polypus-sim     = { path = "crates/polypus-sim", version = "0.4.0" }

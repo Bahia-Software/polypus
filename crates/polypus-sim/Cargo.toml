@@ -1,0 +1,21 @@
+[package]
+name              = "polypus-sim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description       = "Pure-Rust statevector simulator for Polypus circuits: consumes polypus-circuit's ConcreteCircuit directly (no OpenQASM round-trip), GIL-free, with optional rayon parallelism. No Python."
+
+[lib]
+name = "polypus_sim"
+
+[dependencies]
+polypus-circuit = { workspace = true }
+num-complex     = "0.4"
+rayon           = { version = "1", optional = true }
+
+[features]
+default  = []
+# Opt-in data-parallel gate kernels (rayon). Results are identical to the
+# sequential path; only large circuits (see DEFAULT_PARALLEL_THRESHOLD) use it.
+parallel = ["dep:rayon"]

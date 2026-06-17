@@ -5,10 +5,12 @@ use std::sync::Arc;
 pub mod execution_config;
 pub mod local;
 pub mod cunqa;
+pub mod native;
 
 pub use execution_config::{ExecutionConfig, BackendConfig};
 pub use local::LocalBackend;
 pub use cunqa::CunqaBackend;
+pub use native::NativeStatevectorBackend;
 
 /// Supported quantum execution infrastructures.
 pub enum Infrastructure {
@@ -52,6 +54,9 @@ impl Infrastructure {
                     sim_method.clone(),
                 ))
             }
+            BackendConfig::LocalNative => {
+                Arc::new(NativeStatevectorBackend::new(&config.id))
+            }
         }
     }
 }
@@ -72,6 +77,11 @@ pub enum BoundCircuit {
     Qiskit(Py<PyAny>),
     /// An OpenQASM 2.0 program produced by the native Rust circuit layer.
     Qasm2(String),
+    /// A fully bound native circuit from `polypus-circuit`. Carries the circuit
+    /// structure directly so the native statevector backend can simulate it
+    /// without any OpenQASM round-trip or GIL; Python-based backends serialise
+    /// it to OpenQASM 2.0 on demand in [`to_py_object`](Self::to_py_object).
+    Native(polypus_circuit::ConcreteCircuit),
 }
 
 impl BoundCircuit {
@@ -86,17 +96,26 @@ impl BoundCircuit {
                 .expect("Failed to convert QASM string to Python")
                 .into_any()
                 .unbind(),
+            // Native circuits reach a Python backend (Aer/CUNQA) as OpenQASM 2.0,
+            // exactly like the `Qasm2` variant; the conversion is pure Rust.
+            BoundCircuit::Native(circuit) => circuit
+                .to_qasm2()
+                .into_pyobject(py)
+                .expect("Failed to convert QASM string to Python")
+                .into_any()
+                .unbind(),
         }
     }
 
     /// Cheap copy. Only the `Qiskit` variant needs the GIL (reference-count
-    /// bump); the `Qasm2` variant is a plain string clone.
+    /// bump); the `Qasm2` and `Native` variants are plain Rust clones.
     pub fn duplicate(&self) -> BoundCircuit {
         match self {
             BoundCircuit::Qiskit(qc) => {
                 Python::with_gil(|py| BoundCircuit::Qiskit(qc.clone_ref(py)))
             }
             BoundCircuit::Qasm2(qasm) => BoundCircuit::Qasm2(qasm.clone()),
+            BoundCircuit::Native(circuit) => BoundCircuit::Native(circuit.clone()),
         }
     }
 }

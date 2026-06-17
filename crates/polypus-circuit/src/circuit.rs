@@ -5,6 +5,7 @@ use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
 use crate::qasm;
 use crate::qasm_import;
+use crate::qir;
 
 /// A quantum circuit that may contain free parameters ([`GateParam::Param`]).
 ///
@@ -404,6 +405,21 @@ impl ParameterizedCircuit {
         }
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, params)
     }
+
+    /// Bind `params` and serialize to a QIR Base Profile LLVM IR module in one
+    /// step. Equivalent to `self.assign_parameters(params)?.to_qir()`.
+    ///
+    /// See [`ConcreteCircuit::to_qir`] for the gate-to-intrinsic mapping and
+    /// the decompositions applied to `rzz`/`rxx`/`u3`.
+    pub fn to_qir_with_params(&self, params: &[f64]) -> Result<String, CircuitError> {
+        if params.len() != self.num_params {
+            return Err(CircuitError::WrongNumberOfParams {
+                expected: self.num_params,
+                got: params.len(),
+            });
+        }
+        qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, params)
+    }
 }
 
 /// A quantum circuit whose angles are all concrete values
@@ -434,6 +450,25 @@ impl ConcreteCircuit {
     /// the `gates` field was assembled manually.
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
+            "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
+        )
+    }
+
+    /// Serialize to a QIR Base Profile LLVM IR module.
+    ///
+    /// Most gates map to a standard QIS intrinsic; `rzz`/`rxx`/`u3` are
+    /// decomposed to the standard set and `barrier` is dropped. The result is
+    /// a complete, self-contained `.ll` module with a single `@main` entry
+    /// point, suitable for any QIR Base Profile consumer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a gate contains an unbound [`GateParam::Param`]. This cannot
+    /// happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`]; it is only possible when
+    /// the `gates` field was assembled manually.
+    pub fn to_qir(&self) -> String {
+        qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
             "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
         )
     }

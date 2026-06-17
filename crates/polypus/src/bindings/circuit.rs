@@ -5,6 +5,7 @@
 //! `polypus.train` exactly like a Qiskit `QuantumCircuit`.
 
 use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
+use polypus_sim::{Simulator, StatevectorSimulator};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -103,6 +104,32 @@ impl Circuit {
 fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRefMut<'_, Circuit>> {
     slf.inner.try_push(gate).map_err(to_py_err)?;
     Ok(slf)
+}
+
+/// Compute the full statevector of a native `polypus.Circuit` with the pure-Rust
+/// `polypus-sim` backend (no Qiskit, no OpenQASM round-trip).
+///
+/// `params` supplies one value per free parameter; omit it for a circuit that
+/// has none. Returns the `2^n` complex amplitudes in Qiskit little-endian order
+/// (qubit 0 is the least-significant bit), so it can be compared directly with
+/// `qiskit.quantum_info.Statevector`.
+///
+/// ```python
+/// import polypus
+/// qc = polypus.Circuit(2).h(0).cx(0, 1)
+/// amps = polypus.statevector(qc)          # [0.707…, 0, 0, 0.707…]
+/// ```
+#[pyfunction(signature = (qc, params = None))]
+pub fn statevector(
+    qc: PyRef<'_, Circuit>,
+    params: Option<Vec<f64>>,
+) -> PyResult<Vec<polypus_sim::C64>> {
+    let params = params.unwrap_or_default();
+    let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
+    let sv = StatevectorSimulator::new()
+        .run(&concrete)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(sv.amplitudes().to_vec())
 }
 
 #[pymethods]
@@ -274,6 +301,25 @@ impl Circuit {
     fn to_qasm2(&self, params: Option<Vec<f64>>) -> PyResult<String> {
         self.inner
             .to_qasm2_with_params(&params.unwrap_or_default())
+            .map_err(to_py_err)
+    }
+
+    /// Serialize to a QIR Base Profile LLVM IR module (text `.ll`).
+    ///
+    /// For a parameterised circuit, pass `params` (one value per free
+    /// parameter); for a fully fixed circuit, call with no arguments. Most
+    /// gates map to a standard QIS intrinsic; `rzz`/`rxx`/`u3` are decomposed
+    /// to the standard set and `barrier` is dropped. The output targets QIR
+    /// Alliance consumers (e.g. Azure Quantum, Quantinuum).
+    ///
+    /// ```python
+    /// qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+    /// qir = qc.to_qir()                       # complete LLVM IR module
+    /// ```
+    #[pyo3(signature = (params=None))]
+    fn to_qir(&self, params: Option<Vec<f64>>) -> PyResult<String> {
+        self.inner
+            .to_qir_with_params(&params.unwrap_or_default())
             .map_err(to_py_err)
     }
 

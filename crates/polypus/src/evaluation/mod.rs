@@ -40,10 +40,12 @@ impl CircuitSource {
             CircuitSource::Qiskit(circuit) => {
                 BoundCircuit::Qiskit(assign_parameters_qiskit(circuit, params))
             }
-            // Pure Rust: no GIL anywhere on this path.
-            CircuitSource::Native(circuit) => BoundCircuit::Qasm2(
+            // Pure Rust: no GIL anywhere on this path. The bound circuit keeps
+            // its native structure so the statevector backend can simulate it
+            // directly; Python backends serialise it to OpenQASM 2.0 on demand.
+            CircuitSource::Native(circuit) => BoundCircuit::Native(
                 circuit
-                    .to_qasm2_with_params(params)
+                    .assign_parameters(params)
                     .unwrap_or_else(|e| panic!("Error binding native circuit: {e}")),
             ),
         }
