@@ -26,6 +26,15 @@ pub enum CircuitError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// QIR bitcode export requires an external assembler (`llvm-as`) that is
+    /// not available on `PATH`.
+    QirAssemblyToolNotFound { tool: String },
+    /// The external assembler failed while converting QIR text (`.ll`) to
+    /// LLVM bitcode (`.bc`).
+    QirAssemblyFailed {
+        tool: String,
+        message: String,
+    },
 }
 
 impl fmt::Display for CircuitError {
@@ -50,6 +59,14 @@ impl fmt::Display for CircuitError {
             CircuitError::Parse { line, message } => {
                 write!(f, "QASM parse error at line {line}: {message}")
             }
+            CircuitError::QirAssemblyToolNotFound { tool } => write!(
+                f,
+                "QIR bitcode export requires '{tool}', but it was not found on PATH"
+            ),
+            CircuitError::QirAssemblyFailed { tool, message } => write!(
+                f,
+                "QIR bitcode export failed while running '{tool}': {message}"
+            ),
         }
     }
 }

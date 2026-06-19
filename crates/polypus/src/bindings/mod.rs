@@ -20,6 +20,8 @@ use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDiffer
 use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
 use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure};
+#[cfg(feature = "qmio")]
+use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
@@ -64,7 +66,53 @@ fn build_backend_config(
 			nodes,
 			cores_per_qpu,
 		}),
+		Infrastructure::Qmio => build_qmio_backend_config(backend),
 	}
+}
+
+/// Build the [`BackendConfig::Qmio`] for the CESGA QMIO QPU.
+///
+/// The endpoint is read from the `ZMQ_SERVER` environment variable (the same
+/// variable the reference `qmio` Python client uses), falling back to the
+/// documented CESGA address. The public `backend` argument selects the program
+/// representation submitted to the QPU. Only available with `--features qmio`;
+/// otherwise it returns an actionable error instead of silently degrading.
+#[cfg(feature = "qmio")]
+fn build_qmio_backend_config(backend: &str) -> PyResult<BackendConfig> {
+	// Default endpoint documented by CESGA; overridden by ZMQ_SERVER when set.
+	const DEFAULT_QMIO_ENDPOINT: &str = "tcp://10.133.29.226:5556";
+	let endpoint =
+		std::env::var("ZMQ_SERVER").unwrap_or_else(|_| DEFAULT_QMIO_ENDPOINT.to_string());
+	let program_format = match backend {
+		// `"aer"` is the entry-point default, so treat it (and the explicit
+		// aliases) as OpenQASM for the QMIO path.
+		"aer" | "qmio" | "openqasm" | "qasm" => QmioProgramFormat::OpenQasm,
+		"qir" | "qir_text" => QmioProgramFormat::QirText,
+		"qir_bitcode" | "qir_compiled" => QmioProgramFormat::QirBitcode,
+		other => {
+			return Err(pyo3::exceptions::PyValueError::new_err(format!(
+				"unknown qmio program format '{other}'; expected \"openqasm\", \"qir\", or \"qir_bitcode\""
+			)))
+		}
+	};
+	Ok(BackendConfig::Qmio {
+		endpoint,
+		program_format,
+		// Sensible defaults; the optimisation level / results format are not yet
+		// exposed as Python kwargs (kept extensible in BackendConfig::Qmio).
+		optimization: 1,
+		repetition_period: None,
+		res_format: "binary_count".to_string(),
+	})
+}
+
+/// Without the `qmio` feature, selecting the QMIO infrastructure fails with a
+/// clear, actionable message instead of pulling a ZeroMQ stack into every build.
+#[cfg(not(feature = "qmio"))]
+fn build_qmio_backend_config(_backend: &str) -> PyResult<BackendConfig> {
+	Err(pyo3::exceptions::PyValueError::new_err(
+		"the 'qmio' infrastructure requires compiling polypus with --features qmio",
+	))
 }
 
 /// Whether `backend` selects the pure-Rust native statevector simulator, which
@@ -128,6 +176,17 @@ pub fn run_quantum_circuit<'py>(
 			return Err(pyo3::exceptions::PyValueError::new_err(
 				"the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
 				 pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
+			));
+		}
+	}
+	// The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
+	// read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
+	if infrastructure == "qmio" {
+		if let BoundCircuit::Qiskit(_) = &bound_qc {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+				 serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+				 2.0 string",
 			));
 		}
 	}
@@ -208,6 +267,16 @@ pub fn train<'py>(
 			return Err(pyo3::exceptions::PyValueError::new_err(
 				"the native 'polypus' backend requires a native polypus.Circuit; \
 				 got a Qiskit circuit. Build it with polypus.Circuit or use backend=\"aer\"",
+			));
+		}
+	}
+	// QMIO serialises GIL-free, so it likewise needs a native circuit, not a
+	// Qiskit template that can only be read through the interpreter.
+	if infrastructure == "qmio" {
+		if let CircuitSource::Qiskit(_) = &circuit_source {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the 'qmio' infrastructure requires a native polypus.Circuit (GIL-free \
+				 serialization); got a Qiskit circuit. Build it with polypus.Circuit",
 			));
 		}
 	}

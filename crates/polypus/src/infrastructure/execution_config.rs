@@ -61,4 +61,40 @@ pub enum BackendConfig {
         /// CPU cores reserved per QPU.
         cores_per_qpu: u32,
     },
+    /// CESGA QMIO real QPU, reached directly over its ZeroMQ REQ endpoint.
+    ///
+    /// Unlike [`Local`](Self::Local)/[`Cunqa`](Self::Cunqa), this backend speaks
+    /// the QMIO wire protocol (pickle over ZMQ) entirely from Rust, so the
+    /// `Native`/`Qasm2` execution path never touches the Python interpreter.
+    /// Only compiled with `--features qmio`.
+    #[cfg(feature = "qmio")]
+    Qmio {
+        /// ZMQ REQ endpoint of the QMIO server (e.g. `"tcp://10.133.29.226:5556"`).
+        endpoint: String,
+        /// Representation of the program submitted to the QPU.
+        program_format: QmioProgramFormat,
+        /// Tket optimisation level (`0`/`1`/`2` → Tket `$value` `1`/`18`/`30`).
+        optimization: u8,
+        /// Repetition period (`None` = server default).
+        repetition_period: Option<f64>,
+        /// Results format requested from the server (`"binary_count"` by default).
+        res_format: String,
+    },
+}
+
+/// Representation of the program sent to the QMIO QPU.
+///
+/// The legible/compiled axis applies to QIR (a `.ll` text module vs assembled
+/// `.bc` bitcode); OpenQASM has no standard binary form, so it is always text.
+#[cfg(feature = "qmio")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QmioProgramFormat {
+    /// OpenQASM text (`ConcreteCircuit::to_qasm2`, with the header retargeted to
+    /// match the QMIO compiler — see `infrastructure::qmio`).
+    OpenQasm,
+    /// QIR Base Profile LLVM IR text (`ConcreteCircuit::to_qir`).
+    QirText,
+    /// Assembled QIR LLVM bitcode (`ConcreteCircuit::to_qir_bitcode`, needs
+    /// `llvm-as` on `PATH`); travels as Python `bytes`.
+    QirBitcode,
 }

@@ -236,6 +236,31 @@ fn concrete_circuit_to_qir_matches_parameterized() {
     assert_eq!(concrete.to_qir(), pc.to_qir_with_params(&[]).unwrap());
 }
 
+#[test]
+fn qir_bitcode_is_emitted_when_assembler_is_available() {
+    let qc = ParameterizedCircuit::new(2).h(0).cx(0, 1).measure_all();
+    match qc.to_qir_bitcode_with_params(&[]) {
+        Ok(bitcode) => {
+            // LLVM bitcode magic bytes: 'B', 'C', 0xC0, 0xDE
+            assert!(bitcode.starts_with(&[0x42, 0x43, 0xC0, 0xDE]));
+        }
+        Err(CircuitError::QirAssemblyToolNotFound { .. }) => {
+            eprintln!("skipping: llvm-as not found on PATH");
+        }
+        Err(other) => panic!("unexpected QIR bitcode export error: {other}"),
+    }
+}
+
+#[test]
+fn qir_bitcode_param_count_validation_matches_text_qir() {
+    let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
+    let err = qc.to_qir_bitcode_with_params(&[]).unwrap_err();
+    assert!(matches!(
+        err,
+        CircuitError::WrongNumberOfParams { expected: 1, got: 0 }
+    ));
+}
+
 /// Manually constructed measurement still routes through `try_push`.
 #[test]
 fn measure_all_with_uneven_register_records_per_qubit() {

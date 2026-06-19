@@ -6,16 +6,25 @@ pub mod execution_config;
 pub mod local;
 pub mod cunqa;
 pub mod native;
+#[cfg(feature = "qmio")]
+pub mod qmio;
 
 pub use execution_config::{ExecutionConfig, BackendConfig};
 pub use local::LocalBackend;
 pub use cunqa::CunqaBackend;
 pub use native::NativeStatevectorBackend;
+#[cfg(feature = "qmio")]
+pub use qmio::QmioBackend;
 
 /// Supported quantum execution infrastructures.
 pub enum Infrastructure {
     Local,
     Cunqa,
+    /// CESGA QMIO real QPU (see [`QmioBackend`]). The variant always exists so
+    /// that selecting `"qmio"` produces a clear "requires `--features qmio`"
+    /// error rather than an `Unknown infrastructure` panic when the feature is
+    /// disabled; the backend itself is only built with the feature on.
+    Qmio,
 }
 
 impl Infrastructure {
@@ -23,6 +32,7 @@ impl Infrastructure {
         match s {
             "local" => Infrastructure::Local,
             "cunqa" => Infrastructure::Cunqa,
+            "qmio" => Infrastructure::Qmio,
             _ => panic!("Unknown infrastructure: {}", s),
         }
     }
@@ -57,6 +67,20 @@ impl Infrastructure {
             BackendConfig::LocalNative => {
                 Arc::new(NativeStatevectorBackend::new(&config.id))
             }
+            #[cfg(feature = "qmio")]
+            BackendConfig::Qmio {
+                endpoint,
+                program_format,
+                optimization,
+                repetition_period,
+                res_format,
+            } => Arc::new(QmioBackend::new(
+                endpoint.clone(),
+                *program_format,
+                *optimization,
+                *repetition_period,
+                res_format.clone(),
+            )),
         }
     }
 }

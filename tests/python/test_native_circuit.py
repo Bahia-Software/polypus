@@ -66,6 +66,30 @@ class TestCircuitConstruction:
         assert qc.num_qubits == 3
         assert qc.num_clbits == 3
 
+    def test_to_qir_exports_text_module(self):
+        import polypus
+        qir = polypus.Circuit(2).h(0).cx(0, 1).measure_all().to_qir()
+        assert qir.startswith("; ModuleID = 'polypus'")
+        assert "define void @main()" in qir
+
+    def test_to_qir_bitcode_returns_bytes_when_llvm_as_available(self):
+        import polypus
+        try:
+            bitcode = polypus.Circuit(2).h(0).cx(0, 1).measure_all().to_qir_bitcode()
+        except ValueError as exc:
+            if "llvm-as" in str(exc) and "not found" in str(exc):
+                pytest.skip("llvm-as not found on PATH")
+            raise
+
+        assert isinstance(bitcode, (bytes, bytearray))
+        assert bitcode[:4] == b"BC\xc0\xde"
+
+    def test_to_qir_bitcode_wrong_param_count_raises_valueerror(self):
+        import polypus
+        qc = polypus.Circuit(1).rx(0, polypus.Param(0))
+        with pytest.raises(ValueError, match="wrong number of parameter"):
+            qc.to_qir_bitcode([])
+
     def test_qubit_out_of_range_raises_valueerror(self):
         import polypus
         with pytest.raises(ValueError, match="out of range"):
