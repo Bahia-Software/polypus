@@ -22,9 +22,10 @@
 //!     `qat.purr.compiler.config.CompilerConfig` via `$type`/`$data`/`$value`
 //!     tags. `qat` does **not** need to be installed; we build it by hand with
 //!     `serde_json` (see [`build_config_json`]).
-//! - **Reply** = a pickle that contains a JSON **string** with the results.
-//!   Decode path: `recv` bytes → `serde_pickle` → `String` (the JSON) →
-//!   `serde_json` → per-bitstring counts.
+//! - **Reply** = a pickle of a Python `dict` with the results (the live QPU
+//!   pickles the dict directly; some builds may instead pickle a JSON string).
+//!   Decode path: `recv` bytes → `serde_pickle` → `dict`/`String` →
+//!   `serde_json::Value` → per-bitstring counts.
 //!
 //! ## Security
 //!
@@ -36,9 +37,10 @@
 //!
 //! # Points to verify against the live QPU (parametrised TODOs — do not invent)
 //!
-//! 1. **Exact reply JSON schema** (key names / nesting) for `binary_count`.
-//!    [`counts_from_json`] is defensive and searches common container keys;
-//!    tighten it once a real reply is observed.
+//! 1. **Reply JSON schema** for `binary_count`, verified against the live QPU:
+//!    `{"results": {"<register>": {"<bitstring>": count}}, "execution_metrics":
+//!    {…}}`. [`counts_from_json`] reads this register-grouped shape and keeps
+//!    defensive fallbacks for flatter layouts.
 //! 2. **Bit/qubit order** of the returned bitstrings vs Polypus' Qiskit
 //!    little-endian convention. [`normalize_bitstring`] is the single hook to
 //!    flip it.
@@ -50,9 +52,9 @@
 //!    Python-2 server.
 //! 5. **`n_qpus > 1` mapping**: there is a single endpoint, so QMIO is treated as
 //!    one QPU ([`max_batch_size`](QmioBackend::max_batch_size) returns `1`).
-//! 6. **OpenQASM header**: the QMIO examples use an `OPENQASM 3.0` header with a
-//!    2.0-style body; Polypus exports `OPENQASM 2.0`. [`adjust_qasm_header`]
-//!    retargets only the header token (never the body).
+//! 6. **OpenQASM header**: Polypus exports and submits an `OPENQASM 2.0` program
+//!    (header and body), which matches the 2.0-style body the QMIO examples use.
+//!    Verify acceptance against the live QPU (point 6).
 
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
@@ -70,7 +72,7 @@ pub use crate::infrastructure::execution_config::QmioProgramFormat;
 
 /// Default endpoint, used only when `ZMQ_SERVER` is unset. Documented fallback,
 /// never silently hard-coded over an explicit configuration.
-const DEFAULT_ENDPOINT: &str = "tcp://10.133.29.226:5556";
+const DEFAULT_ENDPOINT: &str = "tcp://10.255.3.70:5556";
 
 /// A serialised program ready to be pickled as the first tuple element.
 ///
@@ -238,14 +240,14 @@ impl QmioBackend {
         }
     }
 
-    /// OpenQASM text with the header retargeted for the QMIO compiler.
+    /// OpenQASM 2.0 text exported from the circuit, submitted as-is to the QMIO
+    /// compiler (header and body both `OPENQASM 2.0`).
     fn qasm_text(&self, circuit: &BoundCircuit) -> Result<String, QmioError> {
-        let qasm = match circuit {
-            BoundCircuit::Native(cc) => cc.to_qasm2(),
-            BoundCircuit::Qasm2(s) => s.clone(),
-            BoundCircuit::Qiskit(_) => return Err(QmioError::UnsupportedCircuit),
-        };
-        Ok(adjust_qasm_header(&qasm))
+        match circuit {
+            BoundCircuit::Native(cc) => Ok(cc.to_qasm2()),
+            BoundCircuit::Qasm2(s) => Ok(s.clone()),
+            BoundCircuit::Qiskit(_) => Err(QmioError::UnsupportedCircuit),
+        }
     }
 
     /// QIR LLVM bitcode (`.bc`), mapping the `llvm-as`-missing case to an
@@ -279,6 +281,7 @@ impl QmioBackend {
         program: &ProgramPayload,
         config_json: &str,
     ) -> Result<HashMap<String, u64>, QmioError> {
+        println!("QMIO request: {program:?}, config: {config_json}");
         let request = pickle_request(program, config_json)?;
         let mut guard = self.socket.lock().expect("QMIO socket mutex poisoned");
 
@@ -331,6 +334,7 @@ impl QmioBackend {
                 let socket = guard.as_mut().expect("socket present after send");
                 match tokio::time::timeout(self.recv_timeout, socket.recv()).await {
                     Ok(Ok(reply)) => {
+                        println!("QMIO reply: {reply:?}");
                         let bytes = first_frame(reply);
                         if bytes.len() > self.max_reply_bytes {
                             return Err(QmioError::ResponseTooLarge {
@@ -520,15 +524,17 @@ fn pickle_to_json(value: &PickleValue) -> Result<serde_json::Value, QmioError> {
 
 /// Locate the bitstring→count object inside the reply JSON.
 ///
-/// The exact schema is **unverified** against the live QPU (point 1): we accept
-/// a flat `{bitstring: count}` object, or one nested under a common container
-/// key, or — as a last resort — the first nested object whose values are all
-/// non-negative integers.
+/// The QMIO/`qat` reply groups the counts one level below `results`, keyed by
+/// the classical register name — verified against the live QPU, e.g.
+/// `{"results": {"c": {"00": 1000}}}`. We also accept a flat `{bitstring:
+/// count}` object or one nested directly under a common container key, and fall
+/// back to the first nested counts-like object.
 fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, QmioError> {
     if let Some(map) = as_counts_object(value) {
         return Ok(map);
     }
     if let Some(obj) = value.as_object() {
+        // Container key whose value is *directly* a `{bitstring: count}` object.
         for key in [
             "counts",
             "result",
@@ -539,6 +545,14 @@ fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, Q
             "measurements",
         ] {
             if let Some(map) = obj.get(key).and_then(as_counts_object) {
+                return Ok(map);
+            }
+        }
+        // QMIO/`qat` schema: the counts sit one level deeper, grouped by the
+        // classical register name (e.g. `{"results": {"c": {"00": 1000}}}`).
+        // Merge every register — a single register is the common case.
+        for key in ["results", "result", "data"] {
+            if let Some(map) = obj.get(key).and_then(as_register_counts) {
                 return Ok(map);
             }
         }
@@ -569,6 +583,29 @@ fn as_counts_object(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
     Some(counts)
 }
 
+/// Interpret a JSON value as a map of `register -> {bitstring: count}`, merging
+/// every register into a single counts map.
+///
+/// This is the QMIO/`qat` reply shape, where the measured shots are grouped
+/// under the classical register name (e.g. `{"c": {"00": 1000}}`). A single
+/// register is the common case and is returned unchanged; multiple registers are
+/// summed per bitstring. Returns `None` unless *every* entry is itself a counts
+/// object, so it never matches metadata such as `execution_metrics`.
+fn as_register_counts(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
+    let obj = value.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut merged: HashMap<String, u64> = HashMap::new();
+    for register in obj.values() {
+        let counts = as_counts_object(register)?;
+        for (bitstring, count) in counts {
+            *merged.entry(bitstring).or_insert(0) += count;
+        }
+    }
+    Some(merged)
+}
+
 /// Normalise a returned bitstring key to Polypus' convention.
 ///
 /// Polypus uses Qiskit little-endian with the most-significant classical bit on
@@ -577,18 +614,6 @@ fn as_counts_object(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
 /// opposite order, reverse the string here — this is the single hook.
 fn normalize_bitstring(key: &str) -> String {
     key.split_whitespace().collect()
-}
-
-/// Retarget the OpenQASM header for the QMIO compiler.
-///
-/// QMIO's `circuits.py` uses an `OPENQASM 3.0` header with a 2.0-style body;
-/// Polypus exports `OPENQASM 2.0`. Only the header token is rewritten — the body
-/// is never touched. Verify against the live QPU (point 6) and flip `TO` if
-/// needed.
-fn adjust_qasm_header(qasm: &str) -> String {
-    const FROM: &str = "OPENQASM 2.0";
-    const TO: &str = "OPENQASM 3.0";
-    qasm.replacen(FROM, TO, 1)
 }
 
 /// Map a Tket optimisation level to the `CompilerConfig` `$value` enum integer.
@@ -691,7 +716,7 @@ mod tests {
 
     fn backend(format: QmioProgramFormat) -> QmioBackend {
         QmioBackend::new(
-            "tcp://127.0.0.1:5556".to_string(),
+            "tcp://10.255.3.70:5556".to_string(),
             format,
             0,
             None,
@@ -780,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn program_format_openqasm_produces_text_with_30_header() {
+    fn program_format_openqasm_produces_text_with_20_header() {
         let circuit = bell();
         let exported = circuit.to_qasm2();
         assert!(exported.starts_with("OPENQASM 2.0"), "exporter changed: {exported}");
@@ -790,9 +815,9 @@ mod tests {
             .unwrap();
         match payload {
             ProgramPayload::Text(qasm) => {
-                assert!(qasm.starts_with("OPENQASM 3.0"), "header not retargeted: {qasm}");
-                // Only the header token changes; the body is byte-for-byte intact.
-                assert_eq!(qasm, exported.replacen("OPENQASM 2.0", "OPENQASM 3.0", 1));
+                assert!(qasm.starts_with("OPENQASM 2.0"), "header changed: {qasm}");
+                // The program is submitted exactly as exported (header and body).
+                assert_eq!(qasm, exported);
             }
             ProgramPayload::Bytes(_) => panic!("OpenQASM must be text"),
         }
@@ -860,6 +885,47 @@ mod tests {
     }
 
     #[test]
+    fn counts_from_json_reads_qmio_register_schema() {
+        // The exact reply shape returned by the live QMIO QPU: counts grouped
+        // under the classical register name inside `results`, alongside an
+        // `execution_metrics` sibling that must be ignored.
+        let reply = json!({
+            "results": {"c": {"00": 600, "11": 400}},
+            "execution_metrics": {
+                "optimized_circuit": "OPENQASM 3.0;",
+                "optimized_instruction_count": 98,
+            },
+        });
+        let counts = counts_from_json(&reply).unwrap();
+        assert_eq!(counts.get("00"), Some(&600));
+        assert_eq!(counts.get("11"), Some(&400));
+        assert_eq!(counts.values().sum::<u64>(), 1000);
+    }
+
+    #[test]
+    fn counts_from_json_merges_multiple_registers() {
+        let reply = json!({"results": {"c0": {"0": 3}, "c1": {"1": 7}}});
+        let counts = counts_from_json(&reply).unwrap();
+        assert_eq!(counts.get("0"), Some(&3));
+        assert_eq!(counts.get("1"), Some(&7));
+    }
+
+    #[test]
+    fn parse_counts_accepts_pickled_register_dict() {
+        // End-to-end of the decode path for a pickled `dict` (not a JSON
+        // string), mirroring what the QPU actually sends.
+        let reply_value = json!({
+            "results": {"c": {"00": 512, "11": 488}},
+            "execution_metrics": {"optimized_instruction_count": 98},
+        });
+        let pickled = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
+        let counts = parse_counts(&pickled).unwrap();
+        assert_eq!(counts.get("00"), Some(&512));
+        assert_eq!(counts.get("11"), Some(&488));
+        assert_eq!(counts.values().sum::<u64>(), 1000);
+    }
+
+    #[test]
     fn normalize_bitstring_strips_whitespace() {
         assert_eq!(normalize_bitstring("01 10"), "0110");
     }
@@ -905,7 +971,7 @@ mod tests {
                 };
                 match program {
                     PickleValue::String(qasm) => {
-                        assert!(qasm.starts_with("OPENQASM 3.0"), "header: {qasm}")
+                        assert!(qasm.starts_with("OPENQASM 2.0"), "header: {qasm}")
                     }
                     other => panic!("expected QASM text, got {other:?}"),
                 }
@@ -916,12 +982,13 @@ mod tests {
                 let parsed: serde_json::Value = serde_json::from_str(&config_json).unwrap();
                 assert_eq!(parsed["$data"]["repeats"].as_u64(), Some(1024));
 
-                // Reply with a pickled JSON counts string.
-                let reply = serde_pickle::value_to_vec(
-                    &PickleValue::String("{\"00\": 500, \"11\": 524}".into()),
-                    SerOptions::new(),
-                )
-                .unwrap();
+                // Reply with the verified live-QPU shape: a pickled `dict` whose
+                // counts are grouped under the classical register name.
+                let reply_value = json!({
+                    "results": {"c": {"00": 500, "11": 524}},
+                    "execution_metrics": {"optimized_instruction_count": 98},
+                });
+                let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
                 rep.send(ZmqMessage::from(reply)).await.unwrap();
             });
         });
@@ -968,7 +1035,7 @@ mod tests {
         use crate::infrastructure::BackendConfig;
 
         let endpoint = std::env::var("ZMQ_SERVER")
-            .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://10.133.29.226:5556");
+            .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://10.255.3.70:5556");
         let backend = QmioBackend::new(
             endpoint.clone(),
             QmioProgramFormat::OpenQasm,
