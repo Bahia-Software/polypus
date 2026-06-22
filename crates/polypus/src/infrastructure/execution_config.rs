@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
 
+use crate::infrastructure::transpiler::OptLevel;
+
 /// Provider-agnostic execution parameters, fully decoupled from circuit data.
 ///
 /// Only fields that *every* backend needs live here. Anything provider-specific
@@ -24,6 +26,15 @@ pub struct ExecutionConfig {
     pub infrastructure: String,
     /// Provider-specific configuration.
     pub backend_config: BackendConfig,
+    /// Optimization effort for the backend's transpiler.
+    ///
+    /// Travels to [`crate::infrastructure::Transpiler::transpile`] as a
+    /// [`TranspileOptions`](crate::infrastructure::TranspileOptions) *argument*
+    /// (the *tuning*), while the transpilation *strategy* is injected into the
+    /// backend by composition. Defaults to [`OptLevel::Light`]; with the default
+    /// [`IdentityTranspiler`](crate::infrastructure::IdentityTranspiler) it has
+    /// no effect on results.
+    pub opt_level: OptLevel,
 }
 
 /// Provider-specific configuration.

@@ -1015,6 +1015,7 @@ mod tests {
                 repetition_period: None,
                 res_format: "binary_count".to_string(),
             },
+            opt_level: crate::infrastructure::OptLevel::default(),
         };
 
         let counts = backend.run_circuits(&[BoundCircuit::Native(bell())], &config);
@@ -1055,6 +1056,7 @@ mod tests {
                 repetition_period: None,
                 res_format: "binary_count".to_string(),
             },
+            opt_level: crate::infrastructure::OptLevel::default(),
         };
         let counts = backend.run_circuits(&[BoundCircuit::Native(bell())], &config);
         assert_eq!(counts.len(), 1);

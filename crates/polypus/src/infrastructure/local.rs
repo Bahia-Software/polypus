@@ -1,4 +1,5 @@
-use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
+use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -11,21 +12,35 @@ pub struct LocalBackend {
     sim_method: String,
     /// Optional Qiskit `NoiseModel`.
     noise_model: Option<Py<PyAny>>,
+    /// Native-circuit transpiler applied before submission. Aer transpiles
+    /// internally, so this defaults to the no-op [`IdentityTranspiler`] and the
+    /// observable behavior is unchanged.
+    transpiler: Box<dyn Transpiler>,
 }
 
 impl LocalBackend {
     pub fn new(backend: String, sim_method: String, noise_model: Option<Py<PyAny>>) -> Self {
-        LocalBackend { backend, sim_method, noise_model }
+        LocalBackend {
+            backend,
+            sim_method,
+            noise_model,
+            transpiler: Box::new(IdentityTranspiler),
+        }
     }
 }
 
 impl QuantumBackend for LocalBackend {
     fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
         Python::with_gil(|py| {
-            // Qiskit circuits pass through as-is; native circuits travel as
-            // OpenQASM 2.0 strings and are parsed by the Python layer.
+            // Native circuits are transpiled in pure Rust before submission;
+            // Qiskit circuits pass through untouched (Aer transpiles them) and
+            // every native circuit travels to Python as OpenQASM 2.0.
+            let opts = TranspileOptions {
+                level: config.opt_level,
+            };
             let qcs_pylist = PyList::empty(py);
             for qc in qcs {
+                let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
                 qcs_pylist.append(qc.to_py_object(py)).unwrap();
             }
 

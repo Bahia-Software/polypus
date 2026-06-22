@@ -19,7 +19,7 @@ use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, Distr
 use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDifferentialEvolution};
 use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
 use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure, OptLevel};
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
@@ -205,6 +205,7 @@ pub fn run_quantum_circuit<'py>(
 		n_qpus,
 		infrastructure,
 		backend_config,
+		opt_level: OptLevel::default(),
 	};
 	let args = AlgorithmArgs {
 		qcs: vec![bound_qc],
@@ -294,6 +295,7 @@ pub fn train<'py>(
 		n_qpus,
 		infrastructure: infrastructure.clone(),
 		backend_config,
+		opt_level: OptLevel::default(),
 	});
 	let backend = Infrastructure::create_backend(&config);
 	let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
@@ -455,6 +457,7 @@ pub fn qml_train<'py>(
 		n_qpus,
 		infrastructure: infrastructure.clone(),
 		backend_config,
+		opt_level: OptLevel::default(),
 	});
 	let backend = Infrastructure::create_backend(&config);
 	let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
