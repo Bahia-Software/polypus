@@ -1,0 +1,12 @@
+[alias]
+run-off = "run --no-default-features --features off-logs"
+run-error = "run --no-default-features --features error-logs"
+run-warn = "run --no-default-features --features warn-logs"
+run-debug = "run --no-default-features --features debug-logs"
+run-trace = "run --no-default-features --features trace-logs"
+
+build-off = "build --no-default-features --features off-logs"
+build-error = "build --no-default-features --features error-logs"
+build-warn = "build --no-default-features --features warn-logs"
+build-debug = "build --no-default-features --features debug-logs"
+build-trace = "build --no-default-features --features trace-logs"

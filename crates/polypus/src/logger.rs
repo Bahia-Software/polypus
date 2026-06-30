@@ -3,11 +3,12 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::thread;
 use chrono::Local;
-use log::{Record, Level, Metadata, SetLoggerError};
+use log::{Record, LevelFilter, Metadata, SetLoggerError};
 
 /// Level of detail for the logs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
+    Off = 0,
     Error = 1,
     Warn = 2,
     Info = 3,
@@ -117,9 +118,7 @@ impl LoggerBuilder {
     pub fn init(self) -> Result<(), SetLoggerError> {
         let logger = self.build();
 
-        let log_level: log::Level = logger.config.level.into();
-
-        let max_level_filter = log_level.to_level_filter();
+        let max_level_filter: LevelFilter = logger.config.level.into();
         
         log::set_boxed_logger(Box::new(logger)).map(|()| log::set_max_level(max_level_filter))
     }
@@ -132,14 +131,15 @@ impl Default for LoggerBuilder {
 }
 
 /// Translate LogLevel to Rust's log::Level
-impl From<LogLevel> for Level {
+impl From<LogLevel> for LevelFilter {
     fn from(level: LogLevel) -> Self {
         match level {
-            LogLevel::Error => Level::Error,
-            LogLevel::Warn => Level::Warn,
-            LogLevel::Info => Level::Info,
-            LogLevel::Debug => Level::Debug,
-            LogLevel::Trace => Level::Trace,
+            LogLevel::Off => LevelFilter::Off,
+            LogLevel::Error => LevelFilter::Error,
+            LogLevel::Warn => LevelFilter::Warn,
+            LogLevel::Info => LevelFilter::Info,
+            LogLevel::Debug => LevelFilter::Debug,
+            LogLevel::Trace => LevelFilter::Trace,
         }
     }
 }
@@ -147,7 +147,7 @@ impl From<LogLevel> for Level {
 impl log::Log for Logger {
     /// Check if a message must be processed
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::from(self.config.level)
+        metadata.level() <= Into::<LevelFilter>::into(self.config.level)
     }
 
     /// Build and shoq the log message
@@ -204,4 +204,21 @@ impl log::Log for Logger {
     }
 
     fn flush(&self) {}
+}
+
+pub fn init_experiment_logger(experiment_name: Option<&str>) -> Result<(), SetLoggerError> {
+    let base_name = experiment_name.unwrap_or("polypus_run");
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let file_name = format!("{}_{}.log", base_name, timestamp);
+
+    println!("Initializing logger with log file: {}", file_name);
+
+    LoggerBuilder::new()
+        .level(LogLevel::Info)
+        .format(LogFormat::Text)
+        .target(LogTarget::File(std::path::PathBuf::from(file_name)))
+        .include_timestamp(true)
+        .include_thread_id(true)
+        .include_module_path(true)
+        .init()
 }

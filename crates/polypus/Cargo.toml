@@ -12,6 +12,13 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 extension-module = ["pyo3/extension-module"]
+default = ["info-logs"]
+off-logs = ["log/max_level_off", "log/release_max_level_off"]
+error-logs = ["log/max_level_error", "log/release_max_level_error"]
+warn-logs = ["log/max_level_warn", "log/release_max_level_warn"]
+info-logs = ["log/max_level_info", "log/release_max_level_info"]
+debug-logs = ["log/max_level_debug", "log/release_max_level_debug"]
+trace-logs = ["log/max_level_trace", "log/release_max_level_trace"]
 
 [dependencies]
 polypus-circuit = { workspace = true }
