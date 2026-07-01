@@ -209,7 +209,7 @@ impl QmioBackend {
             .enable_all()
             .build()
             .expect("failed to build the Tokio runtime for the QMIO backend");
-        let recv_timeout = Duration::from_millis(env_u64("QMIO_RECV_TIMEOUT_MS", 30_000));
+        let recv_timeout = Duration::from_millis(env_u64("QMIO_RECV_TIMEOUT_MS", 300_000));
         let max_retries = env_u64("QMIO_MAX_RETRIES", 3) as usize;
         QmioBackend {
             endpoint,
@@ -619,11 +619,12 @@ fn normalize_bitstring(key: &str) -> String {
 /// Map a Tket optimisation level to the `CompilerConfig` `$value` enum integer.
 fn tket_opt_value(optimization: u8) -> Result<i64, QmioError> {
     match optimization {
-        0 => Ok(1),
-        1 => Ok(18),
-        2 => Ok(30),
+        0 => Ok(0),  // TketOptimizations::Empty — no Tket compilation/routing
+        1 => Ok(1),  // DefaultMappingPass only
+        2 => Ok(18), // DefaultMappingPass + circuit simplifications
+        3 => Ok(30), // full optimisation including SWAP routing
         other => Err(QmioError::Config(format!(
-            "unsupported optimization level {other}; expected 0, 1 or 2"
+            "unsupported optimization level {other}; expected 0, 1, 2 or 3"
         ))),
     }
 }
@@ -752,7 +753,7 @@ mod tests {
                 "active_calibrations": [],
                 "optimizations": {
                     "$type": "<enum 'qat.purr.compiler.config.TketOptimizations'>",
-                    "$value": 1
+                    "$value": 0
                 }
             }
         });
@@ -761,12 +762,12 @@ mod tests {
 
     #[test]
     fn config_json_optimization_levels_map_to_tket_values() {
-        for (level, expected) in [(0u8, 1i64), (1, 18), (2, 30)] {
+        for (level, expected) in [(0u8, 0i64), (1, 1), (2, 18), (3, 30)] {
             let config = build_config_json(100, None, "binary_count", level).unwrap();
             let value = &config["$data"]["optimizations"]["$value"];
             assert_eq!(value.as_i64(), Some(expected), "opt level {level}");
         }
-        assert!(build_config_json(100, None, "binary_count", 3).is_err());
+        assert!(build_config_json(100, None, "binary_count", 4).is_err());
     }
 
     #[test]

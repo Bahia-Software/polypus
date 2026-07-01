@@ -100,7 +100,7 @@ fn build_qmio_backend_config(backend: &str) -> PyResult<BackendConfig> {
 		program_format,
 		// Sensible defaults; the optimisation level / results format are not yet
 		// exposed as Python kwargs (kept extensible in BackendConfig::Qmio).
-		optimization: 1,
+		optimization: 0,
 		repetition_period: None,
 		res_format: "binary_count".to_string(),
 	})
@@ -196,7 +196,7 @@ pub fn run_quantum_circuit<'py>(
 		backend,
 		sim_method,
 		noise_model.map(|nm| nm.unbind()),
-		1,
+		0,
 		2,
 	)?;
 	let config = ExecutionConfig {

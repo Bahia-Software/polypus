@@ -195,6 +195,12 @@ pub(crate) fn write_qir(
                 w.gate1(H, *q0);
                 w.gate1(H, *q1);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                let t = angle(theta)?;
+                w.gate2(CZ, *q0, *q1);
+                w.rot(RZ, t, *q1);
+                w.gate2(CZ, *q0, *q1);
+            }
             // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
             // left-to-right that is rz(λ), ry(θ), rz(φ).
             GateInstruction::U {

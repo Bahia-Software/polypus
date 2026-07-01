@@ -140,6 +140,11 @@ impl ParameterizedCircuit {
                 let theta = *theta;
                 self.track_param(&theta);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                self.check_pair(*q0, *q1)?;
+                let theta = *theta;
+                self.track_param(&theta);
+            }
             GateInstruction::U {
                 qubit,
                 theta,
@@ -243,6 +248,15 @@ impl ParameterizedCircuit {
     pub fn rz(self, qubit: usize, theta: impl Into<GateParam>) -> Self {
         self.push(GateInstruction::Rz {
             qubit,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled phase gate: control, target, angle.
+    pub fn cp(self, q0: usize, q1: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cp {
+            q0,
+            q1,
             theta: theta.into(),
         })
     }
@@ -372,6 +386,11 @@ impl ParameterizedCircuit {
                     q1: *q1,
                     theta: resolve(theta)?,
                 },
+                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
+                    q0: *q0,
+                    q1: *q1,
+                    theta: resolve(theta)?,
+                },
                 GateInstruction::U {
                     qubit,
                     theta,
@@ -382,6 +401,11 @@ impl ParameterizedCircuit {
                     theta: resolve(theta)?,
                     phi: resolve(phi)?,
                     lam: resolve(lam)?,
+                },
+                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
+                    q0: *q0,
+                    q1: *q1,
+                    theta: resolve(theta)?,
                 },
                 other => other.clone(),
             };

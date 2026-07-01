@@ -161,6 +161,10 @@ impl Statevector {
                 let m = gates::rxx(angle(theta)?);
                 kernels::apply_2q(&mut self.data, n, *q0, *q1, &m, par);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                let diag = gates::cp_diag(angle(theta)?);
+                kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
+            }
             GateInstruction::U {
                 qubit,
                 theta,

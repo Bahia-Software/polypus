@@ -71,6 +71,9 @@ pub(crate) fn write_qasm2(
             GateInstruction::Rxx { q0, q1, theta } => {
                 let _ = writeln!(out, "rxx({}) q[{q0}],q[{q1}];", angle(theta)?);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                let _ = writeln!(out, "cp({}) q[{q0}],q[{q1}];", angle(theta)?);
+            }
             GateInstruction::U { qubit, theta, phi, lam } => {
                 let _ = writeln!(
                     out,
