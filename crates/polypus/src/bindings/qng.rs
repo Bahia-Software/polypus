@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use polypus_optimizers::VarianceOracle;
 
 /// Quantum Natural Gradient optimizer configuration.
 #[pyclass]
@@ -24,5 +25,41 @@ impl QNG {
 		tikhonov_reg: f64,
 	) -> Self {
 		QNG { variance_function, max_iters, bounds, learning_rate, finite_difference_step, tikhonov_reg }
+	}
+}
+
+/// PyO3 adapter that lets a Python `variance_function` satisfy the pure-Rust
+/// [`VarianceOracle`] contract consumed by the QNG optimizer.
+///
+/// This is the single point where the GIL is touched on the variance path: the
+/// pure optimizer stays Python-free and calls back through this trait object.
+/// [`variance_diagonal`](VarianceOracle::variance_diagonal) is overridden to
+/// acquire the GIL **once** and evaluate every dimension in a tight loop,
+/// preserving the original implementation's single-acquisition semantics.
+pub struct PyVarianceOracle {
+	/// Python callable `fn(theta: list[float], a: int) -> float`.
+	pub variance_function: Py<PyAny>,
+}
+
+impl PyVarianceOracle {
+	/// Call the Python `variance_function(theta, param_index)` under an already
+	/// held GIL and extract the returned float.
+	fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> f64 {
+		self.variance_function
+			.bind(py)
+			.call1((theta.to_vec(), param_index as u32))
+			.expect("Error calling variance_function")
+			.extract()
+			.expect("Failed to extract float from variance_function")
+	}
+}
+
+impl VarianceOracle for PyVarianceOracle {
+	fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
+		Python::with_gil(|py| self.call(py, theta, param_index))
+	}
+
+	fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+		Python::with_gil(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
 	}
 }

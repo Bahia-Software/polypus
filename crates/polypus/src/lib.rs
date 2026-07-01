@@ -71,4 +71,8 @@ pub mod utils;
 /// (re-export of the dependency-free `polypus-circuit` crate).
 pub use polypus_circuit as circuit;
 
+/// Pure-Rust variational optimizers (DE, PSO, QNG)
+/// (re-export of the Python-free `polypus-optimizers` crate).
+pub use polypus_optimizers as optimizers;
+
 pub use crate::algorithms::*;

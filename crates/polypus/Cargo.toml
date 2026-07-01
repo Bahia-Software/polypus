@@ -21,6 +21,7 @@ qmio = ["dep:zeromq", "dep:serde-pickle", "tokio/net"]
 [dependencies]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
+polypus-optimizers = { workspace = true }
 pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"
 ndarray = "0.16"

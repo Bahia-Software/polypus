@@ -12,17 +12,34 @@ pub mod qng;
 use circuit::{statevector, Circuit, Param};
 use de::DE;
 use pso::PSO;
-use qng::QNG;
+use qng::{QNG, PyVarianceOracle};
 
 use std::sync::Arc;
 use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, DistributeByShotsRun};
-use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDifferentialEvolution};
-use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
-use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
+use polypus_optimizers::{
+	AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
+	AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
+};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure, OptLevel};
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
+
+/// Convert an [`OptimizationOutcome`] into the value the Python `train` /
+/// `qml_train` entry points return: the flat list of best parameters
+/// (`list[float]`).
+///
+/// The optimizers now return a richer native struct, but the public Python
+/// contract is still just the best-parameter vector, so the extra fields
+/// (fitness, iteration count, convergence flag) are intentionally dropped at
+/// this binding boundary.
+fn outcome_to_pyobject(py: Python<'_>, outcome: OptimizationOutcome) -> PyObject {
+	outcome
+		.best_params
+		.into_pyobject(py)
+		.expect("Error converting best_params to PyObject")
+		.unbind()
+}
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
 /// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
@@ -312,8 +329,9 @@ pub fn train<'py>(
 			generations: de.generations,
 			dimensions,
 			tolerance: de.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmDifferentialEvolution.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmDifferentialEvolution.optimize(args)));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -327,8 +345,9 @@ pub fn train<'py>(
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
 			tolerance: pso.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmPSO.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmPSO.optimize(args)));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -339,10 +358,13 @@ pub fn train<'py>(
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			variance_function: qng.variance_function.clone_ref(method.py()),
+			variance_oracle: Box::new(PyVarianceOracle {
+				variance_function: qng.variance_function.clone_ref(method.py()),
+			}),
 			tikhonov_reg: qng.tikhonov_reg,
+			seed: None,
 		};
-		return Ok(AlgorithmQNG.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmQNG.optimize(args)));
 	}
 
 	Err(pyo3::exceptions::PyTypeError::new_err(
@@ -474,8 +496,9 @@ pub fn qml_train<'py>(
 			generations: de.generations,
 			dimensions,
 			tolerance: de.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmDifferentialEvolution.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmDifferentialEvolution.optimize(args)));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -489,8 +512,9 @@ pub fn qml_train<'py>(
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
 			tolerance: pso.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmPSO.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmPSO.optimize(args)));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -501,10 +525,13 @@ pub fn qml_train<'py>(
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			variance_function: qng.variance_function.clone_ref(py),
+			variance_oracle: Box::new(PyVarianceOracle {
+				variance_function: qng.variance_function.clone_ref(py),
+			}),
 			tikhonov_reg: qng.tikhonov_reg,
+			seed: None,
 		};
-		return Ok(AlgorithmQNG.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmQNG.optimize(args)));
 	}
 
 	Err(pyo3::exceptions::PyTypeError::new_err(
