@@ -19,3 +19,7 @@ benchmarks/bench_*.csv
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+
+# Logger output
+*.log
+logs/
