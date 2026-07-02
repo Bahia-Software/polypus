@@ -66,7 +66,14 @@ pub mod infrastructure;
 pub mod algorithms;
 pub mod evaluation;
 pub mod utils;
-pub mod logger;
+
+/// Process-wide logging sink (builder + `log::Log` implementation).
+///
+/// Re-export of the pure-Rust `polypus-logger` crate so existing
+/// `polypus::logger::…` paths keep working. Library crates emit through the
+/// `log` facade; only this crate (and other binaries) installs the sink
+/// (see [`logger::LoggerBuilder`]).
+pub use polypus_logger as logger;
 
 /// Pure-Rust quantum circuit representation with OpenQASM 2.0 export
 /// (re-export of the dependency-free `polypus-circuit` crate).

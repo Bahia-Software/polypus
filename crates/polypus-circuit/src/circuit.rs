@@ -402,11 +402,6 @@ impl ParameterizedCircuit {
                     phi: resolve(phi)?,
                     lam: resolve(lam)?,
                 },
-                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
                 other => other.clone(),
             };
             gates.push(bound);
