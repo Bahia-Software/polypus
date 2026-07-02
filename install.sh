@@ -7,6 +7,10 @@
 #   ./install.sh --yes        # accept all defaults, no prompts  (CI / scripts)
 #   ./install.sh --no-tests   # accept all defaults, skip tests  (CI / scripts)
 #   ./install.sh --benchmark  # accept all defaults + run quick benchmark
+#   ./install.sh --qmio       # also build the CESGA QMIO QPU backend (feature "qmio")
+#
+# The QMIO backend (--qmio) is pure-Rust (uses the `zeromq` crate, no system
+# libzmq required). QIR-bitcode submission additionally needs `llvm-as` on PATH.
 
 set -euo pipefail
 
@@ -82,12 +86,14 @@ print_banner() {
 YES=0
 EXPLICIT_NO_TESTS=0
 EXPLICIT_BENCHMARK=0
+WITH_QMIO=0
 for arg in "$@"; do
     case "$arg" in
         --yes|-y)       YES=1                ;;
         --no-tests)     EXPLICIT_NO_TESTS=1  ;;
         --benchmark)    EXPLICIT_BENCHMARK=1 ;;
-        *) error "Unknown argument: '$arg'. Use --yes, --no-tests or --benchmark." ;;
+        --qmio)         WITH_QMIO=1          ;;
+        *) error "Unknown argument: '$arg'. Use --yes, --no-tests, --benchmark or --qmio." ;;
     esac
 done
 # --no-tests implies non-interactive (backward compat)
@@ -193,8 +199,10 @@ success "polypus_python installed."
 
 # ── 7. Build and install polypus Rust extension ──────────────────────────────
 MATURIN_FLAGS="--features extension-module"
+# Opt-in CESGA QMIO QPU backend (pure-Rust ZeroMQ; no system libzmq needed).
+[[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,qmio"
 [[ "$BUILD_MODE" == "release" ]] && MATURIN_FLAGS="--release $MATURIN_FLAGS"
-info "Building polypus Rust extension (maturin develop ${BUILD_MODE})..."
+info "Building polypus Rust extension (maturin develop ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
 python -m maturin develop $MATURIN_FLAGS \
     || error "maturin develop failed."
 success "polypus Rust extension installed."

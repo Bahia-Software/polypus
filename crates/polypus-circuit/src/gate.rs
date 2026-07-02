@@ -83,6 +83,8 @@ pub enum GateInstruction {
     Rzz { q0: usize, q1: usize, theta: GateParam },
     /// Two-qubit XX-interaction rotation, exp(-i θ/2 X⊗X).
     Rxx { q0: usize, q1: usize, theta: GateParam },
+    /// Controlled phase gate: control, target, angle.
+    Cp {q0: usize, q1: usize, theta: GateParam},
     /// Generic single-qubit gate `u3(theta, phi, lambda)`.
     U {
         qubit: usize,

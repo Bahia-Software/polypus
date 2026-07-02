@@ -12,15 +12,34 @@ pub mod qng;
 use circuit::{statevector, Circuit, Param};
 use de::DE;
 use pso::PSO;
-use qng::QNG;
+use qng::{QNG, PyVarianceOracle};
 
 use std::sync::Arc;
 use crate::algorithms::{AlgorithmArgs, AlgorithmTrait, AlgorithmSingleRun, DistributeByShotsRun};
-use crate::algorithms::vqc::{AlgorithmDifferentialEvolutionArgs, AlgorithmDifferentialEvolution};
-use crate::algorithms::vqc::{AlgorithmPSOArgs, AlgorithmPSO};
-use crate::algorithms::vqc::{AlgorithmQNGArgs, AlgorithmQNG};
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure};
+use polypus_optimizers::{
+	AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
+	AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
+};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, BackendConfig, Infrastructure, OptLevel};
+#[cfg(feature = "qmio")]
+use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::evaluation::{CircuitSource, EvaluationOracle, VqcOracle, QmlOracle};
+
+/// Convert an [`OptimizationOutcome`] into the value the Python `train` /
+/// `qml_train` entry points return: the flat list of best parameters
+/// (`list[float]`).
+///
+/// The optimizers now return a richer native struct, but the public Python
+/// contract is still just the best-parameter vector, so the extra fields
+/// (fitness, iteration count, convergence flag) are intentionally dropped at
+/// this binding boundary.
+fn outcome_to_pyobject(py: Python<'_>, outcome: OptimizationOutcome) -> PyObject {
+	outcome
+		.best_params
+		.into_pyobject(py)
+		.expect("Error converting best_params to PyObject")
+		.unbind()
+}
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
 /// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
@@ -64,7 +83,53 @@ fn build_backend_config(
 			nodes,
 			cores_per_qpu,
 		}),
+		Infrastructure::Qmio => build_qmio_backend_config(backend),
 	}
+}
+
+/// Build the [`BackendConfig::Qmio`] for the CESGA QMIO QPU.
+///
+/// The endpoint is read from the `ZMQ_SERVER` environment variable (the same
+/// variable the reference `qmio` Python client uses), falling back to the
+/// documented CESGA address. The public `backend` argument selects the program
+/// representation submitted to the QPU. Only available with `--features qmio`;
+/// otherwise it returns an actionable error instead of silently degrading.
+#[cfg(feature = "qmio")]
+fn build_qmio_backend_config(backend: &str) -> PyResult<BackendConfig> {
+	// Default endpoint documented by CESGA; overridden by ZMQ_SERVER when set.
+	const DEFAULT_QMIO_ENDPOINT: &str = "tcp://10.133.29.226:5556";
+	let endpoint =
+		std::env::var("ZMQ_SERVER").unwrap_or_else(|_| DEFAULT_QMIO_ENDPOINT.to_string());
+	let program_format = match backend {
+		// `"aer"` is the entry-point default, so treat it (and the explicit
+		// aliases) as OpenQASM for the QMIO path.
+		"aer" | "qmio" | "openqasm" | "qasm" => QmioProgramFormat::OpenQasm,
+		"qir" | "qir_text" => QmioProgramFormat::QirText,
+		"qir_bitcode" | "qir_compiled" => QmioProgramFormat::QirBitcode,
+		other => {
+			return Err(pyo3::exceptions::PyValueError::new_err(format!(
+				"unknown qmio program format '{other}'; expected \"openqasm\", \"qir\", or \"qir_bitcode\""
+			)))
+		}
+	};
+	Ok(BackendConfig::Qmio {
+		endpoint,
+		program_format,
+		// Sensible defaults; the optimisation level / results format are not yet
+		// exposed as Python kwargs (kept extensible in BackendConfig::Qmio).
+		optimization: 0,
+		repetition_period: None,
+		res_format: "binary_count".to_string(),
+	})
+}
+
+/// Without the `qmio` feature, selecting the QMIO infrastructure fails with a
+/// clear, actionable message instead of pulling a ZeroMQ stack into every build.
+#[cfg(not(feature = "qmio"))]
+fn build_qmio_backend_config(_backend: &str) -> PyResult<BackendConfig> {
+	Err(pyo3::exceptions::PyValueError::new_err(
+		"the 'qmio' infrastructure requires compiling polypus with --features qmio",
+	))
 }
 
 /// Whether `backend` selects the pure-Rust native statevector simulator, which
@@ -131,13 +196,24 @@ pub fn run_quantum_circuit<'py>(
 			));
 		}
 	}
+	// The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
+	// read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
+	if infrastructure == "qmio" {
+		if let BoundCircuit::Qiskit(_) = &bound_qc {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+				 serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+				 2.0 string",
+			));
+		}
+	}
 	let id = format!("run_{}_{}", n_qpus, infrastructure);
 	let backend_config = build_backend_config(
 		&infrastructure,
 		backend,
 		sim_method,
 		noise_model.map(|nm| nm.unbind()),
-		1,
+		0,
 		2,
 	)?;
 	let config = ExecutionConfig {
@@ -146,6 +222,7 @@ pub fn run_quantum_circuit<'py>(
 		n_qpus,
 		infrastructure,
 		backend_config,
+		opt_level: OptLevel::default(),
 	};
 	let args = AlgorithmArgs {
 		qcs: vec![bound_qc],
@@ -211,6 +288,16 @@ pub fn train<'py>(
 			));
 		}
 	}
+	// QMIO serialises GIL-free, so it likewise needs a native circuit, not a
+	// Qiskit template that can only be read through the interpreter.
+	if infrastructure == "qmio" {
+		if let CircuitSource::Qiskit(_) = &circuit_source {
+			return Err(pyo3::exceptions::PyValueError::new_err(
+				"the 'qmio' infrastructure requires a native polypus.Circuit (GIL-free \
+				 serialization); got a Qiskit circuit. Build it with polypus.Circuit",
+			));
+		}
+	}
 	let backend_config = build_backend_config(
 		&infrastructure,
 		backend,
@@ -225,6 +312,7 @@ pub fn train<'py>(
 		n_qpus,
 		infrastructure: infrastructure.clone(),
 		backend_config,
+		opt_level: OptLevel::default(),
 	});
 	let backend = Infrastructure::create_backend(&config);
 	let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
@@ -241,8 +329,9 @@ pub fn train<'py>(
 			generations: de.generations,
 			dimensions,
 			tolerance: de.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmDifferentialEvolution.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmDifferentialEvolution.optimize(args)));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -256,8 +345,9 @@ pub fn train<'py>(
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
 			tolerance: pso.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmPSO.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmPSO.optimize(args)));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -268,10 +358,13 @@ pub fn train<'py>(
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			variance_function: qng.variance_function.clone_ref(method.py()),
+			variance_oracle: Box::new(PyVarianceOracle {
+				variance_function: qng.variance_function.clone_ref(method.py()),
+			}),
 			tikhonov_reg: qng.tikhonov_reg,
+			seed: None,
 		};
-		return Ok(AlgorithmQNG.run(args));
+		return Ok(outcome_to_pyobject(method.py(), AlgorithmQNG.optimize(args)));
 	}
 
 	Err(pyo3::exceptions::PyTypeError::new_err(
@@ -386,6 +479,7 @@ pub fn qml_train<'py>(
 		n_qpus,
 		infrastructure: infrastructure.clone(),
 		backend_config,
+		opt_level: OptLevel::default(),
 	});
 	let backend = Infrastructure::create_backend(&config);
 	let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
@@ -402,8 +496,9 @@ pub fn qml_train<'py>(
 			generations: de.generations,
 			dimensions,
 			tolerance: de.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmDifferentialEvolution.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmDifferentialEvolution.optimize(args)));
 	}
 
 	if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -417,8 +512,9 @@ pub fn qml_train<'py>(
 			cognitive_weight: pso.cognitive_weight,
 			social_weight: pso.social_weight,
 			tolerance: pso.tolerance,
+			seed: None,
 		};
-		return Ok(AlgorithmPSO.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmPSO.optimize(args)));
 	}
 
 	if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -429,10 +525,13 @@ pub fn qml_train<'py>(
 			finite_difference_step: qng.finite_difference_step,
 			bounds: qng.bounds,
 			dimensions,
-			variance_function: qng.variance_function.clone_ref(py),
+			variance_oracle: Box::new(PyVarianceOracle {
+				variance_function: qng.variance_function.clone_ref(py),
+			}),
 			tikhonov_reg: qng.tikhonov_reg,
+			seed: None,
 		};
-		return Ok(AlgorithmQNG.run(args));
+		return Ok(outcome_to_pyobject(py, AlgorithmQNG.optimize(args)));
 	}
 
 	Err(pyo3::exceptions::PyTypeError::new_err(

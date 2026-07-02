@@ -1,4 +1,5 @@
-use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
+use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -17,15 +18,24 @@ pub struct CunqaBackend {
     /// Number of physical QPUs in the allocation. Bounds how many circuits can
     /// be dispatched per `run_circuits` call (one circuit per QPU).
     n_qpus: u32,
+    /// Native-circuit transpiler applied before submission. CUNQA's simulated
+    /// QPUs transpile internally, so this defaults to the no-op
+    /// [`IdentityTranspiler`] and the observable behavior is unchanged.
+    transpiler: Box<dyn Transpiler>,
 }
 
 impl QuantumBackend for CunqaBackend {
     fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
         Python::with_gil(|py| {
-            // Qiskit circuits pass through as-is; native circuits travel as
-            // OpenQASM 2.0 strings and are parsed by the Python layer.
+            // Native circuits are transpiled in pure Rust before submission;
+            // Qiskit circuits pass through untouched and every native circuit
+            // travels to Python as OpenQASM 2.0.
+            let opts = TranspileOptions {
+                level: config.opt_level,
+            };
             let qcs_pylist = PyList::empty(py);
             for qc in qcs {
+                let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
                 qcs_pylist.append(qc.to_py_object(py)).unwrap();
             }
 
@@ -84,6 +94,7 @@ impl CunqaBackend {
             backend,
             sim_method,
             n_qpus,
+            transpiler: Box::new(IdentityTranspiler),
         };
         backend.raise_qpus(n_qpus, nodes, id, cores_per_qpu);
         backend

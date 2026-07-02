@@ -130,3 +130,8 @@ pub(crate) fn rxx(theta: f64) -> [[C64; 4]; 4] {
         [ns, z0, z0, c],
     ]
 }
+
+pub(crate) fn cp_diag(theta: f64) -> [C64; 4] {
+    let diag = C64::from_polar(1.0, theta);
+    [re(1.0), re(1.0), re(1.0), diag]
+}

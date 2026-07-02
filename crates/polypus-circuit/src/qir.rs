@@ -43,6 +43,8 @@ use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 /// QIR major version reported in the module flags.
 const QIR_MAJOR_VERSION: i32 = 1;
@@ -193,6 +195,12 @@ pub(crate) fn write_qir(
                 w.gate1(H, *q0);
                 w.gate1(H, *q1);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                let t = angle(theta)?;
+                w.gate2(CZ, *q0, *q1);
+                w.rot(RZ, t, *q1);
+                w.gate2(CZ, *q0, *q1);
+            }
             // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
             // left-to-right that is rz(λ), ry(θ), rz(φ).
             GateInstruction::U {
@@ -297,6 +305,73 @@ pub(crate) fn write_qir(
     Ok(out)
 }
 
+/// Serialize a gate sequence to LLVM bitcode (`.bc`) by first emitting QIR
+/// text and assembling it with `llvm-as`.
+///
+/// This keeps the crate dependency-free: no direct LLVM bindings are linked.
+/// Instead, the standard LLVM assembler must be available on `PATH`.
+pub(crate) fn write_qir_bitcode(
+    num_qubits: usize,
+    num_clbits: usize,
+    gates: &[GateInstruction],
+    params: &[f64],
+) -> Result<Vec<u8>, CircuitError> {
+    let ir = write_qir(num_qubits, num_clbits, gates, params)?;
+    assemble_qir_bitcode_with("llvm-as", &ir)
+}
+
+fn assemble_qir_bitcode_with(tool: &str, ir: &str) -> Result<Vec<u8>, CircuitError> {
+    let mut child = Command::new(tool)
+        .args(["-o", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CircuitError::QirAssemblyToolNotFound {
+                    tool: tool.to_string(),
+                }
+            } else {
+                CircuitError::QirAssemblyFailed {
+                    tool: tool.to_string(),
+                    message: e.to_string(),
+                }
+            }
+        })?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(ir.as_bytes())
+            .map_err(|e| CircuitError::QirAssemblyFailed {
+                tool: tool.to_string(),
+                message: format!("failed to write QIR to stdin: {e}"),
+            })?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| CircuitError::QirAssemblyFailed {
+            tool: tool.to_string(),
+            message: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let suffix = if stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr}")
+        };
+        return Err(CircuitError::QirAssemblyFailed {
+            tool: tool.to_string(),
+            message: format!("non-zero exit status {}{suffix}", output.status),
+        });
+    }
+
+    Ok(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +427,18 @@ mod tests {
         assert!(!ir.contains("attributes #1"));
         assert!(!ir.contains("mz__body"));
         assert!(ir.contains("\"required_num_results\"=\"0\""));
+    }
+
+    #[test]
+    fn missing_assembler_reports_tool_not_found() {
+        let err = assemble_qir_bitcode_with(
+            "polypus-llvm-as-does-not-exist",
+            "define void @main() {\nentry:\n  ret void\n}\n",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            CircuitError::QirAssemblyToolNotFound { .. }
+        ));
     }
 }

@@ -7,9 +7,11 @@
 #                              transport + quantum Hamiltonians as Pauli sums; no PyO3)
 #   - crates/polypus-sim     : pure-Rust statevector simulator consuming polypus-circuit's
 #                              ConcreteCircuit directly (no OpenQASM round-trip; no PyO3)
+#   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG) decoupled
+#                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers"]
 resolver = "2"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
@@ -20,6 +22,7 @@ authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "
 license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
 
 [workspace.dependencies]
-polypus-circuit = { path = "crates/polypus-circuit", version = "0.4.0" }
-polypus-physics = { path = "crates/polypus-physics", version = "0.4.0" }
-polypus-sim     = { path = "crates/polypus-sim", version = "0.4.0" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.4.0" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.4.0" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.4.0" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.4.0" }

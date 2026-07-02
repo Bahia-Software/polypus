@@ -1,16 +1,21 @@
-use rand::{thread_rng, Rng};
-use pyo3::prelude::*;
-use crate::algorithms::AlgorithmTrait;
-use crate::evaluation::EvaluationOracle;
+//! Quantum Natural Gradient (QNG) optimizer.
 
+use crate::objective::{EvaluationOracle, VarianceOracle};
+use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::rng::OptRng;
+use rand::Rng;
+
+/// Quantum Natural Gradient optimizer.
 pub struct AlgorithmQNG;
 
 /// Arguments for the Quantum Natural Gradient optimizer.
 ///
 /// The algorithm is completely decoupled from circuits and infrastructure:
-/// gradient circuit evaluation is delegated to `oracle`.
-/// The QFIM diagonal is still computed via `variance_function` because it is
-/// an algorithm-specific mathematical concept, not a circuit execution concern.
+/// gradient circuit evaluation is delegated to
+/// [`oracle`](AlgorithmQNGArgs::oracle) and the QFIM diagonal to
+/// [`variance_oracle`](AlgorithmQNGArgs::variance_oracle). The latter stays a
+/// separate contract because computing `Var[H_a | θ]` is an algorithm-specific
+/// mathematical concept, not a circuit-execution concern.
 pub struct AlgorithmQNGArgs {
     /// Oracle that maps parameter vectors → fitness values (used for gradient + energy eval).
     pub oracle: Box<dyn EvaluationOracle>,
@@ -19,11 +24,13 @@ pub struct AlgorithmQNGArgs {
     pub finite_difference_step: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
-    /// Python callable `fn(theta: list[float], a: int) -> float` that returns
-    /// `Var[H_a | theta]`, the diagonal QFIM element for parameter index `a`.
-    pub variance_function: Py<PyAny>,
+    /// Returns `Var[H_a | θ]`, the diagonal QFIM element for parameter index `a`.
+    pub variance_oracle: Box<dyn VarianceOracle>,
     /// Tikhonov regularisation added to each QFIM element to avoid near-zero division.
     pub tikhonov_reg: f64,
+    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// `Some(seed)` makes the run reproducible.
+    pub seed: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,45 +66,47 @@ fn compute_gradient(oracle: &dyn EvaluationOracle, theta: &[f64], h: f64) -> Vec
     grad
 }
 
-/// Compute the diagonal of the Fubini–Study metric (QFIM) by delegating to
-/// the Python `variance_function(theta, a) -> float` for each dimension `a`.
+/// Compute the diagonal of the Fubini–Study metric (QFIM) via `variance_oracle`,
+/// adding the Tikhonov regularisation term to every element.
 ///
-/// `variance_function` is pure Python and must run under the GIL, so the calls
-/// are serialised regardless of threading. We therefore acquire the GIL once
-/// and evaluate every dimension in a tight loop — this avoids the per-call
-/// thread-spawn and GIL release/reacquire overhead that a Tokio-based version
-/// would incur for no parallelism gain.
+/// The whole diagonal is requested in a single
+/// [`VarianceOracle::variance_diagonal`] call so that runtime-backed oracles
+/// (e.g. a Python callback) can amortise their setup cost across all
+/// dimensions — preserving the "acquire the runtime once, loop over `0..dims`"
+/// semantics of the original implementation.
 fn compute_qfim_diagonal(
-    variance_function: &Py<PyAny>,
+    variance_oracle: &dyn VarianceOracle,
     theta: &[f64],
     dims: usize,
     tikhonov_reg: f64,
 ) -> Vec<f64> {
-    Python::with_gil(|py| {
-        let theta_vec = theta.to_vec();
-        (0..dims)
-            .map(|a| {
-                let variance: f64 = variance_function
-                    .bind(py)
-                    .call1((theta_vec.clone(), a as u32))
-                    .expect("Error calling variance_function")
-                    .extract()
-                    .expect("Failed to extract float from variance_function");
-                variance + tikhonov_reg
-            })
-            .collect()
-    })
+    let mut diag = variance_oracle.variance_diagonal(theta, dims);
+    for v in diag.iter_mut() {
+        *v += tikhonov_reg;
+    }
+    diag
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AlgorithmTrait implementation
+// Optimizer implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
-impl AlgorithmTrait for AlgorithmQNG {
-    type Args = AlgorithmQNGArgs;
-    type AlgorithmReturnType = PyObject;
+impl AlgorithmQNG {
+    /// The optimizer's human-readable name.
+    pub fn name(&self) -> String {
+        String::from("Quantum Natural Gradient")
+    }
 
-    fn run(&self, args: AlgorithmQNGArgs) -> PyObject {
+    /// A short description of the optimizer.
+    pub fn description(&self) -> String {
+        String::from(
+            "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
+             optimizer. Gradients are estimated via the parameter-shift rule and \
+             preconditioned by the diagonal Fubini-Study metric (QFIM).",
+        )
+    }
+
+    fn run_with_rng<R: Rng>(args: AlgorithmQNGArgs, rng: &mut R) -> OptimizationOutcome {
         let AlgorithmQNGArgs {
             oracle,
             max_iters,
@@ -105,26 +114,29 @@ impl AlgorithmTrait for AlgorithmQNG {
             finite_difference_step,
             bounds,
             dimensions,
-            variance_function,
+            variance_oracle,
             tikhonov_reg,
+            seed: _,
         } = args;
 
         let dims = dimensions as usize;
         let (lb, ub) = bounds;
-        let mut rng = thread_rng();
 
         // Initialise θ uniformly in [lb, ub)
         let mut theta: Vec<f64> = (0..dims).map(|_| rng.gen_range(lb..ub)).collect();
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
+        let mut iterations_run = 0usize;
 
         for iteration in 0..max_iters as usize {
+            iterations_run = iteration + 1;
+
             // ── 1. Gradient of −E via parameter-shift rule ───────────────────
             let grad = compute_gradient(oracle.as_ref(), &theta, finite_difference_step);
 
             // ── 2. Diagonal QFIM with Tikhonov regularisation ────────────────
             let qfim_diag =
-                compute_qfim_diagonal(&variance_function, &theta, dims, tikhonov_reg);
+                compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg);
 
             // ── 3. QNG update: θ ← θ − η · G⁻¹ · ∇(−E) ─────────────────────
             //    Equivalent to θ ← θ + η · G⁻¹ · ∇E  (maximise expectation)
@@ -134,7 +146,7 @@ impl AlgorithmTrait for AlgorithmQNG {
 
             // ── 4. Evaluate energy and track best solution ────────────────────
             let energy = oracle.evaluate_batch(&[theta.clone()])[0];
-            println!("Iteration {iteration}: Energy: {energy:.4}");
+            log::debug!("Iteration {iteration}: Energy: {energy:.4}");
 
             if energy > best_energy {
                 best_energy = energy;
@@ -142,24 +154,21 @@ impl AlgorithmTrait for AlgorithmQNG {
             }
         }
 
-        Python::with_gil(|py| {
-            best_theta
-                .into_pyobject(py)
-                .expect("Error converting best_theta to PyObject")
-                .unbind()
-        })
-    }
-
-    fn name(&self) -> String {
-        String::from("Quantum Natural Gradient")
-    }
-
-    fn description(&self) -> String {
-        String::from(
-            "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
-             optimizer. Gradients are estimated via the parameter-shift rule and \
-             preconditioned by the diagonal Fubini-Study metric (QFIM).",
-        )
+        OptimizationOutcome {
+            best_params: best_theta,
+            best_fitness: best_energy,
+            iterations_run,
+            // QNG runs a fixed iteration budget; it has no early-stopping test.
+            converged: false,
+        }
     }
 }
 
+impl Optimizer for AlgorithmQNG {
+    type Args = AlgorithmQNGArgs;
+
+    fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
+        let mut rng = OptRng::from_seed(args.seed);
+        Self::run_with_rng(args, &mut rng)
+    }
+}

@@ -12,6 +12,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 extension-module = ["pyo3/extension-module"]
+# Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ
+# stack. Uses the pure-Rust `zeromq` crate (no system libzmq required) plus
+# `serde-pickle` to speak the QMIO wire protocol (pickle over a ZMQ REQ socket).
+# `tokio/net` enables the runtime IO driver that the async `zeromq` sockets need.
+qmio = ["dep:zeromq", "dep:serde-pickle", "tokio/net"]
 default = ["info-logs"]
 off-logs = ["log/max_level_off", "log/release_max_level_off"]
 error-logs = ["log/max_level_error", "log/release_max_level_error"]
@@ -23,6 +28,7 @@ trace-logs = ["log/max_level_trace", "log/release_max_level_trace"]
 [dependencies]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
+polypus-optimizers = { workspace = true }
 pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"
 ndarray = "0.16"
@@ -33,3 +39,10 @@ log = "0.4"
 fern = "0.6"
 humantime = "2.1"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+# --- optional, only compiled with `--features qmio` ---
+# Pure-Rust ZeroMQ (ZMTP 3.x, interoperable with pyzmq/libzmq); avoids a C
+# `libzmq` build dependency at the cost of an async (tokio) API.
+zeromq = { version = "0.6", optional = true }
+# Reads/writes Python's pickle format WITHOUT executing __reduce__/GLOBAL, so a
+# malicious peer cannot achieve RCE the way Python's `pickle.loads` allows.
+serde-pickle = { version = "1.2", optional = true }
