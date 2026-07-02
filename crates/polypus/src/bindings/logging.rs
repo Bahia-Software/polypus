@@ -89,8 +89,12 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 /// re-initialization below).
 ///
 /// # Arguments
-/// * `level` — `off`/`error`/`warn`/`info`/`debug`/`trace` (optimizer progress is
-///   emitted at `debug`, so pass `"debug"` to capture it).
+/// * `level` — `off`/`error`/`warn`/`info`/`debug`/`trace`. This is the
+///   **runtime** level: it can only lower the compile-time ceiling, never raise
+///   it (see "Compile-time level ceiling" below). Optimizer progress is emitted
+///   at `debug`, so to capture it pass `"debug"` **and** build with
+///   `--features debug-logs` — the default `info-logs` build compiles
+///   `debug!`/`trace!` out entirely, so `level="debug"` alone captures nothing.
 /// * `format` — `"text"` or `"json"`.
 /// * `file` — explicit path to a log file, used **verbatim** (no timestamp is
 ///   appended). Missing parent directories are created; the file is opened in
@@ -107,6 +111,17 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 /// current working directory), named
 /// `<name>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log`. This never collides between
 /// concurrent or repeated runs and is never lost to an uncaptured stdout.
+///
+/// # Compile-time level ceiling
+/// `level` is a *runtime* filter and can only lower the ceiling fixed at build
+/// time by `polypus`'s `*-logs` Cargo features (default `info-logs`, forwarded to
+/// `polypus-logger`). Under the default build, `debug!`/`trace!` records are
+/// compiled out, so `init_logger(level="debug")` will **not** capture debug
+/// output — including optimizer per-generation progress. Rebuild the extension
+/// with `debug-logs` (or `trace-logs`) added to raise the ceiling, e.g.
+/// `maturin develop --release --features "extension-module debug-logs"`; because
+/// the most verbose feature wins process-wide, adding it on top of the default
+/// `info-logs` is enough (no `--no-default-features` needed).
 ///
 /// # Re-initialization
 /// A global logger can be installed only once per process. A second call (e.g.

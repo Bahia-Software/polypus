@@ -75,7 +75,10 @@ impl NativeStatevectorBackend {
             BoundCircuit::Native(cc) => cc.clone(),
             BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
                 .and_then(|pc| pc.assign_parameters(&[]))
-                .unwrap_or_else(|e| panic!("native backend could not parse OpenQASM 2.0: {e}")),
+                .unwrap_or_else(|e| {
+                    log::error!("native backend could not parse OpenQASM 2.0: {e}");
+                    panic!("native backend could not parse OpenQASM 2.0: {e}");
+                }),
             BoundCircuit::Qiskit(_) => panic!(
                 "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
                  pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
@@ -89,7 +92,10 @@ impl NativeStatevectorBackend {
         let raw = self
             .simulator
             .run_and_sample(&concrete, shots as usize, seed)
-            .unwrap_or_else(|e| panic!("native statevector simulation failed: {e}"));
+            .unwrap_or_else(|e| {
+                log::error!("native statevector simulation failed: {e}");
+                panic!("native statevector simulation failed: {e}");
+            });
 
         // Bitstring length = classical register width (qubit count when the
         // circuit has no measurements, mirroring a full-register read-out).

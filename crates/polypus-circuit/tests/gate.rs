@@ -2,9 +2,10 @@
 // GateParam
 
 use polypus_circuit::{GateInstruction, GateParam};
+use std::f64::consts::PI;
 
 #[test]
-fn test_gateparam_creation(){
+fn test_gateparam_creation() {
     let var_fixe = GateParam::Fixed(PI);
     let var_param = GateParam::Param(42);
 

@@ -190,7 +190,12 @@ pub fn run_quantum_circuit<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
 ) -> PyResult<pyo3::PyObject> {
-    println!("run_quantum_circuit called with qc: {:?}, shots: {}, infrastructure: {}, n_qpus: {}, backend: {}", qc, shots, infrastructure, n_qpus, backend);
+    // Entry-point trace carrying the full circuit `Debug` repr on every call:
+    // large and high-volume, so it stays at `debug` rather than the default log.
+    log::debug!(
+        "run_quantum_circuit called with qc: {qc:?}, shots: {shots}, \
+         infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}"
+    );
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) {
         if let BoundCircuit::Qiskit(_) = &bound_qc {

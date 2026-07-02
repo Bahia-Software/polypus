@@ -14,6 +14,29 @@
 //! `polypus` crate, binaries, examples or benches — depends on `polypus-logger`
 //! to install the sink **once per process** via [`LoggerBuilder::init`].
 //!
+//! # Compile-time level ceiling
+//!
+//! The level chosen at *runtime* ([`LoggerBuilder::level`], which drives
+//! `log::set_max_level`) can only ever **lower** the active level — it can never
+//! raise it above the ceiling fixed at *compile time*. That ceiling is the
+//! `log` crate's `max_level_*` / `release_max_level_*` features, which this crate
+//! re-exports as the mutually exclusive Cargo features `off-logs`, `error-logs`,
+//! `warn-logs`, `info-logs`, `debug-logs`, `trace-logs`. A dependent forwards one
+//! of them; the `polypus` crate defaults to `info-logs`.
+//!
+//! The practical consequence: under the default `info-logs`, every `debug!` and
+//! `trace!` record — including the optimizers' per-generation progress — is
+//! **compiled out**, so asking for a runtime level of `debug`/`trace` captures
+//! nothing. To see that output you must **rebuild** with `--features debug-logs`
+//! (or `trace-logs`); raising the runtime level alone is not enough.
+//!
+//! Because these features map to `log`'s process-global `max_level_*` flags and
+//! Cargo unifies features across a build, if two dependents request different
+//! levels the **most verbose one wins for the whole process** — the ceiling is
+//! never per-crate. (Enabling `debug-logs` alongside the default `info-logs` is
+//! therefore enough to lift the ceiling to `debug`; the most verbose feature
+//! wins, so `--no-default-features` is not required.)
+//!
 //! # Example
 //!
 //! ```no_run
@@ -764,5 +787,133 @@ mod tests {
         // Must not panic and must not create the file.
         log_message!(logger, "goes to stderr fallback");
         assert!(!path.exists());
+    }
+
+    /// `flush` on a `File` target must succeed and leave the already-written
+    /// records intact (the handle is unbuffered, so it is effectively a no-op,
+    /// but the method must still run without error). `flush` on a console target
+    /// must likewise be a harmless no-op.
+    #[test]
+    fn flush_on_file_target_succeeds_and_is_noop_on_console() {
+        let path = std::env::temp_dir().join(format!(
+            "polypus_logger_test_flush_{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let logger = LoggerBuilder::new()
+            .format(LogFormat::Text)
+            .target(LogTarget::File(path.clone()))
+            .build();
+
+        log_message!(logger, "line before flush");
+        logger.flush();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("line before flush"));
+
+        // A console target keeps no file handle; flushing it must not panic.
+        LoggerBuilder::new()
+            .target(LogTarget::Stdout)
+            .build()
+            .flush();
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A poisoned file mutex (a prior panic while holding the guard) must be
+    /// recovered via `into_inner()` on the *next* `log`/`flush`, not drop the
+    /// record. The panic is contained with `catch_unwind` on the test-harness
+    /// thread so its output is captured, not printed.
+    #[test]
+    fn poisoned_file_lock_is_recovered_on_log_and_flush() {
+        let path = std::env::temp_dir().join(format!(
+            "polypus_logger_test_poison_{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let logger = LoggerBuilder::new()
+            .format(LogFormat::Text)
+            .target(LogTarget::File(path.clone()))
+            .build();
+        let mutex = logger.file.as_ref().expect("file target keeps a handle");
+
+        // Poison the mutex: panic while holding the guard.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().expect("the fresh mutex is not yet poisoned");
+            panic!("intentionally poisoning the log-file mutex");
+        }));
+        assert!(panicked.is_err(), "the guarded closure must have unwound");
+        assert!(mutex.is_poisoned(), "the mutex must now be poisoned");
+
+        // `log` recovers the poisoned lock and still appends; `flush` shares the
+        // same recovery path and must not panic either.
+        log_message!(logger, "written after poison");
+        logger.flush();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("written after poison"),
+            "a poisoned lock must be recovered, not drop the record"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The one-shot guard for write failures: the first failure flips
+    /// `write_error_reported` (and prints to stderr); later failures see it set
+    /// and are suppressed, so a persistent fault can't flood stderr. We assert
+    /// the guard transition directly — the guard *is* the suppression mechanism,
+    /// and capturing stderr isn't portable.
+    #[test]
+    fn write_error_is_reported_only_once() {
+        let logger = LoggerBuilder::new().target(LogTarget::Stdout).build();
+        let err = std::io::Error::other("simulated disk-full");
+        let path = Path::new("unwritable.log");
+
+        assert!(!logger.write_error_reported.load(Ordering::Relaxed));
+        logger.report_write_error(path, &err); // reports once (captured by the harness)
+        assert!(logger.write_error_reported.load(Ordering::Relaxed));
+        logger.report_write_error(path, &err); // guard already set: no second report
+        assert!(logger.write_error_reported.load(Ordering::Relaxed));
+    }
+
+    /// Same one-shot guarantee for the (defensive) JSON serialization fallback.
+    #[test]
+    fn serialize_error_is_reported_only_once() {
+        let logger = LoggerBuilder::new().target(LogTarget::Stdout).build();
+        // Any `serde_json::Error` suffices; parsing invalid JSON yields one.
+        let err = serde_json::from_str::<serde_json::Value>("this is not json").unwrap_err();
+
+        assert!(!logger.json_error_reported.load(Ordering::Relaxed));
+        logger.report_serialize_error(&err); // reports once
+        assert!(logger.json_error_reported.load(Ordering::Relaxed));
+        logger.report_serialize_error(&err); // suppressed
+        assert!(logger.json_error_reported.load(Ordering::Relaxed));
+    }
+
+    /// End-to-end write-error degradation on Linux: `/dev/full` opens fine but
+    /// every write fails with `ENOSPC`, driving the real error path inside
+    /// `log`/`flush` (not just the helper). It must report once, never re-report,
+    /// and never panic or drop silently.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn write_failure_through_log_reports_once_and_never_panics() {
+        let logger = LoggerBuilder::new()
+            .format(LogFormat::Text)
+            .target(LogTarget::File(PathBuf::from("/dev/full")))
+            .build();
+        assert!(logger.file.is_some(), "/dev/full opens successfully");
+        assert!(!logger.write_error_reported.load(Ordering::Relaxed));
+
+        // First failing write flips the one-shot guard.
+        log_message!(logger, "this write fails with ENOSPC");
+        assert!(logger.write_error_reported.load(Ordering::Relaxed));
+
+        // Subsequent failures (log and flush) must not re-report and must not panic.
+        log_message!(logger, "second failing write");
+        logger.flush();
+        assert!(logger.write_error_reported.load(Ordering::Relaxed));
     }
 }

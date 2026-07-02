@@ -13,6 +13,10 @@ name = "polypus_physics"
 rand    = { version = "0.8", features = ["std_rng"] }
 ndarray = "0.16"
 serde   = { version = "1.0", features = ["derive"], optional = true }
+# Logging *facade* only (no sink): Monte Carlo run diagnostics are emitted
+# through `log::*!` and stay no-ops until the app layer installs a logger. This
+# crate never depends on `polypus-logger`.
+log     = { workspace = true }
 
 [features]
 default = []
