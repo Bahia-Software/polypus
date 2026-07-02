@@ -66,6 +66,7 @@ pub mod infrastructure;
 pub mod algorithms;
 pub mod evaluation;
 pub mod utils;
+pub mod logger;
 
 /// Pure-Rust quantum circuit representation with OpenQASM 2.0 export
 /// (re-export of the dependency-free `polypus-circuit` crate).
