@@ -4,11 +4,11 @@
 use polypus_circuit::{GateInstruction, GateParam};
 
 #[test]
-fn test_gateparam_creation() {
-    let var_fixe = GateParam::Fixed(1.23);
+fn test_gateparam_creation(){
+    let var_fixe = GateParam::Fixed(PI);
     let var_param = GateParam::Param(42);
 
-    assert_eq!(var_fixe, GateParam::Fixed(1.23));
+    assert_eq!(var_fixe, GateParam::Fixed(PI));
     assert_eq!(var_param, GateParam::Param(42));
 }
 

@@ -1,3 +1,34 @@
+//! Shared logging sink for the Polypus workspace.
+//!
+//! This crate provides a concrete [`log::Log`] implementation ([`Logger`]) plus
+//! a [`LoggerBuilder`] to configure it (level, text/JSON format, stdout/stderr/
+//! file target, timestamp/thread/module annotations) and install it as the
+//! process-wide logger.
+//!
+//! # Design: facade vs. sink
+//!
+//! Library crates (`polypus-circuit`, `polypus-sim`, `polypus-physics`,
+//! `polypus-optimizers`, …) **must not** depend on this crate. They emit log
+//! records through the [`log`] facade (`log::info!`, `log::debug!`, …), which is
+//! a no-op until a logger is installed. Only the *application* layer — the
+//! `polypus` crate, binaries, examples or benches — depends on `polypus-logger`
+//! to install the sink **once per process** via [`LoggerBuilder::init`].
+//!
+//! # Example
+//!
+//! ```no_run
+//! use polypus_logger::{LoggerBuilder, LogLevel, LogFormat, LogTarget};
+//!
+//! LoggerBuilder::new()
+//!     .level(LogLevel::Info)
+//!     .format(LogFormat::Text)
+//!     .target(LogTarget::Stdout)
+//!     .init()
+//!     .expect("a global logger was already installed");
+//!
+//! log::info!("logger ready");
+//! ```
+
 use chrono::Local;
 use log::{LevelFilter, Metadata, Record, SetLoggerError};
 use std::fs::{File, OpenOptions};
@@ -341,7 +372,7 @@ mod tests {
                 &Record::builder()
                     .args(format_args!("{}", $message))
                     .level(log::Level::Info)
-                    .module_path(Some("polypus::logger::tests"))
+                    .module_path(Some("polypus_logger::tests"))
                     .build(),
             )
         };

@@ -1,0 +1,31 @@
+[package]
+name = "polypus-logger"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared, pure-Rust logging sink for the Polypus workspace: a configurable `log::Log` implementation (text/JSON, stdout/stderr/file) installed once per process. Library crates only emit through the `log` facade; this crate is depended on by whoever installs the logger."
+
+[dependencies]
+# `log` facade: this crate provides a concrete `log::Log` sink for it. The `std`
+# feature is required for `set_boxed_logger` (installing a heap-allocated global
+# logger); it is not enabled by `log` by default, so we add it on top of the
+# workspace-pinned version.
+log = { workspace = true, features = ["std"] }
+# Local timestamps for log lines.
+chrono = "0.4"
+# JSON output built via `serde_json::Map`, so message content is always escaped
+# correctly and every line is valid JSON.
+serde_json = "1.0"
+
+[features]
+# Compile-time maximum log level. Enabling one statically strips the more
+# verbose `log::*!` macros across the whole dependency graph (the `log` crate's
+# `max_level_*` features are additive and process-global). Consumers pick one;
+# no default is set here so a binary can choose to compile out logging entirely.
+off-logs   = ["log/max_level_off",   "log/release_max_level_off"]
+error-logs = ["log/max_level_error", "log/release_max_level_error"]
+warn-logs  = ["log/max_level_warn",  "log/release_max_level_warn"]
+info-logs  = ["log/max_level_info",  "log/release_max_level_info"]
+debug-logs = ["log/max_level_debug", "log/release_max_level_debug"]
+trace-logs = ["log/max_level_trace", "log/release_max_level_trace"]
