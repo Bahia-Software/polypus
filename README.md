@@ -191,9 +191,21 @@ let qc = ParameterizedCircuit::new(4)
     .measure_all();
 
 let qasm: String = qc.to_qasm2_with_params(&[0.4, 0.8])?; // OpenQASM 2.0
+let qir_ll: String = qc.to_qir_with_params(&[0.4, 0.8])?; // QIR LLVM IR text (.ll)
+let qir_bc: Vec<u8> = qc.to_qir_bitcode_with_params(&[0.4, 0.8])?; // QIR bitcode (.bc)
 ```
 
 The generated OpenQASM 2.0 uses standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
+
+`to_qir_bitcode_with_params` requires `llvm-as` available in `PATH` because Polypus assembles the textual QIR module into LLVM bitcode externally.
+
+From Python, both outputs are also available:
+
+```python
+qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+qir_text = qc.to_qir()            # str (.ll)
+qir_bitcode = qc.to_qir_bitcode() # bytes (.bc)
+```
 
 ### QASM 2.0 import (round-trip)
 

@@ -1,16 +1,24 @@
-use ndarray::{Array1, Array2, Axis};
-use rand::{thread_rng, seq::SliceRandom, Rng};
-use pyo3::prelude::*;
-use std::f64::consts::PI;
-use crate::algorithms::AlgorithmTrait;
-use crate::evaluation::EvaluationOracle;
+//! Differential Evolution (DE) optimizer.
 
+use crate::objective::EvaluationOracle;
+use crate::outcome::{OptimizationOutcome, Optimizer};
+use crate::rng::OptRng;
+use ndarray::{Array1, Array2, Axis};
+use rand::{seq::SliceRandom, Rng};
+use std::f64::consts::PI;
+
+/// Differential Evolution optimizer.
 pub struct AlgorithmDifferentialEvolution;
 
 /// Arguments for the Differential Evolution optimizer.
 ///
 /// The algorithm is completely decoupled from circuits and infrastructure:
-/// all evaluation is delegated to \.
+/// all evaluation is delegated to [`oracle`](AlgorithmDifferentialEvolutionArgs::oracle).
+///
+/// # Preconditions
+///
+/// `population_size >= 4` — each trial mutation samples 3 *distinct* other
+/// members of the population.
 pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
@@ -18,25 +26,38 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     pub generations: u32,
     pub dimensions: u32,
     pub tolerance: f64,
+    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// `Some(seed)` makes the run reproducible.
+    pub seed: Option<u64>,
 }
 
-impl AlgorithmTrait for AlgorithmDifferentialEvolution {
-    type Args = AlgorithmDifferentialEvolutionArgs;
-    type AlgorithmReturnType = PyObject;
+impl AlgorithmDifferentialEvolution {
+    /// The optimizer's human-readable name.
+    pub fn name(&self) -> String {
+        String::from("Differential Evolution")
+    }
 
-    fn run(&self, args: AlgorithmDifferentialEvolutionArgs) -> PyObject {
+    /// A short description of the optimizer.
+    pub fn description(&self) -> String {
+        String::from("Trains a variational quantum circuit using Differential Evolution.")
+    }
+
+    fn run_with_rng<R: Rng>(
+        args: AlgorithmDifferentialEvolutionArgs,
+        rng: &mut R,
+    ) -> OptimizationOutcome {
         let AlgorithmDifferentialEvolutionArgs {
             oracle,
             population_size,
             generations,
             dimensions,
             tolerance,
+            seed: _,
         } = args;
 
         let popsize = population_size as usize;
         let max_gen = generations as usize;
         let dims = dimensions as usize;
-        let mut rng = thread_rng();
 
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));
@@ -57,12 +78,17 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
             .unwrap_or(0);
         let mut best = pop.row(best_idx).to_vec();
 
+        let mut iterations_run = 0usize;
+        let mut converged = false;
+
         for generation in 0..max_gen {
+            iterations_run = generation + 1;
+
             // Build all trial vectors for this generation.
             let mut trials: Vec<Array1<f64>> = Vec::with_capacity(popsize);
             for i in 0..popsize {
                 let ids: Vec<usize> = (0..popsize).filter(|&j| j != i).collect();
-                let sel: Vec<usize> = ids.choose_multiple(&mut rng, 3).cloned().collect();
+                let sel: Vec<usize> = ids.choose_multiple(rng, 3).cloned().collect();
                 let c1 = pop.row(sel[0]).to_owned();
                 let c2 = pop.row(sel[1]).to_owned();
                 let c3 = pop.row(sel[2]).to_owned();
@@ -94,27 +120,33 @@ impl AlgorithmTrait for AlgorithmDifferentialEvolution {
                 }
             }
 
-            let mean = pop.mean_axis(Axis(0)).expect("Failed to compute mean").sum();
+            let mean = pop
+                .mean_axis(Axis(0))
+                .expect("Failed to compute mean")
+                .sum();
             let std: f64 = pop.std_axis(Axis(0), 0.0).iter().sum();
-            println!("Generation {generation}: Mean: {mean:.4}, Std: {std:.4}");
+            log::debug!("Generation {generation}: Mean: {mean:.4}, Std: {std:.4}");
             if std < tolerance * mean {
-                println!("Stopping early at generation {generation} due to convergence");
+                log::debug!("Stopping early at generation {generation} due to convergence");
+                converged = true;
                 break;
             }
         }
 
-        Python::with_gil(|py| {
-            best.into_pyobject(py)
-                .expect("Error converting best to PyObject")
-                .unbind()
-        })
+        OptimizationOutcome {
+            best_fitness: fitness[best_idx],
+            best_params: best,
+            iterations_run,
+            converged,
+        }
     }
+}
 
-    fn name(&self) -> String {
-        String::from("Differential Evolution")
-    }
+impl Optimizer for AlgorithmDifferentialEvolution {
+    type Args = AlgorithmDifferentialEvolutionArgs;
 
-    fn description(&self) -> String {
-        String::from("Trains a variational quantum circuit using Differential Evolution.")
+    fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
+        let mut rng = OptRng::from_seed(args.seed);
+        Self::run_with_rng(args, &mut rng)
     }
 }

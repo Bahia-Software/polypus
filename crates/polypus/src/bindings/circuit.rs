@@ -8,6 +8,7 @@ use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCir
 use polypus_sim::{Simulator, StatevectorSimulator};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
 fn to_py_err(e: CircuitError) -> PyErr {
@@ -321,6 +322,22 @@ impl Circuit {
         self.inner
             .to_qir_with_params(&params.unwrap_or_default())
             .map_err(to_py_err)
+    }
+
+    /// Serialize to QIR LLVM bitcode (`.bc`) as Python `bytes`.
+    ///
+    /// Requires `llvm-as` to be available on `PATH`.
+    #[pyo3(signature = (params=None))]
+    fn to_qir_bitcode<'py>(
+        &self,
+        py: Python<'py>,
+        params: Option<Vec<f64>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let bitcode = self
+            .inner
+            .to_qir_bitcode_with_params(&params.unwrap_or_default())
+            .map_err(to_py_err)?;
+        Ok(PyBytes::new(py, &bitcode))
     }
 
     fn __len__(&self) -> usize {

@@ -1,0 +1,15 @@
+[package]
+name              = "polypus-optimizers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description       = "Pure-Rust variational optimizers for Polypus (Differential Evolution, Particle Swarm Optimization, Quantum Natural Gradient). Decoupled from circuits and Python via the EvaluationOracle/VarianceOracle contracts. No PyO3, no Python."
+
+[lib]
+name = "polypus_optimizers"
+
+[dependencies]
+ndarray = "0.16"
+rand    = "0.8"
+log     = "0.4"

@@ -78,6 +78,11 @@ pub(crate) fn assign_parameters_qiskit(circuit: &Py<PyAny>, params: &[f64]) -> P
 
 /// Contract between optimization algorithms and quantum circuit evaluation.
 ///
+/// Re-exported from the pure-Rust [`polypus_optimizers`] crate, where the trait
+/// now lives (it is the optimizers' input contract). Re-exporting here keeps the
+/// `crate::evaluation::EvaluationOracle` path — used by [`VqcOracle`] and
+/// [`QmlOracle`] — resolving unchanged.
+///
 /// An oracle encapsulates everything needed to translate a parameter vector
 /// into a scalar fitness value: the circuit template (or training circuits),
 /// the backend, and the expectation function.
@@ -87,13 +92,7 @@ pub(crate) fn assign_parameters_qiskit(circuit: &Py<PyAny>, params: &[f64]) -> P
 ///
 /// To add a new evaluation strategy (e.g. noisy readout mitigation, hardware
 /// native gates, …) implement this trait without touching any algorithm.
-pub trait EvaluationOracle: Send + Sync {
-    /// Evaluate a batch of candidate parameter vectors.
-    ///
-    /// Returns one fitness value per candidate. Higher is better
-    /// (algorithms maximise the expectation value).
-    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64>;
-}
+pub use polypus_optimizers::EvaluationOracle;
 
 /// Execute a batch of bound circuits through `backend` and extract expectation
 /// values using the Python `expectation_fn`.

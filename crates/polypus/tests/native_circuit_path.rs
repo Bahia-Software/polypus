@@ -36,13 +36,18 @@ fn native_bind_requires_no_python_interpreter() {
     let source = CircuitSource::Native(qaoa_template());
     let bound = source.bind(&[0.4, 0.8]);
     match bound {
-        BoundCircuit::Qasm2(qasm) => {
+        // A native template binds to the native variant; serialising it to
+        // OpenQASM 2.0 is pure Rust, so this still needs no interpreter.
+        BoundCircuit::Native(circuit) => {
+            let qasm = circuit.to_qasm2();
             assert!(qasm.starts_with("OPENQASM 2.0;"));
             assert!(qasm.contains("rzz(0.400000000000) q[0],q[1];"));
             assert!(qasm.contains("rx(0.800000000000) q[3];"));
             assert!(qasm.ends_with("measure q -> c;\n"));
         }
-        BoundCircuit::Qiskit(_) => panic!("native template must bind to QASM"),
+        BoundCircuit::Qasm2(_) | BoundCircuit::Qiskit(_) => {
+            panic!("native template must bind to the native variant")
+        }
     }
 }
 
@@ -58,10 +63,10 @@ fn native_bind_is_threadsafe_without_gil() {
             std::thread::spawn(move || {
                 for j in 0..100 {
                     let theta = [0.01 * i as f64, 0.02 * j as f64];
-                    let BoundCircuit::Qasm2(qasm) = src.bind(&theta) else {
-                        panic!("expected QASM");
+                    let BoundCircuit::Native(circuit) = src.bind(&theta) else {
+                        panic!("expected native circuit");
                     };
-                    assert!(qasm.starts_with("OPENQASM 2.0;"));
+                    assert!(circuit.to_qasm2().starts_with("OPENQASM 2.0;"));
                 }
             })
         })

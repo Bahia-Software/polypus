@@ -6,16 +6,27 @@ pub mod execution_config;
 pub mod local;
 pub mod cunqa;
 pub mod native;
+pub mod transpiler;
+#[cfg(feature = "qmio")]
+pub mod qmio;
 
 pub use execution_config::{ExecutionConfig, BackendConfig};
 pub use local::LocalBackend;
 pub use cunqa::CunqaBackend;
 pub use native::NativeStatevectorBackend;
+pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
+#[cfg(feature = "qmio")]
+pub use qmio::QmioBackend;
 
 /// Supported quantum execution infrastructures.
 pub enum Infrastructure {
     Local,
     Cunqa,
+    /// CESGA QMIO real QPU (see [`QmioBackend`]). The variant always exists so
+    /// that selecting `"qmio"` produces a clear "requires `--features qmio`"
+    /// error rather than an `Unknown infrastructure` panic when the feature is
+    /// disabled; the backend itself is only built with the feature on.
+    Qmio,
 }
 
 impl Infrastructure {
@@ -23,6 +34,7 @@ impl Infrastructure {
         match s {
             "local" => Infrastructure::Local,
             "cunqa" => Infrastructure::Cunqa,
+            "qmio" => Infrastructure::Qmio,
             _ => panic!("Unknown infrastructure: {}", s),
         }
     }
@@ -57,6 +69,20 @@ impl Infrastructure {
             BackendConfig::LocalNative => {
                 Arc::new(NativeStatevectorBackend::new(&config.id))
             }
+            #[cfg(feature = "qmio")]
+            BackendConfig::Qmio {
+                endpoint,
+                program_format,
+                optimization,
+                repetition_period,
+                res_format,
+            } => Arc::new(QmioBackend::new(
+                endpoint.clone(),
+                *program_format,
+                *optimization,
+                *repetition_period,
+                res_format.clone(),
+            )),
         }
     }
 }
@@ -116,6 +142,38 @@ impl BoundCircuit {
             }
             BoundCircuit::Qasm2(qasm) => BoundCircuit::Qasm2(qasm.clone()),
             BoundCircuit::Native(circuit) => BoundCircuit::Native(circuit.clone()),
+        }
+    }
+
+    /// Rewrite the *native domain* of this circuit with `transpiler`, returning a
+    /// transpiled `BoundCircuit`. This is the composition point shared by the
+    /// Python-backed backends ([`LocalBackend`], [`CunqaBackend`]): each applies
+    /// its injected [`Transpiler`] to every circuit just before submission.
+    ///
+    /// The transpiler is intentionally confined to the GIL-free native domain:
+    ///
+    /// - [`Native`](Self::Native) is transpiled directly on its [`ConcreteCircuit`].
+    /// - [`Qasm2`](Self::Qasm2) is parsed back to a [`ConcreteCircuit`],
+    ///   transpiled, and re-emitted as OpenQASM 2.0. This is *best-effort*: if the
+    ///   QASM cannot be parsed (an unsupported construct, a non-native program),
+    ///   the original text is returned untouched rather than panicking, so a
+    ///   backend that already accepted that QASM keeps working unchanged.
+    /// - [`Qiskit`](Self::Qiskit) is returned as-is: Aer/CUNQA transpile Qiskit
+    ///   circuits internally, and rewriting one here would require reading its
+    ///   gates through the GIL, crossing the deliberate native/Python boundary.
+    pub fn transpiled(&self, transpiler: &dyn Transpiler, opts: &TranspileOptions) -> BoundCircuit {
+        match self {
+            BoundCircuit::Native(cc) => BoundCircuit::Native(transpiler.transpile(cc, opts)),
+            BoundCircuit::Qasm2(qasm) => {
+                match polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+                    .and_then(|pc| pc.assign_parameters(&[]))
+                {
+                    Ok(cc) => BoundCircuit::Qasm2(transpiler.transpile(&cc, opts).to_qasm2()),
+                    // Unparseable QASM is left intact (best-effort, no new panic).
+                    Err(_) => BoundCircuit::Qasm2(qasm.clone()),
+                }
+            }
+            BoundCircuit::Qiskit(_) => self.duplicate(),
         }
     }
 }

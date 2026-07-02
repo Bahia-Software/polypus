@@ -140,6 +140,11 @@ impl ParameterizedCircuit {
                 let theta = *theta;
                 self.track_param(&theta);
             }
+            GateInstruction::Cp { q0, q1, theta } => {
+                self.check_pair(*q0, *q1)?;
+                let theta = *theta;
+                self.track_param(&theta);
+            }
             GateInstruction::U {
                 qubit,
                 theta,
@@ -243,6 +248,15 @@ impl ParameterizedCircuit {
     pub fn rz(self, qubit: usize, theta: impl Into<GateParam>) -> Self {
         self.push(GateInstruction::Rz {
             qubit,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled phase gate: control, target, angle.
+    pub fn cp(self, q0: usize, q1: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cp {
+            q0,
+            q1,
             theta: theta.into(),
         })
     }
@@ -372,6 +386,11 @@ impl ParameterizedCircuit {
                     q1: *q1,
                     theta: resolve(theta)?,
                 },
+                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
+                    q0: *q0,
+                    q1: *q1,
+                    theta: resolve(theta)?,
+                },
                 GateInstruction::U {
                     qubit,
                     theta,
@@ -382,6 +401,11 @@ impl ParameterizedCircuit {
                     theta: resolve(theta)?,
                     phi: resolve(phi)?,
                     lam: resolve(lam)?,
+                },
+                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
+                    q0: *q0,
+                    q1: *q1,
+                    theta: resolve(theta)?,
                 },
                 other => other.clone(),
             };
@@ -419,6 +443,20 @@ impl ParameterizedCircuit {
             });
         }
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, params)
+    }
+
+    /// Bind `params` and serialize to QIR LLVM bitcode (`.bc`) in one step.
+    /// Equivalent to `self.assign_parameters(params)?.to_qir_bitcode()`.
+    ///
+    /// Requires `llvm-as` on `PATH`.
+    pub fn to_qir_bitcode_with_params(&self, params: &[f64]) -> Result<Vec<u8>, CircuitError> {
+        if params.len() != self.num_params {
+            return Err(CircuitError::WrongNumberOfParams {
+                expected: self.num_params,
+                got: params.len(),
+            });
+        }
+        qir::write_qir_bitcode(self.num_qubits, self.num_clbits(), &self.gates, params)
     }
 }
 
@@ -471,6 +509,18 @@ impl ConcreteCircuit {
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
             "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
         )
+    }
+
+    /// Serialize to QIR LLVM bitcode (`.bc`).
+    ///
+    /// Requires `llvm-as` on `PATH`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `llvm-as` is unavailable or fails to assemble the
+    /// generated textual QIR module.
+    pub fn to_qir_bitcode(&self) -> Result<Vec<u8>, CircuitError> {
+        qir::write_qir_bitcode(self.num_qubits, self.num_clbits(), &self.gates, &[])
     }
 }
 
