@@ -18,26 +18,26 @@ extension-module = ["pyo3/extension-module"]
 # `tokio/net` enables the runtime IO driver that the async `zeromq` sockets need.
 qmio = ["dep:zeromq", "dep:serde-pickle", "tokio/net"]
 default = ["info-logs"]
-off-logs = ["log/max_level_off", "log/release_max_level_off"]
-error-logs = ["log/max_level_error", "log/release_max_level_error"]
-warn-logs = ["log/max_level_warn", "log/release_max_level_warn"]
-info-logs = ["log/max_level_info", "log/release_max_level_info"]
-debug-logs = ["log/max_level_debug", "log/release_max_level_debug"]
-trace-logs = ["log/max_level_trace", "log/release_max_level_trace"]
+# Compile-time max log level, forwarded to the shared `polypus-logger` crate
+# (which in turn toggles the `log` crate's global `max_level_*` features).
+off-logs   = ["polypus-logger/off-logs"]
+error-logs = ["polypus-logger/error-logs"]
+warn-logs  = ["polypus-logger/warn-logs"]
+info-logs  = ["polypus-logger/info-logs"]
+debug-logs = ["polypus-logger/debug-logs"]
+trace-logs = ["polypus-logger/trace-logs"]
 
 [dependencies]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
+polypus-logger = { workspace = true }
 pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"
 ndarray = "0.16"
-chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-log = "0.4"
-fern = "0.6"
-humantime = "2.1"
+log = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 # --- optional, only compiled with `--features qmio` ---
 # Pure-Rust ZeroMQ (ZMTP 3.x, interoperable with pyzmq/libzmq); avoids a C
