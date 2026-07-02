@@ -30,7 +30,11 @@ impl LocalBackend {
 }
 
 impl QuantumBackend for LocalBackend {
-    fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+    ) -> Vec<HashMap<String, u64>> {
         Python::with_gil(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched (Aer transpiles them) and

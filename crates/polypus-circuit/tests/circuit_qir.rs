@@ -205,7 +205,10 @@ fn wrong_number_of_params_is_rejected() {
     let err = qc.to_qir_with_params(&[]).unwrap_err();
     assert!(matches!(
         err,
-        CircuitError::WrongNumberOfParams { expected: 1, got: 0 }
+        CircuitError::WrongNumberOfParams {
+            expected: 1,
+            got: 0
+        }
     ));
 }
 
@@ -220,9 +223,13 @@ fn declarations_are_emitted_once_and_sorted() {
         .unwrap();
 
     // Each distinct intrinsic is declared exactly once despite repeated use.
-    assert_eq!(ir.matches("declare void @__quantum__qis__h__body").count(), 1);
     assert_eq!(
-        ir.matches("declare void @__quantum__qis__cnot__body").count(),
+        ir.matches("declare void @__quantum__qis__h__body").count(),
+        1
+    );
+    assert_eq!(
+        ir.matches("declare void @__quantum__qis__cnot__body")
+            .count(),
         1
     );
 }
@@ -257,7 +264,10 @@ fn qir_bitcode_param_count_validation_matches_text_qir() {
     let err = qc.to_qir_bitcode_with_params(&[]).unwrap_err();
     assert!(matches!(
         err,
-        CircuitError::WrongNumberOfParams { expected: 1, got: 0 }
+        CircuitError::WrongNumberOfParams {
+            expected: 1,
+            got: 0
+        }
     ));
 }
 

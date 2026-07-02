@@ -1,19 +1,19 @@
 //! Integration tests for polypus-circuit: gates
 // GateParam
 
-use polypus_circuit::{ GateInstruction, GateParam };
+use polypus_circuit::{GateInstruction, GateParam};
 
 #[test]
-fn test_gateparam_creation(){
-    let var_fixe = GateParam::Fixed(3.14);
+fn test_gateparam_creation() {
+    let var_fixe = GateParam::Fixed(1.23);
     let var_param = GateParam::Param(42);
 
-    assert_eq!(var_fixe, GateParam::Fixed(3.14));
+    assert_eq!(var_fixe, GateParam::Fixed(1.23));
     assert_eq!(var_param, GateParam::Param(42));
 }
 
 #[test]
-fn test_gateparam_from_f64(){
+fn test_gateparam_from_f64() {
     let param_from_from = GateParam::from(2.72);
     let param_from_into: GateParam = 2.72.into();
 
@@ -22,13 +22,12 @@ fn test_gateparam_from_f64(){
 }
 
 #[test]
-fn test_gateparam_from_f64_limit_cases(){
+fn test_gateparam_from_f64_limit_cases() {
     let param_cero = GateParam::from(0.0);
     let param_negativo = GateParam::from(-1.0);
     let param_grande = GateParam::from(1e10);
     let param_nan = GateParam::from(f64::NAN);
     let param_inf = GateParam::from(f64::INFINITY);
-
 
     assert_eq!(param_cero, GateParam::Fixed(0.0));
     assert_eq!(param_negativo, GateParam::Fixed(-1.0));
@@ -98,7 +97,12 @@ fn test_u_gate() {
     };
 
     match u {
-        GateInstruction::U { qubit, theta, phi, lam } => {
+        GateInstruction::U {
+            qubit,
+            theta,
+            phi,
+            lam,
+        } => {
             assert_eq!(qubit, 0);
             assert_eq!(theta, GateParam::Fixed(1.0));
             assert_eq!(phi, GateParam::Fixed(2.0));

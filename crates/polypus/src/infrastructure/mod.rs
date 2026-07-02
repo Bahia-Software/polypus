@@ -2,21 +2,21 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod cunqa;
 pub mod execution_config;
 pub mod local;
-pub mod cunqa;
 pub mod native;
-pub mod transpiler;
 #[cfg(feature = "qmio")]
 pub mod qmio;
+pub mod transpiler;
 
-pub use execution_config::{ExecutionConfig, BackendConfig};
-pub use local::LocalBackend;
 pub use cunqa::CunqaBackend;
+pub use execution_config::{BackendConfig, ExecutionConfig};
+pub use local::LocalBackend;
 pub use native::NativeStatevectorBackend;
-pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 #[cfg(feature = "qmio")]
 pub use qmio::QmioBackend;
+pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 
 /// Supported quantum execution infrastructures.
 pub enum Infrastructure {
@@ -30,6 +30,7 @@ pub enum Infrastructure {
 }
 
 impl Infrastructure {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "local" => Infrastructure::Local,
@@ -47,28 +48,31 @@ impl Infrastructure {
     /// [`QuantumBackend`] for the new type — no algorithm code changes.
     pub fn create_backend(config: &ExecutionConfig) -> Arc<dyn QuantumBackend> {
         match &config.backend_config {
-            BackendConfig::Local { backend, sim_method, noise_model } => {
-                Arc::new(LocalBackend::new(
-                    backend.clone(),
-                    sim_method.clone(),
-                    noise_model
-                        .as_ref()
-                        .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
-                ))
-            }
-            BackendConfig::Cunqa { backend, sim_method, nodes, cores_per_qpu } => {
-                Arc::new(CunqaBackend::new(
-                    config.n_qpus,
-                    *nodes,
-                    &config.id,
-                    *cores_per_qpu,
-                    backend.clone(),
-                    sim_method.clone(),
-                ))
-            }
-            BackendConfig::LocalNative => {
-                Arc::new(NativeStatevectorBackend::new(&config.id))
-            }
+            BackendConfig::Local {
+                backend,
+                sim_method,
+                noise_model,
+            } => Arc::new(LocalBackend::new(
+                backend.clone(),
+                sim_method.clone(),
+                noise_model
+                    .as_ref()
+                    .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+            )),
+            BackendConfig::Cunqa {
+                backend,
+                sim_method,
+                nodes,
+                cores_per_qpu,
+            } => Arc::new(CunqaBackend::new(
+                config.n_qpus,
+                *nodes,
+                &config.id,
+                *cores_per_qpu,
+                backend.clone(),
+                sim_method.clone(),
+            )),
+            BackendConfig::LocalNative => Arc::new(NativeStatevectorBackend::new(&config.id)),
             #[cfg(feature = "qmio")]
             BackendConfig::Qmio {
                 endpoint,
@@ -193,7 +197,11 @@ pub trait QuantumBackend: Send + Sync {
     /// circuit. Keeping the return type native (rather than a Python object)
     /// means non-Python backends (IBM, IQM, a future native MPI scheduler) never
     /// have to touch the GIL, which is essential for HPC-scale distribution.
-    fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>>;
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+    ) -> Vec<HashMap<String, u64>>;
 
     /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
     /// call, given the `total` circuits to evaluate.

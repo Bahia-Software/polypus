@@ -1,4 +1,4 @@
-use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
+use crate::algorithms::{AlgorithmArgs, AlgorithmTrait};
 use crate::infrastructure::Infrastructure;
 use pyo3::prelude::*;
 

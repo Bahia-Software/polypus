@@ -25,7 +25,11 @@ pub struct CunqaBackend {
 }
 
 impl QuantumBackend for CunqaBackend {
-    fn run_circuits(&self, qcs: &[BoundCircuit], config: &ExecutionConfig) -> Vec<HashMap<String, u64>> {
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+    ) -> Vec<HashMap<String, u64>> {
         Python::with_gil(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched and every native circuit
@@ -114,7 +118,9 @@ impl CunqaBackend {
             let connection = module
                 .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
                 .expect("Error raising QPUs in CUNQA");
-            let family: Py<PyAny> = connection.extract().expect("Error extracting family from CUNQA");
+            let family: Py<PyAny> = connection
+                .extract()
+                .expect("Error extracting family from CUNQA");
             println!("QPUs raised successfully");
             self.family = Some(family);
         });
@@ -131,9 +137,7 @@ impl CunqaBackend {
         Python::with_gil(|py| {
             let module = PyModule::import(py, "polypus_python").unwrap();
             let kwargs = PyDict::new(py);
-            kwargs
-                .set_item("family", family.clone_ref(py))
-                .unwrap();
+            kwargs.set_item("family", family.clone_ref(py)).unwrap();
             module
                 .call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))
                 .expect("Error dropping QPUs in CUNQA");

@@ -115,9 +115,18 @@ fn assign_parameters_substitutes_values() {
     assert_eq!(
         bound.gates,
         vec![
-            GateInstruction::Rx { qubit: 0, theta: GateParam::Fixed(1.0) },
-            GateInstruction::Ry { qubit: 1, theta: GateParam::Fixed(2.0) },
-            GateInstruction::Rz { qubit: 0, theta: GateParam::Fixed(0.5) },
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(1.0)
+            },
+            GateInstruction::Ry {
+                qubit: 1,
+                theta: GateParam::Fixed(2.0)
+            },
+            GateInstruction::Rz {
+                qubit: 0,
+                theta: GateParam::Fixed(0.5)
+            },
         ]
     );
 }
@@ -169,11 +178,17 @@ fn wrong_number_of_params_is_rejected() {
 
     assert_eq!(
         qc.assign_parameters(&[0.1]),
-        Err(CircuitError::WrongNumberOfParams { expected: 2, got: 1 })
+        Err(CircuitError::WrongNumberOfParams {
+            expected: 2,
+            got: 1
+        })
     );
     assert_eq!(
         qc.to_qasm2_with_params(&[0.1, 0.2, 0.3]).unwrap_err(),
-        CircuitError::WrongNumberOfParams { expected: 2, got: 3 }
+        CircuitError::WrongNumberOfParams {
+            expected: 2,
+            got: 3
+        }
     );
 }
 
@@ -183,19 +198,31 @@ fn param_index_out_of_bounds_is_rejected() {
     let qc = ParameterizedCircuit {
         num_qubits: 1,
         num_params: 1,
-        gates: vec![GateInstruction::Rx { qubit: 0, theta: GateParam::Param(5) }],
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(5),
+        }],
     };
     assert_eq!(
         qc.assign_parameters(&[0.1]),
-        Err(CircuitError::ParamIndexOutOfBounds { index: 5, num_params: 1 })
+        Err(CircuitError::ParamIndexOutOfBounds {
+            index: 5,
+            num_params: 1
+        })
     );
 }
 
 #[test]
 fn errors_display_human_readable_messages() {
-    let e = CircuitError::WrongNumberOfParams { expected: 2, got: 1 };
+    let e = CircuitError::WrongNumberOfParams {
+        expected: 2,
+        got: 1,
+    };
     assert!(e.to_string().contains("2"));
-    let e = CircuitError::ParamIndexOutOfBounds { index: 5, num_params: 1 };
+    let e = CircuitError::ParamIndexOutOfBounds {
+        index: 5,
+        num_params: 1,
+    };
     assert!(e.to_string().contains("5"));
 }
 
@@ -258,7 +285,10 @@ fn num_clbits_reflects_measurements() {
 fn concrete_circuit_panics_on_unbound_param() {
     let qc = ConcreteCircuit {
         num_qubits: 1,
-        gates: vec![GateInstruction::Rx { qubit: 0, theta: GateParam::Param(0) }],
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(0),
+        }],
     };
     let _ = qc.to_qasm2();
 }

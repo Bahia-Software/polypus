@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use chrono::Local;
+use log::{LevelFilter, Metadata, Record, SetLoggerError};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
-use chrono::Local;
-use log::{Record, LevelFilter, Metadata, SetLoggerError};
 
 /// Level of detail for the logs.
 ///
@@ -142,17 +142,22 @@ impl LoggerBuilder {
     /// retrying the failed open on every single line.
     pub fn build(self) -> Logger {
         let file = match &self.config.target {
-            LogTarget::File(path) => match OpenOptions::new().create(true).append(true).open(path) {
-                Ok(file) => Some(Mutex::new(file)),
-                Err(e) => {
-                    eprintln!("Failed to open log file {:?}: {}", path, e);
-                    None
+            LogTarget::File(path) => {
+                match OpenOptions::new().create(true).append(true).open(path) {
+                    Ok(file) => Some(Mutex::new(file)),
+                    Err(e) => {
+                        eprintln!("Failed to open log file {:?}: {}", path, e);
+                        None
+                    }
                 }
-            },
+            }
             _ => None,
         };
 
-        Logger { config: self.config, file }
+        Logger {
+            config: self.config,
+            file,
+        }
     }
 
     /// Build the logger and install it as the process-wide logger used by the
@@ -241,20 +246,32 @@ impl log::Log for Logger {
                 }
                 LogFormat::Json => {
                     // Built with serde_json so that quotes, backslashes,
-                    // newlines, etc. in the message are escaped correctly 
+                    // newlines, etc. in the message are escaped correctly
                     // and the result is always valid JSON.
                     let mut map = serde_json::Map::new();
                     if let Some(timestamp) = &timestamp {
-                        map.insert("timestamp".to_string(), serde_json::Value::String(timestamp.clone()));
+                        map.insert(
+                            "timestamp".to_string(),
+                            serde_json::Value::String(timestamp.clone()),
+                        );
                     }
                     map.insert("level".to_string(), serde_json::Value::String(level));
                     if let Some(thread_id) = &thread_id {
-                        map.insert("thread_id".to_string(), serde_json::Value::String(thread_id.clone()));
+                        map.insert(
+                            "thread_id".to_string(),
+                            serde_json::Value::String(thread_id.clone()),
+                        );
                     }
                     if let Some(module) = &module {
-                        map.insert("module".to_string(), serde_json::Value::String(module.to_string()));
+                        map.insert(
+                            "module".to_string(),
+                            serde_json::Value::String(module.to_string()),
+                        );
                     }
-                    map.insert("message".to_string(), serde_json::Value::String(message.clone()));
+                    map.insert(
+                        "message".to_string(),
+                        serde_json::Value::String(message.clone()),
+                    );
 
                     serde_json::to_string(&map).unwrap_or(message)
                 }
@@ -352,7 +369,10 @@ mod tests {
     #[test]
     fn json_format_respects_flags_and_is_valid() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("polypus_logger_test_json_{}.log", std::process::id()));
+        let path = dir.join(format!(
+            "polypus_logger_test_json_{}.log",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
 
         let logger = LoggerBuilder::new()
@@ -382,7 +402,10 @@ mod tests {
     #[test]
     fn json_format_escapes_special_characters() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("polypus_logger_test_escape_{}.log", std::process::id()));
+        let path = dir.join(format!(
+            "polypus_logger_test_escape_{}.log",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
 
         let logger = LoggerBuilder::new()
@@ -390,7 +413,10 @@ mod tests {
             .target(LogTarget::File(path.clone()))
             .build();
 
-        log_message!(logger, "line with \"quotes\", a \\ backslash and a\nnewline");
+        log_message!(
+            logger,
+            "line with \"quotes\", a \\ backslash and a\nnewline"
+        );
 
         let contents = std::fs::read_to_string(&path).unwrap();
         let line = contents.lines().next().unwrap();
@@ -409,7 +435,10 @@ mod tests {
     #[test]
     fn file_target_opens_once_and_appends_across_calls() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("polypus_logger_test_append_{}.log", std::process::id()));
+        let path = dir.join(format!(
+            "polypus_logger_test_append_{}.log",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
 
         let logger = LoggerBuilder::new()

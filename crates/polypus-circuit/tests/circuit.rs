@@ -1,10 +1,12 @@
 //! Integration tests for polypus-circuit: circuit
 // ParameterizedCircuit
 
-use polypus_circuit::{ CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParameterizedCircuit };
+use polypus_circuit::{
+    CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParameterizedCircuit,
+};
 
 #[test]
-fn test_parameterized_circuit_basic_creation(){
+fn test_parameterized_circuit_basic_creation() {
     let qc = ParameterizedCircuit::new(3);
 
     assert_eq!(qc.num_qubits, 3);
@@ -13,7 +15,7 @@ fn test_parameterized_circuit_basic_creation(){
 }
 
 #[test]
-fn test_parameterized_circuit_gate_basic_creation(){
+fn test_parameterized_circuit_gate_basic_creation() {
     let qc = ParameterizedCircuit::new(2).h(0).cz(0, 1);
 
     assert_eq!(qc.num_qubits, 2);
@@ -24,48 +26,82 @@ fn test_parameterized_circuit_gate_basic_creation(){
 }
 
 #[test]
-fn test_parameterized_circuit_gate_param_basic_creation(){
+fn test_parameterized_circuit_gate_param_basic_creation() {
     let qc = ParameterizedCircuit::new(2).x(0).rx(0, GateParam::Param(3));
 
     assert_eq!(qc.num_qubits, 2);
     assert_eq!(qc.num_params, 4); // Param(3) means we have 4 parameters (0, 1, 2, 3)
     assert_eq!(qc.gates.len(), 2);
     assert_eq!(qc.gates[0], GateInstruction::X(0));
-    assert_eq!(qc.gates[1], GateInstruction::Rx { qubit: 0, theta: GateParam::Param(3),});
-
+    assert_eq!(
+        qc.gates[1],
+        GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(3),
+        }
+    );
 }
 
 #[test]
 #[should_panic]
-fn test_parameterized_circuit_gate_basic_qubit_out_of_range(){
+fn test_parameterized_circuit_gate_basic_qubit_out_of_range() {
     let _qc = ParameterizedCircuit::new(2).y(5);
 }
 
 #[test]
-#[should_panic] 
-fn test_parameterized_circuit_gate_basic_two_same_qubit(){
+#[should_panic]
+fn test_parameterized_circuit_gate_basic_two_same_qubit() {
     let _qc = ParameterizedCircuit::new(2).cx(0, 0);
 }
 
 #[test]
-fn test_parameterized_circuit_gate_assign_parameters(){
-    let qc = ParameterizedCircuit::new(2).t(0).rz(0, Param(0)).ry(1, Param(1)).rzz(0,1, Param(2));
+fn test_parameterized_circuit_gate_assign_parameters() {
+    let qc = ParameterizedCircuit::new(2)
+        .t(0)
+        .rz(0, Param(0))
+        .ry(1, Param(1))
+        .rzz(0, 1, Param(2));
     assert_eq!(qc.num_params, 3);
 
     let concrete_qc = qc.assign_parameters(&[0.1, 0.2, 0.3]).unwrap();
     assert_eq!(concrete_qc.gates[0], GateInstruction::T(0));
-    assert_eq!(concrete_qc.gates[1], GateInstruction::Rz { qubit: 0, theta: GateParam::Fixed(0.1) });
-    assert_eq!(concrete_qc.gates[2], GateInstruction::Ry { qubit: 1, theta: GateParam::Fixed(0.2) });
-    assert_eq!(concrete_qc.gates[3], GateInstruction::Rzz{ q0: 0, q1: 1, theta: GateParam::Fixed(0.3) });
+    assert_eq!(
+        concrete_qc.gates[1],
+        GateInstruction::Rz {
+            qubit: 0,
+            theta: GateParam::Fixed(0.1)
+        }
+    );
+    assert_eq!(
+        concrete_qc.gates[2],
+        GateInstruction::Ry {
+            qubit: 1,
+            theta: GateParam::Fixed(0.2)
+        }
+    );
+    assert_eq!(
+        concrete_qc.gates[3],
+        GateInstruction::Rzz {
+            q0: 0,
+            q1: 1,
+            theta: GateParam::Fixed(0.3)
+        }
+    );
 }
 
 #[test]
-fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params(){
+fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params() {
     let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
     assert_eq!(qc.num_params, 2);
 
     let result = qc.assign_parameters(&[0.1]);
-    assert_eq!(result, Err(CircuitError::WrongNumberOfParams { expected: 2, got: 1 }));
+    assert_eq!(
+        result,
+        Err(CircuitError::WrongNumberOfParams {
+            expected: 2,
+            got: 1
+        })
+    );
 }
 
 #[test]
@@ -73,17 +109,21 @@ fn test_parameterized_circuit_assign_parameters_param_index_out_of_bounds() {
     let qc = ParameterizedCircuit {
         num_qubits: 1,
         num_params: 1,
-        gates: vec![
-            GateInstruction::Rx {
-                qubit: 0,
-                theta: GateParam::Param(5),
-            },
-        ],
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(5),
+        }],
     };
 
     let result = qc.assign_parameters(&[0.1]);
 
-    assert_eq!(result,Err(CircuitError::ParamIndexOutOfBounds { index: 5, num_params: 1 }));
+    assert_eq!(
+        result,
+        Err(CircuitError::ParamIndexOutOfBounds {
+            index: 5,
+            num_params: 1
+        })
+    );
 }
 
 #[test]
@@ -133,7 +173,6 @@ fn test_parameterized_circuit_to_qasm2_basic() {
     let qc = ParameterizedCircuit::new(1).y(0);
     let qasm = qc.to_qasm2_with_params(&[]).unwrap();
 
-
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[1];"));
     assert!(qasm.contains("y q[0];"));
@@ -142,7 +181,10 @@ fn test_parameterized_circuit_to_qasm2_basic() {
 
 #[test]
 fn test_parameterized_circuit_to_qasm2_with_params_basic() {
-    let qc = ParameterizedCircuit::new(2).sdg(0).rx(0, Param(0)).rxx(0, 1, Param(1));
+    let qc = ParameterizedCircuit::new(2)
+        .sdg(0)
+        .rx(0, Param(0))
+        .rxx(0, 1, Param(1));
     let qasm = qc.to_qasm2_with_params(&[0.5, 1.0]).unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
@@ -158,7 +200,12 @@ fn test_parameterized_circuit_to_qasm2_with_params_basic() {
 
 #[test]
 fn test_parameterized_circuit_to_qasm2_multiple_gates_measure() {
-    let qc = ParameterizedCircuit::new(2).z(0).barrier().rx(0, Param(0)).ry(1, Param(1)).measure_all();
+    let qc = ParameterizedCircuit::new(2)
+        .z(0)
+        .barrier()
+        .rx(0, Param(0))
+        .ry(1, Param(1))
+        .measure_all();
     let qasm = qc.to_qasm2_with_params(&[0.5, 1.0]).unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
@@ -171,13 +218,18 @@ fn test_parameterized_circuit_to_qasm2_multiple_gates_measure() {
     assert!(qasm.contains("ry("));
     assert!(qasm.contains("1.0"));
     assert!(qasm.contains("q[1];"));
-    assert!(qasm.contains("creg c[2];")); 
+    assert!(qasm.contains("creg c[2];"));
     assert!(qasm.contains("measure q -> c;"));
 }
 
 #[test]
 fn test_parameterized_circuit_to_qasm2_multiple_gates_and_parameters() {
-    let qc = ParameterizedCircuit::new(2).tdg(0).barrier_on(&[0, 1]).rx(0, Param(0)).ry(1, Param(1)).u(0, Param(2), Param(3), Param(4));
+    let qc = ParameterizedCircuit::new(2)
+        .tdg(0)
+        .barrier_on(&[0, 1])
+        .rx(0, Param(0))
+        .ry(1, Param(1))
+        .u(0, Param(2), Param(3), Param(4));
     let qasm = qc.to_qasm2_with_params(&[0.1, 0.2, 0.3, 0.4, 0.5]).unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
@@ -199,18 +251,25 @@ fn test_parameterized_circuit_to_qasm2_multiple_gates_and_parameters() {
 
 #[test]
 fn test_parameterized_circuit_to_qasm2_wrong_number_of_params() {
-    
     let qc = ParameterizedCircuit::new(1).rx(0, Param(0));
     let result = qc.to_qasm2_with_params(&[]);
 
-    assert_eq!(result,
-        Err(CircuitError::WrongNumberOfParams { expected: 1, got: 0 })
+    assert_eq!(
+        result,
+        Err(CircuitError::WrongNumberOfParams {
+            expected: 1,
+            got: 0
+        })
     );
 }
 
 #[test]
 fn test_parameterized_circuit_to_qasm2_parser() {
-    let qc = ParameterizedCircuit::new(2).s(0).rx(0, Param(0)).ry(1, Param(1)).measure_all();
+    let qc = ParameterizedCircuit::new(2)
+        .s(0)
+        .rx(0, Param(0))
+        .ry(1, Param(1))
+        .measure_all();
     let qasm = qc.to_qasm2_with_params(&[0.5, 1.0]).unwrap();
 
     let qc2 = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
@@ -266,9 +325,7 @@ fn test_parameterized_circuit_from_qasm2_unsupported_statement() {
 
 #[test]
 fn test_parameterized_circuit_barrier_creation() {
-    let qc = ParameterizedCircuit::new(3)
-        .barrier()
-        .barrier_on(&[0, 2]);
+    let qc = ParameterizedCircuit::new(3).barrier().barrier_on(&[0, 2]);
 
     assert_eq!(qc.gates.len(), 2);
     assert_eq!(qc.gates[0], GateInstruction::Barrier(vec![]));
@@ -291,7 +348,13 @@ fn test_parameterized_circuit_try_push_out_of_range() {
     let mut qc = ParameterizedCircuit::new(1);
     let result = qc.try_push(GateInstruction::Sdg(5));
 
-    assert_eq!(result,Err(CircuitError::QubitOutOfRange { qubit: 5, num_qubits: 1 }));
+    assert_eq!(
+        result,
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 5,
+            num_qubits: 1
+        })
+    );
 }
 
 #[test]
@@ -299,7 +362,7 @@ fn test_parameterized_circuit_try_push_same_qubits() {
     let mut qc = ParameterizedCircuit::new(1);
     let result = qc.try_push(GateInstruction::Cz(0, 0));
 
-    assert_eq!(result,Err(CircuitError::IdenticalQubits{ qubit: 0 }));
+    assert_eq!(result, Err(CircuitError::IdenticalQubits { qubit: 0 }));
 }
 
 #[test]
@@ -309,7 +372,7 @@ fn test_parameterized_circuit_try_push_track_params() {
         qubit: 0,
         theta: GateParam::Param(3),
     });
-    
+
     assert_eq!(result, Ok(()));
     assert_eq!(qc.num_params, 4);
 }
@@ -328,13 +391,11 @@ fn test_parameterized_circuit_push_out_of_range() {
     let _qc = ParameterizedCircuit::new(2).push(GateInstruction::H(5));
 }
 
-
 #[test]
 #[should_panic]
 fn test_parameterized_circuit_push_same_qubits() {
     let _qc = ParameterizedCircuit::new(2).push(GateInstruction::Cx(0, 0));
 }
-
 
 // ConcreteCircuit
 #[test]
@@ -413,9 +474,7 @@ fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
 fn test_concrete_circuit_to_qasm2_basic() {
     let qc = ConcreteCircuit {
         num_qubits: 2,
-        gates: vec![
-            GateInstruction::H(0)
-        ],
+        gates: vec![GateInstruction::H(0)],
     };
     let qasm = qc.to_qasm2();
 
@@ -431,16 +490,16 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
         num_qubits: 2,
         gates: vec![
             GateInstruction::H(0),
-            GateInstruction::Rx{
+            GateInstruction::Rx {
                 qubit: 0,
-                theta: GateParam::Fixed(0.5)
+                theta: GateParam::Fixed(0.5),
             },
-            GateInstruction::Ry{
+            GateInstruction::Ry {
                 qubit: 1,
-                theta: GateParam::Fixed(1.0)
+                theta: GateParam::Fixed(1.0),
             },
-            GateInstruction::MeasureAll
-        ]
+            GateInstruction::MeasureAll,
+        ],
     };
     let qasm = qc.to_qasm2();
 
@@ -453,7 +512,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
     assert!(qasm.contains("ry("));
     assert!(qasm.contains("1.0"));
     assert!(qasm.contains("q[1];"));
-    assert!(qasm.contains("creg c[2];")); 
+    assert!(qasm.contains("creg c[2];"));
     assert!(qasm.contains("measure q -> c;"));
 }
 
@@ -462,12 +521,10 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
 fn test_concrete_circuit_to_qasm2_panics_on_param() {
     let qc = ConcreteCircuit {
         num_qubits: 1,
-        gates: vec![
-            GateInstruction::Rx {
-                qubit: 0,
-                theta: GateParam::Param(0),
-            },
-        ],
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(0),
+        }],
     };
 
     let _ = qc.to_qasm2();

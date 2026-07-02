@@ -40,20 +40,35 @@ pub(crate) fn write_qasm2(
         let _ = writeln!(out, "creg c[{num_clbits}];");
     }
 
-    let angle = |p: &GateParam| -> Result<String, CircuitError> {
-        Ok(fmt_angle(p.resolve(params)?))
-    };
+    let angle =
+        |p: &GateParam| -> Result<String, CircuitError> { Ok(fmt_angle(p.resolve(params)?)) };
 
     for gate in gates {
         match gate {
-            GateInstruction::H(q) => { let _ = writeln!(out, "h q[{q}];"); }
-            GateInstruction::X(q) => { let _ = writeln!(out, "x q[{q}];"); }
-            GateInstruction::Y(q) => { let _ = writeln!(out, "y q[{q}];"); }
-            GateInstruction::Z(q) => { let _ = writeln!(out, "z q[{q}];"); }
-            GateInstruction::S(q) => { let _ = writeln!(out, "s q[{q}];"); }
-            GateInstruction::T(q) => { let _ = writeln!(out, "t q[{q}];"); }
-            GateInstruction::Sdg(q) => { let _ = writeln!(out, "sdg q[{q}];"); }
-            GateInstruction::Tdg(q) => { let _ = writeln!(out, "tdg q[{q}];"); }
+            GateInstruction::H(q) => {
+                let _ = writeln!(out, "h q[{q}];");
+            }
+            GateInstruction::X(q) => {
+                let _ = writeln!(out, "x q[{q}];");
+            }
+            GateInstruction::Y(q) => {
+                let _ = writeln!(out, "y q[{q}];");
+            }
+            GateInstruction::Z(q) => {
+                let _ = writeln!(out, "z q[{q}];");
+            }
+            GateInstruction::S(q) => {
+                let _ = writeln!(out, "s q[{q}];");
+            }
+            GateInstruction::T(q) => {
+                let _ = writeln!(out, "t q[{q}];");
+            }
+            GateInstruction::Sdg(q) => {
+                let _ = writeln!(out, "sdg q[{q}];");
+            }
+            GateInstruction::Tdg(q) => {
+                let _ = writeln!(out, "tdg q[{q}];");
+            }
             GateInstruction::Rx { qubit, theta } => {
                 let _ = writeln!(out, "rx({}) q[{qubit}];", angle(theta)?);
             }
@@ -63,8 +78,12 @@ pub(crate) fn write_qasm2(
             GateInstruction::Rz { qubit, theta } => {
                 let _ = writeln!(out, "rz({}) q[{qubit}];", angle(theta)?);
             }
-            GateInstruction::Cx(c, t) => { let _ = writeln!(out, "cx q[{c}],q[{t}];"); }
-            GateInstruction::Cz(c, t) => { let _ = writeln!(out, "cz q[{c}],q[{t}];"); }
+            GateInstruction::Cx(c, t) => {
+                let _ = writeln!(out, "cx q[{c}],q[{t}];");
+            }
+            GateInstruction::Cz(c, t) => {
+                let _ = writeln!(out, "cz q[{c}],q[{t}];");
+            }
             GateInstruction::Rzz { q0, q1, theta } => {
                 let _ = writeln!(out, "rzz({}) q[{q0}],q[{q1}];", angle(theta)?);
             }
@@ -74,7 +93,12 @@ pub(crate) fn write_qasm2(
             GateInstruction::Cp { q0, q1, theta } => {
                 let _ = writeln!(out, "cp({}) q[{q0}],q[{q1}];", angle(theta)?);
             }
-            GateInstruction::U { qubit, theta, phi, lam } => {
+            GateInstruction::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => {
                 let _ = writeln!(
                     out,
                     "u3({},{},{}) q[{qubit}];",
@@ -119,9 +143,6 @@ mod tests {
     fn angles_have_at_least_ten_decimals() {
         assert_eq!(fmt_angle(0.5), "0.500000000000");
         assert_eq!(fmt_angle(-1.0), "-1.000000000000");
-        assert_eq!(
-            fmt_angle(std::f64::consts::FRAC_PI_2),
-            "1.570796326795"
-        );
+        assert_eq!(fmt_angle(std::f64::consts::FRAC_PI_2), "1.570796326795");
     }
 }

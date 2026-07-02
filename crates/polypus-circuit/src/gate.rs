@@ -36,12 +36,15 @@ impl GateParam {
     pub(crate) fn resolve(&self, params: &[f64]) -> Result<f64, CircuitError> {
         match *self {
             GateParam::Fixed(v) => Ok(v),
-            GateParam::Param(i) => params.get(i).copied().ok_or(
-                CircuitError::ParamIndexOutOfBounds {
-                    index: i,
-                    num_params: params.len(),
-                },
-            ),
+            GateParam::Param(i) => {
+                params
+                    .get(i)
+                    .copied()
+                    .ok_or(CircuitError::ParamIndexOutOfBounds {
+                        index: i,
+                        num_params: params.len(),
+                    })
+            }
         }
     }
 }
@@ -80,11 +83,23 @@ pub enum GateInstruction {
     /// Controlled-Z: control, target.
     Cz(usize, usize),
     /// Two-qubit ZZ-interaction rotation, exp(-i θ/2 Z⊗Z).
-    Rzz { q0: usize, q1: usize, theta: GateParam },
+    Rzz {
+        q0: usize,
+        q1: usize,
+        theta: GateParam,
+    },
     /// Two-qubit XX-interaction rotation, exp(-i θ/2 X⊗X).
-    Rxx { q0: usize, q1: usize, theta: GateParam },
+    Rxx {
+        q0: usize,
+        q1: usize,
+        theta: GateParam,
+    },
     /// Controlled phase gate: control, target, angle.
-    Cp {q0: usize, q1: usize, theta: GateParam},
+    Cp {
+        q0: usize,
+        q1: usize,
+        theta: GateParam,
+    },
     /// Generic single-qubit gate `u3(theta, phi, lambda)`.
     U {
         qubit: usize,
@@ -111,19 +126,24 @@ impl GateInstruction {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_param_eval_integration(){
+    fn test_param_eval_integration() {
         let param_fixed = GateParam::Fixed(1.5);
         let param_variable = GateParam::Param(0);
         let external_values = vec![3.0];
 
-        let fixed_instruction = GateInstruction::Rx { qubit: 0, theta: param_fixed };
-        let variable_instruction = GateInstruction::Rx { qubit: 0, theta: param_variable };
+        let fixed_instruction = GateInstruction::Rx {
+            qubit: 0,
+            theta: param_fixed,
+        };
+        let variable_instruction = GateInstruction::Rx {
+            qubit: 0,
+            theta: param_variable,
+        };
 
         let fixed_result = match fixed_instruction {
             GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
@@ -149,17 +169,19 @@ mod tests {
     }
 
     #[test]
-    fn test_param_eval_out_of_bounds(){
+    fn test_param_eval_out_of_bounds() {
         let param_variable = GateParam::Param(1);
         let external_values = vec![3.0];
 
-        let variable_instruction = GateInstruction::Rx { qubit: 0, theta: param_variable };
-        
+        let variable_instruction = GateInstruction::Rx {
+            qubit: 0,
+            theta: param_variable,
+        };
+
         let variable_result = match variable_instruction {
             GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
             _ => panic!("Expected Rx"),
         };
-
 
         match variable_result {
             Err(CircuitError::ParamIndexOutOfBounds { index, num_params }) => {

@@ -115,7 +115,11 @@ pub enum QmioError {
     /// Receiving the reply failed.
     Recv(String),
     /// No reply within the configured timeout, after all retries.
-    Timeout { endpoint: String, attempts: usize, millis: u128 },
+    Timeout {
+        endpoint: String,
+        attempts: usize,
+        millis: u128,
+    },
     /// The reply exceeded [`QmioBackend::max_reply_bytes`].
     ResponseTooLarge { bytes: usize, limit: usize },
 }
@@ -233,10 +237,10 @@ impl QmioBackend {
     fn serialize_program(&self, circuit: &BoundCircuit) -> Result<ProgramPayload, QmioError> {
         match self.program_format {
             QmioProgramFormat::OpenQasm => Ok(ProgramPayload::Text(self.qasm_text(circuit)?)),
-            QmioProgramFormat::QirText => Ok(ProgramPayload::Text(self.concrete(circuit)?.to_qir())),
-            QmioProgramFormat::QirBitcode => {
-                Ok(ProgramPayload::Bytes(self.qir_bitcode(circuit)?))
+            QmioProgramFormat::QirText => {
+                Ok(ProgramPayload::Text(self.concrete(circuit)?.to_qir()))
             }
+            QmioProgramFormat::QirBitcode => Ok(ProgramPayload::Bytes(self.qir_bitcode(circuit)?)),
         }
     }
 
@@ -253,13 +257,15 @@ impl QmioBackend {
     /// QIR LLVM bitcode (`.bc`), mapping the `llvm-as`-missing case to an
     /// actionable error.
     fn qir_bitcode(&self, circuit: &BoundCircuit) -> Result<Vec<u8>, QmioError> {
-        self.concrete(circuit)?.to_qir_bitcode().map_err(|e| match e {
-            CircuitError::QirAssemblyToolNotFound { tool } => QmioError::QirBitcode(format!(
-                "'{tool}' was not found on PATH; install LLVM (llvm-as) or select \
+        self.concrete(circuit)?
+            .to_qir_bitcode()
+            .map_err(|e| match e {
+                CircuitError::QirAssemblyToolNotFound { tool } => QmioError::QirBitcode(format!(
+                    "'{tool}' was not found on PATH; install LLVM (llvm-as) or select \
                  program_format \"openqasm\"/\"qir\""
-            )),
-            other => QmioError::QirBitcode(other.to_string()),
-        })
+                )),
+                other => QmioError::QirBitcode(other.to_string()),
+            })
     }
 
     /// Obtain a [`ConcreteCircuit`] without touching Python (parses an OpenQASM
@@ -778,8 +784,8 @@ mod tests {
 
     #[test]
     fn pickle_request_text_roundtrips_to_str_tuple() {
-        let payload = pickle_request(&ProgramPayload::Text("OPENQASM 3.0;".into()), "{\"a\":1}")
-            .unwrap();
+        let payload =
+            pickle_request(&ProgramPayload::Text("OPENQASM 3.0;".into()), "{\"a\":1}").unwrap();
         let value = serde_pickle::value_from_slice(&payload, DeOptions::new()).unwrap();
         match value {
             PickleValue::Tuple(items) => {
@@ -809,7 +815,10 @@ mod tests {
     fn program_format_openqasm_produces_text_with_20_header() {
         let circuit = bell();
         let exported = circuit.to_qasm2();
-        assert!(exported.starts_with("OPENQASM 2.0"), "exporter changed: {exported}");
+        assert!(
+            exported.starts_with("OPENQASM 2.0"),
+            "exporter changed: {exported}"
+        );
 
         let payload = backend(QmioProgramFormat::OpenQasm)
             .serialize_program(&BoundCircuit::Native(circuit))
@@ -838,7 +847,8 @@ mod tests {
     #[test]
     fn program_format_qir_bitcode_produces_bc_magic() {
         // `llvm-as` is required for this path; skip gracefully if unavailable.
-        match backend(QmioProgramFormat::QirBitcode).serialize_program(&BoundCircuit::Native(bell()))
+        match backend(QmioProgramFormat::QirBitcode)
+            .serialize_program(&BoundCircuit::Native(bell()))
         {
             Ok(ProgramPayload::Bytes(bc)) => {
                 assert_eq!(&bc[0..2], b"BC", "missing LLVM bitcode magic");

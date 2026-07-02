@@ -213,15 +213,33 @@ impl Circuit {
     }
 
     fn rx(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(slf, GateInstruction::Rx { qubit, theta: theta.into() })
+        push(
+            slf,
+            GateInstruction::Rx {
+                qubit,
+                theta: theta.into(),
+            },
+        )
     }
 
     fn ry(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(slf, GateInstruction::Ry { qubit, theta: theta.into() })
+        push(
+            slf,
+            GateInstruction::Ry {
+                qubit,
+                theta: theta.into(),
+            },
+        )
     }
 
     fn rz(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(slf, GateInstruction::Rz { qubit, theta: theta.into() })
+        push(
+            slf,
+            GateInstruction::Rz {
+                qubit,
+                theta: theta.into(),
+            },
+        )
     }
 
     /// Generic single-qubit gate `u3(theta, phi, lam)`.
@@ -259,7 +277,14 @@ impl Circuit {
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(slf, GateInstruction::Rzz { q0, q1, theta: theta.into() })
+        push(
+            slf,
+            GateInstruction::Rzz {
+                q0,
+                q1,
+                theta: theta.into(),
+            },
+        )
     }
 
     fn rxx(
@@ -268,7 +293,14 @@ impl Circuit {
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(slf, GateInstruction::Rxx { q0, q1, theta: theta.into() })
+        push(
+            slf,
+            GateInstruction::Rxx {
+                q0,
+                q1,
+                theta: theta.into(),
+            },
+        )
     }
 
     // ── Non-unitary instructions ─────────────────────────────────────────

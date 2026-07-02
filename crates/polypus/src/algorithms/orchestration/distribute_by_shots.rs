@@ -1,9 +1,9 @@
-use crate::algorithms::{AlgorithmTrait, AlgorithmArgs};
+use crate::algorithms::{AlgorithmArgs, AlgorithmTrait};
 use crate::infrastructure::Infrastructure;
 
-use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashMap;
 
 /// Distributes shots across multiple QPUs and merges the result counts.
 pub struct DistributeByShotsRun;
@@ -49,7 +49,7 @@ impl AlgorithmTrait for DistributeByShotsRun {
         String::from("Distribute By Shots Run Algorithm")
     }
 
-	fn description(&self) -> String {
-		String::from("Algorithm to run quantum circuits distributed by shots")
-	}
+    fn description(&self) -> String {
+        String::from("Algorithm to run quantum circuits distributed by shots")
+    }
 }

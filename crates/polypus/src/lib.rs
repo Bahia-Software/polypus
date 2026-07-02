@@ -61,12 +61,12 @@
 //! # License
 //! European Union Public Licence (EUPL), version 1.2 or – as soon as they will be approved by the European Commission – subsequent versions of the EUPL.
 
-mod bindings;
-pub mod infrastructure;
 pub mod algorithms;
+mod bindings;
 pub mod evaluation;
-pub mod utils;
+pub mod infrastructure;
 pub mod logger;
+pub mod utils;
 
 /// Pure-Rust quantum circuit representation with OpenQASM 2.0 export
 /// (re-export of the dependency-free `polypus-circuit` crate).

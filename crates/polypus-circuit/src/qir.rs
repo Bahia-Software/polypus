@@ -414,9 +414,9 @@ mod tests {
         assert!(ir.contains("\"required_num_qubits\"=\"2\""));
         assert!(ir.contains("\"required_num_results\"=\"2\""));
         assert!(ir.contains("attributes #1 = { \"irreversible\" }"));
-        assert!(ir.trim_end().ends_with(
-            "!3 = !{i32 1, !\"dynamic_result_management\", i1 false}"
-        ));
+        assert!(ir
+            .trim_end()
+            .ends_with("!3 = !{i32 1, !\"dynamic_result_management\", i1 false}"));
     }
 
     #[test]
@@ -436,9 +436,6 @@ mod tests {
             "define void @main() {\nentry:\n  ret void\n}\n",
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            CircuitError::QirAssemblyToolNotFound { .. }
-        ));
+        assert!(matches!(err, CircuitError::QirAssemblyToolNotFound { .. }));
     }
 }

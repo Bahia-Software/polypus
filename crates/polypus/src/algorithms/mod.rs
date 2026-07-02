@@ -10,8 +10,8 @@ pub use polypus_optimizers::{
     Optimizer, VarianceOracle,
 };
 
-use std::fmt;
 use crate::infrastructure::{BoundCircuit, ExecutionConfig};
+use std::fmt;
 
 /// Trait for all quantum algorithms in Polypus.
 /// Each algorithm should implement this trait for its argument and output types.

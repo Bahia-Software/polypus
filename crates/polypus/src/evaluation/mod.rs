@@ -1,13 +1,13 @@
-pub mod vqc_oracle;
 pub mod qml_oracle;
+pub mod vqc_oracle;
 
-pub use vqc_oracle::VqcOracle;
 pub use qml_oracle::QmlOracle;
+pub use vqc_oracle::VqcOracle;
 
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use polypus_circuit::ParameterizedCircuit;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyModule};
-use polypus_circuit::ParameterizedCircuit;
-use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
 
 /// A parameterised circuit template, in one of the representations Polypus
 /// supports as optimisation targets.

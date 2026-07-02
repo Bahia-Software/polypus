@@ -1,6 +1,6 @@
 use polypus::algorithms::{
-    AlgorithmSingleRun, AlgorithmDifferentialEvolution,
-    AlgorithmPSO, AlgorithmQNG, DistributeByShotsRun,
+    AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG, AlgorithmSingleRun,
+    DistributeByShotsRun,
 };
 use polypus::infrastructure::Infrastructure;
 use polypus::AlgorithmTrait;
@@ -21,7 +21,10 @@ fn single_run_description_is_non_empty() {
 
 #[test]
 fn distribute_by_shots_name() {
-    assert_eq!(DistributeByShotsRun.name(), "Distribute By Shots Run Algorithm");
+    assert_eq!(
+        DistributeByShotsRun.name(),
+        "Distribute By Shots Run Algorithm"
+    );
 }
 
 #[test]
@@ -31,7 +34,10 @@ fn distribute_by_shots_description_is_non_empty() {
 
 #[test]
 fn differential_evolution_name() {
-    assert_eq!(AlgorithmDifferentialEvolution.name(), "Differential Evolution");
+    assert_eq!(
+        AlgorithmDifferentialEvolution.name(),
+        "Differential Evolution"
+    );
 }
 
 #[test]
@@ -65,12 +71,18 @@ fn qng_description_is_non_empty() {
 
 #[test]
 fn infrastructure_from_str_local() {
-    assert!(matches!(Infrastructure::from_str("local"), Infrastructure::Local));
+    assert!(matches!(
+        Infrastructure::from_str("local"),
+        Infrastructure::Local
+    ));
 }
 
 #[test]
 fn infrastructure_from_str_cunqa() {
-    assert!(matches!(Infrastructure::from_str("cunqa"), Infrastructure::Cunqa));
+    assert!(matches!(
+        Infrastructure::from_str("cunqa"),
+        Infrastructure::Cunqa
+    ));
 }
 
 #[test]

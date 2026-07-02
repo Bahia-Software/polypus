@@ -31,10 +31,7 @@ pub enum CircuitError {
     QirAssemblyToolNotFound { tool: String },
     /// The external assembler failed while converting QIR text (`.ll`) to
     /// LLVM bitcode (`.bc`).
-    QirAssemblyFailed {
-        tool: String,
-        message: String,
-    },
+    QirAssemblyFailed { tool: String, message: String },
 }
 
 impl fmt::Display for CircuitError {

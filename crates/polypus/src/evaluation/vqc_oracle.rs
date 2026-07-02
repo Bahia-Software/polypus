@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use crate::evaluation::{run_and_expect, CircuitSource, EvaluationOracle};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
-use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
-use crate::evaluation::{CircuitSource, EvaluationOracle, run_and_expect};
+use std::sync::Arc;
 
 /// Oracle for standard VQC training.
 ///
@@ -40,7 +40,12 @@ impl EvaluationOracle for VqcOracle {
         let batch_size = self.backend.max_batch_size(bound.len()).max(1);
         let mut results = Vec::with_capacity(candidates.len());
         for chunk in bound.chunks(batch_size) {
-            let ev = run_and_expect(self.backend.as_ref(), chunk, &self.config, &self.expectation_fn);
+            let ev = run_and_expect(
+                self.backend.as_ref(),
+                chunk,
+                &self.config,
+                &self.expectation_fn,
+            );
             results.extend(ev);
         }
         results

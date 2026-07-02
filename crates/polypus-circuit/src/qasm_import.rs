@@ -119,9 +119,7 @@ fn tokenize(src: &str) -> Result<Vec<(Tok, usize)>, CircuitError> {
                             i += 1;
                             break;
                         }
-                        Some('\n') | None => {
-                            return Err(err(start, "unterminated string literal"))
-                        }
+                        Some('\n') | None => return Err(err(start, "unterminated string literal")),
                         Some(&ch) => {
                             s.push(ch);
                             i += 1;
@@ -134,20 +132,62 @@ fn tokenize(src: &str) -> Result<Vec<(Tok, usize)>, CircuitError> {
                 toks.push((Tok::Arrow, line));
                 i += 2;
             }
-            '(' => { toks.push((Tok::LParen, line)); i += 1; }
-            ')' => { toks.push((Tok::RParen, line)); i += 1; }
-            '[' => { toks.push((Tok::LBracket, line)); i += 1; }
-            ']' => { toks.push((Tok::RBracket, line)); i += 1; }
-            ',' => { toks.push((Tok::Comma, line)); i += 1; }
-            ';' => { toks.push((Tok::Semi, line)); i += 1; }
-            '+' => { toks.push((Tok::Plus, line)); i += 1; }
-            '-' => { toks.push((Tok::Minus, line)); i += 1; }
-            '*' => { toks.push((Tok::Star, line)); i += 1; }
-            '/' => { toks.push((Tok::Slash, line)); i += 1; }
-            '^' => { toks.push((Tok::Caret, line)); i += 1; }
-            '{' => { toks.push((Tok::LBrace, line)); i += 1; }
-            '}' => { toks.push((Tok::RBrace, line)); i += 1; }
-            '=' => { toks.push((Tok::Eq, line)); i += 1; }
+            '(' => {
+                toks.push((Tok::LParen, line));
+                i += 1;
+            }
+            ')' => {
+                toks.push((Tok::RParen, line));
+                i += 1;
+            }
+            '[' => {
+                toks.push((Tok::LBracket, line));
+                i += 1;
+            }
+            ']' => {
+                toks.push((Tok::RBracket, line));
+                i += 1;
+            }
+            ',' => {
+                toks.push((Tok::Comma, line));
+                i += 1;
+            }
+            ';' => {
+                toks.push((Tok::Semi, line));
+                i += 1;
+            }
+            '+' => {
+                toks.push((Tok::Plus, line));
+                i += 1;
+            }
+            '-' => {
+                toks.push((Tok::Minus, line));
+                i += 1;
+            }
+            '*' => {
+                toks.push((Tok::Star, line));
+                i += 1;
+            }
+            '/' => {
+                toks.push((Tok::Slash, line));
+                i += 1;
+            }
+            '^' => {
+                toks.push((Tok::Caret, line));
+                i += 1;
+            }
+            '{' => {
+                toks.push((Tok::LBrace, line));
+                i += 1;
+            }
+            '}' => {
+                toks.push((Tok::RBrace, line));
+                i += 1;
+            }
+            '=' => {
+                toks.push((Tok::Eq, line));
+                i += 1;
+            }
             _ if c.is_ascii_digit() || c == '.' => {
                 let start = i;
                 let mut is_real = false;
@@ -186,9 +226,7 @@ fn tokenize(src: &str) -> Result<Vec<(Tok, usize)>, CircuitError> {
             }
             _ if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
-                while i < chars.len()
-                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_')
-                {
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 toks.push((Tok::Ident(chars[start..i].iter().collect()), line));
@@ -268,11 +306,12 @@ impl Parser {
     }
 
     fn next(&mut self, what: &str) -> Result<(Tok, usize), CircuitError> {
-        let item = self
-            .toks
-            .get(self.pos)
-            .cloned()
-            .ok_or_else(|| err(self.line(), format!("unexpected end of input, expected {what}")))?;
+        let item = self.toks.get(self.pos).cloned().ok_or_else(|| {
+            err(
+                self.line(),
+                format!("unexpected end of input, expected {what}"),
+            )
+        })?;
         self.pos += 1;
         Ok(item)
     }
@@ -305,7 +344,10 @@ impl Parser {
     fn header(&mut self) -> Result<(), CircuitError> {
         let (kw, line) = self.expect_ident("'OPENQASM'")?;
         if kw != "OPENQASM" {
-            return Err(err(line, format!("expected 'OPENQASM 2.0;' header, found '{kw}'")));
+            return Err(err(
+                line,
+                format!("expected 'OPENQASM 2.0;' header, found '{kw}'"),
+            ));
         }
         let version_ok = match self.next("version number")? {
             (Tok::Real(v), _) => v == 2.0,
@@ -326,7 +368,10 @@ impl Parser {
                 match self.next("file name")? {
                     (Tok::Str(_), _) => {} // contents of qelib1.inc are built in
                     (other, l) => {
-                        return Err(err(l, format!("expected file name, found {}", other.describe())))
+                        return Err(err(
+                            l,
+                            format!("expected file name, found {}", other.describe()),
+                        ))
                     }
                 }
                 self.expect(Tok::Semi)?;
@@ -351,7 +396,10 @@ impl Parser {
         let size = match self.next("register size")? {
             (Tok::Int(n), _) => n,
             (other, l) => {
-                return Err(err(l, format!("expected register size, found {}", other.describe())))
+                return Err(err(
+                    l,
+                    format!("expected register size, found {}", other.describe()),
+                ))
             }
         };
         self.expect(Tok::RBracket)?;
@@ -365,10 +413,18 @@ impl Parser {
             return Err(err(line, format!("register '{name}' already declared")));
         }
         if quantum {
-            self.qregs.push(Reg { name, offset: self.num_qubits, size });
+            self.qregs.push(Reg {
+                name,
+                offset: self.num_qubits,
+                size,
+            });
             self.num_qubits += size;
         } else {
-            self.cregs.push(Reg { name, offset: self.num_cbits, size });
+            self.cregs.push(Reg {
+                name,
+                offset: self.num_cbits,
+                size,
+            });
             self.num_cbits += size;
         }
         Ok(())
@@ -391,7 +447,10 @@ impl Parser {
             let idx = match self.next("bit index")? {
                 (Tok::Int(n), _) => n,
                 (other, l) => {
-                    return Err(err(l, format!("expected bit index, found {}", other.describe())))
+                    return Err(err(
+                        l,
+                        format!("expected bit index, found {}", other.describe()),
+                    ))
                 }
             };
             self.expect(Tok::RBracket)?;
@@ -401,7 +460,10 @@ impl Parser {
                     format!("index {idx} out of range for register '{name}' of size {size}"),
                 ));
             }
-            Ok(ArgIndices { indices: vec![offset + idx], is_register: false })
+            Ok(ArgIndices {
+                indices: vec![offset + idx],
+                is_register: false,
+            })
         } else {
             Ok(ArgIndices {
                 indices: (offset..offset + size).collect(),
@@ -433,7 +495,13 @@ impl Parser {
         Ok((0..span)
             .map(|k| {
                 args.iter()
-                    .map(|a| if a.is_register { a.indices[k] } else { a.indices[0] })
+                    .map(|a| {
+                        if a.is_register {
+                            a.indices[k]
+                        } else {
+                            a.indices[0]
+                        }
+                    })
                     .collect()
             })
             .collect())
@@ -450,7 +518,10 @@ impl Parser {
                 (Tok::Comma, _) => continue,
                 (Tok::Semi, _) => break,
                 (other, l) => {
-                    return Err(err(l, format!("expected ',' or ';', found {}", other.describe())))
+                    return Err(err(
+                        l,
+                        format!("expected ',' or ';', found {}", other.describe()),
+                    ))
                 }
             }
         }
@@ -518,7 +589,10 @@ impl Parser {
                 (Tok::Comma, _) => continue,
                 (Tok::Semi, _) => break,
                 (other, l) => {
-                    return Err(err(l, format!("expected ',' or ';', found {}", other.describe())))
+                    return Err(err(
+                        l,
+                        format!("expected ',' or ';', found {}", other.describe()),
+                    ))
                 }
             }
         }
@@ -538,14 +612,26 @@ impl Parser {
     ) -> Result<(), CircuitError> {
         let arity = |n: usize| -> Result<(), CircuitError> {
             if args.len() != n {
-                Err(err(line, format!("gate '{name}' expects {n} argument(s), found {}", args.len())))
+                Err(err(
+                    line,
+                    format!(
+                        "gate '{name}' expects {n} argument(s), found {}",
+                        args.len()
+                    ),
+                ))
             } else {
                 Ok(())
             }
         };
         let n_params = |n: usize| -> Result<(), CircuitError> {
             if params.len() != n {
-                Err(err(line, format!("gate '{name}' expects {n} parameter(s), found {}", params.len())))
+                Err(err(
+                    line,
+                    format!(
+                        "gate '{name}' expects {n} parameter(s), found {}",
+                        params.len()
+                    ),
+                ))
             } else {
                 Ok(())
             }
@@ -670,7 +756,10 @@ impl Parser {
 
     fn check_distinct(&self, q0: usize, q1: usize, line: usize) -> Result<(), CircuitError> {
         if q0 == q1 {
-            Err(err(line, format!("two-qubit gate requires distinct qubits, got ({q0}, {q1})")))
+            Err(err(
+                line,
+                format!("two-qubit gate requires distinct qubits, got ({q0}, {q1})"),
+            ))
         } else {
             Ok(())
         }
@@ -803,9 +892,8 @@ impl Parser {
         let mut i = 0;
         while i < self.gates.len() {
             if n > 0 && i + n <= self.gates.len() {
-                let full_measure_run = (0..n).all(|k| {
-                    self.gates[i + k] == GateInstruction::Measure { qubit: k, cbit: k }
-                });
+                let full_measure_run = (0..n)
+                    .all(|k| self.gates[i + k] == GateInstruction::Measure { qubit: k, cbit: k });
                 if full_measure_run {
                     gates.push(GateInstruction::MeasureAll);
                     i += n;

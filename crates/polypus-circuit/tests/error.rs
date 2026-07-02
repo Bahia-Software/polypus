@@ -4,7 +4,10 @@ use polypus_circuit::CircuitError;
 
 #[test]
 fn test_circuit_error_display_wrong_number() {
-    let err = CircuitError::WrongNumberOfParams { expected: 2, got: 1 };
+    let err = CircuitError::WrongNumberOfParams {
+        expected: 2,
+        got: 1,
+    };
 
     let msg = format!("{err}");
 
@@ -15,7 +18,10 @@ fn test_circuit_error_display_wrong_number() {
 
 #[test]
 fn test_circuit_error_display_param_index_out_of_bounds() {
-    let err = CircuitError::ParamIndexOutOfBounds { index: 5, num_params: 2 };
+    let err = CircuitError::ParamIndexOutOfBounds {
+        index: 5,
+        num_params: 2,
+    };
 
     let msg = format!("{err}");
 
@@ -25,7 +31,10 @@ fn test_circuit_error_display_param_index_out_of_bounds() {
 
 #[test]
 fn test_circuit_error_display_qubit_out_of_range() {
-    let err = CircuitError::QubitOutOfRange { qubit: 5, num_qubits: 2 };
+    let err = CircuitError::QubitOutOfRange {
+        qubit: 5,
+        num_qubits: 2,
+    };
 
     let msg = format!("{err}");
 

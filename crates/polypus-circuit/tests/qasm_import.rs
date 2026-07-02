@@ -55,10 +55,7 @@ fn roundtrip_measure_all_collapses_back() {
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
     // `measure q -> c;` must come back as a single MeasureAll, not 4 Measures.
-    assert_eq!(
-        imported.gates.last(),
-        Some(&GateInstruction::MeasureAll)
-    );
+    assert_eq!(imported.gates.last(), Some(&GateInstruction::MeasureAll));
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm1);
 }
 
@@ -83,7 +80,10 @@ fn imported_angles_match_bound_values() {
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
     match &imported.gates[0] {
-        GateInstruction::Ry { qubit: 0, theta: GateParam::Fixed(v) } => {
+        GateInstruction::Ry {
+            qubit: 0,
+            theta: GateParam::Fixed(v),
+        } => {
             // 12 decimal places of precision survive the round-trip.
             assert!((v - std::f64::consts::PI).abs() < 1e-11);
         }
@@ -121,8 +121,15 @@ measure q[2] -> meas[2];
     // 3 contiguous measures → MeasureAll.
     let expected = [
         GateInstruction::H(0),
-        GateInstruction::Rzz { q0: 0, q1: 1, theta: GateParam::Fixed(0.4) },
-        GateInstruction::Rx { qubit: 2, theta: GateParam::Fixed(0.8) },
+        GateInstruction::Rzz {
+            q0: 0,
+            q1: 1,
+            theta: GateParam::Fixed(0.4),
+        },
+        GateInstruction::Rx {
+            qubit: 2,
+            theta: GateParam::Fixed(0.8),
+        },
         GateInstruction::U {
             qubit: 0,
             theta: GateParam::Fixed(0.1),
@@ -155,7 +162,11 @@ rx(pi/2) q;
 measure q -> c;
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    let h_count = qc.gates.iter().filter(|g| matches!(g, GateInstruction::H(_))).count();
+    let h_count = qc
+        .gates
+        .iter()
+        .filter(|g| matches!(g, GateInstruction::H(_)))
+        .count();
     assert_eq!(h_count, 3);
     for q in 0..3 {
         assert!(qc.gates.contains(&GateInstruction::Rx {
@@ -209,10 +220,22 @@ rx(2^3) q[0];
     use std::f64::consts::PI;
     let angle = |g: &GateInstruction| -> f64 {
         match g {
-            GateInstruction::Rx { theta: GateParam::Fixed(v), .. }
-            | GateInstruction::Ry { theta: GateParam::Fixed(v), .. }
-            | GateInstruction::Rz { theta: GateParam::Fixed(v), .. } => *v,
-            GateInstruction::U { theta: GateParam::Fixed(v), .. } => *v,
+            GateInstruction::Rx {
+                theta: GateParam::Fixed(v),
+                ..
+            }
+            | GateInstruction::Ry {
+                theta: GateParam::Fixed(v),
+                ..
+            }
+            | GateInstruction::Rz {
+                theta: GateParam::Fixed(v),
+                ..
+            } => *v,
+            GateInstruction::U {
+                theta: GateParam::Fixed(v),
+                ..
+            } => *v,
             other => panic!("unexpected gate {other:?}"),
         }
     };
@@ -221,7 +244,11 @@ rx(2^3) q[0];
     assert!((angle(&qc.gates[2]) - 2.0 * PI).abs() < 1e-15);
     assert!((angle(&qc.gates[3]) - 1.5e-3).abs() < 1e-18);
     match &qc.gates[3] {
-        GateInstruction::U { phi: GateParam::Fixed(phi), lam: GateParam::Fixed(lam), .. } => {
+        GateInstruction::U {
+            phi: GateParam::Fixed(phi),
+            lam: GateParam::Fixed(lam),
+            ..
+        } => {
             assert!((phi - 3.0 * PI).abs() < 1e-14);
             assert!((lam - 1.0).abs() < 1e-15);
         }

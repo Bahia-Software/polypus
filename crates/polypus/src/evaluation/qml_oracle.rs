@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use crate::evaluation::{assign_parameters_qiskit, run_and_expect, EvaluationOracle};
+use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
-use crate::infrastructure::{BoundCircuit, QuantumBackend, ExecutionConfig};
-use crate::evaluation::{assign_parameters_qiskit, EvaluationOracle, run_and_expect};
+use std::sync::Arc;
 
 /// Oracle for QML training with feature-map encoding.
 ///
@@ -30,7 +30,10 @@ impl EvaluationOracle for QmlOracle {
             .map(|theta| {
                 // Clone per-task data (GIL required for Py<T> clone).
                 let training_circuits: Vec<Py<PyAny>> = Python::with_gil(|py| {
-                    self.training_circuits.iter().map(|qc| qc.clone_ref(py)).collect()
+                    self.training_circuits
+                        .iter()
+                        .map(|qc| qc.clone_ref(py))
+                        .collect()
                 });
                 let config = Arc::clone(&self.config);
                 let backend = Arc::clone(&self.backend);
