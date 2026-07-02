@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # PyO3's build script needs to locate a Python interpreter even for a
+      # `cargo check`/clippy build of the `polypus` crate.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Default features only. Do NOT add --all-features here: the `polypus`
+      # crate's `extension-module` feature tells PyO3 not to link libpython,
+      # which breaks building the test/bench targets that --all-targets compiles.
+      - name: Clippy (workspace, default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Lint the optional QMIO backend (pure Rust: zeromq + serde-pickle).
+      - name: Clippy (qmio backend)
+        run: cargo clippy -p polypus --features qmio --all-targets -- -D warnings
+
+  test:
+    name: test (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Needed only at build/link time (PyO3 links libpython). The Rust tests
+      # are Python-runtime-free by design — no Qiskit/Aer needed here.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
+      # whose results must be bit-identical to the sequential path).
+      - name: Test pure-Rust crates (all features)
+        run: >
+          cargo test
+          -p polypus-circuit
+          -p polypus-sim
+          -p polypus-physics
+          -p polypus-optimizers
+          --all-features
+      # `polypus` with default features — NOT extension-module (see clippy note).
+      - name: Test polypus (default features)
+        run: cargo test -p polypus
+      - name: Test polypus (qmio backend)
+        run: cargo test -p polypus --features qmio
+
+  build-extension:
+    name: build Python extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install maturin
+        run: python -m pip install --upgrade maturin
+      # Smoke-test that the PyO3 extension wheel builds. If you package via
+      # packages/polypus_python or install.sh, point maturin there instead.
+      - name: Build wheel
+        run: maturin build --release --features extension-module -m crates/polypus/Cargo.toml
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL: Python test suite. Requires Qiskit/Aer and a working install of
+  # the extension. Confirm the install path for your environment, then enable.
+  # (Mirrors the manual README steps.)
+  # ---------------------------------------------------------------------------
+  python-tests:
+    name: test (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip maturin pytest
+          pip install -r requirements-dev.txt
+      - name: Build & install the extension
+        run: |
+          maturin build --release --features extension-module -m crates/polypus/Cargo.toml --out dist
+          pip install --no-index --find-links dist polypus
+      - name: Run Python tests
+        run: pytest tests/python

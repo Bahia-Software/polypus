@@ -1,0 +1,43 @@
+# cargo-deny configuration for Polypus.
+#
+# Run with:  cargo deny check
+# Schema note: cargo-deny's config format drifts between releases. This targets
+# a recent (v0.16+/v2) schema. If your version rejects a key, run
+# `cargo deny --version` and remove/adjust the offending field.
+
+[advisories]
+# Uses the RustSec advisory database (https://github.com/rustsec/advisory-db).
+# Recent cargo-deny versions default vulnerabilities to "deny" and unmaintained
+# crates to "warn", so no explicit severity keys are needed here.
+ignore = []
+
+[licenses]
+# Polypus is licensed under EUPL-1.2. Allow it plus the common permissive
+# licenses present across the dependency tree. Add licenses as `cargo deny`
+# flags them; don't blanket-allow copyleft without a deliberate decision.
+allow = [
+    "EUPL-1.2",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions and wildcard deps are worth a warning, not a hard failure,
+# for a fast-moving library. Tighten to "deny" once the tree stabilizes.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

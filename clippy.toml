@@ -1,0 +1,15 @@
+# Clippy configuration for the Polypus workspace.
+#
+# NOTE: clippy.toml only tunes lint *thresholds/behaviour*. Lint *levels*
+# (deny/warn/allow) are set in CI (`-- -D warnings`) and, optionally, in the
+# `[workspace.lints]` table of the root Cargo.toml (see AI_GUIDELINES §7).
+
+# Polypus is pre-1.0 (0.4.0) and under active development: don't hold back lints
+# just to preserve a frozen public API.
+avoid-breaking-exported-api = false
+
+# Set this to your true Minimum Supported Rust Version so clippy won't suggest
+# APIs newer than you support. Pick the highest floor required by your deps
+# (pyo3 0.24, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you
+# actually build and test against:
+# msrv = "1.74"
