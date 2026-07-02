@@ -12,7 +12,7 @@ pub mod qng;
 
 use circuit::{statevector, Circuit, Param};
 use de::DE;
-use logging::{init_experiment_logger, init_logger};
+use logging::init_logger;
 use pso::PSO;
 use qng::{PyVarianceOracle, QNG};
 
@@ -569,7 +569,6 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
-    m.add_function(wrap_pyfunction!(init_experiment_logger, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()
     let py = m.py();

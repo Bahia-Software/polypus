@@ -20,7 +20,7 @@ import warnings
 import polypus
 
 
-def test_default_is_file_reinit_is_noop_and_alias_is_deprecated(tmp_path, monkeypatch):
+def test_default_is_file_and_reinit_is_noop(tmp_path, monkeypatch):
     # Redirect the auto-generated default file into a throwaway dir.
     monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path))
 
@@ -43,15 +43,3 @@ def test_default_is_file_reinit_is_noop_and_alias_is_deprecated(tmp_path, monkey
     # The no-op must not have created (leaked) a second log file.
     created = list(tmp_path.glob("*.log"))
     assert len(created) == 1, f"re-init leaked extra log files: {created}"
-
-    # Backward-compat: the deprecated alias still exists and is callable. With a
-    # logger already installed it is a no-op, and it must warn on deprecation.
-    assert hasattr(polypus, "init_experiment_logger")
-    assert callable(polypus.init_experiment_logger)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        alias_result = polypus.init_experiment_logger("exp")
-    assert alias_result is None
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
-        "init_experiment_logger must emit a DeprecationWarning"
-    )

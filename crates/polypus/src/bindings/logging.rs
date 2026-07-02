@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pyo3::exceptions::{PyDeprecationWarning, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -60,14 +60,9 @@ fn parse_format(format: &str) -> PyResult<LogFormat> {
 /// `OpenOptions` (used by the logger to open the file) does not create missing
 /// parents, so we do it here before the logger tries to open the file.
 fn create_parent_dirs(path: &Path) -> PyResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                PyValueError::new_err(format!("failed to create log directory {parent:?}: {e}"))
-            })?;
-        }
-    }
-    Ok(())
+    logger::ensure_parent_dir(path).map_err(|e| {
+        PyValueError::new_err(format!("failed to create log directory for {path:?}: {e}"))
+    })
 }
 
 /// Emit a Python `UserWarning` that a logger is already installed.
@@ -190,25 +185,4 @@ pub fn init_logger(
             Ok(None)
         }
     }
-}
-
-/// Deprecated alias for [`init_logger`]; prefer `init_logger(name=...)`.
-///
-/// Retained so existing experiment scripts keep working. Equivalent to
-/// `init_logger(name=name, level="info", timestamp=True, thread_id=True,
-/// module_path=True)`: a unique per-run, fully annotated text file under the
-/// default log directory.
-#[pyfunction]
-#[pyo3(signature = (name = None))]
-pub fn init_experiment_logger(py: Python<'_>, name: Option<&str>) -> PyResult<Option<String>> {
-    let warnings = PyModule::import(py, "warnings")?;
-    warnings.call_method1(
-        "warn",
-        (
-            "polypus.init_experiment_logger is deprecated; use \
-             polypus.init_logger(name=...) instead",
-            py.get_type::<PyDeprecationWarning>(),
-        ),
-    )?;
-    init_logger(py, "info", "text", None, name, false, true, true, true)
 }

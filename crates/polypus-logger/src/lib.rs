@@ -166,9 +166,9 @@ impl Logger {
 /// This is the low-level API: the default [`LogTarget`] is [`LogTarget::Stdout`]
 /// and an explicit `LogTarget::File(path)` is used **verbatim** (no timestamp is
 /// appended). For a safe per-run default that never collides between runs and
-/// never loses output to an uncaptured stdout, use the high-level entry points
-/// ([`init_experiment_logger`], or `resolve_log_target(None, false, name)` +
-/// [`default_log_path`]).
+/// never loses output to an uncaptured stdout, resolve the target with
+/// `resolve_log_target(None, false, name)` (or call [`default_log_path`]
+/// directly) before passing it to [`LoggerBuilder::target`].
 pub struct LoggerBuilder {
     config: LoggerConfig,
 }
@@ -512,37 +512,18 @@ pub fn resolve_log_target(
     }
 }
 
-/// Convenience entry point for experiment runs: installs a global logger that
-/// writes timestamped, fully-annotated text logs to a **unique per-run file**
-/// under [`default_log_dir`], so concurrent or repeated runs never share a file.
+/// Create the parent directory of `path`, if it has one and it doesn't exist
+/// yet.
 ///
-/// The name is `<name>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log` (see
-/// [`default_log_path`]): the OS pid keeps concurrent processes apart, and the
-/// process-local counter keeps repeated calls apart — a plain second-resolution
-/// timestamp is *not* enough for jobs launched in the same second.
-pub fn init_experiment_logger(experiment_name: Option<&str>) -> Result<(), SetLoggerError> {
-    let file_path = default_log_path(experiment_name);
-
-    // `OpenOptions` (used by `build`) does not create missing parents.
-    if let Some(parent) = file_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Failed to create log directory {parent:?}: {e}");
-            }
-        }
+/// `OpenOptions` (used by [`LoggerBuilder::build`] to open a `LogTarget::File`)
+/// does not create missing parent directories, so callers that resolve a file
+/// target (e.g. via [`resolve_log_target`] or [`default_log_path`]) must call
+/// this before installing the logger.
+pub fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => std::fs::create_dir_all(parent),
+        _ => Ok(()),
     }
-
-    // Informational, on stderr so it never pollutes a program's stdout data.
-    eprintln!("polypus-logger: writing logs to {file_path:?}");
-
-    LoggerBuilder::new()
-        .level(LogLevel::Info)
-        .format(LogFormat::Text)
-        .target(LogTarget::File(file_path))
-        .include_timestamp(true)
-        .include_thread_id(true)
-        .include_module_path(true)
-        .init()
 }
 
 #[cfg(test)]
