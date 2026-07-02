@@ -64,6 +64,7 @@
 pub mod algorithms;
 mod bindings;
 pub mod evaluation;
+pub mod infrastructure;
 pub mod utils;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).

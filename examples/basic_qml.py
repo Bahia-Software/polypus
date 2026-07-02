@@ -1,6 +1,13 @@
 import polypus, numpy as np
 from qiskit.circuit.library import zz_feature_map, real_amplitudes
 
+# Install the logger sink so the internal Rust log records are written to a file.
+# NOTE: optimizer progress is logged at DEBUG level, and the default build
+# compiles those out (feature "info-logs" => log/max_level_info). To capture it,
+# build with debug logging enabled:
+#   maturin develop --no-default-features --features "extension-module,debug-logs"
+polypus.init_logger(level="debug", file="logs/basic_qml.log")
+
 feature_map = zz_feature_map(feature_dimension=4, reps=2)
 ansatz = real_amplitudes(num_qubits=4, reps=2)
 
