@@ -106,6 +106,21 @@ impl Simulator for StatevectorSimulator {
                 max: self.max_qubits,
             });
         }
+        // Orchestration-level diagnostic, emitted once per run *outside* the
+        // per-gate loop (never inside the hot kernels): which kernel path this
+        // circuit takes. Mirrors `Statevector::use_parallel`; side-effect only,
+        // so it cannot influence the (bit-identical) parallel/sequential result.
+        // `log::debug!` gates itself on the level, so no manual guard is needed.
+        log::debug!(
+            "simulating {}-qubit circuit ({} gate(s)) on the {} kernel path",
+            circuit.num_qubits,
+            circuit.gates.len(),
+            if cfg!(feature = "parallel") && circuit.num_qubits >= self.parallel_threshold {
+                "parallel"
+            } else {
+                "sequential"
+            }
+        );
         let mut sv = Statevector::new(circuit.num_qubits)?;
         sv.set_parallel_threshold(self.parallel_threshold);
         for gate in &circuit.gates {

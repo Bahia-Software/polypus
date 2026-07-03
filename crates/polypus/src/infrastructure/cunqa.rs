@@ -53,7 +53,12 @@ impl QuantumBackend for CunqaBackend {
 
             module
                 .call_method("run_qcs", ("cunqa",), Some(&kwargs))
-                .expect("Error running circuits on CUNQA")
+                .unwrap_or_else(|e| {
+                    // Surface the failure before the panic PyO3 turns into a
+                    // Python exception (mirrors the QMIO backend's error paths).
+                    log::error!("CUNQA circuit execution failed: {e}");
+                    panic!("Error running circuits on CUNQA: {e}");
+                })
                 .extract::<Vec<HashMap<String, u64>>>()
                 .expect("run_qcs must return list[dict[str, int]]")
         })
@@ -105,7 +110,11 @@ impl CunqaBackend {
     }
 
     fn raise_qpus(&mut self, n_qpus: u32, nodes: u32, id: &str, cores_per_qpu: u32) {
-        println!("Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}");
+        // Allocating QPUs reserves an HPC (SLURM) allocation — a rare, coarse
+        // lifecycle event an operator wants to see at the default level.
+        log::info!(
+            "Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}"
+        );
         Python::with_gil(|py| {
             let kwargs = PyDict::new(py);
             kwargs.set_item("n", n_qpus).unwrap();
@@ -117,11 +126,14 @@ impl CunqaBackend {
             let module = PyModule::import(py, "polypus_python").unwrap();
             let connection = module
                 .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
-                .expect("Error raising QPUs in CUNQA");
+                .unwrap_or_else(|e| {
+                    log::error!("CUNQA QPU allocation failed: {e}");
+                    panic!("Error raising QPUs in CUNQA: {e}");
+                });
             let family: Py<PyAny> = connection
                 .extract()
                 .expect("Error extracting family from CUNQA");
-            println!("QPUs raised successfully");
+            log::info!("QPUs raised successfully");
             self.family = Some(family);
         });
     }
@@ -133,15 +145,18 @@ impl CunqaBackend {
         let Some(family) = self.family.as_ref() else {
             return;
         };
-        println!("Dropping QPUs");
+        log::info!("Dropping QPUs");
         Python::with_gil(|py| {
             let module = PyModule::import(py, "polypus_python").unwrap();
             let kwargs = PyDict::new(py);
             kwargs.set_item("family", family.clone_ref(py)).unwrap();
             module
                 .call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))
-                .expect("Error dropping QPUs in CUNQA");
-            println!("QPUs dropped successfully");
+                .unwrap_or_else(|e| {
+                    log::error!("CUNQA QPU release failed: {e}");
+                    panic!("Error dropping QPUs in CUNQA: {e}");
+                });
+            log::info!("QPUs dropped successfully");
         });
     }
 }

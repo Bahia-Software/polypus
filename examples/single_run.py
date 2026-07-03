@@ -2,6 +2,8 @@ import polypus
 from qiskit import QuantumCircuit
 import time
 
+polypus.init_logger(run_name="single_run")
+
 NUM_QUBITS = 5
 NUM_LAYERS = 30
 NUM_SHOTS = 10000

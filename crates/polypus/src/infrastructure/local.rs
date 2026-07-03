@@ -51,7 +51,12 @@ impl QuantumBackend for LocalBackend {
             let module = PyModule::import(py, "polypus_python").unwrap();
             let connection = module
                 .call_method("connect_to_infrastructure", ("local",), None)
-                .expect("Error connecting to local infrastructure");
+                .unwrap_or_else(|e| {
+                    // Surface the failure before the panic PyO3 turns into a
+                    // Python exception (mirrors the QMIO/CUNQA error paths).
+                    log::error!("local infrastructure connection failed: {e}");
+                    panic!("Error connecting to local infrastructure: {e}");
+                });
             let connection_str = connection.extract::<String>().unwrap();
 
             let kwargs = PyDict::new(py);
@@ -66,7 +71,10 @@ impl QuantumBackend for LocalBackend {
 
             module
                 .call_method("run_qcs", (connection_str,), Some(&kwargs))
-                .expect("Error running run_qcs")
+                .unwrap_or_else(|e| {
+                    log::error!("local circuit execution failed: {e}");
+                    panic!("Error running run_qcs: {e}");
+                })
                 .extract::<Vec<HashMap<String, u64>>>()
                 .expect("run_qcs must return list[dict[str, int]]")
         })

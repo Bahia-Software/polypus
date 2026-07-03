@@ -13,6 +13,10 @@ name = "polypus_sim"
 polypus-circuit = { workspace = true }
 num-complex     = "0.4"
 rayon           = { version = "1", optional = true }
+# Logging *facade* only (no sink): orchestration-level diagnostics are emitted
+# through `log::*!` and stay no-ops until the app layer installs a logger. This
+# crate never depends on `polypus-logger`.
+log             = { workspace = true }
 
 [features]
 default  = []

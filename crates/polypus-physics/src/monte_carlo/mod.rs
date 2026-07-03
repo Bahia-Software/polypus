@@ -117,6 +117,20 @@ where
         self
     }
 
+    /// Emit a `debug` line marking the start of a run. `mode` names the entry
+    /// point (fixed state, voxel tally, spectrum). Side-effect only: it never
+    /// touches the RNG or the histories, so it cannot affect a seeded result.
+    fn log_run_start(&self, mode: &str) {
+        log::debug!(
+            "Monte Carlo start ({mode}): {} histories, max {} steps, \
+             energy cutoff {} MeV, seed {}",
+            self.config.n_histories,
+            self.config.max_steps,
+            self.config.energy_cutoff_mev,
+            self.config.seed
+        );
+    }
+
     /// Transport a single particle to absorption, energy cutoff, or
     /// `max_steps`, recording its track and total energy deposit.
     ///
@@ -259,6 +273,7 @@ where
         initial_state: ParticleState,
         rng: &mut impl Rng,
     ) -> Result<SimulationResult, PhysicsError> {
+        self.log_run_start("fixed initial state");
         let mut histories = Vec::with_capacity(self.config.n_histories);
         for _ in 0..self.config.n_histories {
             let primary = self.transport_one(initial_state.clone(), rng, None)?;
@@ -291,6 +306,7 @@ where
         mut grid: VoxelGrid,
         rng: &mut impl Rng,
     ) -> Result<(SimulationResult, VoxelGrid), PhysicsError> {
+        self.log_run_start("fixed initial state + voxel tally");
         let mut histories = Vec::with_capacity(self.config.n_histories);
         for _ in 0..self.config.n_histories {
             let primary = self.transport_one(initial_state.clone(), rng, Some(&mut grid))?;
@@ -325,6 +341,7 @@ where
         S: EnergySpectrum + ?Sized,
     {
         let unit_dir = normalize_direction(direction)?;
+        self.log_run_start("energy spectrum");
         let mut histories = Vec::with_capacity(self.config.n_histories);
         for _ in 0..self.config.n_histories {
             let energy_mev = spectrum.sample_energy_mev(rng);
@@ -364,6 +381,11 @@ fn finalize(histories: Vec<ParticleHistory>) -> SimulationResult {
     } else {
         (0.0, 0.0)
     };
+    log::debug!(
+        "Monte Carlo complete: {} histories, mean deposit {mean:.6} MeV, \
+         variance {variance:.6} MeV^2",
+        histories.len()
+    );
     SimulationResult {
         histories,
         mean_deposit_mev: mean,

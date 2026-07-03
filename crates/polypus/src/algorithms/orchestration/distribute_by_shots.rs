@@ -17,6 +17,11 @@ impl AlgorithmTrait for DistributeByShotsRun {
 
         // Divide shots across QPUs
         args.config.shots /= args.config.n_qpus;
+        log::debug!(
+            "distributing run across {} QPUs: {} shots per QPU",
+            args.config.n_qpus,
+            args.config.shots
+        );
 
         // Replicate the circuit once per QPU (cheap: refcount bump or string clone)
         let qcs: Vec<_> = (0..args.config.n_qpus)

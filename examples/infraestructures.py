@@ -20,6 +20,8 @@ import time
 
 import polypus
 
+polypus.init_logger(run_name="infraestructures")
+
 # Fully connected (complete-graph) MaxCut instance over all N_QUBITS nodes.
 N_QUBITS = 12
 EDGES = list(itertools.combinations(range(N_QUBITS), 2))

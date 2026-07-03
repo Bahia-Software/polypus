@@ -287,7 +287,10 @@ impl QmioBackend {
         program: &ProgramPayload,
         config_json: &str,
     ) -> Result<HashMap<String, u64>, QmioError> {
-        println!("QMIO request: {program:?}, config: {config_json}");
+        // Full request payload (program text/bitcode + config): a large, per-call
+        // diagnostic dump, so it stays behind `debug` rather than flooding the
+        // default `info` log.
+        log::debug!("QMIO request: {program:?}, config: {config_json}");
         let request = pickle_request(program, config_json)?;
         let mut guard = self.socket.lock().expect("QMIO socket mutex poisoned");
 
@@ -296,6 +299,19 @@ impl QmioBackend {
             for attempt in 0..=self.max_retries {
                 // Linear backoff before a retry; the first attempt is immediate.
                 if attempt > 0 {
+                    // A retry means the previous attempt hit a transient fault
+                    // and the REQ socket was discarded (Lazy Pirate). Surface it
+                    // at `warn` — recoverable, but an operator should see the QPU
+                    // link is flapping. Emitted before the `.await`, so the
+                    // logger's lock is never held across a suspension point.
+                    if let Some(err) = &last_err {
+                        log::warn!(
+                            "QMIO request to {} failed (attempt {}/{}), reconnecting and retrying: {err}",
+                            self.endpoint,
+                            attempt,
+                            self.max_retries + 1
+                        );
+                    }
                     tokio::time::sleep(self.retry_backoff * attempt as u32).await;
                 }
                 // (Re)connect if we have no live socket.
@@ -340,7 +356,9 @@ impl QmioBackend {
                 let socket = guard.as_mut().expect("socket present after send");
                 match tokio::time::timeout(self.recv_timeout, socket.recv()).await {
                     Ok(Ok(reply)) => {
-                        println!("QMIO reply: {reply:?}");
+                        // Raw wire reply (unparsed ZMQ frames): the noisiest,
+                        // lowest-level dump, kept at `trace`.
+                        log::trace!("QMIO reply: {reply:?}");
                         let bytes = first_frame(reply);
                         if bytes.len() > self.max_reply_bytes {
                             return Err(QmioError::ResponseTooLarge {
