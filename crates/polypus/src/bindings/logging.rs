@@ -93,35 +93,41 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 ///   **runtime** level: it can only lower the compile-time ceiling, never raise
 ///   it (see "Compile-time level ceiling" below). Optimizer progress is emitted
 ///   at `debug`, so to capture it pass `"debug"` **and** build with
-///   `--features debug-logs` — the default `info-logs` build compiles
-///   `debug!`/`trace!` out entirely, so `level="debug"` alone captures nothing.
+///   `--no-default-features --features debug-logs` — the default `info-logs`
+///   build compiles `debug!`/`trace!` out entirely, so `level="debug"` alone
+///   captures nothing.
 /// * `format` — `"text"` or `"json"`.
 /// * `file` — explicit path to a log file, used **verbatim** (no timestamp is
 ///   appended). Missing parent directories are created; the file is opened in
-///   append mode.
-/// * `name` — base name for the auto-generated default file (default `polypus`);
-///   only used when `file` and `console` are both omitted.
+///   append mode. Mutually exclusive with `console` and `run_name`.
+/// * `run_name` — base name for the auto-generated default file (default
+///   `polypus`), producing `<run_name>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log`. It
+///   only names that default file, so it is valid **only** when neither `file`
+///   nor `console` is given; passing it alongside either raises `ValueError`
+///   instead of being silently ignored.
 /// * `console` — log to stdout instead of a file (for local, interactive
-///   debugging). Mutually exclusive with `file`.
+///   debugging). Mutually exclusive with `file` and `run_name`.
 /// * `timestamp` / `thread_id` / `module_path` — per-line annotations.
 ///
 /// # Default target
 /// With neither `file` nor `console`, logs go to a **unique per-run file** under
 /// the log directory (`POLYPUS_LOG_DIR` if set, else `logs/` relative to the
 /// current working directory), named
-/// `<name>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log`. This never collides between
-/// concurrent or repeated runs and is never lost to an uncaptured stdout.
+/// `<run_name>_<YYYYMMDD_HHMMSS>_<pid>_<counter>.log`. This never collides
+/// between concurrent or repeated runs and is never lost to an uncaptured stdout.
 ///
 /// # Compile-time level ceiling
 /// `level` is a *runtime* filter and can only lower the ceiling fixed at build
 /// time by `polypus`'s `*-logs` Cargo features (default `info-logs`, forwarded to
 /// `polypus-logger`). Under the default build, `debug!`/`trace!` records are
 /// compiled out, so `init_logger(level="debug")` will **not** capture debug
-/// output — including optimizer per-generation progress. Rebuild the extension
-/// with `debug-logs` (or `trace-logs`) added to raise the ceiling, e.g.
-/// `maturin develop --release --features "extension-module debug-logs"`; because
-/// the most verbose feature wins process-wide, adding it on top of the default
-/// `info-logs` is enough (no `--no-default-features` needed).
+/// output — including optimizer per-generation progress. `log` treats its
+/// `max_level_*` features as mutually exclusive (a hard compile error if more
+/// than one is active), so raising the ceiling means **disabling** the default
+/// first, not adding to it:
+/// `maturin develop --release --no-default-features --features "extension-module debug-logs"`.
+/// Adding `debug-logs` on top of the default `info-logs` *without*
+/// `--no-default-features` leaves both active at once and fails to build.
 ///
 /// # Re-initialization
 /// A global logger can be installed only once per process. A second call (e.g.
@@ -133,7 +139,7 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
     level = "info",
     format = "text",
     file = None,
-    name = None,
+    run_name = None,
     console = false,
     timestamp = true,
     thread_id = false,
@@ -145,17 +151,19 @@ pub fn init_logger(
     level: &str,
     format: &str,
     file: Option<String>,
-    name: Option<&str>,
+    run_name: Option<&str>,
     console: bool,
     timestamp: bool,
     thread_id: bool,
     module_path: bool,
 ) -> PyResult<Option<String>> {
     // Parse/validate everything that can fail cheaply *before* claiming the
-    // install slot or touching the filesystem.
+    // install slot or touching the filesystem. `resolve_log_target` also rejects
+    // contradictory target options (e.g. `run_name` together with `file` or
+    // `console`), surfacing them as `ValueError` rather than dropping the input.
     let level = parse_level(level)?;
     let format = parse_format(format)?;
-    let target = logger::resolve_log_target(file.map(PathBuf::from), console, name)
+    let target = logger::resolve_log_target(file.map(PathBuf::from), console, run_name)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // Claim the one install slot. If a logger is already installed (Jupyter

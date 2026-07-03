@@ -1,6 +1,8 @@
 import polypus
 from qiskit.circuit.library import QFT
 
+polypus.init_logger(run_name="polypus_cunqa_basic")
+
 # QFT definition
 n_qubits = 5
 qft_circuit = QFT(n_qubits, inverse=False).decompose()

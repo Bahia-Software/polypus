@@ -9,6 +9,7 @@ import csv
 import polypus
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
+
 from polypus_python.qaoa_utils import build_qaoa_circuit, expectation_value
 from qiskit_aer import AerSimulator
 from scipy.optimize import differential_evolution
@@ -224,6 +225,8 @@ def final_evaluation(qc, graph, layers, cost_layers, mixer_layers, params, n_sho
 
 
 if __name__ == "__main__":
+
+    polypus.init_logger(run_name="max_cut_qaoa")
 
     # Experiment setup
     np.random.seed(1) 

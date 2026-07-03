@@ -27,15 +27,22 @@
 //! The practical consequence: under the default `info-logs`, every `debug!` and
 //! `trace!` record — including the optimizers' per-generation progress — is
 //! **compiled out**, so asking for a runtime level of `debug`/`trace` captures
-//! nothing. To see that output you must **rebuild** with `--features debug-logs`
-//! (or `trace-logs`); raising the runtime level alone is not enough.
+//! nothing. To see that output you must **rebuild** with
+//! `--no-default-features --features debug-logs` (or `trace-logs`); raising the
+//! runtime level alone is not enough.
 //!
-//! Because these features map to `log`'s process-global `max_level_*` flags and
-//! Cargo unifies features across a build, if two dependents request different
-//! levels the **most verbose one wins for the whole process** — the ceiling is
-//! never per-crate. (Enabling `debug-logs` alongside the default `info-logs` is
-//! therefore enough to lift the ceiling to `debug`; the most verbose feature
-//! wins, so `--no-default-features` is not required.)
+//! These features map directly to `log`'s `max_level_*` / `release_max_level_*`
+//! flags, and `log` treats them as strictly mutually exclusive: enabling more
+//! than one in the same build is a **hard compile error**
+//! (`compile_error!("multiple max_level_* features set")`), not a "most
+//! verbose wins" resolution. Cargo feature unification does not help here —
+//! it only makes the conflict easier to trigger by accident, since any two
+//! dependents requesting different levels in the same build will hit it. A
+//! dependent that wants a level other than the default it inherited **must**
+//! first disable defaults. For `polypus` (default `info-logs`), that means
+//! `--no-default-features --features debug-logs`, **not**
+//! `--features debug-logs` alone — the latter leaves `info-logs` active
+//! alongside `debug-logs` and fails to compile.
 //!
 //! # Example
 //!
@@ -487,10 +494,22 @@ pub fn default_log_path(base_name: Option<&str>) -> PathBuf {
 
 /// Error returned by [`resolve_log_target`] when the requested output options
 /// are mutually exclusive.
+///
+/// Every variant marks a *contradictory* combination that would otherwise force
+/// one option to be silently ignored; [`resolve_log_target`] rejects it instead
+/// of dropping the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetError {
     /// Both an explicit `file` and `console` output were requested.
     FileAndConsole,
+    /// A base name for the auto-generated log file was given together with an
+    /// explicit `file`. The base name only names the default per-run file, so
+    /// here it would have no effect.
+    NameWithFile,
+    /// A base name for the auto-generated log file was given together with
+    /// `console` output. The base name only names the default per-run file, so
+    /// here it would have no effect.
+    NameWithConsole,
 }
 
 impl std::fmt::Display for TargetError {
@@ -500,6 +519,20 @@ impl std::fmt::Display for TargetError {
                 f,
                 "cannot log to both an explicit file and the console; \
                  pass either `file` or `console`, not both"
+            ),
+            TargetError::NameWithFile => write!(
+                f,
+                "a base name for the auto-generated log file was given together \
+                 with an explicit `file`; the base name only names the default \
+                 per-run file. Pass either the base name (to auto-name the file) \
+                 or `file`, not both"
+            ),
+            TargetError::NameWithConsole => write!(
+                f,
+                "a base name for the auto-generated log file was given together \
+                 with `console` output; the base name only names the default \
+                 per-run file. Pass either the base name (to auto-name the file) \
+                 or `console`, not both"
             ),
         }
     }
@@ -519,18 +552,29 @@ impl std::error::Error for TargetError {}
 ///   to an uncaptured stdout (the common failure mode from notebooks, background
 ///   jobs and job queues).
 ///
-/// `file` together with `console` is contradictory and returns
-/// [`TargetError::FileAndConsole`]. `default_name` only affects the
-/// auto-generated default path.
+/// `default_name` only ever names the auto-generated default file, so it is
+/// **mutually exclusive** with both `file` and `console`: supplying it alongside
+/// either would silently drop it, so this rejects the combination instead. The
+/// contradictory inputs are:
+/// - `file` + `console` → [`TargetError::FileAndConsole`];
+/// - `default_name` + `file` → [`TargetError::NameWithFile`];
+/// - `default_name` + `console` → [`TargetError::NameWithConsole`].
 pub fn resolve_log_target(
     file: Option<PathBuf>,
     console: bool,
     default_name: Option<&str>,
 ) -> Result<LogTarget, TargetError> {
     match (file, console) {
+        // Two explicit targets at once is contradictory.
         (Some(_), true) => Err(TargetError::FileAndConsole),
+        // An explicit file wins, but a base name would then be ignored (it only
+        // names the auto-generated default file): reject rather than drop it.
+        (Some(_), false) if default_name.is_some() => Err(TargetError::NameWithFile),
         (Some(path), false) => Ok(LogTarget::File(path)),
+        // Console likewise leaves a base name with nothing to name.
+        (None, true) if default_name.is_some() => Err(TargetError::NameWithConsole),
         (None, true) => Ok(LogTarget::Stdout),
+        // The default per-run file is the only place the base name is used.
         (None, false) => Ok(LogTarget::File(default_log_path(default_name))),
     }
 }
@@ -765,6 +809,39 @@ mod tests {
             resolve_log_target(Some(PathBuf::from("x.log")), true, None),
             Err(TargetError::FileAndConsole)
         );
+    }
+
+    /// A base name only names the auto-generated default file, so pairing it with
+    /// an explicit `file` is contradictory: the name would be dropped, so it is
+    /// rejected instead of silently ignored.
+    #[test]
+    fn name_with_explicit_file_is_rejected() {
+        assert_eq!(
+            resolve_log_target(Some(PathBuf::from("x.log")), false, Some("exp")),
+            Err(TargetError::NameWithFile)
+        );
+    }
+
+    /// Likewise, a base name together with `console` output is contradictory.
+    #[test]
+    fn name_with_console_is_rejected() {
+        assert_eq!(
+            resolve_log_target(None, true, Some("exp")),
+            Err(TargetError::NameWithConsole)
+        );
+    }
+
+    /// A base name on its own (no `file`, no `console`) is valid and becomes the
+    /// prefix of the auto-generated per-run file.
+    #[test]
+    fn name_only_drives_default_file_prefix() {
+        match resolve_log_target(None, false, Some("exp")).unwrap() {
+            LogTarget::File(path) => {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(name.starts_with("exp_") && name.ends_with(".log"));
+            }
+            other => panic!("expected a file target, got {other:?}"),
+        }
     }
 
     /// If the file can't be opened at build time (missing parent directory), the
