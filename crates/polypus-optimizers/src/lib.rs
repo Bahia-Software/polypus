@@ -74,6 +74,7 @@ pub mod pso;
 pub mod quantum_natural_gradient;
 
 mod rng;
+mod util;
 
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
