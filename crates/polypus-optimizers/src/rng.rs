@@ -31,6 +31,18 @@ impl OptRng {
     }
 }
 
+/// Build the run RNG from an optional seed and hand it to `run`.
+///
+/// Centralises the identical `seed → OptRng::from_seed → run` dispatch that
+/// every optimizer's `optimize` implementation performs (DE, PSO, and QNG),
+/// keeping the seed-to-RNG wiring in one place next to [`OptRng`]. The closure
+/// receives the freshly built generator by mutable reference and returns the
+/// optimization outcome, which is passed straight through.
+pub(crate) fn with_seeded_rng<T>(seed: Option<u64>, run: impl FnOnce(&mut OptRng) -> T) -> T {
+    let mut rng = OptRng::from_seed(seed);
+    run(&mut rng)
+}
+
 impl RngCore for OptRng {
     #[inline]
     fn next_u32(&mut self) -> u32 {
@@ -62,5 +74,32 @@ impl RngCore for OptRng {
             OptRng::Thread(r) => r.try_fill_bytes(dest),
             OptRng::Seeded(r) => r.try_fill_bytes(dest),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_seeded_rng_is_deterministic() {
+        // A fixed seed reproduces the exact RNG stream — the property the
+        // optimizers' determinism tests ultimately rely on.
+        let a = with_seeded_rng(Some(42), |rng| rng.next_u64());
+        let b = with_seeded_rng(Some(42), |rng| rng.next_u64());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn with_seeded_rng_distinct_seeds_differ() {
+        let a = with_seeded_rng(Some(1), |rng| rng.next_u64());
+        let b = with_seeded_rng(Some(2), |rng| rng.next_u64());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn with_seeded_rng_passes_closure_value_through() {
+        let value = with_seeded_rng(Some(7), |_| 99u32);
+        assert_eq!(value, 99);
     }
 }

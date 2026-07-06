@@ -2,8 +2,9 @@
 
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
-use crate::rng::OptRng;
-use ndarray::{Array1, Array2, Axis};
+use crate::rng::with_seeded_rng;
+use crate::util::{argmax, population_converged, rows_to_candidates};
+use ndarray::{Array1, Array2};
 use rand::{seq::SliceRandom, Rng};
 use std::f64::consts::PI;
 
@@ -68,14 +69,9 @@ impl AlgorithmDifferentialEvolution {
         }
 
         // Evaluate initial population (fixes the bug of starting fitness at 0.0)
-        let init_candidates: Vec<Vec<f64>> = pop.outer_iter().map(|r| r.to_vec()).collect();
+        let init_candidates = rows_to_candidates(&pop);
         let mut fitness = oracle.evaluate_batch(&init_candidates);
-        let mut best_idx = fitness
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let mut best_idx = argmax(&fitness);
         let mut best = pop.row(best_idx).to_vec();
 
         let mut iterations_run = 0usize;
@@ -120,14 +116,7 @@ impl AlgorithmDifferentialEvolution {
                 }
             }
 
-            let mean = pop
-                .mean_axis(Axis(0))
-                .expect("Failed to compute mean")
-                .sum();
-            let std: f64 = pop.std_axis(Axis(0), 0.0).iter().sum();
-            log::debug!("Generation {generation}: Mean: {mean:.4}, Std: {std:.4}");
-            if std < tolerance * mean {
-                log::debug!("Stopping early at generation {generation} due to convergence");
+            if population_converged(&pop, tolerance, generation) {
                 converged = true;
                 break;
             }
@@ -146,7 +135,6 @@ impl Optimizer for AlgorithmDifferentialEvolution {
     type Args = AlgorithmDifferentialEvolutionArgs;
 
     fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
-        let mut rng = OptRng::from_seed(args.seed);
-        Self::run_with_rng(args, &mut rng)
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
     }
 }

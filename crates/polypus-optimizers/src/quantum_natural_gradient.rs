@@ -2,7 +2,7 @@
 
 use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
-use crate::rng::OptRng;
+use crate::rng::with_seeded_rng;
 use rand::Rng;
 
 /// Quantum Natural Gradient optimizer.
@@ -168,7 +168,6 @@ impl Optimizer for AlgorithmQNG {
     type Args = AlgorithmQNGArgs;
 
     fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
-        let mut rng = OptRng::from_seed(args.seed);
-        Self::run_with_rng(args, &mut rng)
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
     }
 }
