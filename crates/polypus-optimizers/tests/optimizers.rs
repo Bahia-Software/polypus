@@ -9,7 +9,8 @@
 
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, Optimizer, VarianceOracle,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
+    Optimizer, VarianceOracle,
 };
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
@@ -24,6 +25,31 @@ impl EvaluationOracle for Quadratic {
         candidates
             .iter()
             .map(|c| -c.iter().map(|x| (x - self.target).powi(2)).sum::<f64>())
+            .collect()
+    }
+}
+
+/// Rough (non-convex) test objective: a quadratic bowl overlaid with a bounded
+/// sinusoidal ripple, so the landscape has many local optima and frequent
+/// near-ties. Unlike [`Quadratic`], which is smooth and unimodal — the easy
+/// case where a stale champion pointer stays within floating-point noise of the
+/// true best — this surface is where a desynced `best`/`best_fitness` diverges
+/// arbitrarily, so it is the landscape the C-5 invariant most needs to hold on.
+/// Deterministic (a pure function of the parameters), like every oracle here,
+/// so a fresh instance re-evaluates any candidate bit-for-bit identically.
+struct Multimodal {
+    target: f64,
+}
+
+impl EvaluationOracle for Multimodal {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        candidates
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|x| -(x - self.target).powi(2) + (5.0 * x).sin())
+                    .sum::<f64>()
+            })
             .collect()
     }
 }
@@ -292,4 +318,125 @@ fn pso_rejects_empty_bounds() {
         tolerance: 1e-9,
         seed: Some(1),
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C-5 invariant: the reported best_fitness must describe the reported
+// best_params. In a correct run both come from the *same* `evaluate_batch`
+// call, so re-evaluating the (deterministic) oracle at best_params reproduces
+// best_fitness *bit-for-bit* — the contract is exact equality, not "close
+// enough". These guard the DE champion-self-improvement ordering bug, where
+// best_idx/best were left pointing at a stale, arbitrarily worse vector.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Re-evaluate a fresh instance of the same oracle at `outcome.best_params` and
+/// assert it equals `outcome.best_fitness` exactly. A fresh instance is used
+/// (not the one moved into the optimizer) because every oracle here is a pure,
+/// deterministic function of its input, so the recheck must return identical
+/// bits — anything else means the optimizer reported a fitness that does not
+/// belong to the parameters it returned.
+fn assert_reported_fitness_matches_params(
+    label: &str,
+    seed: u64,
+    outcome: &OptimizationOutcome,
+    recheck: &dyn EvaluationOracle,
+) {
+    let recomputed = recheck.evaluate_batch(std::slice::from_ref(&outcome.best_params))[0];
+    assert_eq!(
+        recomputed, outcome.best_fitness,
+        "{label} seed {seed}: f(best_params) = {recomputed} != best_fitness = {}",
+        outcome.best_fitness,
+    );
+}
+
+#[test]
+fn de_best_params_fitness_invariant_holds_across_seeds() {
+    for seed in 0..20 {
+        // The smooth Quadratic is the easy case: even the buggy ordering left
+        // only a tiny gap here, which is exactly why the bug survived. The
+        // rough Multimodal surface — many local optima, frequent argmax
+        // near-ties — is where a stale champion diverges, so both are checked.
+        let quad = AlgorithmDifferentialEvolution.optimize(AlgorithmDifferentialEvolutionArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 30,
+            generations: 120,
+            dimensions: 4,
+            tolerance: 1e-9,
+            seed: Some(seed),
+        });
+        assert_reported_fitness_matches_params(
+            "de/quadratic",
+            seed,
+            &quad,
+            &Quadratic { target: 1.0 },
+        );
+
+        let multi = AlgorithmDifferentialEvolution.optimize(AlgorithmDifferentialEvolutionArgs {
+            oracle: Box::new(Multimodal { target: 1.0 }),
+            population_size: 30,
+            generations: 120,
+            dimensions: 4,
+            tolerance: 1e-9,
+            seed: Some(seed),
+        });
+        assert_reported_fitness_matches_params(
+            "de/multimodal",
+            seed,
+            &multi,
+            &Multimodal { target: 1.0 },
+        );
+    }
+}
+
+#[test]
+fn pso_best_params_fitness_invariant_holds_across_seeds() {
+    // PSO already recomputes its global best via argmax after updating every
+    // personal best, so this should pass — but C-5 requires the invariant
+    // proven for all three optimizers, not assumed. Multimodal exercises the
+    // same argmax near-ties DE hits.
+    for seed in 0..20 {
+        let outcome = AlgorithmPSO.optimize(AlgorithmPSOArgs {
+            oracle: Box::new(Multimodal { target: 1.0 }),
+            population_size: 30,
+            generations: 120,
+            dimensions: 4,
+            bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 1e-9,
+            seed: Some(seed),
+        });
+        assert_reported_fitness_matches_params(
+            "pso/multimodal",
+            seed,
+            &outcome,
+            &Multimodal { target: 1.0 },
+        );
+    }
+}
+
+#[test]
+fn qng_best_params_fitness_invariant_holds_across_seeds() {
+    // QNG updates best_params/best_fitness atomically from the same evaluation,
+    // so this should pass — asserted here so all three optimizers are covered.
+    for seed in 0..20 {
+        let outcome = AlgorithmQNG.optimize(AlgorithmQNGArgs {
+            oracle: Box::new(Multimodal { target: 1.0 }),
+            max_iters: 120,
+            learning_rate: 0.1,
+            finite_difference_step: 0.1,
+            bounds: (0.0, 2.0),
+            dimensions: 4,
+            variance_oracle: Box::new(ConstVariance(1.0)),
+            tikhonov_reg: 0.05,
+            seed: Some(seed),
+        });
+        assert_reported_fitness_matches_params(
+            "qng/multimodal",
+            seed,
+            &outcome,
+            &Multimodal { target: 1.0 },
+        );
+    }
 }
