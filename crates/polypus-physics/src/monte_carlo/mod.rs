@@ -185,7 +185,6 @@ where
                 .total_cross_section_per_m(&self.particle, &state, medium)?;
             if sigma_tot <= 0.0 {
                 // No interaction possible: particle escapes.
-                state.alive = false;
                 break;
             }
             let mean_free_path = 1.0 / sigma_tot;
@@ -200,7 +199,6 @@ where
             // default) always reports "inside", so this is a no-op for the
             // legacy infinite-medium behaviour.
             if !self.geometry.contains(state.position) {
-                state.alive = false;
                 break;
             }
 
