@@ -93,9 +93,10 @@ jobs:
         run: maturin build --release --features extension-module -m crates/polypus/Cargo.toml
 
   # ---------------------------------------------------------------------------
-  # OPTIONAL: Python test suite. Requires Qiskit/Aer and a working install of
-  # the extension. Confirm the install path for your environment, then enable.
-  # (Mirrors the manual README steps.)
+  # Python test suite. Mirrors install.sh (steps 2, 5-7) and the manual README
+  # instructions: install dev deps, then build & install the pure-Python
+  # `polypus_python` package, then build & install the Rust extension, then run
+  # pytest. Order matters — see the note on the polypus_python step below.
   # ---------------------------------------------------------------------------
   python-tests:
     name: test (Python)
@@ -109,8 +110,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install dev dependencies
         run: |
-          python -m pip install --upgrade pip maturin pytest
+          python -m pip install --upgrade pip maturin pytest build
           pip install -r requirements-dev.txt
+      # The `polypus` extension imports `polypus_python` at runtime
+      # (crates/polypus/src/infrastructure/local.rs and evaluation/mod.rs call
+      # PyModule::import(py, "polypus_python")), so the pure-Python package MUST
+      # be built and installed BEFORE the extension. Installing its wheel also
+      # pulls the runtime deps declared in its pyproject.toml (qiskit, qiskit-aer).
+      - name: Build & install polypus_python (pure-Python package)
+        run: |
+          python -m build packages/polypus_python/ --wheel --no-isolation
+          pip install packages/polypus_python/dist/polypus_python-*.whl
       - name: Build & install the extension
         run: |
           maturin build --release --features extension-module -m crates/polypus/Cargo.toml --out dist
