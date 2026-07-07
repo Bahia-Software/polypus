@@ -1,5 +1,7 @@
 //! Optimizer result type and the shared optimizer trait.
 
+use crate::error::OptimizerError;
+
 /// Outcome of an optimization run.
 ///
 /// The optimizers return this native struct instead of a Python object; the
@@ -36,10 +38,17 @@ pub struct OptimizationOutcome {
 /// The trait deliberately does **not** fix a Python return type: it yields a
 /// native [`OptimizationOutcome`], leaving any interpreter conversion to the
 /// caller.
+///
+/// `optimize` returns a [`Result`]: invalid configuration (e.g. a DE
+/// population smaller than four, or empty PSO/QNG bounds) and an
+/// [`EvaluationOracle`](crate::EvaluationOracle) that breaks its length
+/// contract are reported as [`OptimizerError`] rather than by panicking, so a
+/// caller across an FFI boundary can turn them into a proper exception.
 pub trait Optimizer {
     /// Bundle of oracle(s) and hyper-parameters for this optimizer.
     type Args;
 
-    /// Run the optimization loop and return the best solution found.
-    fn optimize(&self, args: Self::Args) -> OptimizationOutcome;
+    /// Run the optimization loop and return the best solution found, or an
+    /// [`OptimizerError`] if the arguments or the oracle violate a contract.
+    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError>;
 }

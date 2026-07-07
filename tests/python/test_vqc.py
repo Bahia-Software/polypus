@@ -175,3 +175,46 @@ class TestTrainInvalidMethod:
                 cores_per_qpu=_CORES_PER_QPU,
                 id="test_invalid",
             )
+
+
+class TestTrainInvalidConfig:
+    """Invalid optimizer configuration must cross the FFI seam as a ValueError,
+    not panic. DE population_size < 4 and PSO empty bounds previously panicked
+    inside the Rust optimizer loops; they now return a typed OptimizerError that
+    the binding maps to PyValueError."""
+
+    def test_de_population_below_four_raises_value_error(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        import polypus
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.DE(generations=2, population_size=1, tolerance=0.5),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_de_bad_pop",
+            )
+
+    def test_pso_empty_bounds_raises_value_error(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        import polypus
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.PSO(generations=2, population_size=4, bounds=(1.0, 1.0)),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_pso_bad_bounds",
+            )

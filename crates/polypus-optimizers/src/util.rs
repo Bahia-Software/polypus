@@ -8,6 +8,7 @@
 //! order, same comparators, same diagnostics — so the determinism the tests pin
 //! (`tests/optimizers.rs`) is unaffected.
 
+use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
 
 /// NaN-safe argmax over a fitness slice.
@@ -36,28 +37,53 @@ pub(crate) fn rows_to_candidates(population: &Array2<f64>) -> Vec<Vec<f64>> {
 
 /// Population-based early-stopping test shared by DE and PSO.
 ///
-/// Returns `true` when the summed per-dimension standard deviation drops below
-/// `tolerance * mean` (where `mean` is the summed per-dimension means), i.e. the
-/// population has collapsed towards a point. Emits the same per-generation
-/// `log::debug!` diagnostics the two loops previously inlined, including the
-/// "stopping early" line when convergence fires. QNG has no population and does
-/// not use this.
+/// Returns `true` once **every** dimension's population standard deviation
+/// drops below the absolute threshold `tolerance`, i.e. the population has
+/// collapsed towards a point in every coordinate. Emits the same per-generation
+/// `log::debug!` diagnostics the two loops previously inlined (now reporting the
+/// worst per-dimension spread), including the "stopping early" line when
+/// convergence fires. QNG has no population and does not use this.
+///
+/// The old criterion — summed `std < tolerance * mean` against the summed
+/// per-dimension *means* — was dimensionally incoherent: the mean is a *signed*
+/// sum, so for any search space symmetric about zero (e.g. PSO's default bounds
+/// `(-π, π)`) a population collapsing around a near-zero point drives `mean → 0`
+/// and the test reduces to `std < 0`, which (`std ≥ 0`) can never fire. Summing
+/// across dimensions also let one tight dimension mask a wide one. The
+/// per-dimension absolute comparison is scale-honest (a plain std threshold in
+/// the parameters' own units) and independent of where the optimum sits.
 pub(crate) fn population_converged(
     population: &Array2<f64>,
     tolerance: f64,
     generation: usize,
 ) -> bool {
-    let mean = population
-        .mean_axis(Axis(0))
-        .expect("Failed to compute mean")
-        .sum();
-    let std: f64 = population.std_axis(Axis(0), 0.0).iter().sum();
-    log::debug!("Generation {generation}: Mean: {mean:.4}, Std: {std:.4}");
-    let converged = std < tolerance * mean;
+    let std = population.std_axis(Axis(0), 0.0);
+    let max_std = std.iter().copied().fold(0.0_f64, f64::max);
+    log::debug!("Generation {generation}: max per-dimension std {max_std:.4}");
+    // An empty std vector (zero dimensions) has nothing to collapse, so it is
+    // never "converged"; otherwise the worst dimension must be below tolerance.
+    let converged = !std.is_empty() && max_std < tolerance;
     if converged {
         log::debug!("Stopping early at generation {generation} due to convergence");
     }
     converged
+}
+
+/// Validate that an oracle returned exactly one fitness value per candidate.
+///
+/// Every optimizer calls [`EvaluationOracle::evaluate_batch`](crate::EvaluationOracle::evaluate_batch)
+/// and then indexes the returned slice positionally; a short (or long) return
+/// would otherwise panic with an out-of-bounds index deep inside the loop.
+/// Checking the length immediately after each batch call — for *any* oracle,
+/// Python-backed or not — turns that into the typed
+/// [`OptimizerError::OracleLengthMismatch`] the FFI seam maps to a
+/// `PyValueError`.
+pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), OptimizerError> {
+    if expected == got {
+        Ok(())
+    } else {
+        Err(OptimizerError::OracleLengthMismatch { expected, got })
+    }
 }
 
 #[cfg(test)]
@@ -129,9 +155,20 @@ mod tests {
 
     #[test]
     fn population_converged_true_when_collapsed() {
-        // Every row identical → std == 0 < tolerance * mean (mean > 0).
+        // Every row identical → every per-dimension std == 0 < tolerance.
         let pop = array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
         assert!(population_converged(&pop, 0.5, 0));
+    }
+
+    #[test]
+    fn population_converged_true_when_collapsed_at_zero() {
+        // Regression for the symmetric-bounds bug: a population collapsed around
+        // 0 (every per-dimension mean ≈ 0, as under PSO's default bounds
+        // (-π, π)) must still be detected. The old `std < tolerance * mean`
+        // reduced to `std < 0` here and could never fire; the per-dimension
+        // absolute test does.
+        let pop = array![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]];
+        assert!(population_converged(&pop, 0.01, 0));
     }
 
     #[test]
@@ -141,10 +178,46 @@ mod tests {
     }
 
     #[test]
+    fn population_converged_false_when_symmetric_and_spread() {
+        // Symmetric about 0 (per-dimension mean ≈ 0) but widely spread: the old
+        // criterion compared against `tolerance * 0 ≈ 0` and mislabelled such
+        // populations; the new one correctly reports "not converged" because
+        // each dimension's std (3.0) far exceeds the tolerance.
+        let pop = array![[-3.0, -3.0], [3.0, 3.0]];
+        assert!(!population_converged(&pop, 0.01, 0));
+    }
+
+    #[test]
+    fn population_converged_requires_every_dimension_below_tolerance() {
+        // One tight dimension (std 0) and one wide dimension (std 2.0):
+        // convergence is per-dimension, so the wide dimension alone keeps the
+        // whole population "not converged" — the old summed comparison could let
+        // a tight dimension mask a wide one.
+        let pop = array![[1.0, -2.0], [1.0, 2.0]];
+        assert!(!population_converged(&pop, 0.5, 0));
+    }
+
+    #[test]
     fn population_converged_zero_dimensions_does_not_panic() {
-        // mean/std sums are 0, so `0.0 < tolerance * 0.0` is false: no early
-        // stop, no panic. Matches the zero-dimension DE behaviour.
+        // No dimensions → empty std vector → never converged, no panic. Matches
+        // the zero-dimension DE edge case (`de_handles_zero_dimensions`).
         let pop = Array2::<f64>::zeros((3, 0));
         assert!(!population_converged(&pop, 1e-9, 0));
+    }
+
+    #[test]
+    fn check_oracle_len_accepts_matching_length() {
+        assert_eq!(check_oracle_len(5, 5), Ok(()));
+    }
+
+    #[test]
+    fn check_oracle_len_rejects_mismatch() {
+        assert_eq!(
+            check_oracle_len(5, 4),
+            Err(OptimizerError::OracleLengthMismatch {
+                expected: 5,
+                got: 4
+            })
+        );
     }
 }
