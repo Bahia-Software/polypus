@@ -104,17 +104,26 @@ impl AlgorithmDifferentialEvolution {
             let trial_candidates: Vec<Vec<f64>> = trials.iter().map(|t| t.to_vec()).collect();
             let trial_fitness = oracle.evaluate_batch(&trial_candidates);
 
-            // Selection
+            // Selection: greedily accept every trial that beats its parent.
             for i in 0..popsize {
                 if trial_fitness[i] > fitness[i] {
                     fitness[i] = trial_fitness[i];
                     pop.row_mut(i).assign(&trials[i]);
-                    if trial_fitness[i] > fitness[best_idx] {
-                        best_idx = i;
-                        best = trials[i].to_vec();
-                    }
                 }
             }
+
+            // Recompute the champion only after the whole selection pass, the
+            // same way PSO recomputes its global best (src/pso.rs:136-138).
+            // Tracking best_idx/best *inside* the per-i branch hit an ordering
+            // trap: when i == best_idx, fitness[best_idx] was mutated on the
+            // line above before the `trial_fitness[i] > fitness[best_idx]`
+            // check, so the comparison became `x > x` (always false) and the
+            // champion was left pointing at a stale vector even though its own
+            // slot had improved — breaking the C-5 invariant
+            // fitness[best_idx] == f(best). argmax reads the just-updated
+            // fitness, so best_params and best_fitness always agree.
+            best_idx = argmax(&fitness);
+            best = pop.row(best_idx).to_vec();
 
             if population_converged(&pop, tolerance, generation) {
                 converged = true;
