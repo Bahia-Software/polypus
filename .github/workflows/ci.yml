@@ -75,6 +75,25 @@ jobs:
       - name: Test polypus (qmio backend)
         run: cargo test -p polypus --features qmio
 
+  # Sanity-check that the rustdoc still builds cleanly (broken intra-doc links
+  # fail via -D warnings). Catches doc-comment regressions on PRs; the actual
+  # publish to Pages lives in docs.yml and only runs on push to main.
+  docs:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # PyO3's build script needs a Python interpreter to compile `polypus`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs (no deploy)
+        run: cargo doc --no-deps -p polypus
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   build-extension:
     name: build Python extension
     runs-on: ubuntu-latest

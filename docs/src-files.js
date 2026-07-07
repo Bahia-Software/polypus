@@ -1,3 +1,0 @@
-var srcIndex = new Map(JSON.parse('[["polypus",["",[["algorithms",[["orchestration",[],["distribute_by_shots.rs","mod.rs","single_run.rs"]],["vqc",[],["differential_evolution.rs","mod.rs","pso.rs","quantum_natural_gradient.rs"]]],["mod.rs"]],["bindings",[],["de.rs","mod.rs","pso.rs","qng.rs"]],["infrastructure",[],["cunqa.rs","local.rs","mod.rs"]]],["lib.rs"]]]]'));
-createSrcSidebar();
-//{"start":36,"fragment_lengths":[327]}

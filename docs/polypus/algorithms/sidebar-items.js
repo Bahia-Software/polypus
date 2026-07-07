@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["orchestration","vqc"],"struct":["AlgorithmArgs"],"trait":["AlgorithmTrait"]};
