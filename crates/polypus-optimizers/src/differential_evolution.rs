@@ -1,9 +1,10 @@
 //! Differential Evolution (DE) optimizer.
 
+use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{argmax, population_converged, rows_to_candidates};
+use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
 use ndarray::{Array1, Array2};
 use rand::{seq::SliceRandom, Rng};
 use std::f64::consts::PI;
@@ -43,10 +44,14 @@ impl AlgorithmDifferentialEvolution {
         String::from("Trains a variational quantum circuit using Differential Evolution.")
     }
 
+    /// The smallest valid `population_size`: each trial mutation samples 3
+    /// *distinct* other members, so at least 4 members are required.
+    const MIN_POPULATION: usize = 4;
+
     fn run_with_rng<R: Rng>(
         args: AlgorithmDifferentialEvolutionArgs,
         rng: &mut R,
-    ) -> OptimizationOutcome {
+    ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmDifferentialEvolutionArgs {
             oracle,
             population_size,
@@ -60,6 +65,17 @@ impl AlgorithmDifferentialEvolution {
         let max_gen = generations as usize;
         let dims = dimensions as usize;
 
+        // Precondition (documented on the struct): sampling 3 distinct other
+        // members needs `popsize >= 4`. Reject *before* any RNG draw or oracle
+        // call so the caller gets a typed error instead of the out-of-bounds
+        // `sel[2]` panic that fired one line into the trial loop.
+        if popsize < Self::MIN_POPULATION {
+            return Err(OptimizerError::PopulationTooSmall {
+                got: popsize,
+                min: Self::MIN_POPULATION,
+            });
+        }
+
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));
         for mut row in pop.outer_iter_mut() {
@@ -71,6 +87,7 @@ impl AlgorithmDifferentialEvolution {
         // Evaluate initial population (fixes the bug of starting fitness at 0.0)
         let init_candidates = rows_to_candidates(&pop);
         let mut fitness = oracle.evaluate_batch(&init_candidates);
+        check_oracle_len(init_candidates.len(), fitness.len())?;
         let mut best_idx = argmax(&fitness);
         let mut best = pop.row(best_idx).to_vec();
 
@@ -103,6 +120,7 @@ impl AlgorithmDifferentialEvolution {
             // Evaluate all trials in a single oracle call.
             let trial_candidates: Vec<Vec<f64>> = trials.iter().map(|t| t.to_vec()).collect();
             let trial_fitness = oracle.evaluate_batch(&trial_candidates);
+            check_oracle_len(trial_candidates.len(), trial_fitness.len())?;
 
             // Selection: greedily accept every trial that beats its parent.
             for i in 0..popsize {
@@ -131,19 +149,19 @@ impl AlgorithmDifferentialEvolution {
             }
         }
 
-        OptimizationOutcome {
+        Ok(OptimizationOutcome {
             best_fitness: fitness[best_idx],
             best_params: best,
             iterations_run,
             converged,
-        }
+        })
     }
 }
 
 impl Optimizer for AlgorithmDifferentialEvolution {
     type Args = AlgorithmDifferentialEvolutionArgs;
 
-    fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
+    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
         with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
     }
 }

@@ -342,10 +342,10 @@ pub fn train<'py>(
             tolerance: de.tolerance,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(
-            method.py(),
-            AlgorithmDifferentialEvolution.optimize(args),
-        ));
+        return AlgorithmDifferentialEvolution
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(method.py(), outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -361,10 +361,10 @@ pub fn train<'py>(
             tolerance: pso.tolerance,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(
-            method.py(),
-            AlgorithmPSO.optimize(args),
-        ));
+        return AlgorithmPSO
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(method.py(), outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -381,10 +381,10 @@ pub fn train<'py>(
             tikhonov_reg: qng.tikhonov_reg,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(
-            method.py(),
-            AlgorithmQNG.optimize(args),
-        ));
+        return AlgorithmQNG
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(method.py(), outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -519,10 +519,10 @@ pub fn qml_train<'py>(
             tolerance: de.tolerance,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(
-            py,
-            AlgorithmDifferentialEvolution.optimize(args),
-        ));
+        return AlgorithmDifferentialEvolution
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(py, outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -538,7 +538,10 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(py, AlgorithmPSO.optimize(args)));
+        return AlgorithmPSO
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(py, outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -555,7 +558,10 @@ pub fn qml_train<'py>(
             tikhonov_reg: qng.tikhonov_reg,
             seed: None,
         };
-        return Ok(outcome_to_pyobject(py, AlgorithmQNG.optimize(args)));
+        return AlgorithmQNG
+            .optimize(args)
+            .map(|outcome| outcome_to_pyobject(py, outcome))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
