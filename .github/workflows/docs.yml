@@ -1,0 +1,80 @@
+name: Docs
+
+# Build the rustdoc for the `polypus` crate and publish it to GitHub Pages.
+# Docs are no longer committed under docs/ — they are generated here on every
+# push to main and deployed as a Pages artifact.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Least-privilege token plus the OIDC/pages scopes deploy-pages needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize Pages deploys; don't cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # PyO3's build script needs to locate a Python interpreter to compile the
+      # `polypus` crate (same reason the clippy/test jobs in ci.yml set it up).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Only the `polypus` crate is documented (matches the old ALL_CRATES).
+      # -D warnings turns broken intra-doc links into build failures instead of
+      # silently shipping them.
+      - name: Build docs
+        run: cargo doc --no-deps -p polypus
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      # Redirect the Pages root to the crate index (same behavior as the old
+      # committed docs/index.html).
+      - name: Write redirect index
+        run: |
+          cat > target/doc/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta http-equiv="refresh" content="0; url=polypus/index.html" />
+              <title>Redirecting to Rust Docs...</title>
+            </head>
+            <body>
+              <p>If you are not redirected automatically, <a href="polypus/index.html">click here</a>.</p>
+            </body>
+          </html>
+          EOF
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

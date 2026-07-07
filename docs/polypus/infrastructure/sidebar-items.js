@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Infrastructure"],"mod":["cunqa","local"],"trait":["QuantumRunner"]};
