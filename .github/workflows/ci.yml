@@ -69,6 +69,12 @@ jobs:
           -p polypus-physics
           -p polypus-optimizers
           --all-features
+      # `polypus-logger`'s features are mutually-exclusive log-level selectors
+      # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
+      # feature), not independent toggles — `--all-features` sets several at
+      # once and the `log` crate refuses to compile. Test it with no features.
+      - name: Test polypus-logger
+        run: cargo test -p polypus-logger
       # `polypus` with default features — NOT extension-module (see clippy note).
       - name: Test polypus (default features)
         run: cargo test -p polypus

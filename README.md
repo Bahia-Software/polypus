@@ -252,4 +252,4 @@ Polypus relies on the following Python packages:
 See `requirements-dev.txt` and `requirements-examples.txt` for the full pinned dependency lists.
 
 ## License
-Polypus is **Licensed under the EUPL**. Check the *License.txt* file for more details.
+Polypus is **Licensed under the EUPL**. Check the *LICENSE* file for more details.
