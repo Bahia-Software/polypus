@@ -10,7 +10,6 @@ from qiskit.qpy import load
 from qiskit.exceptions import QiskitError, MissingOptionalLibraryError
 import logging
 import shutil
-from collections import Counter
 sys.path.append(os.getenv("HOME"))
 # from cunqa import get_QPUs, gather
 
@@ -204,33 +203,4 @@ def run_qc_in_qpu(id, qc, shots):
     except Exception as e:
         log_message(id,f"Error running quantum circuits on QPUs: {e}", "error")
         raise
-
-def run_qc(id, qc, shots, n_qpus):
-    
-    tic_total = time.time()
-    if n_qpus == 1:
-        try:
-            backend = AerSimulator()
-            qjob = backend.run(qc, shots = shots, transpile=False)
-            log_message(id, f"Total time to run the quantum circuit: {time.time()-tic_total}s", "debug")
-            return qjob.result().get_counts(qc)
-        except Exception as e:
-            log_message(id,f"Error running quantum circuit on QPU: {e}", "error")
-            raise
-    elif n_qpus > 1:
-        shots_per_qpu = shots // n_qpus
-        try:
-            counts = []
-            for i in range(n_qpus):
-                qjob = AerSimulator().run(qc, shots=shots_per_qpu, transpile=False)
-                log_message(id, f"Total time to run the quantum circuit: {time.time()-tic_total}s", "debug")
-                counts.append(qjob.result().get_counts(qc))
-            counts_sum = dict(sum((Counter(d) for d in counts), Counter()))
-            return counts_sum
-        except Exception as e:
-            log_message(id,f"Error running quantum circuit on QPU: {e}", "error")
-            raise
-    else:
-        raise Exception("n_qpus value not valid!")
-
 

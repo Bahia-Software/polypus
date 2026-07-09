@@ -93,6 +93,55 @@ class TestRunQuantumCircuitBackends:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Boundary validation of shots / n_qpus (contract C-3)
+#
+# Validation happens at the Python-facing boundary before any backend work, so
+# these do not need Aer or a QPU. n_qpus=0 previously reached
+# DistributeByShotsRun and panicked with a division by zero; shots<1 silently
+# ran a truncated (or empty) execution. Both must now raise a clear ValueError.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestShotsQpusValidation:
+    def test_zero_qpus_rejected(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="n_qpus must be >= 1"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="local", n_qpus=0
+            )
+
+    def test_zero_shots_rejected(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="shots must be >= 1"):
+            polypus.run_quantum_circuit(
+                qc, shots=0, infrastructure="local", n_qpus=1
+            )
+
+    def test_zero_shots_rejected_in_train(self, simple_expectation_fn):
+        """The same boundary guard protects the train() entry point."""
+        import polypus
+
+        qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
+        with pytest.raises(ValueError, match="shots must be >= 1"):
+            polypus.train(
+                qc,
+                polypus.DE(generations=2, population_size=4),
+                shots=0,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=1,
+                cores_per_qpu=1,
+                id="test_train_zero_shots",
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────
 

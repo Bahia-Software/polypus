@@ -142,6 +142,25 @@ fn is_native_backend(backend: &str) -> bool {
     matches!(backend, "polypus" | "statevector" | "polypus_statevector")
 }
 
+/// Validate the shot/QPU parameters at the Python-facing boundary, so the
+/// orchestration layer can assume `shots >= 1` and `n_qpus >= 1` (contract
+/// C-3). Rejecting here also avoids the division-by-zero panic that `n_qpus = 0`
+/// would otherwise trigger in `DistributeByShotsRun`. Shared by every entry
+/// point rather than duplicated per function.
+fn validate_shots_and_qpus(shots: u32, n_qpus: u32) -> PyResult<()> {
+    if shots < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "shots must be >= 1, got {shots}"
+        )));
+    }
+    if n_qpus < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n_qpus must be >= 1, got {n_qpus}"
+        )));
+    }
+    Ok(())
+}
+
 /// Interpret the `qc` argument of an entry point as a parameterised circuit
 /// template. A `polypus.Circuit` becomes [`CircuitSource::Native`] (binding
 /// will run GIL-free); any other object is assumed to be a Qiskit
@@ -196,6 +215,7 @@ pub fn run_quantum_circuit<'py>(
         "run_quantum_circuit called with qc: {qc:?}, shots: {shots}, \
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}"
     );
+    validate_shots_and_qpus(shots, n_qpus)?;
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) {
         if let BoundCircuit::Qiskit(_) = &bound_qc {
@@ -279,6 +299,7 @@ pub fn train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
 ) -> PyResult<PyObject> {
+    validate_shots_and_qpus(shots, n_qpus)?;
     // Native circuits know their parameter count — catch a mismatch with the
     // requested optimisation dimensions before any QPU work starts.
     let circuit_source = extract_circuit_source(&qc);
@@ -434,6 +455,7 @@ pub fn qml_train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
 ) -> PyResult<PyObject> {
+    validate_shots_and_qpus(shots, n_qpus)?;
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
     // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.

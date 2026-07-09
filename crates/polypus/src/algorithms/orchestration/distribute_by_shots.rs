@@ -15,21 +15,46 @@ impl AlgorithmTrait for DistributeByShotsRun {
     fn run(&self, mut args: AlgorithmArgs) -> pyo3::PyObject {
         let backend = Infrastructure::create_backend(&args.config);
 
-        // Divide shots across QPUs
-        args.config.shots /= args.config.n_qpus;
+        // Distribute shots across QPUs, conserving the total (contract C-3): the
+        // remainder `shots % n_qpus` is spread one extra shot per QPU over the
+        // first `remainder` QPUs, never dropped. `n_qpus >= 1` and `shots >= 1`
+        // are guaranteed by the Python-facing boundary validation, so no guard is
+        // duplicated here.
+        //
+        // `ExecutionConfig::shots` applies uniformly to a whole `run_circuits`
+        // batch, so we submit at most two uniform-shots batches: `remainder`
+        // circuits at `base + 1` shots, and the remaining `n_qpus - remainder`
+        // circuits at `base` shots. When `shots < n_qpus` the base is `0`; that
+        // group is skipped so no zero-shot circuits are ever submitted.
+        let shots = args.config.shots;
+        let n_qpus = args.config.n_qpus;
+        let base = shots / n_qpus;
+        let remainder = shots % n_qpus;
         log::debug!(
-            "distributing run across {} QPUs: {} shots per QPU",
-            args.config.n_qpus,
-            args.config.shots
+            "distributing {} shots across {} QPUs: {} QPU(s) at {} shots, {} QPU(s) at {} shots",
+            shots,
+            n_qpus,
+            remainder,
+            base + 1,
+            n_qpus - remainder,
+            base
         );
 
-        // Replicate the circuit once per QPU (cheap: refcount bump or string clone)
-        let qcs: Vec<_> = (0..args.config.n_qpus)
-            .map(|_| args.qcs[0].duplicate())
-            .collect();
-
-        // Run — native counts, one dict per QPU
-        let counts_vec = backend.run_circuits(&qcs, &args.config);
+        // Run — native counts, one dict per QPU. Replicating the circuit is cheap
+        // (refcount bump or string/struct clone).
+        let mut counts_vec: Vec<HashMap<String, u64>> = Vec::new();
+        if remainder > 0 {
+            let qcs: Vec<_> = (0..remainder).map(|_| args.qcs[0].duplicate()).collect();
+            args.config.shots = base + 1;
+            counts_vec.extend(backend.run_circuits(&qcs, &args.config));
+        }
+        if base > 0 {
+            let qcs: Vec<_> = (0..n_qpus - remainder)
+                .map(|_| args.qcs[0].duplicate())
+                .collect();
+            args.config.shots = base;
+            counts_vec.extend(backend.run_circuits(&qcs, &args.config));
+        }
 
         // Merge counts from all QPUs into a single dict
         let mut total: HashMap<String, u64> = HashMap::new();
