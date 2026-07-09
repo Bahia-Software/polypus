@@ -71,7 +71,7 @@ impl VoxelGrid {
                 message: format!("voxel_size_m must be finite and positive, got {voxel_size_m}"),
             });
         }
-        if dims.iter().any(|&d| d == 0) {
+        if dims.contains(&0) {
             return Err(PhysicsError::SimulationError {
                 message: format!("voxel grid dims must all be > 0, got {dims:?}"),
             });

@@ -136,7 +136,7 @@ fn spectrum_histogram() -> Result<(), PhysicsError> {
     let peak = bins.iter().copied().max().unwrap_or(1).max(1);
     for (i, &count) in bins.iter().enumerate() {
         let e_lo_kev = (lo + i as f64 * width) * 1e3;
-        let bar = (count * 50 / peak).max(0);
+        let bar = count * 50 / peak;
         println!("    {e_lo_kev:>5.0} keV | {} {count}", "█".repeat(bar));
     }
     println!("    → mean photon energy ≈ {mean_kev:.1} keV (well below the 100 keV endpoint)\n");

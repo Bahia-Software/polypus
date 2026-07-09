@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/Logo.png" alt="Polypus logo" width="350">
+  <img src="assets/logo.png" alt="Logo" width="350">
 </p>
 
 <h1 align="center">Polypus</h1>

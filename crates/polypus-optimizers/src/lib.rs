@@ -49,14 +49,16 @@
 //!     }
 //! }
 //!
-//! let outcome = AlgorithmDifferentialEvolution.optimize(AlgorithmDifferentialEvolutionArgs {
-//!     oracle: Box::new(Sphere),
-//!     population_size: 40,
-//!     generations: 200,
-//!     dimensions: 2,
-//!     tolerance: 1e-6,
-//!     seed: Some(7),
-//! });
+//! let outcome = AlgorithmDifferentialEvolution
+//!     .optimize(AlgorithmDifferentialEvolutionArgs {
+//!         oracle: Box::new(Sphere),
+//!         population_size: 40,
+//!         generations: 200,
+//!         dimensions: 2,
+//!         tolerance: 1e-6,
+//!         seed: Some(7),
+//!     })
+//!     .expect("valid arguments optimize successfully");
 //!
 //! // Converges close to the optimum (fitness 0).
 //! assert!(outcome.best_fitness > -1e-2, "fitness = {}", outcome.best_fitness);
@@ -68,16 +70,19 @@
 #![deny(clippy::all)]
 
 pub mod differential_evolution;
+pub mod error;
 pub mod objective;
 pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
 
 mod rng;
+mod util;
 
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
 };
+pub use error::OptimizerError;
 pub use objective::{EvaluationOracle, VarianceOracle};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["distribute_by_shots","single_run"]};

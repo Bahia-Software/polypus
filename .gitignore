@@ -2,6 +2,11 @@
 target/
 Cargo.lock
 
+# Generated rustdoc output. Docs are built and published by
+# .github/workflows/docs.yml (cargo doc -> target/doc -> GitHub Pages),
+# not committed here. This guards against re-committing a copied build.
+/docs/
+
 # Python build artifacts
 dist/
 build/
@@ -23,3 +28,4 @@ examples/plots_maxcut/
 # Logger output
 *.log
 logs/
+CLAUDE.md

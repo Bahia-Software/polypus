@@ -1,9 +1,11 @@
 //! Differential Evolution (DE) optimizer.
 
+use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
-use crate::rng::OptRng;
-use ndarray::{Array1, Array2, Axis};
+use crate::rng::with_seeded_rng;
+use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
+use ndarray::{Array1, Array2};
 use rand::{seq::SliceRandom, Rng};
 use std::f64::consts::PI;
 
@@ -42,10 +44,14 @@ impl AlgorithmDifferentialEvolution {
         String::from("Trains a variational quantum circuit using Differential Evolution.")
     }
 
+    /// The smallest valid `population_size`: each trial mutation samples 3
+    /// *distinct* other members, so at least 4 members are required.
+    const MIN_POPULATION: usize = 4;
+
     fn run_with_rng<R: Rng>(
         args: AlgorithmDifferentialEvolutionArgs,
         rng: &mut R,
-    ) -> OptimizationOutcome {
+    ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmDifferentialEvolutionArgs {
             oracle,
             population_size,
@@ -59,6 +65,17 @@ impl AlgorithmDifferentialEvolution {
         let max_gen = generations as usize;
         let dims = dimensions as usize;
 
+        // Precondition (documented on the struct): sampling 3 distinct other
+        // members needs `popsize >= 4`. Reject *before* any RNG draw or oracle
+        // call so the caller gets a typed error instead of the out-of-bounds
+        // `sel[2]` panic that fired one line into the trial loop.
+        if popsize < Self::MIN_POPULATION {
+            return Err(OptimizerError::PopulationTooSmall {
+                got: popsize,
+                min: Self::MIN_POPULATION,
+            });
+        }
+
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));
         for mut row in pop.outer_iter_mut() {
@@ -68,14 +85,10 @@ impl AlgorithmDifferentialEvolution {
         }
 
         // Evaluate initial population (fixes the bug of starting fitness at 0.0)
-        let init_candidates: Vec<Vec<f64>> = pop.outer_iter().map(|r| r.to_vec()).collect();
+        let init_candidates = rows_to_candidates(&pop);
         let mut fitness = oracle.evaluate_batch(&init_candidates);
-        let mut best_idx = fitness
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        check_oracle_len(init_candidates.len(), fitness.len())?;
+        let mut best_idx = argmax(&fitness);
         let mut best = pop.row(best_idx).to_vec();
 
         let mut iterations_run = 0usize;
@@ -107,46 +120,48 @@ impl AlgorithmDifferentialEvolution {
             // Evaluate all trials in a single oracle call.
             let trial_candidates: Vec<Vec<f64>> = trials.iter().map(|t| t.to_vec()).collect();
             let trial_fitness = oracle.evaluate_batch(&trial_candidates);
+            check_oracle_len(trial_candidates.len(), trial_fitness.len())?;
 
-            // Selection
+            // Selection: greedily accept every trial that beats its parent.
             for i in 0..popsize {
                 if trial_fitness[i] > fitness[i] {
                     fitness[i] = trial_fitness[i];
                     pop.row_mut(i).assign(&trials[i]);
-                    if trial_fitness[i] > fitness[best_idx] {
-                        best_idx = i;
-                        best = trials[i].to_vec();
-                    }
                 }
             }
 
-            let mean = pop
-                .mean_axis(Axis(0))
-                .expect("Failed to compute mean")
-                .sum();
-            let std: f64 = pop.std_axis(Axis(0), 0.0).iter().sum();
-            log::debug!("Generation {generation}: Mean: {mean:.4}, Std: {std:.4}");
-            if std < tolerance * mean {
-                log::debug!("Stopping early at generation {generation} due to convergence");
+            // Recompute the champion only after the whole selection pass, the
+            // same way PSO recomputes its global best (src/pso.rs:136-138).
+            // Tracking best_idx/best *inside* the per-i branch hit an ordering
+            // trap: when i == best_idx, fitness[best_idx] was mutated on the
+            // line above before the `trial_fitness[i] > fitness[best_idx]`
+            // check, so the comparison became `x > x` (always false) and the
+            // champion was left pointing at a stale vector even though its own
+            // slot had improved — breaking the C-5 invariant
+            // fitness[best_idx] == f(best). argmax reads the just-updated
+            // fitness, so best_params and best_fitness always agree.
+            best_idx = argmax(&fitness);
+            best = pop.row(best_idx).to_vec();
+
+            if population_converged(&pop, tolerance, generation) {
                 converged = true;
                 break;
             }
         }
 
-        OptimizationOutcome {
+        Ok(OptimizationOutcome {
             best_fitness: fitness[best_idx],
             best_params: best,
             iterations_run,
             converged,
-        }
+        })
     }
 }
 
 impl Optimizer for AlgorithmDifferentialEvolution {
     type Args = AlgorithmDifferentialEvolutionArgs;
 
-    fn optimize(&self, args: Self::Args) -> OptimizationOutcome {
-        let mut rng = OptRng::from_seed(args.seed);
-        Self::run_with_rng(args, &mut rng)
+    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
     }
 }

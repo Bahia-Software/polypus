@@ -22,7 +22,7 @@ pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler}
 pub enum Infrastructure {
     Local,
     Cunqa,
-    /// CESGA QMIO real QPU (see [`QmioBackend`]). The variant always exists so
+    /// CESGA QMIO real QPU (see `QmioBackend`). The variant always exists so
     /// that selecting `"qmio"` produces a clear "requires `--features qmio`"
     /// error rather than an `Unknown infrastructure` panic when the feature is
     /// disabled; the backend itself is only built with the feature on.
@@ -156,8 +156,10 @@ impl BoundCircuit {
     ///
     /// The transpiler is intentionally confined to the GIL-free native domain:
     ///
-    /// - [`Native`](Self::Native) is transpiled directly on its [`ConcreteCircuit`].
-    /// - [`Qasm2`](Self::Qasm2) is parsed back to a [`ConcreteCircuit`],
+    /// - [`Native`](Self::Native) is transpiled directly on its
+    ///   [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit).
+    /// - [`Qasm2`](Self::Qasm2) is parsed back to a
+    ///   [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit),
     ///   transpiled, and re-emitted as OpenQASM 2.0. This is *best-effort*: if the
     ///   QASM cannot be parsed (an unsupported construct, a non-native program),
     ///   the original text is returned untouched rather than panicking, so a
