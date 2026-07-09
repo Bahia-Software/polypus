@@ -495,10 +495,12 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate contains an unbound [`GateParam::Param`]. This cannot
-    /// happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`]; it is only possible when
-    /// the `gates` field was assembled manually.
+    /// Panics if a gate parameter cannot be resolved: either an unbound
+    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
+    /// value (`NaN` or infinity). Neither can happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
+    /// values at binding time); both are only possible when the `gates` field
+    /// was assembled manually.
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
             "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
@@ -514,10 +516,12 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate contains an unbound [`GateParam::Param`]. This cannot
-    /// happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`]; it is only possible when
-    /// the `gates` field was assembled manually.
+    /// Panics if a gate parameter cannot be resolved: either an unbound
+    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
+    /// value (`NaN` or infinity). Neither can happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
+    /// values at binding time); both are only possible when the `gates` field
+    /// was assembled manually.
     pub fn to_qir(&self) -> String {
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
             "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
