@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ⏳ to add | `disconnect` reads `slurm_job_id`, not `family` (C1) |
 | C-2 | Gate vocabulary symmetry | round-trip + QIR-vs-sim equivalence | ⏳ to add | `cp` missing from importer; QIR decomp not equivalent (C2, C3) |
-| C-3 | Measurement counts format | shot-conservation + last-write-wins | ⏳ to add | shots dropped on uneven distribution (C6) |
+| C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | rejection tests (sim + QIR) | ⏳ to add | measurement semantics (C5) |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
@@ -138,7 +138,9 @@ test (to be added; see `bug_repro.rs` from the audit for the seed).
   measurement wins** (OpenQASM 2.0 register semantics).
 
 **Enforcing test:** shot-conservation assertion in the orchestration tests
-(to be added; audit C6) and last-write-wins case in `polypus-sim` tests.
+(`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
+public-API case in `tests/python/test_local_run.py`; audit C6) and
+last-write-wins case in `polypus-sim` tests (to be added).
 
 ---
 

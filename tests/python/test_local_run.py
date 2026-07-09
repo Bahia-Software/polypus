@@ -81,3 +81,23 @@ class TestRunQuantumCircuitMultipleQpus:
             bell_circuit, shots=shots, infrastructure="local", n_qpus=4
         )
         assert sum(result.values()) == shots
+
+    def test_distributed_total_shots_not_divisible(self, bell_circuit):
+        """Contract C-3: shots % n_qpus != 0 must still conserve the total.
+        1000 / 3 leaves a remainder of 1; the old `shots /= n_qpus` ran 999."""
+        import polypus
+        shots = 1000
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=shots, infrastructure="local", n_qpus=3
+        )
+        assert sum(result.values()) == shots
+
+    def test_distributed_total_shots_fewer_than_qpus(self, bell_circuit):
+        """Contract C-3 degenerate case: shots < n_qpus. 5 shots on 8 QPUs must
+        run exactly 5 shots (one-per-QPU on the first 5), not 0 (5 // 8 == 0)."""
+        import polypus
+        shots = 5
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=shots, infrastructure="local", n_qpus=8
+        )
+        assert sum(result.values()) == shots
