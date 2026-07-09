@@ -127,6 +127,28 @@ fn test_parameterized_circuit_assign_parameters_param_index_out_of_bounds() {
 }
 
 #[test]
+fn test_parameterized_circuit_assign_parameters_rejects_non_finite() {
+    let qc = ParameterizedCircuit::new(2)
+        .rx(0, Param(0))
+        .u(1, Param(1), Param(2), Param(3));
+    assert_eq!(qc.num_params, 4);
+
+    // A caller-supplied non-finite value bound to a `Param` is rejected.
+    assert_eq!(
+        qc.assign_parameters(&[f64::NAN, 0.1, 0.2, 0.3]),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        qc.assign_parameters(&[0.1, f64::INFINITY, 0.2, 0.3]),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        qc.assign_parameters(&[0.1, 0.2, 0.3, f64::NEG_INFINITY]),
+        Err(CircuitError::NonFiniteParam)
+    );
+}
+
+#[test]
 fn test_parameterized_circuit_num_clbits_no_measurements() {
     let qc = ParameterizedCircuit::new(2);
 
@@ -395,6 +417,101 @@ fn test_parameterized_circuit_push_out_of_range() {
 #[should_panic]
 fn test_parameterized_circuit_push_same_qubits() {
     let _qc = ParameterizedCircuit::new(2).push(GateInstruction::Cx(0, 0));
+}
+
+/// Mirror of `polypus-sim`'s `non_finite_angle_is_rejected`
+/// (crates/polypus-sim/tests/gate_matrices.rs): the circuit layer rejects a
+/// non-finite fixed angle with its own error type, matching the simulator's
+/// reference behaviour (contract C-2).
+#[test]
+fn non_finite_angle_is_rejected() {
+    let mut qc = ParameterizedCircuit::new(1);
+    let err = qc
+        .try_push(GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::NAN),
+        })
+        .unwrap_err();
+    assert_eq!(err, CircuitError::NonFiniteParam);
+}
+
+#[test]
+fn test_parameterized_circuit_try_push_rejects_non_finite() {
+    let mut qc = ParameterizedCircuit::new(1);
+
+    // Single-angle gate: infinity is rejected as well as NaN.
+    assert_eq!(
+        qc.try_push(GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::INFINITY),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+
+    // Multi-angle U gate: a non-finite value in any of the three slots is
+    // rejected (NaN in phi, then -inf in theta).
+    assert_eq!(
+        qc.try_push(GateInstruction::U {
+            qubit: 0,
+            theta: GateParam::Fixed(1.0),
+            phi: GateParam::Fixed(f64::NAN),
+            lam: GateParam::Fixed(0.5),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::U {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::NEG_INFINITY),
+            phi: GateParam::Fixed(1.0),
+            lam: GateParam::Fixed(0.5),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+
+    // A finite `Param` reference is unaffected — construction-time validation
+    // only inspects `Fixed` angles.
+    assert_eq!(
+        qc.try_push(GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(0),
+        }),
+        Ok(())
+    );
+
+    // Only the valid gate made it into the circuit.
+    assert_eq!(qc.gates.len(), 1);
+}
+
+/// Regression for issue #38 (acceptance criterion): a non-finite angle must
+/// never reach the QASM exporter as a literal `NaN`/`inf` string. Both a bound
+/// free parameter and a hand-assembled fixed angle are rejected at export.
+#[test]
+fn test_export_rejects_non_finite_angle() {
+    // Route 1: a free parameter bound to a non-finite value.
+    let parameterized = ParameterizedCircuit::new(1).rx(0, Param(0));
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            parameterized.to_qasm2_with_params(&[bad]),
+            Err(CircuitError::NonFiniteParam)
+        );
+    }
+
+    // Route 2: a circuit assembled by hand with a fixed non-finite angle,
+    // bypassing the builder's construction-time guard — the exporter itself
+    // still refuses it, so no `NaN`/`inf` literal is ever serialised.
+    let hand_assembled = ParameterizedCircuit {
+        num_qubits: 1,
+        num_params: 0,
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::INFINITY),
+        }],
+    };
+    assert_eq!(
+        hand_assembled.to_qasm2_with_params(&[]),
+        Err(CircuitError::NonFiniteParam)
+    );
 }
 
 // ConcreteCircuit

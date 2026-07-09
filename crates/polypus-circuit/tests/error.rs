@@ -53,6 +53,16 @@ fn test_circuit_error_display_identical_qubits() {
 }
 
 #[test]
+fn test_circuit_error_display_non_finite_param() {
+    let err = CircuitError::NonFiniteParam;
+
+    let msg = format!("{err}");
+
+    assert!(msg.contains("non-finite"));
+    assert!(msg.contains("NaN or infinity"));
+}
+
+#[test]
 fn test_circuit_error_display_parse() {
     let err = CircuitError::Parse {
         line: 10,

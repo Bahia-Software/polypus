@@ -33,18 +33,23 @@ impl From<f64> for GateParam {
 
 impl GateParam {
     /// Resolve to a concrete value, looking up `Param` indices in `params`.
+    ///
+    /// Rejects a non-finite result — whether from a `Fixed` angle or from a
+    /// caller-supplied value bound to a `Param` — with
+    /// [`CircuitError::NonFiniteParam`], since `NaN`/infinity is not a valid
+    /// rotation angle (mirrors the simulator, contract C-2).
     pub(crate) fn resolve(&self, params: &[f64]) -> Result<f64, CircuitError> {
-        match *self {
-            GateParam::Fixed(v) => Ok(v),
-            GateParam::Param(i) => {
-                params
-                    .get(i)
-                    .copied()
-                    .ok_or(CircuitError::ParamIndexOutOfBounds {
-                        index: i,
-                        num_params: params.len(),
-                    })
-            }
+        let value = match *self {
+            GateParam::Fixed(v) => v,
+            GateParam::Param(i) => *params.get(i).ok_or(CircuitError::ParamIndexOutOfBounds {
+                index: i,
+                num_params: params.len(),
+            })?,
+        };
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(CircuitError::NonFiniteParam)
         }
     }
 }
@@ -214,13 +219,26 @@ mod tests {
 
     #[test]
     fn test_resolve_special_values() {
+        // A `Fixed` non-finite angle is rejected directly.
+        assert_eq!(
+            GateParam::Fixed(f64::NAN).resolve(&[]),
+            Err(CircuitError::NonFiniteParam)
+        );
+        assert_eq!(
+            GateParam::Fixed(f64::INFINITY).resolve(&[]),
+            Err(CircuitError::NonFiniteParam)
+        );
+
+        // A caller-supplied non-finite value bound to a `Param` is also rejected.
         let params = vec![f64::INFINITY, f64::NAN];
-
-        let inf = GateParam::Param(0).resolve(&params).unwrap();
-        let nan = GateParam::Param(1).resolve(&params).unwrap();
-
-        assert!(inf.is_infinite());
-        assert!(nan.is_nan());
+        assert_eq!(
+            GateParam::Param(0).resolve(&params),
+            Err(CircuitError::NonFiniteParam)
+        );
+        assert_eq!(
+            GateParam::Param(1).resolve(&params),
+            Err(CircuitError::NonFiniteParam)
+        );
     }
 
     #[test]

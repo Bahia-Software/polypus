@@ -352,6 +352,23 @@ fn rejects_reset_and_if() {
 }
 
 #[test]
+fn rejects_division_by_zero_in_parameter() {
+    let src = "OPENQASM 2.0;\nqreg q[1];\nrx(1/0) q[0];\n";
+    assert_parse_err(src, "division by zero", 3);
+}
+
+#[test]
+fn rejects_non_finite_parameter_expression() {
+    // ln(0) = -inf: caught by the general finiteness guard.
+    let src = "OPENQASM 2.0;\nqreg q[1];\nrx(ln(0)) q[0];\n";
+    assert_parse_err(src, "non-finite", 3);
+
+    // 0^-1 = inf via powf: same guard, different route.
+    let src = "OPENQASM 2.0;\nqreg q[1];\nrx(0^-1) q[0];\n";
+    assert_parse_err(src, "non-finite", 3);
+}
+
+#[test]
 fn rejects_truncated_input() {
     let src = "OPENQASM 2.0;\nqreg q[1];\nh q[0]";
     assert!(matches!(
