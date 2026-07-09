@@ -503,7 +503,7 @@ impl ConcreteCircuit {
     /// was assembled manually.
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
         )
     }
 
@@ -524,7 +524,7 @@ impl ConcreteCircuit {
     /// was assembled manually.
     pub fn to_qir(&self) -> String {
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
         )
     }
 
