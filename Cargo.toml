@@ -19,17 +19,17 @@ resolver = "2"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
-version = "0.4.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
 license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
 
 [workspace.dependencies]
-polypus-circuit    = { path = "crates/polypus-circuit", version = "0.4.0" }
-polypus-physics    = { path = "crates/polypus-physics", version = "0.4.0" }
-polypus-sim        = { path = "crates/polypus-sim", version = "0.4.0" }
-polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.4.0" }
-polypus-logger     = { path = "crates/polypus-logger", version = "0.4.0" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.6.0" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.6.0" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.6.0" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.6.0" }
+polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
 
 # Shared external dependencies pinned once for the whole workspace.
 # `log` is the logging facade every crate emits through; the concrete sink lives
