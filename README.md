@@ -233,7 +233,7 @@ Round-trip guarantee (verified by tests): for any circuit produced by this libra
 
 ## Credits
 - Diego Beltrán Fernández Prada
-- Víctor Sóñora Pombo 
+- Víctor Sóñora Pombo
 - Sergio Figueiras Gómez
 - Miguel Boubeta Martínez
 - Galicia Supercomputing Center (CESGA)
