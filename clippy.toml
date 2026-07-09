@@ -4,7 +4,7 @@
 # (deny/warn/allow) are set in CI (`-- -D warnings`) and, optionally, in the
 # `[workspace.lints]` table of the root Cargo.toml (see AI_GUIDELINES §7).
 
-# Polypus is pre-1.0 (0.4.0) and under active development: don't hold back lints
+# Polypus is pre-1.0 (0.6.0) and under active development: don't hold back lints
 # just to preserve a frozen public API.
 avoid-breaking-exported-api = false
 

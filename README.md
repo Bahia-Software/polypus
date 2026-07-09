@@ -51,7 +51,7 @@ It is built for researchers and engineers who need to:
 - swap between a local simulator, CESGA's CUNQA platform, or CESGA's QMIO real QPU without touching algorithm code,
 - keep a Python-friendly API while getting Rust-level performance on the hot paths (parameter binding, batched simulation).
 
-> **Status:** Polypus is under active development (current version: `0.4.0`) and is not yet published on PyPI. Install from source — see [Installation](#installation).
+> **Status:** Polypus is under active development (current version: `0.6.0`) and is not yet published on PyPI. Install from source — see [Installation](#installation).
 
 ## Key Features
 
@@ -325,7 +325,7 @@ If Polypus is useful in your research, please cite it:
   title   = {{Polypus: A Distributed Quantum Computing Library}},
   year    = {2026},
   url     = {https://github.com/Bahia-Software/polypus},
-  version = {0.4.0}
+  version = {0.6.0}
 }
 ```
 
