@@ -320,7 +320,7 @@ if __name__ == "__main__":
             nodes=NUM_NODES,
             cores_per_qpu=CORES_PER_QPU,
             id=id,
-            sim_method=de_sim_method)
+            sim_method=de_sim_method).best_params
         elapsed = time.time() - tic
 
         counts, best_bitstring, cut, approximation_ratio = final_evaluation(
@@ -344,7 +344,7 @@ if __name__ == "__main__":
             infrastructure=infrastructure,
             nodes=NUM_NODES,
             cores_per_qpu=CORES_PER_QPU,
-            id=id)
+            id=id).best_params
         elapsed = time.time() - tic
 
         counts, best_bitstring, cut, approximation_ratio = final_evaluation(
@@ -378,7 +378,7 @@ if __name__ == "__main__":
             infrastructure=infrastructure,
             nodes=NUM_NODES,
             cores_per_qpu=CORES_PER_QPU,
-            id=id)
+            id=id).best_params
         elapsed = time.time() - tic
 
         # Final evaluation uses the QNG circuit (alternating parameterisation)
