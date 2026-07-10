@@ -104,10 +104,10 @@ fixed_circuit = build_qaoa([0.8], [0.4])
 
 counts_aer = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="aer"
-).counts[0]
+)[0]
 counts_native = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="polypus"
-).counts[0]
+)[0]
 
 tvd = total_variation(counts_aer, counts_native, SHOTS)
 print(f"\nTotal-variation distance (Aer vs polypus): {tvd:.4f}")
@@ -186,16 +186,14 @@ train_kw = dict(
 
 def time_train(backend):
     t0 = time.perf_counter()
-    result = polypus.train(
+    params = polypus.train(
         ansatz,
         polypus.DE(generations=15, population_size=20, tolerance=1e-6),
         id=f"qaoa_{backend}",
         backend=backend,
         **train_kw,
     )
-    # train now returns a TrainResult (contract C-7); the tuned angles are in
-    # .best_params, alongside .best_fitness / .iterations_run / .converged / .seed.
-    return result.best_params, time.perf_counter() - t0
+    return params, time.perf_counter() - t0
 
 
 def evaluate_solution(params, backend):
@@ -208,7 +206,7 @@ def evaluate_solution(params, backend):
     bound = ansatz.to_qasm2(list(params))
     counts = polypus.run_quantum_circuit(
         bound, shots=SHOTS, infrastructure="local", backend=backend
-    ).counts[0]
+    )[0]
     mean_cut = sum(maxcut_value(k) * v for k, v in counts.items()) / SHOTS
     best_cut = max(maxcut_value(k) for k in counts)
     return mean_cut, best_cut

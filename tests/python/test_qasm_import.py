@@ -95,7 +95,7 @@ class TestRunImportedCircuit:
         result = polypus.run_quantum_circuit(
             imported, shots=1000, infrastructure="local"
         )
-        counts = result.counts[0]
+        counts = result[0]
         assert set(counts.keys()).issubset({"00", "11"})
         assert sum(counts.values()) == 1000
         assert abs(counts.get("00", 0) - 500) < 150

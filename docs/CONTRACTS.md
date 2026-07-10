@@ -26,7 +26,6 @@ Rules of the road:
 | C-4 | Terminal measurement placement | rejection tests (sim + QIR) | ⏳ to add | measurement semantics (C5) |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -144,12 +143,6 @@ test (to be added; see `bug_repro.rs` from the audit for the seed).
 - If several `measure` instructions write the same classical bit, the **last
   measurement wins** (OpenQASM 2.0 register semantics).
 
-The per-circuit dict format above is unchanged by C-7: `run_quantum_circuit`
-now returns that payload as the `counts` attribute of a `RunResult` wrapper
-(`list[dict]` for a single-QPU run, a merged `dict` for `n_qpus > 1`), so
-callers read `result.counts` rather than the bare value. The dict shape,
-bit order and shot-conservation rule are exactly as specified here.
-
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
 public-API case in `tests/python/test_local_run.py`; audit C6) and
@@ -200,62 +193,3 @@ coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
 **Enforcing check:** version-coherence step in `.github/workflows/hygiene.yml`.
-
----
-
-## C-7 · Seeding & run manifest (Python entry points)
-
-This contract governs the outer Rust↔Python boundary of the three public entry
-points `polypus.run_quantum_circuit`, `polypus.train` and `polypus.qml.train`:
-their `seed` kwarg and their return shape. (It is distinct from C-1, which
-freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
-
-### The `seed` kwarg
-
-- **`run_quantum_circuit(..., seed: int | None = None)`** seeds shot sampling,
-  which **only the native statevector backend** performs in-process:
-  - With the native backend (`infrastructure="local"`, `backend="polypus"`): an
-    explicit `seed` is used directly and reproduces the counts byte-for-byte
-    across calls; `seed=None` draws a fresh seed from OS entropy, so repeated
-    calls produce **independent** noise (never the run-`id`-derived repetition
-    that motivated this contract). The run `id` is decoupled from the RNG — it
-    is only a logging/temp-file/SLURM label.
-  - With any other backend (`backend="aer"`, or `infrastructure` `"cunqa"` /
-    `"qmio"`): passing an explicit `seed` raises `ValueError`. Polypus does not
-    seed these paths (Aer's own `seed_simulator` is not wired), so silently
-    accepting a seed would give false confidence in reproducibility. `seed=None`
-    behaves exactly as before.
-- **`train(..., seed=None)` / `qml.train(..., seed=None)`** seed the optimizer's
-  RNG and are **always accepted**, for every backend, because the seed's primary
-  job (making population init / mutation deterministic, inside the pure-Rust
-  `polypus-optimizers`) is independent of which backend evaluates the oracle.
-  Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG` instance; otherwise a fresh OS-entropy value. On the
-  native backend the resolved seed *also* seeds shot sampling, so a
-  native-backend training run is reproducible end-to-end; `qml.train` is
-  Qiskit/Aer-only (native rejected) and Aer shot noise is unseeded, so its
-  reproducibility guarantee covers the optimizer trajectory given a deterministic
-  oracle, not Aer's sampling.
-
-### The run manifest (return shapes)
-
-- `run_quantum_circuit` returns a **`RunResult`** exposing:
-  `counts` (the C-3 payload — `list[dict]` for one QPU, merged `dict` for
-  `n_qpus > 1`), `id` (str), `seed` (`int | None`; the effective seed used, or
-  `None` for a non-native backend), `backend` (str), `infrastructure` (str).
-- `train` / `qml.train` return a **`TrainResult`** exposing the full
-  optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
-  `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
-  seed used). This replaces the former bare `list[float]`, which discarded
-  fitness, iteration count and the convergence flag.
-
-The effective `seed` on both result types is what lets a caller log a run and
-replay it exactly.
-
-**Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
-end-to-end: native reproducibility, entropy variation, the non-native
-rejection, and the returned manifest/outcome fields), plus the Rust tests in
-`crates/polypus/src/bindings/mod.rs` (native seed round-trip through
-`run_quantum_circuit`, the rejection path, and the seed-resolution precedence /
-optimizer determinism) and `crates/polypus/src/infrastructure/native.rs`
-(same-seed reproduces / omitted-seed differs at the backend level).

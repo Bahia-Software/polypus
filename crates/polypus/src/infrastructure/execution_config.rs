@@ -35,28 +35,6 @@ pub struct ExecutionConfig {
     /// [`IdentityTranspiler`](crate::infrastructure::IdentityTranspiler) it has
     /// no effect on results.
     pub opt_level: OptLevel,
-    /// Explicit RNG seed for shot sampling.
-    ///
-    /// Only the native statevector backend
-    /// ([`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend))
-    /// consumes this: it seeds the per-circuit sampling stream, making counts
-    /// reproducible. The Python-facing layer resolves it to `Some` whenever the
-    /// native backend runs (user-supplied value or a fresh OS-entropy draw), so
-    /// the effective seed can be reported back in the run manifest (contract
-    /// C-7). Every other backend ignores it; `None` means "no explicit seed"
-    /// and the native backend falls back to a fresh OS-entropy draw. Decoupled
-    /// from [`id`](Self::id), which is only a logging/temp-file/SLURM label.
-    pub seed: Option<u64>,
-}
-
-/// Draw a fresh 64-bit seed from OS entropy.
-///
-/// Used as the default when no explicit seed is supplied, so an omitted seed
-/// produces genuine (independent) shot noise across runs rather than repeating a
-/// value derived from the run [`id`](ExecutionConfig::id).
-pub(crate) fn random_seed() -> u64 {
-    use rand::RngCore;
-    rand::rngs::OsRng.next_u64()
 }
 
 /// Provider-specific configuration.
