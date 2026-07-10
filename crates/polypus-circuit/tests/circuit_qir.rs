@@ -5,7 +5,9 @@
 //! The optional `qir_base_profile_module_is_valid_llvm` test additionally
 //! parses the output with `llvm-as` when it is available on the host.
 
-use polypus_circuit::{CircuitError, GateInstruction, Param, ParameterizedCircuit};
+use polypus_circuit::{
+    CircuitError, ConcreteCircuit, GateInstruction, GateParam, Param, ParameterizedCircuit,
+};
 
 /// Collect just the `call void @...` instruction lines (without the leading
 /// indentation), in order — handy for asserting on exact gate sequences.
@@ -241,6 +243,21 @@ fn concrete_circuit_to_qir_matches_parameterized() {
     let pc = ParameterizedCircuit::new(1).rx(0, 0.5).measure(0, 0);
     let concrete = pc.assign_parameters(&[]).unwrap();
     assert_eq!(concrete.to_qir(), pc.to_qir_with_params(&[]).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn concrete_circuit_to_qir_panics_on_non_finite_fixed_angle() {
+    // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
+    // QIR exporter still refuses a non-finite fixed angle rather than emitting it.
+    let qc = ConcreteCircuit {
+        num_qubits: 1,
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::INFINITY),
+        }],
+    };
+    let _ = qc.to_qir();
 }
 
 #[test]

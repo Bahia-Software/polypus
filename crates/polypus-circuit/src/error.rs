@@ -14,6 +14,12 @@ pub enum CircuitError {
     /// the provided parameter values. This can only happen when the circuit
     /// was assembled manually (the fluent builder keeps `num_params` in sync).
     ParamIndexOutOfBounds { index: usize, num_params: usize },
+    /// A gate parameter resolved to a non-finite value (`NaN` or infinity),
+    /// which is not a valid rotation angle. Rejected both at construction (a
+    /// `Fixed` angle) and at binding time (a caller-supplied value bound to a
+    /// `Param`), matching the native simulator's reference behaviour
+    /// (contract C-2).
+    NonFiniteParam,
     /// A gate addresses a qubit index `>= num_qubits`.
     QubitOutOfRange { qubit: usize, num_qubits: usize },
     /// A two-qubit gate was given the same qubit twice.
@@ -44,6 +50,10 @@ impl fmt::Display for CircuitError {
             CircuitError::ParamIndexOutOfBounds { index, num_params } => write!(
                 f,
                 "gate references parameter index {index}, but only {num_params} parameter value(s) are available"
+            ),
+            CircuitError::NonFiniteParam => write!(
+                f,
+                "gate parameter resolved to a non-finite value (NaN or infinity)"
             ),
             CircuitError::QubitOutOfRange { qubit, num_qubits } => write!(
                 f,

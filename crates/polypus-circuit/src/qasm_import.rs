@@ -561,7 +561,15 @@ impl Parser {
             let mut values = Vec::new();
             if self.peek() != Some(&Tok::RParen) {
                 loop {
-                    values.push(self.expr()?);
+                    let line = self.line();
+                    let value = self.expr()?;
+                    if !value.is_finite() {
+                        return Err(err(
+                            line,
+                            "parameter expression evaluated to a non-finite value (NaN or infinity)",
+                        ));
+                    }
+                    values.push(value);
                     match self.next("',' or ')'")? {
                         (Tok::Comma, _) => continue,
                         (Tok::RParen, _) => break,
@@ -800,8 +808,13 @@ impl Parser {
                     v *= self.factor()?;
                 }
                 Some(Tok::Slash) => {
+                    let line = self.line();
                     self.pos += 1;
-                    v /= self.factor()?;
+                    let divisor = self.factor()?;
+                    if divisor == 0.0 {
+                        return Err(err(line, "division by zero in parameter expression"));
+                    }
+                    v /= divisor;
                 }
                 _ => return Ok(v),
             }

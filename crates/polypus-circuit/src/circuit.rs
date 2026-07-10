@@ -110,6 +110,19 @@ impl ParameterizedCircuit {
         }
     }
 
+    /// Reject a `Fixed` angle that is not finite (`NaN` or infinity) at
+    /// construction time. `Param` angles are unchecked here — their values are
+    /// only known at binding time, where [`GateParam::resolve`] enforces the
+    /// same rule.
+    fn check_finite(param: &GateParam) -> Result<(), CircuitError> {
+        if let GateParam::Fixed(v) = param {
+            if !v.is_finite() {
+                return Err(CircuitError::NonFiniteParam);
+            }
+        }
+        Ok(())
+    }
+
     /// Fallible version of [`push`](Self::push): append a raw
     /// [`GateInstruction`], validating qubit indices and keeping `num_params`
     /// in sync. Use this from host languages (e.g. Python bindings) where
@@ -128,6 +141,7 @@ impl ParameterizedCircuit {
             | GateInstruction::Ry { qubit, theta }
             | GateInstruction::Rz { qubit, theta } => {
                 self.check_qubit(*qubit)?;
+                Self::check_finite(theta)?;
                 let theta = *theta;
                 self.track_param(&theta);
             }
@@ -136,11 +150,13 @@ impl ParameterizedCircuit {
             }
             GateInstruction::Rzz { q0, q1, theta } | GateInstruction::Rxx { q0, q1, theta } => {
                 self.check_pair(*q0, *q1)?;
+                Self::check_finite(theta)?;
                 let theta = *theta;
                 self.track_param(&theta);
             }
             GateInstruction::Cp { q0, q1, theta } => {
                 self.check_pair(*q0, *q1)?;
+                Self::check_finite(theta)?;
                 let theta = *theta;
                 self.track_param(&theta);
             }
@@ -151,6 +167,9 @@ impl ParameterizedCircuit {
                 lam,
             } => {
                 self.check_qubit(*qubit)?;
+                Self::check_finite(theta)?;
+                Self::check_finite(phi)?;
+                Self::check_finite(lam)?;
                 let (theta, phi, lam) = (*theta, *phi, *lam);
                 self.track_param(&theta);
                 self.track_param(&phi);
@@ -175,9 +194,9 @@ impl ParameterizedCircuit {
     ///
     /// # Panics
     ///
-    /// Panics on out-of-range qubit indices or a two-qubit gate whose qubits
-    /// coincide (see type-level docs). For a fallible variant, use
-    /// [`try_push`](Self::try_push).
+    /// Panics on out-of-range qubit indices, a two-qubit gate whose qubits
+    /// coincide (see type-level docs), or a non-finite fixed angle (`NaN` or
+    /// infinity). For a fallible variant, use [`try_push`](Self::try_push).
     pub fn push(mut self, gate: GateInstruction) -> Self {
         if let Err(e) = self.try_push(gate) {
             panic!("{e}");
@@ -476,13 +495,15 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate contains an unbound [`GateParam::Param`]. This cannot
-    /// happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`]; it is only possible when
-    /// the `gates` field was assembled manually.
+    /// Panics if a gate parameter cannot be resolved: either an unbound
+    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
+    /// value (`NaN` or infinity). Neither can happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
+    /// values at binding time); both are only possible when the `gates` field
+    /// was assembled manually.
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
         )
     }
 
@@ -495,13 +516,15 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate contains an unbound [`GateParam::Param`]. This cannot
-    /// happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`]; it is only possible when
-    /// the `gates` field was assembled manually.
+    /// Panics if a gate parameter cannot be resolved: either an unbound
+    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
+    /// value (`NaN` or infinity). Neither can happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
+    /// values at binding time); both are only possible when the `gates` field
+    /// was assembled manually.
     pub fn to_qir(&self) -> String {
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
         )
     }
 

@@ -115,6 +115,12 @@ Corollaries:
   reproduces the same instruction sequence and parameters as `c`.
 - Adding a gate is a **four-place change** plus a row in the equivalence test;
   a PR adding it in fewer than four places must be rejected.
+- **Non-finite parameters are rejected uniformly.** A `NaN` or infinite angle
+  is never a valid parameter value: circuit construction and parameter binding
+  reject it (`CircuitError::NonFiniteParam`), the OpenQASM importer rejects it
+  at parse time (`CircuitError::Parse`), the QASM and QIR exporters refuse to
+  serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
+  No producer may emit, and no consumer may accept, a non-finite parameter.
 
 *Known breaks (audit C2, C3): `cp` is missing from the importer, and its QIR
 decomposition is not unitarily equivalent.*

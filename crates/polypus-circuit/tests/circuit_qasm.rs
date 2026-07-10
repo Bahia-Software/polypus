@@ -293,6 +293,21 @@ fn concrete_circuit_panics_on_unbound_param() {
     let _ = qc.to_qasm2();
 }
 
+#[test]
+#[should_panic(expected = "non-finite")]
+fn concrete_circuit_panics_on_non_finite_fixed_angle() {
+    // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
+    // exporter still refuses a non-finite fixed angle rather than serialising it.
+    let qc = ConcreteCircuit {
+        num_qubits: 1,
+        gates: vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::NAN),
+        }],
+    };
+    let _ = qc.to_qasm2();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Real-world case: QAOA MaxCut on 4 qubits (ring graph), p = 1
 // ─────────────────────────────────────────────────────────────────────────────
