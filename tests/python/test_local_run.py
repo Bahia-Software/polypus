@@ -14,64 +14,75 @@ pytestmark = pytest.mark.integration
 
 
 class TestRunQuantumCircuitSingleQpu:
-    """n_qpus=1 goes through AlgorithmSingleRun which returns the raw runner
-    output: a list with one counts dict."""
+    """n_qpus=1 goes through AlgorithmSingleRun. The counts payload (a list with
+    one counts dict) is exposed as ``RunResult.counts`` (contract C-7)."""
 
     def test_returns_list(self, bell_circuit):
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
-        assert isinstance(result, list), f"Expected list, got {type(result)}"
+        assert isinstance(result.counts, list), f"Expected list, got {type(result.counts)}"
 
     def test_returns_one_element(self, bell_circuit):
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
-        assert len(result) == 1
+        assert len(result.counts) == 1
 
     def test_element_is_dict(self, bell_circuit):
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
-        assert isinstance(result[0], dict)
+        assert isinstance(result.counts[0], dict)
 
     def test_only_bell_states(self, bell_circuit):
         """A Bell circuit can only produce '00' or '11'."""
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=1000, infrastructure="local")
-        assert set(result[0].keys()).issubset({"00", "11"}), (
-            f"Unexpected bitstrings in Bell result: {result[0].keys()}"
+        assert set(result.counts[0].keys()).issubset({"00", "11"}), (
+            f"Unexpected bitstrings in Bell result: {result.counts[0].keys()}"
         )
 
     def test_total_shots(self, bell_circuit):
         import polypus
         shots = 512
         result = polypus.run_quantum_circuit(bell_circuit, shots=shots, infrastructure="local")
-        assert sum(result[0].values()) == shots
+        assert sum(result.counts[0].values()) == shots
 
     def test_both_bell_states_observed(self, bell_circuit):
         """With 1000 shots both '00' and '11' should appear."""
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=1000, infrastructure="local")
-        counts = result[0]
+        counts = result.counts[0]
         assert "00" in counts and "11" in counts
+
+    def test_manifest_defaults_for_aer(self, bell_circuit):
+        """The manifest records the run metadata; the default Aer backend is not
+        seeded, so the reported seed is None (contract C-7)."""
+        import polypus
+        result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
+        assert result.backend == "aer"
+        assert result.infrastructure == "local"
+        assert result.seed is None
 
 
 class TestRunQuantumCircuitMultipleQpus:
-    """n_qpus>1 goes through DistributeByShotsRun which merges partial results
-    into a single counts dict."""
+    """n_qpus>1 goes through DistributeByShotsRun, which merges partial results
+    into a single counts dict, exposed as ``RunResult.counts``."""
 
     def test_distributed_returns_dict(self, bell_circuit):
         import polypus
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
-        assert isinstance(result, dict), f"Expected merged dict for n_qpus>1, got {type(result)}"
+        assert isinstance(result.counts, dict), (
+            f"Expected merged dict for n_qpus>1, got {type(result.counts)}"
+        )
 
     def test_distributed_only_bell_states(self, bell_circuit):
         import polypus
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
-        assert set(result.keys()).issubset({"00", "11"}), (
-            f"Unexpected bitstrings in distributed Bell result: {result.keys()}"
+        assert set(result.counts.keys()).issubset({"00", "11"}), (
+            f"Unexpected bitstrings in distributed Bell result: {result.counts.keys()}"
         )
 
     def test_distributed_total_shots(self, bell_circuit):
@@ -80,7 +91,7 @@ class TestRunQuantumCircuitMultipleQpus:
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=4
         )
-        assert sum(result.values()) == shots
+        assert sum(result.counts.values()) == shots
 
     def test_distributed_total_shots_not_divisible(self, bell_circuit):
         """Contract C-3: shots % n_qpus != 0 must still conserve the total.
@@ -90,7 +101,7 @@ class TestRunQuantumCircuitMultipleQpus:
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=3
         )
-        assert sum(result.values()) == shots
+        assert sum(result.counts.values()) == shots
 
     def test_distributed_total_shots_fewer_than_qpus(self, bell_circuit):
         """Contract C-3 degenerate case: shots < n_qpus. 5 shots on 8 QPUs must
@@ -100,4 +111,4 @@ class TestRunQuantumCircuitMultipleQpus:
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=8
         )
-        assert sum(result.values()) == shots
+        assert sum(result.counts.values()) == shots

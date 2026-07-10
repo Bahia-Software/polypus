@@ -136,8 +136,8 @@ class TestRunNativeCircuit:
         result = polypus.run_quantum_circuit(
             native_bell_circuit, shots=1000, infrastructure="local"
         )
-        assert isinstance(result, list) and len(result) == 1
-        counts = result[0]
+        assert isinstance(result.counts, list) and len(result.counts) == 1
+        counts = result.counts[0]
         assert set(counts.keys()).issubset({"00", "11"})
         assert sum(counts.values()) == 1000
 
@@ -146,15 +146,15 @@ class TestRunNativeCircuit:
         result = polypus.run_quantum_circuit(
             native_bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
-        assert isinstance(result, dict)
-        assert set(result.keys()).issubset({"00", "11"})
-        assert sum(result.values()) == 400
+        assert isinstance(result.counts, dict)
+        assert set(result.counts.keys()).issubset({"00", "11"})
+        assert sum(result.counts.values()) == 400
 
     def test_qasm_string_input(self, native_bell_circuit):
         import polypus
         qasm = native_bell_circuit.to_qasm2()
         result = polypus.run_quantum_circuit(qasm, shots=500, infrastructure="local")
-        counts = result[0]
+        counts = result.counts[0]
         assert set(counts.keys()).issubset({"00", "11"})
         assert sum(counts.values()) == 500
 
@@ -170,10 +170,10 @@ class TestRunNativeCircuit:
         shots = 4000
         native = polypus.run_quantum_circuit(
             native_bell_circuit, shots=shots, infrastructure="local"
-        )[0]
+        ).counts[0]
         qiskit = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local"
-        )[0]
+        ).counts[0]
         for key in ("00", "11"):
             p_native = native.get(key, 0) / shots
             p_qiskit = qiskit.get(key, 0) / shots
@@ -216,8 +216,8 @@ class TestTrainNativeCircuit:
             id="test_native_de",
             **_TRAIN_KW,
         )
-        assert isinstance(result, list) and len(result) == 1
-        assert all(isinstance(v, float) for v in result)
+        assert isinstance(result.best_params, list) and len(result.best_params) == 1
+        assert all(isinstance(v, float) for v in result.best_params)
 
     def test_train_pso(self, native_parametrized_circuit, simple_expectation_fn):
         import polypus
@@ -228,7 +228,7 @@ class TestTrainNativeCircuit:
             id="test_native_pso",
             **_TRAIN_KW,
         )
-        assert isinstance(result, list) and len(result) == 1
+        assert isinstance(result.best_params, list) and len(result.best_params) == 1
 
     def test_train_qng(self, native_parametrized_circuit, simple_expectation_fn, simple_variance_fn):
         import polypus
@@ -239,7 +239,7 @@ class TestTrainNativeCircuit:
             id="test_native_qng",
             **_TRAIN_KW,
         )
-        assert isinstance(result, list) and len(result) == 1
+        assert isinstance(result.best_params, list) and len(result.best_params) == 1
 
     def test_dimension_mismatch_raises_before_training(self, native_parametrized_circuit, simple_expectation_fn):
         import polypus
@@ -267,12 +267,12 @@ class TestTrainNativeCircuit:
             native_parametrized_circuit, method(),
             expectation_function=simple_expectation_fn,
             id="test_native_conv", **kwargs,
-        )[0]
+        ).best_params[0]
         theta_qiskit = polypus.train(
             parametrized_circuit, method(),
             expectation_function=simple_expectation_fn,
             id="test_qiskit_conv", **kwargs,
-        )[0]
+        ).best_params[0]
 
         # Both must approach θ = π (probability of |1⟩ maximised).
         p1 = math.sin(theta_native / 2) ** 2
