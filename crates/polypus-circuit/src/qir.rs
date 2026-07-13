@@ -19,6 +19,7 @@
 //!
 //! - `rzz(θ)` → `cnot; rz(θ); cnot`
 //! - `rxx(θ)` → `h h; cnot; rz(θ); cnot; h h`
+//! - `cp(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
 //! - `u3(θ,φ,λ)` → `rz(λ); ry(θ); rz(φ)` (ZYZ Euler decomposition)
 //! - `barrier` is dropped (QIR has no barrier; it is only a scheduling hint).
 //!
@@ -146,14 +147,24 @@ impl QirWriter {
 ///
 /// # Errors
 ///
-/// [`CircuitError::ParamIndexOutOfBounds`] if a gate references a parameter
-/// index beyond `params` (only possible for manually assembled circuits).
+/// - [`CircuitError::ParamIndexOutOfBounds`] if a gate references a parameter
+///   index beyond `params` (only possible for manually assembled circuits).
+/// - [`CircuitError::QubitAlreadyMeasured`] if the sequence violates the
+///   terminal-measurement model (contract C-4). The Base Profile requires all
+///   measurements last, so a gate after a measurement is rejected outright —
+///   never silently reordered.
 pub(crate) fn write_qir(
     num_qubits: usize,
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
 ) -> Result<String, CircuitError> {
+    // Contract C-4: reject a gate acting on an already-measured qubit rather
+    // than deferring/reordering it past the measurement below.
+    if let Some(qubit) = crate::gate::terminal_measurement_violation(gates) {
+        return Err(CircuitError::QubitAlreadyMeasured { qubit });
+    }
+
     let angle = |p: &GateParam| -> Result<f64, CircuitError> { p.resolve(params) };
 
     let mut w = QirWriter::new();
@@ -195,11 +206,17 @@ pub(crate) fn write_qir(
                 w.gate1(H, *q0);
                 w.gate1(H, *q1);
             }
+            // cp(θ) = diag(1,1,1,e^{iθ}), up to global phase:
+            //   rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1
+            // (`cz; rz(θ); cz` is wrong: all-diagonal, cz² = I, collapses to
+            // rz(θ) — see contract C-2 / audit item C3.)
             GateInstruction::Cp { q0, q1, theta } => {
                 let t = angle(theta)?;
-                w.gate2(CZ, *q0, *q1);
-                w.rot(RZ, t, *q1);
-                w.gate2(CZ, *q0, *q1);
+                w.rot(RZ, t / 2.0, *q0);
+                w.gate2(CNOT, *q0, *q1);
+                w.rot(RZ, -t / 2.0, *q1);
+                w.gate2(CNOT, *q0, *q1);
+                w.rot(RZ, t / 2.0, *q1);
             }
             // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
             // left-to-right that is rz(λ), ry(θ), rz(φ).

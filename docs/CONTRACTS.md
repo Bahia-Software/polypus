@@ -21,9 +21,9 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` reads `slurm_job_id`, not `family` (C1) |
-| C-2 | Gate vocabulary symmetry | round-trip + QIR-vs-sim equivalence | ⏳ to add | `cp` missing from importer; QIR decomp not equivalent (C2, C3) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
-| C-4 | Terminal measurement placement | rejection tests (sim + QIR) | ⏳ to add | measurement semantics (C5) |
+| C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
@@ -137,8 +137,11 @@ Corollaries:
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
   is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
   reproduces the same instruction sequence and parameters as `c`.
-- Adding a gate is a **four-place change** plus a row in the equivalence test;
-  a PR adding it in fewer than four places must be rejected.
+- Adding a gate is a **five-place change** plus a row in the equivalence test —
+  the OpenQASM exporter (`qasm.rs`), the importer (`qasm_import.rs`), the native
+  simulator (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
+  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method).
+  A PR adding it in fewer places must be rejected.
 - **Non-finite parameters are rejected uniformly.** A `NaN` or infinite angle
   is never a valid parameter value: circuit construction and parameter binding
   reject it (`CircuitError::NonFiniteParam`), the OpenQASM importer rejects it
@@ -146,12 +149,9 @@ Corollaries:
   serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
   No producer may emit, and no consumer may accept, a non-finite parameter.
 
-*Known breaks (audit C2, C3): `cp` is missing from the importer, and its QIR
-decomposition is not unitarily equivalent.*
-
 **Enforcing test:** parametric round-trip test over the whole vocabulary in
-`crates/polypus-circuit/tests/`, plus a QIR-vs-simulator unitary-equivalence
-test (to be added; see `bug_repro.rs` from the audit for the seed).
+`crates/polypus-circuit/tests/contracts.rs`, plus the QIR-vs-simulator
+unitary-equivalence test in `crates/polypus-sim/tests/contracts.rs`.
 
 ---
 
@@ -189,10 +189,13 @@ only to define behaviour for hand-assembled circuits)*.
 
 Backends and exporters **must reject** circuits that violate this with an
 explicit error — never silently reorder, deduplicate or no-op the measurement.
+The single shared check is `polypus_circuit::terminal_measurement_violation`,
+enforced in the builder, the importer, the simulator and the QIR exporter.
 Rationale and alternatives considered: see `docs/adr/0001-terminal-measurements.md`.
 
-**Enforcing test:** rejection tests in `polypus-sim` and `qir.rs` (to be
-added; audit C5).
+**Enforcing test:** rejection tests in
+`crates/polypus-circuit/tests/contracts.rs` (builder, importer, QIR exporter)
+and `crates/polypus-sim/tests/contracts.rs` (simulator).
 
 ---
 

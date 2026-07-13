@@ -106,6 +106,13 @@ impl Simulator for StatevectorSimulator {
                 max: self.max_qubits,
             });
         }
+        // Contract C-4: reject a gate acting on an already-measured qubit
+        // (defense in depth for hand-assembled circuits). `apply` treats
+        // measurements as no-ops, so without this the violation would be
+        // silently simulated as if the measurement were terminal.
+        if let Some(qubit) = polypus_circuit::terminal_measurement_violation(&circuit.gates) {
+            return Err(SimError::GateAfterMeasure { qubit });
+        }
         // Orchestration-level diagnostic, emitted once per run *outside* the
         // per-gate loop (never inside the hot kernels): which kernel path this
         // circuit takes. Mirrors `Statevector::use_parallel`; side-effect only,

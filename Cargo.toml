@@ -15,6 +15,9 @@
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
 members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-logger"]
+# The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
+# `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
+exclude = ["fuzz"]
 resolver = "2"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
