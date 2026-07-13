@@ -76,6 +76,12 @@ impl QuantumBackend for LocalBackend {
                     .set_item("noise_model", nm.clone_ref(py))
                     .map_err(conv)?;
             }
+            // Forwarded to Aer's `seed_simulator` on the Python side (contract
+            // C-7); `None` is simply omitted rather than sent as `seed=None`,
+            // so Aer's own unseeded default behavior is unchanged.
+            if let Some(seed) = config.seed {
+                kwargs.set_item("seed", seed).map_err(conv)?;
+            }
 
             let result = module
                 .call_method("run_qcs", (connection_str,), Some(&kwargs))

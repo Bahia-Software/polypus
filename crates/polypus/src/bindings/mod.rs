@@ -39,11 +39,12 @@ use std::sync::Arc;
 /// ([`AlgorithmSingleRun`](crate::algorithms::AlgorithmSingleRun)), or a single
 /// merged `dict[str, int]` for a distributed (`n_qpus > 1`) run
 /// ([`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)); the
-/// per-dict format is contract C-3. The manifest fields make a native run
+/// per-dict format is contract C-3. The manifest fields make a simulated run
 /// reproducible: feeding the reported [`seed`](Self::seed) back into
-/// `run_quantum_circuit(..., backend="polypus")` reproduces the counts
-/// byte-for-byte. `seed` is `None` for non-native backends, which Polypus does
-/// not seed.
+/// `run_quantum_circuit(..., seed=...)` reproduces the counts byte-for-byte on
+/// any of the native, Aer, or CUNQA (simulated-QPU) backends. `seed` is `None`
+/// only for the `qmio` infrastructure, which runs on real hardware that
+/// Polypus cannot seed.
 #[pyclass(frozen)]
 pub struct RunResult {
     /// Measurement counts. Shape depends on `n_qpus` (see the type docs).
@@ -52,8 +53,8 @@ pub struct RunResult {
     /// Run identifier used for logging, temp files and SLURM job names.
     #[pyo3(get)]
     pub id: String,
-    /// Effective RNG seed used by the native backend's shot sampling
-    /// (user-supplied or OS-entropy). `None` for non-native backends.
+    /// Effective RNG seed used by the backend's shot sampling (user-supplied or OS-entropy).
+    /// Now supported for `native`, `aer`, and `cunqa`. `None` for `qmio` hardware.
     #[pyo3(get)]
     pub seed: Option<u64>,
     /// Device selected within the infrastructure (`"aer"`, `"polypus"`, …).
@@ -137,16 +138,6 @@ fn outcome_to_train_result(
         },
     )
     .map(|result| result.into_any())
-}
-
-/// Whether this `infrastructure` + `backend` combination actually runs on the
-/// native pure-Rust statevector backend — the only backend whose shot sampling
-/// Polypus seeds. It is reached exclusively via `infrastructure="local"` +
-/// `backend="polypus"`; every other combination runs Aer, CUNQA or QMIO, none
-/// of which consume `ExecutionConfig::seed`, so an explicit seed there would be
-/// silently ineffective (see [`run_quantum_circuit`]).
-fn uses_native_backend(infrastructure: &str, backend: &str) -> bool {
-    infrastructure == "local" && is_native_backend(backend)
 }
 
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
@@ -351,13 +342,15 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// or an OpenQASM 2.0 string. `backend` selects the local device: `"aer"`
 /// (default) or the pure-Rust `"polypus"` statevector simulator.
 ///
-/// `seed` controls the native backend's shot sampling (contract C-7): with
-/// `backend="polypus"` an explicit `seed` reproduces the counts byte-for-byte,
-/// and omitting it draws a fresh OS-entropy seed so repeated runs give genuinely
-/// independent noise. Passing a `seed` with any other backend raises
-/// `ValueError` rather than silently ignoring it, since only the native backend
-/// is seeded here. Returns a [`RunResult`] carrying the counts plus a manifest
-/// (`id`, effective `seed`, `backend`, `infrastructure`) for logging and replay.
+/// `seed` controls shot sampling (contract C-7) on every simulated backend —
+/// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs
+/// (`infrastructure="cunqa"`): an explicit `seed` reproduces the counts
+/// byte-for-byte, and omitting it draws a fresh OS-entropy seed so repeated
+/// runs give genuinely independent noise. Passing a `seed` with
+/// `infrastructure="qmio"` raises `ValueError` rather than silently ignoring
+/// it, since that infrastructure is real hardware and cannot be seeded.
+/// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
+/// effective `seed`, `backend`, `infrastructure`) for logging and replay.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
 // Rich FFI entry point mirroring a many-kwarg Python API; same rationale and
 // convention as `train`/`qml_train` below.
@@ -399,21 +392,21 @@ pub fn run_quantum_circuit<'py>(
             ));
         }
     }
-    // Resolve the shot-sampling seed. Only the native statevector backend is
-    // seeded by Polypus; for any other backend an explicit seed would be
-    // silently ineffective, so reject it rather than give false confidence in
-    // reproducibility. When native, `None` means "draw a fresh OS-entropy seed",
-    // resolved here so the effective value can be reported in the manifest.
-    let effective_seed: Option<u64> = if uses_native_backend(&infrastructure, backend) {
-        Some(seed.unwrap_or_else(random_seed))
-    } else if seed.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "seed is only supported for the native statevector backend \
-             (infrastructure=\"local\", backend=\"polypus\"); backend=\"{backend}\" on \
-             infrastructure=\"{infrastructure}\" does not support seeding"
-        )));
-    } else {
+    // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
+    // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
+    // an explicit seed there would be silently ineffective — reject it rather
+    // than give false confidence in reproducibility. When simulated, `None`
+    // means "draw a fresh OS-entropy seed", resolved here so the effective
+    // value can be reported in the manifest.
+    let effective_seed: Option<u64> = if infrastructure == "qmio" {
+        if seed.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
+            ));
+        }
         None
+    } else {
+        Some(seed.unwrap_or_else(random_seed))
     };
 
     let id = format!("run_{}_{}", n_qpus, infrastructure);
@@ -652,10 +645,10 @@ pub fn train<'py>(
 ///    fitness value.
 ///
 /// `seed` follows the same precedence as [`train`] and makes the optimizer's
-/// search reproducible; it returns a [`TrainResult`]. Note that qml.train runs
-/// on the Qiskit/Aer path (the native backend is rejected), and Aer's own shot
-/// sampling is not seeded by Polypus, so full end-to-end reproducibility holds
-/// only for a deterministic oracle (contract C-7).
+/// search reproducible; it returns a [`TrainResult`]. `qml.train` runs on the
+/// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
+/// is now seeded too (contract C-7), so a `qml.train` run is fully
+/// reproducible end-to-end given the same seed.
 ///
 /// Example:
 ///
@@ -691,8 +684,8 @@ pub fn qml_train<'py>(
     validate_shots_and_qpus(shots, n_qpus)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
-    // below), so this seed governs the optimizer's RNG; Aer's own shot sampling
-    // is not seeded by Polypus.
+    // below); this seed governs the optimizer's RNG and, since it's threaded
+    // into ExecutionConfig::seed below, Aer's shot sampling too.
     let effective_seed = resolve_optimizer_seed(seed, method_seed(&method));
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
@@ -990,30 +983,29 @@ mod tests {
         });
     }
 
-    /// A seed passed with any non-native backend is rejected, never silently
-    /// dropped — Polypus only seeds the native statevector backend.
+    /// A seed passed with `infrastructure="qmio"` is rejected, never silently
+    /// dropped — that infrastructure is real hardware and Polypus cannot seed
+    /// it, unlike the native, Aer, and CUNQA simulated backends.
     #[test]
-    fn seed_rejected_for_non_native_backends() {
+    fn seed_rejected_for_qmio_hardware() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let qasm = uniform3_qasm();
-            for (infra, backend) in [("local", "aer"), ("cunqa", "aer"), ("qmio", "aer")] {
-                let qc = PyString::new(py, &qasm).into_any();
-                let result = run_quantum_circuit(
-                    qc,
-                    100,
-                    infra.to_string(),
-                    1,
-                    "automatic",
-                    None,
-                    backend,
-                    Some(3),
-                );
-                assert!(
-                    result.is_err(),
-                    "an explicit seed must be rejected for infrastructure={infra}, backend={backend}"
-                );
-            }
+            let qc = pyo3::types::PyString::new(py, &qasm).into_any();
+            let result = run_quantum_circuit(
+                qc,
+                100,
+                "qmio".to_string(),
+                1,
+                "automatic",
+                None,
+                "aer",
+                Some(3),
+            );
+            assert!(
+                result.is_err(),
+                "an explicit seed must be rejected for infrastructure=qmio"
+            );
         });
     }
 

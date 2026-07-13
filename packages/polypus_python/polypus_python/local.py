@@ -40,6 +40,7 @@ class Local(Infraestructure):
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")
         noise_model = args.get("noise_model", None)
+        seed = args.get("seed", None)
 
         # Submit every circuit in one Aer call so the C++ engine can run the
         # experiments in parallel across cores (GIL released) instead of looping
@@ -49,6 +50,14 @@ class Local(Infraestructure):
             noise_model=noise_model,
             max_parallel_experiments=0,
         )
-        result = sim.run(qcs, shots=shots).result()
+        if seed is not None:
+            # Rust resolves `seed` from the full u64 range, but Aer's
+            # `seed_simulator` takes a signed 64-bit int (rejects values
+            # >= 2**63 with a confusing low-level TypeError); mask down to
+            # that range rather than truncating precision unevenly.
+            result = sim.run(qcs, shots=shots, seed_simulator=seed & 0x7FFFFFFFFFFFFFFF).result()
+        else:
+            result = sim.run(qcs, shots=shots).result()
+
         return [result.get_counts(i) for i in range(len(qcs))]
 
