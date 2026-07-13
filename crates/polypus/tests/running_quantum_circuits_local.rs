@@ -128,6 +128,9 @@ fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
             infrastructure: "local".to_string(),
             backend_config: BackendConfig::LocalNative,
             opt_level: OptLevel::default(),
+            // Fixed seed: these tests assert only shot conservation, and a fixed
+            // seed keeps the native backend's sampling deterministic across runs.
+            seed: Some(7),
         },
         qcs: vec![BoundCircuit::Native(bell)],
     }

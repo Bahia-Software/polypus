@@ -28,13 +28,16 @@ class TestRunQuantumCircuitBackends:
         result = polypus.run_quantum_circuit(
             qc, shots=2000, infrastructure="local", backend="polypus"
         )
-        assert isinstance(result, list) and len(result) == 1
-        counts = result[0]
+        assert isinstance(result.counts, list) and len(result.counts) == 1
+        counts = result.counts[0]
         assert sum(counts.values()) == 2000
         assert set(counts.keys()) <= {"00", "11"}
         # A fair Bell state: both outcomes appear, roughly balanced.
         assert "00" in counts and "11" in counts
         assert abs(counts["00"] / 2000 - 0.5) < 0.1
+        # The native backend is seeded: the manifest reports the effective seed.
+        assert result.backend == "polypus"
+        assert isinstance(result.seed, int)
 
     def test_native_backend_accepts_qasm_string(self):
         import polypus
@@ -44,7 +47,7 @@ class TestRunQuantumCircuitBackends:
             qasm, shots=256, infrastructure="local", backend="polypus"
         )
         # X|0> = |1>: every shot reads "1".
-        assert result[0] == {"1": 256}
+        assert result.counts[0] == {"1": 256}
 
     def test_default_backend_is_aer(self):
         import polypus
@@ -52,7 +55,7 @@ class TestRunQuantumCircuitBackends:
         # No `backend` kwarg → Aer. Native Bell circuit still works end-to-end.
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
         result = polypus.run_quantum_circuit(qc, shots=1000, infrastructure="local")
-        counts = result[0]
+        counts = result.counts[0]
         assert sum(counts.values()) == 1000
         assert set(counts.keys()) <= {"00", "11"}
 
@@ -158,10 +161,10 @@ class TestNativeVsAerEquivalence:
         shots = 8000
         aer = polypus.run_quantum_circuit(
             build(), shots=shots, infrastructure="local", backend="aer"
-        )[0]
+        ).counts[0]
         native = polypus.run_quantum_circuit(
             build(), shots=shots, infrastructure="local", backend="polypus"
-        )[0]
+        ).counts[0]
 
         # Same bitstring format (3-bit keys) and close probabilities.
         assert all(len(k) == 3 for k in native)
@@ -207,7 +210,7 @@ class TestTrainNativeBackend:
             backend="polypus",
             **_TRAIN_KW,
         )
-        theta = result[0]
+        theta = result.best_params[0]
         p1 = math.sin(theta / 2) ** 2
         assert p1 > 0.9, f"native backend did not converge: θ={theta:.3f}, p1={p1:.3f}"
 

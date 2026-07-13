@@ -1102,6 +1102,8 @@ mod tests {
                 res_format: "binary_count".to_string(),
             },
             opt_level: crate::infrastructure::OptLevel::default(),
+            // QMIO does not consume the sampling seed (real QPU / server-side).
+            seed: None,
         };
 
         let counts = backend
@@ -1146,6 +1148,8 @@ mod tests {
                 res_format: "binary_count".to_string(),
             },
             opt_level: crate::infrastructure::OptLevel::default(),
+            // QMIO does not consume the sampling seed (real QPU / server-side).
+            seed: None,
         };
         let counts = backend
             .run_circuits(&[BoundCircuit::Native(bell())], &config)

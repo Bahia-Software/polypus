@@ -13,16 +13,19 @@ use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Tr
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::StatevectorSimulator;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
 ///
-/// Sampling is seeded deterministically from the run `id` plus a per-circuit
-/// counter, so repeated runs with the same `id` reproduce the same counts while
-/// distinct circuits in a batch still get independent shot noise.
+/// Sampling is seeded from an explicit base seed plus a per-circuit counter, so
+/// two backends built with the same seed reproduce the same counts while
+/// distinct circuits in a batch still get independent shot noise. The seed is
+/// supplied by the caller (`ExecutionConfig::seed`, resolved at the
+/// Python-facing boundary from a user value or an OS-entropy draw) and is
+/// **fully decoupled from the run `id`**: an omitted seed yields genuine,
+/// independent noise across runs instead of the `id`-derived repetition that was
+/// previously mistaken for shot noise.
 ///
 /// The backend *composes* a [`Transpiler`] (the rewriting *strategy*) and runs
 /// it on every native circuit before simulating, passing the per-run
@@ -37,24 +40,22 @@ pub struct NativeStatevectorBackend {
 }
 
 impl NativeStatevectorBackend {
-    /// Create a backend whose sampling stream is derived from `id`, using the
+    /// Create a backend whose sampling stream starts from `seed`, using the
     /// no-op [`IdentityTranspiler`] (behavior identical to having no transpiler).
-    pub fn new(id: &str) -> Self {
-        Self::with_transpiler(id, Box::new(IdentityTranspiler))
+    pub fn new(seed: u64) -> Self {
+        Self::with_transpiler(seed, Box::new(IdentityTranspiler))
     }
 
     /// Create a backend with a custom transpilation *strategy* injected by
-    /// composition. The sampling stream is still derived from `id`.
+    /// composition. The sampling stream starts from `seed`.
     ///
     /// This is the extension point for hardware-aware rewriting: pass any
     /// `Box<dyn Transpiler>` without changing the backend or any algorithm code.
-    pub fn with_transpiler(id: &str, transpiler: Box<dyn Transpiler>) -> Self {
-        let mut hasher = DefaultHasher::new();
-        id.hash(&mut hasher);
+    pub fn with_transpiler(seed: u64, transpiler: Box<dyn Transpiler>) -> Self {
         NativeStatevectorBackend {
             simulator: StatevectorSimulator::new(),
             transpiler,
-            base_seed: hasher.finish(),
+            base_seed: seed,
             counter: AtomicU64::new(0),
         }
     }
@@ -164,7 +165,27 @@ mod tests {
             infrastructure: "local".to_string(),
             backend_config: crate::infrastructure::BackendConfig::LocalNative,
             opt_level,
+            // No explicit seed: exercises the OS-entropy fallback path in
+            // `Infrastructure::create_backend`. Tests that build the backend
+            // directly pass their seed to `new`/`with_transpiler`, so this field
+            // is unused by them.
+            seed: None,
         }
+    }
+
+    /// 3-qubit uniform superposition (H on every qubit) with a full read-out.
+    /// Its counts spread over eight bitstrings, so two independent samplings
+    /// differ with overwhelming probability — the circuit used to assert that
+    /// distinct/omitted seeds produce distinct counts without statistical
+    /// flakiness (a 2-outcome Bell state would collide far too often).
+    fn uniform3() -> ConcreteCircuit {
+        ParameterizedCircuit::new(3)
+            .h(0)
+            .h(1)
+            .h(2)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap()
     }
 
     /// Records the last [`OptLevel`] it was asked to honor, proving the level set
@@ -219,9 +240,9 @@ mod tests {
     #[test]
     fn identity_default_matches_explicit_identity() {
         let opts = TranspileOptions::default();
-        let default_backend = NativeStatevectorBackend::new("bell");
+        let default_backend = NativeStatevectorBackend::new(0);
         let explicit_backend =
-            NativeStatevectorBackend::with_transpiler("bell", Box::new(IdentityTranspiler));
+            NativeStatevectorBackend::with_transpiler(0, Box::new(IdentityTranspiler));
         let circuit = BoundCircuit::Native(bell());
         assert_eq!(
             default_backend
@@ -258,7 +279,7 @@ mod tests {
     /// for the same circuit and seed under the identity transpiler.
     #[test]
     fn qasm2_path_matches_native_path() {
-        let backend = NativeStatevectorBackend::new("eq");
+        let backend = NativeStatevectorBackend::new(0);
         let opts = TranspileOptions::default();
         let native = backend
             .simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts)
@@ -288,7 +309,7 @@ mod tests {
     fn opt_level_reaches_transpiler() {
         let seen = Arc::new(AtomicU8::new(0xFF));
         let backend = NativeStatevectorBackend::with_transpiler(
-            "lvl",
+            0,
             Box::new(RecordingTranspiler {
                 seen: Arc::clone(&seen),
             }),
@@ -306,7 +327,7 @@ mod tests {
     /// the injection point, not observed as wrong results.
     #[test]
     fn injected_strategy_runs_through_run_circuits() {
-        let backend = NativeStatevectorBackend::with_transpiler("inj", Box::new(BarrierTranspiler));
+        let backend = NativeStatevectorBackend::with_transpiler(0, Box::new(BarrierTranspiler));
         let cfg = config_with(OptLevel::default());
         let counts = backend
             .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
@@ -319,8 +340,11 @@ mod tests {
         }
     }
 
+    /// Acceptance criterion (defect #1), positive half: the *same explicit
+    /// seed* reproduces byte-identical counts across two independent backends,
+    /// regardless of the run `id` (which no longer feeds the RNG).
     #[test]
-    fn seeding_is_reproducible_per_id() {
+    fn same_seed_reproduces_counts() {
         let cfg = config_with(OptLevel::default());
         let a = NativeStatevectorBackend::new(&cfg.id);
         let b = NativeStatevectorBackend::new(&cfg.id);
@@ -328,6 +352,38 @@ mod tests {
         assert_eq!(
             a.run_circuits(&batch, &cfg).unwrap(),
             b.run_circuits(&batch, &cfg).unwrap()
+        );
+    }
+
+    /// Distinct seeds produce distinct counts: the seed genuinely drives the
+    /// sampling stream (guards against the seed being ignored).
+    #[test]
+    fn distinct_seeds_produce_distinct_counts() {
+        let cfg = config_with(OptLevel::default());
+        let a = NativeStatevectorBackend::new(1);
+        let b = NativeStatevectorBackend::new(2);
+        let batch = vec![BoundCircuit::Native(uniform3())];
+        assert_ne!(a.run_circuits(&batch, &cfg), b.run_circuits(&batch, &cfg));
+    }
+
+    /// Acceptance criterion (defect #1), negative half: with **no explicit
+    /// seed**, two runs sharing the *same `id`* must NOT reproduce each other —
+    /// the shot noise is real noise, not an artefact of hashing the `id`.
+    /// `create_backend` draws a fresh OS-entropy seed for each `LocalNative`
+    /// backend when `config.seed` is `None`. Asserting inequality of the full
+    /// eight-outcome counts dict (not a single statistic) keeps this
+    /// non-flaky. This is the exact inversion of the removed
+    /// `seeding_is_reproducible_per_id`, which encoded the bug.
+    #[test]
+    fn omitted_seed_differs_across_calls_for_same_id() {
+        use crate::infrastructure::Infrastructure;
+        let cfg = config_with(OptLevel::default()); // id "abc", seed: None
+        let batch = vec![BoundCircuit::Native(uniform3())];
+        let a = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
+        let b = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
+        assert_ne!(
+            a, b,
+            "no-seed runs with the same id must produce independent noise"
         );
     }
 }

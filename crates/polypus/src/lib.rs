@@ -25,13 +25,19 @@
 //! result = polypus.run_quantum_circuit(qc, shots=1000, infrastructure="local", n_qpus=10)
 //! ```
 //!
+//! Both calls return a `RunResult`: `result.counts` holds the payload (a
+//! `list[dict]` for a single QPU, a merged `dict` for `n_qpus > 1`), plus
+//! `result.id` / `result.seed` / `result.backend` / `result.infrastructure`
+//! for logging and replay (`seed` is the effective RNG seed on the native
+//! backend, `None` otherwise).
+//!
 //! ## Training a variational circuit
 //! Pass a method object as the second argument to `train()`. The optimizer-specific
 //! parameters are encapsulated in the method object; execution parameters are shared.
 //!
 //! ```python
 //! # Differential Evolution
-//! result_params = polypus.train(
+//! result = polypus.train(
 //!     qc, polypus.DE(generations=100, population_size=50, tolerance=0.01),
 //!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
 //!     expectation_function=bitstring_to_obj,
@@ -39,7 +45,7 @@
 //! )
 //!
 //! # Particle Swarm Optimization
-//! result_params = polypus.train(
+//! result = polypus.train(
 //!     qc, polypus.PSO(generations=100, population_size=50, bounds=(0.0, 3.14)),
 //!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
 //!     expectation_function=bitstring_to_obj,
@@ -47,13 +53,19 @@
 //! )
 //!
 //! # Quantum Natural Gradient
-//! result_params = polypus.train(
+//! result = polypus.train(
 //!     qc, polypus.QNG(variance_fn, max_iters=100, learning_rate=0.1),
 //!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
 //!     expectation_function=bitstring_to_obj,
 //!     infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 //! )
 //! ```
+//!
+//! `train()` returns a `TrainResult` exposing `result.best_params`
+//! (`list[float]`) plus `result.best_fitness`, `result.iterations_run`,
+//! `result.converged`, and the effective `result.seed` — the full optimization
+//! outcome, not just the parameters. Pass `seed=...` (or set it on the
+//! optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a run.
 //!
 //! # Authors
 //! Diego Beltrán Fernández Prada (<diego.fernandez@bahiasoftware.es>), Víctor Sóñora Pombo, Sergio Figueiras Gómez, Miguel Boubeta Martínez, Galicia Supercomputing Center (CESGA)

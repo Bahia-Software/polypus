@@ -73,8 +73,8 @@ bash install.sh --no-tests
 import polypus
 
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-counts = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-print(counts)  # e.g. {'00': 512, '11': 488}
+result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+print(result.counts[0])  # e.g. {'00': 512, '11': 488}
 ```
 
 See [Usage](#usage) for Qiskit circuits, multi-QPU distribution, and variational training.
@@ -140,6 +140,8 @@ Set `n_qpus > 1` to split the shots across available QPUs and reduce execution t
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
+Both calls return a `RunResult`: `result.counts` holds the measurement payload — a `list[dict[str, int]]` for a single QPU, or a single merged `dict[str, int]` when `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay (`seed` is the effective RNG seed on the native `"polypus"` backend, `None` otherwise).
+
 ### Training Variational Circuits
 
 Polypus optimizes variational quantum circuits via `polypus.train()`. The optimizer is selected by passing a method object as the second argument. Polypus distributes the population individuals across the available QPUs automatically.
@@ -157,13 +159,14 @@ The common parameters for all methods are:
 | `nodes` | Number of nodes (CUNQA only) |
 | `cores_per_qpu` | Cores per QPU (CUNQA only) |
 | `id` | Experiment identifier for logging |
+| `seed` | Optional RNG seed for a reproducible run (default: drawn from OS entropy) |
 
 If CUNQA is not available, set `infrastructure="local"`.
 
 #### Differential Evolution
 
 ```python
-result_params = polypus.train(
+result = polypus.train(
     qc,
     polypus.DE(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE, tolerance=TOL),
     shots=N_SHOTS,
@@ -177,10 +180,22 @@ result_params = polypus.train(
 )
 ```
 
+`train()` (and `qml.train()`) return a `TrainResult` carrying the full optimization outcome, not just the tuned parameters:
+
+```python
+print(result.best_params)     # list[float] — the optimized parameters
+print(result.best_fitness)    # float — cost/fitness at those parameters
+print(result.iterations_run)  # int — iterations actually run (early-stopping aware)
+print(result.converged)       # bool — whether the convergence criterion was met
+print(result.seed)            # int — the effective RNG seed; pass it back as seed=... to reproduce the run
+```
+
+Pin reproducibility with the `seed` keyword (`polypus.train(..., seed=42)`) or on the optimizer itself (`polypus.DE(..., seed=42)`); with no seed, one is drawn from OS entropy and reported back in `result.seed`.
+
 #### Particle Swarm Optimization
 
 ```python
-result_params = polypus.train(
+result = polypus.train(
     qc,
     polypus.PSO(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE,
                 bounds=(0.0, np.pi), tolerance=TOL),
@@ -200,7 +215,7 @@ result_params = polypus.train(
 `QNG` requires a `variance_function` callable that estimates the diagonal quantum Fisher information matrix element for each parameter. Default hyperparameters: `learning_rate=0.1`, `finite_difference_step=0.1`, `tikhonov_reg=0.05`.
 
 ```python
-result_params = polypus.train(
+result = polypus.train(
     qc,
     polypus.QNG(variance_fn, max_iters=MAX_GENERATIONS, bounds=(0.0, np.pi),
                 learning_rate=0.1, finite_difference_step=0.1, tikhonov_reg=0.05),
@@ -228,7 +243,7 @@ import polypus
 
 # Fully bound circuit → run directly
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-counts = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
 
 # Parameterized ansatz → train (binding happens in Rust, GIL-free)
 qaoa = (polypus.Circuit(4)
@@ -238,7 +253,7 @@ qaoa = (polypus.Circuit(4)
         .rx(0, polypus.Param(1)).rx(1, polypus.Param(1))
         .rx(2, polypus.Param(1)).rx(3, polypus.Param(1))
         .measure_all())
-params = polypus.train(qaoa, polypus.DE(generations=100, population_size=50),
+result = polypus.train(qaoa, polypus.DE(generations=100, population_size=50),
                        shots=1024, n_qpus=1, dimensions=2,
                        expectation_function=my_cost, infrastructure="local",
                        nodes=1, cores_per_qpu=1, id="qaoa")

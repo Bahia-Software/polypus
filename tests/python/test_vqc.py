@@ -42,7 +42,15 @@ class TestTrainDE:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_de",
         )
-        assert isinstance(result, list), f"Expected list of parameters, got {type(result)}"
+        assert isinstance(result.best_params, list), (
+            f"Expected list of parameters, got {type(result.best_params)}"
+        )
+        # The richer result also carries fitness / iterations / convergence /
+        # seed (contract C-7), not just the parameters.
+        assert isinstance(result.best_fitness, float)
+        assert isinstance(result.iterations_run, int)
+        assert isinstance(result.converged, bool)
+        assert isinstance(result.seed, int)
 
     def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
         import polypus
@@ -58,7 +66,7 @@ class TestTrainDE:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_de_len",
         )
-        assert len(result) == _DIMENSIONS
+        assert len(result.best_params) == _DIMENSIONS
 
     def test_train_result_contains_floats(self, parametrized_circuit, simple_expectation_fn):
         import polypus
@@ -74,7 +82,7 @@ class TestTrainDE:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_de_floats",
         )
-        for val in result:
+        for val in result.best_params:
             assert isinstance(val, float), f"Expected float parameter, got {type(val)}"
 
 
@@ -93,7 +101,7 @@ class TestTrainPSO:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_pso",
         )
-        assert isinstance(result, list)
+        assert isinstance(result.best_params, list)
 
     def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
         import polypus
@@ -109,7 +117,7 @@ class TestTrainPSO:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_pso_len",
         )
-        assert len(result) == _DIMENSIONS
+        assert len(result.best_params) == _DIMENSIONS
 
 
 class TestTrainQNG:
@@ -134,7 +142,7 @@ class TestTrainQNG:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_qng",
         )
-        assert isinstance(result, list)
+        assert isinstance(result.best_params, list)
 
     def test_train_result_length(
         self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
@@ -156,7 +164,7 @@ class TestTrainQNG:
             cores_per_qpu=_CORES_PER_QPU,
             id="test_qng_len",
         )
-        assert len(result) == _DIMENSIONS
+        assert len(result.best_params) == _DIMENSIONS
 
 
 class TestTrainInvalidMethod:
