@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn bell_counts_only_correlated_outcomes() {
-        let backend = NativeStatevectorBackend::new("test");
+        let backend = NativeStatevectorBackend::new(0);
         let counts = backend
             .simulate_one(
                 &BoundCircuit::Native(bell()),
@@ -262,7 +262,7 @@ mod tests {
             .assign_parameters(&[])
             .unwrap()
             .to_qasm2();
-        let backend = NativeStatevectorBackend::new("t");
+        let backend = NativeStatevectorBackend::new(0);
         let counts = backend
             .simulate_one(
                 &BoundCircuit::Qasm2(qasm),
@@ -346,8 +346,8 @@ mod tests {
     #[test]
     fn same_seed_reproduces_counts() {
         let cfg = config_with(OptLevel::default());
-        let a = NativeStatevectorBackend::new(&cfg.id);
-        let b = NativeStatevectorBackend::new(&cfg.id);
+        let a = NativeStatevectorBackend::new(2024);
+        let b = NativeStatevectorBackend::new(2024);
         let batch = vec![BoundCircuit::Native(bell())];
         assert_eq!(
             a.run_circuits(&batch, &cfg).unwrap(),
@@ -363,7 +363,10 @@ mod tests {
         let a = NativeStatevectorBackend::new(1);
         let b = NativeStatevectorBackend::new(2);
         let batch = vec![BoundCircuit::Native(uniform3())];
-        assert_ne!(a.run_circuits(&batch, &cfg), b.run_circuits(&batch, &cfg));
+        assert_ne!(
+            a.run_circuits(&batch, &cfg).unwrap(),
+            b.run_circuits(&batch, &cfg).unwrap()
+        );
     }
 
     /// Acceptance criterion (defect #1), negative half: with **no explicit
@@ -379,8 +382,14 @@ mod tests {
         use crate::infrastructure::Infrastructure;
         let cfg = config_with(OptLevel::default()); // id "abc", seed: None
         let batch = vec![BoundCircuit::Native(uniform3())];
-        let a = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
-        let b = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
+        let a = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&batch, &cfg)
+            .unwrap();
+        let b = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&batch, &cfg)
+            .unwrap();
         assert_ne!(
             a, b,
             "no-seed runs with the same id must produce independent noise"

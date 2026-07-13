@@ -97,7 +97,13 @@ impl Infrastructure {
                 backend.clone(),
                 sim_method.clone(),
             )?)),
-            BackendConfig::LocalNative => Ok(Arc::new(NativeStatevectorBackend::new(&config.id))),
+            // The Python-facing layer resolves a concrete seed whenever the
+            // native backend runs; the entropy fallback here only guards a
+            // directly-built config that left `seed` unset (e.g. tests), so
+            // an omitted seed still yields independent noise, never a panic.
+            BackendConfig::LocalNative => Ok(Arc::new(NativeStatevectorBackend::new(
+                config.seed.unwrap_or_else(execution_config::random_seed),
+            ))),
             #[cfg(feature = "qmio")]
             BackendConfig::Qmio {
                 endpoint,

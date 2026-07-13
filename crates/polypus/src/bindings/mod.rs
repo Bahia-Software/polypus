@@ -18,6 +18,7 @@ use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
 use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, QmlOracle, VqcOracle};
+use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::infrastructure::{
@@ -33,12 +34,145 @@ use std::sync::Arc;
 /// Result of [`run_quantum_circuit`]: the measurement counts plus the run
 /// manifest that lets a run be logged and replayed (contract C-7).
 ///
-/// The optimizers now return a richer native struct, but the public Python
-/// contract is still just the best-parameter vector, so the extra fields
-/// (fitness, iteration count, convergence flag) are intentionally dropped at
-/// this binding boundary.
-fn outcome_to_pyobject(py: Python<'_>, outcome: OptimizationOutcome) -> PyResult<PyObject> {
-    Ok(outcome.best_params.into_pyobject(py)?.unbind())
+/// `counts` is the exact payload the runner produced before this wrapper
+/// existed — a `list[dict[str, int]]` for a single-QPU run
+/// ([`AlgorithmSingleRun`](crate::algorithms::AlgorithmSingleRun)), or a single
+/// merged `dict[str, int]` for a distributed (`n_qpus > 1`) run
+/// ([`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)); the
+/// per-dict format is contract C-3. The manifest fields make a native run
+/// reproducible: feeding the reported [`seed`](Self::seed) back into
+/// `run_quantum_circuit(..., backend="polypus")` reproduces the counts
+/// byte-for-byte. `seed` is `None` for non-native backends, which Polypus does
+/// not seed.
+#[pyclass(frozen)]
+pub struct RunResult {
+    /// Measurement counts. Shape depends on `n_qpus` (see the type docs).
+    #[pyo3(get)]
+    pub counts: PyObject,
+    /// Run identifier used for logging, temp files and SLURM job names.
+    #[pyo3(get)]
+    pub id: String,
+    /// Effective RNG seed used by the native backend's shot sampling
+    /// (user-supplied or OS-entropy). `None` for non-native backends.
+    #[pyo3(get)]
+    pub seed: Option<u64>,
+    /// Device selected within the infrastructure (`"aer"`, `"polypus"`, …).
+    #[pyo3(get)]
+    pub backend: String,
+    /// Execution infrastructure label (`"local"`, `"cunqa"`, `"qmio"`).
+    #[pyo3(get)]
+    pub infrastructure: String,
+}
+
+#[pymethods]
+impl RunResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "RunResult(id={:?}, seed={:?}, backend={:?}, infrastructure={:?})",
+            self.id, self.seed, self.backend, self.infrastructure
+        )
+    }
+}
+
+/// Result of [`train`] / [`qml_train`]: the full [`OptimizationOutcome`] plus
+/// the effective RNG seed used, so a training run can be reported and reproduced
+/// (contract C-7).
+///
+/// Replaces the former bare `list[float]` return, which discarded the fitness,
+/// iteration count and convergence flag. `best_params` remains available as a
+/// field; the previously dropped [`OptimizationOutcome`] fields are now exposed
+/// alongside it, and `seed` records the value that drove the optimizer.
+#[pyclass(frozen)]
+pub struct TrainResult {
+    /// Best parameter vector found.
+    #[pyo3(get)]
+    pub best_params: Vec<f64>,
+    /// Fitness of [`best_params`](Self::best_params) (higher is better).
+    #[pyo3(get)]
+    pub best_fitness: f64,
+    /// Generations/iterations actually executed (below the budget when an
+    /// early-stopping criterion fired).
+    #[pyo3(get)]
+    pub iterations_run: usize,
+    /// Whether the optimizer's convergence criterion was satisfied.
+    #[pyo3(get)]
+    pub converged: bool,
+    /// Effective RNG seed that drove the optimizer (and, on the native backend,
+    /// shot sampling): the explicit `seed` kwarg, else the optimizer object's
+    /// `seed`, else a fresh OS-entropy value (contract C-7).
+    #[pyo3(get)]
+    pub seed: u64,
+}
+
+#[pymethods]
+impl TrainResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "TrainResult(best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
+            self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
+        )
+    }
+}
+
+/// Wrap an [`OptimizationOutcome`] and the effective `seed` into the
+/// [`TrainResult`] that `train` / `qml_train` now return.
+///
+/// This is the current public Python contract for those entry points (contract
+/// C-7): the whole outcome — `best_params`, `best_fitness`, `iterations_run`,
+/// `converged` — plus the `seed`, rather than the bare best-parameter list the
+/// former `outcome_to_pyobject` produced.
+fn outcome_to_train_result(
+    py: Python<'_>,
+    outcome: OptimizationOutcome,
+    seed: u64,
+) -> PyResult<PyObject> {
+    Py::new(
+        py,
+        TrainResult {
+            best_params: outcome.best_params,
+            best_fitness: outcome.best_fitness,
+            iterations_run: outcome.iterations_run,
+            converged: outcome.converged,
+            seed,
+        },
+    )
+    .map(|result| result.into_any())
+}
+
+/// Whether this `infrastructure` + `backend` combination actually runs on the
+/// native pure-Rust statevector backend — the only backend whose shot sampling
+/// Polypus seeds. It is reached exclusively via `infrastructure="local"` +
+/// `backend="polypus"`; every other combination runs Aer, CUNQA or QMIO, none
+/// of which consume `ExecutionConfig::seed`, so an explicit seed there would be
+/// silently ineffective (see [`run_quantum_circuit`]).
+fn uses_native_backend(infrastructure: &str, backend: &str) -> bool {
+    infrastructure == "local" && is_native_backend(backend)
+}
+
+/// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
+///
+/// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
+/// `seed` field pinned on the `DE`/`PSO`/`QNG` instance; otherwise a fresh
+/// OS-entropy value. The chosen value both drives the optimizer and is reported
+/// back in the [`TrainResult`], so the run can be replayed.
+fn resolve_optimizer_seed(kwarg_seed: Option<u64>, method_seed: Option<u64>) -> u64 {
+    kwarg_seed.or(method_seed).unwrap_or_else(random_seed)
+}
+
+/// Read the `seed` field pinned on the optimizer object passed as `method`,
+/// whichever of `DE`/`PSO`/`QNG` it is (`None` if it is none of them — the type
+/// error is surfaced later by the dispatch that actually runs the optimizer).
+fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
+    if let Ok(de) = method.extract::<PyRef<DE>>() {
+        return de.seed;
+    }
+    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
+        return pso.seed;
+    }
+    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
+        return qng.seed;
+    }
+    None
 }
 
 /// Turn an optimizer result into the value the Python entry point returns.
@@ -53,12 +187,13 @@ fn finish_optimization(
     py: Python<'_>,
     result: Result<OptimizationOutcome, OptimizerError>,
     errors: &OracleErrorSlot,
+    seed: u64,
 ) -> PyResult<PyObject> {
     if let Some(eval_err) = errors.take() {
         return Err(eval_err.into());
     }
     let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    outcome_to_pyobject(py, outcome)
+    outcome_to_train_result(py, outcome, seed)
 }
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
@@ -312,7 +447,21 @@ pub fn run_quantum_circuit<'py>(
         Box::new(DistributeByShotsRun)
     };
 
-    algorithm.run(args)
+    // Keep the original counts payload intact and wrap it with the run manifest.
+    let counts = algorithm.run(args)?;
+    Python::with_gil(|py| {
+        Py::new(
+            py,
+            RunResult {
+                counts,
+                id,
+                seed: effective_seed,
+                backend: backend.to_string(),
+                infrastructure,
+            },
+        )
+        .map(|result| result.into_any())
+    })
 }
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
@@ -437,6 +586,7 @@ pub fn train<'py>(
             method.py(),
             AlgorithmDifferentialEvolution.optimize(args),
             &errors,
+            effective_seed,
         );
     }
 
@@ -453,7 +603,12 @@ pub fn train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        return finish_optimization(method.py(), AlgorithmPSO.optimize(args), &errors);
+        return finish_optimization(
+            method.py(),
+            AlgorithmPSO.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -471,7 +626,12 @@ pub fn train<'py>(
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        return finish_optimization(method.py(), AlgorithmQNG.optimize(args), &errors);
+        return finish_optimization(
+            method.py(),
+            AlgorithmQNG.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -626,7 +786,12 @@ pub fn qml_train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        return finish_optimization(py, AlgorithmDifferentialEvolution.optimize(args), &errors);
+        return finish_optimization(
+            py,
+            AlgorithmDifferentialEvolution.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -642,7 +807,7 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        return finish_optimization(py, AlgorithmPSO.optimize(args), &errors);
+        return finish_optimization(py, AlgorithmPSO.optimize(args), &errors, effective_seed);
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -660,7 +825,7 @@ pub fn qml_train<'py>(
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        return finish_optimization(py, AlgorithmQNG.optimize(args), &errors);
+        return finish_optimization(py, AlgorithmQNG.optimize(args), &errors, effective_seed);
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
