@@ -7,20 +7,16 @@ pub struct AlgorithmSingleRun;
 
 impl AlgorithmTrait for AlgorithmSingleRun {
     type Args = AlgorithmArgs;
-    type AlgorithmReturnType = pyo3::PyObject;
+    type AlgorithmReturnType = PyResult<pyo3::PyObject>;
 
-    fn run(&self, args: AlgorithmArgs) -> pyo3::PyObject {
-        let backend = Infrastructure::create_backend(&args.config);
-        let counts = backend.run_circuits(&args.qcs, &args.config);
+    fn run(&self, args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
+        // Backend creation and execution surface any failure as a `PyErr`; the
+        // backend's `Drop` still releases resources if we return early.
+        let backend = Infrastructure::create_backend(&args.config)?;
+        let counts = backend.run_circuits(&args.qcs, &args.config)?;
         backend.close();
         // Convert native counts to a Python `list[dict]` at the FFI boundary.
-        Python::with_gil(|py| {
-            counts
-                .into_pyobject(py)
-                .expect("Failed to convert counts to a Python object")
-                .into_any()
-                .unbind()
-        })
+        Python::with_gil(|py| Ok(counts.into_pyobject(py)?.into_any().unbind()))
     }
 
     fn name(&self) -> String {

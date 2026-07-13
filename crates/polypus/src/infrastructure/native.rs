@@ -8,6 +8,7 @@
 //! string is also accepted (parsed in Rust); a Qiskit `QuantumCircuit` is not,
 //! since reading its gates would require the interpreter.
 
+use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
@@ -70,20 +71,25 @@ impl NativeStatevectorBackend {
         shots: u32,
         seed: u64,
         opts: &TranspileOptions,
-    ) -> HashMap<String, u64> {
+    ) -> Result<HashMap<String, u64>, BackendError> {
         // Obtain a ConcreteCircuit without touching Python.
         let concrete: ConcreteCircuit = match circuit {
             BoundCircuit::Native(cc) => cc.clone(),
             BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
                 .and_then(|pc| pc.assign_parameters(&[]))
-                .unwrap_or_else(|e| {
+                .map_err(|e| {
                     log::error!("native backend could not parse OpenQASM 2.0: {e}");
-                    panic!("native backend could not parse OpenQASM 2.0: {e}");
-                }),
-            BoundCircuit::Qiskit(_) => panic!(
-                "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
-                 pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
-            ),
+                    BackendError::NativeCircuit(format!(
+                        "native backend could not parse OpenQASM 2.0: {e}"
+                    ))
+                })?,
+            BoundCircuit::Qiskit(_) => {
+                return Err(BackendError::UnsupportedCircuit(
+                    "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
+                     pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
+                        .to_string(),
+                ))
+            }
         };
 
         // Transpile the native circuit (GIL-free) before simulating. With the
@@ -93,10 +99,10 @@ impl NativeStatevectorBackend {
         let raw = self
             .simulator
             .run_and_sample(&concrete, shots as usize, seed)
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
-                panic!("native statevector simulation failed: {e}");
-            });
+                BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+            })?;
 
         // Bitstring length = classical register width (qubit count when the
         // circuit has no measurements, mirroring a full-register read-out).
@@ -104,9 +110,10 @@ impl NativeStatevectorBackend {
             0 => concrete.num_qubits,
             c => c,
         };
-        raw.into_iter()
+        Ok(raw
+            .into_iter()
             .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
-            .collect()
+            .collect())
     }
 }
 
@@ -115,7 +122,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         &self,
         qcs: &[BoundCircuit],
         config: &ExecutionConfig,
-    ) -> Vec<HashMap<String, u64>> {
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         // Tuning travels as an argument; the strategy is the injected field.
         let opts = TranspileOptions {
             level: config.opt_level,
@@ -212,12 +219,14 @@ mod tests {
     #[test]
     fn bell_counts_only_correlated_outcomes() {
         let backend = NativeStatevectorBackend::new(0);
-        let counts = backend.simulate_one(
-            &BoundCircuit::Native(bell()),
-            2000,
-            7,
-            &TranspileOptions::default(),
-        );
+        let counts = backend
+            .simulate_one(
+                &BoundCircuit::Native(bell()),
+                2000,
+                7,
+                &TranspileOptions::default(),
+            )
+            .unwrap();
         let total: u64 = counts.values().sum();
         assert_eq!(total, 2000);
         for key in counts.keys() {
@@ -236,8 +245,12 @@ mod tests {
             NativeStatevectorBackend::with_transpiler(0, Box::new(IdentityTranspiler));
         let circuit = BoundCircuit::Native(bell());
         assert_eq!(
-            default_backend.simulate_one(&circuit, 1000, 42, &opts),
-            explicit_backend.simulate_one(&circuit, 1000, 42, &opts),
+            default_backend
+                .simulate_one(&circuit, 1000, 42, &opts)
+                .unwrap(),
+            explicit_backend
+                .simulate_one(&circuit, 1000, 42, &opts)
+                .unwrap(),
         );
     }
 
@@ -250,12 +263,14 @@ mod tests {
             .unwrap()
             .to_qasm2();
         let backend = NativeStatevectorBackend::new(0);
-        let counts = backend.simulate_one(
-            &BoundCircuit::Qasm2(qasm),
-            128,
-            1,
-            &TranspileOptions::default(),
-        );
+        let counts = backend
+            .simulate_one(
+                &BoundCircuit::Qasm2(qasm),
+                128,
+                1,
+                &TranspileOptions::default(),
+            )
+            .unwrap();
         // X|0> = |1>: every shot reads "1".
         assert_eq!(counts.get("1"), Some(&128));
     }
@@ -266,8 +281,12 @@ mod tests {
     fn qasm2_path_matches_native_path() {
         let backend = NativeStatevectorBackend::new(0);
         let opts = TranspileOptions::default();
-        let native = backend.simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts);
-        let qasm = backend.simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts);
+        let native = backend
+            .simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts)
+            .unwrap();
+        let qasm = backend
+            .simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts)
+            .unwrap();
         assert_eq!(native, qasm);
     }
 
@@ -296,7 +315,9 @@ mod tests {
             }),
         );
         let cfg = config_with(OptLevel::Heavy);
-        backend.run_circuits(&[BoundCircuit::Native(bell())], &cfg);
+        backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
         assert_eq!(seen.load(Ordering::SeqCst), OptLevel::Heavy as u8);
     }
 
@@ -308,7 +329,9 @@ mod tests {
     fn injected_strategy_runs_through_run_circuits() {
         let backend = NativeStatevectorBackend::with_transpiler(0, Box::new(BarrierTranspiler));
         let cfg = config_with(OptLevel::default());
-        let counts = backend.run_circuits(&[BoundCircuit::Native(bell())], &cfg);
+        let counts = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
         assert_eq!(counts.len(), 1);
         let total: u64 = counts[0].values().sum();
         assert_eq!(total, u64::from(cfg.shots));
@@ -325,8 +348,11 @@ mod tests {
         let cfg = config_with(OptLevel::default());
         let a = NativeStatevectorBackend::new(2024);
         let b = NativeStatevectorBackend::new(2024);
-        let batch = vec![BoundCircuit::Native(uniform3())];
-        assert_eq!(a.run_circuits(&batch, &cfg), b.run_circuits(&batch, &cfg));
+        let batch = vec![BoundCircuit::Native(bell())];
+        assert_eq!(
+            a.run_circuits(&batch, &cfg).unwrap(),
+            b.run_circuits(&batch, &cfg).unwrap()
+        );
     }
 
     /// Distinct seeds produce distinct counts: the seed genuinely drives the
@@ -337,7 +363,10 @@ mod tests {
         let a = NativeStatevectorBackend::new(1);
         let b = NativeStatevectorBackend::new(2);
         let batch = vec![BoundCircuit::Native(uniform3())];
-        assert_ne!(a.run_circuits(&batch, &cfg), b.run_circuits(&batch, &cfg));
+        assert_ne!(
+            a.run_circuits(&batch, &cfg).unwrap(),
+            b.run_circuits(&batch, &cfg).unwrap()
+        );
     }
 
     /// Acceptance criterion (defect #1), negative half: with **no explicit
@@ -353,8 +382,14 @@ mod tests {
         use crate::infrastructure::Infrastructure;
         let cfg = config_with(OptLevel::default()); // id "abc", seed: None
         let batch = vec![BoundCircuit::Native(uniform3())];
-        let a = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
-        let b = Infrastructure::create_backend(&cfg).run_circuits(&batch, &cfg);
+        let a = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&batch, &cfg)
+            .unwrap();
+        let b = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&batch, &cfg)
+            .unwrap();
         assert_ne!(
             a, b,
             "no-seed runs with the same id must produce independent noise"

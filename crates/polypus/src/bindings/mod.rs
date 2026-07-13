@@ -17,7 +17,7 @@ use pso::PSO;
 use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
-use crate::evaluation::{CircuitSource, EvaluationOracle, QmlOracle, VqcOracle};
+use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, QmlOracle, VqcOracle};
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
@@ -27,6 +27,7 @@ use crate::infrastructure::{
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
+    OptimizerError,
 };
 use std::sync::Arc;
 
@@ -165,6 +166,27 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     None
 }
 
+/// Turn an optimizer result into the value the Python entry point returns.
+///
+/// An oracle failure recorded in `errors` takes precedence over the optimizer's
+/// own result: because [`EvaluationOracle`]/`VarianceOracle` cannot return a
+/// `Result`, an oracle records its first failure in the shared
+/// [`OracleErrorSlot`] and yields finite sentinels, so `optimize` may return
+/// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
+/// makes the FFI boundary report the real cause instead of that garbage.
+fn finish_optimization(
+    py: Python<'_>,
+    result: Result<OptimizationOutcome, OptimizerError>,
+    errors: &OracleErrorSlot,
+    seed: u64,
+) -> PyResult<PyObject> {
+    if let Some(eval_err) = errors.take() {
+        return Err(eval_err.into());
+    }
+    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    outcome_to_train_result(py, outcome, seed)
+}
+
 /// Map the public `infrastructure` + `backend` strings and provider parameters
 /// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
 /// mapping in one place and guarantees the config matches the selected backend.
@@ -181,7 +203,7 @@ fn build_backend_config(
     nodes: u32,
     cores_per_qpu: u32,
 ) -> PyResult<BackendConfig> {
-    match Infrastructure::from_str(infrastructure) {
+    match Infrastructure::from_str(infrastructure)? {
         Infrastructure::Local => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
                 backend: "AerSimulator".to_string(),
@@ -410,15 +432,16 @@ pub fn run_quantum_circuit<'py>(
         config,
     };
 
-    let algorithm: Box<dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyObject>> =
-        if n_qpus == 1 {
-            Box::new(AlgorithmSingleRun)
-        } else {
-            Box::new(DistributeByShotsRun)
-        };
+    let algorithm: Box<
+        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>>,
+    > = if n_qpus == 1 {
+        Box::new(AlgorithmSingleRun)
+    } else {
+        Box::new(DistributeByShotsRun)
+    };
 
     // Keep the original counts payload intact and wrap it with the run manifest.
-    let counts = algorithm.run(args);
+    let counts = algorithm.run(args)?;
     Python::with_gil(|py| {
         Py::new(
             py,
@@ -530,12 +553,17 @@ pub fn train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
-    let backend = Infrastructure::create_backend(&config);
+    let backend = Infrastructure::create_backend(&config)?;
+    // Shared error slot: the oracles record the first evaluation failure here
+    // (the optimizer traits cannot return a `Result`) and it is surfaced by
+    // `finish_optimization` after `optimize` returns.
+    let errors = OracleErrorSlot::new();
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
+        errors: errors.clone(),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -547,10 +575,12 @@ pub fn train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmDifferentialEvolution
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return finish_optimization(
+            method.py(),
+            AlgorithmDifferentialEvolution.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -566,10 +596,12 @@ pub fn train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmPSO
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return finish_optimization(
+            method.py(),
+            AlgorithmPSO.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -582,14 +614,17 @@ pub fn train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(method.py()),
+                errors: errors.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmQNG
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return finish_optimization(
+            method.py(),
+            AlgorithmQNG.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -723,12 +758,16 @@ pub fn qml_train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
-    let backend = Infrastructure::create_backend(&config);
+    let backend = Infrastructure::create_backend(&config)?;
+    // Shared error slot (see `train`): oracles record the first evaluation
+    // failure here and `finish_optimization` surfaces it after `optimize`.
+    let errors = OracleErrorSlot::new();
     let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
+        errors: errors.clone(),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -740,10 +779,12 @@ pub fn qml_train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmDifferentialEvolution
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return finish_optimization(
+            py,
+            AlgorithmDifferentialEvolution.optimize(args),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -759,10 +800,7 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmPSO
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return finish_optimization(py, AlgorithmPSO.optimize(args), &errors, effective_seed);
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -775,14 +813,12 @@ pub fn qml_train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(py),
+                errors: errors.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmQNG
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return finish_optimization(py, AlgorithmQNG.optimize(args), &errors, effective_seed);
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -790,8 +826,18 @@ pub fn qml_train<'py>(
     ))
 }
 
+/// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
+/// process. A `Drop` must never panic, so a failed teardown (e.g. releasing a
+/// CUNQA SLURM allocation) is logged and counted rather than raised; this
+/// exposes the consultable count to Python for diagnostics/monitoring.
+#[pyfunction]
+fn backend_cleanup_failures() -> u64 {
+    crate::infrastructure::cleanup_failure_count()
+}
+
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::exceptions::register(m)?;
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
     m.add_class::<QNG>()?;
@@ -803,6 +849,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()
     let py = m.py();

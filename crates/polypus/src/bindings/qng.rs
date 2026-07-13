@@ -1,3 +1,4 @@
+use crate::evaluation::{EvaluationError, OracleErrorSlot};
 use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
 
@@ -61,18 +62,44 @@ impl QNG {
 pub struct PyVarianceOracle {
     /// Python callable `fn(theta: list[float], a: int) -> float`.
     pub variance_function: Py<PyAny>,
+    /// Shared with the `train`/`qml.train` entry point: a failure calling the
+    /// user's `variance_function` is recorded here and surfaced as a `PyErr`
+    /// after `optimize` returns, since [`VarianceOracle`] cannot return a
+    /// `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl PyVarianceOracle {
     /// Call the Python `variance_function(theta, param_index)` under an already
-    /// held GIL and extract the returned float.
+    /// held GIL, recording any failure and returning a finite sentinel so the
+    /// optimizer never observes a panic (contract C-5 keeps outputs finite).
     fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> f64 {
+        if self.errors.failed() {
+            return 0.0;
+        }
+        match self.try_call(py, theta, param_index) {
+            Ok(value) => value,
+            Err(e) => {
+                self.errors.record(e);
+                0.0
+            }
+        }
+    }
+
+    /// Fallible core of [`call`](Self::call): invoke the user callback and
+    /// extract the float, carrying any Python error verbatim.
+    fn try_call(
+        &self,
+        py: Python<'_>,
+        theta: &[f64],
+        param_index: usize,
+    ) -> Result<f64, EvaluationError> {
         self.variance_function
             .bind(py)
             .call1((theta.to_vec(), param_index as u32))
-            .expect("Error calling variance_function")
+            .map_err(EvaluationError::Python)?
             .extract()
-            .expect("Failed to extract float from variance_function")
+            .map_err(EvaluationError::Python)
     }
 }
 

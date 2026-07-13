@@ -1,6 +1,8 @@
+pub mod error;
 pub mod qml_oracle;
 pub mod vqc_oracle;
 
+pub use error::EvaluationError;
 pub use qml_oracle::QmlOracle;
 pub use vqc_oracle::VqcOracle;
 
@@ -8,6 +10,45 @@ use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::ParameterizedCircuit;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyModule};
+use std::sync::{Arc, Mutex};
+
+/// Thread-safe holder for the first error an oracle hits during `optimize`.
+///
+/// The optimizer traits ([`EvaluationOracle`] and
+/// [`VarianceOracle`](polypus_optimizers::VarianceOracle)) return plain
+/// `f64`/`Vec<f64>` — a pure-crate contract this crate cannot change — so a
+/// Python-side failure mid-optimization cannot be returned through the trait.
+/// Instead the oracle records it here and yields a finite sentinel; the entry
+/// point inspects the slot after `optimize` returns and surfaces the error as a
+/// `PyErr` (contract C-5 keeps oracle outputs finite regardless).
+#[derive(Clone, Default)]
+pub struct OracleErrorSlot(Arc<Mutex<Option<EvaluationError>>>);
+
+impl OracleErrorSlot {
+    /// A fresh, empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `err` as the failure, keeping the *first* one recorded.
+    pub fn record(&self, err: EvaluationError) {
+        let mut guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            *guard = Some(err);
+        }
+    }
+
+    /// Whether a failure has been recorded (lets callers short-circuit further
+    /// work once evaluation is doomed).
+    pub fn failed(&self) -> bool {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    /// Take the recorded failure, if any.
+    pub fn take(&self) -> Option<EvaluationError> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+}
 
 /// A parameterised circuit template, in one of the representations Polypus
 /// supports as optimisation targets.
@@ -29,25 +70,24 @@ pub enum CircuitSource {
 impl CircuitSource {
     /// Bind one candidate parameter vector, producing an executable circuit.
     ///
-    /// # Panics
-    ///
-    /// Panics if binding fails (wrong number of parameters, Python error).
-    /// Entry points validate `dimensions` against the template up front, so a
-    /// failure here is a programming error, consistent with the rest of the
-    /// evaluation layer.
-    pub fn bind(&self, params: &[f64]) -> BoundCircuit {
+    /// Returns an [`EvaluationError`] on failure (wrong parameter count, a
+    /// Python error binding a Qiskit circuit) rather than panicking, so the
+    /// failure can cross the FFI as a typed exception. Entry points still
+    /// validate `dimensions` up front, so a failure here is normally
+    /// unreachable — but it is reported, never a panic.
+    pub fn bind(&self, params: &[f64]) -> Result<BoundCircuit, EvaluationError> {
         match self {
-            CircuitSource::Qiskit(circuit) => {
-                BoundCircuit::Qiskit(assign_parameters_qiskit(circuit, params))
-            }
+            CircuitSource::Qiskit(circuit) => Ok(BoundCircuit::Qiskit(assign_parameters_qiskit(
+                circuit, params,
+            )?)),
             // Pure Rust: no GIL anywhere on this path. The bound circuit keeps
             // its native structure so the statevector backend can simulate it
             // directly; Python backends serialise it to OpenQASM 2.0 on demand.
-            CircuitSource::Native(circuit) => BoundCircuit::Native(
+            CircuitSource::Native(circuit) => Ok(BoundCircuit::Native(
                 circuit
                     .assign_parameters(params)
-                    .unwrap_or_else(|e| panic!("Error binding native circuit: {e}")),
-            ),
+                    .map_err(EvaluationError::Binding)?,
+            )),
         }
     }
 
@@ -63,16 +103,26 @@ impl CircuitSource {
 }
 
 /// Bind `params` to a copy of a Qiskit `circuit` and return the bound circuit.
-pub(crate) fn assign_parameters_qiskit(circuit: &Py<PyAny>, params: &[f64]) -> Py<PyAny> {
+///
+/// Any Python error (constructing the kwargs, calling `assign_parameters`) is
+/// returned as [`EvaluationError::Python`] — carried verbatim so the caller can
+/// re-raise it with its original type across the FFI.
+pub(crate) fn assign_parameters_qiskit(
+    circuit: &Py<PyAny>,
+    params: &[f64],
+) -> Result<Py<PyAny>, EvaluationError> {
     Python::with_gil(|py| {
         let qc = circuit
             .clone_ref(py)
             .into_pyobject(py)
-            .expect("Failed to get circuit as PyObject");
-        let kwargs = [("inplace", false)].into_py_dict(py).unwrap();
-        qc.call_method("assign_parameters", (params.to_vec(),), Some(&kwargs))
-            .expect("Error assigning parameters to circuit")
-            .unbind()
+            .map_err(|e| EvaluationError::Python(e.into()))?;
+        let kwargs = [("inplace", false)]
+            .into_py_dict(py)
+            .map_err(EvaluationError::Python)?;
+        Ok(qc
+            .call_method("assign_parameters", (params.to_vec(),), Some(&kwargs))
+            .map_err(EvaluationError::Python)?
+            .unbind())
     })
 }
 
@@ -100,25 +150,27 @@ pub use polypus_optimizers::EvaluationOracle;
 /// This is the **single place** in the codebase that calls
 /// `polypus_python.expectation_values`, eliminating the duplication that
 /// previously existed across DE, PSO, QNG, and the orchestration layer.
-pub(crate) fn run_and_expect(
+///
+/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped,
+/// and a Python error (import, `expectation_values`, extraction) is carried
+/// verbatim — never a panic.
+pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
     config: &ExecutionConfig,
     expectation_fn: &Py<PyAny>,
-) -> Vec<f64> {
-    let counts = backend.run_circuits(qcs, config);
+) -> Result<Vec<f64>, EvaluationError> {
+    let counts = backend.run_circuits(qcs, config)?;
     Python::with_gil(|py| {
         // Convert the native counts back into a Python `list[dict]` for the
         // Python `expectation_values` function. Once expectation computation is
         // also native this round-trip disappears entirely.
-        let py_counts = counts
-            .into_pyobject(py)
-            .expect("Failed to convert counts to a Python object");
+        let py_counts = counts.into_pyobject(py).map_err(EvaluationError::Python)?;
         PyModule::import(py, "polypus_python")
-            .expect("Failed to import polypus_python")
+            .map_err(EvaluationError::Python)?
             .call_method("expectation_values", (py_counts, expectation_fn), None)
-            .expect("Error computing expectation values")
+            .map_err(EvaluationError::Python)?
             .extract::<Vec<f64>>()
-            .expect("Failed to extract expectation values as Vec<f64>")
+            .map_err(EvaluationError::Python)
     })
 }

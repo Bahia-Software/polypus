@@ -156,6 +156,25 @@ unrecoverable invariants, always with a clear message). Each crate defines its
 own error type (`error.rs`); reuse and extend it instead of introducing ad-hoc
 errors or bare strings. Never silence or discard errors (`let _ = ...`).
 Errors crossing the FFI boundary become `PyErr` via `Result` — never a panic.
+In the `polypus` crate this means every path reachable from a `#[pyfunction]` /
+`#[pymethods]` returns a typed error (`BackendError`, `EvaluationError`, or the
+crate's `QmioError`) mapped to the `polypus::exceptions` Python hierarchy — even
+where the failure is "unlikely". A Python exception raised by the
+`polypus_python` seam is carried verbatim and re-raised with its original type,
+so contract C-1's `ValueError`/`TypeError` failure modes are preserved.
+
+**`Drop` must be panic-free.** No `Drop` impl may panic under any circumstance:
+a panic while another panic is already unwinding aborts the whole process,
+defeating the RAII guarantee (for `CunqaBackend` this would leak the SLURM
+allocation). A `Drop` that does fallible cleanup (releasing QPUs, closing a
+socket) **logs the failure with `log::error!` and continues** — it never
+propagates the error. Because a per-instance flag is worthless once the instance
+is gone, the failure is *also* recorded in process-wide state that a higher
+layer can inspect (the `backend_cleanup_failures()` counter, exposed to Python).
+Acquiring the GIL inside a `Drop` is allowed only when it is explicitly safe
+against re-entrancy (PyO3 0.24's `Python::with_gil` is re-entrant) and cannot
+propagate a panic through the in-progress unwind; keep the fallible operation
+behind a `Result`-returning helper so the `Drop` body only logs and counts.
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over
@@ -208,7 +227,8 @@ it into an unrelated diff. `cargo deny check` gates licenses and advisories.
       deserializers? (§8)
 - [ ] `fmt` + `clippy -D warnings` + tests green; performance claims backed
       by a benchmark? (§9, `docs/CONTRIBUTING.md`)
-- [ ] Explicit errors (no `unwrap`/`panic` in production), edge cases
+- [ ] Explicit errors (no `unwrap`/`panic` in production, including
+      `#[pyfunction]`-reachable paths), no `Drop` that can panic, edge cases
       covered, public items documented? (§9)
 - [ ] Does the change touch a seam listed in `docs/CONTRACTS.md`? Then the same PR
       updates the contract and its enforcing test.

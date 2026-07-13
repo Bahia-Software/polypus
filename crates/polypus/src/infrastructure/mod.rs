@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub mod cunqa;
+pub mod error;
 pub mod execution_config;
 pub mod local;
 pub mod native;
@@ -11,12 +13,31 @@ pub mod qmio;
 pub mod transpiler;
 
 pub use cunqa::CunqaBackend;
+pub use error::BackendError;
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
 pub use native::NativeStatevectorBackend;
 #[cfg(feature = "qmio")]
 pub use qmio::QmioBackend;
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
+
+/// Process-wide count of backend cleanup (`close`/`Drop`) failures.
+///
+/// A `Drop` must never panic, so a failed teardown is logged and counted here
+/// rather than propagated. A per-instance flag would be useless — nobody holds
+/// the instance once `Drop` returns — so the consultable state lives in this
+/// process-wide counter, exposed to Python as `polypus.backend_cleanup_failures()`.
+static CLEANUP_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Record that a backend's resource cleanup failed. Called from `close`/`Drop`.
+pub fn record_cleanup_failure() {
+    CLEANUP_FAILURES.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Number of backend cleanup failures recorded so far this process (diagnostic).
+pub fn cleanup_failure_count() -> u64 {
+    CLEANUP_FAILURES.load(Ordering::SeqCst)
+}
 
 /// Supported quantum execution infrastructures.
 pub enum Infrastructure {
@@ -31,12 +52,14 @@ pub enum Infrastructure {
 
 impl Infrastructure {
     #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Result<Self, BackendError> {
         match s {
-            "local" => Infrastructure::Local,
-            "cunqa" => Infrastructure::Cunqa,
-            "qmio" => Infrastructure::Qmio,
-            _ => panic!("Unknown infrastructure: {}", s),
+            "local" => Ok(Infrastructure::Local),
+            "cunqa" => Ok(Infrastructure::Cunqa),
+            "qmio" => Ok(Infrastructure::Qmio),
+            other => Err(BackendError::UnknownInfrastructure {
+                name: other.to_string(),
+            }),
         }
     }
 
@@ -46,39 +69,41 @@ impl Infrastructure {
     /// chosen backend and its parameters can never desync. Adding a new backend
     /// (IBM, IQM, …) means adding one arm here and implementing
     /// [`QuantumBackend`] for the new type — no algorithm code changes.
-    pub fn create_backend(config: &ExecutionConfig) -> Arc<dyn QuantumBackend> {
+    pub fn create_backend(
+        config: &ExecutionConfig,
+    ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
         match &config.backend_config {
             BackendConfig::Local {
                 backend,
                 sim_method,
                 noise_model,
-            } => Arc::new(LocalBackend::new(
+            } => Ok(Arc::new(LocalBackend::new(
                 backend.clone(),
                 sim_method.clone(),
                 noise_model
                     .as_ref()
                     .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
-            )),
+            ))),
             BackendConfig::Cunqa {
                 backend,
                 sim_method,
                 nodes,
                 cores_per_qpu,
-            } => Arc::new(CunqaBackend::new(
+            } => Ok(Arc::new(CunqaBackend::new(
                 config.n_qpus,
                 *nodes,
                 &config.id,
                 *cores_per_qpu,
                 backend.clone(),
                 sim_method.clone(),
-            )),
-            BackendConfig::LocalNative => Arc::new(NativeStatevectorBackend::new(
-                // The Python-facing layer resolves a concrete seed whenever the
-                // native backend runs; the entropy fallback here only guards a
-                // directly-built config that left `seed` unset (e.g. tests), so
-                // an omitted seed still yields independent noise, never a panic.
+            )?)),
+            // The Python-facing layer resolves a concrete seed whenever the
+            // native backend runs; the entropy fallback here only guards a
+            // directly-built config that left `seed` unset (e.g. tests), so
+            // an omitted seed still yields independent noise, never a panic.
+            BackendConfig::LocalNative => Ok(Arc::new(NativeStatevectorBackend::new(
                 config.seed.unwrap_or_else(execution_config::random_seed),
-            )),
+            ))),
             #[cfg(feature = "qmio")]
             BackendConfig::Qmio {
                 endpoint,
@@ -86,12 +111,15 @@ impl Infrastructure {
                 optimization,
                 repetition_period,
                 res_format,
-            } => Arc::new(QmioBackend::new(
-                endpoint.clone(),
-                *program_format,
-                *optimization,
-                *repetition_period,
-                res_format.clone(),
+            } => Ok(Arc::new(
+                QmioBackend::new(
+                    endpoint.clone(),
+                    *program_format,
+                    *optimization,
+                    *repetition_period,
+                    res_format.clone(),
+                )
+                .map_err(BackendError::Qmio)?,
             )),
         }
     }
@@ -124,22 +152,23 @@ impl BoundCircuit {
     /// Convert to the Python object expected by `polypus_python.run_qcs`:
     /// the Qiskit circuit as-is, or the QASM program as a `str` (the Python
     /// layer parses/forwards it per infrastructure).
-    pub fn to_py_object(&self, py: Python<'_>) -> Py<PyAny> {
+    pub fn to_py_object(&self, py: Python<'_>) -> Result<Py<PyAny>, BackendError> {
+        let conv = |e: PyErr| BackendError::Conversion(e.to_string());
         match self {
-            BoundCircuit::Qiskit(qc) => qc.clone_ref(py),
-            BoundCircuit::Qasm2(qasm) => qasm
+            BoundCircuit::Qiskit(qc) => Ok(qc.clone_ref(py)),
+            BoundCircuit::Qasm2(qasm) => Ok(qasm
                 .into_pyobject(py)
-                .expect("Failed to convert QASM string to Python")
+                .map_err(|e| conv(e.into()))?
                 .into_any()
-                .unbind(),
+                .unbind()),
             // Native circuits reach a Python backend (Aer/CUNQA) as OpenQASM 2.0,
             // exactly like the `Qasm2` variant; the conversion is pure Rust.
-            BoundCircuit::Native(circuit) => circuit
+            BoundCircuit::Native(circuit) => Ok(circuit
                 .to_qasm2()
                 .into_pyobject(py)
-                .expect("Failed to convert QASM string to Python")
+                .map_err(|e| conv(e.into()))?
                 .into_any()
-                .unbind(),
+                .unbind()),
         }
     }
 
@@ -205,11 +234,17 @@ pub trait QuantumBackend: Send + Sync {
     /// circuit. Keeping the return type native (rather than a Python object)
     /// means non-Python backends (IBM, IQM, a future native MPI scheduler) never
     /// have to touch the GIL, which is essential for HPC-scale distribution.
+    ///
+    /// A failure is returned as a [`BackendError`] (never a panic): a Python
+    /// exception from the `polypus_python` seam is carried verbatim in
+    /// [`BackendError::Seam`] so it re-raises with its original type, and
+    /// Rust-originated failures map to the typed
+    /// [`exceptions`](crate::exceptions) hierarchy at the FFI boundary.
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
         config: &ExecutionConfig,
-    ) -> Vec<HashMap<String, u64>>;
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError>;
 
     /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
     /// call, given the `total` circuits to evaluate.
