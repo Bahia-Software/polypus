@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ⏳ to add | `disconnect` reads `slurm_job_id`, not `family` (C1) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` reads `slurm_job_id`, not `family` (C1) |
 | C-2 | Gate vocabulary symmetry | round-trip + QIR-vs-sim equivalence | ⏳ to add | `cp` missing from importer; QIR decomp not equivalent (C2, C3) |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | rejection tests (sim + QIR) | ⏳ to add | measurement semantics (C5) |
@@ -84,8 +84,31 @@ Returns exactly `len(counts)` finite floats, in order.
   "must-be-consumed" rule above: neither side silently drops or invents args).
 - A missing **required** kwarg raises `TypeError`.
 
-**Enforcing test:** `tests/python/test_seam_contract.py` (to be added — must
-run in CI against a mock of `cunqa.qutils`, so no SLURM is needed).
+A failure **must never** cross the seam as a `pyo3_runtime.PanicException` or a
+process abort (it used to: the Rust side `unwrap()`/`panic!`-ed on these calls).
+The Rust orchestration layer now returns a typed `Result` on every path:
+
+- A Python exception raised *by the seam function itself* (the three failure
+  modes above, or any runtime error inside `run_qcs`) is **re-raised verbatim**,
+  preserving its original type — so the `ValueError`/`TypeError` guarantees
+  above hold unchanged.
+- A failure originating *in the Rust layer* (backend construction, a native
+  circuit that will not parse/simulate, the QMIO network path, a data
+  conversion) raises a class from the `polypus` exception hierarchy:
+  `PolypusError` (base) → `BackendError` → {`CunqaError`, `QmioError`,
+  `NativeCircuitError`}, and `PolypusError` → `EvaluationError`. Catching
+  `polypus.PolypusError` catches them all.
+
+`disconnect_from_infrastructure` runs from `CunqaBackend`'s `Drop`, which **must
+never panic**: a release failure is logged (`log::error!`) and recorded in the
+process-wide `polypus.backend_cleanup_failures()` counter rather than raised
+(see ENGINEERING.md §9). This is independent of the known break below, which is
+about *which kwarg* the Python side reads.
+
+**Enforcing test:** `tests/python/test_seam_contract.py` — runs in CI without
+SLURM by monkeypatching the `polypus_python` seam (`run_qcs`) to force a
+failure, asserting it surfaces as a typed Python exception (never a
+`PanicException`) with the C-1 type preserved.
 
 ---
 

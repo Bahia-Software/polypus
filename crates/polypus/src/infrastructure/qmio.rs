@@ -56,7 +56,10 @@
 //!    (header and body), which matches the 2.0-style body the QMIO examples use.
 //!    Verify acceptance against the live QPU (point 6).
 
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::infrastructure::error::BackendError;
+use crate::infrastructure::{
+    record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend,
+};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use serde_json::json;
 use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
@@ -85,13 +88,12 @@ enum ProgramPayload {
 
 /// Errors raised on the QMIO network/serialisation path.
 ///
-/// [`QuantumBackend::run_circuits`] cannot return a `Result` (its signature is
-/// shared by every backend), so a fatal error is logged and turned into a panic
-/// — which PyO3 surfaces to Python as an exception. This mirrors how
-/// [`CunqaBackend`](crate::infrastructure::CunqaBackend) and
-/// [`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend)
-/// report unrecoverable failures, while keeping the network code itself free of
-/// scattered `unwrap()`s.
+/// These bubble up through [`QuantumBackend::run_circuits`] as a
+/// [`BackendError::Qmio`], which the FFI boundary maps to the typed
+/// `polypus.QmioError` Python exception — never a panic. The enum keeps its own
+/// rich variants (verified against the wire protocol) instead of being
+/// flattened into [`BackendError`]; see [`crate::infrastructure::error`] for the
+/// crate-wide granularity decision.
 #[derive(Debug)]
 pub enum QmioError {
     /// A Qiskit `QuantumCircuit` reached the GIL-free QMIO path.
@@ -122,6 +124,12 @@ pub enum QmioError {
     },
     /// The reply exceeded [`QmioBackend::max_reply_bytes`].
     ResponseTooLarge { bytes: usize, limit: usize },
+    /// The dedicated Tokio runtime could not be built at construction time.
+    Runtime(String),
+    /// An internal invariant of the request loop did not hold (e.g. the socket
+    /// was unexpectedly absent after a successful connect). Returned rather than
+    /// panicked so it can never abort the process; the request is retried.
+    Internal(String),
 }
 
 impl fmt::Display for QmioError {
@@ -151,6 +159,10 @@ impl fmt::Display for QmioError {
                 f,
                 "QMIO reply of {bytes} bytes exceeds the {limit}-byte safety limit"
             ),
+            QmioError::Runtime(m) => {
+                write!(f, "could not build the Tokio runtime for the QMIO backend: {m}")
+            }
+            QmioError::Internal(m) => write!(f, "internal QMIO backend error: {m}"),
         }
     }
 }
@@ -199,7 +211,7 @@ impl QmioBackend {
         optimization: u8,
         repetition_period: Option<f64>,
         res_format: String,
-    ) -> Self {
+    ) -> Result<Self, QmioError> {
         let endpoint = if endpoint.is_empty() {
             DEFAULT_ENDPOINT.to_string()
         } else {
@@ -212,10 +224,10 @@ impl QmioBackend {
             .worker_threads(1)
             .enable_all()
             .build()
-            .expect("failed to build the Tokio runtime for the QMIO backend");
+            .map_err(|e| QmioError::Runtime(e.to_string()))?;
         let recv_timeout = Duration::from_millis(env_u64("QMIO_RECV_TIMEOUT_MS", 300_000));
         let max_retries = env_u64("QMIO_MAX_RETRIES", 3) as usize;
-        QmioBackend {
+        Ok(QmioBackend {
             endpoint,
             program_format,
             optimization,
@@ -229,7 +241,7 @@ impl QmioBackend {
             // 64 MiB: far above any realistic counts payload, far below "OOM".
             max_reply_bytes: 64 * 1024 * 1024,
             closed: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Serialise one bound circuit into the program payload for the configured
@@ -292,7 +304,10 @@ impl QmioBackend {
         // default `info` log.
         log::debug!("QMIO request: {program:?}, config: {config_json}");
         let request = pickle_request(program, config_json)?;
-        let mut guard = self.socket.lock().expect("QMIO socket mutex poisoned");
+        // Recover the guard even if a previous holder panicked: a poisoned lock
+        // carries no broken invariant here (the socket is `Option`-guarded), and
+        // recovering it keeps this path panic-free.
+        let mut guard = self.socket.lock().unwrap_or_else(|p| p.into_inner());
 
         self.runtime.block_on(async {
             let mut last_err: Option<QmioError> = None;
@@ -324,7 +339,17 @@ impl QmioBackend {
                         }
                     }
                 }
-                let socket = guard.as_mut().expect("socket present after connect");
+                let socket = match guard.as_mut() {
+                    Some(socket) => socket,
+                    None => {
+                        // Cannot happen (we just connected), but never panic:
+                        // record it and let the loop reconnect and retry.
+                        last_err = Some(QmioError::Internal(
+                            "socket unexpectedly absent after connect".to_string(),
+                        ));
+                        continue;
+                    }
+                };
 
                 // Send, bounded by the timeout. A REQ socket that fails or times
                 // out while sending is unusable and must be discarded.
@@ -353,7 +378,15 @@ impl QmioBackend {
 
                 // Receive, bounded by the configured timeout. On timeout or
                 // error the REQ socket is stuck, so we discard and retry.
-                let socket = guard.as_mut().expect("socket present after send");
+                let socket = match guard.as_mut() {
+                    Some(socket) => socket,
+                    None => {
+                        last_err = Some(QmioError::Internal(
+                            "socket unexpectedly absent after send".to_string(),
+                        ));
+                        continue;
+                    }
+                };
                 match tokio::time::timeout(self.recv_timeout, socket.recv()).await {
                     Ok(Ok(reply)) => {
                         // Raw wire reply (unparsed ZMQ frames): the noisiest,
@@ -396,33 +429,11 @@ impl QuantumBackend for QmioBackend {
         &self,
         qcs: &[BoundCircuit],
         config: &ExecutionConfig,
-    ) -> Vec<HashMap<String, u64>> {
-        // The config JSON is identical for every circuit in the batch.
-        let config_json = build_config_json(
-            config.shots,
-            self.repetition_period,
-            &self.res_format,
-            self.optimization,
-        )
-        .and_then(|v| serde_json::to_string(&v).map_err(|e| QmioError::Json(e.to_string())))
-        .unwrap_or_else(|e| {
-            log::error!("QMIO config build failed: {e}");
-            panic!("QMIO backend error: {e}");
-        });
-
-        // One REQ/REP exchange per circuit: the endpoint is a single QPU.
-        qcs.iter()
-            .map(|qc| {
-                let program = self.serialize_program(qc).unwrap_or_else(|e| {
-                    log::error!("QMIO circuit serialisation failed: {e}");
-                    panic!("QMIO backend error: {e}");
-                });
-                self.run_one(&program, &config_json).unwrap_or_else(|e| {
-                    log::error!("QMIO execution failed: {e}");
-                    panic!("QMIO backend error talking to {}: {e}", self.endpoint);
-                })
-            })
-            .collect()
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        self.run_all(qcs, config).map_err(|e| {
+            log::error!("QMIO backend error talking to {}: {e}", self.endpoint);
+            BackendError::Qmio(e)
+        })
     }
 
     fn max_batch_size(&self, _total: usize) -> usize {
@@ -434,12 +445,51 @@ impl QuantumBackend for QmioBackend {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Ok(mut guard) = self.socket.lock() {
-            if let Some(socket) = guard.take() {
-                // Graceful close must run inside the runtime context.
-                let _ = self.runtime.block_on(socket.close());
+        // Recover a poisoned guard so `close` still attempts a graceful shutdown
+        // (and never panics) — this runs from `Drop`.
+        let mut guard = self.socket.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(socket) = guard.take() {
+            // Graceful close must run inside the runtime context. `close`
+            // returns any errors it hit instead of a `Result`; log (never
+            // discard) them and record the failed cleanup.
+            let errors = self.runtime.block_on(socket.close());
+            if !errors.is_empty() {
+                log::error!(
+                    "QMIO socket close reported {} error(s): {errors:?}",
+                    errors.len()
+                );
+                record_cleanup_failure();
             }
         }
+    }
+}
+
+impl QmioBackend {
+    /// Execute every circuit in the batch, returning the first failure as a
+    /// [`QmioError`]. Split out from `run_circuits` so the whole batch is a
+    /// single `?`-threaded `Result` with no per-circuit panic.
+    fn run_all(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+    ) -> Result<Vec<HashMap<String, u64>>, QmioError> {
+        // The config JSON is identical for every circuit in the batch.
+        let config_value = build_config_json(
+            config.shots,
+            self.repetition_period,
+            &self.res_format,
+            self.optimization,
+        )?;
+        let config_json =
+            serde_json::to_string(&config_value).map_err(|e| QmioError::Json(e.to_string()))?;
+
+        // One REQ/REP exchange per circuit: the endpoint is a single QPU.
+        qcs.iter()
+            .map(|qc| {
+                let program = self.serialize_program(qc)?;
+                self.run_one(&program, &config_json)
+            })
+            .collect()
     }
 }
 
@@ -467,7 +517,12 @@ async fn connect(endpoint: &str) -> Result<ReqSocket, QmioError> {
 /// request will transparently reconnect.
 async fn drop_socket(guard: &mut Option<ReqSocket>) {
     if let Some(socket) = guard.take() {
-        let _ = socket.close().await;
+        // Don't discard the close errors silently (ENGINEERING.md §9): this is a
+        // transient reconnect on a faulted socket, so they are informational.
+        let errors = socket.close().await;
+        if !errors.is_empty() {
+            log::debug!("QMIO faulted-socket close reported errors: {errors:?}");
+        }
     }
 }
 
@@ -747,6 +802,7 @@ mod tests {
             None,
             "binary_count".to_string(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -1031,7 +1087,8 @@ mod tests {
             0,
             None,
             "binary_count".to_string(),
-        );
+        )
+        .unwrap();
         let config = ExecutionConfig {
             id: "qmio-sim".to_string(),
             shots: 1024,
@@ -1047,7 +1104,9 @@ mod tests {
             opt_level: crate::infrastructure::OptLevel::default(),
         };
 
-        let counts = backend.run_circuits(&[BoundCircuit::Native(bell())], &config);
+        let counts = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].get("00"), Some(&500));
         assert_eq!(counts[0].get("11"), Some(&524));
@@ -1072,7 +1131,8 @@ mod tests {
             1,
             None,
             "binary_count".to_string(),
-        );
+        )
+        .unwrap();
         let config = ExecutionConfig {
             id: "qmio-real".to_string(),
             shots: 1000,
@@ -1087,7 +1147,9 @@ mod tests {
             },
             opt_level: crate::infrastructure::OptLevel::default(),
         };
-        let counts = backend.run_circuits(&[BoundCircuit::Native(bell())], &config);
+        let counts = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].values().sum::<u64>(), 1000);
     }

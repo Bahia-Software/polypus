@@ -8,7 +8,7 @@
 //! therefore proof of GIL-freedom, not just a convention.
 
 use polypus::circuit::{Param, ParameterizedCircuit};
-use polypus::evaluation::CircuitSource;
+use polypus::evaluation::{CircuitSource, EvaluationError};
 use polypus::infrastructure::BoundCircuit;
 
 /// QAOA MaxCut ansatz used across the test suite (4 qubits, ring graph, p=1).
@@ -34,7 +34,9 @@ fn qaoa_template() -> ParameterizedCircuit {
 #[test]
 fn native_bind_requires_no_python_interpreter() {
     let source = CircuitSource::Native(qaoa_template());
-    let bound = source.bind(&[0.4, 0.8]);
+    let bound = source
+        .bind(&[0.4, 0.8])
+        .expect("binding a valid native template must succeed");
     match bound {
         // A native template binds to the native variant; serialising it to
         // OpenQASM 2.0 is pure Rust, so this still needs no interpreter.
@@ -63,7 +65,8 @@ fn native_bind_is_threadsafe_without_gil() {
             std::thread::spawn(move || {
                 for j in 0..100 {
                     let theta = [0.01 * i as f64, 0.02 * j as f64];
-                    let BoundCircuit::Native(circuit) = src.bind(&theta) else {
+                    let bound = src.bind(&theta).expect("native binding must succeed");
+                    let BoundCircuit::Native(circuit) = bound else {
                         panic!("expected native circuit");
                     };
                     assert!(circuit.to_qasm2().starts_with("OPENQASM 2.0;"));
@@ -83,10 +86,15 @@ fn native_num_params_known_without_python() {
 }
 
 #[test]
-#[should_panic(expected = "wrong number of parameter values")]
-fn native_bind_panics_on_wrong_param_count() {
+fn native_bind_errors_on_wrong_param_count() {
+    // A wrong parameter count is now a typed binding error, not a panic — it
+    // reaches Python as an EvaluationError instead of unwinding across the FFI.
     let source = CircuitSource::Native(qaoa_template());
-    let _ = source.bind(&[0.1]); // template declares 2 params
+    let result = source.bind(&[0.1]); // template declares 2 params
+    assert!(
+        matches!(result, Err(EvaluationError::Binding(_))),
+        "expected a typed native binding error"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

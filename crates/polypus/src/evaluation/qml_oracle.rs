@@ -1,4 +1,6 @@
-use crate::evaluation::{assign_parameters_qiskit, run_and_expect, EvaluationOracle};
+use crate::evaluation::{
+    assign_parameters_qiskit, run_and_evaluate, EvaluationError, EvaluationOracle, OracleErrorSlot,
+};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -19,11 +21,39 @@ pub struct QmlOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
+    /// Shared with the `qml.train` entry point: the first evaluation failure is
+    /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
+    /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl EvaluationOracle for QmlOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        let rt = crate::utils::tokio_runtime();
+        // Once evaluation has failed, stop doing work: return finite sentinels
+        // and let the entry point surface the recorded error.
+        if self.errors.failed() {
+            return vec![0.0; candidates.len()];
+        }
+        match self.try_evaluate(candidates) {
+            Ok(values) => values,
+            Err(e) => {
+                self.errors.record(e);
+                vec![0.0; candidates.len()]
+            }
+        }
+    }
+}
+
+impl QmlOracle {
+    /// Fallible core of [`EvaluationOracle::evaluate_batch`]. Kept separate so
+    /// the trait method (which must return `Vec<f64>`) can record any error and
+    /// yield finite sentinels while the entry point re-raises it.
+    fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
+        let rt = crate::utils::tokio_runtime().map_err(|e| {
+            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to start the Tokio runtime for QML evaluation: {e}"
+            )))
+        })?;
 
         let handles: Vec<_> = candidates
             .iter()
@@ -56,9 +86,16 @@ impl EvaluationOracle for QmlOracle {
                 rt.block_on(async {
                     let mut out = Vec::with_capacity(handles.len());
                     for h in handles {
-                        out.push(h.await.expect("QML eval task panicked"));
+                        // A `JoinError` means the worker task itself panicked;
+                        // turn it into a typed error rather than re-panicking.
+                        let single = h.await.map_err(|e| {
+                            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(
+                                format!("QML evaluation task failed: {e}"),
+                            ))
+                        })?;
+                        out.push(single?);
                     }
-                    out
+                    Ok(out)
                 })
             })
         })
@@ -68,27 +105,32 @@ impl EvaluationOracle for QmlOracle {
 /// Evaluate one candidate `theta` against all training circuits.
 ///
 /// Binds `theta` to each training circuit, runs them in batches of
-/// `config.n_qpus`, and returns the mean expectation value.
+/// `config.n_qpus`, and returns the mean expectation value. Any failure is
+/// returned as an [`EvaluationError`] instead of panicking.
 fn evaluate_qml_single(
     training_circuits: &[Py<PyAny>],
     config: &ExecutionConfig,
     backend: &dyn QuantumBackend,
     expectation_fn: &Py<PyAny>,
     theta: &[f64],
-) -> f64 {
+) -> Result<f64, EvaluationError> {
     // Training circuits are Qiskit objects (feature-map pre-binding is
     // Qiskit-specific); native QML circuits arrive with a later phase.
     let bound: Vec<BoundCircuit> = training_circuits
         .iter()
-        .map(|qc_xi| BoundCircuit::Qiskit(assign_parameters_qiskit(qc_xi, theta)))
-        .collect();
+        .map(|qc_xi| {
+            Ok(BoundCircuit::Qiskit(assign_parameters_qiskit(
+                qc_xi, theta,
+            )?))
+        })
+        .collect::<Result<_, EvaluationError>>()?;
 
     let batch_size = backend.max_batch_size(bound.len()).max(1);
     let mut all_ev: Vec<f64> = Vec::with_capacity(bound.len());
     for chunk in bound.chunks(batch_size) {
-        let ev = run_and_expect(backend, chunk, config, expectation_fn);
+        let ev = run_and_evaluate(backend, chunk, config, expectation_fn)?;
         all_ev.extend(ev);
     }
 
-    all_ev.iter().sum::<f64>() / all_ev.len() as f64
+    Ok(all_ev.iter().sum::<f64>() / all_ev.len() as f64)
 }

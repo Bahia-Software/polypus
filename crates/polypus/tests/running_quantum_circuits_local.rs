@@ -4,7 +4,7 @@ use polypus::algorithms::{
 };
 use polypus::circuit::ParameterizedCircuit;
 use polypus::infrastructure::{
-    BackendConfig, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
+    BackendConfig, BackendError, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
 };
 use polypus::AlgorithmTrait;
 use pyo3::prelude::*;
@@ -78,7 +78,7 @@ fn qng_description_is_non_empty() {
 fn infrastructure_from_str_local() {
     assert!(matches!(
         Infrastructure::from_str("local"),
-        Infrastructure::Local
+        Ok(Infrastructure::Local)
     ));
 }
 
@@ -86,14 +86,20 @@ fn infrastructure_from_str_local() {
 fn infrastructure_from_str_cunqa() {
     assert!(matches!(
         Infrastructure::from_str("cunqa"),
-        Infrastructure::Cunqa
+        Ok(Infrastructure::Cunqa)
     ));
 }
 
 #[test]
-#[should_panic(expected = "Unknown infrastructure")]
-fn infrastructure_from_str_unknown_panics() {
-    Infrastructure::from_str("unknown_backend");
+fn infrastructure_from_str_unknown_is_typed_error() {
+    // An unknown infrastructure is now a typed `Result` error (surfaced across
+    // the FFI as a `ValueError`, contract C-1), never a panic.
+    match Infrastructure::from_str("unknown_backend") {
+        Err(BackendError::UnknownInfrastructure { name }) => {
+            assert_eq!(name, "unknown_backend");
+        }
+        _ => panic!("expected an UnknownInfrastructure error, not a panic"),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,7 +136,9 @@ fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
 /// Run the distribute-by-shots algorithm and return the merged counts.
 fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64> {
     pyo3::prepare_freethreaded_python();
-    let result = DistributeByShotsRun.run(native_bell_args(shots, n_qpus, id));
+    let result = DistributeByShotsRun
+        .run(native_bell_args(shots, n_qpus, id))
+        .expect("distribute-by-shots must succeed on the native backend");
     Python::with_gil(|py| {
         result
             .extract::<HashMap<String, u64>>(py)

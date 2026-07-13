@@ -64,6 +64,8 @@
 pub mod algorithms;
 mod bindings;
 pub mod evaluation;
+/// Custom Python exception hierarchy raised across the FFI boundary.
+pub mod exceptions;
 pub mod infrastructure;
 pub mod utils;
 

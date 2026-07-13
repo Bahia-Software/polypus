@@ -1,4 +1,6 @@
-use crate::evaluation::{run_and_expect, CircuitSource, EvaluationOracle};
+use crate::evaluation::{
+    run_and_evaluate, CircuitSource, EvaluationError, EvaluationOracle, OracleErrorSlot,
+};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -23,16 +25,40 @@ pub struct VqcOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
+    /// Shared with the `train` entry point: the first evaluation failure is
+    /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
+    /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl EvaluationOracle for VqcOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        // Once evaluation has failed, stop doing work: return finite sentinels
+        // and let the entry point surface the recorded error.
+        if self.errors.failed() {
+            return vec![0.0; candidates.len()];
+        }
+        match self.try_evaluate(candidates) {
+            Ok(values) => values,
+            Err(e) => {
+                self.errors.record(e);
+                vec![0.0; candidates.len()]
+            }
+        }
+    }
+}
+
+impl VqcOracle {
+    /// Fallible core of [`EvaluationOracle::evaluate_batch`]. Kept separate so
+    /// the trait method (which must return `Vec<f64>`) can record any error and
+    /// yield finite sentinels while the entry point re-raises it.
+    fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
         // Bind each candidate to the circuit template. For native circuits
         // this loop never touches Python.
         let bound: Vec<BoundCircuit> = candidates
             .iter()
             .map(|params| self.circuit.bind(params))
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Submit circuits in backend-sized batches and collect expectations.
         // Local runs the whole batch in one Aer call (parallel experiments);
@@ -40,14 +66,14 @@ impl EvaluationOracle for VqcOracle {
         let batch_size = self.backend.max_batch_size(bound.len()).max(1);
         let mut results = Vec::with_capacity(candidates.len());
         for chunk in bound.chunks(batch_size) {
-            let ev = run_and_expect(
+            let ev = run_and_evaluate(
                 self.backend.as_ref(),
                 chunk,
                 &self.config,
                 &self.expectation_fn,
-            );
+            )?;
             results.extend(ev);
         }
-        results
+        Ok(results)
     }
 }
