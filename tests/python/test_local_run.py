@@ -54,13 +54,14 @@ class TestRunQuantumCircuitSingleQpu:
         assert "00" in counts and "11" in counts
 
     def test_manifest_defaults_for_aer(self, bell_circuit):
-        """The manifest records the run metadata; the default Aer backend is not
-        seeded, so the reported seed is None (contract C-7)."""
+        """The manifest records the run metadata; the default Aer backend is
+        seeded too (contract C-7), so an omitted seed still reports the
+        fresh OS-entropy value that was actually used."""
         import polypus
         result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
         assert result.backend == "aer"
         assert result.infrastructure == "local"
-        assert result.seed is None
+        assert isinstance(result.seed, int)
 
 
 class TestRunQuantumCircuitMultipleQpus:

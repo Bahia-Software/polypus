@@ -1,26 +1,39 @@
 """
 Seed reproducibility & run manifest — public-API end-to-end tests (contract C-7).
 
-These exercise issue #34's acceptance criteria from Python:
+These exercise issue #34 / #56's acceptance criteria from Python:
 
-* ``run_quantum_circuit(..., seed=...)`` on the native backend: same seed ⇒
+* ``run_quantum_circuit(..., seed=...)`` on every *simulated* backend (native
+  ``"polypus"`` and Aer, both under ``infrastructure="local"``): same seed ⇒
   identical counts; no seed ⇒ different counts; the effective seed and manifest
-  are returned; a seed with any non-native backend is rejected.
+  are returned. A seed is rejected for ``infrastructure="qmio"`` (real hardware).
 * ``train`` / ``qml.train`` seed: same seed ⇒ identical outcome; no seed ⇒
   different outcome; the outcome now exposes fitness / iterations / convergence
   / seed, and the ``DE``/``PSO``/``QNG`` ``seed`` field feeds the precedence.
 
+CUNQA's simulated QPUs (``infrastructure="cunqa"``) attempt the same kind of
+seed forwarding as Aer (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
+`local.rs`), but this is unverified, not just untested: the `cunqa` package
+isn't installed anywhere in this environment/CI, and reading the actual
+CESGA-Quantum-Spain/cunqa source at the version README.md pins turned up API
+mismatches predating this seed work (wrong import path, wrong kwarg names, a
+`QPU.run()` method that may not exist at that version) — see the CUNQA
+integration follow-up. There is no dedicated test here for the same reason
+QMIO's `real_qpu_smoke` test is marked `ignored`: no live infrastructure.
+
 The native backend is fully seeded by Polypus, so its reproducibility tests need
-no mocking. ``qml.train`` runs on Qiskit/Aer (native rejected) and Aer's own shot
-sampling is not seeded by Polypus, so that test mocks ``polypus_python.run_qcs``
-to make the oracle deterministic and isolate the optimizer RNG the seed controls.
+no mocking; Aer is genuinely seeded too (via `seed_simulator`, forwarded across
+the C-1 seam), so its tests run for real as well. ``qml.train`` additionally
+mocks ``polypus_python.run_qcs`` to make the oracle's expectation values fixed
+regardless of the (still-seeded) Aer sampling underneath, isolating the
+assertions to the optimizer RNG that ``seed`` controls.
 """
 
 import pytest
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# run_quantum_circuit — native backend is seeded; other backends reject a seed
+# run_quantum_circuit — native and Aer are seeded; qmio (real hardware) rejects
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -34,28 +47,30 @@ def _uniform3():
 
 @pytest.mark.integration
 class TestRunQuantumCircuitSeed:
-    def test_same_seed_reproduces_counts(self):
+    @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
+    def test_same_seed_reproduces_counts(self, backend_name):
         import polypus
 
         qc = _uniform3()
         r1 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend="polypus", seed=42
+            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
         )
         r2 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend="polypus", seed=42
+            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
         )
         assert r1.seed == 42 and r2.seed == 42
         assert r1.counts == r2.counts
 
-    def test_no_seed_differs_across_calls(self):
+    @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
+    def test_no_seed_differs_across_calls(self, backend_name):
         import polypus
 
         qc = _uniform3()
         r1 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend="polypus"
+            qc, shots=2000, infrastructure="local", backend=backend_name
         )
         r2 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend="polypus"
+            qc, shots=2000, infrastructure="local", backend=backend_name
         )
         # An entropy seed is generated, reported, and fresh on every call.
         assert isinstance(r1.seed, int) and isinstance(r2.seed, int)
@@ -75,30 +90,21 @@ class TestRunQuantumCircuitSeed:
         assert r.id == "run_1_local"
         assert isinstance(r.counts, list) and len(r.counts) == 1
 
-    def test_seed_rejected_for_aer(self):
-        import polypus
-
-        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-        with pytest.raises(ValueError, match="seed is only supported"):
-            polypus.run_quantum_circuit(
-                qc, shots=100, infrastructure="local", backend="aer", seed=1
-            )
-
     def test_seed_rejected_for_qmio(self):
         import polypus
 
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-        with pytest.raises(ValueError, match="seed is only supported"):
+        with pytest.raises(ValueError, match="seed is not supported"):
             polypus.run_quantum_circuit(
                 qc, shots=100, infrastructure="qmio", seed=1
             )
 
-    def test_aer_without_seed_reports_none(self):
+    def test_aer_without_seed_reports_entropy_seed(self):
         import polypus
 
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
         r = polypus.run_quantum_circuit(qc, shots=100, infrastructure="local", backend="aer")
-        assert r.seed is None
+        assert isinstance(r.seed, int)
         assert r.backend == "aer"
 
 
@@ -196,7 +202,8 @@ class TestTrainSeed:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# qml.train — optimizer RNG is seeded; Aer sampling isn't, so mock the backend
+# qml.train — optimizer RNG and Aer sampling are both seeded; mock the backend
+# to isolate the optimizer RNG assertions from Aer's own (also-seeded) noise
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -207,9 +214,9 @@ class TestQmlTrainSeed:
     def _patch_deterministic_backend(monkeypatch):
         import polypus_python
 
-        # Fixed counts regardless of the circuit ⇒ a deterministic oracle, so the
-        # only remaining randomness is the optimizer RNG that qml.train's seed
-        # controls (Aer's own shot sampling is not seeded by Polypus; C-7).
+        # Fixed counts regardless of the circuit ⇒ a deterministic oracle, so
+        # these assertions isolate the optimizer RNG that qml.train's seed
+        # controls, independent of Aer's own (now also seeded, C-7) sampling.
         def fake_run_qcs(infrastructure, **kwargs):
             return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]]
 
