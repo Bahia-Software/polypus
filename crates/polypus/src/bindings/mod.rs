@@ -468,6 +468,11 @@ pub fn run_quantum_circuit<'py>(
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged` and the effective `seed`.
 ///
+/// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
+/// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
+/// waiting for the run to finish. An exception raised by
+/// `expectation_function` propagates the same way, as itself.
+///
 /// Example:
 ///
 /// ```ignore
@@ -656,6 +661,11 @@ pub fn train<'py>(
 /// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
 /// is now seeded too (contract C-7), so a `qml.train` run is fully
 /// reproducible end-to-end given the same seed.
+///
+/// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
+/// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
+/// finish, and an exception raised by `expectation_function` propagates as
+/// itself.
 ///
 /// Example:
 ///
