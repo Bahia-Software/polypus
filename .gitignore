@@ -15,10 +15,9 @@ __pycache__/
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
 
-# Experiment outputs
-qaoa_results.csv
-examples/qaoa_results.csv
-examples/plots_maxcut/
+# Experiment outputs (generated at runtime; the committed demo report under
+# examples/max_cut/demo/ is intentionally NOT ignored)
+examples/max_cut/output/
 
 # Logger output
 *.log
