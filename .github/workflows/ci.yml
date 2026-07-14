@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v7
       # PyO3's build script needs to locate a Python interpreter even for a
       # `cargo check`/clippy build of the `polypus` crate.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
@@ -85,8 +85,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@1.85.0
@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@v7
       # Needed only at build/link time (PyO3 links libpython). The Rust tests
       # are Python-runtime-free by design — no Qiskit/Aer needed here.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
@@ -142,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # PyO3's build script needs a Python interpreter to compile `polypus`.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@stable
@@ -170,8 +170,8 @@ jobs:
           - os: macos-latest
             python-version: "3.9"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
@@ -199,8 +199,8 @@ jobs:
       matrix:
         python-version: ["3.9", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
