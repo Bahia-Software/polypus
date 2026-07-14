@@ -582,7 +582,9 @@ pub fn train<'py>(
             // other Python thread and (with the per-batch check_signals in
             // run_and_evaluate) keep Ctrl+C from taking effect until the run
             // ends. See docs/ENGINEERING.md §3.
-            method.py().allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
+            method
+                .py()
+                .allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
             &errors,
             effective_seed,
         );
