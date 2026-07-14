@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "polypus_python"
 version = "0.0.2"
+requires-python = ">=3.9"
 dependencies = [
     "qiskit>=2.0",
     "qiskit-aer>=0.17",

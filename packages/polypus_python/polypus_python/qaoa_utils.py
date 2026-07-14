@@ -1,9 +1,12 @@
-from qiskit.circuit import QuantumCircuit, ParameterVector
+from qiskit.circuit import ParameterVector, QuantumCircuit
 
-def build_qaoa_circuit(graph, n_layers, cost_hamiltonian_layers, mixer_hamiltonian_layers) -> QuantumCircuit:
+
+def build_qaoa_circuit(
+    graph, n_layers, cost_hamiltonian_layers, mixer_hamiltonian_layers
+) -> QuantumCircuit:
     """
     Build a generic QAOA circuit.
- 
+
     Args:
         n_qubits (int): Number of qubits.
         n_layers (int): Number of QAOA layers (p).
@@ -22,10 +25,10 @@ def build_qaoa_circuit(graph, n_layers, cost_hamiltonian_layers, mixer_hamiltoni
     n_qubits = graph.number_of_nodes()
 
     qc = QuantumCircuit(n_qubits)
-    
+
     # Parameter vector: first n_layers for gamma, then n_layers for beta
-    gamma = ParameterVector('γ', n_layers)
-    beta = ParameterVector('β', n_layers)
+    gamma = ParameterVector("γ", n_layers)
+    beta = ParameterVector("β", n_layers)
 
     # Initial state: Hadamard on all qubits
     for i in range(n_qubits):
@@ -40,6 +43,7 @@ def build_qaoa_circuit(graph, n_layers, cost_hamiltonian_layers, mixer_hamiltoni
 
     qc.measure_all()
     return qc
+
 
 def expectation_value(counts, bitstring_to_obj):
     """
@@ -62,6 +66,7 @@ def expectation_value(counts, bitstring_to_obj):
     if sum_count == 0:
         return 0.0
     return avg / sum_count
+
 
 def expectation_values(array_counts, bitstring_to_obj):
     """
@@ -86,8 +91,9 @@ def expectation_values(array_counts, bitstring_to_obj):
             expectation_values.append(0.0)
         else:
             expectation_values.append(avg / sum_count)
-    
+
     return expectation_values
+
 
 def assign_parameters(qc, params):
     """

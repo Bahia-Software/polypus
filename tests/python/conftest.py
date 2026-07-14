@@ -1,7 +1,7 @@
 """Shared pytest fixtures for polypus tests."""
 
 import pytest
-from qiskit.circuit import QuantumCircuit, ParameterVector
+from qiskit.circuit import ParameterVector, QuantumCircuit
 
 
 @pytest.fixture
@@ -31,6 +31,7 @@ def simple_expectation_fn():
     Passed to polypus.train as the per-bitstring objective. Returns 1.0 for
     the all-ones state, 0.0 otherwise — drives optimisers toward θ = π.
     """
+
     def _fn(bitstring: str) -> float:
         return float(all(b == "1" for b in bitstring))
 
@@ -44,6 +45,7 @@ def simple_variance_fn():
     Returns 0.5 (constant) — sufficient to verify QNG plumbing without
     requiring a real quantum Fisher information matrix computation.
     """
+
     def _fn(theta: list, a: int) -> float:
         return 0.5
 

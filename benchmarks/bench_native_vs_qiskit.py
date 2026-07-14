@@ -62,9 +62,11 @@ def main():
     qk, nv = qiskit_qaoa(), native_qaoa()
 
     # 1. Binding microbenchmark
-    us_qiskit = bench(lambda i: qk.assign_parameters([0.001 * i, 0.002 * i], inplace=False))
+    us_qiskit = bench(
+        lambda i: qk.assign_parameters([0.001 * i, 0.002 * i], inplace=False)
+    )
     us_native = bench(lambda i: nv.to_qasm2([0.001 * i, 0.002 * i]))
-    print(f"binding (QAOA 4q, 2 params, mean of best round, n=2000):")
+    print("binding (QAOA 4q, 2 params, mean of best round, n=2000):")
     print(f"  qiskit assign_parameters : {us_qiskit:8.1f} us/candidate")
     print(f"  native  bind+QASM        : {us_native:8.1f} us/candidate")
     print(f"  speedup                  : {us_qiskit / us_native:8.1f}x")
@@ -88,8 +90,10 @@ def main():
 
     for label, qc_factory in (("qiskit", qiskit_qaoa), ("native", native_qaoa)):
         times = [train_once(qc_factory(), f"bench_{label}_{i}") for i in range(3)]
-        print(f"train DE 10x20 ({label:6s})    : {min(times):.2f}s best, "
-              f"{statistics.mean(times):.2f}s mean of 3")
+        print(
+            f"train DE 10x20 ({label:6s})    : {min(times):.2f}s best, "
+            f"{statistics.mean(times):.2f}s mean of 3"
+        )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 name              = "polypus-physics"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description       = "Pure-Rust particle-physics simulation layer for Polypus: classical Monte Carlo transport and quantum Hamiltonian definitions as Pauli sums. No Python, no external physics framework."

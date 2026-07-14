@@ -14,7 +14,6 @@ import math
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # run_quantum_circuit with the native backend
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,18 +110,14 @@ class TestShotsQpusValidation:
 
         qc = polypus.Circuit(1).h(0).measure_all()
         with pytest.raises(ValueError, match="n_qpus must be >= 1"):
-            polypus.run_quantum_circuit(
-                qc, shots=100, infrastructure="local", n_qpus=0
-            )
+            polypus.run_quantum_circuit(qc, shots=100, infrastructure="local", n_qpus=0)
 
     def test_zero_shots_rejected(self):
         import polypus
 
         qc = polypus.Circuit(1).h(0).measure_all()
         with pytest.raises(ValueError, match="shots must be >= 1"):
-            polypus.run_quantum_circuit(
-                qc, shots=0, infrastructure="local", n_qpus=1
-            )
+            polypus.run_quantum_circuit(qc, shots=0, infrastructure="local", n_qpus=1)
 
     def test_zero_shots_rejected_in_train(self, simple_expectation_fn):
         """The same boundary guard protects the train() entry point."""
@@ -199,7 +194,9 @@ def native_ry_circuit():
 @pytest.mark.integration
 @pytest.mark.vqc
 class TestTrainNativeBackend:
-    def test_train_de_with_native_backend(self, native_ry_circuit, simple_expectation_fn):
+    def test_train_de_with_native_backend(
+        self, native_ry_circuit, simple_expectation_fn
+    ):
         import polypus
 
         result = polypus.train(

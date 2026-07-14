@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+
 class Infraestructure(ABC):
     def __init__(self, **kwargs):
         """
@@ -10,9 +11,9 @@ class Infraestructure(ABC):
 
         Any missing value defaults to None.
         """
-        self.num_qpus = kwargs.get('num_qpus', None)
-        self.qubits_per_qpu = kwargs.get('qubits_per_qpu', None)
-        self.qpu_types = kwargs.get('qpu_types', None)
+        self.num_qpus = kwargs.get("num_qpus", None)
+        self.qubits_per_qpu = kwargs.get("qubits_per_qpu", None)
+        self.qpu_types = kwargs.get("qpu_types", None)
 
     @abstractmethod
     def get_qpus(self, **kwargs) -> object:

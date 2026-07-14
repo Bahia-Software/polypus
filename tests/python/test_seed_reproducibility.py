@@ -31,7 +31,6 @@ assertions to the optimizer RNG that ``seed`` controls.
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # run_quantum_circuit — native and Aer are seeded; qmio (real hardware) rejects
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,15 +94,15 @@ class TestRunQuantumCircuitSeed:
 
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
         with pytest.raises(ValueError, match="seed is not supported"):
-            polypus.run_quantum_circuit(
-                qc, shots=100, infrastructure="qmio", seed=1
-            )
+            polypus.run_quantum_circuit(qc, shots=100, infrastructure="qmio", seed=1)
 
     def test_aer_without_seed_reports_entropy_seed(self):
         import polypus
 
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-        r = polypus.run_quantum_circuit(qc, shots=100, infrastructure="local", backend="aer")
+        r = polypus.run_quantum_circuit(
+            qc, shots=100, infrastructure="local", backend="aer"
+        )
         assert isinstance(r.seed, int)
         assert r.backend == "aer"
 

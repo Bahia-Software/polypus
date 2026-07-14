@@ -9,7 +9,17 @@
 # Uses the RustSec advisory database (https://github.com/rustsec/advisory-db).
 # Recent cargo-deny versions default vulnerabilities to "deny" and unmaintained
 # crates to "warn", so no explicit severity keys are needed here.
-ignore = []
+ignore = [
+    # PyCFunction::new_closure lacked a Sync bound in pyo3 <0.29. The
+    # workspace never calls new_closure (verified: no occurrences under
+    # crates/), so the advisory does not apply. Remove this entry when the
+    # pyo3 >=0.29 migration lands.
+    { id = "RUSTSEC-2026-0177", reason = "PyCFunction::new_closure is not used in this workspace" },
+    # Out-of-bounds read in `nth`/`nth_back` on PyList/PyTuple iterators
+    # (also reachable via `skip`/`step_by`). No such calls exist on pyo3
+    # iterators in this workspace. Remove when the pyo3 >=0.26 upgrade lands.
+    { id = "RUSTSEC-2026-0176", reason = "nth/nth_back (and skip/step_by) are never called on PyList/PyTuple iterators here" },
+]
 
 [licenses]
 # Polypus is licensed under EUPL-1.2. Allow it plus the common permissive

@@ -9,7 +9,6 @@ These tests require qiskit-aer to be installed. They are marked with the
 
 import pytest
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -19,37 +18,57 @@ class TestRunQuantumCircuitSingleQpu:
 
     def test_returns_list(self, bell_circuit):
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
-        assert isinstance(result.counts, list), f"Expected list, got {type(result.counts)}"
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=100, infrastructure="local"
+        )
+        assert isinstance(result.counts, list), (
+            f"Expected list, got {type(result.counts)}"
+        )
 
     def test_returns_one_element(self, bell_circuit):
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=100, infrastructure="local"
+        )
         assert len(result.counts) == 1
 
     def test_element_is_dict(self, bell_circuit):
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=100, infrastructure="local"
+        )
         assert isinstance(result.counts[0], dict)
 
     def test_only_bell_states(self, bell_circuit):
         """A Bell circuit can only produce '00' or '11'."""
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=1000, infrastructure="local")
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=1000, infrastructure="local"
+        )
         assert set(result.counts[0].keys()).issubset({"00", "11"}), (
             f"Unexpected bitstrings in Bell result: {result.counts[0].keys()}"
         )
 
     def test_total_shots(self, bell_circuit):
         import polypus
+
         shots = 512
-        result = polypus.run_quantum_circuit(bell_circuit, shots=shots, infrastructure="local")
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=shots, infrastructure="local"
+        )
         assert sum(result.counts[0].values()) == shots
 
     def test_both_bell_states_observed(self, bell_circuit):
         """With 1000 shots both '00' and '11' should appear."""
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=1000, infrastructure="local")
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=1000, infrastructure="local"
+        )
         counts = result.counts[0]
         assert "00" in counts and "11" in counts
 
@@ -58,7 +77,10 @@ class TestRunQuantumCircuitSingleQpu:
         seeded too (contract C-7), so an omitted seed still reports the
         fresh OS-entropy value that was actually used."""
         import polypus
-        result = polypus.run_quantum_circuit(bell_circuit, shots=100, infrastructure="local")
+
+        result = polypus.run_quantum_circuit(
+            bell_circuit, shots=100, infrastructure="local"
+        )
         assert result.backend == "aer"
         assert result.infrastructure == "local"
         assert isinstance(result.seed, int)
@@ -70,6 +92,7 @@ class TestRunQuantumCircuitMultipleQpus:
 
     def test_distributed_returns_dict(self, bell_circuit):
         import polypus
+
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
@@ -79,6 +102,7 @@ class TestRunQuantumCircuitMultipleQpus:
 
     def test_distributed_only_bell_states(self, bell_circuit):
         import polypus
+
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
@@ -88,6 +112,7 @@ class TestRunQuantumCircuitMultipleQpus:
 
     def test_distributed_total_shots(self, bell_circuit):
         import polypus
+
         shots = 400
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=4
@@ -98,6 +123,7 @@ class TestRunQuantumCircuitMultipleQpus:
         """Contract C-3: shots % n_qpus != 0 must still conserve the total.
         1000 / 3 leaves a remainder of 1; the old `shots /= n_qpus` ran 999."""
         import polypus
+
         shots = 1000
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=3
@@ -108,6 +134,7 @@ class TestRunQuantumCircuitMultipleQpus:
         """Contract C-3 degenerate case: shots < n_qpus. 5 shots on 8 QPUs must
         run exactly 5 shots (one-per-QPU on the first 5), not 0 (5 // 8 == 0)."""
         import polypus
+
         shots = 5
         result = polypus.run_quantum_circuit(
             bell_circuit, shots=shots, infrastructure="local", n_qpus=8
