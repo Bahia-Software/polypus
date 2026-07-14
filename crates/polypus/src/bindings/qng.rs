@@ -1,7 +1,6 @@
-use crate::evaluation::InterruptState;
+use crate::evaluation::{EvaluationError, OracleErrorSlot};
 use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
-use std::sync::Arc;
 
 /// Quantum Natural Gradient optimizer configuration.
 #[pyclass]
@@ -63,62 +62,53 @@ impl QNG {
 pub struct PyVarianceOracle {
     /// Python callable `fn(theta: list[float], a: int) -> float`.
     pub variance_function: Py<PyAny>,
-    /// Cancellation state shared with the run's [`VqcOracle`](crate::evaluation::VqcOracle).
-    /// QNG hits both oracles per iteration; sharing the state means a Ctrl+C (or
-    /// a `variance_function` exception) observed on either path short-circuits
-    /// the whole run and is re-raised by the entry point as the original
-    /// exception (see [`InterruptState`]).
-    pub interrupt: Arc<InterruptState>,
+    /// Shared with the `train`/`qml.train` entry point: a failure calling the
+    /// user's `variance_function` is recorded here and surfaced as a `PyErr`
+    /// after `optimize` returns, since [`VarianceOracle`] cannot return a
+    /// `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl PyVarianceOracle {
     /// Call the Python `variance_function(theta, param_index)` under an already
-    /// held GIL and extract the returned float, propagating any exception it
-    /// raises rather than swallowing it into a panic with `.expect()`.
-    fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> PyResult<f64> {
+    /// held GIL, recording any failure and returning a finite sentinel so the
+    /// optimizer never observes a panic (contract C-5 keeps outputs finite).
+    fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> f64 {
+        if self.errors.failed() {
+            return 0.0;
+        }
+        match self.try_call(py, theta, param_index) {
+            Ok(value) => value,
+            Err(e) => {
+                self.errors.record(e);
+                0.0
+            }
+        }
+    }
+
+    /// Fallible core of [`call`](Self::call): invoke the user callback and
+    /// extract the float, carrying any Python error verbatim.
+    fn try_call(
+        &self,
+        py: Python<'_>,
+        theta: &[f64],
+        param_index: usize,
+    ) -> Result<f64, EvaluationError> {
         self.variance_function
             .bind(py)
-            .call1((theta.to_vec(), param_index as u32))?
+            .call1((theta.to_vec(), param_index as u32))
+            .map_err(EvaluationError::Python)?
             .extract()
+            .map_err(EvaluationError::Python)
     }
 }
 
 impl VarianceOracle for PyVarianceOracle {
     fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
-        if self.interrupt.is_interrupted() {
-            return 0.0;
-        }
-        Python::with_gil(|py| match self.call(py, theta, param_index) {
-            Ok(v) => v,
-            Err(err) => {
-                self.interrupt.capture(err);
-                0.0
-            }
-        })
+        Python::with_gil(|py| self.call(py, theta, param_index))
     }
 
     fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
-        // Once interrupted, return a finite placeholder diagonal without calling
-        // Python. QNG adds Tikhonov regularisation to every element, so a zero
-        // here can never cause a divide-by-zero; the outcome is discarded anyway.
-        if self.interrupt.is_interrupted() {
-            return vec![0.0; dims];
-        }
-        Python::with_gil(|py| {
-            let mut diagonal = Vec::with_capacity(dims);
-            for a in 0..dims {
-                match self.call(py, theta, a) {
-                    Ok(v) => diagonal.push(v),
-                    Err(err) => {
-                        // Capture the exception, stop calling Python, and pad the
-                        // rest with placeholders (the entry point re-raises it).
-                        self.interrupt.capture(err);
-                        diagonal.resize(dims, 0.0);
-                        break;
-                    }
-                }
-            }
-            diagonal
-        })
+        Python::with_gil(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
     }
 }

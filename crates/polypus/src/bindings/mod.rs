@@ -17,7 +17,7 @@ use pso::PSO;
 use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
-use crate::evaluation::{CircuitSource, EvaluationOracle, InterruptState, QmlOracle, VqcOracle};
+use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, QmlOracle, VqcOracle};
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
@@ -27,6 +27,7 @@ use crate::infrastructure::{
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
+    OptimizerError,
 };
 use std::sync::Arc;
 
@@ -38,11 +39,12 @@ use std::sync::Arc;
 /// ([`AlgorithmSingleRun`](crate::algorithms::AlgorithmSingleRun)), or a single
 /// merged `dict[str, int]` for a distributed (`n_qpus > 1`) run
 /// ([`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)); the
-/// per-dict format is contract C-3. The manifest fields make a native run
+/// per-dict format is contract C-3. The manifest fields make a simulated run
 /// reproducible: feeding the reported [`seed`](Self::seed) back into
-/// `run_quantum_circuit(..., backend="polypus")` reproduces the counts
-/// byte-for-byte. `seed` is `None` for non-native backends, which Polypus does
-/// not seed.
+/// `run_quantum_circuit(..., seed=...)` reproduces the counts byte-for-byte on
+/// any of the native, Aer, or CUNQA (simulated-QPU) backends. `seed` is `None`
+/// only for the `qmio` infrastructure, which runs on real hardware that
+/// Polypus cannot seed.
 #[pyclass(frozen)]
 pub struct RunResult {
     /// Measurement counts. Shape depends on `n_qpus` (see the type docs).
@@ -51,8 +53,8 @@ pub struct RunResult {
     /// Run identifier used for logging, temp files and SLURM job names.
     #[pyo3(get)]
     pub id: String,
-    /// Effective RNG seed used by the native backend's shot sampling
-    /// (user-supplied or OS-entropy). `None` for non-native backends.
+    /// Effective RNG seed used by the backend's shot sampling (user-supplied or OS-entropy).
+    /// Now supported for `native`, `aer`, and `cunqa`. `None` for `qmio` hardware.
     #[pyo3(get)]
     pub seed: Option<u64>,
     /// Device selected within the infrastructure (`"aer"`, `"polypus"`, …).
@@ -138,16 +140,6 @@ fn outcome_to_train_result(
     .map(|result| result.into_any())
 }
 
-/// Whether this `infrastructure` + `backend` combination actually runs on the
-/// native pure-Rust statevector backend — the only backend whose shot sampling
-/// Polypus seeds. It is reached exclusively via `infrastructure="local"` +
-/// `backend="polypus"`; every other combination runs Aer, CUNQA or QMIO, none
-/// of which consume `ExecutionConfig::seed`, so an explicit seed there would be
-/// silently ineffective (see [`run_quantum_circuit`]).
-fn uses_native_backend(infrastructure: &str, backend: &str) -> bool {
-    infrastructure == "local" && is_native_backend(backend)
-}
-
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
@@ -174,6 +166,27 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     None
 }
 
+/// Turn an optimizer result into the value the Python entry point returns.
+///
+/// An oracle failure recorded in `errors` takes precedence over the optimizer's
+/// own result: because [`EvaluationOracle`]/`VarianceOracle` cannot return a
+/// `Result`, an oracle records its first failure in the shared
+/// [`OracleErrorSlot`] and yields finite sentinels, so `optimize` may return
+/// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
+/// makes the FFI boundary report the real cause instead of that garbage.
+fn finish_optimization(
+    py: Python<'_>,
+    result: Result<OptimizationOutcome, OptimizerError>,
+    errors: &OracleErrorSlot,
+    seed: u64,
+) -> PyResult<PyObject> {
+    if let Some(eval_err) = errors.take() {
+        return Err(eval_err.into());
+    }
+    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    outcome_to_train_result(py, outcome, seed)
+}
+
 /// Map the public `infrastructure` + `backend` strings and provider parameters
 /// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
 /// mapping in one place and guarantees the config matches the selected backend.
@@ -190,7 +203,7 @@ fn build_backend_config(
     nodes: u32,
     cores_per_qpu: u32,
 ) -> PyResult<BackendConfig> {
-    match Infrastructure::from_str(infrastructure) {
+    match Infrastructure::from_str(infrastructure)? {
         Infrastructure::Local => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
                 backend: "AerSimulator".to_string(),
@@ -329,13 +342,15 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// or an OpenQASM 2.0 string. `backend` selects the local device: `"aer"`
 /// (default) or the pure-Rust `"polypus"` statevector simulator.
 ///
-/// `seed` controls the native backend's shot sampling (contract C-7): with
-/// `backend="polypus"` an explicit `seed` reproduces the counts byte-for-byte,
-/// and omitting it draws a fresh OS-entropy seed so repeated runs give genuinely
-/// independent noise. Passing a `seed` with any other backend raises
-/// `ValueError` rather than silently ignoring it, since only the native backend
-/// is seeded here. Returns a [`RunResult`] carrying the counts plus a manifest
-/// (`id`, effective `seed`, `backend`, `infrastructure`) for logging and replay.
+/// `seed` controls shot sampling (contract C-7) on every simulated backend —
+/// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs
+/// (`infrastructure="cunqa"`): an explicit `seed` reproduces the counts
+/// byte-for-byte, and omitting it draws a fresh OS-entropy seed so repeated
+/// runs give genuinely independent noise. Passing a `seed` with
+/// `infrastructure="qmio"` raises `ValueError` rather than silently ignoring
+/// it, since that infrastructure is real hardware and cannot be seeded.
+/// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
+/// effective `seed`, `backend`, `infrastructure`) for logging and replay.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
 // Rich FFI entry point mirroring a many-kwarg Python API; same rationale and
 // convention as `train`/`qml_train` below.
@@ -377,21 +392,21 @@ pub fn run_quantum_circuit<'py>(
             ));
         }
     }
-    // Resolve the shot-sampling seed. Only the native statevector backend is
-    // seeded by Polypus; for any other backend an explicit seed would be
-    // silently ineffective, so reject it rather than give false confidence in
-    // reproducibility. When native, `None` means "draw a fresh OS-entropy seed",
-    // resolved here so the effective value can be reported in the manifest.
-    let effective_seed: Option<u64> = if uses_native_backend(&infrastructure, backend) {
-        Some(seed.unwrap_or_else(random_seed))
-    } else if seed.is_some() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "seed is only supported for the native statevector backend \
-             (infrastructure=\"local\", backend=\"polypus\"); backend=\"{backend}\" on \
-             infrastructure=\"{infrastructure}\" does not support seeding"
-        )));
-    } else {
+    // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
+    // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
+    // an explicit seed there would be silently ineffective — reject it rather
+    // than give false confidence in reproducibility. When simulated, `None`
+    // means "draw a fresh OS-entropy seed", resolved here so the effective
+    // value can be reported in the manifest.
+    let effective_seed: Option<u64> = if infrastructure == "qmio" {
+        if seed.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
+            ));
+        }
         None
+    } else {
+        Some(seed.unwrap_or_else(random_seed))
     };
 
     let id = format!("run_{}_{}", n_qpus, infrastructure);
@@ -417,15 +432,16 @@ pub fn run_quantum_circuit<'py>(
         config,
     };
 
-    let algorithm: Box<dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyObject>> =
-        if n_qpus == 1 {
-            Box::new(AlgorithmSingleRun)
-        } else {
-            Box::new(DistributeByShotsRun)
-        };
+    let algorithm: Box<
+        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>>,
+    > = if n_qpus == 1 {
+        Box::new(AlgorithmSingleRun)
+    } else {
+        Box::new(DistributeByShotsRun)
+    };
 
     // Keep the original counts payload intact and wrap it with the run manifest.
-    let counts = algorithm.run(args);
+    let counts = algorithm.run(args)?;
     Python::with_gil(|py| {
         Py::new(
             py,
@@ -451,11 +467,6 @@ pub fn run_quantum_circuit<'py>(
 /// sampling, so a native-backend run reproduces exactly. Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged` and the effective `seed`.
-///
-/// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
-/// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
-/// waiting for the run to finish. An exception raised by
-/// `expectation_function` propagates the same way, as itself.
 ///
 /// Example:
 ///
@@ -542,17 +553,17 @@ pub fn train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
-    let backend = Infrastructure::create_backend(&config);
-    // Cancellation state shared with the oracle(s): a Ctrl+C or a Python error
-    // observed mid-optimization is captured here and re-raised below as the
-    // original exception, instead of being swallowed into a panic.
-    let interrupt = Arc::new(InterruptState::default());
+    let backend = Infrastructure::create_backend(&config)?;
+    // Shared error slot: the oracles record the first evaluation failure here
+    // (the optimizer traits cannot return a `Result`) and it is surfaced by
+    // `finish_optimization` after `optimize` returns.
+    let errors = OracleErrorSlot::new();
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
-        interrupt: Arc::clone(&interrupt),
+        errors: errors.clone(),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -564,9 +575,17 @@ pub fn train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        return run_optimizer(method.py(), &interrupt, effective_seed, || {
-            AlgorithmDifferentialEvolution.optimize(args)
-        });
+        return finish_optimization(
+            method.py(),
+            // Release the GIL for the whole optimization: parameter binding and
+            // native simulation are GIL-free, so holding it would stall every
+            // other Python thread and (with the per-batch check_signals in
+            // run_and_evaluate) keep Ctrl+C from taking effect until the run
+            // ends. See docs/ENGINEERING.md §3.
+            method.py().allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -582,9 +601,12 @@ pub fn train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        return run_optimizer(method.py(), &interrupt, effective_seed, || {
-            AlgorithmPSO.optimize(args)
-        });
+        return finish_optimization(
+            method.py(),
+            method.py().allow_threads(|| AlgorithmPSO.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -597,55 +619,22 @@ pub fn train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(method.py()),
-                interrupt: Arc::clone(&interrupt),
+                errors: errors.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        return run_optimizer(method.py(), &interrupt, effective_seed, || {
-            AlgorithmQNG.optimize(args)
-        });
+        return finish_optimization(
+            method.py(),
+            method.py().allow_threads(|| AlgorithmQNG.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
         "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
     ))
-}
-
-/// Run one optimizer to completion off the GIL and turn the result into the
-/// `train`/`qml_train` return value.
-///
-/// Shared by both entry points and all three optimizers. It:
-///
-/// 1. Releases the GIL for the whole `optimize()` call
-///    ([`Python::allow_threads`]) so the GIL-free parameter binding and
-///    simulation don't stall other Python threads — the core GIL discipline of
-///    the project (`docs/ENGINEERING.md` §3).
-/// 2. After the optimizer returns, re-raises any exception the oracle captured
-///    (a `KeyboardInterrupt`, or an error raised by the Python
-///    `expectation_function` / variance callback) as the **original** exception.
-///    Releasing the GIL is not enough on its own to make Ctrl+C responsive:
-///    the oracle also calls `py.check_signals()` at each Python touchpoint, and
-///    stashes the resulting `PyErr` in `interrupt`; this is where it surfaces.
-/// 3. Otherwise maps a pure-Rust [`OptimizerError`] to `PyValueError` (an
-///    invalid configuration) and wraps the outcome in a [`TrainResult`].
-fn run_optimizer<F>(
-    py: Python<'_>,
-    interrupt: &InterruptState,
-    effective_seed: u64,
-    optimize: F,
-) -> PyResult<PyObject>
-where
-    F: FnOnce() -> Result<OptimizationOutcome, polypus_optimizers::OptimizerError> + Send,
-{
-    let result = py.allow_threads(optimize);
-    // A captured exception wins over the (now meaningless) optimizer outcome,
-    // and must be re-raised as itself so callers can `except KeyboardInterrupt`.
-    if let Some(err) = interrupt.take() {
-        return Err(err);
-    }
-    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    outcome_to_train_result(py, outcome, effective_seed)
 }
 
 /// QML entry point: train a data-encoding VQC where `feature_map` encodes each
@@ -661,15 +650,10 @@ where
 ///    fitness value.
 ///
 /// `seed` follows the same precedence as [`train`] and makes the optimizer's
-/// search reproducible; it returns a [`TrainResult`]. Note that qml.train runs
-/// on the Qiskit/Aer path (the native backend is rejected), and Aer's own shot
-/// sampling is not seeded by Polypus, so full end-to-end reproducibility holds
-/// only for a deterministic oracle (contract C-7).
-///
-/// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
-/// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
-/// finish, and an exception raised by `expectation_function` propagates as
-/// itself.
+/// search reproducible; it returns a [`TrainResult`]. `qml.train` runs on the
+/// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
+/// is now seeded too (contract C-7), so a `qml.train` run is fully
+/// reproducible end-to-end given the same seed.
 ///
 /// Example:
 ///
@@ -705,8 +689,8 @@ pub fn qml_train<'py>(
     validate_shots_and_qpus(shots, n_qpus)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
-    // below), so this seed governs the optimizer's RNG; Aer's own shot sampling
-    // is not seeded by Polypus.
+    // below); this seed governs the optimizer's RNG and, since it's threaded
+    // into ExecutionConfig::seed below, Aer's shot sampling too.
     let effective_seed = resolve_optimizer_seed(seed, method_seed(&method));
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
@@ -779,16 +763,16 @@ pub fn qml_train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
-    let backend = Infrastructure::create_backend(&config);
-    // Same cancellation wiring as `train` (see [`run_optimizer`]): a Ctrl+C or a
-    // Python error is captured here and re-raised as the original exception.
-    let interrupt = Arc::new(InterruptState::default());
+    let backend = Infrastructure::create_backend(&config)?;
+    // Shared error slot (see `train`): oracles record the first evaluation
+    // failure here and `finish_optimization` surfaces it after `optimize`.
+    let errors = OracleErrorSlot::new();
     let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
-        interrupt: Arc::clone(&interrupt),
+        errors: errors.clone(),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -800,9 +784,15 @@ pub fn qml_train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        return run_optimizer(py, &interrupt, effective_seed, || {
-            AlgorithmDifferentialEvolution.optimize(args)
-        });
+        return finish_optimization(
+            py,
+            // Release the GIL for the optimization (see `train` and
+            // docs/ENGINEERING.md §3): the QML workers re-acquire it per batch,
+            // and the main-thread signal check in the oracle keeps Ctrl+C prompt.
+            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -818,9 +808,12 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        return run_optimizer(py, &interrupt, effective_seed, || {
-            AlgorithmPSO.optimize(args)
-        });
+        return finish_optimization(
+            py,
+            py.allow_threads(|| AlgorithmPSO.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -833,14 +826,17 @@ pub fn qml_train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(py),
-                interrupt: Arc::clone(&interrupt),
+                errors: errors.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        return run_optimizer(py, &interrupt, effective_seed, || {
-            AlgorithmQNG.optimize(args)
-        });
+        return finish_optimization(
+            py,
+            py.allow_threads(|| AlgorithmQNG.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -848,8 +844,18 @@ pub fn qml_train<'py>(
     ))
 }
 
+/// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
+/// process. A `Drop` must never panic, so a failed teardown (e.g. releasing a
+/// CUNQA SLURM allocation) is logged and counted rather than raised; this
+/// exposes the consultable count to Python for diagnostics/monitoring.
+#[pyfunction]
+fn backend_cleanup_failures() -> u64 {
+    crate::infrastructure::cleanup_failure_count()
+}
+
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::exceptions::register(m)?;
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
     m.add_class::<QNG>()?;
@@ -861,6 +867,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()
     let py = m.py();
@@ -994,30 +1001,29 @@ mod tests {
         });
     }
 
-    /// A seed passed with any non-native backend is rejected, never silently
-    /// dropped — Polypus only seeds the native statevector backend.
+    /// A seed passed with `infrastructure="qmio"` is rejected, never silently
+    /// dropped — that infrastructure is real hardware and Polypus cannot seed
+    /// it, unlike the native, Aer, and CUNQA simulated backends.
     #[test]
-    fn seed_rejected_for_non_native_backends() {
+    fn seed_rejected_for_qmio_hardware() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let qasm = uniform3_qasm();
-            for (infra, backend) in [("local", "aer"), ("cunqa", "aer"), ("qmio", "aer")] {
-                let qc = PyString::new(py, &qasm).into_any();
-                let result = run_quantum_circuit(
-                    qc,
-                    100,
-                    infra.to_string(),
-                    1,
-                    "automatic",
-                    None,
-                    backend,
-                    Some(3),
-                );
-                assert!(
-                    result.is_err(),
-                    "an explicit seed must be rejected for infrastructure={infra}, backend={backend}"
-                );
-            }
+            let qc = pyo3::types::PyString::new(py, &qasm).into_any();
+            let result = run_quantum_circuit(
+                qc,
+                100,
+                "qmio".to_string(),
+                1,
+                "automatic",
+                None,
+                "aer",
+                Some(3),
+            );
+            assert!(
+                result.is_err(),
+                "an explicit seed must be rejected for infrastructure=qmio"
+            );
         });
     }
 

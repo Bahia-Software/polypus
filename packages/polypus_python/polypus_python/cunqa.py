@@ -37,6 +37,8 @@ class Cunqa(Infraestructure):
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")
 
+        seed = args.get("seed", None)
+
         sys.path.append(os.getenv("HOME"))
         try:
             qpus = get_QPUs(local=False, family=family_id)
@@ -47,7 +49,33 @@ class Cunqa(Infraestructure):
         try:
             qjobs = []
             for i in range(len(qcs)):
-                qjob = qpus[i].run(qcs[i], shots=shots, transpile=False)
+                if seed is not None:
+                    # `seed` (not `seed_simulator`) is the kwarg CUNQA's own
+                    # docs name (reference/api/run_configuration.html).
+                    # Offset by QPU index (mirrors the native backend's
+                    # `base_seed + i` in native.rs) so each QPU gets a
+                    # distinct, deterministic seed instead of every QPU
+                    # reproducing the exact same counts; masked to the 63-bit
+                    # range Aer accepts, since CUNQA's simulated QPUs are
+                    # Aer-based (same reason as local.py's mask).
+                    #
+                    # UNVERIFIED beyond the kwarg name: the `cunqa` package
+                    # isn't installed anywhere this can be exercised, and
+                    # CESGA-Quantum-Spain/cunqa@2.3.0 (the version README.md
+                    # pins) has no `QPU.run()` method at all (only
+                    # `.execute()`) and no `cunqa.qutils` module, which this
+                    # file already imports from above — this whole
+                    # integration may not run at all against that version.
+                    # See the follow-up task for reconciling this file with
+                    # the real, deployed CUNQA API.
+                    qjob = qpus[i].run(
+                        qcs[i],
+                        shots=shots,
+                        transpile=False,
+                        seed=(seed + i) & 0x7FFFFFFFFFFFFFFF,
+                    )
+                else:
+                    qjob = qpus[i].run(qcs[i], shots=shots, transpile=False)
                 qjobs.append(qjob)
             
             results = gather(qjobs)

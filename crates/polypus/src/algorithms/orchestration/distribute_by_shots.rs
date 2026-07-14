@@ -10,10 +10,10 @@ pub struct DistributeByShotsRun;
 
 impl AlgorithmTrait for DistributeByShotsRun {
     type Args = AlgorithmArgs;
-    type AlgorithmReturnType = pyo3::PyObject;
+    type AlgorithmReturnType = PyResult<pyo3::PyObject>;
 
-    fn run(&self, mut args: AlgorithmArgs) -> pyo3::PyObject {
-        let backend = Infrastructure::create_backend(&args.config);
+    fn run(&self, mut args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
+        let backend = Infrastructure::create_backend(&args.config)?;
 
         // Distribute shots across QPUs, conserving the total (contract C-3): the
         // remainder `shots % n_qpus` is spread one extra shot per QPU over the
@@ -46,14 +46,14 @@ impl AlgorithmTrait for DistributeByShotsRun {
         if remainder > 0 {
             let qcs: Vec<_> = (0..remainder).map(|_| args.qcs[0].duplicate()).collect();
             args.config.shots = base + 1;
-            counts_vec.extend(backend.run_circuits(&qcs, &args.config));
+            counts_vec.extend(backend.run_circuits(&qcs, &args.config)?);
         }
         if base > 0 {
             let qcs: Vec<_> = (0..n_qpus - remainder)
                 .map(|_| args.qcs[0].duplicate())
                 .collect();
             args.config.shots = base;
-            counts_vec.extend(backend.run_circuits(&qcs, &args.config));
+            counts_vec.extend(backend.run_circuits(&qcs, &args.config)?);
         }
 
         // Merge counts from all QPUs into a single dict
@@ -63,16 +63,16 @@ impl AlgorithmTrait for DistributeByShotsRun {
                 *total.entry(k).or_insert(0) += v;
             }
         }
-        let merged_pyobj = Python::with_gil(|py| {
+        let merged_pyobj = Python::with_gil(|py| -> PyResult<pyo3::PyObject> {
             let py_dict = PyDict::new(py);
             for (k, v) in total {
-                py_dict.set_item(k, v).unwrap();
+                py_dict.set_item(k, v)?;
             }
-            py_dict.into()
-        });
+            Ok(py_dict.into())
+        })?;
 
         backend.close();
-        merged_pyobj
+        Ok(merged_pyobj)
     }
 
     fn name(&self) -> String {

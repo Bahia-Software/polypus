@@ -11,13 +11,12 @@ pub use polypus_optimizers::{
 };
 
 use crate::infrastructure::{BoundCircuit, ExecutionConfig};
-use std::fmt;
 
 /// Trait for all quantum algorithms in Polypus.
 /// Each algorithm should implement this trait for its argument and output types.
 pub trait AlgorithmTrait {
     type Args;
-    type AlgorithmReturnType: fmt::Display;
+    type AlgorithmReturnType;
 
     /// Run the algorithm with the given arguments.
     fn run(&self, args: Self::Args) -> Self::AlgorithmReturnType;

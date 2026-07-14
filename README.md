@@ -140,7 +140,7 @@ Set `n_qpus > 1` to split the shots across available QPUs and reduce execution t
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
-Both calls return a `RunResult`: `result.counts` holds the measurement payload — a `list[dict[str, int]]` for a single QPU, or a single merged `dict[str, int]` when `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay (`seed` is the effective RNG seed on the native `"polypus"` backend, `None` otherwise).
+Both calls return a `RunResult`: `result.counts` holds the measurement payload — a `list[dict[str, int]]` for a single QPU, or a single merged `dict[str, int]` when `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay. Pass `seed=...` to `run_quantum_circuit()` for reproducible shot noise on every simulated backend (native `"polypus"`, Aer, and CUNQA's simulated QPUs); `result.seed` reports the effective seed used (`None` only for the `"qmio"` infrastructure, which is real hardware and rejects an explicit seed).
 
 ### Training Variational Circuits
 

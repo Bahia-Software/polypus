@@ -1,3 +1,4 @@
+use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
@@ -34,7 +35,7 @@ impl QuantumBackend for LocalBackend {
         &self,
         qcs: &[BoundCircuit],
         config: &ExecutionConfig,
-    ) -> Vec<HashMap<String, u64>> {
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         Python::with_gil(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched (Aer transpiles them) and
@@ -45,38 +46,52 @@ impl QuantumBackend for LocalBackend {
             let qcs_pylist = PyList::empty(py);
             for qc in qcs {
                 let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
-                qcs_pylist.append(qc.to_py_object(py)).unwrap();
+                qcs_pylist
+                    .append(qc.to_py_object(py)?)
+                    .map_err(|e| BackendError::Conversion(e.to_string()))?;
             }
 
-            let module = PyModule::import(py, "polypus_python").unwrap();
+            let module = PyModule::import(py, "polypus_python").map_err(BackendError::Seam)?;
             let connection = module
                 .call_method("connect_to_infrastructure", ("local",), None)
-                .unwrap_or_else(|e| {
-                    // Surface the failure before the panic PyO3 turns into a
-                    // Python exception (mirrors the QMIO/CUNQA error paths).
+                .map_err(|e| {
+                    // Surface the failure before it crosses the FFI as a Python
+                    // exception (mirrors the QMIO/CUNQA error paths).
                     log::error!("local infrastructure connection failed: {e}");
-                    panic!("Error connecting to local infrastructure: {e}");
-                });
-            let connection_str = connection.extract::<String>().unwrap();
+                    BackendError::Seam(e)
+                })?;
+            let connection_str = connection.extract::<String>().map_err(BackendError::Seam)?;
 
             let kwargs = PyDict::new(py);
-            kwargs.set_item("id", &config.id).unwrap();
-            kwargs.set_item("backend", &self.backend).unwrap();
-            kwargs.set_item("qcs", qcs_pylist).unwrap();
-            kwargs.set_item("shots", config.shots).unwrap();
-            kwargs.set_item("sim_method", &self.sim_method).unwrap();
+            let conv = |e: PyErr| BackendError::Conversion(e.to_string());
+            kwargs.set_item("id", &config.id).map_err(conv)?;
+            kwargs.set_item("backend", &self.backend).map_err(conv)?;
+            kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
+            kwargs.set_item("shots", config.shots).map_err(conv)?;
+            kwargs
+                .set_item("sim_method", &self.sim_method)
+                .map_err(conv)?;
             if let Some(nm) = &self.noise_model {
-                kwargs.set_item("noise_model", nm.clone_ref(py)).unwrap();
+                kwargs
+                    .set_item("noise_model", nm.clone_ref(py))
+                    .map_err(conv)?;
+            }
+            // Forwarded to Aer's `seed_simulator` on the Python side (contract
+            // C-7); `None` is simply omitted rather than sent as `seed=None`,
+            // so Aer's own unseeded default behavior is unchanged.
+            if let Some(seed) = config.seed {
+                kwargs.set_item("seed", seed).map_err(conv)?;
             }
 
-            module
+            let result = module
                 .call_method("run_qcs", (connection_str,), Some(&kwargs))
-                .unwrap_or_else(|e| {
+                .map_err(|e| {
                     log::error!("local circuit execution failed: {e}");
-                    panic!("Error running run_qcs: {e}");
-                })
+                    BackendError::Seam(e)
+                })?;
+            result
                 .extract::<Vec<HashMap<String, u64>>>()
-                .expect("run_qcs must return list[dict[str, int]]")
+                .map_err(BackendError::Seam)
         })
     }
 }

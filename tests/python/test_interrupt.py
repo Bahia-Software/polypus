@@ -7,7 +7,7 @@ backend) is running, rather than being ignored until the whole optimization
 finishes.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
-share `run_and_expect`, but reach it through different paths — a native,
+share `run_and_evaluate`, but reach it through different paths — a native,
 GIL-free simulation loop for `train`, and Tokio `spawn_blocking` workers
 (`allow_threads` around a `block_on`, needed to avoid the deadlock documented
 in `qml_oracle.rs`) for `qml.train`. Only the calling (main) thread can have a

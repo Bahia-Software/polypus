@@ -28,8 +28,10 @@
 //! Both calls return a `RunResult`: `result.counts` holds the payload (a
 //! `list[dict]` for a single QPU, a merged `dict` for `n_qpus > 1`), plus
 //! `result.id` / `result.seed` / `result.backend` / `result.infrastructure`
-//! for logging and replay (`seed` is the effective RNG seed on the native
-//! backend, `None` otherwise).
+//! for logging and replay. Pass `seed=...` for reproducible shot noise on
+//! every simulated backend (native, Aer, CUNQA); `result.seed` reports the
+//! effective seed (`None` only for the `"qmio"` infrastructure, real hardware
+//! that cannot be seeded).
 //!
 //! ## Training a variational circuit
 //! Pass a method object as the second argument to `train()`. The optimizer-specific
@@ -76,6 +78,8 @@
 pub mod algorithms;
 mod bindings;
 pub mod evaluation;
+/// Custom Python exception hierarchy raised across the FFI boundary.
+pub mod exceptions;
 pub mod infrastructure;
 pub mod utils;
 

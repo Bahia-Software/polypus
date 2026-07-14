@@ -1,4 +1,6 @@
-use crate::evaluation::{run_and_expect, CircuitSource, EvaluationOracle, InterruptState};
+use crate::evaluation::{
+    run_and_evaluate, CircuitSource, EvaluationError, EvaluationOracle, OracleErrorSlot,
+};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -23,30 +25,40 @@ pub struct VqcOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
-    /// Shared cancellation state. When Ctrl+C (or any exception raised inside
-    /// the Python `expectation_function`) is observed mid-run, it is captured
-    /// here and the entry point re-raises it as the original exception (see
-    /// [`InterruptState`]).
-    pub interrupt: Arc<InterruptState>,
+    /// Shared with the `train` entry point: the first evaluation failure is
+    /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
+    /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl EvaluationOracle for VqcOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        // A Ctrl+C (or a Python error) was already captured on an earlier batch:
-        // do no further work. Returning a finite, correctly-sized placeholder
-        // keeps the C-5 length/finiteness contract while the optimizer spins
-        // cheaply through its remaining generations; the entry point discards
-        // this outcome and re-raises the captured exception.
-        if self.interrupt.is_interrupted() {
+        // Once evaluation has failed, stop doing work: return finite sentinels
+        // and let the entry point surface the recorded error.
+        if self.errors.failed() {
             return vec![0.0; candidates.len()];
         }
+        match self.try_evaluate(candidates) {
+            Ok(values) => values,
+            Err(e) => {
+                self.errors.record(e);
+                vec![0.0; candidates.len()]
+            }
+        }
+    }
+}
 
+impl VqcOracle {
+    /// Fallible core of [`EvaluationOracle::evaluate_batch`]. Kept separate so
+    /// the trait method (which must return `Vec<f64>`) can record any error and
+    /// yield finite sentinels while the entry point re-raises it.
+    fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
         // Bind each candidate to the circuit template. For native circuits
         // this loop never touches Python.
         let bound: Vec<BoundCircuit> = candidates
             .iter()
             .map(|params| self.circuit.bind(params))
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Submit circuits in backend-sized batches and collect expectations.
         // Local runs the whole batch in one Aer call (parallel experiments);
@@ -54,21 +66,14 @@ impl EvaluationOracle for VqcOracle {
         let batch_size = self.backend.max_batch_size(bound.len()).max(1);
         let mut results = Vec::with_capacity(candidates.len());
         for chunk in bound.chunks(batch_size) {
-            match run_and_expect(
+            let ev = run_and_evaluate(
                 self.backend.as_ref(),
                 chunk,
                 &self.config,
                 &self.expectation_fn,
-            ) {
-                Ok(ev) => results.extend(ev),
-                // Capture the original exception (e.g. `KeyboardInterrupt`) and
-                // stop; the entry point turns it back into that exception.
-                Err(err) => {
-                    self.interrupt.capture(err);
-                    return vec![0.0; candidates.len()];
-                }
-            }
+            )?;
+            results.extend(ev);
         }
-        results
+        Ok(results)
     }
 }

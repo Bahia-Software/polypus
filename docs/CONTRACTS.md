@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ⏳ to add | `disconnect` reads `slurm_job_id`, not `family` (C1) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` reads `slurm_job_id`, not `family` (C1) |
 | C-2 | Gate vocabulary symmetry | round-trip + QIR-vs-sim equivalence | ⏳ to add | `cp` missing from importer; QIR decomp not equivalent (C2, C3) |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | rejection tests (sim + QIR) | ⏳ to add | measurement semantics (C5) |
@@ -58,8 +58,8 @@ violation.
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional) |
-| cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str` |
+| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional), `seed: int` (optional, C-7) |
+| cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
 `qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
 strings; the Python side parses strings (`QuantumCircuit.from_qasm_str`).
@@ -85,8 +85,31 @@ Returns exactly `len(counts)` finite floats, in order.
   "must-be-consumed" rule above: neither side silently drops or invents args).
 - A missing **required** kwarg raises `TypeError`.
 
-**Enforcing test:** `tests/python/test_seam_contract.py` (to be added — must
-run in CI against a mock of `cunqa.qutils`, so no SLURM is needed).
+A failure **must never** cross the seam as a `pyo3_runtime.PanicException` or a
+process abort (it used to: the Rust side `unwrap()`/`panic!`-ed on these calls).
+The Rust orchestration layer now returns a typed `Result` on every path:
+
+- A Python exception raised *by the seam function itself* (the three failure
+  modes above, or any runtime error inside `run_qcs`) is **re-raised verbatim**,
+  preserving its original type — so the `ValueError`/`TypeError` guarantees
+  above hold unchanged.
+- A failure originating *in the Rust layer* (backend construction, a native
+  circuit that will not parse/simulate, the QMIO network path, a data
+  conversion) raises a class from the `polypus` exception hierarchy:
+  `PolypusError` (base) → `BackendError` → {`CunqaError`, `QmioError`,
+  `NativeCircuitError`}, and `PolypusError` → `EvaluationError`. Catching
+  `polypus.PolypusError` catches them all.
+
+`disconnect_from_infrastructure` runs from `CunqaBackend`'s `Drop`, which **must
+never panic**: a release failure is logged (`log::error!`) and recorded in the
+process-wide `polypus.backend_cleanup_failures()` counter rather than raised
+(see ENGINEERING.md §9). This is independent of the known break below, which is
+about *which kwarg* the Python side reads.
+
+**Enforcing test:** `tests/python/test_seam_contract.py` — runs in CI without
+SLURM by monkeypatching the `polypus_python` seam (`run_qcs`) to force a
+failure, asserting it surfaces as a typed Python exception (never a
+`PanicException`) with the C-1 type preserved.
 
 ---
 
@@ -212,18 +235,33 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
 
-- **`run_quantum_circuit(..., seed: int | None = None)`** seeds shot sampling,
-  which **only the native statevector backend** performs in-process:
-  - With the native backend (`infrastructure="local"`, `backend="polypus"`): an
-    explicit `seed` is used directly and reproduces the counts byte-for-byte
-    across calls; `seed=None` draws a fresh seed from OS entropy, so repeated
-    calls produce **independent** noise (never the run-`id`-derived repetition
-    that motivated this contract). The run `id` is decoupled from the RNG — it
-    is only a logging/temp-file/SLURM label.
-  - With any other backend (`backend="aer"`, or `infrastructure` `"cunqa"` /
-    `"qmio"`): passing an explicit `seed` raises `ValueError`. Polypus does not
-    seed these paths (Aer's own `seed_simulator` is not wired), so silently
-    accepting a seed would give false confidence in reproducibility. `seed=None`
+- **`run_quantum_circuit(..., seed: int | None = None)`** seeds shot sampling
+  across every *simulated* backend:
+  - With `infrastructure="local"` (`backend="polypus"`, the native
+    statevector simulator, or `backend="aer"`, Qiskit Aer): an explicit `seed`
+    is used directly — the native backend seeds its own RNG in-process, and
+    Aer receives it as the `seed` kwarg forwarded across the C-1 seam
+    (`crates/polypus/src/infrastructure/local.rs`, which passes it to Aer's
+    `seed_simulator` option in `polypus_python`'s `local.py`) — and
+    reproduces the counts byte-for-byte across calls, verified against a real
+    Aer install. `seed=None` draws a fresh seed from OS entropy, so repeated
+    calls produce **independent** noise (never the run-`id`-derived
+    repetition that motivated this contract). The run `id` is decoupled from
+    the RNG — it is only a logging/temp-file/SLURM label.
+  - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
+    the same seam (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
+    `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
+    per-QPU offset so distributed shots aren't identical copies. **This path
+    is unverified** — the `cunqa` package isn't installed anywhere this can be
+    tested, and reading CUNQA's actual source (CESGA-Quantum-Spain/cunqa) at
+    the version README.md pins (`>= 2.3`) turned up API mismatches predating
+    this contract (wrong module path, wrong kwarg names, a `.run()` method
+    that may not exist on `QPU` objects at that version) — see the CUNQA
+    integration follow-up.
+  - With physical hardware (`infrastructure="qmio"`): passing an explicit
+    `seed` raises `ValueError`. Real quantum processors rely on physical
+    processes and cannot be deterministically seeded, so silently accepting
+    a seed would give false confidence in reproducibility. `seed=None`
     behaves exactly as before.
 - **`train(..., seed=None)` / `qml.train(..., seed=None)`** seed the optimizer's
   RNG and are **always accepted**, for every backend, because the seed's primary
@@ -231,18 +269,19 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
   on the `DE`/`PSO`/`QNG` instance; otherwise a fresh OS-entropy value. On the
-  native backend the resolved seed *also* seeds shot sampling, so a
-  native-backend training run is reproducible end-to-end; `qml.train` is
-  Qiskit/Aer-only (native rejected) and Aer shot noise is unseeded, so its
-  reproducibility guarantee covers the optimizer trajectory given a deterministic
-  oracle, not Aer's sampling.
+  native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
+  so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
+  Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
+  too, its reproducibility guarantee covers both the optimizer trajectory and
+  Aer's sampling.
 
 ### The run manifest (return shapes)
 
 - `run_quantum_circuit` returns a **`RunResult`** exposing:
   `counts` (the C-3 payload — `list[dict]` for one QPU, merged `dict` for
   `n_qpus > 1`), `id` (str), `seed` (`int | None`; the effective seed used, or
-  `None` for a non-native backend), `backend` (str), `infrastructure` (str).
+  `None` only for the `qmio` infrastructure), `backend` (str), `infrastructure`
+  (str).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
   `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
@@ -253,9 +292,18 @@ The effective `seed` on both result types is what lets a caller log a run and
 replay it exactly.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
-end-to-end: native reproducibility, entropy variation, the non-native
+end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
 rejection, and the returned manifest/outcome fields), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
-`run_quantum_circuit`, the rejection path, and the seed-resolution precedence /
-optimizer determinism) and `crates/polypus/src/infrastructure/native.rs`
-(same-seed reproduces / omitted-seed differs at the backend level).
+`run_quantum_circuit`, the `qmio` rejection path, and the seed-resolution
+precedence / optimizer determinism) and `crates/polypus/src/infrastructure/native.rs`
+(same-seed reproduces / omitted-seed differs at the backend level). CUNQA's
+`seed` forwarding follows the same shape as Aer's on the Rust side
+(`crates/polypus/src/infrastructure/cunqa.rs` mirrors `local.rs`) but has no
+dedicated automated test and no verified-working status: per `ENGINEERING.md`
+§3 the Rust suite is deliberately Python-runtime-free, so this seam can only
+be tested from `tests/python/`, and the `cunqa` package isn't installed
+anywhere in this project's CI or dev sandboxes (unlike Aer) — so, unlike the
+Aer path, it has never actually been run. Treat CUNQA's `seed` support as
+unverified until the CUNQA integration follow-up confirms it against a real
+install.

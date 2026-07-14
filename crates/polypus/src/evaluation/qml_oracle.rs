@@ -1,5 +1,5 @@
 use crate::evaluation::{
-    assign_parameters_qiskit, run_and_expect, EvaluationOracle, InterruptState,
+    assign_parameters_qiskit, run_and_evaluate, EvaluationError, EvaluationOracle, OracleErrorSlot,
 };
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
@@ -21,19 +21,39 @@ pub struct QmlOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
-    /// Shared cancellation state. See [`InterruptState`]; captured errors are
-    /// re-raised by the entry point as the original exception.
-    pub interrupt: Arc<InterruptState>,
+    /// Shared with the `qml.train` entry point: the first evaluation failure is
+    /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
+    /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
+    pub errors: OracleErrorSlot,
 }
 
 impl EvaluationOracle for QmlOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        // A Ctrl+C (or a Python error) was already captured: skip all work and
-        // let the optimizer wind down cheaply (the entry point re-raises it).
-        if self.interrupt.is_interrupted() {
+        // Once evaluation has failed, stop doing work: return finite sentinels
+        // and let the entry point surface the recorded error.
+        if self.errors.failed() {
             return vec![0.0; candidates.len()];
         }
-        let rt = crate::utils::tokio_runtime();
+        match self.try_evaluate(candidates) {
+            Ok(values) => values,
+            Err(e) => {
+                self.errors.record(e);
+                vec![0.0; candidates.len()]
+            }
+        }
+    }
+}
+
+impl QmlOracle {
+    /// Fallible core of [`EvaluationOracle::evaluate_batch`]. Kept separate so
+    /// the trait method (which must return `Vec<f64>`) can record any error and
+    /// yield finite sentinels while the entry point re-raises it.
+    fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
+        let rt = crate::utils::tokio_runtime().map_err(|e| {
+            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to start the Tokio runtime for QML evaluation: {e}"
+            )))
+        })?;
 
         let handles: Vec<_> = candidates
             .iter()
@@ -49,17 +69,9 @@ impl EvaluationOracle for QmlOracle {
                 let backend = Arc::clone(&self.backend);
                 let ef = Python::with_gil(|py| self.expectation_fn.clone_ref(py));
                 let theta = theta.clone();
-                let interrupt = Arc::clone(&self.interrupt);
 
                 rt.spawn_blocking(move || {
-                    evaluate_qml_single(
-                        &training_circuits,
-                        &config,
-                        backend.as_ref(),
-                        &ef,
-                        &theta,
-                        &interrupt,
-                    )
+                    evaluate_qml_single(&training_circuits, &config, backend.as_ref(), &ef, &theta)
                 })
             })
             .collect();
@@ -69,71 +81,63 @@ impl EvaluationOracle for QmlOracle {
         // (binding circuits, running them, computing expectations), so we MUST
         // release it here while blocking on them — otherwise this thread holds
         // the GIL inside `block_on` while the workers wait for it: a deadlock.
-        let results = Python::with_gil(|py| {
-            py.allow_threads(|| {
+        Python::with_gil(|py| {
+            let out = py.allow_threads(|| {
                 rt.block_on(async {
                     let mut out = Vec::with_capacity(handles.len());
                     for h in handles {
-                        out.push(h.await.expect("QML eval task panicked"));
+                        // A `JoinError` means the worker task itself panicked;
+                        // turn it into a typed error rather than re-panicking.
+                        let single = h.await.map_err(|e| {
+                            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(
+                                format!("QML evaluation task failed: {e}"),
+                            ))
+                        })?;
+                        out.push(single?);
                     }
-                    out
+                    Ok::<_, EvaluationError>(out)
                 })
-            })
-        });
-
-        // `PyErr_CheckSignals` only acts on the main thread; the workers above
-        // ran off it, so their `run_and_expect` signal checks are no-ops for
-        // SIGINT. Check once here on the main thread (the calling `#[pyfunction]`
-        // thread) so `qml.train` is interruptible too, at the same per-batch
-        // granularity as the native path.
-        Python::with_gil(|py| {
-            if let Err(err) = py.check_signals() {
-                self.interrupt.capture(err);
-            }
-        });
-
-        results
+            })?;
+            // The workers ran off the main thread, where `PyErr_CheckSignals` is
+            // a no-op, so a pending SIGINT (Ctrl+C) was not seen there. Check it
+            // here on the calling (main) thread so `qml.train` is interruptible
+            // too, at the same per-batch granularity as the native path; the
+            // KeyboardInterrupt is carried verbatim via `EvaluationError::Python`.
+            py.check_signals().map_err(EvaluationError::Python)?;
+            Ok(out)
+        })
     }
 }
 
 /// Evaluate one candidate `theta` against all training circuits.
 ///
 /// Binds `theta` to each training circuit, runs them in batches of
-/// `config.n_qpus`, and returns the mean expectation value.
+/// `config.n_qpus`, and returns the mean expectation value. Any failure is
+/// returned as an [`EvaluationError`] instead of panicking.
 fn evaluate_qml_single(
     training_circuits: &[Py<PyAny>],
     config: &ExecutionConfig,
     backend: &dyn QuantumBackend,
     expectation_fn: &Py<PyAny>,
     theta: &[f64],
-    interrupt: &InterruptState,
-) -> f64 {
-    // Another candidate's task already hit Ctrl+C / an error: skip the work.
-    if interrupt.is_interrupted() {
-        return 0.0;
-    }
-
+) -> Result<f64, EvaluationError> {
     // Training circuits are Qiskit objects (feature-map pre-binding is
     // Qiskit-specific); native QML circuits arrive with a later phase.
     let bound: Vec<BoundCircuit> = training_circuits
         .iter()
-        .map(|qc_xi| BoundCircuit::Qiskit(assign_parameters_qiskit(qc_xi, theta)))
-        .collect();
+        .map(|qc_xi| {
+            Ok(BoundCircuit::Qiskit(assign_parameters_qiskit(
+                qc_xi, theta,
+            )?))
+        })
+        .collect::<Result<_, EvaluationError>>()?;
 
     let batch_size = backend.max_batch_size(bound.len()).max(1);
     let mut all_ev: Vec<f64> = Vec::with_capacity(bound.len());
     for chunk in bound.chunks(batch_size) {
-        match run_and_expect(backend, chunk, config, expectation_fn) {
-            Ok(ev) => all_ev.extend(ev),
-            // Capture the original exception and bail with a placeholder; the
-            // entry point re-raises it. Returning early also avoids dividing by
-            // an empty `all_ev` below.
-            Err(err) => {
-                interrupt.capture(err);
-                return 0.0;
-            }
-        }
+        let ev = run_and_evaluate(backend, chunk, config, expectation_fn)?;
+        all_ev.extend(ev);
     }
 
-    all_ev.iter().sum::<f64>() / all_ev.len() as f64
+    Ok(all_ev.iter().sum::<f64>() / all_ev.len() as f64)
 }
