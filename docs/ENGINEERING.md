@@ -58,6 +58,21 @@ boundary stays out-of-process and explicit; see
   themselves need to acquire it: release it first with
   `Python::with_gil(|py| py.allow_threads(...))`. Ignoring this deadlocks
   (documented in `crates/polypus/src/evaluation/qml_oracle.rs`).
+- **Releasing the GIL does not by itself process signals.** `allow_threads`
+  lets other Python threads run, but a pending SIGINT (Ctrl+C) is turned into a
+  `KeyboardInterrupt` only when the **main thread** runs Python bytecode or when
+  `PyErr_CheckSignals` is called explicitly. Long-running Rust work is otherwise
+  deaf to Ctrl+C until it returns. So a GIL-free loop that must stay
+  interruptible has to call `py.check_signals()` at a safe boundary: the
+  optimizer entry points (`train` / `qml.train`) release the GIL around the
+  whole `optimize()` call **and** call `py.check_signals()` at each per-batch
+  Python touchpoint (`run_and_expect`, plus once on the main thread after the
+  QML workers join, since `PyErr_CheckSignals` is a no-op off the main thread).
+  The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
+  `expectation_function` / variance callback — is captured and re-raised to
+  Python as the **original** exception, never swallowed into a panic by an
+  `.expect()` (that would surface as an opaque `PanicException`; see §9 and
+  `InterruptState` in `crates/polypus/src/evaluation/mod.rs`).
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.

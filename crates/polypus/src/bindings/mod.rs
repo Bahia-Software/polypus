@@ -17,7 +17,7 @@ use pso::PSO;
 use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
-use crate::evaluation::{CircuitSource, EvaluationOracle, QmlOracle, VqcOracle};
+use crate::evaluation::{CircuitSource, EvaluationOracle, InterruptState, QmlOracle, VqcOracle};
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
@@ -452,6 +452,11 @@ pub fn run_quantum_circuit<'py>(
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged` and the effective `seed`.
 ///
+/// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
+/// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
+/// waiting for the run to finish. An exception raised by
+/// `expectation_function` propagates the same way, as itself.
+///
 /// Example:
 ///
 /// ```ignore
@@ -538,11 +543,16 @@ pub fn train<'py>(
         seed: Some(effective_seed),
     });
     let backend = Infrastructure::create_backend(&config);
+    // Cancellation state shared with the oracle(s): a Ctrl+C or a Python error
+    // observed mid-optimization is captured here and re-raised below as the
+    // original exception, instead of being swallowed into a panic.
+    let interrupt = Arc::new(InterruptState::default());
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
+        interrupt: Arc::clone(&interrupt),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -554,10 +564,9 @@ pub fn train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmDifferentialEvolution
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return run_optimizer(method.py(), &interrupt, effective_seed, || {
+            AlgorithmDifferentialEvolution.optimize(args)
+        });
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -573,10 +582,9 @@ pub fn train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmPSO
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return run_optimizer(method.py(), &interrupt, effective_seed, || {
+            AlgorithmPSO.optimize(args)
+        });
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -589,19 +597,55 @@ pub fn train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(method.py()),
+                interrupt: Arc::clone(&interrupt),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmQNG
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(method.py(), outcome, effective_seed);
+        return run_optimizer(method.py(), &interrupt, effective_seed, || {
+            AlgorithmQNG.optimize(args)
+        });
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
         "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
     ))
+}
+
+/// Run one optimizer to completion off the GIL and turn the result into the
+/// `train`/`qml_train` return value.
+///
+/// Shared by both entry points and all three optimizers. It:
+///
+/// 1. Releases the GIL for the whole `optimize()` call
+///    ([`Python::allow_threads`]) so the GIL-free parameter binding and
+///    simulation don't stall other Python threads — the core GIL discipline of
+///    the project (`docs/ENGINEERING.md` §3).
+/// 2. After the optimizer returns, re-raises any exception the oracle captured
+///    (a `KeyboardInterrupt`, or an error raised by the Python
+///    `expectation_function` / variance callback) as the **original** exception.
+///    Releasing the GIL is not enough on its own to make Ctrl+C responsive:
+///    the oracle also calls `py.check_signals()` at each Python touchpoint, and
+///    stashes the resulting `PyErr` in `interrupt`; this is where it surfaces.
+/// 3. Otherwise maps a pure-Rust [`OptimizerError`] to `PyValueError` (an
+///    invalid configuration) and wraps the outcome in a [`TrainResult`].
+fn run_optimizer<F>(
+    py: Python<'_>,
+    interrupt: &InterruptState,
+    effective_seed: u64,
+    optimize: F,
+) -> PyResult<PyObject>
+where
+    F: FnOnce() -> Result<OptimizationOutcome, polypus_optimizers::OptimizerError> + Send,
+{
+    let result = py.allow_threads(optimize);
+    // A captured exception wins over the (now meaningless) optimizer outcome,
+    // and must be re-raised as itself so callers can `except KeyboardInterrupt`.
+    if let Some(err) = interrupt.take() {
+        return Err(err);
+    }
+    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    outcome_to_train_result(py, outcome, effective_seed)
 }
 
 /// QML entry point: train a data-encoding VQC where `feature_map` encodes each
@@ -621,6 +665,11 @@ pub fn train<'py>(
 /// on the Qiskit/Aer path (the native backend is rejected), and Aer's own shot
 /// sampling is not seeded by Polypus, so full end-to-end reproducibility holds
 /// only for a deterministic oracle (contract C-7).
+///
+/// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
+/// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
+/// finish, and an exception raised by `expectation_function` propagates as
+/// itself.
 ///
 /// Example:
 ///
@@ -731,11 +780,15 @@ pub fn qml_train<'py>(
         seed: Some(effective_seed),
     });
     let backend = Infrastructure::create_backend(&config);
+    // Same cancellation wiring as `train` (see [`run_optimizer`]): a Ctrl+C or a
+    // Python error is captured here and re-raised as the original exception.
+    let interrupt = Arc::new(InterruptState::default());
     let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
+        interrupt: Arc::clone(&interrupt),
     });
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -747,10 +800,9 @@ pub fn qml_train<'py>(
             tolerance: de.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmDifferentialEvolution
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return run_optimizer(py, &interrupt, effective_seed, || {
+            AlgorithmDifferentialEvolution.optimize(args)
+        });
     }
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -766,10 +818,9 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmPSO
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return run_optimizer(py, &interrupt, effective_seed, || {
+            AlgorithmPSO.optimize(args)
+        });
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -782,14 +833,14 @@ pub fn qml_train<'py>(
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(py),
+                interrupt: Arc::clone(&interrupt),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        let outcome = AlgorithmQNG
-            .optimize(args)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        return outcome_to_train_result(py, outcome, effective_seed);
+        return run_optimizer(py, &interrupt, effective_seed, || {
+            AlgorithmQNG.optimize(args)
+        });
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(

@@ -1,5 +1,7 @@
+use crate::evaluation::InterruptState;
 use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
+use std::sync::Arc;
 
 /// Quantum Natural Gradient optimizer configuration.
 #[pyclass]
@@ -61,27 +63,62 @@ impl QNG {
 pub struct PyVarianceOracle {
     /// Python callable `fn(theta: list[float], a: int) -> float`.
     pub variance_function: Py<PyAny>,
+    /// Cancellation state shared with the run's [`VqcOracle`](crate::evaluation::VqcOracle).
+    /// QNG hits both oracles per iteration; sharing the state means a Ctrl+C (or
+    /// a `variance_function` exception) observed on either path short-circuits
+    /// the whole run and is re-raised by the entry point as the original
+    /// exception (see [`InterruptState`]).
+    pub interrupt: Arc<InterruptState>,
 }
 
 impl PyVarianceOracle {
     /// Call the Python `variance_function(theta, param_index)` under an already
-    /// held GIL and extract the returned float.
-    fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> f64 {
+    /// held GIL and extract the returned float, propagating any exception it
+    /// raises rather than swallowing it into a panic with `.expect()`.
+    fn call(&self, py: Python<'_>, theta: &[f64], param_index: usize) -> PyResult<f64> {
         self.variance_function
             .bind(py)
-            .call1((theta.to_vec(), param_index as u32))
-            .expect("Error calling variance_function")
+            .call1((theta.to_vec(), param_index as u32))?
             .extract()
-            .expect("Failed to extract float from variance_function")
     }
 }
 
 impl VarianceOracle for PyVarianceOracle {
     fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
-        Python::with_gil(|py| self.call(py, theta, param_index))
+        if self.interrupt.is_interrupted() {
+            return 0.0;
+        }
+        Python::with_gil(|py| match self.call(py, theta, param_index) {
+            Ok(v) => v,
+            Err(err) => {
+                self.interrupt.capture(err);
+                0.0
+            }
+        })
     }
 
     fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
-        Python::with_gil(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
+        // Once interrupted, return a finite placeholder diagonal without calling
+        // Python. QNG adds Tikhonov regularisation to every element, so a zero
+        // here can never cause a divide-by-zero; the outcome is discarded anyway.
+        if self.interrupt.is_interrupted() {
+            return vec![0.0; dims];
+        }
+        Python::with_gil(|py| {
+            let mut diagonal = Vec::with_capacity(dims);
+            for a in 0..dims {
+                match self.call(py, theta, a) {
+                    Ok(v) => diagonal.push(v),
+                    Err(err) => {
+                        // Capture the exception, stop calling Python, and pad the
+                        // rest with placeholders (the entry point re-raises it).
+                        self.interrupt.capture(err);
+                        diagonal.resize(dims, 0.0);
+                        break;
+                    }
+                }
+            }
+            diagonal
+        })
     }
 }

@@ -1,4 +1,4 @@
-use crate::evaluation::{run_and_expect, CircuitSource, EvaluationOracle};
+use crate::evaluation::{run_and_expect, CircuitSource, EvaluationOracle, InterruptState};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -23,10 +23,24 @@ pub struct VqcOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
+    /// Shared cancellation state. When Ctrl+C (or any exception raised inside
+    /// the Python `expectation_function`) is observed mid-run, it is captured
+    /// here and the entry point re-raises it as the original exception (see
+    /// [`InterruptState`]).
+    pub interrupt: Arc<InterruptState>,
 }
 
 impl EvaluationOracle for VqcOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        // A Ctrl+C (or a Python error) was already captured on an earlier batch:
+        // do no further work. Returning a finite, correctly-sized placeholder
+        // keeps the C-5 length/finiteness contract while the optimizer spins
+        // cheaply through its remaining generations; the entry point discards
+        // this outcome and re-raises the captured exception.
+        if self.interrupt.is_interrupted() {
+            return vec![0.0; candidates.len()];
+        }
+
         // Bind each candidate to the circuit template. For native circuits
         // this loop never touches Python.
         let bound: Vec<BoundCircuit> = candidates
@@ -40,13 +54,20 @@ impl EvaluationOracle for VqcOracle {
         let batch_size = self.backend.max_batch_size(bound.len()).max(1);
         let mut results = Vec::with_capacity(candidates.len());
         for chunk in bound.chunks(batch_size) {
-            let ev = run_and_expect(
+            match run_and_expect(
                 self.backend.as_ref(),
                 chunk,
                 &self.config,
                 &self.expectation_fn,
-            );
-            results.extend(ev);
+            ) {
+                Ok(ev) => results.extend(ev),
+                // Capture the original exception (e.g. `KeyboardInterrupt`) and
+                // stop; the entry point turns it back into that exception.
+                Err(err) => {
+                    self.interrupt.capture(err);
+                    return vec![0.0; candidates.len()];
+                }
+            }
         }
         results
     }

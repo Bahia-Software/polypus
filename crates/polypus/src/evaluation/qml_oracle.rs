@@ -1,4 +1,6 @@
-use crate::evaluation::{assign_parameters_qiskit, run_and_expect, EvaluationOracle};
+use crate::evaluation::{
+    assign_parameters_qiskit, run_and_expect, EvaluationOracle, InterruptState,
+};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -19,10 +21,18 @@ pub struct QmlOracle {
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     pub expectation_fn: Py<PyAny>,
+    /// Shared cancellation state. See [`InterruptState`]; captured errors are
+    /// re-raised by the entry point as the original exception.
+    pub interrupt: Arc<InterruptState>,
 }
 
 impl EvaluationOracle for QmlOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        // A Ctrl+C (or a Python error) was already captured: skip all work and
+        // let the optimizer wind down cheaply (the entry point re-raises it).
+        if self.interrupt.is_interrupted() {
+            return vec![0.0; candidates.len()];
+        }
         let rt = crate::utils::tokio_runtime();
 
         let handles: Vec<_> = candidates
@@ -39,9 +49,17 @@ impl EvaluationOracle for QmlOracle {
                 let backend = Arc::clone(&self.backend);
                 let ef = Python::with_gil(|py| self.expectation_fn.clone_ref(py));
                 let theta = theta.clone();
+                let interrupt = Arc::clone(&self.interrupt);
 
                 rt.spawn_blocking(move || {
-                    evaluate_qml_single(&training_circuits, &config, backend.as_ref(), &ef, &theta)
+                    evaluate_qml_single(
+                        &training_circuits,
+                        &config,
+                        backend.as_ref(),
+                        &ef,
+                        &theta,
+                        &interrupt,
+                    )
                 })
             })
             .collect();
@@ -51,7 +69,7 @@ impl EvaluationOracle for QmlOracle {
         // (binding circuits, running them, computing expectations), so we MUST
         // release it here while blocking on them — otherwise this thread holds
         // the GIL inside `block_on` while the workers wait for it: a deadlock.
-        Python::with_gil(|py| {
+        let results = Python::with_gil(|py| {
             py.allow_threads(|| {
                 rt.block_on(async {
                     let mut out = Vec::with_capacity(handles.len());
@@ -61,7 +79,20 @@ impl EvaluationOracle for QmlOracle {
                     out
                 })
             })
-        })
+        });
+
+        // `PyErr_CheckSignals` only acts on the main thread; the workers above
+        // ran off it, so their `run_and_expect` signal checks are no-ops for
+        // SIGINT. Check once here on the main thread (the calling `#[pyfunction]`
+        // thread) so `qml.train` is interruptible too, at the same per-batch
+        // granularity as the native path.
+        Python::with_gil(|py| {
+            if let Err(err) = py.check_signals() {
+                self.interrupt.capture(err);
+            }
+        });
+
+        results
     }
 }
 
@@ -75,7 +106,13 @@ fn evaluate_qml_single(
     backend: &dyn QuantumBackend,
     expectation_fn: &Py<PyAny>,
     theta: &[f64],
+    interrupt: &InterruptState,
 ) -> f64 {
+    // Another candidate's task already hit Ctrl+C / an error: skip the work.
+    if interrupt.is_interrupted() {
+        return 0.0;
+    }
+
     // Training circuits are Qiskit objects (feature-map pre-binding is
     // Qiskit-specific); native QML circuits arrive with a later phase.
     let bound: Vec<BoundCircuit> = training_circuits
@@ -86,8 +123,16 @@ fn evaluate_qml_single(
     let batch_size = backend.max_batch_size(bound.len()).max(1);
     let mut all_ev: Vec<f64> = Vec::with_capacity(bound.len());
     for chunk in bound.chunks(batch_size) {
-        let ev = run_and_expect(backend, chunk, config, expectation_fn);
-        all_ev.extend(ev);
+        match run_and_expect(backend, chunk, config, expectation_fn) {
+            Ok(ev) => all_ev.extend(ev),
+            // Capture the original exception and bail with a placeholder; the
+            // entry point re-raises it. Returning early also avoids dividing by
+            // an empty `all_ev` below.
+            Err(err) => {
+                interrupt.capture(err);
+                return 0.0;
+            }
+        }
     }
 
     all_ev.iter().sum::<f64>() / all_ev.len() as f64
