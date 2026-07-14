@@ -82,7 +82,7 @@ impl QmlOracle {
         // release it here while blocking on them — otherwise this thread holds
         // the GIL inside `block_on` while the workers wait for it: a deadlock.
         Python::with_gil(|py| {
-            py.allow_threads(|| {
+            let out = py.allow_threads(|| {
                 rt.block_on(async {
                     let mut out = Vec::with_capacity(handles.len());
                     for h in handles {
@@ -95,9 +95,16 @@ impl QmlOracle {
                         })?;
                         out.push(single?);
                     }
-                    Ok(out)
+                    Ok::<_, EvaluationError>(out)
                 })
-            })
+            })?;
+            // The workers ran off the main thread, where `PyErr_CheckSignals` is
+            // a no-op, so a pending SIGINT (Ctrl+C) was not seen there. Check it
+            // here on the calling (main) thread so `qml.train` is interruptible
+            // too, at the same per-batch granularity as the native path; the
+            // KeyboardInterrupt is carried verbatim via `EvaluationError::Python`.
+            py.check_signals().map_err(EvaluationError::Python)?;
+            Ok(out)
         })
     }
 }

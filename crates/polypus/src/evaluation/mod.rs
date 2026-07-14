@@ -162,6 +162,16 @@ pub(crate) fn run_and_evaluate(
 ) -> Result<Vec<f64>, EvaluationError> {
     let counts = backend.run_circuits(qcs, config)?;
     Python::with_gil(|py| {
+        // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
+        // per-batch boundary. The optimizer entry points release the GIL around
+        // `optimize()`, which lets other Python threads run but does NOT by
+        // itself process signals: CPython only acts on a pending signal while
+        // the main thread runs Python bytecode or when `PyErr_CheckSignals` is
+        // called explicitly. This is that explicit call, so a long native-backend
+        // run stays interruptible instead of ignoring Ctrl+C until it finishes
+        // (see docs/ENGINEERING.md §3). The KeyboardInterrupt is carried verbatim
+        // via `EvaluationError::Python` and re-raised as itself by the entry point.
+        py.check_signals().map_err(EvaluationError::Python)?;
         // Convert the native counts back into a Python `list[dict]` for the
         // Python `expectation_values` function. Once expectation computation is
         // also native this round-trip disappears entirely.

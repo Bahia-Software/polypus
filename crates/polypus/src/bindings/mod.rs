@@ -468,6 +468,11 @@ pub fn run_quantum_circuit<'py>(
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged` and the effective `seed`.
 ///
+/// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
+/// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
+/// waiting for the run to finish. An exception raised by
+/// `expectation_function` propagates the same way, as itself.
+///
 /// Example:
 ///
 /// ```ignore
@@ -577,7 +582,14 @@ pub fn train<'py>(
         };
         return finish_optimization(
             method.py(),
-            AlgorithmDifferentialEvolution.optimize(args),
+            // Release the GIL for the whole optimization: parameter binding and
+            // native simulation are GIL-free, so holding it would stall every
+            // other Python thread and (with the per-batch check_signals in
+            // run_and_evaluate) keep Ctrl+C from taking effect until the run
+            // ends. See docs/ENGINEERING.md §3.
+            method
+                .py()
+                .allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
             &errors,
             effective_seed,
         );
@@ -598,7 +610,7 @@ pub fn train<'py>(
         };
         return finish_optimization(
             method.py(),
-            AlgorithmPSO.optimize(args),
+            method.py().allow_threads(|| AlgorithmPSO.optimize(args)),
             &errors,
             effective_seed,
         );
@@ -621,7 +633,7 @@ pub fn train<'py>(
         };
         return finish_optimization(
             method.py(),
-            AlgorithmQNG.optimize(args),
+            method.py().allow_threads(|| AlgorithmQNG.optimize(args)),
             &errors,
             effective_seed,
         );
@@ -649,6 +661,11 @@ pub fn train<'py>(
 /// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
 /// is now seeded too (contract C-7), so a `qml.train` run is fully
 /// reproducible end-to-end given the same seed.
+///
+/// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
+/// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
+/// finish, and an exception raised by `expectation_function` propagates as
+/// itself.
 ///
 /// Example:
 ///
@@ -781,7 +798,10 @@ pub fn qml_train<'py>(
         };
         return finish_optimization(
             py,
-            AlgorithmDifferentialEvolution.optimize(args),
+            // Release the GIL for the optimization (see `train` and
+            // docs/ENGINEERING.md §3): the QML workers re-acquire it per batch,
+            // and the main-thread signal check in the oracle keeps Ctrl+C prompt.
+            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
             &errors,
             effective_seed,
         );
@@ -800,7 +820,12 @@ pub fn qml_train<'py>(
             tolerance: pso.tolerance,
             seed: Some(effective_seed),
         };
-        return finish_optimization(py, AlgorithmPSO.optimize(args), &errors, effective_seed);
+        return finish_optimization(
+            py,
+            py.allow_threads(|| AlgorithmPSO.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
@@ -818,7 +843,12 @@ pub fn qml_train<'py>(
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
         };
-        return finish_optimization(py, AlgorithmQNG.optimize(args), &errors, effective_seed);
+        return finish_optimization(
+            py,
+            py.allow_threads(|| AlgorithmQNG.optimize(args)),
+            &errors,
+            effective_seed,
+        );
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
