@@ -120,6 +120,22 @@ pub enum GateInstruction {
     MeasureAll,
 }
 
+/// The qubits an instruction evolves *unitarily*.
+///
+/// Used by the terminal-measurement check (contract C-4): only unitary
+/// operations are forbidden on an already-measured qubit. `Barrier`,
+/// `Measure` and `MeasureAll` do not evolve the state and therefore report
+/// [`ActsOn::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActsOn {
+    /// A non-unitary instruction (barrier / measure / measure_all).
+    None,
+    /// A single-qubit unitary on this qubit.
+    One(usize),
+    /// A two-qubit unitary on these qubits.
+    Two(usize, usize),
+}
+
 impl GateInstruction {
     /// Largest classical-bit index used by this instruction, if any.
     /// `MeasureAll` is handled separately by the circuit (it needs `num_qubits`).
@@ -129,6 +145,82 @@ impl GateInstruction {
             _ => None,
         }
     }
+
+    /// Which qubits this instruction acts on *as a unitary* (see [`ActsOn`]).
+    pub(crate) fn acts_on(&self) -> ActsOn {
+        match self {
+            GateInstruction::H(q)
+            | GateInstruction::X(q)
+            | GateInstruction::Y(q)
+            | GateInstruction::Z(q)
+            | GateInstruction::S(q)
+            | GateInstruction::T(q)
+            | GateInstruction::Sdg(q)
+            | GateInstruction::Tdg(q)
+            | GateInstruction::Rx { qubit: q, .. }
+            | GateInstruction::Ry { qubit: q, .. }
+            | GateInstruction::Rz { qubit: q, .. }
+            | GateInstruction::U { qubit: q, .. } => ActsOn::One(*q),
+            GateInstruction::Cx(a, b)
+            | GateInstruction::Cz(a, b)
+            | GateInstruction::Rzz { q0: a, q1: b, .. }
+            | GateInstruction::Rxx { q0: a, q1: b, .. }
+            | GateInstruction::Cp { q0: a, q1: b, .. } => ActsOn::Two(*a, *b),
+            GateInstruction::Barrier(_)
+            | GateInstruction::Measure { .. }
+            | GateInstruction::MeasureAll => ActsOn::None,
+        }
+    }
+}
+
+/// Whether `gates` already measured `qubit` (via a matching `Measure` or any
+/// `MeasureAll`). Used for the incremental C-4 check in
+/// [`ParameterizedCircuit::try_push`](crate::ParameterizedCircuit::try_push),
+/// where the existing prefix is known to already respect the contract.
+pub(crate) fn is_qubit_measured(gates: &[GateInstruction], qubit: usize) -> bool {
+    gates.iter().any(|g| match g {
+        GateInstruction::MeasureAll => true,
+        GateInstruction::Measure { qubit: q, .. } => *q == qubit,
+        _ => false,
+    })
+}
+
+/// Scan a full instruction sequence for a violation of the terminal-measurement
+/// model (contract C-4): a **unitary** gate acting on a qubit that an earlier
+/// instruction already measured. Returns the offending qubit, or `None` when
+/// the sequence is terminal.
+///
+/// Semantics (see `docs/adr/0001-terminal-measurements.md`):
+/// - a unitary on a measured qubit is a violation;
+/// - `Barrier` is always allowed (a scheduling hint, it touches no state);
+/// - re-measuring an already-measured qubit is allowed (idempotent).
+///
+/// This is the shared reference used by the builder, the QASM importer, the QIR
+/// exporter and the native simulator so all four reject identically.
+pub fn terminal_measurement_violation(gates: &[GateInstruction]) -> Option<usize> {
+    let mut measure_all = false;
+    let mut measured: Vec<usize> = Vec::new();
+    for gate in gates {
+        let offending = match gate.acts_on() {
+            ActsOn::One(q) if measure_all || measured.contains(&q) => Some(q),
+            ActsOn::Two(a, _) if measure_all || measured.contains(&a) => Some(a),
+            ActsOn::Two(_, b) if measure_all || measured.contains(&b) => Some(b),
+            _ => None,
+        };
+        if offending.is_some() {
+            return offending;
+        }
+        match gate {
+            GateInstruction::Measure { qubit, .. } => {
+                if !measured.contains(qubit) {
+                    measured.push(*qubit);
+                }
+            }
+            GateInstruction::MeasureAll => measure_all = true,
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]

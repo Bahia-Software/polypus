@@ -303,6 +303,23 @@ impl Circuit {
         )
     }
 
+    /// Controlled phase gate `cp(theta)` on `(q0, q1)`.
+    fn cp(
+        slf: PyRefMut<'_, Self>,
+        q0: usize,
+        q1: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Cp {
+                q0,
+                q1,
+                theta: theta.into(),
+            },
+        )
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier on all qubits, or on `qubits` when given.

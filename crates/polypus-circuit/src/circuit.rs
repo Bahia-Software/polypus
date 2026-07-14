@@ -2,7 +2,7 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
-use crate::gate::{GateInstruction, GateParam};
+use crate::gate::{is_qubit_measured, ActsOn, GateInstruction, GateParam};
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
@@ -128,6 +128,24 @@ impl ParameterizedCircuit {
     /// in sync. Use this from host languages (e.g. Python bindings) where
     /// invalid input must surface as a recoverable error, not a panic.
     pub fn try_push(&mut self, gate: GateInstruction) -> Result<(), CircuitError> {
+        // Terminal-measurement model (contract C-4): a unitary gate may not act
+        // on a qubit that an earlier instruction already measured. The existing
+        // prefix is already valid, so only the new gate can offend. Checked
+        // before any mutation below.
+        match gate.acts_on() {
+            ActsOn::One(q) if is_qubit_measured(&self.gates, q) => {
+                return Err(CircuitError::QubitAlreadyMeasured { qubit: q });
+            }
+            ActsOn::Two(a, b) => {
+                if is_qubit_measured(&self.gates, a) {
+                    return Err(CircuitError::QubitAlreadyMeasured { qubit: a });
+                }
+                if is_qubit_measured(&self.gates, b) {
+                    return Err(CircuitError::QubitAlreadyMeasured { qubit: b });
+                }
+            }
+            _ => {}
+        }
         match &gate {
             GateInstruction::H(q)
             | GateInstruction::X(q)
@@ -516,15 +534,17 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate parameter cannot be resolved: either an unbound
-    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
-    /// value (`NaN` or infinity). Neither can happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
-    /// values at binding time); both are only possible when the `gates` field
-    /// was assembled manually.
+    /// Panics if a gate parameter cannot be resolved (an unbound
+    /// [`GateParam::Param`] or a [`GateParam::Fixed`] holding a non-finite
+    /// value), or if the sequence violates the terminal-measurement model (a
+    /// gate acting on an already-measured qubit; contract C-4). None can happen
+    /// for circuits produced by [`ParameterizedCircuit::assign_parameters`];
+    /// all are only possible when the `gates` field was assembled manually. For
+    /// a fallible export, use
+    /// [`ParameterizedCircuit::to_qir_with_params`](crate::ParameterizedCircuit::to_qir_with_params).
     pub fn to_qir(&self) -> String {
         qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit is invalid (unbound Param, non-finite fixed angle, or a gate after a measurement); build it via ParameterizedCircuit",
         )
     }
 

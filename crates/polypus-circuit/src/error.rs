@@ -24,6 +24,10 @@ pub enum CircuitError {
     QubitOutOfRange { qubit: usize, num_qubits: usize },
     /// A two-qubit gate was given the same qubit twice.
     IdenticalQubits { qubit: usize },
+    /// A unitary gate acts on a qubit that was already measured, violating the
+    /// terminal-measurement model (contract C-4). See
+    /// `docs/adr/0001-terminal-measurements.md`.
+    QubitAlreadyMeasured { qubit: usize },
     /// The OpenQASM 2.0 source could not be parsed
     /// (see [`ParameterizedCircuit::from_qasm2`](crate::ParameterizedCircuit::from_qasm2)).
     Parse {
@@ -62,6 +66,10 @@ impl fmt::Display for CircuitError {
             CircuitError::IdenticalQubits { qubit } => write!(
                 f,
                 "two-qubit gate requires distinct qubits, got ({qubit}, {qubit})"
+            ),
+            CircuitError::QubitAlreadyMeasured { qubit } => write!(
+                f,
+                "gate acts on qubit {qubit} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
             ),
             CircuitError::Parse { line, message } => {
                 write!(f, "QASM parse error at line {line}: {message}")

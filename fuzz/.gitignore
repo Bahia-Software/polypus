@@ -1,0 +1,10 @@
+# cargo-fuzz build output and crash artifacts.
+target/
+artifacts/
+coverage/
+Cargo.lock
+
+# libFuzzer grows the corpus with generated inputs; keep only the named seed
+# files (*.qasm), not the thousands of hash-named entries a run produces.
+corpus/from_qasm2/*
+!corpus/from_qasm2/*.qasm

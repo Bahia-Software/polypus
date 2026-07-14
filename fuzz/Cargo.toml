@@ -1,0 +1,30 @@
+# cargo-fuzz target crate for polypus-circuit's untrusted input surface.
+#
+# This crate lives outside the main workspace on purpose: it needs a nightly
+# toolchain and `cargo-fuzz`, and must not be pulled into `cargo build/test
+# --workspace`. `polypus-circuit` itself stays dependency-free; the fuzzer's
+# dependencies (libfuzzer-sys) are confined here.
+#
+# Run:  cargo +nightly fuzz run from_qasm2 -- -max_total_time=60
+[package]
+name = "polypus-circuit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+polypus-circuit = { path = "../crates/polypus-circuit" }
+
+[[bin]]
+name = "from_qasm2"
+path = "fuzz_targets/from_qasm2.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent Cargo workspace (see the header note).
+[workspace]

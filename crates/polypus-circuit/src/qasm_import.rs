@@ -4,9 +4,9 @@
 //! ([`crate::qasm`]) plus the common `qelib1.inc` vocabulary produced by other
 //! toolchains (notably Qiskit's `qasm2.dumps`):
 //!
-//! - Gates: `h x y z s t sdg tdg id rx ry rz p u1 u2 u3 u U cx CX cz swap rzz rxx`
-//!   (`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to its standard 3×`cx`
-//!   decomposition, `id` is dropped — it is the identity).
+//! - Gates: `h x y z s t sdg tdg id rx ry rz p u1 u2 u3 u U cx CX cz swap rzz
+//!   rxx cp` (`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to its standard
+//!   3×`cx` decomposition, `id` is dropped — it is the identity).
 //! - `barrier`, `measure` (including register broadcast `measure q -> c;`).
 //! - Multiple `qreg`/`creg` declarations, flattened into one index space in
 //!   declaration order.
@@ -16,14 +16,37 @@
 //!
 //! Unsupported statements (`gate` definitions, `opaque`, `if`, `reset`) are
 //! rejected with a [`CircuitError::Parse`] carrying the 1-based line number —
-//! never silently dropped.
+//! never silently dropped. A gate acting on an already-measured qubit is
+//! likewise rejected (terminal-measurement model, contract C-4).
+//!
+//! This is an **untrusted input surface**, so a few resource limits guard
+//! against denial-of-service inputs, each surfaced as a [`CircuitError::Parse`]:
+//! - angle expressions may nest at most [`MAX_EXPR_DEPTH`] levels (no stack
+//!   overflow from `((((…))))` or `----…-1`);
+//! - the total declared qubits, and separately classical bits, may not exceed
+//!   [`MAX_REGISTER_BITS`] (no multi-gigabyte index vector from a hostile
+//!   `qreg q[4000000000];`).
 //!
 //! OpenQASM 2.0 has no free parameters, so imported circuits are always fully
 //! concrete (`num_params == 0`).
 
 use crate::circuit::ParameterizedCircuit;
 use crate::error::CircuitError;
-use crate::gate::{GateInstruction, GateParam};
+use crate::gate::{ActsOn, GateInstruction, GateParam};
+use std::collections::BTreeSet;
+
+/// Maximum nesting depth of a constant angle expression. Bounds parser
+/// recursion so untrusted input like `((((…))))` or `----…-1` cannot overflow
+/// the stack. Legitimate `qelib1.inc` angle expressions (`pi/2`, `-pi/4`,
+/// `(1+2)*pi`, …) nest only a handful of levels, so this is generous.
+const MAX_EXPR_DEPTH: usize = 64;
+
+/// Upper bound on the *total* number of declared qubits (and, separately, of
+/// declared classical bits). Guards against a hostile `qreg q[4000000000];`
+/// materialising a multi-gigabyte index vector during argument expansion. One
+/// million bits is far beyond any simulable circuit (the statevector backend
+/// caps out around 30 qubits) yet cheap to reject.
+const MAX_REGISTER_BITS: usize = 1_000_000;
 
 /// Shorthand for building a [`CircuitError::Parse`].
 fn err(line: usize, message: impl Into<String>) -> CircuitError {
@@ -263,6 +286,10 @@ struct Parser {
     num_qubits: usize,
     num_cbits: usize,
     gates: Vec<GateInstruction>,
+    /// Qubits already measured, for the terminal-measurement check (C-4). The
+    /// parser emits per-qubit `Measure`s (never `MeasureAll`, which `finish`
+    /// synthesizes later), so tracking a qubit set is sufficient.
+    measured: BTreeSet<usize>,
 }
 
 /// Parse a complete OpenQASM 2.0 program into a (fully concrete)
@@ -278,6 +305,7 @@ pub(crate) fn parse_qasm2(src: &str) -> Result<ParameterizedCircuit, CircuitErro
         num_qubits: 0,
         num_cbits: 0,
         gates: Vec::new(),
+        measured: BTreeSet::new(),
     };
     p.header()?;
     while !p.at_end() {
@@ -408,6 +436,26 @@ impl Parser {
         if size == 0 {
             return Err(err(line, format!("register '{name}' has size 0")));
         }
+        // Cap the running total. `checked_add` also rejects a `size` so large
+        // it would overflow `usize`, before argument expansion ever tries to
+        // materialise the index vector.
+        let running_total = if quantum {
+            self.num_qubits
+        } else {
+            self.num_cbits
+        };
+        let kind = if quantum { "qubit" } else { "classical bit" };
+        if running_total
+            .checked_add(size)
+            .is_none_or(|t| t > MAX_REGISTER_BITS)
+        {
+            return Err(err(
+                line,
+                format!(
+                    "total {kind} count would exceed MAX_REGISTER_BITS ({MAX_REGISTER_BITS}); register '{name}' has size {size}"
+                ),
+            ));
+        }
         // QASM 2.0 identifiers share one namespace.
         if self.qregs.iter().chain(&self.cregs).any(|r| r.name == name) {
             return Err(err(line, format!("register '{name}' already declared")));
@@ -510,6 +558,7 @@ impl Parser {
     /// `barrier <args>;` — expanded to explicit indices, then normalised in
     /// [`finish`](Self::finish).
     fn barrier_stmt(&mut self) -> Result<(), CircuitError> {
+        let line = self.line();
         let mut indices = Vec::new();
         loop {
             let arg = self.argument(true)?;
@@ -525,8 +574,8 @@ impl Parser {
                 }
             }
         }
-        self.gates.push(GateInstruction::Barrier(indices));
-        Ok(())
+        // Barriers are always allowed, even on measured qubits (C-4).
+        self.push_validated(GateInstruction::Barrier(indices), line)
     }
 
     /// `measure q -> c;` (register or single-bit form).
@@ -548,7 +597,7 @@ impl Parser {
             ));
         }
         for (&qubit, &cbit) in q.indices.iter().zip(&c.indices) {
-            self.gates.push(GateInstruction::Measure { qubit, cbit });
+            self.push_validated(GateInstruction::Measure { qubit, cbit }, line)?;
         }
         Ok(())
     }
@@ -562,7 +611,7 @@ impl Parser {
             if self.peek() != Some(&Tok::RParen) {
                 loop {
                     let line = self.line();
-                    let value = self.expr()?;
+                    let value = self.expr(0)?;
                     if !value.is_finite() {
                         return Err(err(
                             line,
@@ -666,7 +715,7 @@ impl Parser {
                         "id" => continue,
                         _ => unreachable!(),
                     };
-                    self.gates.push(gate);
+                    self.push_validated(gate, line)?;
                 }
                 Ok(())
             }
@@ -676,11 +725,12 @@ impl Parser {
                 arity(1)?;
                 for t in Self::broadcast(args, line)? {
                     let (qubit, theta) = (t[0], fixed(0));
-                    self.gates.push(match name {
+                    let gate = match name {
                         "rx" => GateInstruction::Rx { qubit, theta },
                         "ry" => GateInstruction::Ry { qubit, theta },
                         _ => GateInstruction::Rz { qubit, theta },
-                    });
+                    };
+                    self.push_validated(gate, line)?;
                 }
                 Ok(())
             }
@@ -689,12 +739,15 @@ impl Parser {
                 n_params(1)?;
                 arity(1)?;
                 for t in Self::broadcast(args, line)? {
-                    self.gates.push(GateInstruction::U {
-                        qubit: t[0],
-                        theta: GateParam::Fixed(0.0),
-                        phi: GateParam::Fixed(0.0),
-                        lam: fixed(0),
-                    });
+                    self.push_validated(
+                        GateInstruction::U {
+                            qubit: t[0],
+                            theta: GateParam::Fixed(0.0),
+                            phi: GateParam::Fixed(0.0),
+                            lam: fixed(0),
+                        },
+                        line,
+                    )?;
                 }
                 Ok(())
             }
@@ -702,12 +755,15 @@ impl Parser {
                 n_params(2)?;
                 arity(1)?;
                 for t in Self::broadcast(args, line)? {
-                    self.gates.push(GateInstruction::U {
-                        qubit: t[0],
-                        theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
-                        phi: fixed(0),
-                        lam: fixed(1),
-                    });
+                    self.push_validated(
+                        GateInstruction::U {
+                            qubit: t[0],
+                            theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
+                            phi: fixed(0),
+                            lam: fixed(1),
+                        },
+                        line,
+                    )?;
                 }
                 Ok(())
             }
@@ -715,12 +771,15 @@ impl Parser {
                 n_params(3)?;
                 arity(1)?;
                 for t in Self::broadcast(args, line)? {
-                    self.gates.push(GateInstruction::U {
-                        qubit: t[0],
-                        theta: fixed(0),
-                        phi: fixed(1),
-                        lam: fixed(2),
-                    });
+                    self.push_validated(
+                        GateInstruction::U {
+                            qubit: t[0],
+                            theta: fixed(0),
+                            phi: fixed(1),
+                            lam: fixed(2),
+                        },
+                        line,
+                    )?;
                 }
                 Ok(())
             }
@@ -732,29 +791,30 @@ impl Parser {
                     let (a, b) = (t[0], t[1]);
                     self.check_distinct(a, b, line)?;
                     match name {
-                        "cz" => self.gates.push(GateInstruction::Cz(a, b)),
+                        "cz" => self.push_validated(GateInstruction::Cz(a, b), line)?,
                         // qelib1.inc: swap a,b = cx a,b; cx b,a; cx a,b
-                        "swap" => self.gates.extend([
-                            GateInstruction::Cx(a, b),
-                            GateInstruction::Cx(b, a),
-                            GateInstruction::Cx(a, b),
-                        ]),
-                        _ => self.gates.push(GateInstruction::Cx(a, b)),
+                        "swap" => {
+                            self.push_validated(GateInstruction::Cx(a, b), line)?;
+                            self.push_validated(GateInstruction::Cx(b, a), line)?;
+                            self.push_validated(GateInstruction::Cx(a, b), line)?;
+                        }
+                        _ => self.push_validated(GateInstruction::Cx(a, b), line)?,
                     }
                 }
                 Ok(())
             }
-            "rzz" | "rxx" => {
+            "rzz" | "rxx" | "cp" => {
                 n_params(1)?;
                 arity(2)?;
                 for t in Self::broadcast(args, line)? {
                     let (q0, q1, theta) = (t[0], t[1], fixed(0));
                     self.check_distinct(q0, q1, line)?;
-                    self.gates.push(if name == "rzz" {
-                        GateInstruction::Rzz { q0, q1, theta }
-                    } else {
-                        GateInstruction::Rxx { q0, q1, theta }
-                    });
+                    let gate = match name {
+                        "rzz" => GateInstruction::Rzz { q0, q1, theta },
+                        "rxx" => GateInstruction::Rxx { q0, q1, theta },
+                        _ => GateInstruction::Cp { q0, q1, theta },
+                    };
+                    self.push_validated(gate, line)?;
                 }
                 Ok(())
             }
@@ -773,6 +833,32 @@ impl Parser {
         }
     }
 
+    /// Append a fully-resolved instruction, enforcing the terminal-measurement
+    /// model (contract C-4): a unitary gate acting on an already-measured qubit
+    /// is rejected with the offending line, rather than silently accepted. This
+    /// is the single push point for every statement handler.
+    fn push_validated(&mut self, gate: GateInstruction, line: usize) -> Result<(), CircuitError> {
+        let violated = match gate.acts_on() {
+            ActsOn::One(q) if self.measured.contains(&q) => Some(q),
+            ActsOn::Two(a, _) if self.measured.contains(&a) => Some(a),
+            ActsOn::Two(_, b) if self.measured.contains(&b) => Some(b),
+            _ => None,
+        };
+        if let Some(q) = violated {
+            return Err(err(
+                line,
+                format!(
+                    "gate acts on qubit {q} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
+                ),
+            ));
+        }
+        if let GateInstruction::Measure { qubit, .. } = &gate {
+            self.measured.insert(*qubit);
+        }
+        self.gates.push(gate);
+        Ok(())
+    }
+
     // ── Constant expressions ─────────────────────────────────────────────
     //
     // Grammar (QASM 2.0 spec):
@@ -781,36 +867,55 @@ impl Parser {
     //   factor := ('-'|'+') factor | power
     //   power  := primary ('^' factor)?          (right-associative)
     //   primary:= real | int | 'pi' | fn '(' expr ')' | '(' expr ')'
+    //
+    // `depth` bounds the recursion so untrusted input like `(((…)))` or
+    // `----…-1` cannot overflow the stack; it is incremented only when
+    // descending into a nested sub-expression (parenthesis, function argument,
+    // unary operator, exponent).
 
-    fn expr(&mut self) -> Result<f64, CircuitError> {
-        let mut v = self.term()?;
+    /// Guard against runaway recursion (DoS via deeply nested expressions).
+    fn check_depth(&self, depth: usize) -> Result<(), CircuitError> {
+        if depth > MAX_EXPR_DEPTH {
+            Err(err(
+                self.line(),
+                format!("expression nested too deeply (max {MAX_EXPR_DEPTH})"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn expr(&mut self, depth: usize) -> Result<f64, CircuitError> {
+        self.check_depth(depth)?;
+        let mut v = self.term(depth)?;
         loop {
             match self.peek() {
                 Some(Tok::Plus) => {
                     self.pos += 1;
-                    v += self.term()?;
+                    v += self.term(depth)?;
                 }
                 Some(Tok::Minus) => {
                     self.pos += 1;
-                    v -= self.term()?;
+                    v -= self.term(depth)?;
                 }
                 _ => return Ok(v),
             }
         }
     }
 
-    fn term(&mut self) -> Result<f64, CircuitError> {
-        let mut v = self.factor()?;
+    fn term(&mut self, depth: usize) -> Result<f64, CircuitError> {
+        self.check_depth(depth)?;
+        let mut v = self.factor(depth)?;
         loop {
             match self.peek() {
                 Some(Tok::Star) => {
                     self.pos += 1;
-                    v *= self.factor()?;
+                    v *= self.factor(depth)?;
                 }
                 Some(Tok::Slash) => {
                     let line = self.line();
                     self.pos += 1;
-                    let divisor = self.factor()?;
+                    let divisor = self.factor(depth)?;
                     if divisor == 0.0 {
                         return Err(err(line, "division by zero in parameter expression"));
                     }
@@ -821,37 +926,40 @@ impl Parser {
         }
     }
 
-    fn factor(&mut self) -> Result<f64, CircuitError> {
+    fn factor(&mut self, depth: usize) -> Result<f64, CircuitError> {
+        self.check_depth(depth)?;
         match self.peek() {
             Some(Tok::Minus) => {
                 self.pos += 1;
-                Ok(-self.factor()?)
+                Ok(-self.factor(depth + 1)?)
             }
             Some(Tok::Plus) => {
                 self.pos += 1;
-                self.factor()
+                self.factor(depth + 1)
             }
-            _ => self.power(),
+            _ => self.power(depth),
         }
     }
 
-    fn power(&mut self) -> Result<f64, CircuitError> {
-        let base = self.primary()?;
+    fn power(&mut self, depth: usize) -> Result<f64, CircuitError> {
+        self.check_depth(depth)?;
+        let base = self.primary(depth)?;
         if self.peek() == Some(&Tok::Caret) {
             self.pos += 1;
-            let exp = self.factor()?;
+            let exp = self.factor(depth + 1)?;
             Ok(base.powf(exp))
         } else {
             Ok(base)
         }
     }
 
-    fn primary(&mut self) -> Result<f64, CircuitError> {
+    fn primary(&mut self, depth: usize) -> Result<f64, CircuitError> {
+        self.check_depth(depth)?;
         match self.next("an expression")? {
             (Tok::Real(v), _) => Ok(v),
             (Tok::Int(v), _) => Ok(v as f64),
             (Tok::LParen, _) => {
-                let v = self.expr()?;
+                let v = self.expr(depth + 1)?;
                 self.expect(Tok::RParen)?;
                 Ok(v)
             }
@@ -874,7 +982,7 @@ impl Parser {
                     }
                 };
                 self.expect(Tok::LParen)?;
-                let v = self.expr()?;
+                let v = self.expr(depth + 1)?;
                 self.expect(Tok::RParen)?;
                 Ok(f(v))
             }

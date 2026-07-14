@@ -26,6 +26,14 @@ pub enum SimError {
     /// A gate angle resolved to a non-finite value (`NaN` or infinity), which
     /// would corrupt the statevector.
     NonFiniteAmplitude,
+    /// A gate acts on a qubit that was already measured, violating the
+    /// terminal-measurement model (contract C-4). This can only happen for a
+    /// manually assembled circuit; the builder and QASM importer reject it at
+    /// construction time.
+    GateAfterMeasure {
+        /// The qubit that was operated on after being measured.
+        qubit: usize,
+    },
 }
 
 impl fmt::Display for SimError {
@@ -42,6 +50,10 @@ impl fmt::Display for SimError {
             SimError::NonFiniteAmplitude => {
                 write!(f, "a gate angle resolved to a non-finite value (NaN or infinity)")
             }
+            SimError::GateAfterMeasure { qubit } => write!(
+                f,
+                "gate acts on qubit {qubit} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
+            ),
         }
     }
 }

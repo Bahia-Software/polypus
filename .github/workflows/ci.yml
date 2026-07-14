@@ -152,3 +152,22 @@ jobs:
           pip install --no-index --find-links dist polypus
       - name: Run Python tests
         run: pytest tests/python
+
+  # Fuzz the untrusted OpenQASM 2.0 import surface on a short time budget, as a
+  # regression guard for the DoS vectors closed in polypus-circuit (unbounded
+  # expression recursion, oversized register declarations, non-finite angles).
+  # Needs a nightly toolchain and cargo-fuzz; the `fuzz/` crate lives outside
+  # the workspace (see the root Cargo.toml `exclude`).
+  fuzz:
+    name: fuzz (from_qasm2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Seeds from the committed corpus (fuzz/corpus/from_qasm2). A crash or
+      # OOM fails the job; a clean 60s run passes.
+      - name: Run libFuzzer (60s budget)
+        run: cargo fuzz run from_qasm2 -- -max_total_time=60 -rss_limit_mb=2048
