@@ -117,8 +117,10 @@ exp_aer = sum(maxcut_value(k) * v for k, v in counts_aer.items()) / SHOTS
 exp_native = sum(maxcut_value(k) * v for k, v in counts_native.items()) / SHOTS
 print(f"Mean cut   Aer: {exp_aer:.4f}   polypus: {exp_native:.4f}")
 print(f"Optimal cut (brute force): {OPTIMAL}")
-print(f"Approximation ratio   Aer: {exp_aer / OPTIMAL:.4f}"
-      f"   polypus: {exp_native / OPTIMAL:.4f}")
+print(
+    f"Approximation ratio   Aer: {exp_aer / OPTIMAL:.4f}"
+    f"   polypus: {exp_native / OPTIMAL:.4f}"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,13 +221,21 @@ mean_aer, best_aer = evaluate_solution(params_aer, "aer")
 mean_native, best_native = evaluate_solution(params_native, "polypus")
 
 print(f"\nOptimal cut (brute force): {OPTIMAL}")
-print(f"Aer:     best (gamma, beta) = ({params_aer[0]:.3f}, {params_aer[1]:.3f})"
-      f"   time = {dt_aer:.2f} s")
-print(f"         mean cut = {mean_aer:.3f} (approx ratio {mean_aer / OPTIMAL:.3f})"
-      f"   best sampled cut = {best_aer}/{OPTIMAL}")
-print(f"polypus: best (gamma, beta) = ({params_native[0]:.3f}, {params_native[1]:.3f})"
-      f"   time = {dt_native:.2f} s")
-print(f"         mean cut = {mean_native:.3f} (approx ratio {mean_native / OPTIMAL:.3f})"
-      f"   best sampled cut = {best_native}/{OPTIMAL}")
+print(
+    f"Aer:     best (gamma, beta) = ({params_aer[0]:.3f}, {params_aer[1]:.3f})"
+    f"   time = {dt_aer:.2f} s"
+)
+print(
+    f"         mean cut = {mean_aer:.3f} (approx ratio {mean_aer / OPTIMAL:.3f})"
+    f"   best sampled cut = {best_aer}/{OPTIMAL}"
+)
+print(
+    f"polypus: best (gamma, beta) = ({params_native[0]:.3f}, {params_native[1]:.3f})"
+    f"   time = {dt_native:.2f} s"
+)
+print(
+    f"         mean cut = {mean_native:.3f} (approx ratio {mean_native / OPTIMAL:.3f})"
+    f"   best sampled cut = {best_native}/{OPTIMAL}"
+)
 if dt_native:
     print(f"speedup: {dt_aer / dt_native:.2f}x")

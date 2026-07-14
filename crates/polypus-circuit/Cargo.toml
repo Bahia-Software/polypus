@@ -2,6 +2,7 @@
 name = "polypus-circuit"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Pure-Rust quantum circuit representation with OpenQASM 2.0 export, used by Polypus. No PyO3 / Python dependency."

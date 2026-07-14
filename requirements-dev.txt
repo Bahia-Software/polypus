@@ -9,3 +9,7 @@ qiskit>=2.0
 # Testing
 pytest>=8.0
 
+# Lint/format (config in [tool.ruff] in pyproject.toml; CI enforces both
+# `ruff check` and `ruff format --check`)
+ruff>=0.8
+

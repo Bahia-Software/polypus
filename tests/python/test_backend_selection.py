@@ -14,7 +14,6 @@ import math
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # run_quantum_circuit with the native backend
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,7 +146,9 @@ def native_ry_circuit():
 @pytest.mark.integration
 @pytest.mark.vqc
 class TestTrainNativeBackend:
-    def test_train_de_with_native_backend(self, native_ry_circuit, simple_expectation_fn):
+    def test_train_de_with_native_backend(
+        self, native_ry_circuit, simple_expectation_fn
+    ):
         import polypus
 
         result = polypus.train(

@@ -1,4 +1,3 @@
-
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 
@@ -14,8 +13,7 @@ def _ensure_quantum_circuits(qcs):
     backends that speak QASM natively can skip this step entirely.
     """
     return [
-        QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
-        for qc in qcs
+        QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc for qc in qcs
     ]
 
 
@@ -51,4 +49,3 @@ class Local(Infraestructure):
         )
         result = sim.run(qcs, shots=shots).result()
         return [result.get_counts(i) for i in range(len(qcs))]
-

@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# CI only reads the repo; keep the default token read-only.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,6 +21,7 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,9 +29,33 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # Python lint + formatting (packages, tests, benchmarks, examples).
+  # Config lives in [tool.ruff] in the root pyproject.toml.
+  ruff:
+    name: ruff (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+      - run: ruff format --check
+
+  # Security advisories (RustSec), license allowlist and registry sources,
+  # per deny.toml. Runs `cargo metadata` only — no build, no Python needed.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # PyO3's build script needs to locate a Python interpreter even for a
@@ -47,9 +76,30 @@ jobs:
       - name: Clippy (qmio backend)
         run: cargo clippy -p polypus --features qmio --all-targets -- -D warnings
 
+  # Guard the declared MSRV (rust-version in Cargo.toml). Without a committed
+  # Cargo.lock this resolves fresh dependencies each run, so a new release of
+  # a dependency can raise the effective MSRV and turn this job red without
+  # any change in the repo — if that happens, bump rust-version deliberately.
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (workspace, default features)
+        run: cargo check --workspace --all-targets
+      - name: Check (qmio backend)
+        run: cargo check -p polypus --features qmio --all-targets
+
   test:
     name: test (Rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Needed only at build/link time (PyO3 links libpython). The Rust tests
@@ -81,12 +131,14 @@ jobs:
       - name: Test polypus (qmio backend)
         run: cargo test -p polypus --features qmio
 
-  # Sanity-check that the rustdoc still builds cleanly (broken intra-doc links
-  # fail via -D warnings). Catches doc-comment regressions on PRs; the actual
-  # publish to Pages lives in docs.yml and only runs on push to main.
+  # Sanity-check that the rustdoc still builds cleanly across the whole
+  # workspace (broken intra-doc links fail via -D warnings). Catches
+  # doc-comment regressions on PRs; the actual publish to Pages lives in
+  # docs.yml, only runs on push to main, and still documents `polypus` only.
   docs:
     name: docs build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # PyO3's build script needs a Python interpreter to compile `polypus`.
@@ -96,18 +148,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build docs (no deploy)
-        run: cargo doc --no-deps -p polypus
+        run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  # Smoke-test that the PyO3 extension wheel builds on every supported
+  # platform, at the floor and latest supported Python (no abi3, so wheels
+  # are per-version). The full test suite still runs on Linux only.
   build-extension:
-    name: build Python extension
-    runs-on: ubuntu-latest
+    name: build extension (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
+        exclude:
+          # macos-latest runners are arm64; actions/setup-python has no
+          # reliable 3.9 build there. macOS is covered by 3.13.
+          - os: macos-latest
+            python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install maturin
@@ -122,15 +188,21 @@ jobs:
   # instructions: install dev deps, then build & install the pure-Python
   # `polypus_python` package, then build & install the Rust extension, then run
   # pytest. Order matters — see the note on the polypus_python step below.
+  # Runs at the floor and latest supported Python versions.
   # ---------------------------------------------------------------------------
   python-tests:
-    name: test (Python)
+    name: test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install dev dependencies
@@ -150,5 +222,10 @@ jobs:
         run: |
           maturin build --release --features extension-module -m crates/polypus/Cargo.toml --out dist
           pip install --no-index --find-links dist polypus
+      # Examples and benchmarks are not executed (no __main__ guards; some
+      # need optional deps like cunqa), but they must at least stay valid
+      # Python — this catches syntax rot without running them.
+      - name: Compile-check examples and benchmarks
+        run: python -m compileall -q examples benchmarks
       - name: Run Python tests
         run: pytest tests/python

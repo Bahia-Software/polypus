@@ -1,6 +1,7 @@
+import time
+
 import polypus
 from qiskit import QuantumCircuit
-import time
 
 polypus.init_logger(run_name="single_run")
 
@@ -18,7 +19,9 @@ qc.measure_all()
 # Single run on local
 print("Running single run local")
 tic1 = time.time()
-result1 = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure="local", n_qpus=1)
+result1 = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure="local", n_qpus=1
+)
 tac1 = time.time()
 time.sleep(5)
 
