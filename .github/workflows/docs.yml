@@ -32,7 +32,7 @@ jobs:
     name: build rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # PyO3's build script needs to locate a Python interpreter to compile the
       # `polypus` crate (same reason the clippy/test jobs in ci.yml set it up).
       - uses: actions/setup-python@v5
