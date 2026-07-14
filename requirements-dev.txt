@@ -4,6 +4,9 @@
 # Rust/Python build
 maturin>=1.8,<2.0
 build>=1.0
+# packages/polypus_python builds with --no-isolation; Python >=3.12 no longer
+# ships setuptools in fresh environments, so declare it explicitly.
+setuptools>=70
 qiskit>=2.0
 
 # Testing

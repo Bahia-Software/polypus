@@ -38,6 +38,10 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # Public-domain equivalent (OSI approved). Pulled in by win_uds, a
+    # Windows-only dep of zeromq behind the qmio feature (the CI deny job
+    # checks --all-features, which includes it).
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 
