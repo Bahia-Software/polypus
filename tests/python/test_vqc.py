@@ -13,9 +13,9 @@ Skip all integration tests (including VQC):
     pytest -m "not integration"
 """
 
-import pytest
 import math
 
+import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.vqc]
 
@@ -30,6 +30,7 @@ _CORES_PER_QPU = 1
 class TestTrainDE:
     def test_train_returns_list(self, parametrized_circuit, simple_expectation_fn):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.DE(generations=2, population_size=4, tolerance=0.5),
@@ -54,6 +55,7 @@ class TestTrainDE:
 
     def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.DE(generations=2, population_size=4, tolerance=0.5),
@@ -68,8 +70,11 @@ class TestTrainDE:
         )
         assert len(result.best_params) == _DIMENSIONS
 
-    def test_train_result_contains_floats(self, parametrized_circuit, simple_expectation_fn):
+    def test_train_result_contains_floats(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.DE(generations=2, population_size=4, tolerance=0.5),
@@ -89,6 +94,7 @@ class TestTrainDE:
 class TestTrainPSO:
     def test_train_returns_list(self, parametrized_circuit, simple_expectation_fn):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.PSO(generations=2, population_size=4, bounds=(0.0, math.pi)),
@@ -105,6 +111,7 @@ class TestTrainPSO:
 
     def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.PSO(generations=2, population_size=4, bounds=(0.0, math.pi)),
@@ -125,6 +132,7 @@ class TestTrainQNG:
         self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
     ):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.QNG(
@@ -148,6 +156,7 @@ class TestTrainQNG:
         self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
     ):
         import polypus
+
         result = polypus.train(
             parametrized_circuit,
             polypus.QNG(
@@ -168,8 +177,11 @@ class TestTrainQNG:
 
 
 class TestTrainInvalidMethod:
-    def test_invalid_method_raises_type_error(self, parametrized_circuit, simple_expectation_fn):
+    def test_invalid_method_raises_type_error(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
         import polypus
+
         with pytest.raises(TypeError):
             polypus.train(
                 parametrized_circuit,
@@ -195,6 +207,7 @@ class TestTrainInvalidConfig:
         self, parametrized_circuit, simple_expectation_fn
     ):
         import polypus
+
         with pytest.raises(ValueError):
             polypus.train(
                 parametrized_circuit,
@@ -213,6 +226,7 @@ class TestTrainInvalidConfig:
         self, parametrized_circuit, simple_expectation_fn
     ):
         import polypus
+
         with pytest.raises(ValueError):
             polypus.train(
                 parametrized_circuit,

@@ -12,7 +12,6 @@ import math
 
 import pytest
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Circuit.from_qasm2 (no backend required)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,9 +20,12 @@ import pytest
 class TestQasmImport:
     def test_roundtrip_is_byte_stable(self):
         import polypus
+
         qc = (
             polypus.Circuit(3)
-            .h(0).h(1).h(2)
+            .h(0)
+            .h(1)
+            .h(2)
             .rzz(0, 1, polypus.Param(0))
             .rx(2, polypus.Param(1))
             .u(0, 0.1, 0.2, 0.3)
@@ -36,6 +38,7 @@ class TestQasmImport:
 
     def test_import_is_fully_concrete(self):
         import polypus
+
         qasm = polypus.Circuit(1).ry(0, polypus.Param(0)).to_qasm2([math.pi])
         imported = polypus.Circuit.from_qasm2(qasm)
         assert imported.num_params == 0
@@ -44,6 +47,7 @@ class TestQasmImport:
     def test_imports_qiskit_dumps_output(self):
         import polypus
         from qiskit import QuantumCircuit, qasm2
+
         qk = QuantumCircuit(2)
         qk.h(0)
         qk.cx(0, 1)
@@ -58,6 +62,7 @@ class TestQasmImport:
 
     def test_imported_circuit_extends_with_builder(self):
         import polypus
+
         qasm = polypus.Circuit(2).h(0).cx(0, 1).to_qasm2()
         qc = polypus.Circuit.from_qasm2(qasm).rz(1, 0.5).measure_all()
         out = qc.to_qasm2()
@@ -66,17 +71,20 @@ class TestQasmImport:
 
     def test_parse_error_carries_line_number(self):
         import polypus
-        src = 'OPENQASM 2.0;\nqreg q[2];\nccz q[0],q[1];\n'
+
+        src = "OPENQASM 2.0;\nqreg q[2];\nccz q[0],q[1];\n"
         with pytest.raises(ValueError, match=r"line 3.*unsupported gate 'ccz'"):
             polypus.Circuit.from_qasm2(src)
 
     def test_rejects_qasm3(self):
         import polypus
+
         with pytest.raises(ValueError, match="version 2.0"):
             polypus.Circuit.from_qasm2("OPENQASM 3.0;\n")
 
     def test_rejects_out_of_range_index(self):
         import polypus
+
         with pytest.raises(ValueError, match="out of range"):
             polypus.Circuit.from_qasm2("OPENQASM 2.0;\nqreg q[2];\nh q[7];\n")
 
@@ -87,6 +95,7 @@ class TestRunImportedCircuit:
         """from_qasm2(Qiskit Bell) executes with the expected distribution."""
         import polypus
         from qiskit import QuantumCircuit, qasm2
+
         qk = QuantumCircuit(2)
         qk.h(0)
         qk.cx(0, 1)
@@ -125,16 +134,12 @@ class TestAerBatching:
         monkeypatch.setattr(local_mod, "AerSimulator", SpySimulator)
 
         population, generations = 8, 2
-        qc = (
-            polypus.Circuit(2)
-            .ry(0, polypus.Param(0))
-            .cx(0, 1)
-            .measure_all()
-        )
+        qc = polypus.Circuit(2).ry(0, polypus.Param(0)).cx(0, 1).measure_all()
         polypus.train(
             qc,
-            polypus.DE(generations=generations, population_size=population,
-                       tolerance=1e-12),
+            polypus.DE(
+                generations=generations, population_size=population, tolerance=1e-12
+            ),
             shots=128,
             n_qpus=1,
             dimensions=1,

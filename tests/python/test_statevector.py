@@ -30,8 +30,7 @@ def _compare(polypus_amps, qc, atol=1e-10):
     ref = Statevector(qc).data
     assert got.shape == ref.shape, f"shape {got.shape} != {ref.shape}"
     assert np.allclose(got, ref, atol=atol), (
-        f"\npolypus = {np.round(got, 4)}"
-        f"\nqiskit  = {np.round(ref, 4)}"
+        f"\npolypus = {np.round(got, 4)}\nqiskit  = {np.round(ref, 4)}"
     )
 
 

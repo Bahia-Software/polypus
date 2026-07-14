@@ -24,8 +24,15 @@ resolver = "2"
 [workspace.package]
 version = "0.6.0"
 edition = "2021"
+# MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
+# (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
+# workspace's own code needs far less. Bump deliberately when a dep requires it.
+rust-version = "1.85"
 authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
-license = "European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL."
+# SPDX identifier (required by cargo-deny and crates.io). The full licence
+# text, including the "or subsequent versions approved by the European
+# Commission" clause, lives in the LICENSE file at the repo root.
+license = "EUPL-1.2"
 
 [workspace.dependencies]
 polypus-circuit    = { path = "crates/polypus-circuit", version = "0.6.0" }

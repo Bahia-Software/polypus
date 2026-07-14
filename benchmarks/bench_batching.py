@@ -39,8 +39,9 @@ def train_once(run_id):
     t0 = time.perf_counter()
     polypus.train(
         ansatz(),
-        polypus.DE(generations=GENERATIONS, population_size=POPULATION,
-                   tolerance=1e-12),
+        polypus.DE(
+            generations=GENERATIONS, population_size=POPULATION, tolerance=1e-12
+        ),
         shots=SHOTS,
         n_qpus=1,
         dimensions=2,
@@ -81,20 +82,26 @@ class _MergedResult:
 
 def main():
     real_sim = local_mod.AerSimulator
-    print(f"DE {GENERATIONS}x{POPULATION}, {N_QUBITS} qubits, {SHOTS} shots, "
-          f"best of {REPEATS}:")
+    print(
+        f"DE {GENERATIONS}x{POPULATION}, {N_QUBITS} qubits, {SHOTS} shots, "
+        f"best of {REPEATS}:"
+    )
 
     results = {}
-    for label, sim_cls in (("batched (current)", real_sim),
-                           ("per-circuit (legacy)", UnbatchedSpy)):
+    for label, sim_cls in (
+        ("batched (current)", real_sim),
+        ("per-circuit (legacy)", UnbatchedSpy),
+    ):
         local_mod.AerSimulator = sim_cls
         try:
             times = [train_once(f"bench_{label[:7]}_{i}") for i in range(REPEATS)]
         finally:
             local_mod.AerSimulator = real_sim
         results[label] = min(times)
-        print(f"  {label:22s}: {min(times):6.2f}s best, "
-              f"{statistics.mean(times):6.2f}s mean")
+        print(
+            f"  {label:22s}: {min(times):6.2f}s best, "
+            f"{statistics.mean(times):6.2f}s mean"
+        )
 
     speedup = results["per-circuit (legacy)"] / results["batched (current)"]
     print(f"  speedup               : {speedup:6.1f}x")

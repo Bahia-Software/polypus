@@ -1,0 +1,10 @@
+# Keep the GitHub Actions used by CI up to date (checkout, setup-python,
+# rust-toolchain, rust-cache, ...). Rust/Python dependencies are deliberately
+# not tracked here: there is no committed lockfile, so CI already resolves
+# fresh semver-compatible versions on every run.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

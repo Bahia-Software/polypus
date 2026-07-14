@@ -1,17 +1,16 @@
-import time
-from qiskit_aer import AerSimulator
 import json
-import os, sys
-import random
-from qiskit import QuantumCircuit
-from qiskit.qpy import dump
-from qiskit.qpy.exceptions import QpyError
-from qiskit.qpy import load
-from qiskit.exceptions import QiskitError, MissingOptionalLibraryError
 import logging
-import shutil
+import os
+import sys
+import time
+
+from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
+from qiskit.qpy import dump, load
+from qiskit.qpy.exceptions import QpyError
+
 sys.path.append(os.getenv("HOME"))
 # from cunqa import get_QPUs, gather
+
 
 def get_logger(id):
     """Get or create the module logger that logs only to a file."""
@@ -22,11 +21,12 @@ def get_logger(id):
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, f"polypus_python_{id}.log")
         file_handler = logging.FileHandler(log_file)
-        formatter = logging.Formatter('[%(asctime)s][%(levelname)s] %(message)s')
+        formatter = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     logger.setLevel(logging.DEBUG)
     return logger
+
 
 def log_message(id, message, level="error"):
     logger = get_logger(id)
@@ -43,75 +43,84 @@ def log_message(id, message, level="error"):
     else:
         logger.debug(message)
 
+
 def _load_configuration(id):
-    """ Load the configuration json file """
+    """Load the configuration json file"""
 
     # Get the path to the configuration file
-    config_file = 'configuration_backend.json'
+    config_file = "configuration_backend.json"
 
     try:
         config_path = os.path.join(os.getcwd(), config_file)
     except Exception as e:
-        log_message(id,f"Error constructing configuration file path: {e} - {config_path}", "error")
+        log_message(
+            id,
+            f"Error constructing configuration file path: {e} - {config_path}",
+            "error",
+        )
         return {"success": False, "error": "PathConstructionError", "message": str(e)}
 
     # Load the configuration from the JSON file
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             config = json.load(f)
-    except FileNotFoundError:
-        log_message(id,f"Configuration file not found: {e}", "error")
+    except FileNotFoundError as e:
+        log_message(id, f"Configuration file not found: {e}", "error")
         raise
-    except json.JSONDecodeError:
-        log_message(id,f"Error decoding JSON configuration: {e}", "error")
+    except json.JSONDecodeError as e:
+        log_message(id, f"Error decoding JSON configuration: {e}", "error")
         raise
-    except Exception:
-        log_message(id,f"Unexpected error loading configuration: {e}", "error")
+    except Exception as e:
+        log_message(id, f"Unexpected error loading configuration: {e}", "error")
         raise
 
-    log_message(id,"Configuration loaded successfully.", "info")
+    log_message(id, "Configuration loaded successfully.", "info")
     return config
+
 
 def _get_temp_directory(id):
     """Get the temporary directory for storing serialized files."""
     try:
         temp_dir = os.path.join(os.getcwd(), "temp")
     except Exception as e:
-        log_message(id,f"Error constructing temp directory path: {e}", "error")
+        log_message(id, f"Error constructing temp directory path: {e}", "error")
         raise
     os.makedirs(temp_dir, exist_ok=True)  # Ensure the folder exists
     return temp_dir
 
+
 def _deserialize_quantum_circuit(id):
     """Deserialize a quantum circuit from a QPY file, handling possible errors."""
-    
+
     # Temporary directory for the serialized file
     temp_dir = _get_temp_directory(id)
     try:
         filename = os.path.join(temp_dir, f"circuit_{id}.qpy")
     except Exception as e:
-        log_message(id,f"Error constructing QPY filename: {e}", "error")
+        log_message(id, f"Error constructing QPY filename: {e}", "error")
         raise
 
     try:
         with open(filename, "rb") as f:
             circuits = list(load(f))
             if not circuits:
-                log_message(id,"No circuits found in QPY file.", "error")
+                log_message(id, "No circuits found in QPY file.", "error")
                 raise QpyError("No circuits found in QPY file.")
             return circuits[0]
     except QpyError as e:
-        log_message(id,f"QPY deserialization error: {e}", "error")
+        log_message(id, f"QPY deserialization error: {e}", "error")
         raise
     except TypeError as e:
-        log_message(id,f"Type error during deserialization: {e}", "error")
+        log_message(id, f"Type error during deserialization: {e}", "error")
         raise
     except Exception as e:
-        log_message(id,f"Unexpected error during deserialization: {e}", "error")
+        log_message(id, f"Unexpected error during deserialization: {e}", "error")
         raise
+
 
 def test_connection():
     print("Testing connection to the QASM simulator backend...")
+
 
 def serialize_quantum_circuit(id, qc):
     """Serialize the quantum circuit using Qiskit qpy, handling possible errors."""
@@ -124,24 +133,29 @@ def serialize_quantum_circuit(id, qc):
         with open(temp_file, "wb") as f:
             # Serialize the quantum circuit to a file
             dump(qc, f)
-            log_message(id,f"Quantum circuit serialized successfully to {temp_file}.", "info")
+            log_message(
+                id, f"Quantum circuit serialized successfully to {temp_file}.", "info"
+            )
     except QpyError as e:
-        log_message(id,f"QPY serialization error: {e}", "error")
+        log_message(id, f"QPY serialization error: {e}", "error")
         raise
     except QiskitError as e:
-        log_message(id,f"Qiskit error during serialization: {e}", "error")
+        log_message(id, f"Qiskit error during serialization: {e}", "error")
         raise
     except MissingOptionalLibraryError as e:
-        log_message(id,f"Missing optional library error during serialization: {e}", "error")
+        log_message(
+            id, f"Missing optional library error during serialization: {e}", "error"
+        )
         raise
     except TypeError as e:
-        log_message(id,f"Type error during serialization: {e}", "error")
+        log_message(id, f"Type error during serialization: {e}", "error")
         raise
     except Exception as e:
-        log_message(id,f"Unexpected error during serialization: {e}", "error")
+        log_message(id, f"Unexpected error during serialization: {e}", "error")
         raise
-    
+
     return True
+
 
 def run_qcs_in_qpu(id, qcs, shots):
 
@@ -150,57 +164,63 @@ def run_qcs_in_qpu(id, qcs, shots):
     #     counts.append(AerSimulator().run(qcs[i], shots=shots).result().get_counts(qcs[i]))
     # return counts
 
+    # CUNQA is an optional dependency; import it only when this path runs.
+    from cunqa.qjob import gather
+    from cunqa.qutils import get_QPUs
+
     # # Get the QPUs
-    tic_total = time.time()
     # sys.path.append(os.getenv("HOME"))
     try:
         qpus = get_QPUs(local=False, family=id)
         # log_message(id,f"Time to get QPUs: {time.time() - tic_total}s", "debug")
-    except Exception as e:
+    except Exception:
         # log_message(id,f"Error getting QPUs: {e}", "error")
         raise
-    
+
     # Asynchronously run the quantum circuits on the QPUs
     try:
         qjobs = []
         for i in range(len(qcs)):
-            qjob = qpus[i].run(qcs[i], shots = shots, transpile=False)
+            qjob = qpus[i].run(qcs[i], shots=shots, transpile=False)
             qjobs.append(qjob)
             # log_message(id,f"Running qpu: {qpus[i]}", "info")
-        
+
         results = gather(qjobs)
         # log_message(id, f"Results: {results}", "debug")
         counts = [result.counts for result in results]
         return counts
     except Exception as e:
-        log_message(id,f"Error running quantum circuits on QPUs: {e}", "error")
+        log_message(id, f"Error running quantum circuits on QPUs: {e}", "error")
         raise
 
+
 def run_qc_in_qpu(id, qc, shots):
+    # CUNQA is an optional dependency; import it only when this path runs.
+    from cunqa.qjob import gather
+    from cunqa.qutils import get_QPUs
 
     # Get the QPUs
     tic_total = time.time()
     sys.path.append(os.getenv("HOME"))
     try:
-        qpus = getQPUs(local=False, family=id)
-        log_message(id,f"Time to get the QPU: {time.time() - tic_total}s", "debug")
+        qpus = get_QPUs(local=False, family=id)
+        log_message(id, f"Time to get the QPU: {time.time() - tic_total}s", "debug")
     except Exception as e:
-        log_message(id,f"Error getting QPU: {e}", "error")
+        log_message(id, f"Error getting QPU: {e}", "error")
         raise
-    
+
     # Asynchronously run the quantum circuits on the QPUs
     try:
         qjobs = []
         for i in range(len(qpus)):
-            qjob = qpus[i].run(qc, shots = shots, transpile=False)
+            qjob = qpus[i].run(qc, shots=shots, transpile=False)
             qjobs.append(qjob)
-            log_message(id,f"Running qpu: {qpus[i]}", "info")
-        
+            log_message(id, f"Running qpu: {qpus[i]}", "info")
+
         results = gather(qjobs)
         log_message(id, f"Results: {results}", "debug")
         counts = [result.counts for result in results]
         return counts
     except Exception as e:
-        log_message(id,f"Error running quantum circuits on QPUs: {e}", "error")
+        log_message(id, f"Error running quantum circuits on QPUs: {e}", "error")
         raise
-

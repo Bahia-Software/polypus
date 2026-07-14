@@ -15,7 +15,9 @@ print(result)
 
 # 2. Single Run Local with distribute by shots
 print("Calling Polypus Local with 10 qpus")
-result = polypus.run_quantum_circuit(qft_circuit, shots=10000, infraestructure="local", n_qpus=10)
+result = polypus.run_quantum_circuit(
+    qft_circuit, shots=10000, infraestructure="local", n_qpus=10
+)
 print(result)
 
 # 3. Single Run QMIO
@@ -25,5 +27,7 @@ print(result)
 
 # 4. Distribute by shots
 print("Calling Polypus Single Run for 10 QPUs")
-result = polypus.run_quantum_circuit(qft_circuit, shots=10000, infraestructure="qmio", n_qpus=10)
+result = polypus.run_quantum_circuit(
+    qft_circuit, shots=10000, infraestructure="qmio", n_qpus=10
+)
 print(result)

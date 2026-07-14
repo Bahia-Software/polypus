@@ -4,7 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "polypus"
-requires-python = ">=3.8"
+# Floor set by the runtime deps of polypus_python (qiskit>=2.0 needs >=3.9).
+# CI tests the floor and the latest supported version.
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -15,6 +17,21 @@ dynamic = ["version"]
 features = ["extension-module"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
+
+# Python lint + formatting for the whole repo (packages, tests, benchmarks,
+# examples). CI runs `ruff check` and `ruff format --check`.
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+# Default rules (pycodestyle errors + pyflakes) plus import sorting.
+extend-select = ["I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package roots re-export their public API.
+"**/__init__.py" = ["F401"]
+# Tests import qiskit after a pytest.importorskip guard.
+"tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
