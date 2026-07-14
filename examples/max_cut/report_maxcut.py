@@ -79,7 +79,17 @@ def _method_order(methods):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _stats(values):
+def _stats(values, lo=None, hi=None):
+    """Summary statistics plus a 95% t-interval for the mean.
+
+    ``mean``/``std`` are the raw sample values (never altered). The *displayed*
+    interval (``ci_low``/``ci_high`` and the asymmetric error offsets
+    ``err_low``/``err_high``) is clipped to the metric's physical domain
+    ``[lo, hi]`` — an unclipped t-interval can otherwise report a ratio above 1
+    or a negative time with few repetitions, which reads as a bug in a report
+    meant to be shown to others. Pass ``lo``/``hi`` (either may be ``None`` for
+    an open side); the clip only bounds what is drawn, not the statistics.
+    """
     arr = np.asarray(values, dtype=float)
     n = arr.size
     mean = float(arr.mean())
@@ -94,6 +104,11 @@ def _stats(values):
     else:
         std = 0.0
         half = 0.0
+    ci_low, ci_high = mean - half, mean + half
+    if lo is not None:
+        ci_low = max(lo, ci_low)
+    if hi is not None:
+        ci_high = min(hi, ci_high)
     return {
         "n": int(n),
         "mean": mean,
@@ -101,9 +116,11 @@ def _stats(values):
         "median": float(np.median(arr)),
         "min": float(arr.min()),
         "max": float(arr.max()),
-        "ci_low": mean - half,
-        "ci_high": mean + half,
-        "ci_half": half,
+        "ci_half": half,           # raw half-width (unclipped), for reference
+        "ci_low": ci_low,          # displayed bound, clipped to [lo, hi]
+        "ci_high": ci_high,
+        "err_low": mean - ci_low,  # asymmetric error-bar offsets (>= 0)
+        "err_high": ci_high - mean,
     }
 
 
@@ -128,8 +145,10 @@ def aggregate(rows):
                 "method": method,
                 "display": _style(method)[0],
                 "n_qubits": q,
-                "ratio": _stats(g["ratio"]),
-                "time": _stats(g["time"]),
+                # Clip displayed CIs to each metric's physical domain: ratio is
+                # a fraction in [0, 1]; run time is non-negative.
+                "ratio": _stats(g["ratio"], lo=0.0, hi=1.0),
+                "time": _stats(g["time"], lo=0.0, hi=None),
             })
     return out
 
@@ -186,14 +205,19 @@ def _init_matplotlib():
 
 
 def _series_by_method(agg, field):
-    """method -> (qubits[], mean[], ci_half[]) for the given metric field."""
+    """method -> (qubits[], mean[], err_low[], err_high[]) for the given metric.
+
+    The errors are the asymmetric, domain-clipped CI offsets, so an error bar
+    never crosses the metric's physical bound (e.g. a ratio bar stops at 1.0).
+    """
     series = OrderedDict()
     for method in _method_order({row["method"] for row in agg}):
         pts = sorted((r["n_qubits"], r[field]) for r in agg if r["method"] == method)
         series[method] = (
             [q for q, _ in pts],
             [s["mean"] for _, s in pts],
-            [s["ci_half"] for _, s in pts],
+            [s["err_low"] for _, s in pts],
+            [s["err_high"] for _, s in pts],
         )
     return series
 
@@ -201,9 +225,9 @@ def _series_by_method(agg, field):
 def _fig_metric_vs_qubits(plt, agg, field, ylabel, title, path, logy=False):
     fig, ax = plt.subplots(figsize=(7.5, 4.6), dpi=140)
     series = _series_by_method(agg, field)
-    for method, (xs, ys, errs) in series.items():
+    for method, (xs, ys, err_lo, err_hi) in series.items():
         name, color, ls, marker, _ = _style(method)
-        ax.errorbar(xs, ys, yerr=errs, label=name, color=color, linestyle=ls,
+        ax.errorbar(xs, ys, yerr=[err_lo, err_hi], label=name, color=color, linestyle=ls,
                     marker=marker, markersize=7, linewidth=2, capsize=3,
                     markeredgecolor=SURFACE, markeredgewidth=1.0, zorder=3)
     # Identity comes from the legend: the DE and scipy lines run nearly on top of
@@ -260,11 +284,12 @@ def _fig_polypus_vs_scipy(plt, agg, path):
     for i, method in enumerate(methods):
         name, color, _, _, hatch = _style(method)
         means = [ratio_by.get((method, q), {}).get("mean", np.nan) for q in qubits]
-        errs = [ratio_by.get((method, q), {}).get("ci_half", 0.0) for q in qubits]
+        err_lo = [ratio_by.get((method, q), {}).get("err_low", 0.0) for q in qubits]
+        err_hi = [ratio_by.get((method, q), {}).get("err_high", 0.0) for q in qubits]
         offs = x + (i - (n_m - 1) / 2) * width
         ax.bar(offs, means, width=width * 0.9, label=name, color=color,
                edgecolor=SURFACE, linewidth=1.2, hatch=hatch or None,
-               yerr=errs, ecolor=MUTED, capsize=2, zorder=3)
+               yerr=[err_lo, err_hi], ecolor=MUTED, capsize=2, zorder=3)
     ax.set_xticks(x)
     ax.set_xticklabels([str(q) for q in qubits])
     ax.set_xlabel("qubits (graph nodes)")
@@ -395,6 +420,11 @@ def _narrative_md(prov, headline):
         "(expected cut ÷ optimal cut, so 1.0 is perfect); the 95% CI is a t-interval over "
         "the `n` repetitions. `time` columns are wall-clock seconds per run. Higher ratio "
         "is better; lower time is better.",
+        "",
+        "> The CI shown is a 95% t-interval **clipped to each metric's physical range** "
+        "(ratio to `[0, 1]`, time to `[0, ∞)`). With few repetitions the raw t-interval can "
+        "extend past those bounds; the mean and standard deviation are the unmodified sample "
+        "values — only the displayed interval (and its error bars) is clamped.",
     ]
     if headline:
         h = headline
@@ -537,6 +567,10 @@ python examples/max_cut/report_maxcut.py</pre>
 <p>One row per (method, qubit count). <code>ratio mean</code> is expected cut ÷ optimal cut
 (1.0 is perfect); the 95% CI is a t-interval over the <code>n</code> repetitions. Higher ratio is
 better; lower time is better.</p>
+<p class="prov">The CI shown is a 95% t-interval <b>clipped to each metric's physical range</b>
+(ratio to [0,&nbsp;1], time to [0,&nbsp;∞)). With few repetitions the raw t-interval can extend
+past those bounds; the mean and standard deviation are the unmodified sample values — only the
+displayed interval (and its error bars) is clamped.</p>
 <div class="table-wrap"><table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table></div>
 <h2>Provenance</h2>
 <p class="prov">runs: {prov['total_runs']} · qubits: {prov['qubits']} · repeats: {prov['repeats']}

@@ -17,33 +17,35 @@ python examples/max_cut/report_maxcut.py
 
 One row per (method, qubit count). `ratio mean` is the primary quality metric (expected cut ÷ optimal cut, so 1.0 is perfect); the 95% CI is a t-interval over the `n` repetitions. `time` columns are wall-clock seconds per run. Higher ratio is better; lower time is better.
 
+> The CI shown is a 95% t-interval **clipped to each metric's physical range** (ratio to `[0, 1]`, time to `[0, ∞)`). With few repetitions the raw t-interval can extend past those bounds; the mean and standard deviation are the unmodified sample values — only the displayed interval (and its error bars) is clamped.
+
 ## Headline
 
-At 6 qubits, the best Polypus optimizer (**Polypus PSO**) reached a mean approximation ratio of **0.9160**, 0.0672 above the scipy baseline (0.8488), with a mean run time of 5.25s vs scipy's 16.66s (≈3.17× time ratio).
+At 6 qubits, the best Polypus optimizer (**Polypus PSO**) reached a mean approximation ratio of **0.9160**, 0.0672 above the scipy baseline (0.8488), with a mean run time of 5.21s vs scipy's 17.03s (≈3.27× time ratio).
 
 ## Provenance
 
 - runs: **36** | qubits: [4, 5, 6] | methods: ['Polypus DE', 'Polypus PSO', 'Polypus QNG', 'scipy DE (baseline)']
 - repeats: 3 | base seed(s): [42] | shots: [4000]
-- git commit(s): ['96d4a3b'] | polypus: ['0.6.0']
-- timestamps: 2026-07-14T09:51:44Z … 2026-07-14T09:54:15Z
+- git commit(s): ['451e0fd'] | polypus: ['0.6.0']
+- timestamps: 2026-07-14T12:23:08Z … 2026-07-14T12:25:38Z
 
 ## Metrics
 
 | method | qubits | n | ratio mean | ratio std | ratio median | ratio min | ratio max | ratio 95% CI | time mean [s] | time std [s] | time 95% CI [s] |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Polypus DE | 4 | 3 | 0.9195 | 0.0204 | 0.9130 | 0.9032 | 0.9424 | [0.8688, 0.9703] | 0.962 | 0.005 | [0.949, 0.976] |
-| Polypus DE | 5 | 3 | 0.9675 | 0.0152 | 0.9588 | 0.9588 | 0.9850 | [0.9299, 1.0052] | 1.706 | 0.009 | [1.682, 1.729] |
-| Polypus DE | 6 | 3 | 0.8408 | 0.0137 | 0.8424 | 0.8264 | 0.8536 | [0.8067, 0.8748] | 5.216 | 0.040 | [5.116, 5.316] |
-| Polypus PSO | 4 | 3 | 0.9753 | 0.0196 | 0.9708 | 0.9583 | 0.9968 | [0.9265, 1.0241] | 0.960 | 0.022 | [0.904, 1.015] |
-| Polypus PSO | 5 | 3 | 0.9937 | 0.0042 | 0.9941 | 0.9893 | 0.9977 | [0.9831, 1.0042] | 1.739 | 0.033 | [1.656, 1.821] |
-| Polypus PSO | 6 | 3 | 0.9160 | 0.0309 | 0.9248 | 0.8816 | 0.9415 | [0.8392, 0.9927] | 5.251 | 0.058 | [5.106, 5.395] |
-| Polypus QNG | 4 | 3 | 0.8819 | 0.0883 | 0.9324 | 0.7799 | 0.9333 | [0.6625, 1.1012] | 1.019 | 0.108 | [0.751, 1.287] |
-| Polypus QNG | 5 | 3 | 0.8869 | 0.0523 | 0.8869 | 0.8347 | 0.9393 | [0.7570, 1.0168] | 1.839 | 0.161 | [1.439, 2.239] |
-| Polypus QNG | 6 | 3 | 0.7989 | 0.0021 | 0.7977 | 0.7976 | 0.8013 | [0.7937, 0.8041] | 5.511 | 0.156 | [5.122, 5.900] |
-| scipy DE (baseline) | 4 | 3 | 0.9418 | 0.0292 | 0.9523 | 0.9087 | 0.9643 | [0.8692, 1.0144] | 2.630 | 1.433 | [-0.929, 6.189] |
-| scipy DE (baseline) | 5 | 3 | 0.9474 | 0.0106 | 0.9428 | 0.9400 | 0.9596 | [0.9211, 0.9738] | 3.132 | 0.244 | [2.525, 3.738] |
-| scipy DE (baseline) | 6 | 3 | 0.8488 | 0.0096 | 0.8436 | 0.8429 | 0.8598 | [0.8250, 0.8725] | 16.658 | 2.972 | [9.277, 24.040] |
+| Polypus DE | 4 | 3 | 0.9195 | 0.0204 | 0.9130 | 0.9032 | 0.9424 | [0.8688, 0.9703] | 0.987 | 0.017 | [0.945, 1.030] |
+| Polypus DE | 5 | 3 | 0.9675 | 0.0152 | 0.9588 | 0.9588 | 0.9850 | [0.9299, 1.0000] | 1.790 | 0.018 | [1.744, 1.836] |
+| Polypus DE | 6 | 3 | 0.8408 | 0.0137 | 0.8424 | 0.8264 | 0.8536 | [0.8067, 0.8748] | 5.209 | 0.015 | [5.172, 5.246] |
+| Polypus PSO | 4 | 3 | 0.9753 | 0.0196 | 0.9708 | 0.9583 | 0.9968 | [0.9265, 1.0000] | 0.938 | 0.012 | [0.909, 0.966] |
+| Polypus PSO | 5 | 3 | 0.9937 | 0.0042 | 0.9941 | 0.9893 | 0.9977 | [0.9831, 1.0000] | 1.756 | 0.016 | [1.716, 1.796] |
+| Polypus PSO | 6 | 3 | 0.9160 | 0.0309 | 0.9248 | 0.8816 | 0.9415 | [0.8392, 0.9927] | 5.209 | 0.027 | [5.143, 5.275] |
+| Polypus QNG | 4 | 3 | 0.8819 | 0.0883 | 0.9324 | 0.7799 | 0.9333 | [0.6625, 1.0000] | 1.111 | 0.085 | [0.900, 1.323] |
+| Polypus QNG | 5 | 3 | 0.8869 | 0.0523 | 0.8869 | 0.8347 | 0.9393 | [0.7570, 1.0000] | 1.758 | 0.023 | [1.699, 1.816] |
+| Polypus QNG | 6 | 3 | 0.7989 | 0.0021 | 0.7977 | 0.7976 | 0.8013 | [0.7937, 0.8041] | 5.724 | 0.228 | [5.158, 6.290] |
+| scipy DE (baseline) | 4 | 3 | 0.9418 | 0.0292 | 0.9523 | 0.9087 | 0.9643 | [0.8692, 1.0000] | 1.811 | 0.015 | [1.775, 1.848] |
+| scipy DE (baseline) | 5 | 3 | 0.9474 | 0.0106 | 0.9428 | 0.9400 | 0.9596 | [0.9211, 0.9738] | 2.986 | 0.011 | [2.959, 3.013] |
+| scipy DE (baseline) | 6 | 3 | 0.8488 | 0.0096 | 0.8436 | 0.8429 | 0.8598 | [0.8250, 0.8725] | 17.026 | 4.607 | [5.581, 28.470] |
 
 ## Figures
 

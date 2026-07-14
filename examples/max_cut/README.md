@@ -31,7 +31,7 @@ Everything below assumes the extension module is built and importable
 # 1. Preview the plan (run count + rough time estimate), run nothing:
 python examples/max_cut/sweep_maxcut.py --dry-run
 
-# 2. Run the default sweep (qubits 4–7, 4 methods, 5 repeats = 80 runs):
+# 2. Run the default sweep (qubits 4–7, 4 methods, 10 repeats = 160 runs):
 python examples/max_cut/sweep_maxcut.py --seed 42
 
 # 3. Generate the report from whatever the CSV has accumulated:
@@ -44,7 +44,16 @@ Outputs land under `examples/max_cut/output/` (git-ignored):
 
 A small **committed demo** lives in [`demo/`](demo/) so the deliverable is
 visible in the repo/PR without running anything — see
-[`demo/maxcut_report.md`](demo/maxcut_report.md).
+[`demo/maxcut_report.md`](demo/maxcut_report.md). It is a deliberately reduced,
+reproducible sample; regenerate it with:
+
+```bash
+python examples/max_cut/sweep_maxcut.py --qubits 4 5 6 --repeats 3 --shots 4000 \
+    --seed 42 --fresh --csv examples/max_cut/demo/maxcut_results.csv
+python examples/max_cut/report_maxcut.py \
+    --csv examples/max_cut/demo/maxcut_results.csv --out-dir examples/max_cut/demo
+rm -rf examples/max_cut/demo/logs examples/max_cut/demo/maxcut_manifest_*.json
+```
 
 ### Regenerating only the report
 
@@ -72,8 +81,8 @@ variance you see comes purely from the optimizer seed.
 
 ## Estimated time
 
-`--dry-run` prints a rough estimate. As a guide, the default 80-run sweep
-(qubits 4–7, 5 repeats, 10 000 shots) is on the order of ~20 minutes on a
+`--dry-run` prints a rough estimate. As a guide, the default 160-run sweep
+(qubits 4–7, 10 repeats, 10 000 shots) is on the order of ~40 minutes on a
 laptop; it grows steeply with qubit count (statevector cost) and linearly with
 shots. Shrink it while iterating:
 

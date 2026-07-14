@@ -60,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--methods", nargs="+", default=list(mc.DEFAULT_SWEEP_METHODS),
                    choices=mc.ALL_METHODS,
                    help="Methods to sweep. Default: the 3 local Polypus optimizers + scipy baseline.")
-    p.add_argument("--repeats", type=int, default=5, help="Repetitions per (qubits, method).")
+    p.add_argument("--repeats", type=int, default=10, help="Repetitions per (qubits, method).")
     p.add_argument("--seed", type=int, default=42,
                    help="Base seed; repetition r uses seed = base_seed + r.")
     p.add_argument("--shots", type=int, default=10_000, help="Shots per circuit evaluation.")
