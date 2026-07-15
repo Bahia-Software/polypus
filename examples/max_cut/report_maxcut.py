@@ -25,6 +25,7 @@ import base64
 import logging
 import math
 import os
+import re
 import sys
 from collections import OrderedDict, defaultdict
 
@@ -169,6 +170,114 @@ def _provenance(rows):
         "shots": distinct("n_shots"),
         "timestamps": (min(distinct("timestamp")), max(distinct("timestamp"))),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training configuration (schema v2) — the hyper-parameters behind the metrics.
+#
+# Same "fail high, never hide" stance as read_records: a value that should be
+# constant but is not (a scaling factor differing between rows, a per-method
+# knob that drifted) is surfaced with a ⚠ marker and a logged warning — never
+# silently collapsed to one representative value.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: (label, field) for the sweep-wide scaling factors + shot count.
+_CONFIG_FACTORS = [
+    ("layers_factor", "layers_factor"),
+    ("population_factor", "population_factor"),
+    ("generations_factor", "generations_factor"),
+    ("n_shots", "n_shots"),
+]
+
+#: Per-n_qubits problem sizing (derived from the factors + n_qubits).
+_SIZING_FIELDS = ["layers", "dimensions", "population_size", "max_generations",
+                  "best_solution_bruteforce"]
+_SIZING_HEADERS = ["qubits", "layers", "dimensions", "population_size",
+                   "max_generations", "optimal cut (bruteforce)"]
+
+
+def _fmt_val(v):
+    if v is None:
+        return "n/a"
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+def _distinct_vals(rows, field):
+    """Distinct values of ``field`` across ``rows``, deduped, None sorted last."""
+    seen = []
+    for r in rows:
+        v = r[field]
+        if v not in seen:
+            seen.append(v)
+    return sorted(seen, key=lambda v: (v is None, v))
+
+
+def _cell(vals):
+    """(text, varies) for a set of distinct values. ``varies`` is True when more
+    than one distinct value was seen where one was expected."""
+    if len(vals) <= 1:
+        return (_fmt_val(vals[0]) if vals else "n/a"), False
+    return "varies: " + ", ".join(_fmt_val(v) for v in vals), True
+
+
+def _method_param_fields(method):
+    """(label, field) hyper-parameters that the given method actually uses."""
+    opt = mc.METHOD_SPECS[method][0]
+    if opt == "qng":
+        return [("learning_rate", "qng_learning_rate"),
+                ("finite-diff step", "qng_step"),
+                ("tikhonov reg", "qng_tikhonov")]
+    if opt == "scipy":
+        # scipy's differential_evolution takes popsize=population_factor (NOT
+        # population_size); see the note under the sizing table.
+        return [("tolerance", "tolerance"),
+                ("popsize (→ differential_evolution)", "population_factor"),
+                ("scipy_workers", "scipy_workers")]
+    return [("tolerance", "tolerance")]  # de / pso
+
+
+def _config(rows):
+    """Structured training configuration for the report's Configuration section."""
+    factors = []
+    for label, field in _CONFIG_FACTORS:
+        text, varies = _cell(_distinct_vals(rows, field))
+        factors.append((label, text, varies))
+
+    per_method = []
+    for method in _method_order({r["method"] for r in rows}):
+        mrows = [r for r in rows if r["method"] == method]
+        params = []
+        for label, field in _method_param_fields(method):
+            text, varies = _cell(_distinct_vals(mrows, field))
+            params.append((label, text, varies))
+        per_method.append({"method": method, "display": _style(method)[0], "params": params})
+
+    sizing = []
+    for q in sorted({r["n_qubits"] for r in rows}):
+        qrows = [r for r in rows if r["n_qubits"] == q]
+        cells = {f: _cell(_distinct_vals(qrows, f)) for f in _SIZING_FIELDS}
+        sizing.append({"n_qubits": q, "cells": cells})
+
+    return {"factors": factors, "per_method": per_method, "sizing": sizing}
+
+
+def _config_warnings(config):
+    """Human-readable messages for every value flagged as unexpectedly varying."""
+    msgs = []
+    for label, _text, varies in config["factors"]:
+        if varies:
+            msgs.append(f"scaling factor/shots '{label}' is not constant across the CSV")
+    for pm in config["per_method"]:
+        for label, _text, varies in pm["params"]:
+            if varies:
+                msgs.append(f"hyper-parameter '{label}' varies within method '{pm['display']}'")
+    for s in config["sizing"]:
+        for field, (_text, varies) in s["cells"].items():
+            if varies:
+                msgs.append(f"problem sizing '{field}' varies at {s['n_qubits']} qubits")
+    return msgs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,6 +496,54 @@ def _md_table(headers, rows):
     return "\n".join(lines)
 
 
+def _flag(text, varies):
+    """Append the ⚠ marker to a cell whose value varied unexpectedly."""
+    return text + (" ⚠" if varies else "")
+
+
+_CONFIG_INTRO = (
+    "The training configuration behind the metrics above. The scaling factors "
+    "and shot count are expected to be constant across the whole sweep; the "
+    "problem sizing is derived from them and `n_qubits`. A **⚠** marks a value "
+    "that is not constant where one was expected — it is shown as a list of the "
+    "distinct values rather than silently collapsed to one (same fail-high "
+    "stance as the CSV reader)."
+)
+
+_POPSIZE_NOTE = (
+    "`population_size` is the population handed to the **Polypus** DE/PSO "
+    "optimizers (`dimensions × population_factor`). The **scipy** baseline "
+    "instead receives `popsize = population_factor` and multiplies it by "
+    "`dimensions` internally, so its per-method row reports `popsize` while the "
+    "sizing table reports `population_size` — two conventions for (effectively) "
+    "the same total population, not the same number."
+)
+
+
+def _config_md(config):
+    out = ["## Configuration", "", _CONFIG_INTRO, "",
+           "**Scaling factors & shots**", "",
+           _md_table(["parameter", "value"],
+                     [[label, _flag(text, varies)] for label, text, varies in config["factors"]]),
+           "",
+           "**Hyper-parameters per method** — only the knobs each optimizer "
+           "actually uses; `n/a` means the method does not consult that knob.", ""]
+    for pm in config["per_method"]:
+        out += [f"*{pm['display']}*", "",
+                _md_table(["hyper-parameter", "value"],
+                          [[label, _flag(text, varies)] for label, text, varies in pm["params"]]),
+                ""]
+    out += ["**Problem sizing by qubit count** — varies with `n_qubits`; sets "
+            "the scale of each run and gives context for the ratio/time rows above.", ""]
+    sizing_rows = [
+        [str(s["n_qubits"])] + [_flag(*s["cells"][f]) for f in _SIZING_FIELDS]
+        for s in config["sizing"]
+    ]
+    out += [_md_table(_SIZING_HEADERS, sizing_rows), "",
+            f"> {_POPSIZE_NOTE}"]
+    return "\n".join(out)
+
+
 def _narrative_md(prov, headline):
     seeds = prov["base_seeds"]
     seed_str = ", ".join(str(s) for s in seeds)
@@ -442,7 +599,7 @@ def _narrative_md(prov, headline):
     return "\n".join(parts)
 
 
-def render_markdown(agg, rows, figures, prov, out_path):
+def render_markdown(agg, rows, figures, prov, config, out_path):
     headline = _headline(agg, prov)
     fig_titles = [
         ("ratio_vs_qubits", "Approximation ratio vs. qubits"),
@@ -463,6 +620,8 @@ def render_markdown(agg, rows, figures, prov, out_path):
         f"- git commit(s): {prov['git_commits']} | polypus: {prov['polypus_versions']}",
         f"- timestamps: {prov['timestamps'][0]} … {prov['timestamps'][1]}",
         "",
+        _config_md(config),
+        "",
         "## Metrics",
         "",
         _md_table(_TABLE_HEADERS, list(_table_rows(agg))),
@@ -482,7 +641,54 @@ def _b64_img(path):
         return base64.b64encode(fh.read()).decode("ascii")
 
 
-def render_html(agg, rows, figures, prov, out_path):
+def _inline_md_to_html(text):
+    """Convert the small subset of inline Markdown used in the shared config
+    blurbs (``**bold**`` and `` `code` ``) to HTML, so the same source string
+    renders correctly in both the ``.md`` and ``.html`` reports."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    return text
+
+
+def _html_table(headers, rows):
+    thead = "".join(f"<th>{h}</th>" for h in headers)
+    tbody = "".join(
+        "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows
+    )
+    return (f'<div class="table-wrap"><table><thead><tr>{thead}</tr></thead>'
+            f'<tbody>{tbody}</tbody></table></div>')
+
+
+def _config_html(config):
+    factor_tbl = _html_table(
+        ["parameter", "value"],
+        [[label, _flag(text, varies)] for label, text, varies in config["factors"]],
+    )
+    method_blocks = "".join(
+        f'<h3 class="cfg-h3">{pm["display"]}</h3>'
+        + _html_table(["hyper-parameter", "value"],
+                      [[label, _flag(text, varies)] for label, text, varies in pm["params"]])
+        for pm in config["per_method"]
+    )
+    sizing_tbl = _html_table(
+        _SIZING_HEADERS,
+        [[str(s["n_qubits"])] + [_flag(*s["cells"][f]) for f in _SIZING_FIELDS]
+         for s in config["sizing"]],
+    )
+    return f"""<h2>Configuration</h2>
+<p>{_inline_md_to_html(_CONFIG_INTRO)}</p>
+<h3 class="cfg-h3">Scaling factors &amp; shots</h3>
+{factor_tbl}
+<h3 class="cfg-h3">Hyper-parameters per method</h3>
+<p>Only the knobs each optimizer actually uses; <code>n/a</code> means the method does not consult that knob.</p>
+{method_blocks}
+<h3 class="cfg-h3">Problem sizing by qubit count</h3>
+<p>These vary with <code>n_qubits</code> and set the scale of each run.</p>
+{sizing_tbl}
+<p class="prov">{_inline_md_to_html(_POPSIZE_NOTE)}</p>"""
+
+
+def render_html(agg, rows, figures, prov, config, out_path):
     headline = _headline(agg, prov)
     thead = "".join(f"<th>{h}</th>" for h in _TABLE_HEADERS)
     tbody = "".join(
@@ -527,6 +733,7 @@ def render_html(agg, rows, figures, prov, out_path):
   main {{ max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }}
   h1 {{ font-size: 1.7rem; margin: 0 0 .2em; }}
   h2 {{ font-size: 1.2rem; margin: 1.8em 0 .5em; border-bottom: 1px solid var(--grid); padding-bottom: .2em; }}
+  h3.cfg-h3 {{ font-size: .98rem; margin: 1.2em 0 .4em; color: var(--ink); }}
   p, li {{ color: var(--ink2); }}
   code, pre {{ font-family: ui-monospace, "SF Mono", Menlo, monospace; }}
   pre {{ background: var(--surface); border: 1px solid var(--grid); border-radius: 8px;
@@ -576,6 +783,7 @@ displayed interval (and its error bars) is clamped.</p>
 <p class="prov">runs: {prov['total_runs']} · qubits: {prov['qubits']} · repeats: {prov['repeats']}
 · base seed(s): {prov['base_seeds']} · shots: {prov['shots']} · git: {prov['git_commits']}
 · polypus: {prov['polypus_versions']} · {prov['timestamps'][0]} … {prov['timestamps'][1]}</p>
+{_config_html(config)}
 <h2>Figures</h2>
 <div class="figs">{figs_html}</div>
 </main></body></html>
@@ -614,13 +822,16 @@ def main(argv=None) -> int:
 
     agg = aggregate(rows)
     prov = _provenance(rows)
+    config = _config(rows)
+    for msg in _config_warnings(config):
+        log.warning("configuration inconsistency (shown with ⚠ in the report): %s", msg)
     os.makedirs(args.out_dir, exist_ok=True)
 
     figures = render_figures(agg, rows, args.out_dir)
     md_path = os.path.join(args.out_dir, "maxcut_report.md")
     html_path = os.path.join(args.out_dir, "maxcut_report.html")
-    render_markdown(agg, rows, figures, prov, md_path)
-    render_html(agg, rows, figures, prov, html_path)
+    render_markdown(agg, rows, figures, prov, config, md_path)
+    render_html(agg, rows, figures, prov, config, html_path)
 
     log.info("read %d rows from %s", len(rows), args.csv)
     log.info("wrote figures: %s", ", ".join(os.path.basename(p) for p in figures.values()))

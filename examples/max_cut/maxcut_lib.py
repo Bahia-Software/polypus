@@ -102,9 +102,19 @@ _OPTIMIZER_LABEL = {"de": "DE", "pso": "PSO", "qng": "QNG", "scipy": "scipy_DE"}
 # ─────────────────────────────────────────────────────────────────────────────
 # CSV schema — one row per (n_qubits, method, repeat). Bumped if columns change;
 # the reader rejects rows whose schema_version it does not understand.
+#
+# v2 (this version) adds the training hyper-parameters that produced each row so
+# a report can explain where the numbers came from: the scaling factors
+# (layers/population/generations), the convergence tolerance, the scipy worker
+# count and the QNG-specific knobs. Hyper-parameters that do not apply to a
+# given method are written as an EMPTY cell (parsed back as ``None``) — an
+# explicit "not applicable", deliberately never ``0`` (which would read as a
+# real, meaningful value). v1 CSVs are NOT readable under v2 (their header lacks
+# these columns, so ``read_records`` rejects them loudly, as it does any header
+# mismatch); regenerate the data rather than migrating it in place.
 # ─────────────────────────────────────────────────────────────────────────────
 
-CSV_SCHEMA_VERSION = 1
+CSV_SCHEMA_VERSION = 2
 
 CSV_FIELDS = (
     "schema_version",
@@ -126,6 +136,19 @@ CSV_FIELDS = (
     "dimensions",
     "population_size",
     "max_generations",
+    # Scaling factors that (with n_qubits) DERIVE layers/population/generations
+    # above — constant across a sweep, kept per row so the derivation is legible.
+    "layers_factor",
+    "population_factor",
+    "generations_factor",
+    # Convergence tolerance: DE/PSO/scipy only. Empty (None) for QNG.
+    "tolerance",
+    # scipy baseline worker processes: scipy only. Empty (None) otherwise.
+    "scipy_workers",
+    # QNG-only hyper-parameters. Empty (None) for every non-QNG method.
+    "qng_learning_rate",
+    "qng_step",
+    "qng_tikhonov",
     "n_shots",
     "n_qpus",
     "nodes",
@@ -140,6 +163,18 @@ CSV_FIELDS = (
     "converged",
     "time_seconds",
 )
+
+#: Hyper-parameter columns that are method-specific: written empty (parsed as
+#: ``None``) when the method they belong to did not run. Kept in one place so the
+#: writer, the reader's coercion and the report agree on what "not applicable"
+#: means.
+NULLABLE_FIELDS = frozenset({
+    "tolerance",
+    "scipy_workers",
+    "qng_learning_rate",
+    "qng_step",
+    "qng_tikhonov",
+})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,6 +224,24 @@ class RunConfig:
     def infrastructure(self) -> str:
         return METHOD_SPECS[self.method][1]
 
+    def applicable_hyperparams(self) -> dict:
+        """The training hyper-parameters that actually govern THIS method's run.
+
+        A knob a method does not consult is reported as ``None`` ("not
+        applicable"), not its numeric default — so a reader never mistakes an
+        inert default for a value that shaped the result. ``tolerance`` drives
+        DE/PSO/scipy convergence but is unused by QNG; ``scipy_workers`` is the
+        baseline's multiprocessing width; the ``qng_*`` knobs are QNG-only.
+        """
+        opt = self.optimizer
+        return {
+            "tolerance": None if opt == "qng" else self.tolerance,
+            "scipy_workers": self.scipy_workers if opt == "scipy" else None,
+            "qng_learning_rate": self.qng_learning_rate if opt == "qng" else None,
+            "qng_step": self.qng_step if opt == "qng" else None,
+            "qng_tikhonov": self.qng_tikhonov if opt == "qng" else None,
+        }
+
 
 @dataclass
 class RunRecord:
@@ -213,6 +266,16 @@ class RunRecord:
     dimensions: int
     population_size: int
     max_generations: int
+    layers_factor: int
+    population_factor: int
+    generations_factor: int
+    # Method-specific hyper-parameters; ``None`` == "not applicable to this
+    # method" (serialised as an empty CSV cell, never 0).
+    tolerance: Optional[float]
+    scipy_workers: Optional[int]
+    qng_learning_rate: Optional[float]
+    qng_step: Optional[float]
+    qng_tikhonov: Optional[float]
     n_shots: int
     n_qpus: int
     nodes: int
@@ -730,6 +793,10 @@ def run_single(cfg: RunConfig, artifacts: Optional[dict] = None) -> RunRecord:
         dimensions=prob.dimensions,
         population_size=prob.population_size,
         max_generations=prob.max_generations,
+        layers_factor=cfg.layers_factor,
+        population_factor=cfg.population_factor,
+        generations_factor=cfg.generations_factor,
+        **cfg.applicable_hyperparams(),
         n_shots=cfg.n_shots,
         n_qpus=cfg.n_qpus,
         nodes=cfg.nodes,
@@ -769,18 +836,27 @@ def append_record(csv_path: str, record: RunRecord) -> None:
 
 
 def _coerce(field_name: str, value: str):
-    """Parse a CSV string cell into its typed value; raise on garbage."""
+    """Parse a CSV string cell into its typed value; raise on garbage.
+
+    A ``NULLABLE_FIELDS`` cell that is empty parses back to ``None`` ("not
+    applicable to this method"); any other empty cell is left to fail loudly in
+    the numeric/bool branches rather than being silently coerced.
+    """
     int_fields = {
         "schema_version", "n_qubits", "seed", "base_seed", "repeat_index",
         "graph_seed", "n_edges", "layers", "dimensions", "population_size",
-        "max_generations", "n_shots", "n_qpus", "nodes", "cores_per_qpu",
-        "best_solution_bruteforce", "best_cut", "iterations_run",
+        "max_generations", "layers_factor", "population_factor",
+        "generations_factor", "scipy_workers", "n_shots", "n_qpus", "nodes",
+        "cores_per_qpu", "best_solution_bruteforce", "best_cut", "iterations_run",
     }
     float_fields = {
-        "graph_prob", "approximation_ratio", "best_ratio", "best_fitness",
+        "graph_prob", "tolerance", "qng_learning_rate", "qng_step",
+        "qng_tikhonov", "approximation_ratio", "best_ratio", "best_fitness",
         "time_seconds",
     }
     bool_fields = {"converged"}
+    if field_name in NULLABLE_FIELDS and value.strip() == "":
+        return None
     if field_name in int_fields:
         return int(value)
     if field_name in float_fields:

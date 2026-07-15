@@ -114,3 +114,127 @@ class TestRunSingleValidation:
         cfg.method = "not_a_method"
         with pytest.raises(mc.InputValidationError, match="unknown method"):
             mc.run_single(cfg)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV schema v2: training hyper-parameters persist, with "not applicable"
+# distinguished from a real 0. These are pure (no backend) — they exercise the
+# config→record→CSV→record path directly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _record(cfg: mc.RunConfig) -> mc.RunRecord:
+    """A RunRecord for ``cfg`` without running any backend: sizing comes from
+    build_problem (pure) and the hyper-parameters from the config, so the
+    schema/serialisation can be tested without training."""
+    prob = mc.build_problem(cfg)
+    return mc.RunRecord(
+        schema_version=mc.CSV_SCHEMA_VERSION,
+        timestamp="2026-07-15T00:00:00Z",
+        git_commit="deadbee",
+        polypus_version="0.6.0",
+        n_qubits=prob.n_qubits,
+        method=cfg.method,
+        optimizer=mc._OPTIMIZER_LABEL[cfg.optimizer],
+        infrastructure=cfg.infrastructure,
+        backend="aer",
+        seed=cfg.seed,
+        base_seed=cfg.base_seed,
+        repeat_index=cfg.repeat_index,
+        graph_seed=cfg.graph_seed,
+        graph_prob=cfg.graph_prob,
+        n_edges=len(prob.edges),
+        layers=prob.layers,
+        dimensions=prob.dimensions,
+        population_size=prob.population_size,
+        max_generations=prob.max_generations,
+        layers_factor=cfg.layers_factor,
+        population_factor=cfg.population_factor,
+        generations_factor=cfg.generations_factor,
+        **cfg.applicable_hyperparams(),
+        n_shots=cfg.n_shots,
+        n_qpus=cfg.n_qpus,
+        nodes=cfg.nodes,
+        cores_per_qpu=cfg.cores_per_qpu,
+        best_solution_bruteforce=prob.best_solution,
+        best_cut=prob.best_solution,
+        best_bitstring="0" * prob.n_qubits,
+        approximation_ratio=1.0,
+        best_ratio=1.0,
+        best_fitness=float(prob.best_solution),
+        iterations_run=1,
+        converged=True,
+        time_seconds=0.0,
+    )
+
+
+class TestHyperparamSchema:
+    def test_applicable_hyperparams_by_optimizer(self):
+        # QNG: tolerance N/A, qng_* set, scipy_workers N/A.
+        qng = _cfg("polypus_local_qng", seed=1).applicable_hyperparams()
+        assert qng["tolerance"] is None
+        assert qng["scipy_workers"] is None
+        assert qng["qng_learning_rate"] == 0.1
+        assert qng["qng_step"] == 0.1
+        assert qng["qng_tikhonov"] == 0.05
+
+        # DE/PSO: tolerance set, everything method-specific else N/A.
+        for method in ("polypus_local", "polypus_local_pso"):
+            hp = _cfg(method, seed=1).applicable_hyperparams()
+            assert hp["tolerance"] == 1e-5
+            assert hp["scipy_workers"] is None
+            assert hp["qng_learning_rate"] is None
+            assert hp["qng_step"] is None
+            assert hp["qng_tikhonov"] is None
+
+        # scipy: tolerance + scipy_workers set, qng_* N/A.
+        sp = _cfg("scipy", seed=1, scipy_workers=3).applicable_hyperparams()
+        assert sp["tolerance"] == 1e-5
+        assert sp["scipy_workers"] == 3
+        assert sp["qng_learning_rate"] is None
+
+    def test_schema_version_is_two(self):
+        assert mc.CSV_SCHEMA_VERSION == 2
+        # New columns are part of the contract.
+        for col in ("layers_factor", "population_factor", "generations_factor",
+                    "tolerance", "scipy_workers", "qng_learning_rate",
+                    "qng_step", "qng_tikhonov"):
+            assert col in mc.CSV_FIELDS
+
+    def test_csv_roundtrip_preserves_none_and_values(self, tmp_path):
+        csv_path = str(tmp_path / "results.csv")
+        qng = _record(_cfg("polypus_local_qng", seed=1))
+        scipy = _record(_cfg("scipy", seed=1, scipy_workers=4))
+        mc.append_record(csv_path, qng)
+        mc.append_record(csv_path, scipy)
+
+        rows = {r["method"]: r for r in mc.read_records(csv_path)}
+        assert rows["polypus_local_qng"]["schema_version"] == 2
+
+        # QNG row: tolerance/scipy_workers are "not applicable" (None), not 0.
+        assert rows["polypus_local_qng"]["tolerance"] is None
+        assert rows["polypus_local_qng"]["scipy_workers"] is None
+        assert rows["polypus_local_qng"]["qng_learning_rate"] == 0.1
+        assert rows["polypus_local_qng"]["qng_tikhonov"] == 0.05
+
+        # scipy row: tolerance + scipy_workers persisted; qng_* not applicable.
+        assert rows["scipy"]["tolerance"] == 1e-5
+        assert rows["scipy"]["scipy_workers"] == 4
+        assert rows["scipy"]["qng_step"] is None
+        # Scaling factors persist for every method.
+        assert rows["scipy"]["population_factor"] == 2  # from _cfg override
+
+    def test_old_schema_version_rejected(self, tmp_path):
+        # A v2-shaped header but a stale schema_version cell must fail loudly —
+        # the reader never silently upgrades an old row.
+        csv_path = tmp_path / "old.csv"
+        rec = _record(_cfg("polypus_local", seed=1))
+        row = rec.to_row()
+        row["schema_version"] = 1
+        import csv as _csv
+        with open(csv_path, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=mc.CSV_FIELDS)
+            w.writeheader()
+            w.writerow(row)
+        with pytest.raises(mc.ExperimentError, match="schema_version"):
+            mc.read_records(str(csv_path))
