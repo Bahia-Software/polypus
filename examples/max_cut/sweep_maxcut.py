@@ -88,15 +88,36 @@ def _plan(args) -> list[Combo]:
     return combos
 
 
+# Per-method wall-clock at the calibration anchor: 4 qubits, 10 000 shots, on a
+# laptop. Read off the mean ``time_seconds`` per (method, n_qubits) of two
+# accumulated real sweeps (``output/maxcut_results.csv`` 4–7q ×10 reps, and
+# ``output/maxcut_results_4-10q.csv`` 4–10q ×2 reps, both shots=10000).
+_ANCHOR_SHOTS = 10_000.0
+_ANCHOR_SECONDS = {"scipy": 2.8, "de": 1.15, "pso": 1.15, "qng": 1.35}
+# Shots are nearly free: Aer builds the statevector once per evaluation and
+# samples cheaply from it, so time grows as a small power of the shot count,
+# not linearly. Measured DE at 4 qubits: 1000→0.85s, 4000→1.03s, 10000→1.14s,
+# i.e. ×10 shots ⇒ ×1.34 time ⇒ exponent ≈ log(1.34)/log(10) ≈ 0.13.
+_SHOTS_EXPONENT = 0.13
+
+
 def _rough_seconds(method: str, n_qubits: int, shots: int) -> float:
     """Order-of-magnitude per-run time estimate for the plan preview only.
 
-    Anchored on local timings (~1 s at 4 qubits / 2000 shots); scales linearly
-    with shots and roughly doubles per extra qubit (statevector cost). This is a
-    rough guide, not a benchmark — the printed total is labelled approximate.
+    Calibrated against two real accumulated sweeps (see ``_ANCHOR_SECONDS``):
+
+    * anchored at ~1.1 s (DE) for 4 qubits / 10 000 shots;
+    * doubles per extra qubit — the real per-qubit factor is ≈1.9× across every
+      method (statevector cost), so 2× is kept;
+    * grows only as ``shots ** 0.13`` — the earlier linear ``shots / 2000`` term
+      overestimated badly (it inflated a 10 000-shot estimate ~4× over the 2 000
+      anchor), because sampling is cheap next to simulating the circuit.
+
+    Still a rough guide, not a benchmark — the printed total is labelled
+    approximate.
     """
-    base = {"scipy": 1.2, "de": 0.6, "pso": 0.6, "qng": 0.9}[mc.METHOD_SPECS[method][0]]
-    return base * (shots / 2000.0) * (2.0 ** (n_qubits - 4))
+    base = _ANCHOR_SECONDS[mc.METHOD_SPECS[method][0]]
+    return base * (shots / _ANCHOR_SHOTS) ** _SHOTS_EXPONENT * (2.0 ** (n_qubits - 4))
 
 
 def _fmt_duration(seconds: float) -> str:
