@@ -86,8 +86,25 @@ class TestRunQuantumCircuitSeed:
         assert r.seed == 7
         assert r.backend == "polypus"
         assert r.infrastructure == "local"
-        assert r.id == "run_1_local"
+        # The id keeps the human-readable `run_{n_qpus}_{infra}_` prefix but is
+        # suffixed with a per-call UUID for uniqueness (see test_id_is_unique),
+        # so only the stable prefix is asserted here.
+        assert r.id.startswith("run_1_local_")
         assert isinstance(r.counts, list) and len(r.counts) == 1
+
+    def test_id_is_unique_across_identical_calls(self):
+        # Regression for #45: the auto-generated run id must be unique per call.
+        # Two runs with identical arguments used to collide on `run_{n}_{infra}`,
+        # which names SLURM families/allocations, temp files and log streams.
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        kwargs = dict(shots=100, infrastructure="local", backend="polypus", seed=7)
+        r1 = polypus.run_quantum_circuit(qc, **kwargs)
+        r2 = polypus.run_quantum_circuit(qc, **kwargs)
+        assert r1.id.startswith("run_1_local_")
+        assert r2.id.startswith("run_1_local_")
+        assert r1.id != r2.id
 
     def test_seed_rejected_for_qmio(self):
         import polypus
