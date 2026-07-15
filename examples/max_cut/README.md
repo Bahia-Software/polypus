@@ -82,9 +82,10 @@ variance you see comes purely from the optimizer seed.
 ## Estimated time
 
 `--dry-run` prints a rough estimate. As a guide, the default 160-run sweep
-(qubits 4–7, 10 repeats, 10 000 shots) is on the order of ~40 minutes on a
-laptop; it grows steeply with qubit count (statevector cost) and linearly with
-shots. Shrink it while iterating:
+(qubits 4–7, 10 repeats, 10 000 shots) is on the order of ~20 minutes on a
+laptop; it grows steeply with qubit count (statevector cost) but only weakly
+with shots (sampling is cheap next to simulating the circuit). Shrink it while
+iterating:
 
 ```bash
 python examples/max_cut/sweep_maxcut.py --qubits 4 5 --repeats 2 --shots 2000
