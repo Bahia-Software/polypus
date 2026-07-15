@@ -30,6 +30,7 @@ use polypus_optimizers::{
     OptimizerError,
 };
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Result of [`run_quantum_circuit`]: the measurement counts plus the run
 /// manifest that lets a run be logged and replayed (contract C-7).
@@ -409,7 +410,12 @@ pub fn run_quantum_circuit<'py>(
         Some(seed.unwrap_or_else(random_seed))
     };
 
-    let id = format!("run_{}_{}", n_qpus, infrastructure);
+    // Append a UUID v4 so two concurrent calls with identical `n_qpus`/
+    // `infrastructure` never collide: the id names SLURM families/allocations,
+    // temp files and log streams (see ExecutionConfig::id), so a byte-identical
+    // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
+    // prefix is kept for human-readable debuggability.
+    let id = format!("run_{}_{}_{}", n_qpus, infrastructure, Uuid::new_v4());
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1001,7 +1007,14 @@ mod tests {
             let get = |name: &str| bound.getattr(name).unwrap().extract::<String>().unwrap();
             assert_eq!(get("backend"), "polypus");
             assert_eq!(get("infrastructure"), "local");
-            assert_eq!(get("id"), "run_1_local");
+            // The id keeps the human-readable `run_{n}_{infra}_` prefix but is
+            // suffixed with a per-call UUID (see the uniqueness test below), so
+            // only the stable prefix is asserted here.
+            assert!(
+                get("id").starts_with("run_1_local_"),
+                "id must keep the run_{{n}}_{{infra}}_ prefix, got {}",
+                get("id")
+            );
             assert_eq!(
                 bound
                     .getattr("seed")
@@ -1009,6 +1022,46 @@ mod tests {
                     .extract::<Option<u64>>()
                     .unwrap(),
                 Some(7)
+            );
+        });
+    }
+
+    /// Regression for #45: two runs with identical arguments must not share an
+    /// id. The id names SLURM families/allocations, temp files and log streams,
+    /// so a collision (as with the old `run_{n}_{infra}` format) could make two
+    /// concurrent runs clobber one another. The per-call UUID v4 guarantees
+    /// uniqueness while the `run_1_local_` prefix stays stable for debugging.
+    #[test]
+    fn auto_generated_id_is_unique_per_call() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let qasm = uniform3_qasm();
+            let id_of = || {
+                let qc = PyString::new(py, &qasm).into_any();
+                let result = run_quantum_circuit(
+                    qc,
+                    100,
+                    "local".to_string(),
+                    1,
+                    "automatic",
+                    None,
+                    "polypus",
+                    Some(7),
+                )
+                .expect("native run succeeds");
+                result
+                    .bind(py)
+                    .getattr("id")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap()
+            };
+            let id1 = id_of();
+            let id2 = id_of();
+            assert!(id1.starts_with("run_1_local_") && id2.starts_with("run_1_local_"));
+            assert_ne!(
+                id1, id2,
+                "ids from identical calls must differ (unique per run)"
             );
         });
     }

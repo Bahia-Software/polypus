@@ -45,3 +45,5 @@ polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
 # `log` is the logging facade every crate emits through; the concrete sink lives
 # in `polypus-logger`, which additionally enables its `std` feature.
 log                = "0.4"
+# UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
+uuid               = { version = "1", features = ["v4"] }
