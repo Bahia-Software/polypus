@@ -158,9 +158,7 @@ class TestCunqaAllocationValidation:
 
         qc = polypus.Circuit(1).h(0).measure_all()
         with pytest.raises(ValueError, match="nodes must be >= 1"):
-            polypus.run_quantum_circuit(
-                qc, shots=100, infrastructure="cunqa", nodes=0
-            )
+            polypus.run_quantum_circuit(qc, shots=100, infrastructure="cunqa", nodes=0)
 
     def test_zero_cores_per_qpu_rejected_for_cunqa(self):
         import polypus
