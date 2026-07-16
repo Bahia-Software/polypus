@@ -140,6 +140,21 @@ Set `n_qpus > 1` to split the shots across available QPUs and reduce execution t
 result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
 ```
 
+When `infrastructure="cunqa"`, two optional kwargs size the SLURM allocation for the distributed QPUs:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `nodes` | `1` | Number of SLURM nodes to request (`>= 1`) |
+| `cores_per_qpu` | `2` | CPU cores allocated per QPU (`>= 1`) |
+
+```python
+result = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4
+)
+```
+
+Both must be `>= 1` for `"cunqa"` (a `0` reaching SLURM is rejected with a `ValueError`). They are ignored by `infrastructure="local"` and `"qmio"`, so those calls omit them.
+
 Both calls return a `RunResult`: `result.counts` holds the measurement payload — a `list[dict[str, int]]` for a single QPU, or a single merged `dict[str, int]` when `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay. Pass `seed=...` to `run_quantum_circuit()` for reproducible shot noise on every simulated backend (native `"polypus"`, Aer, and CUNQA's simulated QPUs); `result.seed` reports the effective seed used (`None` only for the `"qmio"` infrastructure, which is real hardware and rejects an explicit seed).
 
 ### Training Variational Circuits

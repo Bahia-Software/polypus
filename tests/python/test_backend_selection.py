@@ -140,6 +140,67 @@ class TestShotsQpusValidation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Boundary validation of the CUNQA allocation params (issue #74)
+#
+# `nodes`/`cores_per_qpu` size the SLURM allocation and are consumed only by
+# `infrastructure="cunqa"` (they reach CUNQA's `qraise`). A zero for either has
+# no sane SLURM meaning, so it must be rejected at the boundary — before any
+# `raise_qpus`/`connect_to_infrastructure` seam call, exactly like the zero
+# shots/qpus guards above, so these need no real CUNQA/SLURM environment. The
+# `local`/`qmio` paths ignore both params, so their validation is gated on
+# `cunqa` and non-cunqa calls that omit them keep working unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCunqaAllocationValidation:
+    def test_zero_nodes_rejected_for_cunqa(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="nodes must be >= 1"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", nodes=0
+            )
+
+    def test_zero_cores_per_qpu_rejected_for_cunqa(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="cores_per_qpu must be >= 1"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", cores_per_qpu=0
+            )
+
+    def test_local_ignores_allocation_defaults(self):
+        """Non-cunqa calls omit nodes/cores_per_qpu; the inert defaults must not
+        trip the cunqa-only validation, proving backward compatibility."""
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        result = polypus.run_quantum_circuit(qc, shots=128, infrastructure="local")
+        assert sum(result.counts[0].values()) == 128
+
+    def test_zero_nodes_rejected_in_train(self, simple_expectation_fn):
+        """The same guard protects the train() entry point for cunqa."""
+        import polypus
+
+        qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
+        with pytest.raises(ValueError, match="nodes must be >= 1"):
+            polypus.train(
+                qc,
+                polypus.DE(generations=2, population_size=4),
+                shots=100,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="cunqa",
+                nodes=0,
+                cores_per_qpu=2,
+                id="test_train_zero_nodes",
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────
 
