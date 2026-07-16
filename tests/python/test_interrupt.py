@@ -1,10 +1,23 @@
 """
-Ctrl+C responsiveness during training (issue #36).
+Ctrl+C responsiveness and GIL release during long-running calls
+(issues #36 and #73).
 
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 ``polypus.train`` (native backend) or ``polypus.qml.train`` (Qiskit/Aer
 backend) is running, rather than being ignored until the whole optimization
 finishes.
+
+``run_quantum_circuit`` (issue #73) is covered here too: it releases the GIL
+around the whole run and calls ``py.check_signals()`` at the per-circuit /
+pre-result-conversion boundary in both orchestration variants
+(``AlgorithmSingleRun`` for ``n_qpus == 1``, ``DistributeByShotsRun`` for
+``n_qpus > 1``). Two properties are asserted: a pending SIGINT surfaces as a
+``KeyboardInterrupt`` (not ``COMPLETED``) when the run returns, and another
+Python thread makes real progress while a native run is in flight (proving the
+GIL is actually released). Unlike ``train``, ``run_quantum_circuit`` has no
+per-shot/per-gate signal checks (out of scope for #73), so the interrupt is
+honored when the run reaches that boundary — the child circuits below are
+sized to finish in ~1–2s, comfortably inside ``_INTERRUPT_DEADLINE_S``.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
 share `run_and_evaluate`, but reach it through different paths — a native,
@@ -243,4 +256,145 @@ def test_qml_training_responds_to_sigint_promptly():
             "worker join is likely missing or the GIL is not released around "
             "the optimizer"
         ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# run_quantum_circuit (issue #73)
+# --------------------------------------------------------------------------- #
+
+# Child template for the SIGINT tests. A cheap warm-up forces the lazy
+# `polypus_python` import before the timed window; `READY` is printed only once
+# that is done, so the measured elapsed reflects the native run itself. The
+# timed run uses a circuit sized (below) to take ~1-2s on the native backend:
+# long enough that the SIGINT sent `_DELAY_BEFORE_SIGINT_S` after READY lands
+# while the run is in flight (GIL released), short enough that reaching the
+# check_signals boundary — where the pending signal becomes a KeyboardInterrupt
+# — happens well inside `_INTERRUPT_DEADLINE_S`. `__N_QPUS__` selects the
+# orchestration variant: 1 -> AlgorithmSingleRun, >1 -> DistributeByShotsRun.
+_RUN_CHILD_TEMPLATE = r"""
+import sys, time
+import polypus
+
+def make(n, reps):
+    qc = polypus.Circuit(n)
+    for q in range(n):
+        qc = qc.h(q)
+    for _ in range(reps):
+        for q in range(n - 1):
+            qc = qc.cx(q, q + 1)
+        for q in range(n):
+            qc = qc.rx(q, 0.3)
+    return qc.measure_all()
+
+# Cheap warm-up: pay the lazy import cost outside the timed window.
+polypus.run_quantum_circuit(
+    make(2, 1), shots=64, infrastructure="local",
+    n_qpus=__N_QPUS__, backend="polypus",
+)
+
+qc = make(__N__, __REPS__)
+print("READY", flush=True)
+start = time.time()
+try:
+    polypus.run_quantum_circuit(
+        qc, shots=4096, infrastructure="local",
+        n_qpus=__N_QPUS__, backend="polypus",
+    )
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a PanicException from a swallowed signal
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+def _run_child(*, n_qpus, n, reps):
+    """Build a `run_quantum_circuit` SIGINT child source for the given variant.
+
+    Uses token replacement rather than `str.format` because the template's
+    f-string (`{time.time() ...}`) contains literal braces."""
+    return (
+        _RUN_CHILD_TEMPLATE.replace("__N_QPUS__", str(n_qpus))
+        .replace("__N__", str(n))
+        .replace("__REPS__", str(reps))
+    )
+
+
+def test_run_quantum_circuit_single_responds_to_sigint_promptly():
+    # n_qpus == 1 -> AlgorithmSingleRun. n=23/reps=12 is ~2s native run time.
+    _assert_responds_to_sigint_promptly(
+        _run_child(n_qpus=1, n=23, reps=12),
+        failure_hint=(
+            "run_quantum_circuit (AlgorithmSingleRun) — the GIL is likely held "
+            "for the whole run or check_signals is missing before result "
+            "conversion"
+        ),
+    )
+
+
+def test_run_quantum_circuit_distributed_responds_to_sigint_promptly():
+    # n_qpus > 1 -> DistributeByShotsRun. n=22/reps=8 x4 QPUs is ~1.5s.
+    _assert_responds_to_sigint_promptly(
+        _run_child(n_qpus=4, n=22, reps=8),
+        failure_hint=(
+            "run_quantum_circuit (DistributeByShotsRun) — the GIL is likely "
+            "held for the whole run or check_signals is missing before the "
+            "merge/result conversion"
+        ),
+    )
+
+
+# The GIL-release proof runs in-process (no signals involved): while a native
+# `run_quantum_circuit` call is in flight on the main thread, a background
+# thread spins a tight counter loop. With the GIL held for the whole run the
+# background thread advances only by the incidental amount the call's Python
+# entry/exit stages allow (measured ~1e5); with the GIL released around the
+# native run it advances by tens of millions over the ~2s run. The threshold
+# sits ~20x above the held-GIL value and ~15x below the released-GIL value, so
+# it cleanly separates the two without pinning down an exact rate.
+_MIN_COUNTER_PROGRESS = 2_000_000
+
+
+def _make_native_circuit(polypus, n, reps):
+    qc = polypus.Circuit(n)
+    for q in range(n):
+        qc = qc.h(q)
+    for _ in range(reps):
+        for q in range(n - 1):
+            qc = qc.cx(q, q + 1)
+        for q in range(n):
+            qc = qc.rx(q, 0.3)
+    return qc.measure_all()
+
+
+def test_run_quantum_circuit_releases_gil_for_other_threads():
+    import threading
+
+    import polypus
+
+    counter = {"n": 0}
+    stop = threading.Event()
+
+    def spin():
+        while not stop.is_set():
+            counter["n"] += 1
+
+    qc = _make_native_circuit(polypus, n=23, reps=12)  # ~2s native run
+    worker = threading.Thread(target=spin)
+    worker.start()
+    try:
+        before = counter["n"]
+        polypus.run_quantum_circuit(
+            qc, shots=4096, infrastructure="local", n_qpus=1, backend="polypus"
+        )
+        advanced = counter["n"] - before
+    finally:
+        stop.set()
+        worker.join()
+
+    assert advanced > _MIN_COUNTER_PROGRESS, (
+        f"background thread advanced only {advanced} counts during the native "
+        f"run — the GIL was likely not released around run_quantum_circuit"
     )
