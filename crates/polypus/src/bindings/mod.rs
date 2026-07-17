@@ -458,15 +458,21 @@ pub fn run_quantum_circuit<'py>(
     };
 
     let algorithm: Box<
-        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>>,
+        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>> + Send,
     > = if n_qpus == 1 {
         Box::new(AlgorithmSingleRun)
     } else {
         Box::new(DistributeByShotsRun)
     };
 
+    // Release the GIL for the whole run, mirroring `train` below: circuit
+    // execution is GIL-free on the native backend (and internally reacquires
+    // the GIL where Aer/CUNQA need it), so holding it here would stall every
+    // other Python thread and (with the per-circuit check_signals each
+    // algorithm variant performs before result conversion) keep Ctrl+C from
+    // taking effect until the run finishes. See docs/ENGINEERING.md §3.
     // Keep the original counts payload intact and wrap it with the run manifest.
-    let counts = algorithm.run(args)?;
+    let counts = qc.py().allow_threads(move || algorithm.run(args))?;
     Python::with_gil(|py| {
         Py::new(
             py,

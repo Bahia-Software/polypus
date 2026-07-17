@@ -16,7 +16,14 @@ impl AlgorithmTrait for AlgorithmSingleRun {
         let counts = backend.run_circuits(&args.qcs, &args.config)?;
         backend.close();
         // Convert native counts to a Python `list[dict]` at the FFI boundary.
-        Python::with_gil(|py| Ok(counts.into_pyobject(py)?.into_any().unbind()))
+        Python::with_gil(|py| {
+            // The run above executes with the GIL released (see
+            // `run_quantum_circuit`); this reacquire is the first Python
+            // touchpoint, so honor a pending Ctrl+C here before building any
+            // Python object and propagate it verbatim. See docs/ENGINEERING.md §3.
+            py.check_signals()?;
+            Ok(counts.into_pyobject(py)?.into_any().unbind())
+        })
     }
 
     fn name(&self) -> String {

@@ -75,6 +75,14 @@ boundary stays out-of-process and explicit; see
   swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in
   `crates/polypus/src/evaluation/mod.rs`).
+- The same discipline applies to `run_quantum_circuit`: it releases the GIL
+  around the whole `algorithm.run(args)` call and each orchestration variant
+  calls `py.check_signals()` at its per-circuit / pre-result-conversion
+  boundary — the single `Python::with_gil` block where `AlgorithmSingleRun`
+  and `DistributeByShotsRun` reacquire the GIL to build the return value, as
+  the first statement before constructing any Python object. A pending Ctrl+C
+  surfaces there as a `KeyboardInterrupt` propagated verbatim through the
+  function's `Result`, never swallowed or retyped.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
