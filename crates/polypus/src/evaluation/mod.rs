@@ -151,9 +151,12 @@ pub use polypus_optimizers::EvaluationOracle;
 /// `polypus_python.expectation_values`, eliminating the duplication that
 /// previously existed across DE, PSO, QNG, and the orchestration layer.
 ///
-/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped,
-/// and a Python error (import, `expectation_values`, extraction) is carried
-/// verbatim — never a panic.
+/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped;
+/// a raised Python exception (import, a pending `KeyboardInterrupt`, or one
+/// thrown by `expectation_values` / the user callback) is carried verbatim; and
+/// a wrong-shaped `expectation_values` return value — a Rust-side conversion
+/// failure, not a raised exception — becomes [`EvaluationError::Conversion`].
+/// Never a panic.
 pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
@@ -180,7 +183,13 @@ pub(crate) fn run_and_evaluate(
             .map_err(EvaluationError::Python)?
             .call_method("expectation_values", (py_counts, expectation_fn), None)
             .map_err(EvaluationError::Python)?
+            // `expectation_values` returned successfully; a wrong-shaped value
+            // is a Rust-side conversion failure, not a raised Python exception.
             .extract::<Vec<f64>>()
-            .map_err(EvaluationError::Python)
+            .map_err(|e| {
+                EvaluationError::Conversion(format!(
+                    "expected expectation_values() to return list[float]: {e}"
+                ))
+            })
     })
 }
