@@ -104,14 +104,21 @@ pub struct TrainResult {
     /// `seed`, else a fresh OS-entropy value (contract C-7).
     #[pyo3(get)]
     pub seed: u64,
+    /// Run identifier used for logging, temp files and SLURM job names. This is
+    /// the caller-supplied `id` prefix suffixed with a UUID v4 for uniqueness —
+    /// see #75 — so it differs from the `id` kwarg that was passed in and must
+    /// never be used to correlate runs by content, only to identify a run's
+    /// allocation/log stream. Mirrors [`RunResult::id`].
+    #[pyo3(get)]
+    pub id: String,
 }
 
 #[pymethods]
 impl TrainResult {
     fn __repr__(&self) -> String {
         format!(
-            "TrainResult(best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
-            self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
+            "TrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
+            self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
         )
     }
 }
@@ -127,6 +134,7 @@ fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
     seed: u64,
+    id: String,
 ) -> PyResult<PyObject> {
     Py::new(
         py,
@@ -136,6 +144,7 @@ fn outcome_to_train_result(
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             seed,
+            id,
         },
     )
     .map(|result| result.into_any())
@@ -149,6 +158,15 @@ fn outcome_to_train_result(
 /// back in the [`TrainResult`], so the run can be replayed.
 fn resolve_optimizer_seed(kwarg_seed: Option<u64>, method_seed: Option<u64>) -> u64 {
     kwarg_seed.or(method_seed).unwrap_or_else(random_seed)
+}
+
+/// Suffix `base` with a UUID v4 so concurrent calls never share an
+/// `ExecutionConfig::id` — which names SLURM families/allocations, temp files
+/// and log streams. Used by `run_quantum_circuit`'s auto-generated id,
+/// `train`'s and `qml_train`'s caller-supplied id (#45 / PR #70, #75): in
+/// every case `base` is kept as a human-readable prefix on the effective id.
+fn unique_id(base: &str) -> String {
+    format!("{}_{}", base, Uuid::new_v4())
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
@@ -180,12 +198,13 @@ fn finish_optimization(
     result: Result<OptimizationOutcome, OptimizerError>,
     errors: &OracleErrorSlot,
     seed: u64,
+    id: String,
 ) -> PyResult<PyObject> {
     if let Some(eval_err) = errors.take() {
         return Err(eval_err.into());
     }
     let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    outcome_to_train_result(py, outcome, seed)
+    outcome_to_train_result(py, outcome, seed, id)
 }
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
@@ -415,7 +434,7 @@ pub fn run_quantum_circuit<'py>(
     // temp files and log streams (see ExecutionConfig::id), so a byte-identical
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
-    let id = format!("run_{}_{}_{}", n_qpus, infrastructure, Uuid::new_v4());
+    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure));
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -472,7 +491,12 @@ pub fn run_quantum_circuit<'py>(
 /// OS-entropy value. On the native backend the same seed also drives shot
 /// sampling, so a native-backend run reproduces exactly. Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
-/// `converged` and the effective `seed`.
+/// `converged`, the effective `seed` and the effective `id`.
+///
+/// The `id` kwarg is a human-readable *prefix*, not the literal effective id:
+/// a UUID v4 is appended for uniqueness (mirroring [`run_quantum_circuit`]),
+/// so `TrainResult.id` differs from what was passed in and names the run's
+/// SLURM allocation / temp files / log stream (see #75).
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -553,8 +577,14 @@ pub fn train<'py>(
         nodes,
         cores_per_qpu,
     )?;
+    // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
+    // runs sharing the same `id` never collide on the SLURM family/allocation,
+    // temp files or log streams named by ExecutionConfig::id (#75, mirroring
+    // run_quantum_circuit). The prefix is kept for debuggability and the
+    // effective id is reported back in the TrainResult.
+    let effective_id = unique_id(&id);
     let config = Arc::new(ExecutionConfig {
-        id: id.clone(),
+        id: effective_id.clone(),
         shots,
         n_qpus,
         infrastructure: infrastructure.clone(),
@@ -598,6 +628,7 @@ pub fn train<'py>(
                 .allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -619,6 +650,7 @@ pub fn train<'py>(
             method.py().allow_threads(|| AlgorithmPSO.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -642,6 +674,7 @@ pub fn train<'py>(
             method.py().allow_threads(|| AlgorithmQNG.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -667,6 +700,11 @@ pub fn train<'py>(
 /// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
 /// is now seeded too (contract C-7), so a `qml.train` run is fully
 /// reproducible end-to-end given the same seed.
+///
+/// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
+/// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
+/// `TrainResult.id` differs from what was passed in and names the run's SLURM
+/// allocation / temp files / log stream (see #75).
 ///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
@@ -770,8 +808,13 @@ pub fn qml_train<'py>(
         nodes,
         cores_per_qpu,
     )?;
+    // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
+    // concurrent qml.train runs sharing the same `id` never collide on the
+    // SLURM family/allocation, temp files or log streams named by
+    // ExecutionConfig::id. The effective id is reported back in the TrainResult.
+    let effective_id = unique_id(&id);
     let config = Arc::new(ExecutionConfig {
-        id: id.clone(),
+        id: effective_id.clone(),
         shots,
         n_qpus,
         infrastructure: infrastructure.clone(),
@@ -810,6 +853,7 @@ pub fn qml_train<'py>(
             py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -831,6 +875,7 @@ pub fn qml_train<'py>(
             py.allow_threads(|| AlgorithmPSO.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -854,6 +899,7 @@ pub fn qml_train<'py>(
             py.allow_threads(|| AlgorithmQNG.optimize(args)),
             &errors,
             effective_seed,
+            effective_id.clone(),
         );
     }
 
@@ -1064,6 +1110,43 @@ mod tests {
                 "ids from identical calls must differ (unique per run)"
             );
         });
+    }
+
+    /// Regression for #75, at the shared-helper boundary. `train`/`qml_train`
+    /// take a caller-supplied `id` and used to pass it verbatim into
+    /// `ExecutionConfig::id` — which names SLURM families/allocations, temp
+    /// files and log streams — so two concurrent training runs sharing an `id`
+    /// (the doc examples all use `id="run1"`/`id="qml_run"`) could clobber one
+    /// another. All three id-bearing entry points now funnel through
+    /// [`unique_id`], which keeps the caller's string as a human-readable prefix
+    /// and appends a UUID v4 for uniqueness.
+    ///
+    /// This asserts that guarantee directly on `unique_id` rather than by
+    /// calling `train`/`qml_train`: those need a live Python oracle
+    /// (`polypus_python` → Qiskit/Aer) and `qml_train` needs Qiskit for its
+    /// feature-map/ansatz composition, but the Rust suite is Python-runtime-free
+    /// by design (see `.github/workflows/ci.yml` and
+    /// `resolved_seed_drives_the_optimizer_deterministically`). The end-to-end
+    /// `train`/`qml.train` id-uniqueness checks live in the Python suite
+    /// (`tests/python/test_seed_reproducibility.py`), mirroring
+    /// `run_quantum_circuit`'s `test_id_is_unique_across_identical_calls`.
+    #[test]
+    fn unique_id_keeps_prefix_and_is_unique_per_call() {
+        // Same base (as with `train(..., id="run1")` twice) ⇒ unique ids that
+        // both keep the supplied string as a prefix.
+        for base in ["run1", "qml_run", "run_1_local"] {
+            let id1 = unique_id(base);
+            let id2 = unique_id(base);
+            let prefix = format!("{base}_");
+            assert!(
+                id1.starts_with(&prefix) && id2.starts_with(&prefix),
+                "the caller-supplied id must survive as a prefix, got {id1} / {id2}"
+            );
+            assert_ne!(
+                id1, id2,
+                "ids built from an identical base must differ (unique per call)"
+            );
+        }
     }
 
     /// A seed passed with `infrastructure="qmio"` is rejected, never silently

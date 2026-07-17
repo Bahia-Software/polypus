@@ -216,6 +216,19 @@ class TestTrainSeed:
         r = self._train(seed=777, method=m, ident="train_override")
         assert r.seed == 777
 
+    def test_id_is_unique_across_identical_calls(self):
+        # Regression for #75: two training runs with byte-identical arguments —
+        # crucially the same id="..." — must not share an effective id. The id
+        # names SLURM families/allocations, temp files and log streams, so a
+        # collision could make two concurrent runs clobber one another. The
+        # supplied string is kept as a prefix and a UUID v4 is appended, so the
+        # returned TrainResult.id differs from what was passed in.
+        r1 = self._train(seed=7, ident="train_id")
+        r2 = self._train(seed=7, ident="train_id")
+        assert r1.id.startswith("train_id_")
+        assert r2.id.startswith("train_id_")
+        assert r1.id != r2.id
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # qml.train — optimizer RNG and Aer sampling are both seeded; mock the backend
@@ -277,3 +290,16 @@ class TestQmlTrainSeed:
         r2 = self._qml_train(None)
         assert r1.seed != r2.seed
         assert r1.best_params != r2.best_params
+
+    def test_id_is_unique_across_identical_calls(self, monkeypatch):
+        # Regression for #75, qml.train side: two runs with byte-identical
+        # arguments — including the same id="qml_seed" — must not share an
+        # effective id (which names the SLURM family/allocation, temp files and
+        # log streams). The supplied string is kept as a prefix; a UUID v4 is
+        # appended for uniqueness.
+        self._patch_deterministic_backend(monkeypatch)
+        r1 = self._qml_train(7)
+        r2 = self._qml_train(7)
+        assert r1.id.startswith("qml_seed_")
+        assert r2.id.startswith("qml_seed_")
+        assert r1.id != r2.id

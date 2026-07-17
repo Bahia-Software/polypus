@@ -288,7 +288,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
   `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
-  seed used). This replaces the former bare `list[float]`, which discarded
+  seed used) and `id` (str, the effective run id: the caller-supplied `id`
+  prefix suffixed with a UUID v4 for uniqueness — a label for logging /
+  SLURM / temp-file identification only, never for correlating runs by content;
+  see #75). This replaces the former bare `list[float]`, which discarded
   fitness, iteration count and the convergence flag.
 
 The effective `seed` on both result types is what lets a caller log a run and
