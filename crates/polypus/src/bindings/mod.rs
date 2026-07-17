@@ -802,6 +802,18 @@ pub fn qml_train<'py>(
 			 and ansätze are Qiskit circuits); use backend=\"aer\"",
         ));
     }
+    // The optimizer searches a `dimensions`-wide vector and binds it to the
+    // ansatz's free parameters; a mismatch surfaces later as a cryptic Qiskit
+    // binding error inside the oracle. Catch it upfront, mirroring how `train`
+    // validates `dimensions` against the circuit's parameter count (contract
+    // C-8). `len()` calls `__len__`, working on Qiskit's ParameterView the same
+    // as on a list.
+    let num_ansatz_params = ansatz.getattr("parameters")?.len()?;
+    if num_ansatz_params != dimensions as usize {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
+        )));
+    }
     let py = feature_map.py();
 
     // 1. Compose feature_map + ansatz
@@ -824,8 +836,22 @@ pub fn qml_train<'py>(
     //    parameters unbound for the optimizer to fill in later.
     let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
     let mut qcs: Vec<Py<PyAny>> = Vec::new();
-    for row_result in x_train.try_iter()? {
+    // Each row must supply exactly one value per feature-map parameter. Zipping
+    // the two iterators would stop at the shorter one — a longer row silently
+    // drops features, a shorter row leaves feature-map parameters unbound and
+    // fails later as a cryptic Qiskit error inside the oracle. Materialize both
+    // lengths and reject a mismatch upfront with the row index and both lengths
+    // (contract C-8).
+    let fm_len = fm_params_list.len()?;
+    for (row_idx, row_result) in x_train.try_iter()?.enumerate() {
         let row = row_result?;
+        let row_len = row.len()?;
+        if row_len != fm_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "x_train row {row_idx} has {row_len} features, but feature_map expects {fm_len} \
+                 (len(feature_map.parameters))"
+            )));
+        }
         let param_dict = PyDict::new(py);
         for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
             param_dict.set_item(param?, val?)?;
