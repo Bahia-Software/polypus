@@ -323,6 +323,31 @@ fn validate_shots_and_qpus(shots: u32, n_qpus: u32) -> PyResult<()> {
     Ok(())
 }
 
+/// Validate the CUNQA allocation parameters at the Python-facing boundary. Only
+/// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu` (they flow to
+/// SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu` via
+/// `CunqaBackend`); the `local` and `qmio` match arms of `build_backend_config`
+/// ignore them, so validating unconditionally would reject harmless non-cunqa
+/// calls. A zero for either value has no sane meaning once it reaches SLURM, so
+/// reject it here before any seam call rather than forward it. Shared by every
+/// entry point rather than duplicated per function.
+fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u32) -> PyResult<()> {
+    if infrastructure != "cunqa" {
+        return Ok(());
+    }
+    if nodes < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "nodes must be >= 1 for the 'cunqa' infrastructure, got {nodes}"
+        )));
+    }
+    if cores_per_qpu < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "cores_per_qpu must be >= 1 for the 'cunqa' infrastructure, got {cores_per_qpu}"
+        )));
+    }
+    Ok(())
+}
+
 /// Interpret the `qc` argument of an entry point as a parameterised circuit
 /// template. A `polypus.Circuit` becomes [`CircuitSource::Native`] (binding
 /// will run GIL-free); any other object is assumed to be a Qiskit
@@ -369,9 +394,16 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// runs give genuinely independent noise. Passing a `seed` with
 /// `infrastructure="qmio"` raises `ValueError` rather than silently ignoring
 /// it, since that infrastructure is real hardware and cannot be seeded.
+///
+/// `nodes` and `cores_per_qpu` size the SLURM allocation and are meaningful
+/// only for `infrastructure="cunqa"` (they become CUNQA's `qraise` parameters);
+/// the `local` and `qmio` infrastructures ignore them. For `cunqa` both must be
+/// `>= 1` — a zero has no sane meaning once it reaches SLURM and is rejected.
+/// They default to `nodes=1, cores_per_qpu=2`.
+///
 /// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
 /// effective `seed`, `backend`, `infrastructure`) for logging and replay.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
 // Rich FFI entry point mirroring a many-kwarg Python API; same rationale and
 // convention as `train`/`qml_train` below.
 #[allow(clippy::too_many_arguments)]
@@ -380,6 +412,8 @@ pub fn run_quantum_circuit<'py>(
     shots: u32,
     infrastructure: String,
     n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
@@ -392,6 +426,7 @@ pub fn run_quantum_circuit<'py>(
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
     validate_shots_and_qpus(shots, n_qpus)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) {
         if let BoundCircuit::Qiskit(_) = &bound_qc {
@@ -440,8 +475,8 @@ pub fn run_quantum_circuit<'py>(
         backend,
         sim_method,
         noise_model.map(|nm| nm.unbind()),
-        0,
-        2,
+        nodes,
+        cores_per_qpu,
     )?;
     let config = ExecutionConfig {
         id: id.clone(),
@@ -503,6 +538,10 @@ pub fn run_quantum_circuit<'py>(
 /// waiting for the run to finish. An exception raised by
 /// `expectation_function` propagates the same way, as itself.
 ///
+/// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
+/// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
+/// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+///
 /// Example:
 ///
 /// ```ignore
@@ -532,6 +571,7 @@ pub fn train<'py>(
     seed: Option<u64>,
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
     // `run_quantum_circuit`, a seed is always meaningful here — it seeds the
@@ -711,6 +751,10 @@ pub fn train<'py>(
 /// finish, and an exception raised by `expectation_function` propagates as
 /// itself.
 ///
+/// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
+/// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
+/// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+///
 /// Example:
 ///
 /// ```ignore
@@ -743,6 +787,7 @@ pub fn qml_train<'py>(
     seed: Option<u64>,
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
     // below); this seed governs the optimizer's RNG and, since it's threaded
@@ -978,6 +1023,8 @@ mod tests {
             500,
             "local".to_string(),
             1,
+            1,
+            2,
             "automatic",
             None,
             "polypus",
@@ -1043,6 +1090,8 @@ mod tests {
                 100,
                 "local".to_string(),
                 1,
+                1,
+                2,
                 "automatic",
                 None,
                 "polypus",
@@ -1089,6 +1138,8 @@ mod tests {
                     100,
                     "local".to_string(),
                     1,
+                    1,
+                    2,
                     "automatic",
                     None,
                     "polypus",
@@ -1163,6 +1214,8 @@ mod tests {
                 100,
                 "qmio".to_string(),
                 1,
+                1,
+                2,
                 "automatic",
                 None,
                 "aer",
