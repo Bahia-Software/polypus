@@ -37,15 +37,18 @@ pub struct ExecutionConfig {
     pub opt_level: OptLevel,
     /// Explicit RNG seed for shot sampling.
     ///
-    /// Only the native statevector backend
+    /// Consumed by every backend that samples shots itself: the native
+    /// statevector backend
     /// ([`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend))
-    /// consumes this: it seeds the per-circuit sampling stream, making counts
-    /// reproducible. The Python-facing layer resolves it to `Some` whenever the
-    /// native backend runs (user-supplied value or a fresh OS-entropy draw), so
-    /// the effective seed can be reported back in the run manifest (contract
-    /// C-7). Every other backend ignores it; `None` means "no explicit seed"
-    /// and the native backend falls back to a fresh OS-entropy draw. Decoupled
-    /// from [`id`](Self::id), which is only a logging/temp-file/SLURM label.
+    /// seeds its per-circuit sampling stream directly, while [`Local`](BackendConfig::Local)
+    /// and [`Cunqa`](BackendConfig::Cunqa) forward it to the underlying Aer
+    /// (`seed_simulator`) and CUNQA `run(..., seed=...)` calls respectively.
+    /// The Python-facing layer resolves it to `Some` whenever a seed-consuming
+    /// backend runs (user-supplied value or a fresh OS-entropy draw), so the
+    /// effective seed can be reported back in the run manifest (contract
+    /// C-7). `None` means "no explicit seed", and each backend falls back to
+    /// its own unseeded default. Decoupled from [`id`](Self::id), which is
+    /// only a logging/temp-file/SLURM label.
     pub seed: Option<u64>,
 }
 
@@ -106,7 +109,7 @@ pub enum BackendConfig {
         endpoint: String,
         /// Representation of the program submitted to the QPU.
         program_format: QmioProgramFormat,
-        /// Tket optimisation level (`0`/`1`/`2` → Tket `$value` `1`/`18`/`30`).
+        /// Tket optimisation level (`0`/`1`/`2`/`3` → Tket `$value` `0`/`1`/`18`/`30`).
         optimization: u8,
         /// Repetition period (`None` = server default).
         repetition_period: Option<f64>,
