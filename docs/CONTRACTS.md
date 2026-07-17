@@ -27,6 +27,7 @@ Rules of the road:
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
+| C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -310,3 +311,37 @@ anywhere in this project's CI or dev sandboxes (unlike Aer) — so, unlike the
 Aer path, it has never actually been run. Treat CUNQA's `seed` support as
 unverified until the CUNQA integration follow-up confirms it against a real
 install.
+
+---
+
+## C-8 · qml.train row/dimension symmetry (Python entry point)
+
+`polypus.qml.train` composes a Qiskit `feature_map` with an `ansatz`, pre-binds
+each row of `x_train` to the feature-map parameters, and hands the resulting
+circuits to the optimizer, which searches a `dimensions`-wide vector and binds
+it to the ansatz's free parameters. Two shape agreements must hold, and both are
+validated **upfront** with a clear `ValueError` — before any circuit is composed
+or executed — rather than surfacing as a silent truncation or a cryptic Qiskit
+binding error deep inside the oracle.
+
+- **Row width.** Every row of `x_train` must have **exactly
+  `len(feature_map.parameters)`** elements. A longer row would silently drop the
+  extra features (the pre-binding zip stops at the shorter iterator); a shorter
+  row would leave feature-map parameters unbound and fail later as a cryptic
+  Qiskit error inside the oracle. Either case is a `ValueError` reporting the
+  offending **0-based** row index and both lengths (row features vs.
+  `len(feature_map.parameters)`), consistent with how `x_train` is indexed as an
+  array/list on the Python side.
+- **Dimensions.** `dimensions` must be **exactly `len(ansatz.parameters)`**. This
+  mirrors `train`, which validates `dimensions` against the circuit's free
+  parameter count (`circuit_source.num_params()`); that symmetry was documented
+  only implicitly (in `train`'s docstring) and was missing entirely from
+  `qml.train`, which is precisely why it now earns an explicit contract. A
+  mismatch is a `ValueError` naming both `dimensions` and the ansatz's free
+  parameter count.
+
+A row whose length cannot be read (e.g. a generator with no `__len__`) is a
+legitimate type error and propagates as-is; it is not masked into the messages
+above.
+
+**Enforcing test:** `tests/python/test_qml_train_validation.py`.
