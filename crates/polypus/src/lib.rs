@@ -5,9 +5,13 @@
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation
 //! across available hardware resources. The core is written in Rust; Python bindings are provided via PyO3.
 //!
-//! Polypus is agnostic to the underlying hardware infrastructure. Currently two backends are supported:
-//! - **local**: Runs on local infrastructure using Qiskit AerSimulator.
+//! Polypus is agnostic to the underlying hardware infrastructure. Currently three
+//! `infrastructure` values are supported:
+//! - **local**: Runs on local infrastructure. Defaults to Qiskit AerSimulator
+//!   (`backend="aer"`); pass `backend="polypus"` to run instead on the noiseless
+//!   statevector simulator implemented natively in Rust (no Qiskit, no GIL).
 //! - **cunqa**: Distributed QPU platform developed by CESGA (<https://github.com/CESGA-Quantum-Spain/cunqa>).
+//! - **qmio**: CESGA's real QPU, reached directly over its ZeroMQ wire protocol (`--features qmio`).
 //!
 //! ## Features
 //! - Run a quantum circuit on one or multiple QPUs.
