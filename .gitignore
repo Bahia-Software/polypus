@@ -27,3 +27,6 @@ logs/
 CLAUDE.md
 AI_GUIDELINES.md
 .claude/
+
+# QML crate design doc — draft, not ready to be tracked yet
+docs/design/qml.md
