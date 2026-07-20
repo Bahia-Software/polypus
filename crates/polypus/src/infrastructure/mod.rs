@@ -203,6 +203,17 @@ impl BoundCircuit {
     ///   circuits internally, and rewriting one here would require reading its
     ///   gates through the GIL, crossing the deliberate native/Python boundary.
     pub fn transpiled(&self, transpiler: &dyn Transpiler, opts: &TranspileOptions) -> BoundCircuit {
+        // A guaranteed no-op transpiler changes nothing, so skip the parse →
+        // transpile → re-emit round trip (Qasm2) and the trait-dispatch clone
+        // (Native) entirely, keeping only the cheap representation-preserving
+        // copy. `Qiskit` is already a passthrough via `duplicate`.
+        if transpiler.is_identity() {
+            return match self {
+                BoundCircuit::Native(cc) => BoundCircuit::Native(cc.clone()),
+                BoundCircuit::Qasm2(qasm) => BoundCircuit::Qasm2(qasm.clone()),
+                BoundCircuit::Qiskit(_) => self.duplicate(),
+            };
+        }
         match self {
             BoundCircuit::Native(cc) => BoundCircuit::Native(transpiler.transpile(cc, opts)),
             BoundCircuit::Qasm2(qasm) => {
