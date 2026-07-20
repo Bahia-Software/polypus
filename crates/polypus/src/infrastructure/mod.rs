@@ -256,8 +256,7 @@ pub trait QuantumBackend: Send + Sync {
     ///
     /// The method exists so a backend that can *reuse* one circuit evolution
     /// across many shot batches can override it and avoid re-simulating the
-    /// identical circuit once per replica (see
-    /// [`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend)).
+    /// identical circuit once per replica (see [`NativeStatevectorBackend`]).
     /// This **default** reproduces the historical behaviour for backends that
     /// cannot: it replicates `qc` and forwards it to
     /// [`run_circuits`](Self::run_circuits), grouping consecutive replicas that
