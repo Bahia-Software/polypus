@@ -12,7 +12,7 @@ use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::StatevectorSimulator;
+use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -60,18 +60,16 @@ impl NativeStatevectorBackend {
         }
     }
 
-    /// Run one bound circuit and return Aer-compatible bitstring counts.
-    ///
-    /// The bitstring width and bit order match Qiskit's: little-endian qubit
-    /// indexing with the highest classical bit on the left, so the counts are
-    /// interchangeable with those from the Aer backend.
-    fn simulate_one(
+    /// Derive the executable [`ConcreteCircuit`] from a [`BoundCircuit`] and
+    /// apply the injected transpiler — all GIL-free. Shared by
+    /// [`simulate_one`](Self::simulate_one) and
+    /// [`run_shots_distributed`](Self::run_shots_distributed) so both paths
+    /// handle the `Native`/`Qasm2`/`Qiskit` variants and transpile identically.
+    fn concrete_circuit(
         &self,
         circuit: &BoundCircuit,
-        shots: u32,
-        seed: u64,
         opts: &TranspileOptions,
-    ) -> Result<HashMap<String, u64>, BackendError> {
+    ) -> Result<ConcreteCircuit, BackendError> {
         // Obtain a ConcreteCircuit without touching Python.
         let concrete: ConcreteCircuit = match circuit {
             BoundCircuit::Native(cc) => cc.clone(),
@@ -94,8 +92,22 @@ impl NativeStatevectorBackend {
 
         // Transpile the native circuit (GIL-free) before simulating. With the
         // default IdentityTranspiler this is a clone and changes nothing.
-        let concrete = self.transpiler.transpile(&concrete, opts);
+        Ok(self.transpiler.transpile(&concrete, opts))
+    }
 
+    /// Run one bound circuit and return Aer-compatible bitstring counts.
+    ///
+    /// The bitstring width and bit order match Qiskit's: little-endian qubit
+    /// indexing with the highest classical bit on the left, so the counts are
+    /// interchangeable with those from the Aer backend.
+    fn simulate_one(
+        &self,
+        circuit: &BoundCircuit,
+        shots: u32,
+        seed: u64,
+        opts: &TranspileOptions,
+    ) -> Result<HashMap<String, u64>, BackendError> {
+        let concrete = self.concrete_circuit(circuit, opts)?;
         let raw = self
             .simulator
             .run_and_sample(&concrete, shots as usize, seed)
@@ -103,18 +115,22 @@ impl NativeStatevectorBackend {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
-
-        // Bitstring length = classical register width (qubit count when the
-        // circuit has no measurements, mirroring a full-register read-out).
-        let width = match concrete.num_clbits() {
-            0 => concrete.num_qubits,
-            c => c,
-        };
-        Ok(raw
-            .into_iter()
-            .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
-            .collect())
+        Ok(format_counts(&concrete, raw))
     }
+}
+
+/// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
+/// qubit indexing with the highest classical bit on the left. The width is the
+/// classical-register size, or the qubit count for a measurement-free circuit
+/// (a full-register read-out).
+fn format_counts(concrete: &ConcreteCircuit, raw: HashMap<usize, u64>) -> HashMap<String, u64> {
+    let width = match concrete.num_clbits() {
+        0 => concrete.num_qubits,
+        c => c,
+    };
+    raw.into_iter()
+        .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
+        .collect()
 }
 
 impl QuantumBackend for NativeStatevectorBackend {
@@ -135,6 +151,50 @@ impl QuantumBackend for NativeStatevectorBackend {
             .map(|(i, qc)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
                 self.simulate_one(qc, config.shots, seed, &opts)
+            })
+            .collect()
+    }
+
+    /// Single-evolution fast path: `polypus-sim` separates evolution from
+    /// sampling, so the shared circuit is evolved **once** and every shot batch
+    /// samples from that same statevector — instead of re-running the identical
+    /// evolution once per replica as the default (via `run_circuits`) would.
+    ///
+    /// Reproducibility is preserved exactly (contract C-7): the per-batch seeds
+    /// come from the *same* contiguous-block scheme `run_circuits` uses
+    /// (`counter.fetch_add` + `base_seed.wrapping_add`), and
+    /// [`sample_projected`] with a given seed yields byte-identical counts to a
+    /// full `run_and_sample`. Shot conservation is preserved too (contract
+    /// C-3): a zero-shot batch samples nothing and returns an empty map.
+    fn run_shots_distributed(
+        &self,
+        qc: &BoundCircuit,
+        shot_batches: &[u32],
+        config: &ExecutionConfig,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        // Evolve the shared circuit exactly once; the statevector is reused for
+        // every batch's sampling.
+        let concrete = self.concrete_circuit(qc, &opts)?;
+        let sv = self.simulator.run(&concrete).map_err(|e| {
+            log::error!("native statevector simulation failed: {e}");
+            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+        })?;
+        // Reserve a contiguous seed block, one seed per batch, from the same
+        // scheme `run_circuits` uses so a given base seed reproduces identical
+        // counts regardless of which path ran the batches.
+        let start = self
+            .counter
+            .fetch_add(shot_batches.len() as u64, Ordering::Relaxed);
+        shot_batches
+            .iter()
+            .enumerate()
+            .map(|(i, &shots)| {
+                let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
+                let raw = sample_projected(&concrete, &sv, shots as usize, seed);
+                Ok(format_counts(&concrete, raw))
             })
             .collect()
     }
@@ -377,6 +437,77 @@ mod tests {
     /// eight-outcome counts dict (not a single statistic) keeps this
     /// non-flaky. This is the exact inversion of the removed
     /// `seeding_is_reproducible_per_id`, which encoded the bug.
+    /// Fast path (defect #3): `run_shots_distributed` conserves the total shots
+    /// across batches (C-3) and is deterministic for a fixed base seed (C-7).
+    #[test]
+    fn run_shots_distributed_conserves_shots_and_is_deterministic() {
+        let cfg = config_with(OptLevel::default());
+        let batches = [3u32, 3, 2]; // 8 shots over 3 "QPUs", uneven split.
+        let out = NativeStatevectorBackend::new(2024)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .unwrap();
+        assert_eq!(out.len(), batches.len());
+        let total: u64 = out.iter().flat_map(|m| m.values()).sum();
+        assert_eq!(total, u64::from(batches.iter().sum::<u32>()));
+        // Same base seed reproduces byte-identical batches.
+        let again = NativeStatevectorBackend::new(2024)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .unwrap();
+        assert_eq!(out, again);
+        for m in &out {
+            for k in m.keys() {
+                assert!(k == "00" || k == "11", "unexpected outcome {k}");
+            }
+        }
+    }
+
+    /// Fast path equivalence (C-7): the single-evolution path yields
+    /// byte-identical counts to sampling each batch through `run_circuits` with
+    /// the same contiguous seed block (`seed = base_seed + i`). The optimisation
+    /// changes performance, never results.
+    #[test]
+    fn run_shots_distributed_matches_run_circuits_per_batch() {
+        let batches = [5u32, 5, 4];
+        let fast = NativeStatevectorBackend::new(99)
+            .run_shots_distributed(
+                &BoundCircuit::Native(bell()),
+                &batches,
+                &config_with(OptLevel::default()),
+            )
+            .unwrap();
+
+        // Reference: one fresh backend per batch, seeded `99 + i` so it replays
+        // the exact seed the fast path reserves for replica `i`.
+        let reference: Vec<_> = batches
+            .iter()
+            .enumerate()
+            .map(|(i, &shots)| {
+                let mut cfg = config_with(OptLevel::default());
+                cfg.shots = shots;
+                NativeStatevectorBackend::new(99u64.wrapping_add(i as u64))
+                    .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+                    .unwrap()
+                    .remove(0)
+            })
+            .collect();
+
+        assert_eq!(fast, reference);
+    }
+
+    /// A zero-shot batch samples nothing (empty map), so shots stay conserved
+    /// even when `shots < n_qpus` (some replicas get `base = 0`).
+    #[test]
+    fn run_shots_distributed_zero_batch_is_empty() {
+        let cfg = config_with(OptLevel::default());
+        let out = NativeStatevectorBackend::new(1)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &[1u32, 0, 0], &cfg)
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(out[1].is_empty() && out[2].is_empty());
+        let total: u64 = out.iter().flat_map(|m| m.values()).sum();
+        assert_eq!(total, 1);
+    }
+
     #[test]
     fn omitted_seed_differs_across_calls_for_same_id() {
         use crate::infrastructure::Infrastructure;

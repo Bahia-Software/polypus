@@ -45,6 +45,18 @@ pub enum BackendError {
         /// The rejected infrastructure string.
         name: String,
     },
+    /// An algorithm was handed a number of circuits it cannot operate on
+    /// (e.g. `DistributeByShotsRun` requires exactly one circuit: it replicates
+    /// that circuit across the QPUs and splits the shots, so an empty `qcs`
+    /// would panic on `qcs[0]` and extra circuits would be silently dropped).
+    /// Input-parameter validation, so it surfaces as `ValueError` — the same
+    /// mapping as [`UnknownInfrastructure`](Self::UnknownInfrastructure).
+    InvalidCircuitCount {
+        /// The exact number of circuits the algorithm requires.
+        expected: usize,
+        /// The number of circuits actually supplied.
+        got: usize,
+    },
     /// A backend was asked to run a circuit representation it cannot execute
     /// (e.g. a Qiskit `QuantumCircuit` on a GIL-free backend).
     UnsupportedCircuit(String),
@@ -76,6 +88,9 @@ impl fmt::Display for BackendError {
             BackendError::UnknownInfrastructure { name } => {
                 write!(f, "unknown infrastructure '{name}'")
             }
+            BackendError::InvalidCircuitCount { expected, got } => {
+                write!(f, "expected exactly {expected} circuit(s), got {got}")
+            }
             BackendError::UnsupportedCircuit(m) => write!(f, "{m}"),
             BackendError::NativeCircuit(m) => write!(f, "{m}"),
             BackendError::Cunqa(m) => write!(f, "CUNQA backend error: {m}"),
@@ -100,6 +115,9 @@ impl From<BackendError> for PyErr {
             BackendError::UnknownInfrastructure { name } => PyValueError::new_err(format!(
                 "unknown infrastructure '{name}'; expected \"local\", \"cunqa\" or \"qmio\""
             )),
+            BackendError::InvalidCircuitCount { expected, got } => {
+                PyValueError::new_err(format!("expected exactly {expected} circuit(s), got {got}"))
+            }
             BackendError::UnsupportedCircuit(m) => PyNativeCircuitError::new_err(m),
             BackendError::NativeCircuit(m) => PyNativeCircuitError::new_err(m),
             BackendError::Cunqa(m) => PyCunqaError::new_err(m),

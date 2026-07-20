@@ -11,7 +11,7 @@ use crate::infrastructure::transpiler::OptLevel;
 /// Passed to [`crate::infrastructure::QuantumBackend::run_circuits`] alongside
 /// the circuits, so the backend knows *how* and *where* to run them without
 /// coupling to algorithm logic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// Unique identifier for this run (logging, temp files, SLURM job names).
     pub id: String,
@@ -113,6 +113,56 @@ pub enum BackendConfig {
         /// Results format requested from the server (`"binary_count"` by default).
         res_format: String,
     },
+}
+
+/// Manual [`Clone`]: the only non-`Clone` field is `BackendConfig::Local`'s
+/// optional Qiskit `NoiseModel`, whose reference count must be bumped under the
+/// GIL via `clone_ref` (the same pattern
+/// [`Infrastructure::create_backend`](crate::infrastructure::Infrastructure::create_backend)
+/// uses). Cloning a config is what lets an orchestration algorithm derive a
+/// per-batch config that differs only in `shots` without mutating the caller's.
+impl Clone for BackendConfig {
+    fn clone(&self) -> Self {
+        match self {
+            BackendConfig::Local {
+                backend,
+                sim_method,
+                noise_model,
+            } => BackendConfig::Local {
+                backend: backend.clone(),
+                sim_method: sim_method.clone(),
+                noise_model: noise_model
+                    .as_ref()
+                    .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+            },
+            BackendConfig::LocalNative => BackendConfig::LocalNative,
+            BackendConfig::Cunqa {
+                backend,
+                sim_method,
+                nodes,
+                cores_per_qpu,
+            } => BackendConfig::Cunqa {
+                backend: backend.clone(),
+                sim_method: sim_method.clone(),
+                nodes: *nodes,
+                cores_per_qpu: *cores_per_qpu,
+            },
+            #[cfg(feature = "qmio")]
+            BackendConfig::Qmio {
+                endpoint,
+                program_format,
+                optimization,
+                repetition_period,
+                res_format,
+            } => BackendConfig::Qmio {
+                endpoint: endpoint.clone(),
+                program_format: *program_format,
+                optimization: *optimization,
+                repetition_period: *repetition_period,
+                res_format: res_format.clone(),
+            },
+        }
+    }
 }
 
 /// Representation of the program sent to the QMIO QPU.

@@ -1,5 +1,5 @@
 use crate::algorithms::{AlgorithmArgs, AlgorithmTrait};
-use crate::infrastructure::Infrastructure;
+use crate::infrastructure::{BackendError, Infrastructure};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -12,7 +12,22 @@ impl AlgorithmTrait for DistributeByShotsRun {
     type Args = AlgorithmArgs;
     type AlgorithmReturnType = PyResult<pyo3::PyObject>;
 
-    fn run(&self, mut args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
+    fn run(&self, args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
+        // This algorithm operates on exactly one circuit: it replicates that
+        // single circuit across `n_qpus` and splits the shots between the
+        // replicas. Reject any other count with a typed error instead of
+        // panicking on `args.qcs[0]` (empty `qcs`) or silently dropping the
+        // extras (`qcs[1..]`). `n_qpus >= 1` and `shots >= 1` are guaranteed by
+        // the Python-facing boundary; the circuit count is not, so this is the
+        // sole place that contract is enforced — before any backend is built.
+        if args.qcs.len() != 1 {
+            return Err(BackendError::InvalidCircuitCount {
+                expected: 1,
+                got: args.qcs.len(),
+            }
+            .into());
+        }
+
         let backend = Infrastructure::create_backend(&args.config)?;
 
         // Distribute shots across QPUs, conserving the total (contract C-3): the
@@ -21,11 +36,11 @@ impl AlgorithmTrait for DistributeByShotsRun {
         // are guaranteed by the Python-facing boundary validation, so no guard is
         // duplicated here.
         //
-        // `ExecutionConfig::shots` applies uniformly to a whole `run_circuits`
-        // batch, so we submit at most two uniform-shots batches: `remainder`
-        // circuits at `base + 1` shots, and the remaining `n_qpus - remainder`
-        // circuits at `base` shots. When `shots < n_qpus` the base is `0`; that
-        // group is skipped so no zero-shot circuits are ever submitted.
+        // `shot_batches[i]` is replica `i`'s shot count (`base + 1` for the first
+        // `remainder` replicas, `base` for the rest). The backend runs the single
+        // circuit once per batch via `run_shots_distributed`; the native backend
+        // overrides that to evolve the statevector once and sample each batch,
+        // while other backends fall back to replicating + `run_circuits`.
         let shots = args.config.shots;
         let n_qpus = args.config.n_qpus;
         let base = shots / n_qpus;
@@ -40,21 +55,11 @@ impl AlgorithmTrait for DistributeByShotsRun {
             base
         );
 
-        // Run — native counts, one dict per QPU. Replicating the circuit is cheap
-        // (refcount bump or string/struct clone).
-        let mut counts_vec: Vec<HashMap<String, u64>> = Vec::new();
-        if remainder > 0 {
-            let qcs: Vec<_> = (0..remainder).map(|_| args.qcs[0].duplicate()).collect();
-            args.config.shots = base + 1;
-            counts_vec.extend(backend.run_circuits(&qcs, &args.config)?);
-        }
-        if base > 0 {
-            let qcs: Vec<_> = (0..n_qpus - remainder)
-                .map(|_| args.qcs[0].duplicate())
-                .collect();
-            args.config.shots = base;
-            counts_vec.extend(backend.run_circuits(&qcs, &args.config)?);
-        }
+        let shot_batches: Vec<u32> = (0..n_qpus)
+            .map(|i| if i < remainder { base + 1 } else { base })
+            .collect();
+        let counts_vec =
+            backend.run_shots_distributed(&args.qcs[0], &shot_batches, &args.config)?;
 
         // Merge counts from all QPUs into a single dict
         let mut total: HashMap<String, u64> = HashMap::new();
