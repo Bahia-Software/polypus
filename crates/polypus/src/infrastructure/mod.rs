@@ -246,6 +246,52 @@ pub trait QuantumBackend: Send + Sync {
         config: &ExecutionConfig,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError>;
 
+    /// Run a single circuit `qc` under a per-replica shot distribution,
+    /// returning one counts map per entry of `shot_batches` (replica `i` runs
+    /// `shot_batches[i]` shots). The caller has already apportioned the shots —
+    /// e.g. [`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)
+    /// splitting a total across `n_qpus`, one extra shot on the first
+    /// `shots % n_qpus` replicas — so the summed counts conserve the total
+    /// exactly (contract C-3).
+    ///
+    /// The method exists so a backend that can *reuse* one circuit evolution
+    /// across many shot batches can override it and avoid re-simulating the
+    /// identical circuit once per replica (see [`NativeStatevectorBackend`]).
+    /// This **default** reproduces the historical behaviour for backends that
+    /// cannot: it replicates `qc` and forwards it to
+    /// [`run_circuits`](Self::run_circuits), grouping consecutive replicas that
+    /// request the same shot count into one uniform-shots batch — Aer/CUNQA
+    /// submit a whole batch per call and re-seed per call, so this grouping
+    /// leaves their per-run results unchanged (contract C-7). A zero-shot entry
+    /// submits nothing and yields an empty map, so no zero-shot circuit is ever
+    /// sent and the total is still conserved.
+    fn run_shots_distributed(
+        &self,
+        qc: &BoundCircuit,
+        shot_batches: &[u32],
+        config: &ExecutionConfig,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let mut out: Vec<HashMap<String, u64>> = Vec::with_capacity(shot_batches.len());
+        let mut i = 0;
+        while i < shot_batches.len() {
+            let shots = shot_batches[i];
+            let mut j = i + 1;
+            while j < shot_batches.len() && shot_batches[j] == shots {
+                j += 1;
+            }
+            if shots > 0 {
+                let qcs: Vec<BoundCircuit> = (i..j).map(|_| qc.duplicate()).collect();
+                let mut cfg = config.clone();
+                cfg.shots = shots;
+                out.extend(self.run_circuits(&qcs, &cfg)?);
+            } else {
+                out.extend((i..j).map(|_| HashMap::new()));
+            }
+            i = j;
+        }
+        Ok(out)
+    }
+
     /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
     /// call, given the `total` circuits to evaluate.
     ///

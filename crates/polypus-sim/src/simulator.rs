@@ -59,43 +59,65 @@ impl StatevectorSimulator {
         seed: u64,
     ) -> Result<HashMap<usize, u64>, SimError> {
         let sv = self.run(circuit)?;
-        let mut rng = SplitMix64::new(seed);
-        let raw = sv.sample(shots, &mut rng);
-
-        // Collect the qubit → classical-bit mapping declared by the circuit.
-        let mut measured: Vec<(usize, usize)> = Vec::new();
-        let mut measure_all = false;
-        for gate in &circuit.gates {
-            match gate {
-                GateInstruction::Measure { qubit, cbit } => measured.push((*qubit, *cbit)),
-                GateInstruction::MeasureAll => measure_all = true,
-                _ => {}
-            }
-        }
-
-        // No measurements: report the full basis state directly.
-        if !measure_all && measured.is_empty() {
-            return Ok(raw);
-        }
-        if measure_all {
-            for q in 0..sv.num_qubits() {
-                measured.push((q, q));
-            }
-        }
-
-        // Project each sampled basis state onto the classical register.
-        let mut counts = HashMap::new();
-        for (state, c) in raw {
-            let mut key = 0usize;
-            for &(qubit, cbit) in &measured {
-                if (state >> qubit) & 1 == 1 {
-                    key |= 1usize << cbit;
-                }
-            }
-            *counts.entry(key).or_insert(0) += c;
-        }
-        Ok(counts)
+        Ok(sample_projected(circuit, &sv, shots, seed))
     }
+}
+
+/// Draw `shots` measurements from an already-evolved statevector `sv`, seeded by
+/// `seed`, and project each sampled basis state onto `circuit`'s classical
+/// register (the qubit → classical-bit mapping declared by its `Measure` /
+/// `MeasureAll` instructions; a circuit that measures nothing reports the full
+/// basis state, matching the "measure all" convention).
+///
+/// This is the sampling half of [`StatevectorSimulator::run_and_sample`],
+/// factored out so a caller that evolves a circuit **once** can sample it many
+/// times — each batch with its own `seed` — without repeating the (identical,
+/// deterministic) state evolution. For a given `sv` and `seed` the result is
+/// byte-identical to `run_and_sample`, which is what lets shot batches be
+/// distributed across replicas from a single evolution while preserving
+/// per-seed reproducibility.
+pub fn sample_projected(
+    circuit: &ConcreteCircuit,
+    sv: &Statevector,
+    shots: usize,
+    seed: u64,
+) -> HashMap<usize, u64> {
+    let mut rng = SplitMix64::new(seed);
+    let raw = sv.sample(shots, &mut rng);
+
+    // Collect the qubit → classical-bit mapping declared by the circuit.
+    let mut measured: Vec<(usize, usize)> = Vec::new();
+    let mut measure_all = false;
+    for gate in &circuit.gates {
+        match gate {
+            GateInstruction::Measure { qubit, cbit } => measured.push((*qubit, *cbit)),
+            GateInstruction::MeasureAll => measure_all = true,
+            _ => {}
+        }
+    }
+
+    // No measurements: report the full basis state directly.
+    if !measure_all && measured.is_empty() {
+        return raw;
+    }
+    if measure_all {
+        for q in 0..sv.num_qubits() {
+            measured.push((q, q));
+        }
+    }
+
+    // Project each sampled basis state onto the classical register.
+    let mut counts = HashMap::new();
+    for (state, c) in raw {
+        let mut key = 0usize;
+        for &(qubit, cbit) in &measured {
+            if (state >> qubit) & 1 == 1 {
+                key |= 1usize << cbit;
+            }
+        }
+        *counts.entry(key).or_insert(0) += c;
+    }
+    counts
 }
 
 impl Simulator for StatevectorSimulator {
