@@ -13,3 +13,9 @@ name = "polypus_qml"
 [dependencies]
 polypus-circuit = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# Statevector simulation and the DE optimizer drive the end-to-end native
+# training test (tests/end_to_end.rs); neither touches the public API.
+polypus-sim = { workspace = true }
+polypus-optimizers = { workspace = true }
