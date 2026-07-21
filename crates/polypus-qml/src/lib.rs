@@ -40,6 +40,7 @@ mod layers;
 mod loss;
 mod model;
 mod observables;
+mod problem;
 mod readout;
 mod rng;
 
@@ -51,4 +52,5 @@ pub use layers::{
 pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel};
 pub use observables::{Observable, Pauli, PauliString};
+pub use problem::QmlProblem;
 pub use readout::{Decision, Readout};

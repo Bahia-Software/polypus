@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn squared_error_accepts_any_finite_label() {
-        assert!(Loss::SquaredError.validate_label(3.14, 0).is_ok());
+        assert!(Loss::SquaredError.validate_label(2.5, 0).is_ok());
         assert!(Loss::SquaredError.validate_label(-100.0, 0).is_ok());
     }
 
