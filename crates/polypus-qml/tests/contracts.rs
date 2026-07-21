@@ -29,9 +29,7 @@ use polypus_qml::{
 /// have at least one active qubit at logical position 0).
 fn z0_readout() -> Readout {
     Readout::new(
-        vec![
-            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap(),
-        ],
+        vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap()],
         Decision::Sign,
     )
     .unwrap()
@@ -229,7 +227,10 @@ fn bind_batch_circuits_are_c4_clean_and_c2_valid_c8() {
             let qasm1 = concrete.to_qasm2();
             let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
             let qasm2 = imported.to_qasm2_with_params(&[]).unwrap();
-            assert_eq!(qasm1, qasm2, "bind_batch circuit QASM must be a fixed point (C-2)");
+            assert_eq!(
+                qasm1, qasm2,
+                "bind_batch circuit QASM must be a fixed point (C-2)"
+            );
         }
     }
 }
@@ -253,7 +254,10 @@ fn fitness_from_counts_is_finite_c8() {
             })
             .collect();
         let fitness = problem.fitness_from_counts(&counts).unwrap();
-        assert!(fitness.is_finite(), "fitness must be finite (C-8), got {fitness}");
+        assert!(
+            fitness.is_finite(),
+            "fitness must be finite (C-8), got {fitness}"
+        );
     }
 }
 

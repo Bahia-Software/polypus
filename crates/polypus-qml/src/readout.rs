@@ -52,10 +52,7 @@ impl Readout {
     /// A mismatch is [`ValidationError::DecisionObservableMismatch`]. (Whether
     /// a decision is trainable by the chosen loss is a separate check, made in
     /// [`QmlProblem::new`](crate::QmlProblem::new) where both coexist.)
-    pub fn new(
-        observables: Vec<Observable>,
-        decision: Decision,
-    ) -> Result<Self, ValidationError> {
+    pub fn new(observables: Vec<Observable>, decision: Decision) -> Result<Self, ValidationError> {
         let min_observables = match decision {
             Decision::Argmax => 2,
             Decision::Sign | Decision::Threshold(_) | Decision::Raw => 1,
@@ -142,7 +139,11 @@ mod tests {
     }
 
     fn z_observable(position: usize) -> Observable {
-        Observable::new(vec![(1.0, PauliString::new(vec![(position, Pauli::Z)]).unwrap())]).unwrap()
+        Observable::new(vec![(
+            1.0,
+            PauliString::new(vec![(position, Pauli::Z)]).unwrap(),
+        )])
+        .unwrap()
     }
 
     fn resolved_z(position: usize) -> ResolvedObservable {
@@ -209,8 +210,7 @@ mod tests {
     fn argmax_returns_winning_index_and_breaks_ties_low() {
         // Two observables, width-2 counts. Z_0 over "01" (=+1 for qubit0? "01":
         // qubit0 is right char '1' → −1), Z_1 over "01" (qubit1 left '0' → +1).
-        let readout =
-            ResolvedReadout::new(vec![resolved_z(0), resolved_z(1)], Decision::Argmax);
+        let readout = ResolvedReadout::new(vec![resolved_z(0), resolved_z(1)], Decision::Argmax);
         // "01": ⟨Z_0⟩ = −1, ⟨Z_1⟩ = +1 → argmax is index 1.
         assert_eq!(readout.predict(&counts(&[("01", 10)])), Ok(1.0));
         // Tie (both +1 over "00") → lowest index 0.

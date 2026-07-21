@@ -266,9 +266,15 @@ mod tests {
         // ⟨Z_0⟩ over one qubit: "0" → +1, "1" → −1.
         let z0 = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
         // All |0⟩: +1.
-        assert_eq!(expectation_from_counts(&counts(&[("0", 100)]), &z0), Ok(1.0));
+        assert_eq!(
+            expectation_from_counts(&counts(&[("0", 100)]), &z0),
+            Ok(1.0)
+        );
         // All |1⟩: −1.
-        assert_eq!(expectation_from_counts(&counts(&[("1", 100)]), &z0), Ok(-1.0));
+        assert_eq!(
+            expectation_from_counts(&counts(&[("1", 100)]), &z0),
+            Ok(-1.0)
+        );
         // Even split: 0.
         let e = expectation_from_counts(&counts(&[("0", 50), ("1", 50)]), &z0).unwrap();
         assert!((e - 0.0).abs() < 1e-12);
@@ -279,8 +285,14 @@ mod tests {
         // Width-2 keys, ⟨Z_1⟩: qubit 1 is the *left* character (index 0).
         let z1 = ResolvedPauliString::new(vec![(1, Pauli::Z)]);
         // "10" → qubit 1 is '1' → −1; "01" → qubit 1 is '0' → +1.
-        assert_eq!(expectation_from_counts(&counts(&[("10", 10)]), &z1), Ok(-1.0));
-        assert_eq!(expectation_from_counts(&counts(&[("01", 10)]), &z1), Ok(1.0));
+        assert_eq!(
+            expectation_from_counts(&counts(&[("10", 10)]), &z1),
+            Ok(-1.0)
+        );
+        assert_eq!(
+            expectation_from_counts(&counts(&[("01", 10)]), &z1),
+            Ok(1.0)
+        );
     }
 
     #[test]

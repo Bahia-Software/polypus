@@ -87,7 +87,9 @@ mod tests {
     fn bce_requires_zero_or_one() {
         assert!(Loss::BinaryCrossEntropy.validate_label(0.0, 0).is_ok());
         assert!(Loss::BinaryCrossEntropy.validate_label(1.0, 0).is_ok());
-        let err = Loss::BinaryCrossEntropy.validate_label(-1.0, 4).unwrap_err();
+        let err = Loss::BinaryCrossEntropy
+            .validate_label(-1.0, 4)
+            .unwrap_err();
         assert_eq!(
             err,
             ValidationError::LabelDomain {

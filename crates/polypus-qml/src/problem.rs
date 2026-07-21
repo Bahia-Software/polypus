@@ -279,6 +279,9 @@ mod tests {
         // ⟨Z₀⟩ over "00" (width 2) = +1 → Sign → +1.
         assert_eq!(problem.predict_from_counts(&counts(&[("00", 10)])), Ok(1.0));
         // ⟨Z₀⟩ over "01" = −1 → Sign → −1.
-        assert_eq!(problem.predict_from_counts(&counts(&[("01", 10)])), Ok(-1.0));
+        assert_eq!(
+            problem.predict_from_counts(&counts(&[("01", 10)])),
+            Ok(-1.0)
+        );
     }
 }

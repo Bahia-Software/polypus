@@ -353,7 +353,10 @@ impl fmt::Display for QmlError {
                 "counts width mismatch: expected bitstrings of width {expected}, got {got}"
             ),
             QmlError::EmptyCounts => {
-                write!(f, "counts map is empty: nothing to estimate an expectation from")
+                write!(
+                    f,
+                    "counts map is empty: nothing to estimate an expectation from"
+                )
             }
             QmlError::CountsLengthMismatch { expected, got } => write!(
                 f,

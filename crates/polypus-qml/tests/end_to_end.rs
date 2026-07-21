@@ -161,7 +161,8 @@ fn native_training_reaches_perfect_train_accuracy() {
     }
     let accuracy = correct as f64 / train.num_samples() as f64;
     assert_eq!(
-        accuracy, 1.0,
+        accuracy,
+        1.0,
         "expected perfect train accuracy, got {accuracy} ({correct}/{})",
         train.num_samples()
     );

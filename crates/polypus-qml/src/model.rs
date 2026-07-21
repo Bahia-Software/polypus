@@ -301,7 +301,10 @@ mod tests {
     /// test that needs `compile` to reach past the `MissingReadout` check.
     fn z0_readout() -> Readout {
         Readout::new(
-            vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap()],
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
             Decision::Sign,
         )
         .unwrap()
@@ -428,8 +431,10 @@ mod tests {
     fn compile_rejects_observable_qubit_out_of_range() {
         // A 2-qubit model with a readout on logical position 2.
         let readout = Readout::new(
-            vec![Observable::new(vec![(1.0, PauliString::new(vec![(2, Pauli::Z)]).unwrap())])
-                .unwrap()],
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(2, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
             Decision::Sign,
         )
         .unwrap();
@@ -452,8 +457,10 @@ mod tests {
     fn compile_rejects_unsupported_pauli() {
         // v1 readout is Z-only; an X factor is rejected at compile time.
         let readout = Readout::new(
-            vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::X)]).unwrap())])
-                .unwrap()],
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::X)]).unwrap())])
+                    .unwrap(),
+            ],
             Decision::Sign,
         )
         .unwrap();
