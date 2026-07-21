@@ -15,9 +15,21 @@ use polypus_circuit::{
     terminal_measurement_violation, GateInstruction, GateParam, ParameterizedCircuit,
 };
 use polypus_qml::{
-    CompiledModel, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, QuantumModel,
-    RotationAxis,
+    CompiledModel, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, Observable,
+    Pauli, PauliString, QuantumModel, Readout, RotationAxis,
 };
+
+/// A minimal `⟨Z₀⟩` / `Sign` readout, valid for every catalogue model (all
+/// have at least one active qubit at logical position 0).
+fn z0_readout() -> Readout {
+    Readout::new(
+        vec![
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap(),
+        ],
+        Decision::Sign,
+    )
+    .unwrap()
+}
 
 /// The model catalogue. Each entry is a compiled model paired with a few valid
 /// samples to template.
@@ -39,6 +51,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                 .layer(Layer::HardwareEfficient(
                     HardwareEfficientAnsatz::real_amplitudes(1),
                 ))
+                .readout(z0_readout())
                 .compile(2)
                 .unwrap(),
             samples(2),
@@ -48,6 +61,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
             QuantumModel::new(3)
                 .angle_encoder(RotationAxis::Rz)
                 .hardware_efficient(2)
+                .readout(z0_readout())
                 .compile(3)
                 .unwrap(),
             samples(3),
@@ -63,6 +77,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                     entanglement: Entanglement::Full,
                     final_rotation_layer: false,
                 }))
+                .readout(z0_readout())
                 .compile(4)
                 .unwrap(),
             samples(4),
@@ -79,6 +94,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                     entanglement: Entanglement::Circular,
                     final_rotation_layer: true,
                 }))
+                .readout(z0_readout())
                 .compile(2)
                 .unwrap(),
             samples(2),
@@ -88,6 +104,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
             QuantumModel::new(1)
                 .angle_encoder(RotationAxis::Ry)
                 .hardware_efficient(1)
+                .readout(z0_readout())
                 .compile(1)
                 .unwrap(),
             samples(1),

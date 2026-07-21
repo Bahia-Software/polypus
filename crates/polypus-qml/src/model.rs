@@ -33,6 +33,8 @@ use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{AngleEncoder, HardwareEfficientAnsatz, Layer, RotationAxis};
+use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
+use crate::readout::{Readout, ResolvedReadout};
 
 /// The accumulator threaded through a model's layers, in order, during
 /// compilation. Carries exactly the three things a layer's `plan` needs.
@@ -50,7 +52,7 @@ pub(crate) struct LayerContext {
 
 /// What a layer records in `plan` and consumes in `emit`: the half-open range
 /// of global `θ` indices it owns, and a snapshot of the qubits it operates on.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LayerAllocation {
     /// The layer's slice of the global parameter space, `start..end`. Empty
     /// (`start == end`) for layers that consume no `θ` (e.g. encoders).
@@ -82,12 +84,13 @@ pub(crate) trait LayerOps {
 /// in [`compile`](Self::compile), which yields the immutable [`CompiledModel`]
 /// ("make illegal states unrepresentable", ENGINEERING §9).
 ///
-/// Readout (observables + decision) is not part of this phase; it arrives with
-/// the learning layer in a later phase.
+/// The [`Readout`] (observables + decision) is attached with
+/// [`readout`](Self::readout); [`compile`](Self::compile) requires one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantumModel {
     num_qubits: usize,
     layers: Vec<Layer>,
+    readout: Option<Readout>,
 }
 
 impl QuantumModel {
@@ -96,12 +99,22 @@ impl QuantumModel {
         QuantumModel {
             num_qubits,
             layers: Vec::new(),
+            readout: None,
         }
     }
 
     /// Append `layer` to the model.
     pub fn layer(mut self, layer: Layer) -> Self {
         self.layers.push(layer);
+        self
+    }
+
+    /// Attach the [`Readout`] that [`compile`](Self::compile) will resolve
+    /// against the model's final active qubits. A model without one is rejected
+    /// with [`ValidationError::MissingReadout`]. Calling this twice keeps the
+    /// last readout.
+    pub fn readout(mut self, readout: Readout) -> Self {
+        self.readout = Some(readout);
         self
     }
 
@@ -121,10 +134,12 @@ impl QuantumModel {
     ///
     /// Checks the global invariants no single layer can see on its own, in
     /// order: at least one qubit ([`ValidationError::NoQubits`]), at least one
-    /// layer ([`ValidationError::EmptyModel`]), then each layer's `plan`
-    /// (which may raise e.g. [`ValidationError::NotEnoughQubits`]), and finally
-    /// that the model reserved at least one trainable parameter
-    /// ([`ValidationError::NoTrainableParams`]).
+    /// layer ([`ValidationError::EmptyModel`]), a readout present
+    /// ([`ValidationError::MissingReadout`]), then each layer's `plan` (which
+    /// may raise e.g. [`ValidationError::NotEnoughQubits`]), that the model
+    /// reserved at least one trainable parameter
+    /// ([`ValidationError::NoTrainableParams`]), and finally that the readout
+    /// resolves against the final active qubits (see [`resolve_readout`]).
     pub fn compile(self, num_features: usize) -> Result<CompiledModel, ValidationError> {
         if self.num_qubits < 1 {
             return Err(ValidationError::NoQubits);
@@ -132,6 +147,10 @@ impl QuantumModel {
         if self.layers.is_empty() {
             return Err(ValidationError::EmptyModel);
         }
+        let readout = match &self.readout {
+            Some(readout) => readout,
+            None => return Err(ValidationError::MissingReadout),
+        };
 
         let mut ctx = LayerContext {
             active: (0..self.num_qubits).collect(),
@@ -148,11 +167,17 @@ impl QuantumModel {
         }
         let num_params = ctx.param_cursor;
 
+        // The readout's logical positions are resolved against the *final*
+        // active qubits (after any layer that removed some, e.g. a future
+        // pooling), so this must run after the plan loop.
+        let resolved_readout = resolve_readout(readout, &ctx.active)?;
+
         log::debug!(
-            "compiled model: {} qubit(s), {} layer(s), {num_params} trainable parameter(s), {} feature(s)",
+            "compiled model: {} qubit(s), {} layer(s), {num_params} trainable parameter(s), {} feature(s), {} readout observable(s)",
             self.num_qubits,
             self.layers.len(),
             num_features,
+            resolved_readout.observables().len(),
         );
 
         Ok(CompiledModel {
@@ -160,20 +185,57 @@ impl QuantumModel {
             num_features,
             num_params,
             allocations,
+            resolved_readout,
         })
     }
+}
+
+/// Resolve a [`Readout`]'s logical qubit positions to physical indices against
+/// the model's final `active` qubits, validating as it goes:
+///
+/// - a position `>= active.len()` is [`ValidationError::ObservableQubitOutOfRange`];
+/// - any Pauli other than `Z` is [`ValidationError::UnsupportedPauli`] (v1
+///   readout is computational-basis only, design doc §7.2).
+fn resolve_readout(
+    readout: &Readout,
+    active: &[usize],
+) -> Result<ResolvedReadout, ValidationError> {
+    let mut resolved_observables = Vec::with_capacity(readout.observables.len());
+    for observable in &readout.observables {
+        let mut resolved_terms = Vec::with_capacity(observable.terms.len());
+        for (coeff, string) in &observable.terms {
+            let mut resolved_positions = Vec::with_capacity(string.terms().len());
+            for &(position, pauli) in string.terms() {
+                if position >= active.len() {
+                    return Err(ValidationError::ObservableQubitOutOfRange {
+                        position,
+                        num_active: active.len(),
+                    });
+                }
+                if pauli != Pauli::Z {
+                    return Err(ValidationError::UnsupportedPauli { pauli, position });
+                }
+                resolved_positions.push((active[position], pauli));
+            }
+            resolved_terms.push((*coeff, ResolvedPauliString::new(resolved_positions)));
+        }
+        resolved_observables.push(ResolvedObservable::new(resolved_terms));
+    }
+    Ok(ResolvedReadout::new(resolved_observables, readout.decision))
 }
 
 /// A validated, immutable model: it cannot be in an invalid state, so
 /// [`template_for`](Self::template_for) and [`bind`](Self::bind) only fail on a
 /// bad sample or bad parameter values, never on structural problems.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompiledModel {
     spec: QuantumModel,
     num_features: usize,
     num_params: usize,
     /// One allocation per layer, in layer order (parallel to `spec.layers`).
     allocations: Vec<LayerAllocation>,
+    /// The readout resolved to physical qubit indices (design doc §5.2).
+    resolved_readout: ResolvedReadout,
 }
 
 impl CompiledModel {
@@ -186,6 +248,12 @@ impl CompiledModel {
     /// The number of features per sample the model was compiled for.
     pub fn num_features(&self) -> usize {
         self.num_features
+    }
+
+    /// The resolved readout (crate-internal: consumed by
+    /// [`QmlProblem`](crate::QmlProblem) to estimate expectations and predict).
+    pub(crate) fn resolved_readout(&self) -> &ResolvedReadout {
+        &self.resolved_readout
     }
 
     /// Build the parameterized circuit template for one sample `x`: features
@@ -226,6 +294,18 @@ impl CompiledModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observables::{Observable, Pauli, PauliString};
+    use crate::readout::{Decision, Readout};
+
+    /// A minimal readout: `⟨Z₀⟩` with a `Sign` decision, reusable by every
+    /// test that needs `compile` to reach past the `MissingReadout` check.
+    fn z0_readout() -> Readout {
+        Readout::new(
+            vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap()],
+            Decision::Sign,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn compile_rejects_zero_qubits() {
@@ -248,6 +328,7 @@ mod tests {
         // An encoder alone reserves no θ.
         let err = QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
+            .readout(z0_readout())
             .compile(2)
             .unwrap_err();
         assert_eq!(err, ValidationError::NoTrainableParams);
@@ -259,6 +340,7 @@ mod tests {
         let err = QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
             .hardware_efficient(1)
+            .readout(z0_readout())
             .compile(3)
             .unwrap_err();
         assert_eq!(
@@ -277,6 +359,7 @@ mod tests {
             .layer(Layer::HardwareEfficient(
                 HardwareEfficientAnsatz::real_amplitudes(1),
             ))
+            .readout(z0_readout())
             .compile(2)
             .unwrap();
         let err = model.template_for(&[0.1]).unwrap_err();
@@ -296,6 +379,7 @@ mod tests {
             .layer(Layer::HardwareEfficient(
                 HardwareEfficientAnsatz::real_amplitudes(1),
             ))
+            .readout(z0_readout())
             .compile(2)
             .unwrap();
 
@@ -326,5 +410,81 @@ mod tests {
                 got: 1,
             })
         ));
+    }
+
+    #[test]
+    fn compile_rejects_missing_readout() {
+        // A model with qubits and a trainable layer but no readout is rejected
+        // *before* the plan loop (MissingReadout precedes NoTrainableParams).
+        let err = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .compile(2)
+            .unwrap_err();
+        assert_eq!(err, ValidationError::MissingReadout);
+    }
+
+    #[test]
+    fn compile_rejects_observable_qubit_out_of_range() {
+        // A 2-qubit model with a readout on logical position 2.
+        let readout = Readout::new(
+            vec![Observable::new(vec![(1.0, PauliString::new(vec![(2, Pauli::Z)]).unwrap())])
+                .unwrap()],
+            Decision::Sign,
+        )
+        .unwrap();
+        let err = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(2)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ObservableQubitOutOfRange {
+                position: 2,
+                num_active: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn compile_rejects_unsupported_pauli() {
+        // v1 readout is Z-only; an X factor is rejected at compile time.
+        let readout = Readout::new(
+            vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::X)]).unwrap())])
+                .unwrap()],
+            Decision::Sign,
+        )
+        .unwrap();
+        let err = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(2)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::UnsupportedPauli {
+                pauli: Pauli::X,
+                position: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn compile_resolves_readout_and_keeps_it() {
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        // The resolved readout survives and is cloneable together with the model.
+        assert_eq!(model.resolved_readout().observables().len(), 1);
+        let cloned = model.clone();
+        assert_eq!(cloned.num_params(), model.num_params());
     }
 }
