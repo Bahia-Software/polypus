@@ -27,5 +27,6 @@
 //! arrive in later phases.
 
 mod error;
+mod rng;
 
 pub use error::ValidationError;
