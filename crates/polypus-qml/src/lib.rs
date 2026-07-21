@@ -21,12 +21,14 @@
 //!
 //! ## Phase 1 scope
 //!
-//! This is the skeleton phase: `Dataset` (validated construction,
+//! This is the skeleton phase: [`Dataset`] (validated construction,
 //! deterministic splits, feature scaling), [`ValidationError`], and the
 //! internal RNG. Models, layers, readout, losses and the training problem
 //! arrive in later phases.
 
+mod dataset;
 mod error;
 mod rng;
 
+pub use dataset::Dataset;
 pub use error::ValidationError;
