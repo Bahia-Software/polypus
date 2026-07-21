@@ -21,22 +21,26 @@
 //!
 //! ## Current scope
 //!
-//! Data and the model core are in place: [`Dataset`] (validated construction,
-//! deterministic splits, feature scaling), the layered model builder
-//! ([`QuantumModel`] → [`CompiledModel`]) with its [`Layer`] catalogue
-//! ([`AngleEncoder`], [`HardwareEfficientAnsatz`]), and the two error enums
-//! ([`ValidationError`], [`QmlError`]). A compiled model turns a sample into a
-//! [`polypus_circuit`] template with the data features fixed and the trainable
-//! parameters left free.
+//! End-to-end training in pure Rust is now possible. On top of [`Dataset`]
+//! (validated construction, deterministic splits, feature scaling) and the
+//! layered model builder ([`QuantumModel`] → [`CompiledModel`]) with its
+//! [`Layer`] catalogue ([`AngleEncoder`], [`HardwareEfficientAnsatz`]), a model
+//! now carries a [`Readout`] — Pauli [`Observable`]s plus a [`Decision`] — and
+//! a [`Loss`] closes the loop: [`QmlProblem`] bundles a compiled model, a
+//! training set and a loss into the pair of operations an optimizer oracle
+//! needs (bind parameters into circuits; turn measurement counts into a
+//! fitness), producing a fully trainable model without any Python in the loop.
 //!
-//! Readout (Pauli observables + decision), losses and the training problem —
-//! and the convolution/pooling and amplitude-encoding layers — arrive in later
-//! phases.
+//! The convolution/pooling and amplitude-encoding layers, and the X/Y readout
+//! bases, arrive in later phases.
 
 mod dataset;
 mod error;
 mod layers;
+mod loss;
 mod model;
+mod observables;
+mod readout;
 mod rng;
 
 pub use dataset::Dataset;
@@ -44,4 +48,7 @@ pub use error::{QmlError, ValidationError};
 pub use layers::{
     AngleEncoder, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, RotationAxis,
 };
+pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel};
+pub use observables::{Observable, Pauli, PauliString};
+pub use readout::{Decision, Readout};
