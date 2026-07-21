@@ -1,0 +1,14 @@
+[package]
+name = "polypus-qml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pure-Rust quantum machine learning for Polypus: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses. Produces polypus-circuit circuits; execution and optimizers stay decoupled. No PyO3, no Python."
+
+[lib]
+name = "polypus_qml"
+
+[dependencies]
+log = { workspace = true }

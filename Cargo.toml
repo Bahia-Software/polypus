@@ -12,9 +12,12 @@
 #   - crates/polypus-logger  : pure-Rust logging sink (a `log::Log` implementation) shared by
 #                              the whole workspace; libraries emit via the `log` facade, only
 #                              the app layer installs it (no PyO3)
+#   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered variational
+#                              models, Pauli readout, losses); produces polypus-circuit circuits,
+#                              execution and optimizers stay decoupled (no PyO3)
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-logger"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-logger", "crates/polypus-qml"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -40,6 +43,7 @@ polypus-physics    = { path = "crates/polypus-physics", version = "0.6.0" }
 polypus-sim        = { path = "crates/polypus-sim", version = "0.6.0" }
 polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.6.0" }
 polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
+polypus-qml        = { path = "crates/polypus-qml", version = "0.6.0" }
 
 # Shared external dependencies pinned once for the whole workspace.
 # `log` is the logging facade every crate emits through; the concrete sink lives
