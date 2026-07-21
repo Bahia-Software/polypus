@@ -31,4 +31,4 @@ mod error;
 mod rng;
 
 pub use dataset::Dataset;
-pub use error::ValidationError;
+pub use error::{QmlError, ValidationError};

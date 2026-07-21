@@ -1,20 +1,29 @@
 //! Error types for the QML layer.
 //!
-//! This crate does **not** depend on `polypus-circuit` yet (that dependency
-//! arrives with `model.rs` in a later phase), so there is deliberately no
-//! runtime `QmlError` and no `From<CircuitError>` conversion here. Phase 1 only
-//! constructs and validates data, so a single construction/validation enum is
-//! all that is reachable. The remaining variants of the full catalogue
-//! (compilation, emission, readout) are introduced by the phases that can
-//! actually raise them — they are intentionally not anticipated here.
+//! Two enums, split by *when* they can be raised, following the design doc
+//! (§10) and the repo style (`PhysicsError`/`OptimizerError`: one flat enum
+//! each, hand-written `Display` and `std::error::Error`, no `thiserror`, named
+//! fields):
 //!
-//! Style follows `PhysicsError`/`OptimizerError`: one flat enum, hand-written
-//! `Display` and `std::error::Error` (no `thiserror`), named fields, and no
-//! premature `From` impls. `Eq` is intentionally omitted because
+//! - [`ValidationError`] — construction/compilation failures, all detectable
+//!   *without* runtime (execution) data: bad datasets, and — added in phase 2
+//!   — the model-level invariants checked by `compile` (no qubits, empty model,
+//!   no trainable parameters, not enough qubits for an encoder).
+//! - [`QmlError`] — runtime failures raised while emitting or binding a
+//!   circuit template. It wraps [`CircuitError`] (with a `From` impl so `?`
+//!   propagates transparently from every `try_push`/`assign_parameters` call)
+//!   and adds the feature-count check `template_for` performs before dispatch.
+//!
+//! `ValidationError` deliberately omits `Eq` because
 //! [`ValidationError::InvalidTestFraction`] carries an `f64`, which is not
-//! `Eq`.
+//! `Eq`; `QmlError` derives `Eq` (all its payloads are `Eq`, and `CircuitError`
+//! is too). The full error catalogue of §10 is still completed incrementally —
+//! the readout/loss/problem variants arrive with the phases that can raise
+//! them.
 
 use std::fmt;
+
+use polypus_circuit::CircuitError;
 
 /// Errors raised while constructing or validating QML data.
 ///
@@ -72,6 +81,25 @@ pub enum ValidationError {
         /// The length of the supplied slice.
         got: usize,
     },
+    /// A model was compiled with zero qubits. A circuit needs at least one
+    /// qubit to carry any gate.
+    NoQubits,
+    /// A model was compiled with no layers. There is nothing to emit.
+    EmptyModel,
+    /// A model compiled to zero trainable parameters (e.g. only encoders, no
+    /// ansatz). Training a model with `dimensions == 0` is meaningless, so it
+    /// is rejected at compile time rather than discovered as an optimizer that
+    /// "converges" trivially.
+    NoTrainableParams,
+    /// A layer needs more active qubits than are available at its position in
+    /// the model. Raised by an encoder whose feature count exceeds the number
+    /// of active qubits.
+    NotEnoughQubits {
+        /// The number of active qubits the layer requires.
+        needed: usize,
+        /// The number of active qubits available at this position.
+        active: usize,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -107,11 +135,81 @@ impl fmt::Display for ValidationError {
                 f,
                 "feature-range count mismatch: dataset has {expected} feature(s), got {got} range(s)"
             ),
+            ValidationError::NoQubits => {
+                write!(f, "model has no qubits: at least one qubit is required")
+            }
+            ValidationError::EmptyModel => {
+                write!(f, "model has no layers: at least one layer is required")
+            }
+            ValidationError::NoTrainableParams => write!(
+                f,
+                "model has no trainable parameters: add at least one ansatz layer"
+            ),
+            ValidationError::NotEnoughQubits { needed, active } => write!(
+                f,
+                "layer needs {needed} active qubit(s) but only {active} are available"
+            ),
         }
     }
 }
 
 impl std::error::Error for ValidationError {}
+
+/// Errors raised while emitting or binding a circuit template at runtime.
+///
+/// Distinct from [`ValidationError`]: those are precondition violations caught
+/// during construction/compilation, whereas these arise while turning a
+/// compiled model plus a sample `x` into a [`ParameterizedCircuit`] or a
+/// [`ConcreteCircuit`]. Every `try_push` and `assign_parameters` call inside an
+/// `emit`/`template_for`/`bind` propagates its [`CircuitError`] here via `?`
+/// and the [`From`] impl below, so an internal bookkeeping bug surfaces as a
+/// typed error rather than a `panic!` crossing the FFI boundary.
+///
+/// [`ParameterizedCircuit`]: polypus_circuit::ParameterizedCircuit
+/// [`ConcreteCircuit`]: polypus_circuit::ConcreteCircuit
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QmlError {
+    /// A circuit operation failed (out-of-range qubit, non-finite angle, wrong
+    /// number of bound parameters, …). Wraps the underlying [`CircuitError`].
+    Circuit(CircuitError),
+    /// A sample passed to
+    /// [`template_for`](crate::CompiledModel::template_for) or
+    /// [`bind`](crate::CompiledModel::bind) has a feature count different from
+    /// the one the model was compiled for.
+    FeatureCountMismatch {
+        /// The feature count the model was compiled with.
+        expected: usize,
+        /// The length of the supplied sample.
+        got: usize,
+    },
+}
+
+impl fmt::Display for QmlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QmlError::Circuit(e) => write!(f, "circuit error: {e}"),
+            QmlError::FeatureCountMismatch { expected, got } => write!(
+                f,
+                "feature count mismatch: model expects {expected} feature(s) per sample, got {got}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for QmlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            QmlError::Circuit(e) => Some(e),
+            QmlError::FeatureCountMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<CircuitError> for QmlError {
+    fn from(e: CircuitError) -> Self {
+        QmlError::Circuit(e)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -140,5 +238,49 @@ mod tests {
     fn error_trait_is_implemented() {
         fn assert_error<E: std::error::Error>(_: &E) {}
         assert_error(&ValidationError::EmptyDataset);
+        assert_error(&QmlError::FeatureCountMismatch {
+            expected: 2,
+            got: 1,
+        });
+    }
+
+    #[test]
+    fn new_validation_variants_display_their_values() {
+        assert!(ValidationError::NoQubits.to_string().contains("qubit"));
+        assert!(ValidationError::EmptyModel.to_string().contains("layer"));
+        assert!(ValidationError::NoTrainableParams
+            .to_string()
+            .contains("trainable"));
+        let s = ValidationError::NotEnoughQubits {
+            needed: 4,
+            active: 3,
+        }
+        .to_string();
+        assert!(s.contains('4'));
+        assert!(s.contains('3'));
+    }
+
+    #[test]
+    fn qml_error_feature_count_mismatch_displays_values() {
+        let s = QmlError::FeatureCountMismatch {
+            expected: 5,
+            got: 2,
+        }
+        .to_string();
+        assert!(s.contains('5'));
+        assert!(s.contains('2'));
+    }
+
+    #[test]
+    fn qml_error_wraps_circuit_error_via_from() {
+        let inner = CircuitError::QubitOutOfRange {
+            qubit: 3,
+            num_qubits: 2,
+        };
+        let err: QmlError = inner.clone().into();
+        assert_eq!(err, QmlError::Circuit(inner.clone()));
+        // Display forwards the inner message; `source` exposes the cause.
+        assert!(err.to_string().contains(&inner.to_string()));
+        assert!(std::error::Error::source(&err).is_some());
     }
 }

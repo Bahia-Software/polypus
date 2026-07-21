@@ -11,4 +11,5 @@ description = "Pure-Rust quantum machine learning for Polypus: datasets, layered
 name = "polypus_qml"
 
 [dependencies]
+polypus-circuit = { workspace = true }
 log = { workspace = true }
