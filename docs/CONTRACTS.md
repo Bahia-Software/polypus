@@ -27,6 +27,7 @@ Rules of the road:
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
+| C-8 | QML problem ↔ oracle | `polypus-qml` `tests/contracts.rs` (+ oracle test in `polypus`, Phase 4) | ⏳ partial | — |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -313,3 +314,50 @@ anywhere in this project's CI or dev sandboxes (unlike Aer) — so, unlike the
 Aer path, it has never actually been run. Treat CUNQA's `seed` support as
 unverified until the CUNQA integration follow-up confirms it against a real
 install.
+
+---
+
+## C-8 · QML problem ↔ oracle (`polypus-qml`)
+
+This contract governs the seam between a [`QmlProblem`] (the trainable object
+`polypus-qml` produces) and the evaluation oracle that scores it. Like C-5, it
+is a **Rust-to-Rust** contract — no Python is involved — and it is what lets
+`crates/polypus`' native QML oracle drive the pure-Rust optimizers without
+either side knowing the other's internals.
+
+A `QmlProblem` bundles a compiled model, a training set and a loss, and exposes
+exactly the pair of operations an oracle needs: *bind these parameters into
+circuits* and *here are the counts, give me the fitness*. Everything between —
+backend, shots, batching, distribution — is `crates/polypus`' concern. The four
+guarantees:
+
+- **(a) `bind_batch` shape and order.** `bind_batch(θ)` returns exactly
+  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order** (in v1,
+  one circuit per training sample; when X/Y base grouping lands it becomes
+  sample-major × base-group-minor). Counts handed back to
+  `fitness_from_counts` must be in the **same order** — misaligned counts are a
+  corrupt result, so the order is specified and tested, never assumed.
+- **(b) Finite fitness or typed error.** `fitness_from_counts` returns a finite
+  `f64` (`= −mean_loss`, since the optimizers maximise) or a typed `QmlError` —
+  **never `NaN`**. `BinaryCrossEntropy` clamps its probability away from the
+  `log` singularities, and non-finite predictions are already impossible
+  upstream (the dataset and circuits reject them). Length-mismatched counts are
+  a typed `QmlError::CountsLengthMismatch`, not a panic.
+- **(c) Emitted circuits obey C-4 and C-2.** Every circuit `bind_batch`
+  produces satisfies C-4 (terminal measurement) and uses only the C-2 gate
+  vocabulary — guaranteed by construction, since the model emits exclusively
+  through `polypus-circuit`'s builder.
+- **(d) `num_params()` is stable and positive.** `num_params()` is fixed at
+  `compile` time, always `> 0` (a model with no trainable parameters is
+  rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
+  the optimizer consumes under C-5.
+
+**Enforcing test:** `crates/polypus-qml/tests/contracts.rs` covers the QML side
+today — `bind_batch` length/order, C-4/C-2 on every bound circuit, finite
+fitness, and `num_params()` matching the compiled model. The **oracle half**
+(the `NativeQmlOracle` in `crates/polypus` that wires this problem to the C-5
+optimizers, with the sentinel + `OracleErrorSlot` error path) arrives in Phase 4
+and is not yet present — hence this contract's ⏳ *partial* status. It flips to
+✅ when that oracle test lands.
+
+[`QmlProblem`]: ../crates/polypus-qml/src/problem.rs
