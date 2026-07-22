@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyModule};
+use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
@@ -8,16 +8,18 @@ pub mod circuit;
 pub mod de;
 pub mod logging;
 pub mod pso;
+pub mod qml;
 pub mod qng;
 
 use circuit::{statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
 use pso::PSO;
+use qml::qml_train;
 use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
-use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, QmlOracle, VqcOracle};
+use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, VqcOracle};
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
@@ -723,236 +725,6 @@ pub fn train<'py>(
     ))
 }
 
-/// QML entry point: train a data-encoding VQC where `feature_map` encodes each
-/// training sample and `ansatz` holds the trainable weights.
-///
-/// Internally, this function:
-/// 1. Composes `feature_map` and `ansatz` into a single circuit.
-/// 2. Pre-binds each row of `x_train` to the feature-map parameters, producing
-///    one partially-bound circuit per training sample.
-/// 3. Delegates to the chosen optimizer with `TrainMode::Qml`, so that for
-///    every candidate parameter vector θ the optimizer binds θ to all training
-///    circuits, runs them, and averages the expectation values into a single
-///    fitness value.
-///
-/// `seed` follows the same precedence as [`train`] and makes the optimizer's
-/// search reproducible; it returns a [`TrainResult`]. `qml.train` runs on the
-/// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
-/// is now seeded too (contract C-7), so a `qml.train` run is fully
-/// reproducible end-to-end given the same seed.
-///
-/// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
-/// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
-/// `TrainResult.id` differs from what was passed in and names the run's SLURM
-/// allocation / temp files / log stream (see #75).
-///
-/// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
-/// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
-/// finish, and an exception raised by `expectation_function` propagates as
-/// itself.
-///
-/// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
-/// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
-/// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
-///
-/// Example:
-///
-/// ```ignore
-///     result = polypus.qml.train(
-///         feature_map, ansatz, X_train,
-///         polypus.PSO(generations=50, population_size=20, bounds=(0, np.pi)),
-///         shots=1024, n_qpus=4, dimensions=12,
-///         expectation_function=my_loss,
-///         infrastructure="local", nodes=1, cores_per_qpu=2, id="qml_run",
-///     )
-/// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
-#[allow(clippy::too_many_arguments)]
-pub fn qml_train<'py>(
-    feature_map: Bound<'py, PyAny>,
-    ansatz: Bound<'py, PyAny>,
-    x_train: Bound<'py, PyAny>,
-    method: Bound<'py, PyAny>,
-    shots: u32,
-    n_qpus: u32,
-    dimensions: u32,
-    expectation_function: Bound<'py, PyAny>,
-    infrastructure: String,
-    nodes: u32,
-    cores_per_qpu: u32,
-    id: String,
-    sim_method: &str,
-    noise_model: Option<Bound<'py, PyAny>>,
-    backend: &str,
-    seed: Option<u64>,
-) -> PyResult<PyObject> {
-    validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
-    // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
-    // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
-    // below); this seed governs the optimizer's RNG and, since it's threaded
-    // into ExecutionConfig::seed below, Aer's shot sampling too.
-    let effective_seed = resolve_optimizer_seed(seed, method_seed(&method));
-    // QML composes Qiskit feature maps and ansätze, so it is inherently a
-    // Qiskit path; the native statevector backend cannot consume a Qiskit
-    // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
-    if is_native_backend(backend) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "the native 'polypus' backend is not supported for qml.train (feature maps \
-			 and ansätze are Qiskit circuits); use backend=\"aer\"",
-        ));
-    }
-    let py = feature_map.py();
-
-    // 1. Compose feature_map + ansatz
-    let composed = feature_map.call_method1("compose", (&ansatz,))?;
-
-    // 2. Add measurements if the composed circuit has no classical bits.
-    //    Qiskit's AerSimulator requires classical bits to return counts.
-    let num_clbits: usize = composed.getattr("num_clbits")?.extract()?;
-    if num_clbits == 0 {
-        composed.call_method0("measure_all")?;
-    }
-
-    // 3. Collect feature-map parameters in their canonical (sorted-by-name) order
-    let fm_params = feature_map.getattr("parameters")?;
-    let builtins = PyModule::import(py, "builtins")?;
-    let fm_params_list = builtins.call_method1("list", (&fm_params,))?;
-
-    // 4. Pre-bind each training sample to the feature-map parameters.
-    //    We pass a dict so Qiskit performs *partial* binding, leaving the ansatz
-    //    parameters unbound for the optimizer to fill in later.
-    let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
-    let mut qcs: Vec<Py<PyAny>> = Vec::new();
-    for row_result in x_train.try_iter()? {
-        let row = row_result?;
-        let param_dict = PyDict::new(py);
-        for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
-            param_dict.set_item(param?, val?)?;
-        }
-        let bound_qc = composed
-            .call_method("assign_parameters", (&param_dict,), Some(&kwargs_assign))?
-            .unbind();
-        qcs.push(bound_qc);
-    }
-
-    if qcs.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "x_train must contain at least one training sample",
-        ));
-    }
-
-    // QML composes Qiskit feature maps and ansätze, so it is inherently a
-    // Qiskit path (native backend already rejected above): `backend` can only be
-    // an Aer variant here.
-    let backend_config = build_backend_config(
-        &infrastructure,
-        backend,
-        sim_method,
-        noise_model.map(|nm| nm.unbind()),
-        nodes,
-        cores_per_qpu,
-    )?;
-    // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
-    // concurrent qml.train runs sharing the same `id` never collide on the
-    // SLURM family/allocation, temp files or log streams named by
-    // ExecutionConfig::id. The effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id);
-    let config = Arc::new(ExecutionConfig {
-        id: effective_id.clone(),
-        shots,
-        n_qpus,
-        infrastructure: infrastructure.clone(),
-        backend_config,
-        opt_level: OptLevel::default(),
-        // Consumed only by the native backend; ignored by Aer/CUNQA/QMIO. Set
-        // unconditionally so a native-backend training run reproduces exactly.
-        seed: Some(effective_seed),
-    });
-    let backend = Infrastructure::create_backend(&config)?;
-    // Shared error slot (see `train`): oracles record the first evaluation
-    // failure here and `finish_optimization` surfaces it after `optimize`.
-    let errors = OracleErrorSlot::new();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
-        training_circuits: qcs,
-        config: Arc::clone(&config),
-        backend,
-        expectation_fn: expectation_function.unbind(),
-        errors: errors.clone(),
-    });
-
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            // Release the GIL for the optimization (see `train` and
-            // docs/ENGINEERING.md §3): the QML workers re-acquire it per batch,
-            // and the main-thread signal check in the oracle keeps Ctrl+C prompt.
-            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-        );
-    }
-
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmPSO.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-        );
-    }
-
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
-            bounds: qng.bounds,
-            dimensions,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(py),
-                errors: errors.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmQNG.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-        );
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
-    ))
-}
-
 /// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
 /// process. A `Drop` must never panic, so a failed teardown (e.g. releasing a
 /// CUNQA SLURM allocation) is logged and counted rather than raised; this
@@ -978,14 +750,18 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
     m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
 
-    // qml submodule — exposes polypus.qml.train()
+    // qml submodule — exposes polypus.qml.train(), polypus.qml.Model and
+    // polypus.qml.Dataset
     let py = m.py();
-    let qml = PyModule::new(py, "qml")?;
-    qml.add_function(wrap_pyfunction!(qml_train, &qml)?)?;
-    m.add_submodule(&qml)?;
+    let qml_module = PyModule::new(py, "qml")?;
+    qml_module.add_function(wrap_pyfunction!(qml_train, &qml_module)?)?;
+    qml_module.add_class::<qml::Model>()?;
+    qml_module.add_class::<qml::Dataset>()?;
+    m.add_submodule(&qml_module)?;
     // Register in sys.modules so `import polypus.qml` also works
     let sys = PyModule::import(py, "sys")?;
-    sys.getattr("modules")?.set_item("polypus.qml", &qml)?;
+    sys.getattr("modules")?
+        .set_item("polypus.qml", &qml_module)?;
 
     Ok(())
 }
