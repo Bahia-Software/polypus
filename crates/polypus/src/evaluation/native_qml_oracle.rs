@@ -19,21 +19,25 @@ use std::sync::Arc;
 /// turns the counts into a single fitness ([`QmlProblem::fitness_from_counts`],
 /// `= −mean_loss`, since the optimizers maximise).
 ///
-/// ## Sequential evaluation (and why it is *not* `QmlOracle`'s `spawn_blocking`)
+/// ## Concurrent evaluation (mirroring `QmlOracle` to the letter)
 ///
-/// Like `QmlOracle` this runs N training circuits per candidate; unlike it, it
-/// evaluates candidates **sequentially**, mirroring [`VqcOracle`]'s structure
-/// rather than `QmlOracle`'s concurrent `spawn_blocking`. This is required for
-/// reproducibility: [`NativeStatevectorBackend`] seeds each circuit from a
-/// per-batch atomic counter (`base_seed + counter`), so counts are deterministic
-/// only when circuits are submitted in a deterministic order. `QmlOracle`'s
-/// concurrent workers race on that counter, which is harmless for Aer (its seed
-/// is not counter-based) but would make a native `qml.train` run non-reproducible
-/// — breaking contract C-7 and decision J of the phase-4 plan. `VqcOracle` (the
-/// existing native training path) is sequential for exactly this reason. The
-/// per-batch signal check that keeps the run interruptible is kept.
+/// Each candidate is evaluated concurrently via Tokio `spawn_blocking`, exactly
+/// like [`QmlOracle`](crate::evaluation::QmlOracle): one blocking task per
+/// candidate, the GIL released around the join (`allow_threads` + `block_on`),
+/// and a single [`Python::check_signals`] on the calling thread after the join
+/// so the run stays interruptible at per-batch granularity.
 ///
-/// [`VqcOracle`]: crate::evaluation::VqcOracle
+/// This was **not** always safe. An earlier revision fell back to sequential
+/// evaluation because [`NativeStatevectorBackend`] used to seed each circuit from
+/// a *shared atomic counter* advanced by call-arrival order; concurrent workers
+/// raced on that counter, so a native `qml.train` run was not reproducible
+/// byte-for-byte (breaking contract C-7). That root cause is now fixed at the
+/// backend: it derives every circuit's seed purely from the circuit's own content
+/// (an FNV-1a hash of its OpenQASM text) plus its batch index, with **no shared
+/// mutable state**. Concurrent candidates therefore can never race for seed
+/// assignment, so this oracle is free to reclaim the genuine cross-candidate
+/// parallelism that is the whole point of the native path.
+///
 /// [`NativeStatevectorBackend`]: crate::infrastructure::NativeStatevectorBackend
 pub struct NativeQmlOracle {
     /// The trainable problem: bind parameters in, get fitness out (C-8).
@@ -68,25 +72,59 @@ impl NativeQmlOracle {
     /// the trait method (which must return `Vec<f64>`) can record any error and
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        let mut results = Vec::with_capacity(candidates.len());
-        for theta in candidates {
-            // The entry point released the GIL around the whole `optimize()`
-            // (see `qml.train` and ENGINEERING §3). A native evaluation never
-            // touches Python, so a pending SIGINT (Ctrl+C) would otherwise go
-            // unseen until the run ends: reacquire the GIL only to turn it into a
-            // `KeyboardInterrupt` at this safe per-candidate boundary, then drop
-            // it again for the GIL-free work. The exception is carried verbatim
-            // via `EvaluationError::Python` and re-raised as itself by the entry
-            // point.
-            Python::with_gil(|py| py.check_signals()).map_err(EvaluationError::Python)?;
-            results.push(evaluate_native_qml_single(
-                &self.problem,
-                &self.config,
-                self.backend.as_ref(),
-                theta,
-            )?);
-        }
-        Ok(results)
+        let rt = crate::utils::tokio_runtime().map_err(|e| {
+            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to start the Tokio runtime for native QML evaluation: {e}"
+            )))
+        })?;
+
+        // Clone the problem once per batch into an `Arc` so every candidate's
+        // `spawn_blocking` task holds an owned, `'static`, cheaply-shared handle
+        // to it — the native counterpart to how `QmlOracle` hands its already-
+        // `Arc` config/backend (and `clone_ref`'d circuits) to its workers.
+        let problem = Arc::new(self.problem.clone());
+
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|theta| {
+                let problem = Arc::clone(&problem);
+                let config = Arc::clone(&self.config);
+                let backend = Arc::clone(&self.backend);
+                let theta = theta.clone();
+                rt.spawn_blocking(move || {
+                    evaluate_native_qml_single(&problem, &config, backend.as_ref(), &theta)
+                })
+            })
+            .collect();
+
+        // The calling thread entered from a PyO3 `#[pyfunction]` and still holds
+        // the GIL. A native evaluation never touches Python, but the entry point
+        // already released the GIL around the whole `optimize()` (ENGINEERING §3);
+        // release it again here while blocking on the workers so nothing waits on
+        // it. After the join, check signals **once** on this (main) thread — where
+        // `PyErr_CheckSignals` is not a no-op — so `qml.train` stays interruptible
+        // at per-batch granularity; a pending SIGINT (Ctrl+C) becomes a
+        // `KeyboardInterrupt` carried verbatim via `EvaluationError::Python`.
+        Python::with_gil(|py| {
+            let out = py.allow_threads(|| {
+                rt.block_on(async {
+                    let mut out = Vec::with_capacity(handles.len());
+                    for h in handles {
+                        // A `JoinError` means the worker task itself panicked;
+                        // turn it into a typed error rather than re-panicking.
+                        let single = h.await.map_err(|e| {
+                            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(
+                                format!("native QML evaluation task failed: {e}"),
+                            ))
+                        })?;
+                        out.push(single?);
+                    }
+                    Ok::<_, EvaluationError>(out)
+                })
+            })?;
+            py.check_signals().map_err(EvaluationError::Python)?;
+            Ok(out)
+        })
     }
 }
 
@@ -218,16 +256,19 @@ mod tests {
         );
     }
 
-    /// Reproducibility (C-7 / decision J): two runs of the same candidates on two
-    /// backends built with the same seed produce byte-identical fitnesses. This is
-    /// what the sequential evaluation buys — a concurrent oracle would race on the
-    /// backend's per-batch seed counter and fail this.
+    /// Reproducibility (C-7) under **concurrent** evaluation: two runs of the same
+    /// candidates on two backends built with the same seed produce byte-identical
+    /// fitnesses. Now that candidates are evaluated concurrently via
+    /// `spawn_blocking`, this is the real guard against the seed-assignment race —
+    /// if the backend still derived seeds from shared mutable state, the two runs
+    /// would diverge under nondeterministic worker scheduling. A larger candidate
+    /// set widens the window in which such a race could surface.
     #[test]
     fn evaluate_batch_is_reproducible_for_a_fixed_seed() {
         pyo3::prepare_freethreaded_python();
         let a = oracle(OracleErrorSlot::new());
         let b = oracle(OracleErrorSlot::new());
-        let candidates = vec![vec![0.1_f64; 8], vec![0.2_f64; 8], vec![0.3_f64; 8]];
+        let candidates: Vec<Vec<f64>> = (0..12).map(|k| vec![0.05 + 0.03 * k as f64; 8]).collect();
         assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
     }
 }
