@@ -8,15 +8,39 @@
 //! enumerable, serializable and FFI-friendly (design doc D1).
 
 mod ansatz;
+mod conv;
 mod encoders;
+mod pool;
 
 pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz};
+pub use conv::{ConvBlock, ConvLayer, Pairing};
 pub use encoders::AngleEncoder;
+pub use pool::{KeepRule, PoolBlock, PoolLayer};
 
 use polypus_circuit::ParameterizedCircuit;
 
 use crate::error::{QmlError, ValidationError};
 use crate::model::{LayerAllocation, LayerContext, LayerOps};
+
+/// Adjacent, non-overlapping pairs over `n` logical positions:
+/// `(0,1),(2,3),…` — pair `k` is `(2k, 2k+1)` for `k` in `0..n/2`. With `n`
+/// odd the last position is left unpaired (design doc §6.4). Shared by
+/// [`conv`] and [`pool`].
+pub(crate) fn even_pairs(n: usize) -> Vec<(usize, usize)> {
+    (0..n / 2).map(|k| (2 * k, 2 * k + 1)).collect()
+}
+
+/// Adjacent, non-overlapping pairs shifted by one over `n` logical positions:
+/// `(1,2),(3,4),…` — pair `k` is `(2k+1, 2k+2)` for `k` in `0..(n-1)/2`. The
+/// `n == 0` case is guarded explicitly so the `n - 1` never underflows; for
+/// `n == 1` the integer division already yields the empty range (design doc
+/// §6.4).
+pub(crate) fn odd_pairs(n: usize) -> Vec<(usize, usize)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    (0..(n - 1) / 2).map(|k| (2 * k + 1, 2 * k + 2)).collect()
+}
 
 /// The rotation axis of a single-qubit rotation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +67,10 @@ pub enum Layer {
     AngleEncoder(AngleEncoder),
     /// A hardware-efficient variational block (consumes `θ`).
     HardwareEfficient(HardwareEfficientAnsatz),
+    /// A convolution block with parameter sharing across pairs (consumes `θ`).
+    Conv(ConvLayer),
+    /// A unitary pooling block that shrinks the active set (consumes `θ`).
+    Pool(PoolLayer),
 }
 
 impl LayerOps for Layer {
@@ -50,6 +78,8 @@ impl LayerOps for Layer {
         match self {
             Layer::AngleEncoder(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
+            Layer::Conv(l) => l.plan(ctx),
+            Layer::Pool(l) => l.plan(ctx),
         }
     }
 
@@ -62,6 +92,8 @@ impl LayerOps for Layer {
         match self {
             Layer::AngleEncoder(l) => l.emit(qc, alloc, x),
             Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
+            Layer::Conv(l) => l.emit(qc, alloc, x),
+            Layer::Pool(l) => l.emit(qc, alloc, x),
         }
     }
 }

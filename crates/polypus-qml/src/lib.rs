@@ -24,15 +24,17 @@
 //! End-to-end training in pure Rust is now possible. On top of [`Dataset`]
 //! (validated construction, deterministic splits, feature scaling) and the
 //! layered model builder ([`QuantumModel`] → [`CompiledModel`]) with its
-//! [`Layer`] catalogue ([`AngleEncoder`], [`HardwareEfficientAnsatz`]), a model
+//! [`Layer`] catalogue ([`AngleEncoder`], [`HardwareEfficientAnsatz`],
+//! [`ConvLayer`], [`PoolLayer`]), a model
 //! now carries a [`Readout`] — Pauli [`Observable`]s plus a [`Decision`] — and
 //! a [`Loss`] closes the loop: [`QmlProblem`] bundles a compiled model, a
 //! training set and a loss into the pair of operations an optimizer oracle
 //! needs (bind parameters into circuits; turn measurement counts into a
 //! fitness), producing a fully trainable model without any Python in the loop.
 //!
-//! The convolution/pooling and amplitude-encoding layers, and the X/Y readout
-//! bases, arrive in later phases.
+//! The convolution ([`ConvLayer`]) and unitary-pooling ([`PoolLayer`]) layers
+//! that build QCNNs are now available. The amplitude-encoding layer, and the
+//! X/Y readout bases, arrive in later phases.
 
 mod dataset;
 mod error;
@@ -47,7 +49,8 @@ mod rng;
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
 pub use layers::{
-    AngleEncoder, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, RotationAxis,
+    AngleEncoder, ConvBlock, ConvLayer, Entanglement, Entangler, HardwareEfficientAnsatz, KeepRule,
+    Layer, Pairing, PoolBlock, PoolLayer, RotationAxis,
 };
 pub use loss::Loss;
 pub use model::{CompiledModel, QuantumModel};

@@ -32,7 +32,10 @@ use std::ops::Range;
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::{AngleEncoder, HardwareEfficientAnsatz, Layer, RotationAxis};
+use crate::layers::{
+    AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, Layer, PoolBlock, PoolLayer,
+    RotationAxis,
+};
 use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Readout, ResolvedReadout};
 
@@ -127,6 +130,18 @@ impl QuantumModel {
     /// repetitions.
     pub fn hardware_efficient(self, reps: usize) -> Self {
         self.layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(reps)))
+    }
+
+    /// Sugar for `.layer(Layer::Conv(ConvLayer::new(block)))`, with the default
+    /// [`Pairing::Alternating`](crate::Pairing).
+    pub fn conv(self, block: ConvBlock) -> Self {
+        self.layer(Layer::Conv(ConvLayer::new(block)))
+    }
+
+    /// Sugar for `.layer(Layer::Pool(PoolLayer::new(block)))`, with the default
+    /// [`KeepRule::EvenPositions`](crate::KeepRule).
+    pub fn pool(self, block: PoolBlock) -> Self {
+        self.layer(Layer::Pool(PoolLayer::new(block)))
     }
 
     /// Validate the model against a dataset of `num_features` features and
