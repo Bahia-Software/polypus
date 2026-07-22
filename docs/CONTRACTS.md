@@ -27,7 +27,7 @@ Rules of the road:
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
-| C-8 | QML problem ↔ oracle | `polypus-qml` `tests/contracts.rs` (+ oracle test in `polypus`, Phase 4) | ⏳ partial | — |
+| C-8 | QML problem ↔ oracle | `polypus-qml` `tests/contracts.rs` + `NativeQmlOracle` test in `polypus` | ✅ present | — |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -274,10 +274,24 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
   on the `DE`/`PSO`/`QNG` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
-  so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
-  Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
-  too, its reproducibility guarantee covers both the optimizer trajectory and
-  Aer's sampling.
+  so a `train()` run on any of them is reproducible end-to-end.
+
+  `qml.train` accepts **both** a Qiskit feature map and a native
+  `polypus.qml.Model`, dispatching on the type of its first argument: a `Model`
+  takes the native (pure-Rust) path, anything else the original Qiskit/Aer path.
+  The **native path is reproducible byte-for-byte on any simulated backend**
+  (`polypus`, `aer`, or `cunqa`) given the same seed: the `NativeQmlOracle`
+  builds circuits deterministically from the `QmlProblem` (C-8) and evaluates
+  candidates in a fixed order, and the simulated backend seeds its shot sampling
+  from that same resolved seed (the native `NativeStatevectorBackend` in-process,
+  Aer via `seed_simulator` forwarded across the C-1 seam). The **Qiskit path is
+  unchanged**, and with Aer's shot noise seeded too its reproducibility covers
+  both the optimizer trajectory and Aer's sampling. `qmio` still rejects an
+  explicit `seed` exactly as `run_quantum_circuit` does (real hardware cannot be
+  seeded) — unchanged by this phase. CUNQA's `seed` for the native path shares
+  Aer's shape on the Rust side but is **unverified**, for the same reason CUNQA
+  is flagged unverified elsewhere in this contract: the `cunqa` package isn't
+  installed anywhere this can be tested.
 
 ### The run manifest (return shapes)
 
@@ -352,12 +366,14 @@ guarantees:
   rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
   the optimizer consumes under C-5.
 
-**Enforcing test:** `crates/polypus-qml/tests/contracts.rs` covers the QML side
-today — `bind_batch` length/order, C-4/C-2 on every bound circuit, finite
-fitness, and `num_params()` matching the compiled model. The **oracle half**
-(the `NativeQmlOracle` in `crates/polypus` that wires this problem to the C-5
-optimizers, with the sentinel + `OracleErrorSlot` error path) arrives in Phase 4
-and is not yet present — hence this contract's ⏳ *partial* status. It flips to
-✅ when that oracle test lands.
+**Enforcing test:** `crates/polypus-qml/tests/contracts.rs` covers the QML side —
+`bind_batch` length/order, C-4/C-2 on every bound circuit, finite fitness, and
+`num_params()` matching the compiled model — and
+`crates/polypus/src/evaluation/native_qml_oracle.rs` covers the **oracle half**:
+the `NativeQmlOracle` that wires this problem to the C-5 optimizers returns one
+finite fitness per candidate, yields the finite `0.0` sentinel while recording
+the real failure in its shared `OracleErrorSlot` when a candidate cannot be
+evaluated, and is byte-reproducible for a fixed seed. The public-API path is
+exercised end-to-end from Python in `tests/python/test_qml_native.py`.
 
 [`QmlProblem`]: ../crates/polypus-qml/src/problem.rs
