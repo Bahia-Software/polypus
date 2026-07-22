@@ -9,6 +9,7 @@
 use std::fmt;
 
 use polypus_circuit::CircuitError;
+use polypus_qml::QmlError;
 use pyo3::PyErr;
 
 use crate::exceptions::EvaluationError as PyEvaluationError;
@@ -34,6 +35,10 @@ pub enum EvaluationError {
     /// A Python callback or conversion on the evaluation path raised. Carried
     /// verbatim so the original exception type is preserved across the FFI.
     Python(PyErr),
+    /// A native QML problem failed to bind a candidate into circuits or to turn
+    /// measurement counts into a fitness (contract C-8). Reached only on the
+    /// [`NativeQmlOracle`](crate::evaluation::NativeQmlOracle) path.
+    Qml(QmlError),
 }
 
 impl fmt::Display for EvaluationError {
@@ -42,6 +47,7 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Backend(err) => write!(f, "{err}"),
             EvaluationError::Binding(err) => write!(f, "circuit binding failed: {err}"),
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
+            EvaluationError::Qml(err) => write!(f, "QML evaluation error: {err}"),
         }
     }
 }
@@ -54,6 +60,12 @@ impl From<BackendError> for EvaluationError {
     }
 }
 
+impl From<QmlError> for EvaluationError {
+    fn from(err: QmlError) -> Self {
+        EvaluationError::Qml(err)
+    }
+}
+
 impl From<EvaluationError> for PyErr {
     fn from(err: EvaluationError) -> PyErr {
         match err {
@@ -61,6 +73,9 @@ impl From<EvaluationError> for PyErr {
             EvaluationError::Binding(circuit_err) => {
                 PyEvaluationError::new_err(circuit_err.to_string())
             }
+            // A native QML failure maps to the same evaluation exception as a
+            // native binding failure — both are Rust-side evaluation errors.
+            EvaluationError::Qml(qml_err) => PyEvaluationError::new_err(qml_err.to_string()),
             // Preserve the original Python exception type raised by the callback.
             EvaluationError::Python(py_err) => py_err,
         }

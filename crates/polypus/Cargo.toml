@@ -32,6 +32,7 @@ trace-logs = ["polypus-logger/trace-logs"]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
+polypus-qml = { workspace = true }
 polypus-logger = { workspace = true }
 pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"

@@ -1,8 +1,10 @@
 pub mod error;
+pub mod native_qml_oracle;
 pub mod qml_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
+pub use native_qml_oracle::NativeQmlOracle;
 pub use qml_oracle::QmlOracle;
 pub use vqc_oracle::VqcOracle;
 
