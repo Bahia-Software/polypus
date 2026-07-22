@@ -282,9 +282,15 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   The **native path is reproducible byte-for-byte on any simulated backend**
   (`polypus`, `aer`, or `cunqa`) given the same seed: the `NativeQmlOracle`
   builds circuits deterministically from the `QmlProblem` (C-8) and evaluates
-  candidates in a fixed order, and the simulated backend seeds its shot sampling
-  from that same resolved seed (the native `NativeStatevectorBackend` in-process,
-  Aer via `seed_simulator` forwarded across the C-1 seam). The **Qiskit path is
+  candidates **concurrently** (one Tokio `spawn_blocking` task per candidate).
+  Reproducibility no longer depends on the order in which candidates are
+  evaluated, because `NativeStatevectorBackend` derives each circuit's shot-
+  sampling seed **solely from that circuit's own content** (an FNV-1a hash of its
+  OpenQASM 2.0 text) plus its position within a batch, added to the resolved base
+  seed — never from any mutable state shared between calls. Concurrent candidates
+  therefore can never race for seed assignment. On Aer the same resolved seed is
+  forwarded across the C-1 seam to `seed_simulator`, which carries no shared state
+  of its own. The **Qiskit path is
   unchanged**, and with Aer's shot noise seeded too its reproducibility covers
   both the optimizer trajectory and Aer's sampling. `qmio` still rejects an
   explicit `seed` exactly as `run_quantum_circuit` does (real hardware cannot be
