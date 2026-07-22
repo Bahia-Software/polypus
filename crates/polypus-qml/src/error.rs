@@ -122,6 +122,13 @@ pub enum ValidationError {
         /// The number of active qubits available to the readout.
         num_active: usize,
     },
+    /// A pooling layer needs at least two active qubits to form a pair, but
+    /// fewer are available at its position in the model. Raised by
+    /// [`PoolLayer`](crate::PoolLayer)'s `plan`.
+    PoolNeedsTwoQubits {
+        /// The number of active qubits available at this position.
+        active: usize,
+    },
     /// A [`PauliString`](crate::PauliString) was constructed with two factors
     /// on the same qubit position. Positions must be unique.
     DuplicatePauliPosition {
@@ -237,6 +244,10 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "readout observable references logical qubit {position}, but only {num_active} qubit(s) are active"
+            ),
+            ValidationError::PoolNeedsTwoQubits { active } => write!(
+                f,
+                "pooling layer needs at least 2 active qubit(s) but only {active} are available"
             ),
             ValidationError::DuplicatePauliPosition { position } => write!(
                 f,
@@ -476,6 +487,13 @@ mod tests {
         }
         .to_string()
         .contains("Argmax"));
+    }
+
+    #[test]
+    fn pool_needs_two_qubits_displays_its_value() {
+        assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
+            .to_string()
+            .contains('1'));
     }
 
     #[test]
