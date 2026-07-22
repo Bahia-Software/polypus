@@ -14,18 +14,23 @@ use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::StatevectorSimulator;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
 ///
-/// Sampling is seeded from an explicit base seed plus a per-circuit counter, so
-/// two backends built with the same seed reproduce the same counts while
-/// distinct circuits in a batch still get independent shot noise. The seed is
-/// supplied by the caller (`ExecutionConfig::seed`, resolved at the
-/// Python-facing boundary from a user value or an OS-entropy draw) and is
-/// **fully decoupled from the run `id`**: an omitted seed yields genuine,
-/// independent noise across runs instead of the `id`-derived repetition that was
-/// previously mistaken for shot noise.
+/// Sampling is seeded from an explicit base seed plus, per circuit, a hash of
+/// the circuit's *own content* (its OpenQASM 2.0 text) and its position within
+/// the submitted batch — never from any mutable state shared between calls. Two
+/// backends built with the same seed reproduce the same counts, while distinct
+/// circuits in a batch (e.g. the same ansatz bound to different `θ`) still get
+/// independent shot noise because their content differs. Crucially, this makes
+/// [`run_circuits`](QuantumBackend::run_circuits) **safe to call concurrently on
+/// a shared instance**: each circuit's seed is a pure function of its content and
+/// its index, so overlapping calls can never race for seed assignment (the bug
+/// that a previous shared atomic counter had). The seed is supplied by the caller
+/// (`ExecutionConfig::seed`, resolved at the Python-facing boundary from a user
+/// value or an OS-entropy draw) and is **fully decoupled from the run `id`**: an
+/// omitted seed yields genuine, independent noise across runs instead of the
+/// `id`-derived repetition that was previously mistaken for shot noise.
 ///
 /// The backend *composes* a [`Transpiler`] (the rewriting *strategy*) and runs
 /// it on every native circuit before simulating, passing the per-run
@@ -36,7 +41,40 @@ pub struct NativeStatevectorBackend {
     simulator: StatevectorSimulator,
     transpiler: Box<dyn Transpiler>,
     base_seed: u64,
-    counter: AtomicU64,
+}
+
+/// FNV-1a hash of `bytes`, used **only** to derive a per-circuit sampling seed
+/// from the circuit's own content — it is neither a general-purpose PRNG nor a
+/// hash-map hasher.
+///
+/// Written out by hand (offset basis `0xcbf29ce484222325`, prime
+/// `0x100000001b3`, XOR-then-multiply per byte) rather than reaching for
+/// `std::hash::DefaultHasher` because the standard library does **not** guarantee
+/// `DefaultHasher` yields the same value across compiler versions — the very
+/// reproducibility hazard that led `polypus-qml` to ship its own `SplitMix64`
+/// instead of `rand` (crate decision D6). FNV-1a is a fixed, public-domain
+/// algorithm, so the seeds derived here stay byte-stable forever.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The content key a circuit's seed is derived from: its own textual form, so
+/// the seed depends only on the circuit itself and never on shared state.
+///
+/// A [`BoundCircuit::Qiskit`] never reaches here — [`simulate_one`] rejects that
+/// variant before a seed is ever needed — so its empty key is unreachable in
+/// practice and only present to keep the match total.
+fn seed_content_key(circuit: &BoundCircuit) -> String {
+    match circuit {
+        BoundCircuit::Native(cc) => cc.to_qasm2(),
+        BoundCircuit::Qasm2(s) => s.clone(),
+        BoundCircuit::Qiskit(_) => String::new(),
+    }
 }
 
 impl NativeStatevectorBackend {
@@ -56,7 +94,6 @@ impl NativeStatevectorBackend {
             simulator: StatevectorSimulator::new(),
             transpiler,
             base_seed: seed,
-            counter: AtomicU64::new(0),
         }
     }
 
@@ -127,13 +164,18 @@ impl QuantumBackend for NativeStatevectorBackend {
         let opts = TranspileOptions {
             level: config.opt_level,
         };
-        // Reserve a contiguous block of seeds for this batch so each circuit is
-        // sampled independently and deterministically, regardless of order.
-        let start = self.counter.fetch_add(qcs.len() as u64, Ordering::Relaxed);
+        // Derive each circuit's seed from its own content plus its batch
+        // position — no shared mutable state — so distinct circuits sample
+        // independently and deterministically while concurrent calls on this
+        // shared instance can never race for seed assignment.
         qcs.iter()
             .enumerate()
             .map(|(i, qc)| {
-                let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
+                let content = seed_content_key(qc);
+                let seed = self
+                    .base_seed
+                    .wrapping_add(fnv1a(content.as_bytes()))
+                    .wrapping_add(i as u64);
                 self.simulate_one(qc, config.shots, seed, &opts)
             })
             .collect()
@@ -145,7 +187,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::OptLevel;
     use polypus_circuit::{GateInstruction, ParameterizedCircuit};
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
 
     fn bell() -> ConcreteCircuit {
@@ -393,6 +435,66 @@ mod tests {
         assert_ne!(
             a, b,
             "no-seed runs with the same id must produce independent noise"
+        );
+    }
+
+    /// Regression for the seed-assignment race (root cause of the phase-4
+    /// emergency sequential fallback): many threads call `run_circuits`
+    /// **concurrently on the same backend instance**, each with a distinct
+    /// circuit (an `Ry` at a thread-specific angle, standing in for distinct
+    /// optimizer candidates). Because every circuit's seed is derived purely
+    /// from its own content plus its batch index — with no shared mutable state
+    /// — the full set of results must be byte-identical across two independent
+    /// runs at the same base seed, no matter how the OS scheduled the threads.
+    /// With the old shared atomic counter, the seed each circuit received
+    /// depended on the (racy) arrival order, so the two runs would diverge.
+    #[test]
+    fn concurrent_run_circuits_on_shared_instance_is_reproducible() {
+        fn candidate(angle: f64) -> BoundCircuit {
+            BoundCircuit::Native(
+                ParameterizedCircuit::new(1)
+                    .ry(0, angle)
+                    .measure_all()
+                    .assign_parameters(&[])
+                    .unwrap(),
+            )
+        }
+
+        // Each element is one thread's distinct candidate circuit.
+        let angles: Vec<f64> = (0..8).map(|k| 0.1 + 0.37 * k as f64).collect();
+
+        // Run every candidate concurrently on one shared backend, collecting
+        // (angle-index, counts) so the outcome is order-independent.
+        let run_once = || -> Vec<(usize, HashMap<String, u64>)> {
+            let backend = NativeStatevectorBackend::new(2024);
+            let cfg = config_with(OptLevel::default());
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = angles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &angle)| {
+                        let backend = &backend;
+                        let cfg = &cfg;
+                        scope.spawn(move || {
+                            let counts = backend
+                                .run_circuits(&[candidate(angle)], cfg)
+                                .unwrap()
+                                .pop()
+                                .unwrap();
+                            (i, counts)
+                        })
+                    })
+                    .collect();
+                let mut out: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                out.sort_by_key(|(i, _)| *i);
+                out
+            })
+        };
+
+        assert_eq!(
+            run_once(),
+            run_once(),
+            "concurrent runs on a shared instance must be byte-identical despite thread scheduling"
         );
     }
 }
