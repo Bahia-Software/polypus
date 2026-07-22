@@ -7,23 +7,34 @@ use std::sync::Arc;
 
 /// Oracle for native (pure-Rust) QML training (contract C-8).
 ///
-/// This is the native counterpart to [`QmlOracle`](crate::evaluation::QmlOracle):
-/// where `QmlOracle` holds Qiskit `QuantumCircuit`s and computes expectations
-/// through Python, this holds a [`QmlProblem`] — a compiled model, a training
-/// set and a loss produced entirely by `polypus-qml` — and lets it bind
-/// parameters and score counts in pure Rust. It works on **any** simulated
-/// backend: the native statevector simulator (GIL-free end to end) or, via the
-/// C-1 seam, Aer / CUNQA's simulated QPUs.
+/// It holds a [`QmlProblem`] — a compiled model, a training set and a loss
+/// produced entirely by `polypus-qml` — and lets it bind parameters and score
+/// counts in pure Rust, where [`QmlOracle`](crate::evaluation::QmlOracle) holds
+/// Qiskit `QuantumCircuit`s and computes expectations through Python. It works on
+/// **any** simulated backend: the native statevector simulator (GIL-free end to
+/// end) or, via the C-1 seam, Aer / CUNQA's simulated QPUs.
 ///
-/// For each candidate `θ` it binds `θ` to every training circuit
+/// For each candidate `θ` it binds `θ` into one circuit per training sample
 /// ([`QmlProblem::bind_batch`]), runs them (batched by `max_batch_size`), and
 /// turns the counts into a single fitness ([`QmlProblem::fitness_from_counts`],
 /// `= −mean_loss`, since the optimizers maximise).
 ///
-/// Each candidate is evaluated concurrently via Tokio `spawn_blocking`, mirroring
-/// `QmlOracle`. On the native backend that parallelism is genuine (no GIL); on a
-/// Python backend the GIL serialises the actual simulation calls, exactly as it
-/// does for `QmlOracle`.
+/// ## Sequential evaluation (and why it is *not* `QmlOracle`'s `spawn_blocking`)
+///
+/// Like `QmlOracle` this runs N training circuits per candidate; unlike it, it
+/// evaluates candidates **sequentially**, mirroring [`VqcOracle`]'s structure
+/// rather than `QmlOracle`'s concurrent `spawn_blocking`. This is required for
+/// reproducibility: [`NativeStatevectorBackend`] seeds each circuit from a
+/// per-batch atomic counter (`base_seed + counter`), so counts are deterministic
+/// only when circuits are submitted in a deterministic order. `QmlOracle`'s
+/// concurrent workers race on that counter, which is harmless for Aer (its seed
+/// is not counter-based) but would make a native `qml.train` run non-reproducible
+/// — breaking contract C-7 and decision J of the phase-4 plan. `VqcOracle` (the
+/// existing native training path) is sequential for exactly this reason. The
+/// per-batch signal check that keeps the run interruptible is kept.
+///
+/// [`VqcOracle`]: crate::evaluation::VqcOracle
+/// [`NativeStatevectorBackend`]: crate::infrastructure::NativeStatevectorBackend
 pub struct NativeQmlOracle {
     /// The trainable problem: bind parameters in, get fitness out (C-8).
     pub problem: QmlProblem,
@@ -57,72 +68,35 @@ impl NativeQmlOracle {
     /// the trait method (which must return `Vec<f64>`) can record any error and
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        let rt = crate::utils::tokio_runtime().map_err(|e| {
-            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "failed to start the Tokio runtime for native QML evaluation: {e}"
-            )))
-        })?;
-
-        // Share the problem across tasks by reference-counting it once: `QmlProblem`
-        // is pure Rust (no `Py<T>`), so unlike `QmlOracle` there is nothing to
-        // clone under the GIL — a single `Arc` bump per candidate suffices.
-        let problem = Arc::new(self.problem.clone());
-        let handles: Vec<_> = candidates
-            .iter()
-            .map(|theta| {
-                let problem = Arc::clone(&problem);
-                let config = Arc::clone(&self.config);
-                let backend = Arc::clone(&self.backend);
-                let theta = theta.clone();
-
-                rt.spawn_blocking(move || {
-                    evaluate_native_qml_single(&problem, &config, backend.as_ref(), &theta)
-                })
-            })
-            .collect();
-
-        // The calling thread entered Rust from a PyO3 `#[pyfunction]` and still
-        // holds the GIL. A `spawn_blocking` worker on a Python backend (Aer/CUNQA)
-        // needs to acquire the GIL to run circuits, so we MUST release it here
-        // while blocking on the workers — otherwise this thread holds the GIL
-        // inside `block_on` while a worker waits for it: a deadlock. (On the
-        // native backend the workers never touch the GIL, but releasing it is
-        // harmless and keeps the two oracle paths identical.)
-        Python::with_gil(|py| {
-            let out = py.allow_threads(|| {
-                rt.block_on(async {
-                    let mut out = Vec::with_capacity(handles.len());
-                    for h in handles {
-                        // A `JoinError` means the worker task itself panicked;
-                        // turn it into a typed error rather than re-panicking.
-                        let single = h.await.map_err(|e| {
-                            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(
-                                format!("native QML evaluation task failed: {e}"),
-                            ))
-                        })?;
-                        out.push(single?);
-                    }
-                    Ok::<_, EvaluationError>(out)
-                })
-            })?;
-            // The workers ran off the main thread, where `PyErr_CheckSignals` is
-            // a no-op, so a pending SIGINT (Ctrl+C) was not seen there. Check it
-            // here on the calling (main) thread so `qml.train` stays interruptible
-            // at the same per-batch granularity as `QmlOracle`; the
-            // KeyboardInterrupt is carried verbatim via `EvaluationError::Python`.
-            py.check_signals().map_err(EvaluationError::Python)?;
-            Ok(out)
-        })
+        let mut results = Vec::with_capacity(candidates.len());
+        for theta in candidates {
+            // The entry point released the GIL around the whole `optimize()`
+            // (see `qml.train` and ENGINEERING §3). A native evaluation never
+            // touches Python, so a pending SIGINT (Ctrl+C) would otherwise go
+            // unseen until the run ends: reacquire the GIL only to turn it into a
+            // `KeyboardInterrupt` at this safe per-candidate boundary, then drop
+            // it again for the GIL-free work. The exception is carried verbatim
+            // via `EvaluationError::Python` and re-raised as itself by the entry
+            // point.
+            Python::with_gil(|py| py.check_signals()).map_err(EvaluationError::Python)?;
+            results.push(evaluate_native_qml_single(
+                &self.problem,
+                &self.config,
+                self.backend.as_ref(),
+                theta,
+            )?);
+        }
+        Ok(results)
     }
 }
 
 /// Evaluate one candidate `theta` against the whole training set.
 ///
-/// Binds `theta` into one circuit per training sample ([`QmlProblem::bind_batch`]),
-/// runs them in batches of `max_batch_size`, reassembles the counts in the same
-/// (stable, sample-major) order, and returns the fitness computed by
-/// [`QmlProblem::fitness_from_counts`]. Any failure is returned as an
-/// [`EvaluationError`] instead of panicking.
+/// Binds `theta` into one native circuit per training sample
+/// ([`QmlProblem::bind_batch`]), runs them in batches of `max_batch_size`,
+/// reassembles the counts in the same (stable, sample-major) order, and returns
+/// the fitness computed by [`QmlProblem::fitness_from_counts`]. Any failure is
+/// returned as an [`EvaluationError`] instead of panicking.
 fn evaluate_native_qml_single(
     problem: &QmlProblem,
     config: &ExecutionConfig,
@@ -204,9 +178,9 @@ mod tests {
     /// records no error (contract C-5 length + C-8 (b) finiteness, via the oracle).
     #[test]
     fn evaluate_batch_returns_one_finite_fitness_per_candidate() {
-        // `evaluate_batch` acquires the GIL internally (like `QmlOracle`); the
-        // interpreter must exist, but no Qiskit/Aer/`polypus_python` is involved —
-        // the whole path is native (ENGINEERING §3).
+        // `evaluate_batch` acquires the GIL only for the per-candidate signal
+        // check; the interpreter must exist, but no Qiskit/Aer/`polypus_python`
+        // is involved — the whole evaluation is native (ENGINEERING §3).
         pyo3::prepare_freethreaded_python();
         let errors = OracleErrorSlot::new();
         let oracle = oracle(errors.clone());
@@ -242,5 +216,18 @@ mod tests {
             ),
             "unexpected error variant: {err:?}"
         );
+    }
+
+    /// Reproducibility (C-7 / decision J): two runs of the same candidates on two
+    /// backends built with the same seed produce byte-identical fitnesses. This is
+    /// what the sequential evaluation buys — a concurrent oracle would race on the
+    /// backend's per-batch seed counter and fail this.
+    #[test]
+    fn evaluate_batch_is_reproducible_for_a_fixed_seed() {
+        pyo3::prepare_freethreaded_python();
+        let a = oracle(OracleErrorSlot::new());
+        let b = oracle(OracleErrorSlot::new());
+        let candidates = vec![vec![0.1_f64; 8], vec![0.2_f64; 8], vec![0.3_f64; 8]];
+        assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
     }
 }
