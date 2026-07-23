@@ -573,7 +573,6 @@ if __name__ == "__main__":
         variance_fn = make_variance_function(graph, n_qubits, N_SHOTS)
 
         QNG_LEARNING_RATE = 0.1
-        QNG_STEP_SIZE = 0.1
         QNG_TIKHONOV_REG = 0.05
 
         tic = time.time()
@@ -584,7 +583,6 @@ if __name__ == "__main__":
                 max_iters=MAX_GENERATIONS,
                 bounds=(0.0, np.pi),
                 learning_rate=QNG_LEARNING_RATE,
-                finite_difference_step=QNG_STEP_SIZE,
                 tikhonov_reg=QNG_TIKHONOV_REG,
             ),
             shots=N_SHOTS,
