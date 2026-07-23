@@ -553,24 +553,14 @@ fn qml_train_qiskit(
     let fm_params = feature_map.getattr("parameters")?;
     let builtins = PyModule::import(py, "builtins")?;
     let fm_params_list = builtins.call_method1("list", (&fm_params,))?;
-    let num_fm_params = fm_params_list.len()?;
 
     // 4. Pre-bind each training sample to the feature-map parameters.
     //    We pass a dict so Qiskit performs *partial* binding, leaving the ansatz
     //    parameters unbound for the optimizer to fill in later.
     let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
     let mut qcs: Vec<Py<PyAny>> = Vec::new();
-    for (row_index, row_result) in x_train.try_iter()?.enumerate() {
+    for row_result in x_train.try_iter()? {
         let row = row_result?;
-        let row_len = row.len()?;
-        // Reject a row/feature-map width mismatch upfront with a clear error,
-        // rather than silently dropping or leaving parameters unbound (#79).
-        if row_len != num_fm_params {
-            return Err(PyValueError::new_err(format!(
-                "x_train row {row_index} has {row_len} features, but the feature map expects \
-                 {num_fm_params}"
-            )));
-        }
         let param_dict = PyDict::new(py);
         for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
             param_dict.set_item(param?, val?)?;
