@@ -104,14 +104,23 @@ impl QmlProblem {
         Ok(circuits)
     }
 
-    /// Turn per-sample measurement `counts` (in the same order as
-    /// [`bind_batch`](Self::bind_batch)) into a fitness `= −mean_loss`.
+    /// The per-sample raw expectation `⟨O₀⟩` (the readout's first observable)
+    /// for each sample's measurement `counts`, in the same (stable, sample-major)
+    /// order as [`bind_batch`](Self::bind_batch).
     ///
-    /// The loss always operates on the raw `⟨O₀⟩` (the readout's first
-    /// observable), never on the [`Decision`] output (design doc §8). Returns a
-    /// finite `f64` for valid counts, or a typed [`QmlError`] — never `NaN`
-    /// (contract C-8).
-    pub fn fitness_from_counts(&self, counts: &[HashMap<String, u64>]) -> Result<f64, QmlError> {
+    /// This is the shared building block of both [`fitness_from_counts`] (which
+    /// composes a [`Loss`] over these) and [`param_gradient`] (which shifts
+    /// them): every loss, and the exact parameter-shift gradient, operates on
+    /// these raw expectations, never on the [`Decision`] output (design doc §8).
+    /// The `counts` length is checked exactly as `fitness_from_counts` does,
+    /// yielding [`QmlError::CountsLengthMismatch`] on a mismatch.
+    ///
+    /// [`fitness_from_counts`]: Self::fitness_from_counts
+    /// [`param_gradient`]: Self::param_gradient
+    pub fn expectations_from_counts(
+        &self,
+        counts: &[HashMap<String, u64>],
+    ) -> Result<Vec<f64>, QmlError> {
         if counts.len() != self.templates.len() {
             return Err(QmlError::CountsLengthMismatch {
                 expected: self.templates.len(),
@@ -119,15 +128,102 @@ impl QmlProblem {
             });
         }
         let observable = &self.model.resolved_readout().observables()[0];
+        counts
+            .iter()
+            .map(|sample_counts| observable.expectation(sample_counts))
+            .collect()
+    }
+
+    /// Turn per-sample measurement `counts` (in the same order as
+    /// [`bind_batch`](Self::bind_batch)) into a fitness `= −mean_loss`.
+    ///
+    /// A thin layer over [`expectations_from_counts`](Self::expectations_from_counts):
+    /// it evaluates the [`Loss`] against each raw `⟨O₀⟩` and averages. The loss
+    /// always operates on the raw expectation, never on the [`Decision`] output
+    /// (design doc §8). Returns a finite `f64` for valid counts, or a typed
+    /// [`QmlError`] — never `NaN` (contract C-8).
+    pub fn fitness_from_counts(&self, counts: &[HashMap<String, u64>]) -> Result<f64, QmlError> {
+        let expectations = self.expectations_from_counts(counts)?;
         let labels = self.train.labels();
-        let mut total = 0.0;
-        for (i, sample_counts) in counts.iter().enumerate() {
-            let expectation = observable.expectation(sample_counts)?;
-            total += self.loss.evaluate(expectation, labels[i]);
-        }
+        let total: f64 = expectations
+            .iter()
+            .zip(labels)
+            .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
+            .sum();
         // `counts.len() == templates.len() >= 1` (the dataset is non-empty), so
         // the mean is well defined and finite.
-        Ok(-total / counts.len() as f64)
+        Ok(-total / expectations.len() as f64)
+    }
+
+    /// The exact parameter-shift gradient of the fitness with respect to **one**
+    /// trainable parameter (design doc §17).
+    ///
+    /// "Exact" here means an exact mathematical identity in the noiseless limit;
+    /// every argument is built from finite-shot `counts`, so the returned value
+    /// is an unbiased *estimator* of the true gradient component, not a
+    /// noise-free number.
+    ///
+    /// The fitness composes a nonlinear [`Loss`] over the raw per-sample
+    /// expectations, so the shift rule cannot be applied to the aggregate
+    /// fitness directly — it needs the chain rule. Given the base expectations
+    /// `⟨O_i⟩(θ)`, and the counts at `θ ± π/2·e_k` (the parameter shifted by
+    /// `±π/2`), this returns
+    ///
+    /// `−(1/n) · Σᵢ Loss'(⟨O_i⟩, yᵢ) · (⟨O_i⟩(θ+) − ⟨O_i⟩(θ−)) / 2`
+    ///
+    /// where `(⟨O_i⟩(θ+) − ⟨O_i⟩(θ−))/2` is the parameter-shift derivative of
+    /// the raw expectation (exact for the `±1`-eigenvalue generators this crate
+    /// uses) and `Loss'` is [`Loss::gradient`]. The leading `−(1/n)` mirrors
+    /// `fitness_from_counts`' `−mean_loss` so the sign convention agrees: higher
+    /// fitness is better, and this is `∂fitness/∂θ_k` (the ascent direction).
+    ///
+    /// Length validation, in this order, each against
+    /// [`num_circuits`](Self::num_circuits): `plus_counts`, then `minus_counts`,
+    /// then `base_expectations` — the first mismatch returns
+    /// [`QmlError::CountsLengthMismatch`], deterministically, even if several
+    /// disagree at once.
+    pub fn param_gradient(
+        &self,
+        base_expectations: &[f64],
+        plus_counts: &[HashMap<String, u64>],
+        minus_counts: &[HashMap<String, u64>],
+    ) -> Result<f64, QmlError> {
+        let n = self.num_circuits();
+        if plus_counts.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: plus_counts.len(),
+            });
+        }
+        if minus_counts.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: minus_counts.len(),
+            });
+        }
+        if base_expectations.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: base_expectations.len(),
+            });
+        }
+
+        // Both helper calls re-check their own length against `num_circuits()`,
+        // so the checks above are redundant for `plus`/`minus` — but they keep
+        // the documented, deterministic error ordering and guard `base` (which
+        // never reaches the helper) before the parallel iteration below.
+        let plus_expectations = self.expectations_from_counts(plus_counts)?;
+        let minus_expectations = self.expectations_from_counts(minus_counts)?;
+        let labels = self.train.labels();
+
+        let total: f64 = (0..n)
+            .map(|i| {
+                self.loss.gradient(base_expectations[i], labels[i])
+                    * (plus_expectations[i] - minus_expectations[i])
+                    / 2.0
+            })
+            .sum();
+        Ok(-total / n as f64)
     }
 
     /// Infer a prediction from one sample's `counts`, applying the readout's
@@ -263,6 +359,133 @@ mod tests {
 
         // Wrong number of counts maps is a typed error.
         let err = problem.fitness_from_counts(&c[..1]).unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    /// A 1-qubit `⟨Z₀⟩` model reading `Loss::SquaredError`, used by the
+    /// expectation/gradient tests where the bitstring width is 1 (`"0"`/`"1"`)
+    /// so synthetic counts map to exact expectation values.
+    fn one_qubit_z0_problem(labels: &[f64]) -> QmlProblem {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let model = QuantumModel::new(1)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(1)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = labels.iter().map(|_| vec![0.3]).collect();
+        let ds = Dataset::from_rows(&rows, labels).unwrap();
+        QmlProblem::new(model, ds, Loss::SquaredError).unwrap()
+    }
+
+    #[test]
+    fn expectations_from_counts_reads_raw_z0_and_checks_length() {
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        // "0":3,"1":1 → (3−1)/4 = +0.5 ; "0":1,"1":3 → −0.5.
+        let c = vec![counts(&[("0", 3), ("1", 1)]), counts(&[("0", 1), ("1", 3)])];
+        let exps = problem.expectations_from_counts(&c).unwrap();
+        assert!((exps[0] - 0.5).abs() < 1e-12);
+        assert!((exps[1] + 0.5).abs() < 1e-12);
+
+        let err = problem.expectations_from_counts(&c[..1]).unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn fitness_from_counts_is_neg_mean_loss_over_expectations() {
+        // The refactor makes `fitness_from_counts` a thin layer over
+        // `expectations_from_counts`; confirm the observable behaviour is
+        // unchanged by checking it equals `−mean(SquaredError(⟨O_i⟩, yᵢ))`
+        // recomputed independently from the same raw expectations.
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let c = vec![counts(&[("0", 3), ("1", 1)]), counts(&[("0", 1), ("1", 3)])];
+        let exps = problem.expectations_from_counts(&c).unwrap();
+        // SquaredError: (0.5−1)² = 0.25 ; (−0.5−(−1))² = 0.25 → mean 0.25.
+        let expected = -(0.25 + 0.25) / 2.0;
+        let fitness = problem.fitness_from_counts(&c).unwrap();
+        assert!((fitness - expected).abs() < 1e-12, "fitness={fitness}");
+        // And it must agree with a fully independent recomputation from `exps`.
+        let manual: f64 = exps
+            .iter()
+            .zip([1.0, -1.0])
+            .map(|(&e, y)| (e - y).powi(2))
+            .sum::<f64>()
+            / exps.len() as f64;
+        assert!((fitness + manual).abs() < 1e-12);
+    }
+
+    #[test]
+    fn param_gradient_matches_hand_computation() {
+        // Two samples, ⟨Z₀⟩, SquaredError. Feed synthetic counts whose
+        // (a−b)/(a+b) reproduce chosen exact expectations, then check
+        // param_gradient equals the by-hand chain-rule value.
+        //
+        //   sample 0 (y=+1): base=0.5, plus=+1.0, minus=0.0
+        //   sample 1 (y=−1): base=−0.5, plus=0.0, minus=+1.0
+        //
+        //   Loss'(pred,y)=2(pred−y); shiftᵢ=(plus−minus)/2
+        //   s0: 2(0.5−1)=−1 ; shift=(1−0)/2=0.5     → −0.5
+        //   s1: 2(−0.5+1)=+1 ; shift=(0−1)/2=−0.5    → −0.5
+        //   grad = −(1/2)·(−0.5 + −0.5) = +0.5
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let base = vec![0.5, -0.5];
+        let plus = vec![counts(&[("0", 1)]), counts(&[("0", 1), ("1", 1)])];
+        let minus = vec![counts(&[("0", 1), ("1", 1)]), counts(&[("0", 1)])];
+        let grad = problem.param_gradient(&base, &plus, &minus).unwrap();
+        assert!((grad - 0.5).abs() < 1e-12, "grad={grad}");
+    }
+
+    #[test]
+    fn param_gradient_checks_lengths_in_documented_order() {
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]); // num_circuits() == 2
+        let ok_pair = vec![counts(&[("0", 1)]), counts(&[("1", 1)])];
+        let base_ok = vec![0.0, 0.0];
+
+        // plus wrong → reported first (expected 2, got 1).
+        let err = problem
+            .param_gradient(&base_ok, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        // plus ok, minus wrong → reported next.
+        let err = problem
+            .param_gradient(&base_ok, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        // plus/minus ok, base wrong → reported last.
+        let err = problem
+            .param_gradient(&base_ok[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
         assert_eq!(
             err,
             QmlError::CountsLengthMismatch {
