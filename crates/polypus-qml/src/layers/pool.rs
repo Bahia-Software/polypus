@@ -164,6 +164,7 @@ mod tests {
             active: (0..num_qubits).collect(),
             num_features: 0,
             param_cursor: 0,
+            layers_planned: 0,
         }
     }
 

@@ -51,6 +51,12 @@ pub(crate) struct LayerContext {
     /// The next free global `θ` index. `plan` advances it by the number of
     /// parameters the layer reserves.
     pub(crate) param_cursor: usize,
+    /// How many layers have already been planned before the current one. The
+    /// [`AmplitudeEncoder`](crate::AmplitudeEncoder) reads this to enforce that
+    /// it is the first layer (it prepares a state from `|0…0⟩`, so it cannot
+    /// compose on top of earlier gates). `compile` bumps it after every
+    /// [`plan`](LayerOps::plan).
+    pub(crate) layers_planned: usize,
 }
 
 /// What a layer records in `plan` and consumes in `emit`: the half-open range
@@ -171,10 +177,14 @@ impl QuantumModel {
             active: (0..self.num_qubits).collect(),
             num_features,
             param_cursor: 0,
+            layers_planned: 0,
         };
         let mut allocations = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
             allocations.push(layer.plan(&mut ctx)?);
+            // Track position so a later layer can tell it is *not* first (the
+            // amplitude encoder rejects any position but the first).
+            ctx.layers_planned += 1;
         }
 
         if ctx.param_cursor == 0 {

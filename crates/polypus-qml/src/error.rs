@@ -129,6 +129,20 @@ pub enum ValidationError {
         /// The number of active qubits available at this position.
         active: usize,
     },
+    /// An [`AmplitudeEncoder`](crate::AmplitudeEncoder) was placed anywhere but
+    /// first in the model. It prepares a state from `|0…0⟩` rather than
+    /// transforming an existing one, so it cannot compose on top of earlier
+    /// layers (design doc §6.2).
+    AmplitudeEncoderNotFirst,
+    /// An encoder was asked to encode more features than its active qubits can
+    /// address. Raised by [`AmplitudeEncoder`](crate::AmplitudeEncoder)'s
+    /// `plan`, which can hold at most `2^k` amplitudes on `k` qubits.
+    TooManyFeatures {
+        /// The largest feature count the active qubits can encode (`2^k`).
+        max: usize,
+        /// The feature count requested.
+        got: usize,
+    },
     /// A [`PauliString`](crate::PauliString) was constructed with two factors
     /// on the same qubit position. Positions must be unique.
     DuplicatePauliPosition {
@@ -249,6 +263,14 @@ impl fmt::Display for ValidationError {
                 f,
                 "pooling layer needs at least 2 active qubit(s) but only {active} are available"
             ),
+            ValidationError::AmplitudeEncoderNotFirst => write!(
+                f,
+                "amplitude encoder must be the first layer: it prepares a state from |0…0⟩, not a composable transformation"
+            ),
+            ValidationError::TooManyFeatures { max, got } => write!(
+                f,
+                "too many features for amplitude encoding: {got} feature(s) exceed the {max} amplitude(s) the active qubits can hold"
+            ),
             ValidationError::DuplicatePauliPosition { position } => write!(
                 f,
                 "Pauli string has more than one factor on position {position}"
@@ -337,6 +359,16 @@ pub enum QmlError {
         /// width against which an out-of-range position was checked).
         got: usize,
     },
+    /// A sample handed to the [`AmplitudeEncoder`](crate::AmplitudeEncoder) has
+    /// zero L2 norm (every feature is zero), so there is no normalized state to
+    /// prepare. Never "fixed" silently — a zero sample is a data error the
+    /// caller must resolve (design doc §6.2).
+    ///
+    /// This is a unit variant: `emit` sees only the sample it is handed, not
+    /// its index in the dataset, so it cannot report a `sample` position
+    /// without widening the [`LayerOps::emit`](crate::model) signature for this
+    /// single case.
+    ZeroNormSample,
     /// The counts map handed to the expectation estimator is empty (or records
     /// zero total shots): there is nothing to estimate an expectation from.
     EmptyCounts,
@@ -362,6 +394,10 @@ impl fmt::Display for QmlError {
             QmlError::CountsWidthMismatch { expected, got } => write!(
                 f,
                 "counts width mismatch: expected bitstrings of width {expected}, got {got}"
+            ),
+            QmlError::ZeroNormSample => write!(
+                f,
+                "amplitude encoding requires a non-zero sample: the L2 norm is zero, so there is no state to prepare"
             ),
             QmlError::EmptyCounts => {
                 write!(
@@ -494,6 +530,16 @@ mod tests {
         assert!(ValidationError::PoolNeedsTwoQubits { active: 1 }
             .to_string()
             .contains('1'));
+    }
+
+    #[test]
+    fn phase6_variants_display_their_values() {
+        assert!(ValidationError::AmplitudeEncoderNotFirst
+            .to_string()
+            .contains("first"));
+        let s = ValidationError::TooManyFeatures { max: 4, got: 5 }.to_string();
+        assert!(s.contains('4') && s.contains('5'));
+        assert!(QmlError::ZeroNormSample.to_string().contains("norm"));
     }
 
     #[test]

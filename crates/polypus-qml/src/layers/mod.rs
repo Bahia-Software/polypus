@@ -14,7 +14,7 @@ mod pool;
 
 pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz};
 pub use conv::{ConvBlock, ConvLayer, Pairing};
-pub use encoders::AngleEncoder;
+pub use encoders::{AmplitudeEncoder, AngleEncoder};
 pub use pool::{KeepRule, PoolBlock, PoolLayer};
 
 use polypus_circuit::ParameterizedCircuit;
