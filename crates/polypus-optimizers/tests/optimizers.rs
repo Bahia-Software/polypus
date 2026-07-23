@@ -8,9 +8,10 @@
 //! Python extension — evidence a future pure-Rust consumer can reuse them.
 
 use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
-    Optimizer, OptimizerError, VarianceOracle,
+    linear_parameter_shift_gradient, AlgorithmDifferentialEvolution,
+    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
+    AlgorithmQNGArgs, EvaluationOracle, GradientOracle, OptimizationOutcome, Optimizer,
+    OptimizerError, VarianceOracle,
 };
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
@@ -87,6 +88,62 @@ impl VarianceOracle for ConstVariance {
     }
 }
 
+/// Exact gradient of [`Quadratic`]: fitness `= −Σ(xᵢ − target)²`, so
+/// `∂fitness/∂xᵢ = −2(xᵢ − target)` (ascent sign, matching the oracle).
+struct QuadraticGradient {
+    target: f64,
+}
+
+impl GradientOracle for QuadraticGradient {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        -2.0 * (theta[param_index] - self.target)
+    }
+}
+
+/// Exact gradient of [`Multimodal`]: fitness `= Σ(−(xᵢ − target)² + sin(5xᵢ))`,
+/// so `∂fitness/∂xᵢ = −2(xᵢ − target) + 5·cos(5xᵢ)`.
+struct MultimodalGradient {
+    target: f64,
+}
+
+impl GradientOracle for MultimodalGradient {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        let x = theta[param_index];
+        -2.0 * (x - self.target) + 5.0 * (5.0 * x).cos()
+    }
+}
+
+/// Gradient oracle that violates the length contract: it returns one *fewer*
+/// component than `dims`. The [`GradientOracle`] analogue of [`ShortOracle`],
+/// used to prove QNG surfaces [`OptimizerError::OracleLengthMismatch`] instead
+/// of indexing the gradient out of bounds.
+struct ShortGradientOracle;
+
+impl GradientOracle for ShortGradientOracle {
+    fn gradient(&self, _theta: &[f64], _param_index: usize) -> f64 {
+        0.0
+    }
+    fn gradient_batch(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
+        vec![0.0; dims.saturating_sub(1)]
+    }
+}
+
+/// Fitness `= Σᵢ cos(θᵢ)`: a separable, raw-expectation-like objective for which
+/// the parameter-shift rule is *exact* in closed form (`∂/∂θᵢ = −sin(θᵢ)`, since
+/// `[cos(θ+π/2) − cos(θ−π/2)]/2 = −sin(θ)`). Used to check
+/// [`linear_parameter_shift_gradient`] against a known analytic gradient with no
+/// shot noise involved.
+struct CosSum;
+
+impl EvaluationOracle for CosSum {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        candidates
+            .iter()
+            .map(|c| c.iter().map(|x| x.cos()).sum())
+            .collect()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Convergence on a known analytic optimum (deterministic via a fixed seed)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,9 +203,9 @@ fn qng_converges_to_known_optimum() {
     let outcome = AlgorithmQNG
         .optimize(AlgorithmQNGArgs {
             oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
             max_iters: 200,
             learning_rate: 0.1,
-            finite_difference_step: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 3,
             variance_oracle: Box::new(ConstVariance(1.0)),
@@ -435,9 +492,9 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
     let outcome = AlgorithmQNG
         .optimize(AlgorithmQNGArgs {
             oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
             max_iters: 1,
             learning_rate: 0.1,
-            finite_difference_step: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 2,
             variance_oracle: Box::new(ConstVariance(0.0)),
@@ -451,15 +508,17 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
 }
 
 #[test]
-fn qng_short_oracle_returns_error_not_panic() {
-    // The gradient batch submits 2·dims = 4 shifted candidates; ShortOracle
-    // returns 3, so the positional indexing in the gradient assembly would panic
-    // — it must return a typed error instead.
+fn qng_short_gradient_oracle_returns_error_not_panic() {
+    // QNG now assembles its update from `gradient_oracle.gradient_batch(θ, dims)`
+    // and indexes it positionally per parameter. A gradient oracle that returns
+    // fewer than `dims` components (here dims−1 = 1) would make that indexing
+    // panic — it must surface a typed error instead. The fitness `oracle` is
+    // irrelevant: the gradient step runs (and fails the length check) first.
     let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
-        oracle: Box::new(ShortOracle),
+        oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(ShortGradientOracle),
         max_iters: 5,
         learning_rate: 0.1,
-        finite_difference_step: 0.1,
         bounds: (0.0, 2.0),
         dimensions: 2,
         variance_oracle: Box::new(ConstVariance(1.0)),
@@ -470,8 +529,8 @@ fn qng_short_oracle_returns_error_not_panic() {
         matches!(
             result,
             Err(OptimizerError::OracleLengthMismatch {
-                expected: 4,
-                got: 3
+                expected: 2,
+                got: 1
             })
         ),
         "expected OracleLengthMismatch, got {result:?}"
@@ -509,9 +568,9 @@ fn qng_rejects_empty_bounds() {
     // same panic risk and must likewise return a typed error, not panic.
     let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
         oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
         max_iters: 5,
         learning_rate: 0.1,
-        finite_difference_step: 0.1,
         bounds: (1.0, 1.0),
         dimensions: 2,
         variance_oracle: Box::new(ConstVariance(1.0)),
@@ -522,6 +581,23 @@ fn qng_rejects_empty_bounds() {
         matches!(result, Err(OptimizerError::InvalidBounds { .. })),
         "empty QNG bounds should be rejected, got {result:?}"
     );
+}
+
+#[test]
+fn linear_parameter_shift_matches_analytic_gradient() {
+    // For CosSum (fitness = Σ cos θᵢ) the parameter-shift rule is exact in
+    // closed form: ∂/∂θᵢ = −sin θᵢ, and [cos(θ+π/2) − cos(θ−π/2)]/2 = −sin θ.
+    // No shot noise is involved (the oracle is analytic), so equality is tight.
+    let theta = vec![0.3, -1.1, 2.0, 0.0];
+    let grad = linear_parameter_shift_gradient(&CosSum, &theta, theta.len());
+    assert_eq!(grad.len(), theta.len());
+    for (i, &g) in grad.iter().enumerate() {
+        let expected = -theta[i].sin();
+        assert!(
+            (g - expected).abs() < 1e-12,
+            "param {i}: parameter-shift {g} vs analytic {expected}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -634,9 +710,9 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
         let outcome = AlgorithmQNG
             .optimize(AlgorithmQNGArgs {
                 oracle: Box::new(Multimodal { target: 1.0 }),
+                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
                 max_iters: 120,
                 learning_rate: 0.1,
-                finite_difference_step: 0.1,
                 bounds: (0.0, 2.0),
                 dimensions: 4,
                 variance_oracle: Box::new(ConstVariance(1.0)),

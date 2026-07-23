@@ -32,7 +32,7 @@ use crate::evaluation::{EvaluationOracle, NativeQmlOracle, OracleErrorSlot, QmlO
 use crate::infrastructure::{ExecutionConfig, Infrastructure, OptLevel};
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, Optimizer,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, GradientOracle, Optimizer,
 };
 
 /// Map a `polypus-qml` [`ValidationError`] (a construction/compilation failure —
@@ -475,17 +475,24 @@ fn qml_train_native(
     });
     let backend = Infrastructure::create_backend(&config)?;
     let errors = OracleErrorSlot::new();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(NativeQmlOracle {
+    // One concrete oracle behind an `Arc`, handed to `dispatch_optimizer` as two
+    // independent trait-object boxes via the `Arc<T>` blanket impls: the same
+    // NativeQmlOracle scores fitness (EvaluationOracle) and its exact
+    // parameter-shift gradient (GradientOracle) for QNG.
+    let oracle = Arc::new(NativeQmlOracle {
         problem,
         config: Arc::clone(&config),
         backend,
         errors: errors.clone(),
     });
+    let eval_oracle: Box<dyn EvaluationOracle> = Box::new(Arc::clone(&oracle));
+    let gradient_oracle: Box<dyn GradientOracle> = Box::new(oracle);
 
     dispatch_optimizer(
         py,
         method,
-        oracle,
+        eval_oracle,
+        gradient_oracle,
         dimensions,
         &errors,
         effective_seed,
@@ -597,18 +604,24 @@ fn qml_train_qiskit(
     });
     let backend = Infrastructure::create_backend(&config)?;
     let errors = OracleErrorSlot::new();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
+    // Same Arc + two-boxes pattern as the native path: the QmlOracle scores
+    // fitness and, for QNG, its parameter-shift gradient (exact by linearity of
+    // the mean expectation — this path has no nonlinear loss).
+    let oracle = Arc::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
         errors: errors.clone(),
     });
+    let eval_oracle: Box<dyn EvaluationOracle> = Box::new(Arc::clone(&oracle));
+    let gradient_oracle: Box<dyn GradientOracle> = Box::new(oracle);
 
     dispatch_optimizer(
         py,
         method,
-        oracle,
+        eval_oracle,
+        gradient_oracle,
         dimensions,
         &errors,
         effective_seed,
@@ -622,10 +635,15 @@ fn qml_train_qiskit(
 ///
 /// Shared verbatim by both `qml.train` paths — the only difference between them
 /// is which oracle and `dimensions` are passed in.
+///
+/// `gradient_oracle` is the same underlying oracle as `oracle` (built from one
+/// `Arc` via the blanket impls); it is consumed only by the QNG branch and
+/// ignored by DE/PSO, which are gradient-free.
 fn dispatch_optimizer(
     py: Python<'_>,
     method: &Bound<'_, PyAny>,
     oracle: Box<dyn EvaluationOracle>,
+    gradient_oracle: Box<dyn GradientOracle>,
     dimensions: u32,
     errors: &OracleErrorSlot,
     effective_seed: u64,
@@ -674,9 +692,9 @@ fn dispatch_optimizer(
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
         let args = AlgorithmQNGArgs {
             oracle,
+            gradient_oracle,
             max_iters: qng.max_iters,
             learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
             bounds: qng.bounds,
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {

@@ -1,7 +1,7 @@
 //! Quantum Natural Gradient (QNG) optimizer.
 
 use crate::error::OptimizerError;
-use crate::objective::{EvaluationOracle, VarianceOracle};
+use crate::objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::check_oracle_len;
@@ -12,23 +12,29 @@ pub struct AlgorithmQNG;
 
 /// Arguments for the Quantum Natural Gradient optimizer.
 ///
-/// The algorithm is completely decoupled from circuits and infrastructure:
-/// gradient circuit evaluation is delegated to
-/// [`oracle`](AlgorithmQNGArgs::oracle) and the QFIM diagonal to
-/// [`variance_oracle`](AlgorithmQNGArgs::variance_oracle). The latter stays a
-/// separate contract because computing `Var[H_a | θ]` is an algorithm-specific
-/// mathematical concept, not a circuit-execution concern.
+/// The algorithm is completely decoupled from circuits and infrastructure: the
+/// fitness gradient is delegated to
+/// [`gradient_oracle`](AlgorithmQNGArgs::gradient_oracle), the fitness itself
+/// (for best-solution tracking) to [`oracle`](AlgorithmQNGArgs::oracle), and the
+/// QFIM diagonal to [`variance_oracle`](AlgorithmQNGArgs::variance_oracle). Each
+/// stays a separate contract because the gradient, the raw fitness and
+/// `Var[H_a | θ]` are distinct mathematical quantities, not one circuit-execution
+/// concern.
 ///
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); the initial `θ` is drawn
 /// uniformly from it.
 pub struct AlgorithmQNGArgs {
-    /// Oracle that maps parameter vectors → fitness values (used for gradient + energy eval).
+    /// Oracle that maps parameter vectors → fitness values (used for tracking
+    /// the best solution across iterations).
     pub oracle: Box<dyn EvaluationOracle>,
+    /// Exact fitness gradient `∇fitness(θ)` (parameter-shift). Its ascent-sign
+    /// convention matches [`oracle`](AlgorithmQNGArgs::oracle): higher fitness is
+    /// better, so this points uphill and the QNG update *adds* it.
+    pub gradient_oracle: Box<dyn GradientOracle>,
     pub max_iters: u32,
     pub learning_rate: f64,
-    pub finite_difference_step: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
     /// Returns `Var[H_a | θ]`, the diagonal QFIM element for parameter index `a`.
@@ -43,51 +49,6 @@ pub struct AlgorithmQNGArgs {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Estimate the gradient of **−E(θ)** with a **central finite-difference**
-/// stencil, using the caller-supplied step `h` (`finite_difference_step`).
-///
-/// This is an *approximation* whose accuracy depends on `h`; it is deliberately
-/// **not** the parameter-shift rule, which would use a fixed ±π/2 shift and
-/// yield an exact analytic gradient with no step to tune. The tunable step is
-/// exactly what makes this a finite difference — see
-/// [`AlgorithmQNGArgs::finite_difference_step`].
-///
-/// Builds a flat list of 2·dims shifted candidates and submits them to the
-/// oracle in one batch call, then assembles the gradient from the results.
-/// Returns [`OptimizerError::OracleLengthMismatch`] if the oracle does not
-/// return exactly one value per shifted candidate (2·dims), since the assembly
-/// below indexes the result positionally.
-fn central_difference_gradient(
-    oracle: &dyn EvaluationOracle,
-    theta: &[f64],
-    h: f64,
-) -> Result<Vec<f64>, OptimizerError> {
-    let dims = theta.len();
-    // Layout: [θ+h·e₀, θ−h·e₀, θ+h·e₁, θ−h·e₁, …]
-    let candidates: Vec<Vec<f64>> = (0..dims)
-        .flat_map(|i| {
-            let mut tp = theta.to_vec();
-            let mut tm = theta.to_vec();
-            tp[i] += h;
-            tm[i] -= h;
-            [tp, tm]
-        })
-        .collect();
-
-    let expectations = oracle.evaluate_batch(&candidates);
-    check_oracle_len(candidates.len(), expectations.len())?;
-
-    // grad[i] = [E(θ−h·eᵢ) − E(θ+h·eᵢ)] / (2h)  →  ∇(−E); the update descends
-    // this (θ ← θ − η·G⁻¹·∇(−E)), i.e. ascends E, maximising the expectation.
-    let mut grad = vec![0.0f64; dims];
-    for i in 0..dims {
-        let e_plus = expectations[2 * i];
-        let e_minus = expectations[2 * i + 1];
-        grad[i] = (e_minus - e_plus) / (2.0 * h);
-    }
-    Ok(grad)
-}
 
 /// Compute the diagonal of the Fubini–Study metric (QFIM) via `variance_oracle`,
 /// adding the Tikhonov regularisation term to every element.
@@ -124,8 +85,8 @@ impl AlgorithmQNG {
     pub fn description(&self) -> String {
         String::from(
             "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
-             optimizer. Gradients are estimated via a central finite-difference stencil and \
-             preconditioned by the diagonal Fubini-Study metric (QFIM).",
+             optimizer. The exact fitness gradient (parameter-shift) is preconditioned by the \
+             diagonal Fubini-Study metric (QFIM).",
         )
     }
 
@@ -135,9 +96,9 @@ impl AlgorithmQNG {
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmQNGArgs {
             oracle,
+            gradient_oracle,
             max_iters,
             learning_rate,
-            finite_difference_step,
             bounds,
             dimensions,
             variance_oracle,
@@ -164,18 +125,20 @@ impl AlgorithmQNG {
         for iteration in 0..max_iters as usize {
             iterations_run = iteration + 1;
 
-            // ── 1. Gradient of −E via central finite differences ─────────────
-            let grad =
-                central_difference_gradient(oracle.as_ref(), &theta, finite_difference_step)?;
+            // ── 1. Exact fitness gradient via parameter-shift ────────────────
+            //    `gradient_oracle` returns ∇fitness directly (ascent sign), one
+            //    value per parameter; check the length as any oracle output is.
+            let grad = gradient_oracle.gradient_batch(&theta, dims);
+            check_oracle_len(dims, grad.len())?;
 
             // ── 2. Diagonal QFIM with Tikhonov regularisation ────────────────
             let qfim_diag =
                 compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg);
 
-            // ── 3. QNG update: θ ← θ − η · G⁻¹ · ∇(−E) ─────────────────────
-            //    Equivalent to θ ← θ + η · G⁻¹ · ∇E  (maximise expectation)
+            // ── 3. QNG update: θ ← θ + η · G⁻¹ · ∇fitness ────────────────────
+            //    `grad` is ∇fitness (uphill), so ascend it to maximise fitness.
             for i in 0..dims {
-                theta[i] -= learning_rate * grad[i] / qfim_diag[i];
+                theta[i] += learning_rate * grad[i] / qfim_diag[i];
             }
 
             // ── 4. Evaluate energy and track best solution ────────────────────

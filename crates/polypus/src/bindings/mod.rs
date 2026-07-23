@@ -28,8 +28,8 @@ use crate::infrastructure::{
 };
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
-    OptimizerError,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, GradientOracle, OptimizationOutcome,
+    Optimizer, OptimizerError,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -641,17 +641,24 @@ pub fn train<'py>(
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
     let errors = OracleErrorSlot::new();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
+    // One concrete VqcOracle behind an `Arc`, exposed as two independent
+    // trait-object boxes via the `Arc<T>` blanket impls: the same oracle scores
+    // fitness (EvaluationOracle) and, for QNG, its parameter-shift gradient
+    // (GradientOracle, exact by linearity — the VQC fitness is a raw expectation
+    // with no nonlinear loss on top). DE/PSO ignore the gradient box.
+    let oracle = Arc::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
         expectation_fn: expectation_function.unbind(),
         errors: errors.clone(),
     });
+    let eval_oracle: Box<dyn EvaluationOracle> = Box::new(Arc::clone(&oracle));
+    let gradient_oracle: Box<dyn GradientOracle> = Box::new(oracle);
 
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
+            oracle: eval_oracle,
             population_size: de.population_size,
             generations: de.generations,
             dimensions,
@@ -676,7 +683,7 @@ pub fn train<'py>(
 
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
         let args = AlgorithmPSOArgs {
-            oracle,
+            oracle: eval_oracle,
             population_size: pso.population_size,
             generations: pso.generations,
             dimensions,
@@ -698,10 +705,10 @@ pub fn train<'py>(
 
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
         let args = AlgorithmQNGArgs {
-            oracle,
+            oracle: eval_oracle,
+            gradient_oracle,
             max_iters: qng.max_iters,
             learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
             bounds: qng.bounds,
             dimensions,
             variance_oracle: Box::new(PyVarianceOracle {
