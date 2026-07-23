@@ -3,7 +3,7 @@
 //! instruction-list golden tests, but the actual quantum state and its
 //! measured expectations.
 //!
-//! Four checks:
+//! Five checks:
 //! 1. the [`AngleEncoder`] produces the expected tensor-product state;
 //! 2. the [`ConvBlock::Cartan`] block (including the synthesized `ryy`) matches
 //!    an independently hand-applied gate sequence on every canonical basis
@@ -11,7 +11,10 @@
 //! 3. `expectation_from_counts(sample(seed))` ≈ [`Statevector::expectation_z`]
 //!    with statistical tolerance;
 //! 4. after pooling, the expectation over a retained qubit is consistent with
-//!    the global state.
+//!    the global state;
+//! 5. the `AmplitudeEncoder` prepares exactly the L2-normalized, zero-padded
+//!    target state (real, imaginary part ~0) — the empirical guarantee of the
+//!    Möttönen state preparation.
 //!
 //! `polypus-sim` enters only as a dev-dependency — the crate's public API never
 //! executes a circuit.
@@ -243,4 +246,73 @@ fn pooling_expectation_is_consistent_with_the_global_state() {
         (exact - estimate).abs() < 0.01,
         "pooled counts estimate {estimate} deviates from exact {exact}"
     );
+}
+
+/// (5) The [`AmplitudeEncoder`] prepares exactly `x/‖x‖₂` (zero-padded to
+/// `2^k`) as a *real* statevector.
+///
+/// A model needs a trainable layer to compile (an encoder alone reserves no
+/// θ), so a `real_amplitudes(1)` ansatz is appended and bound at `θ = 0`. That
+/// zeroes every ansatz `Ry`, but its fixed linear `Cx` chain is **not**
+/// identity — so the chain is stripped back off the simulated state (each `Cx`
+/// is its own inverse, undone in reverse order) to isolate the pure encoded
+/// state, which is then compared amplitude-by-amplitude against the exact
+/// normalized target. The whole circuit is `Ry`+`Cx` (real), so every
+/// imaginary part must vanish — checked explicitly, since a non-trivial
+/// imaginary component would signal a bug.
+fn assert_amplitude_encoding(k: usize, x: &[f64]) {
+    let model = QuantumModel::new(k)
+        .amplitude_encoder()
+        .layer(Layer::HardwareEfficient(
+            HardwareEfficientAnsatz::real_amplitudes(1),
+        ))
+        .readout(z0_readout(Decision::Raw))
+        .compile(x.len())
+        .unwrap();
+
+    let theta = vec![0.0; model.num_params()];
+    let circuit = model.bind(x, &theta).unwrap();
+    let mut sv = StatevectorSimulator::new().run(&circuit).unwrap();
+
+    // Undo the ansatz's fixed linear Cx chain — Cx(0,1),…,Cx(k-2,k-1). Each Cx
+    // is involutory, so re-applying them in reverse order inverts the chain,
+    // leaving the pure amplitude-encoded state.
+    for i in (0..k.saturating_sub(1)).rev() {
+        apply(&mut sv, GateInstruction::Cx(i, i + 1));
+    }
+
+    // Exact target: x/‖x‖₂, zero-padded to 2^k (index j addresses |j⟩ under the
+    // C-3 little-endian convention, matching the encoder's own indexing).
+    let norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let dim = 1usize << k;
+    let mut target = vec![0.0; dim];
+    for (j, &xi) in x.iter().enumerate() {
+        target[j] = xi / norm;
+    }
+
+    let amps = sv.amplitudes();
+    assert_eq!(amps.len(), dim);
+    for (j, a) in amps.iter().enumerate() {
+        assert!(
+            a.im.abs() < 1e-10,
+            "amplitude {j} has a non-negligible imaginary part: {a}"
+        );
+        assert!(
+            (a.re - target[j]).abs() < 1e-10,
+            "amplitude {j}: got real {} vs expected {}",
+            a.re,
+            target[j]
+        );
+    }
+}
+
+#[test]
+fn amplitude_encoder_prepares_the_normalized_state() {
+    // k=2, an interior zero: the general multiplexed path with a zeroed leaf.
+    assert_amplitude_encoding(2, &[1.0, 2.0, 0.0, 3.0]);
+    // k=2, a whole zeroed sub-block ([0,0] at prefix 1): exercises the
+    // null-mass branch (M_p == 0 ⇒ θ_p = 0) inside the level-angle computation.
+    assert_amplitude_encoding(2, &[1.0, 2.0, 0.0, 0.0]);
+    // k=3, eight positive values including a zero.
+    assert_amplitude_encoding(3, &[0.5, 1.5, 2.0, 0.0, 1.0, 2.5, 3.0, 0.7]);
 }
