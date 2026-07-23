@@ -33,8 +33,8 @@ use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{
-    AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, Layer, PoolBlock, PoolLayer,
-    RotationAxis,
+    AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, Layer,
+    PoolBlock, PoolLayer, RotationAxis,
 };
 use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Readout, ResolvedReadout};
@@ -130,6 +130,13 @@ impl QuantumModel {
     /// Sugar for `.layer(Layer::AngleEncoder(AngleEncoder::new(axis)))`.
     pub fn angle_encoder(self, axis: RotationAxis) -> Self {
         self.layer(Layer::AngleEncoder(AngleEncoder::new(axis)))
+    }
+
+    /// Sugar for `.layer(Layer::AmplitudeEncoder(AmplitudeEncoder))`. The
+    /// [`AmplitudeEncoder`] takes no configuration in v1 and must be the first
+    /// layer of the model.
+    pub fn amplitude_encoder(self) -> Self {
+        self.layer(Layer::AmplitudeEncoder(AmplitudeEncoder))
     }
 
     /// Sugar for a default [`HardwareEfficientAnsatz::new`] with `reps`

@@ -65,6 +65,9 @@ pub enum RotationAxis {
 pub enum Layer {
     /// Feature encoding via single-qubit rotations (consumes no `θ`).
     AngleEncoder(AngleEncoder),
+    /// State-preparation feature encoding via multiplexed `Ry` rotations
+    /// (consumes no `θ`; must be the first layer).
+    AmplitudeEncoder(AmplitudeEncoder),
     /// A hardware-efficient variational block (consumes `θ`).
     HardwareEfficient(HardwareEfficientAnsatz),
     /// A convolution block with parameter sharing across pairs (consumes `θ`).
@@ -77,6 +80,7 @@ impl LayerOps for Layer {
     fn plan(&self, ctx: &mut LayerContext) -> Result<LayerAllocation, ValidationError> {
         match self {
             Layer::AngleEncoder(l) => l.plan(ctx),
+            Layer::AmplitudeEncoder(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
             Layer::Conv(l) => l.plan(ctx),
             Layer::Pool(l) => l.plan(ctx),
@@ -91,6 +95,7 @@ impl LayerOps for Layer {
     ) -> Result<(), QmlError> {
         match self {
             Layer::AngleEncoder(l) => l.emit(qc, alloc, x),
+            Layer::AmplitudeEncoder(l) => l.emit(qc, alloc, x),
             Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
             Layer::Conv(l) => l.emit(qc, alloc, x),
             Layer::Pool(l) => l.emit(qc, alloc, x),
