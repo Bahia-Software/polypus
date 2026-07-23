@@ -209,6 +209,24 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- `GradientOracle::gradient_batch(theta, dims)` (QNG only) returns the fitness
+  gradient `∂fitness/∂θ`, **exactly `dims` values**, in order, same ascent-sign
+  convention as `EvaluationOracle` (higher fitness is better; the value points
+  uphill). QNG length-checks it like any oracle output. "Exact" is the
+  parameter-shift identity in the **noiseless limit**: evaluated over finite
+  `shots` it is an unbiased *estimator* of the true gradient, not a noise-free
+  value. Exactness is the caller's guarantee (the crate cannot see circuits or
+  gate generators), exactly as the QFIM-diagonal `VarianceOracle` is. The free
+  function `linear_parameter_shift_gradient` builds it for any oracle whose
+  fitness is linear in the shifted expectations (raw expectation or unweighted
+  mean, no nonlinear loss on top); an oracle that composes a nonlinear loss over
+  per-sample expectations needs the chain rule instead (see
+  `polypus_qml::QmlProblem::param_gradient`).
+- **Breaking change:** `AlgorithmQNGArgs` no longer accepts
+  `finite_difference_step` (and the Python `QNG` pyclass no longer exposes it).
+  QNG now consumes the exact parameter-shift gradient above instead of a
+  central finite-difference stencil — a deliberate contract change with no
+  compatibility shim.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/`.
