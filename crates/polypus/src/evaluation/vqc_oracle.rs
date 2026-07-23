@@ -2,6 +2,7 @@ use crate::evaluation::{
     run_and_evaluate, CircuitSource, EvaluationError, EvaluationOracle, OracleErrorSlot,
 };
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use polypus_optimizers::GradientOracle;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -45,6 +46,31 @@ impl EvaluationOracle for VqcOracle {
                 vec![0.0; candidates.len()]
             }
         }
+    }
+}
+
+impl GradientOracle for VqcOracle {
+    /// Exact parameter-shift gradient (noiseless limit; an unbiased estimator
+    /// under shot noise). The VQC fitness is the raw expectation computed by
+    /// `expectation_fn` — linear in each shifted expectation, no `Loss` on top —
+    /// so shifting the whole candidate by `±π/2` and delegating to the existing
+    /// `evaluate_batch` is exact by linearity. The caller is responsible for
+    /// that precondition holding (contract C-5's `GradientOracle`): if a
+    /// user-supplied `expectation_fn` is a nonlinear function of the raw
+    /// expectation, the value is no longer the exact gradient.
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        // A prior failure short-circuits, mirroring `evaluate_batch`. No error
+        // recording is needed here: any failure inside the delegated
+        // `evaluate_batch` already records itself through the normal
+        // `EvaluationOracle` path.
+        if self.errors.failed() {
+            return vec![0.0; dims];
+        }
+        polypus_optimizers::linear_parameter_shift_gradient(self, theta, dims)
+    }
+
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        self.gradient_batch(theta, param_index + 1)[param_index]
     }
 }
 
