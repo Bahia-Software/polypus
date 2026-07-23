@@ -491,8 +491,7 @@ fn qml_train_native(
     dispatch_optimizer(
         py,
         method,
-        eval_oracle,
-        gradient_oracle,
+        (eval_oracle, gradient_oracle),
         dimensions,
         &errors,
         effective_seed,
@@ -620,8 +619,7 @@ fn qml_train_qiskit(
     dispatch_optimizer(
         py,
         method,
-        eval_oracle,
-        gradient_oracle,
+        (eval_oracle, gradient_oracle),
         dimensions,
         &errors,
         effective_seed,
@@ -642,13 +640,16 @@ fn qml_train_qiskit(
 fn dispatch_optimizer(
     py: Python<'_>,
     method: &Bound<'_, PyAny>,
-    oracle: Box<dyn EvaluationOracle>,
-    gradient_oracle: Box<dyn GradientOracle>,
+    oracles: (Box<dyn EvaluationOracle>, Box<dyn GradientOracle>),
     dimensions: u32,
     errors: &OracleErrorSlot,
     effective_seed: u64,
     effective_id: String,
 ) -> PyResult<PyObject> {
+    // The two boxes are the same underlying oracle (one Arc, two blanket-impl
+    // facets): the evaluation box for DE/PSO/QNG fitness, the gradient box for
+    // QNG only. Passed as a pair to keep the argument count in check.
+    let (oracle, gradient_oracle) = oracles;
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         let args = AlgorithmDifferentialEvolutionArgs {
             oracle,
