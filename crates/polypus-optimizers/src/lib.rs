@@ -19,6 +19,13 @@
 //! - [`VarianceOracle`] (QNG only) returns the diagonal elements of the
 //!   Fubini–Study metric (QFIM). It abstracts the one algorithm-specific
 //!   callback QNG needs, so no runtime detail leaks into this crate.
+//! - [`GradientOracle`] (QNG only) returns the exact gradient of the fitness
+//!   with respect to each parameter (parameter-shift, in the noiseless limit).
+//!   QNG uses it in place of a finite-difference stencil; like
+//!   [`VarianceOracle`], the caller guarantees the value is the true gradient
+//!   of whatever its companion [`EvaluationOracle`] scores. The free function
+//!   [`linear_parameter_shift_gradient`] builds it for any oracle whose fitness
+//!   is linear in the shifted expectations (no nonlinear loss on top).
 //!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
@@ -83,7 +90,9 @@ pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
 };
 pub use error::OptimizerError;
-pub use objective::{EvaluationOracle, VarianceOracle};
+pub use objective::{
+    linear_parameter_shift_gradient, EvaluationOracle, GradientOracle, VarianceOracle,
+};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};
