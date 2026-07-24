@@ -135,6 +135,20 @@ impl ResolvedObservable {
         }
         Ok(sum)
     }
+
+    /// Compute `⟨O⟩ = Σ_k c_k · ⟨P_k⟩` from **exact** basis-state
+    /// `probabilities` (the exact-mode mirror of
+    /// [`expectation`](Self::expectation)).
+    pub(crate) fn expectation_from_probabilities(
+        &self,
+        probabilities: &HashMap<String, f64>,
+    ) -> Result<f64, QmlError> {
+        let mut sum = 0.0;
+        for (coeff, string) in &self.terms {
+            sum += coeff * expectation_from_probabilities(probabilities, string)?;
+        }
+        Ok(sum)
+    }
 }
 
 /// Estimate `⟨Z_S⟩` from measurement `counts` for a resolved Pauli string `S`
@@ -198,6 +212,75 @@ pub(crate) fn expectation_from_counts(
         return Err(QmlError::EmptyCounts);
     }
     Ok(weighted / shots as f64)
+}
+
+/// The exact-mode mirror of [`expectation_from_counts`]: estimate `⟨Z_S⟩` from
+/// exact basis-state `probabilities` (`|amplitude|²` per bitstring) instead of
+/// finite-shot counts.
+///
+/// Identical parity logic and C-3 bit order; the only difference is that the
+/// parity sign is weighted by each state's `f64` probability rather than its
+/// `u64` count, and the result is divided by the **sum of the weights present**.
+/// That sum is `≈ 1.0` by construction (a normalised statevector), but it is
+/// summed explicitly rather than assumed — exactly as
+/// [`expectation_from_counts`] sums `shots` explicitly instead of assuming a
+/// total.
+///
+/// # Errors
+///
+/// - [`QmlError::EmptyCounts`] if `probabilities` is empty or its weights sum to
+///   zero. The [`EmptyCounts`](QmlError::EmptyCounts) variant is reused
+///   deliberately: the conceptual failure ("nothing to estimate from") is the
+///   same, even though the message names "counts".
+/// - [`QmlError::CountsWidthMismatch`] if the keys are not all the same width,
+///   or if `string` references a position wider than the keys carry.
+pub(crate) fn expectation_from_probabilities(
+    probabilities: &HashMap<String, f64>,
+    string: &ResolvedPauliString,
+) -> Result<f64, QmlError> {
+    // Width is derived from the first key; an empty map has none.
+    let width = match probabilities.keys().next() {
+        Some(key) => key.len(),
+        None => return Err(QmlError::EmptyCounts),
+    };
+    // Every key must share that width.
+    for key in probabilities.keys() {
+        if key.len() != width {
+            return Err(QmlError::CountsWidthMismatch {
+                expected: width,
+                got: key.len(),
+            });
+        }
+    }
+    // Every referenced position must fit inside the register.
+    for &(position, _) in &string.0 {
+        if position >= width {
+            return Err(QmlError::CountsWidthMismatch {
+                expected: position + 1,
+                got: width,
+            });
+        }
+    }
+
+    let mut weighted = 0.0;
+    let mut total = 0.0;
+    for (key, &p) in probabilities {
+        let bytes = key.as_bytes();
+        let mut parity = 0u32;
+        for &(position, _) in &string.0 {
+            // C-3: qubit `position` is the character at `width - 1 - position`.
+            if bytes[width - 1 - position] == b'1' {
+                parity ^= 1;
+            }
+        }
+        let sign = if parity == 0 { 1.0 } else { -1.0 };
+        weighted += sign * p;
+        total += p;
+    }
+    if total == 0.0 {
+        return Err(QmlError::EmptyCounts);
+    }
+    Ok(weighted / total)
 }
 
 #[cfg(test)]
@@ -325,6 +408,110 @@ mod tests {
             (2.0, ResolvedPauliString::new(vec![])),
         ]);
         let e = obs.expectation(&counts(&[("0", 100)])).unwrap();
+        assert!((e - 2.5).abs() < 1e-12);
+    }
+
+    // ── Exact-mode mirror of the counts catalogue above ──────────────────────
+
+    fn probs(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    #[test]
+    fn empty_probabilities_rejected() {
+        let string = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
+        assert_eq!(
+            expectation_from_probabilities(&HashMap::new(), &string),
+            Err(QmlError::EmptyCounts)
+        );
+        // All-zero weights are treated the same: nothing to estimate from.
+        assert_eq!(
+            expectation_from_probabilities(&probs(&[("0", 0.0)]), &string),
+            Err(QmlError::EmptyCounts)
+        );
+    }
+
+    #[test]
+    fn width_mismatch_across_probability_keys() {
+        let string = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
+        let err =
+            expectation_from_probabilities(&probs(&[("00", 0.5), ("0", 0.5)]), &string).unwrap_err();
+        assert!(matches!(err, QmlError::CountsWidthMismatch { .. }));
+    }
+
+    #[test]
+    fn probability_position_wider_than_register_rejected() {
+        let string = ResolvedPauliString::new(vec![(3, Pauli::Z)]);
+        let err = expectation_from_probabilities(&probs(&[("00", 1.0)]), &string).unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsWidthMismatch {
+                expected: 4,
+                got: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn single_z_parity_estimator_from_probabilities() {
+        // ⟨Z_0⟩ over one qubit: "0" → +1, "1" → −1.
+        let z0 = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
+        // All weight on |0⟩: +1.
+        assert_eq!(
+            expectation_from_probabilities(&probs(&[("0", 1.0)]), &z0),
+            Ok(1.0)
+        );
+        // All weight on |1⟩: −1.
+        assert_eq!(
+            expectation_from_probabilities(&probs(&[("1", 1.0)]), &z0),
+            Ok(-1.0)
+        );
+        // Even split: 0.
+        let e = expectation_from_probabilities(&probs(&[("0", 0.5), ("1", 0.5)]), &z0).unwrap();
+        assert!(e.abs() < 1e-12);
+    }
+
+    #[test]
+    fn zz_parity_estimator_from_probabilities() {
+        // ⟨Z_0 Z_1⟩: parity over both qubits. "00","11" → +1; "01","10" → −1.
+        let zz = ResolvedPauliString::new(vec![(0, Pauli::Z), (1, Pauli::Z)]);
+        let p = probs(&[("00", 0.25), ("11", 0.25), ("01", 0.25), ("10", 0.25)]);
+        let e = expectation_from_probabilities(&p, &zz).unwrap();
+        assert!(e.abs() < 1e-12);
+        assert_eq!(
+            expectation_from_probabilities(&probs(&[("00", 0.5), ("11", 0.5)]), &zz),
+            Ok(1.0)
+        );
+    }
+
+    #[test]
+    fn identity_string_has_probability_expectation_one() {
+        let identity = ResolvedPauliString::new(vec![]);
+        assert_eq!(
+            expectation_from_probabilities(&probs(&[("01", 0.3), ("10", 0.7)]), &identity),
+            Ok(1.0)
+        );
+    }
+
+    #[test]
+    fn probabilities_normalise_over_present_weights() {
+        // Weights that do not sum to 1 are still normalised by their own total:
+        // ⟨Z_0⟩ over {"0": 0.3, "1": 0.1} = (0.3 − 0.1)/0.4 = 0.5.
+        let z0 = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
+        let e = expectation_from_probabilities(&probs(&[("0", 0.3), ("1", 0.1)]), &z0).unwrap();
+        assert!((e - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn resolved_observable_sums_weighted_terms_from_probabilities() {
+        // 0.5·Z_0 + 2.0·I over "0" (⟨Z_0⟩=1, ⟨I⟩=1) = 2.5.
+        let obs = ResolvedObservable::new(vec![
+            (0.5, ResolvedPauliString::new(vec![(0, Pauli::Z)])),
+            (2.0, ResolvedPauliString::new(vec![])),
+        ]);
+        let e = obs
+            .expectation_from_probabilities(&probs(&[("0", 1.0)]))
+            .unwrap();
         assert!((e - 2.5).abs() < 1e-12);
     }
 }
