@@ -179,6 +179,21 @@ bit order and shot-conservation rule are exactly as specified here.
 public-API case in `tests/python/test_local_run.py`; audit C6) and
 last-write-wins case in `polypus-sim` tests (to be added).
 
+**Out of scope — exact mode.** The native `qml.train` exact path
+(`exact=True`, native Model+Dataset only — design doc §17) does **not** produce
+`counts`: it reads exact basis-state probabilities (`|amplitude|²`) straight
+off the statevector via `NativeStatevectorBackend::run_circuits_exact`, an
+inherent method that never touches the `QuantumBackend` trait. C-3's guarantees
+(`sum(counts.values()) == shots`, shot-conservation across QPUs) simply do not
+apply there — there is no shot budget and nothing is sampled. The guarantee
+that *does* hold in its place is **byte-for-byte determinism given the same
+circuit, with no seed required** (there is no sampling RNG to seed): the
+expectation summation is performed in a fixed basis order so it is independent
+of `HashMap` iteration order, delivering the C-7 reproducibility promise
+without a seed. This mode is exclusive to the pure-statevector backend;
+"exact" has no physical meaning for a noisy Aer backend or real hardware
+(QMIO/CUNQA), which is why it is native-only and rejected elsewhere.
+
 ---
 
 ## C-4 · Measurement placement (terminal measurements)

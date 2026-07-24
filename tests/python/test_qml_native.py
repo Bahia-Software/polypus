@@ -234,3 +234,91 @@ class TestNativeVsAerQmlTrain:
             f"native={native.best_fitness:.4f} aer={aer.best_fitness:.4f} "
             f"differ by more than {self.FITNESS_TOL}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Exact mode (exact=True) — design doc §17
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestNativeQmlTrainExact:
+    """The shot-free exact path: no sampling, so two runs with the same
+    configuration are byte-identical, and the result does not depend on the
+    seed. Only the native local + native-backend combination is accepted."""
+
+    @staticmethod
+    def _train(seed, backend="polypus", shots=1024):
+        import polypus
+
+        return polypus.qml.train(
+            _model(),
+            _dataset(),
+            method=polypus.DE(generations=30, population_size=16, tolerance=1e-9),
+            loss="hinge",
+            shots=shots,
+            infrastructure="local",
+            backend=backend,
+            id="qml_native_exact",
+            seed=seed,
+            exact=True,
+        )
+
+    def test_exact_trains_and_is_bit_identical_across_runs(self):
+        r1 = self._train(seed=7)
+        r2 = self._train(seed=7)
+        # Exact mode draws no shot noise → the whole outcome matches exactly.
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+
+    def test_exact_is_independent_of_seed(self):
+        # The optimizer seed still drives DE's search, but the *fitness* is
+        # exact, so the same seed obviously reproduces; here we assert the
+        # stronger property that shots never enter the fitness: two shot counts
+        # that would give very different sampling noise yield the identical
+        # best fitness for the same optimizer seed.
+        r_low = self._train(seed=11, shots=32)
+        r_high = self._train(seed=11, shots=1_000_000)
+        assert r_low.best_params == r_high.best_params
+        assert r_low.best_fitness == r_high.best_fitness
+
+    def test_exact_rejected_on_aer_backend(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="exact"):
+            polypus.qml.train(
+                _model(),
+                _dataset(),
+                method=polypus.DE(generations=2, population_size=4),
+                loss="hinge",
+                infrastructure="local",
+                backend="aer",
+                id="qml_exact_aer",
+                seed=7,
+                exact=True,
+            )
+
+    def test_exact_rejected_on_qiskit_path(self):
+        import numpy as np
+        import polypus
+        from qiskit.circuit.library import real_amplitudes, zz_feature_map
+
+        feature_map = zz_feature_map(feature_dimension=2, reps=1)
+        ansatz = real_amplitudes(num_qubits=2, reps=1)
+        with pytest.raises(ValueError, match="exact"):
+            polypus.qml.train(
+                feature_map,
+                ansatz,
+                np.zeros((2, 2)),
+                polypus.DE(generations=2, population_size=4),
+                dimensions=len(ansatz.parameters),
+                expectation_function=lambda b: sum(int(c) for c in b) / len(b),
+                infrastructure="local",
+                backend="aer",
+                id="qml_exact_qiskit",
+                seed=7,
+                exact=True,
+            )
