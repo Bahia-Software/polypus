@@ -16,7 +16,7 @@ use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 
 use crate::dataset::Dataset;
 use crate::error::{QmlError, ValidationError};
-use crate::loss::Loss;
+use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::CompiledModel;
 use crate::readout::Decision;
 
@@ -57,13 +57,37 @@ impl QmlProblem {
             });
         }
 
+        // Decision ↔ loss is a bidirectional pairing (design doc §17): the
+        // multiclass `Argmax` decision pairs with (and only with) the multiclass
+        // `CategoricalCrossEntropy` loss; every scalar loss pairs with (and only
+        // with) a non-`Argmax` decision. `!=` on the two booleans catches both
+        // mismatches (Argmax under a scalar loss, or categorical under a scalar
+        // decision) in one check.
         let decision = model.resolved_readout().decision();
-        if decision == Decision::Argmax {
-            return Err(ValidationError::DecisionNotSupportedByLoss { decision });
+        let is_categorical = loss == Loss::CategoricalCrossEntropy;
+        if (decision == Decision::Argmax) != is_categorical {
+            return Err(ValidationError::DecisionNotSupportedByLoss { decision, loss });
         }
 
         for (sample, &label) in train.labels().iter().enumerate() {
             loss.validate_label(label, sample)?;
+        }
+
+        // For the categorical loss, `validate_label` has already confirmed every
+        // label is a non-negative integer; the upper bound needs `num_classes`
+        // (the observable count), which only this cross-check knows. Reject any
+        // label naming a class `≥ num_classes`.
+        if is_categorical {
+            let num_classes = model.resolved_readout().observables().len();
+            for (sample, &label) in train.labels().iter().enumerate() {
+                if label as usize >= num_classes {
+                    return Err(ValidationError::LabelClassOutOfRange {
+                        sample,
+                        label,
+                        num_classes,
+                    });
+                }
+            }
         }
 
         let mut templates = Vec::with_capacity(train.num_samples());
@@ -89,6 +113,14 @@ impl QmlProblem {
     /// the number of training samples (one basis group per sample).
     pub fn num_circuits(&self) -> usize {
         self.templates.len()
+    }
+
+    /// The problem's loss. Exposed so a caller (e.g.
+    /// [`NativeQmlOracle`](../../polypus/evaluation/index.html)) can decide
+    /// whether to take the scalar or the categorical fitness/gradient path
+    /// without re-deriving it. [`Loss`] is `Copy`, so this is a cheap read.
+    pub fn loss(&self) -> Loss {
+        self.loss
     }
 
     /// Bind `theta` into one [`ConcreteCircuit`] per training sample, in stable
@@ -134,6 +166,38 @@ impl QmlProblem {
             .collect()
     }
 
+    /// The per-sample expectation vector `[⟨O₀⟩, …, ⟨O_{k−1}⟩]` over **all** the
+    /// readout's observables, for each sample's measurement `counts`, in the same
+    /// (stable, sample-major) order as [`bind_batch`](Self::bind_batch).
+    ///
+    /// The multiclass counterpart of
+    /// [`expectations_from_counts`](Self::expectations_from_counts), which reads
+    /// only `⟨O₀⟩`: `CategoricalCrossEntropy` scores the whole vector, one
+    /// component per class. Applies the same `counts`-length check
+    /// ([`QmlError::CountsLengthMismatch`]) and yields a `Vec<f64>` of length
+    /// `k = observables().len()` per sample.
+    pub fn expectations_per_class_from_counts(
+        &self,
+        counts: &[HashMap<String, u64>],
+    ) -> Result<Vec<Vec<f64>>, QmlError> {
+        if counts.len() != self.templates.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.templates.len(),
+                got: counts.len(),
+            });
+        }
+        let observables = self.model.resolved_readout().observables();
+        counts
+            .iter()
+            .map(|sample_counts| {
+                observables
+                    .iter()
+                    .map(|observable| observable.expectation(sample_counts))
+                    .collect::<Result<Vec<f64>, QmlError>>()
+            })
+            .collect()
+    }
+
     /// Turn per-sample measurement `counts` (in the same order as
     /// [`bind_batch`](Self::bind_batch)) into a fitness `= −mean_loss`.
     ///
@@ -143,6 +207,25 @@ impl QmlProblem {
     /// (design doc §8). Returns a finite `f64` for valid counts, or a typed
     /// [`QmlError`] — never `NaN` (contract C-8).
     pub fn fitness_from_counts(&self, counts: &[HashMap<String, u64>]) -> Result<f64, QmlError> {
+        // The categorical loss scores the whole per-class expectation vector, so
+        // it takes a wholly separate path (design doc §17): all-class
+        // expectations + `categorical_cross_entropy` per sample, then the same
+        // `−mean` aggregation. Branching here keeps every caller (e.g.
+        // `NativeQmlOracle::evaluate_batch`) agnostic — they call
+        // `fitness_from_counts` identically regardless of the loss.
+        if self.loss == Loss::CategoricalCrossEntropy {
+            let per_class = self.expectations_per_class_from_counts(counts)?;
+            let labels = self.train.labels();
+            let total: f64 = per_class
+                .iter()
+                .zip(labels)
+                .map(|(expectations, &label)| {
+                    categorical_cross_entropy(expectations, label as usize)
+                })
+                .sum();
+            return Ok(-total / per_class.len() as f64);
+        }
+
         let expectations = self.expectations_from_counts(counts)?;
         let labels = self.train.labels();
         let total: f64 = expectations
@@ -226,6 +309,71 @@ impl QmlProblem {
         Ok(-total / n as f64)
     }
 
+    /// The exact parameter-shift gradient of the **categorical** fitness with
+    /// respect to one trainable parameter (design doc §17): the multiclass
+    /// counterpart of [`param_gradient`](Self::param_gradient).
+    ///
+    /// The fitness composes `CategoricalCrossEntropy` over the per-sample
+    /// *vector* of class expectations, so the chain rule runs over every class:
+    ///
+    /// `−(1/n) · Σᵢ Σⱼ CE'(z_i, yᵢ)[j] · (⟨O_j⟩(θ+) − ⟨O_j⟩(θ−)) / 2`
+    ///
+    /// where `z_i = base_expectations[i]` is sample `i`'s full class-expectation
+    /// vector, `CE'` is [`categorical_cross_entropy_gradient`] (a per-class
+    /// vector), and each `(⟨O_j⟩(θ+) − ⟨O_j⟩(θ−))/2` is the parameter-shift
+    /// derivative of class `j`'s raw expectation. The leading `−(1/n)` matches
+    /// [`fitness_from_counts`](Self::fitness_from_counts)'s `−mean_loss`, so the
+    /// sign convention agrees (this is `∂fitness/∂θ_k`, the ascent direction).
+    ///
+    /// Length validation, in this order, each against
+    /// [`num_circuits`](Self::num_circuits): `plus_counts`, then `minus_counts`,
+    /// then `base_expectations` — the same deterministic ordering as
+    /// [`param_gradient`](Self::param_gradient).
+    pub fn param_gradient_categorical(
+        &self,
+        base_expectations: &[Vec<f64>],
+        plus_counts: &[HashMap<String, u64>],
+        minus_counts: &[HashMap<String, u64>],
+    ) -> Result<f64, QmlError> {
+        let n = self.num_circuits();
+        if plus_counts.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: plus_counts.len(),
+            });
+        }
+        if minus_counts.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: minus_counts.len(),
+            });
+        }
+        if base_expectations.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: base_expectations.len(),
+            });
+        }
+
+        let plus_per_class = self.expectations_per_class_from_counts(plus_counts)?;
+        let minus_per_class = self.expectations_per_class_from_counts(minus_counts)?;
+        let labels = self.train.labels();
+
+        let total: f64 = (0..n)
+            .map(|i| {
+                let g =
+                    categorical_cross_entropy_gradient(&base_expectations[i], labels[i] as usize);
+                // Chain rule summed over every class j: CE'[j] · shift_j.
+                g.iter()
+                    .zip(plus_per_class[i].iter())
+                    .zip(minus_per_class[i].iter())
+                    .map(|((&g_j, &plus_j), &minus_j)| g_j * (plus_j - minus_j) / 2.0)
+                    .sum::<f64>()
+            })
+            .sum();
+        Ok(-total / n as f64)
+    }
+
     /// Infer a prediction from one sample's `counts`, applying the readout's
     /// [`Decision`] (design doc §7.1).
     pub fn predict_from_counts(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
@@ -285,10 +433,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn new_rejects_argmax_decision() {
-        // Argmax needs >=2 observables; build one and confirm QmlProblem rejects
-        // it as untrainable by any v1 loss.
+    /// A 2-class `Argmax` readout (`⟨Z₀⟩`, `⟨Z₁⟩`) compiled over 2 features, the
+    /// categorical counterpart of [`two_qubit_model`].
+    fn argmax_two_class_model() -> CompiledModel {
         let readout = Readout::new(
             vec![
                 Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
@@ -299,17 +446,73 @@ mod tests {
             Decision::Argmax,
         )
         .unwrap();
-        let model = QuantumModel::new(2)
+        QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
             .hardware_efficient(1)
             .readout(readout)
             .compile(2)
-            .unwrap();
-        let err = QmlProblem::new(model, dataset(&[1.0, -1.0]), Loss::Hinge).unwrap_err();
+            .unwrap()
+    }
+
+    #[test]
+    fn new_rejects_argmax_decision_with_scalar_loss() {
+        // Argmax under a scalar loss (Hinge) is one direction of the bidirectional
+        // pairing mismatch: rejected, carrying both the decision and the loss.
+        let err = QmlProblem::new(argmax_two_class_model(), dataset(&[1.0, -1.0]), Loss::Hinge)
+            .unwrap_err();
         assert_eq!(
             err,
             ValidationError::DecisionNotSupportedByLoss {
                 decision: Decision::Argmax,
+                loss: Loss::Hinge,
+            }
+        );
+    }
+
+    #[test]
+    fn new_rejects_categorical_loss_with_scalar_decision() {
+        // The other direction: CategoricalCrossEntropy under a non-Argmax
+        // decision (Sign) is equally rejected.
+        let model = two_qubit_model(Decision::Sign);
+        let err = QmlProblem::new(model, dataset(&[0.0, 1.0]), Loss::CategoricalCrossEntropy)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::DecisionNotSupportedByLoss {
+                decision: Decision::Sign,
+                loss: Loss::CategoricalCrossEntropy,
+            }
+        );
+    }
+
+    #[test]
+    fn new_accepts_argmax_with_categorical_loss() {
+        // The matching pairing (Argmax + CategoricalCrossEntropy) is accepted.
+        let problem = QmlProblem::new(
+            argmax_two_class_model(),
+            dataset(&[0.0, 1.0]),
+            Loss::CategoricalCrossEntropy,
+        )
+        .unwrap();
+        assert_eq!(problem.loss(), Loss::CategoricalCrossEntropy);
+    }
+
+    #[test]
+    fn new_rejects_label_class_out_of_range() {
+        // Two observables → 2 classes {0, 1}; label 2 is a valid non-negative
+        // integer (passes validate_label) but names a non-existent class.
+        let err = QmlProblem::new(
+            argmax_two_class_model(),
+            dataset(&[0.0, 2.0]),
+            Loss::CategoricalCrossEntropy,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::LabelClassOutOfRange {
+                sample: 1,
+                label: 2.0,
+                num_classes: 2,
             }
         );
     }
@@ -485,6 +688,123 @@ mod tests {
         // plus/minus ok, base wrong → reported last.
         let err = problem
             .param_gradient(&base_ok[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    /// A 2-class categorical problem over `argmax_two_class_model`, labels
+    /// `[0, 1]`, used by the categorical fitness/gradient hand-computation tests.
+    fn categorical_two_class_problem() -> QmlProblem {
+        QmlProblem::new(
+            argmax_two_class_model(),
+            dataset(&[0.0, 1.0]),
+            Loss::CategoricalCrossEntropy,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn expectations_per_class_reads_all_observables_and_checks_length() {
+        let problem = categorical_two_class_problem();
+        // sample 0: "00":3,"10":1 → ⟨Z₀⟩=(3+1)/4=1.0 ; ⟨Z₁⟩=(3−1)/4=0.5
+        // sample 1: "10":1,"11":3 → ⟨Z₀⟩=(1−3)/4=−0.5 ; ⟨Z₁⟩=(−1−3)/4=−1.0
+        let c = vec![
+            counts(&[("00", 3), ("10", 1)]),
+            counts(&[("10", 1), ("11", 3)]),
+        ];
+        let per_class = problem.expectations_per_class_from_counts(&c).unwrap();
+        assert_eq!(per_class.len(), 2);
+        assert_eq!(per_class[0].len(), 2);
+        assert!((per_class[0][0] - 1.0).abs() < 1e-12);
+        assert!((per_class[0][1] - 0.5).abs() < 1e-12);
+        assert!((per_class[1][0] + 0.5).abs() < 1e-12);
+        assert!((per_class[1][1] + 1.0).abs() < 1e-12);
+
+        let err = problem
+            .expectations_per_class_from_counts(&c[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn fitness_from_counts_categorical_matches_hand_computation() {
+        let problem = categorical_two_class_problem();
+        // sample 0 (y=0): z=[1.0, 0.5] ; sample 1 (y=1): z=[−0.5, −1.0]
+        //   CE0 = −z_0 + ln(e^1 + e^0.5) = −1.0 + 1.474064 = 0.474064
+        //   CE1 = −z_1 + ln(e^−0.5 + e^−1) = 1.0 + (−0.025916) = 0.974084
+        //   fitness = −(CE0 + CE1)/2 = −0.724074
+        let c = vec![
+            counts(&[("00", 3), ("10", 1)]),
+            counts(&[("10", 1), ("11", 3)]),
+        ];
+        let fitness = problem.fitness_from_counts(&c).unwrap();
+        assert!(fitness.is_finite());
+        assert!((fitness + 0.724074).abs() < 1e-3, "fitness={fitness}");
+    }
+
+    #[test]
+    fn param_gradient_categorical_matches_hand_computation() {
+        let problem = categorical_two_class_problem();
+        // base per-class expectations: s0 (y=0) z=[1.0,0.5] ; s1 (y=1) z=[−0.5,−1.0]
+        let base = vec![vec![1.0, 0.5], vec![-0.5, -1.0]];
+        // plus  ("10") → z=[1.0, −1.0] ; minus ("01") → z=[−1.0, 1.0]
+        //   shift_j = (plus − minus)/2 = [1.0, −1.0] for both samples
+        let plus = vec![counts(&[("10", 1)]), counts(&[("10", 1)])];
+        let minus = vec![counts(&[("01", 1)]), counts(&[("01", 1)])];
+        // CE'(z0,0) = softmax([1.0,0.5]) − [1,0] = [−0.377541, 0.377541]
+        //   Σⱼ CE'·shift = −0.377541·1.0 + 0.377541·(−1.0) = −0.755082
+        // CE'(z1,1) = softmax([−0.5,−1.0]) − [0,1] = [0.622459, −0.622459]
+        //   Σⱼ CE'·shift = 0.622459·1.0 + (−0.622459)·(−1.0) = 1.244918
+        // grad = −(1/2)·(−0.755082 + 1.244918) = −0.244918
+        let grad = problem
+            .param_gradient_categorical(&base, &plus, &minus)
+            .unwrap();
+        assert!((grad + 0.244918).abs() < 1e-3, "grad={grad}");
+    }
+
+    #[test]
+    fn param_gradient_categorical_checks_lengths_in_documented_order() {
+        let problem = categorical_two_class_problem(); // num_circuits() == 2
+        let ok_pair = vec![counts(&[("00", 1)]), counts(&[("11", 1)])];
+        let base_ok = vec![vec![0.0, 0.0], vec![0.0, 0.0]];
+
+        // plus wrong → reported first.
+        let err = problem
+            .param_gradient_categorical(&base_ok, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        // plus ok, minus wrong → reported next.
+        let err = problem
+            .param_gradient_categorical(&base_ok, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        // plus/minus ok, base wrong → reported last.
+        let err = problem
+            .param_gradient_categorical(&base_ok[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,

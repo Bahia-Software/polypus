@@ -30,6 +30,17 @@ pub enum Loss {
     BinaryCrossEntropy,
     /// Hinge loss `max(0, 1 − label·pred)`. Requires labels in `{−1, +1}`.
     Hinge,
+    /// Multiclass softmax cross-entropy over **all** the readout's observables
+    /// (design doc §17). Unlike the three losses above — which score the single
+    /// raw expectation `⟨O₀⟩` — this one consumes the whole expectation vector
+    /// `[⟨O₀⟩, …, ⟨O_{k−1}⟩]` and an integer class index `y ∈ {0, …, k−1}`, so
+    /// it is served by the free [`categorical_cross_entropy`] /
+    /// [`categorical_cross_entropy_gradient`] functions rather than the scalar
+    /// [`evaluate`](Self::evaluate) / [`gradient`](Self::gradient) methods.
+    /// Requires a non-negative integer label (the class index); the upper bound
+    /// `< num_classes` is checked separately by
+    /// [`QmlProblem::new`](crate::QmlProblem::new), which knows `k`.
+    CategoricalCrossEntropy,
 }
 
 impl Loss {
@@ -43,6 +54,11 @@ impl Loss {
             Loss::SquaredError => true,
             Loss::BinaryCrossEntropy => label == 0.0 || label == 1.0,
             Loss::Hinge => label == -1.0 || label == 1.0,
+            // A class index: a non-negative integer. The upper bound
+            // (`< num_classes`) is not knowable here — `validate_label` has no
+            // `k` — so `QmlProblem::new` checks it separately once it knows the
+            // number of observables.
+            Loss::CategoricalCrossEntropy => label >= 0.0 && label.fract() == 0.0,
         };
         if ok {
             return Ok(());
@@ -51,6 +67,7 @@ impl Loss {
             Loss::SquaredError => "any finite value",
             Loss::BinaryCrossEntropy => "{0.0, 1.0}",
             Loss::Hinge => "{-1.0, 1.0}",
+            Loss::CategoricalCrossEntropy => "a non-negative integer class index",
         };
         Err(ValidationError::LabelDomain {
             loss: *self,
@@ -69,6 +86,15 @@ impl Loss {
                 -(label * p.ln() + (1.0 - label) * (1.0 - p).ln())
             }
             Loss::Hinge => (1.0 - label * prediction).max(0.0),
+            // `CategoricalCrossEntropy` scores the whole expectation vector, not
+            // a single `⟨O₀⟩`, so it has no scalar form. It is served by the free
+            // `categorical_cross_entropy` function, and `QmlProblem` routes the
+            // categorical path there *before* reaching this scalar method (see
+            // `fitness_from_counts`), so this arm is unreachable by construction.
+            Loss::CategoricalCrossEntropy => unreachable!(
+                "CategoricalCrossEntropy uses the free categorical_cross_entropy function, \
+                 not the scalar Loss::evaluate path"
+            ),
         }
     }
 
@@ -106,8 +132,59 @@ impl Loss {
                     0.0
                 }
             }
+            // See `evaluate`: the categorical path is served by the free
+            // `categorical_cross_entropy_gradient` function and never reaches
+            // this scalar method (`param_gradient` routes it away first).
+            Loss::CategoricalCrossEntropy => unreachable!(
+                "CategoricalCrossEntropy uses the free categorical_cross_entropy_gradient \
+                 function, not the scalar Loss::gradient path"
+            ),
         }
     }
+}
+
+/// The softmax cross-entropy of an expectation vector `expectations` against an
+/// integer class `label` (design doc §17):
+///
+/// `CE(z, y) = −z_y + ln(Σ_k exp(z_k))`
+///
+/// where `z = expectations` are the raw per-class expectations `[⟨O₀⟩, …]` and
+/// `y = label` is the class index. The standard log-sum-exp stability trick
+/// (subtract `max(z)` before exponentiating) keeps `exp` from overflowing for
+/// large expectations; the subtracted constant cancels exactly, so the result
+/// is unchanged. A free function, not a [`Loss`] method: it only makes sense for
+/// the vector-valued categorical variant (see the [`Loss`] enum docs).
+pub(crate) fn categorical_cross_entropy(expectations: &[f64], label: usize) -> f64 {
+    // log-sum-exp with the max shifted out: ln Σ exp(z_k)
+    //   = m + ln Σ exp(z_k − m),  m = max_k z_k.
+    let max = expectations
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let sum_exp: f64 = expectations.iter().map(|&z| (z - max).exp()).sum();
+    let log_sum_exp = max + sum_exp.ln();
+    log_sum_exp - expectations[label]
+}
+
+/// The gradient of [`categorical_cross_entropy`] with respect to each component
+/// of the expectation vector (design doc §17):
+///
+/// `∂CE/∂z_j = softmax(z)_j − [j == y]`
+///
+/// Returns one value per class, in class order. Uses the same log-sum-exp
+/// stability shift as [`categorical_cross_entropy`]. A free function for the
+/// same reason.
+pub(crate) fn categorical_cross_entropy_gradient(expectations: &[f64], label: usize) -> Vec<f64> {
+    let max = expectations
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = expectations.iter().map(|&z| (z - max).exp()).collect();
+    let sum_exp: f64 = exps.iter().sum();
+    exps.iter()
+        .enumerate()
+        .map(|(j, &e)| e / sum_exp - if j == label { 1.0 } else { 0.0 })
+        .collect()
 }
 
 #[cfg(test)]
@@ -230,6 +307,88 @@ mod tests {
         assert_eq!(Loss::Hinge.gradient(2.0, 1.0), 0.0);
         // Exactly at the break-point (1 − label·pred == 0): 0, not −label.
         assert_eq!(Loss::Hinge.gradient(1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn categorical_cross_entropy_requires_non_negative_integer_label() {
+        assert!(Loss::CategoricalCrossEntropy.validate_label(0.0, 0).is_ok());
+        assert!(Loss::CategoricalCrossEntropy.validate_label(3.0, 0).is_ok());
+        // Negative: rejected.
+        let err = Loss::CategoricalCrossEntropy
+            .validate_label(-1.0, 5)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::LabelDomain {
+                loss: Loss::CategoricalCrossEntropy,
+                expected: "a non-negative integer class index",
+                found_sample: 5,
+            }
+        );
+        // Non-integer: rejected.
+        let err = Loss::CategoricalCrossEntropy
+            .validate_label(1.5, 2)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::LabelDomain {
+                loss: Loss::CategoricalCrossEntropy,
+                expected: "a non-negative integer class index",
+                found_sample: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn categorical_cross_entropy_value_matches_hand_computation() {
+        // k=3, z=[1.0, 2.0, 0.5], y=1.
+        //   Σ exp = e + e² + e^0.5 = 11.7560592
+        //   ln Σ exp = 2.4643696
+        //   CE = −z_1 + ln Σ exp = −2.0 + 2.4643696 = 0.4643696
+        let z = [1.0, 2.0, 0.5];
+        let ce = categorical_cross_entropy(&z, 1);
+        assert!((ce - 0.4643696).abs() < 1e-6, "CE={ce}");
+    }
+
+    #[test]
+    fn categorical_cross_entropy_stability_shift_is_exact() {
+        // Adding a constant to every logit leaves CE unchanged (the log-sum-exp
+        // shift cancels), and a large logit must not overflow to inf/NaN.
+        let z = [1.0, 2.0, 0.5];
+        let shifted = [1.0 + 1000.0, 2.0 + 1000.0, 0.5 + 1000.0];
+        let a = categorical_cross_entropy(&z, 1);
+        let b = categorical_cross_entropy(&shifted, 1);
+        assert!(b.is_finite(), "CE overflowed: {b}");
+        assert!((a - b).abs() < 1e-9, "shift changed CE: {a} vs {b}");
+    }
+
+    #[test]
+    fn categorical_cross_entropy_gradient_matches_finite_difference() {
+        // Central finite difference of `categorical_cross_entropy` per component
+        // vs the analytic softmax−onehot gradient, at k=3, z=[1.0, 2.0, 0.5],
+        // y=1 (the same hand case). Verifies ∂CE/∂z_j = softmax(z)_j − [j==y].
+        let z = [1.0, 2.0, 0.5];
+        let label = 1usize;
+        let analytic = categorical_cross_entropy_gradient(&z, label);
+        assert_eq!(analytic.len(), z.len());
+        let h = 1e-6;
+        for j in 0..z.len() {
+            let mut zp = z;
+            let mut zm = z;
+            zp[j] += h;
+            zm[j] -= h;
+            let fd = (categorical_cross_entropy(&zp, label)
+                - categorical_cross_entropy(&zm, label))
+                / (2.0 * h);
+            assert!(
+                (analytic[j] - fd).abs() < 1e-4,
+                "component {j}: analytic {} vs fd {fd}",
+                analytic[j]
+            );
+        }
+        // Invariant: the softmax−onehot gradient sums to exactly 0 (Σ softmax = 1).
+        let sum: f64 = analytic.iter().sum();
+        assert!(sum.abs() < 1e-12, "gradient does not sum to zero: {sum}");
     }
 
     #[test]

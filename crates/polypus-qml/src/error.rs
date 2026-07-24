@@ -185,13 +185,31 @@ pub enum ValidationError {
         /// The number of observables supplied.
         num_observables: usize,
     },
-    /// A [`Decision`] cannot be trained by any v1 [`Loss`]. `Argmax` is
-    /// multiclass but every v1 loss operates on `⟨O₀⟩` alone, so the pairing
-    /// would silently optimise one observable while inference reads them all.
-    /// Raised by [`QmlProblem::new`](crate::QmlProblem::new) (design doc §8).
+    /// A [`Decision`] and a [`Loss`] were paired incompatibly. The pairing is
+    /// bidirectional (design doc §17): [`Decision::Argmax`] is the multiclass
+    /// decision and must pair with the multiclass
+    /// [`Loss::CategoricalCrossEntropy`], while every scalar loss
+    /// (`SquaredError`/`BinaryCrossEntropy`/`Hinge`) reads `⟨O₀⟩` alone and must
+    /// pair with a scalar decision. Either mismatch — a scalar loss under
+    /// `Argmax`, or `CategoricalCrossEntropy` under a non-`Argmax` decision —
+    /// raises this. Raised by [`QmlProblem::new`](crate::QmlProblem::new).
     DecisionNotSupportedByLoss {
-        /// The decision that no v1 loss supports.
+        /// The decision that could not be paired with `loss`.
         decision: Decision,
+        /// The loss that could not be paired with `decision`.
+        loss: Loss,
+    },
+    /// A categorical label is a valid non-negative integer (already checked by
+    /// [`Loss::validate_label`]) but names a class `≥ num_classes`. Raised by
+    /// [`QmlProblem::new`](crate::QmlProblem::new), which knows the number of
+    /// observables (`= num_classes`) that [`Loss::validate_label`] does not.
+    LabelClassOutOfRange {
+        /// Index of the offending sample.
+        sample: usize,
+        /// The out-of-range class label.
+        label: f64,
+        /// The number of classes (readout observables) available.
+        num_classes: usize,
     },
     /// Precompiling a training template failed while constructing a
     /// [`QmlProblem`](crate::QmlProblem). Wraps the underlying [`QmlError`] so
@@ -298,9 +316,17 @@ impl fmt::Display for ValidationError {
                 f,
                 "decision {decision:?} is incompatible with {num_observables} observable(s)"
             ),
-            ValidationError::DecisionNotSupportedByLoss { decision } => write!(
+            ValidationError::DecisionNotSupportedByLoss { decision, loss } => write!(
                 f,
-                "decision {decision:?} is not trainable by any v1 loss (all operate on a single observable)"
+                "decision {decision:?} cannot be paired with loss {loss:?}: Argmax requires CategoricalCrossEntropy and every scalar loss requires a non-Argmax decision"
+            ),
+            ValidationError::LabelClassOutOfRange {
+                sample,
+                label,
+                num_classes,
+            } => write!(
+                f,
+                "label class out of range: sample {sample} names class {label} but only {num_classes} class(es) are available"
             ),
             ValidationError::Template(e) => write!(f, "template compilation failed: {e}"),
         }
@@ -520,9 +546,29 @@ mod tests {
         assert!(s.contains("Hinge") && s.contains('2'));
         assert!(ValidationError::DecisionNotSupportedByLoss {
             decision: Decision::Argmax,
+            loss: Loss::Hinge,
         }
         .to_string()
         .contains("Argmax"));
+    }
+
+    #[test]
+    fn categorical_validation_variants_display_their_values() {
+        // DecisionNotSupportedByLoss now carries both the decision and the loss.
+        let s = ValidationError::DecisionNotSupportedByLoss {
+            decision: Decision::Argmax,
+            loss: Loss::SquaredError,
+        }
+        .to_string();
+        assert!(s.contains("Argmax") && s.contains("SquaredError"));
+        // LabelClassOutOfRange reports the sample, the label and the class count.
+        let s = ValidationError::LabelClassOutOfRange {
+            sample: 4,
+            label: 3.0,
+            num_classes: 3,
+        }
+        .to_string();
+        assert!(s.contains('4') && s.contains('3'));
     }
 
     #[test]
