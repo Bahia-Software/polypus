@@ -35,6 +35,10 @@ impl Adam {
     // weights, so a larger step is well-scaled here. `beta1`/`beta2`/`epsilon`
     // are the standard values from the literature.
     #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, seed = None))]
+    // Constructor mirrors Adam's full hyper-parameter set as Python kwargs; the
+    // added `tolerance` pushes it one past the lint threshold, exactly as `seed`
+    // does for `PSO::new`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_iters: u32,
         learning_rate: f64,
