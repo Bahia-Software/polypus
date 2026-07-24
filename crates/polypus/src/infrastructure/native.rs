@@ -12,7 +12,7 @@ use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::StatevectorSimulator;
+use polypus_sim::{Simulator, StatevectorSimulator};
 use std::collections::HashMap;
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
@@ -97,18 +97,29 @@ impl NativeStatevectorBackend {
         }
     }
 
-    /// Run one bound circuit and return Aer-compatible bitstring counts.
+    /// Resolve a [`BoundCircuit`] to a transpiled [`ConcreteCircuit`] and the
+    /// bitstring width its read-out uses, without touching Python.
     ///
-    /// The bitstring width and bit order match Qiskit's: little-endian qubit
-    /// indexing with the highest classical bit on the left, so the counts are
-    /// interchangeable with those from the Aer backend.
-    fn simulate_one(
+    /// This is the shared front half of both execution paths — sampled
+    /// ([`simulate_one`](Self::simulate_one)) and exact
+    /// ([`simulate_one_exact`](Self::simulate_one_exact)) — factored out so the
+    /// two paths cannot drift on circuit resolution, transpilation or width:
+    ///
+    /// 1. turn the variant into a [`ConcreteCircuit`] (a `Qiskit` circuit is
+    ///    rejected — reading its gates would require the interpreter);
+    /// 2. run the injected [`Transpiler`] with the per-run [`TranspileOptions`]
+    ///    (a clone under the default [`IdentityTranspiler`]);
+    /// 3. compute the read-out width — the classical-register width, falling
+    ///    back to the qubit count when the circuit has no measurements
+    ///    (full-register read-out convention, matching C-3).
+    ///
+    /// The width is computed **after** transpiling, so a strategy that changes
+    /// the register width is reflected.
+    fn resolve_and_transpile(
         &self,
         circuit: &BoundCircuit,
-        shots: u32,
-        seed: u64,
         opts: &TranspileOptions,
-    ) -> Result<HashMap<String, u64>, BackendError> {
+    ) -> Result<(ConcreteCircuit, usize), BackendError> {
         // Obtain a ConcreteCircuit without touching Python.
         let concrete: ConcreteCircuit = match circuit {
             BoundCircuit::Native(cc) => cc.clone(),
@@ -133,6 +144,29 @@ impl NativeStatevectorBackend {
         // default IdentityTranspiler this is a clone and changes nothing.
         let concrete = self.transpiler.transpile(&concrete, opts);
 
+        // Bitstring length = classical register width (qubit count when the
+        // circuit has no measurements, mirroring a full-register read-out).
+        let width = match concrete.num_clbits() {
+            0 => concrete.num_qubits,
+            c => c,
+        };
+        Ok((concrete, width))
+    }
+
+    /// Run one bound circuit and return Aer-compatible bitstring counts.
+    ///
+    /// The bitstring width and bit order match Qiskit's: little-endian qubit
+    /// indexing with the highest classical bit on the left, so the counts are
+    /// interchangeable with those from the Aer backend.
+    fn simulate_one(
+        &self,
+        circuit: &BoundCircuit,
+        shots: u32,
+        seed: u64,
+        opts: &TranspileOptions,
+    ) -> Result<HashMap<String, u64>, BackendError> {
+        let (concrete, width) = self.resolve_and_transpile(circuit, opts)?;
+
         let raw = self
             .simulator
             .run_and_sample(&concrete, shots as usize, seed)
@@ -141,16 +175,87 @@ impl NativeStatevectorBackend {
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
 
-        // Bitstring length = classical register width (qubit count when the
-        // circuit has no measurements, mirroring a full-register read-out).
-        let width = match concrete.num_clbits() {
-            0 => concrete.num_qubits,
-            c => c,
-        };
         Ok(raw
             .into_iter()
             .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
             .collect())
+    }
+
+    /// Run one bound circuit and return the **exact** probability of every
+    /// computational basis state, `|amplitude|²` — never sampled, so no RNG and
+    /// no shot noise are involved.
+    ///
+    /// The returned map is keyed by the same Qiskit little-endian bitstrings as
+    /// [`simulate_one`](Self::simulate_one)'s counts, so the two are
+    /// interchangeable everywhere except the value type (`f64` probability vs.
+    /// `u64` count). Because the state is read exactly, two calls on the same
+    /// circuit return byte-identical maps.
+    ///
+    /// # Errors
+    ///
+    /// - [`BackendError::UnsupportedCircuit`] for a **partial** measurement
+    ///   (`0 < num_clbits < num_qubits`): reading a strict subset of the
+    ///   register would require marginalising the exact distribution over the
+    ///   unmeasured qubits, which is out of scope here. Only full-register
+    ///   read-out (no measurements, or `MeasureAll` — the sole shape
+    ///   `polypus-qml` emits) is supported.
+    /// - [`BackendError::NativeCircuit`] if the statevector simulation fails.
+    fn simulate_one_exact(
+        &self,
+        circuit: &BoundCircuit,
+        opts: &TranspileOptions,
+    ) -> Result<HashMap<String, f64>, BackendError> {
+        let (concrete, width) = self.resolve_and_transpile(circuit, opts)?;
+        // Precondition: the exact mode only supports a full-register read-out
+        // (0 classical bits = read the whole state, or `num_clbits ==
+        // num_qubits` = MeasureAll — the only case polypus-qml generates). A
+        // PARTIAL measurement (0 < num_clbits < num_qubits) would require
+        // marginalising the exact distribution over the unmeasured qubits, which
+        // is not implemented here.
+        let num_clbits = concrete.num_clbits();
+        if num_clbits != 0 && num_clbits != concrete.num_qubits {
+            return Err(BackendError::UnsupportedCircuit(format!(
+                "exact mode only supports full-register read-out (0 or {} classical bits), \
+                 got {num_clbits}",
+                concrete.num_qubits
+            )));
+        }
+        let sv = self.simulator.run(&concrete).map_err(|e| {
+            log::error!("native statevector simulation failed: {e}");
+            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+        })?;
+        let probs = sv.probabilities();
+        Ok(probs
+            .into_iter()
+            .enumerate()
+            .map(|(state, p)| (format!("{:0w$b}", state, w = width), p))
+            .collect())
+    }
+
+    /// Run a batch of bound circuits and return the **exact** basis-state
+    /// probabilities of each, one map per circuit in submission order.
+    ///
+    /// This is the exact counterpart of the sampled
+    /// [`run_circuits`](QuantumBackend::run_circuits), but is an **inherent**
+    /// method — deliberately *not* part of the [`QuantumBackend`] trait, because
+    /// "exact" has no physical meaning for a noisy Aer backend or for real
+    /// hardware (QMIO/CUNQA); it is exclusive to this pure-statevector backend
+    /// and is reached only through the native `qml.train` exact path.
+    ///
+    /// `config.shots` and `config.seed` are **ignored**: there is no sampling,
+    /// so there is nothing to seed and no shot budget to spend. Only
+    /// [`ExecutionConfig::opt_level`] is read, to build the [`TranspileOptions`].
+    pub fn run_circuits_exact(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        qcs.iter()
+            .map(|qc| self.simulate_one_exact(qc, &opts))
+            .collect()
     }
 }
 
@@ -495,6 +600,61 @@ mod tests {
             run_once(),
             run_once(),
             "concurrent runs on a shared instance must be byte-identical despite thread scheduling"
+        );
+    }
+
+    /// Exact mode over a Bell state returns exactly `{"00": 0.5, "11": 0.5}` —
+    /// no statistical tolerance, because the probabilities are read from the
+    /// statevector, not sampled.
+    #[test]
+    fn run_circuits_exact_bell_is_exact() {
+        let backend = NativeStatevectorBackend::new(0);
+        let cfg = config_with(OptLevel::default());
+        let mut probs = backend
+            .run_circuits_exact(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
+        assert_eq!(probs.len(), 1);
+        let probs = probs.pop().unwrap();
+        // Only the two correlated outcomes carry weight, each exactly 1/2.
+        assert!((probs.get("00").copied().unwrap_or(0.0) - 0.5).abs() < 1e-12);
+        assert!((probs.get("11").copied().unwrap_or(0.0) - 0.5).abs() < 1e-12);
+        assert!((probs.get("01").copied().unwrap_or(0.0)).abs() < 1e-12);
+        assert!((probs.get("10").copied().unwrap_or(0.0)).abs() < 1e-12);
+    }
+
+    /// A partial measurement (fewer `measure` than qubits) is rejected in exact
+    /// mode with [`BackendError::UnsupportedCircuit`]: marginalising the exact
+    /// distribution over the unmeasured qubits is out of scope.
+    #[test]
+    fn run_circuits_exact_rejects_partial_measurement() {
+        // 3 qubits, but only qubit 0 is measured → num_clbits() == 1.
+        let partial = ParameterizedCircuit::new(3)
+            .h(0)
+            .measure(0, 0)
+            .assign_parameters(&[])
+            .unwrap();
+        let backend = NativeStatevectorBackend::new(0);
+        let cfg = config_with(OptLevel::default());
+        let err = backend
+            .run_circuits_exact(&[BoundCircuit::Native(partial)], &cfg)
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::UnsupportedCircuit(_)),
+            "expected UnsupportedCircuit, got {err:?}"
+        );
+    }
+
+    /// Determinism: two calls to `run_circuits_exact` on the same circuit return
+    /// byte-identical maps. There is no RNG on this path, so this must hold
+    /// trivially — but it is verified, not assumed.
+    #[test]
+    fn run_circuits_exact_is_bit_identical_across_calls() {
+        let backend = NativeStatevectorBackend::new(0);
+        let cfg = config_with(OptLevel::default());
+        let batch = vec![BoundCircuit::Native(uniform3())];
+        assert_eq!(
+            backend.run_circuits_exact(&batch, &cfg).unwrap(),
+            backend.run_circuits_exact(&batch, &cfg).unwrap()
         );
     }
 }
