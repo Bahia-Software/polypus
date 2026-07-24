@@ -44,6 +44,12 @@ pub struct AlgorithmAdamArgs {
     pub epsilon: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
+    /// Early-stopping tolerance on the gradient norm. After each full iteration
+    /// the L2 norm `‖∇fitness(θ)‖` of that iteration's gradient is compared
+    /// against this value; when it falls below `tolerance` the run stops early
+    /// with `converged = true`. Mirrors the `tolerance` field DE/PSO use for
+    /// their population-collapse test.
+    pub tolerance: f64,
     /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
@@ -60,7 +66,8 @@ impl AlgorithmAdam {
         String::from(
             "Trains a variational quantum circuit using the Adam optimizer. The exact fitness \
              gradient (parameter-shift) drives per-parameter adaptive steps from the running \
-             first and second moments of the gradient, with standard bias correction.",
+             first and second moments of the gradient, with standard bias correction. Stops \
+             early once the gradient norm falls below the configured tolerance.",
         )
     }
 
@@ -78,6 +85,7 @@ impl AlgorithmAdam {
             epsilon,
             bounds,
             dimensions,
+            tolerance,
             seed: _,
         } = args;
 
@@ -97,8 +105,11 @@ impl AlgorithmAdam {
         let mut v = vec![0.0_f64; dims];
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
+        let mut iterations_run = 0usize;
+        let mut converged = false;
 
         for iteration in 0..max_iters as usize {
+            iterations_run = iteration + 1;
             // Adam's bias correction is 1-indexed by the iteration count `t`.
             let t = iteration as i32 + 1;
 
@@ -130,14 +141,24 @@ impl AlgorithmAdam {
                 best_energy = energy;
                 best_theta = theta.clone();
             }
+
+            // ── 4. Early stopping on the gradient norm ────────────────────────
+            //    Decide after the full iteration's work (the same placement as
+            //    DE/PSO's population_converged test): if ‖∇fitness(θ)‖ from this
+            //    iteration's `grad` has fallen below `tolerance`, no further
+            //    iteration is needed.
+            let grad_norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+            if grad_norm < tolerance {
+                converged = true;
+                break;
+            }
         }
 
         Ok(OptimizationOutcome {
             best_params: best_theta,
             best_fitness: best_energy,
-            iterations_run: max_iters as usize,
-            // Adam runs a fixed iteration budget; it has no early-stopping test.
-            converged: false,
+            iterations_run,
+            converged,
         })
     }
 }

@@ -37,6 +37,12 @@ pub struct AlgorithmQNGArgs {
     pub learning_rate: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
+    /// Early-stopping tolerance on the gradient norm. After each full iteration
+    /// the L2 norm `‖∇fitness(θ)‖` of that iteration's gradient is compared
+    /// against this value; when it falls below `tolerance` the run stops early
+    /// with `converged = true`. Mirrors the `tolerance` field DE/PSO use for
+    /// their population-collapse test.
+    pub tolerance: f64,
     /// Returns `Var[H_a | θ]`, the diagonal QFIM element for parameter index `a`.
     pub variance_oracle: Box<dyn VarianceOracle>,
     /// Tikhonov regularisation added to each QFIM element to avoid near-zero division.
@@ -86,7 +92,8 @@ impl AlgorithmQNG {
         String::from(
             "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
              optimizer. The exact fitness gradient (parameter-shift) is preconditioned by the \
-             diagonal Fubini-Study metric (QFIM).",
+             diagonal Fubini-Study metric (QFIM). Stops early once the gradient norm falls \
+             below the configured tolerance.",
         )
     }
 
@@ -101,6 +108,7 @@ impl AlgorithmQNG {
             learning_rate,
             bounds,
             dimensions,
+            tolerance,
             variance_oracle,
             tikhonov_reg,
             seed: _,
@@ -121,6 +129,7 @@ impl AlgorithmQNG {
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;
+        let mut converged = false;
 
         for iteration in 0..max_iters as usize {
             iterations_run = iteration + 1;
@@ -151,14 +160,24 @@ impl AlgorithmQNG {
                 best_energy = energy;
                 best_theta = theta.clone();
             }
+
+            // ── 5. Early stopping on the gradient norm ────────────────────────
+            //    Decide after the full iteration's work (the same placement as
+            //    DE/PSO's population_converged test): if ‖∇fitness(θ)‖ from this
+            //    iteration's `grad` has fallen below `tolerance`, no further
+            //    iteration is needed.
+            let grad_norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+            if grad_norm < tolerance {
+                converged = true;
+                break;
+            }
         }
 
         Ok(OptimizationOutcome {
             best_params: best_theta,
             best_fitness: best_energy,
             iterations_run,
-            // QNG runs a fixed iteration budget; it has no early-stopping test.
-            converged: false,
+            converged,
         })
     }
 }

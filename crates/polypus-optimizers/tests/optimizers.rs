@@ -208,6 +208,9 @@ fn qng_converges_to_known_optimum() {
             learning_rate: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 3,
+            // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
+            // exhausts its full iteration budget — the behaviour this test asserts.
+            tolerance: 0.0,
             variance_oracle: Box::new(ConstVariance(1.0)),
             tikhonov_reg: 0.05,
             seed: Some(42),
@@ -222,7 +225,8 @@ fn qng_converges_to_known_optimum() {
     for x in &outcome.best_params {
         assert!((x - 1.0).abs() < 0.05, "param off target: {x}");
     }
-    // QNG runs a fixed iteration budget with no early-stopping test.
+    // With tolerance 0.0 the gradient-norm early-stopping test never fires, so
+    // QNG runs the full iteration budget.
     assert_eq!(outcome.iterations_run, 200);
     assert!(!outcome.converged);
 }
@@ -240,6 +244,9 @@ fn adam_converges_to_known_optimum() {
             epsilon: 1e-8,
             bounds: (0.0, 2.0),
             dimensions: 3,
+            // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
+            // exhausts its full iteration budget — the behaviour this test asserts.
+            tolerance: 0.0,
             seed: Some(42),
         })
         .expect("valid Adam args optimize successfully");
@@ -252,7 +259,8 @@ fn adam_converges_to_known_optimum() {
     for x in &outcome.best_params {
         assert!((x - 1.0).abs() < 0.05, "param off target: {x}");
     }
-    // Adam runs a fixed iteration budget with no early-stopping test.
+    // With tolerance 0.0 the gradient-norm early-stopping test never fires, so
+    // Adam runs the full iteration budget.
     assert_eq!(outcome.iterations_run, 400);
     assert!(!outcome.converged);
 }
@@ -314,6 +322,7 @@ fn adam_is_deterministic_for_a_fixed_seed() {
                 epsilon: 1e-8,
                 bounds: (0.0, 2.0),
                 dimensions: 4,
+                tolerance: 0.0,
                 seed: Some(123),
             })
             .expect("valid Adam args optimize successfully")
@@ -389,6 +398,72 @@ fn pso_early_stops_on_collapse_with_symmetric_bounds() {
         outcome.iterations_run
     );
     // Reproducible across runs with the same seed.
+    assert_eq!(outcome.iterations_run, make().iterations_run);
+}
+
+#[test]
+fn qng_early_stops_on_small_gradient() {
+    // A generous tolerance makes the gradient-norm test ‖∇fitness(θ)‖ < tolerance
+    // fire once QNG has descended close enough to the optimum, well before the
+    // iteration budget is exhausted. QuadraticGradient is exact, so the norm
+    // shrinks monotonically toward zero as θ → target.
+    let make = || {
+        AlgorithmQNG
+            .optimize(AlgorithmQNGArgs {
+                oracle: Box::new(Quadratic { target: 1.0 }),
+                gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+                max_iters: 500,
+                learning_rate: 0.1,
+                bounds: (0.0, 2.0),
+                dimensions: 3,
+                tolerance: 0.5,
+                variance_oracle: Box::new(ConstVariance(1.0)),
+                tikhonov_reg: 0.05,
+                seed: Some(7),
+            })
+            .expect("valid QNG args optimize successfully")
+    };
+    let outcome = make();
+    assert!(outcome.converged, "expected early convergence");
+    assert!(
+        outcome.iterations_run < 500,
+        "iterations_run = {}",
+        outcome.iterations_run
+    );
+    // The recorded iteration count is identical across runs with the same seed.
+    assert_eq!(outcome.iterations_run, make().iterations_run);
+}
+
+#[test]
+fn adam_early_stops_on_small_gradient() {
+    // Mirror of `qng_early_stops_on_small_gradient`: a generous tolerance makes
+    // Adam's gradient-norm test fire before the iteration budget is exhausted,
+    // once the exact QuadraticGradient has shrunk near the optimum.
+    let make = || {
+        AlgorithmAdam
+            .optimize(AlgorithmAdamArgs {
+                oracle: Box::new(Quadratic { target: 1.0 }),
+                gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+                max_iters: 500,
+                learning_rate: 0.05,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (0.0, 2.0),
+                dimensions: 3,
+                tolerance: 0.5,
+                seed: Some(7),
+            })
+            .expect("valid Adam args optimize successfully")
+    };
+    let outcome = make();
+    assert!(outcome.converged, "expected early convergence");
+    assert!(
+        outcome.iterations_run < 500,
+        "iterations_run = {}",
+        outcome.iterations_run
+    );
+    // The recorded iteration count is identical across runs with the same seed.
     assert_eq!(outcome.iterations_run, make().iterations_run);
 }
 
@@ -549,6 +624,7 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
             learning_rate: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 2,
+            tolerance: 0.0,
             variance_oracle: Box::new(ConstVariance(0.0)),
             tikhonov_reg: 0.05,
             seed: Some(1),
@@ -573,6 +649,7 @@ fn qng_short_gradient_oracle_returns_error_not_panic() {
         learning_rate: 0.1,
         bounds: (0.0, 2.0),
         dimensions: 2,
+        tolerance: 0.0,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -625,6 +702,7 @@ fn qng_rejects_empty_bounds() {
         learning_rate: 0.1,
         bounds: (1.0, 1.0),
         dimensions: 2,
+        tolerance: 0.0,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -653,6 +731,7 @@ fn adam_short_gradient_oracle_returns_error_not_panic() {
         epsilon: 1e-8,
         bounds: (0.0, 2.0),
         dimensions: 2,
+        tolerance: 0.0,
         seed: Some(1),
     });
     assert!(
@@ -681,6 +760,7 @@ fn adam_rejects_empty_bounds() {
         epsilon: 1e-8,
         bounds: (1.0, 1.0),
         dimensions: 2,
+        tolerance: 0.0,
         seed: Some(1),
     });
     assert!(
@@ -821,6 +901,7 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
                 learning_rate: 0.1,
                 bounds: (0.0, 2.0),
                 dimensions: 4,
+                tolerance: 0.0,
                 variance_oracle: Box::new(ConstVariance(1.0)),
                 tikhonov_reg: 0.05,
                 seed: Some(seed),
@@ -852,6 +933,7 @@ fn adam_best_params_fitness_invariant_holds_across_seeds() {
                 epsilon: 1e-8,
                 bounds: (0.0, 2.0),
                 dimensions: 4,
+                tolerance: 0.0,
                 seed: Some(seed),
             })
             .expect("valid Adam args optimize successfully");
