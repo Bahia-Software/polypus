@@ -8,10 +8,10 @@
 //! Python extension — evidence a future pure-Rust consumer can reuse them.
 
 use polypus_optimizers::{
-    linear_parameter_shift_gradient, AlgorithmDifferentialEvolution,
-    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
-    AlgorithmQNGArgs, EvaluationOracle, GradientOracle, OptimizationOutcome, Optimizer,
-    OptimizerError, VarianceOracle,
+    linear_parameter_shift_gradient, AlgorithmAdam, AlgorithmAdamArgs,
+    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, GradientOracle,
+    OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
@@ -227,6 +227,36 @@ fn qng_converges_to_known_optimum() {
     assert!(!outcome.converged);
 }
 
+#[test]
+fn adam_converges_to_known_optimum() {
+    let outcome = AlgorithmAdam
+        .optimize(AlgorithmAdamArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+            max_iters: 400,
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (0.0, 2.0),
+            dimensions: 3,
+            seed: Some(42),
+        })
+        .expect("valid Adam args optimize successfully");
+
+    assert!(
+        outcome.best_fitness > -1e-3,
+        "fitness = {}",
+        outcome.best_fitness
+    );
+    for x in &outcome.best_params {
+        assert!((x - 1.0).abs() < 0.05, "param off target: {x}");
+    }
+    // Adam runs a fixed iteration budget with no early-stopping test.
+    assert_eq!(outcome.iterations_run, 400);
+    assert!(!outcome.converged);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Determinism: a fixed seed reproduces the trajectory exactly
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,6 +297,28 @@ fn pso_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid PSO args optimize successfully")
     };
+    assert_eq!(make(), make());
+}
+
+#[test]
+fn adam_is_deterministic_for_a_fixed_seed() {
+    let make = || {
+        AlgorithmAdam
+            .optimize(AlgorithmAdamArgs {
+                oracle: Box::new(Quadratic { target: 0.7 }),
+                gradient_oracle: Box::new(QuadraticGradient { target: 0.7 }),
+                max_iters: 50,
+                learning_rate: 0.05,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (0.0, 2.0),
+                dimensions: 4,
+                seed: Some(123),
+            })
+            .expect("valid Adam args optimize successfully")
+    };
+    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome.
     assert_eq!(make(), make());
 }
 
@@ -584,6 +636,60 @@ fn qng_rejects_empty_bounds() {
 }
 
 #[test]
+fn adam_short_gradient_oracle_returns_error_not_panic() {
+    // Adam assembles its update from `gradient_oracle.gradient_batch(θ, dims)`
+    // and indexes it positionally per parameter, exactly like QNG. A gradient
+    // oracle returning fewer than `dims` components (here dims−1 = 1) would make
+    // that indexing panic — it must surface a typed error instead. The fitness
+    // `oracle` is irrelevant: the gradient step runs (and fails the length
+    // check) first.
+    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
+        oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(ShortGradientOracle),
+        max_iters: 5,
+        learning_rate: 0.05,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        bounds: (0.0, 2.0),
+        dimensions: 2,
+        seed: Some(1),
+    });
+    assert!(
+        matches!(
+            result,
+            Err(OptimizerError::OracleLengthMismatch {
+                expected: 2,
+                got: 1
+            })
+        ),
+        "expected OracleLengthMismatch, got {result:?}"
+    );
+}
+
+#[test]
+fn adam_rejects_empty_bounds() {
+    // Adam draws θ from [lb, ub) exactly like QNG/PSO, so an empty interval is
+    // the same panic risk and must likewise return a typed error, not panic.
+    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
+        oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+        max_iters: 5,
+        learning_rate: 0.05,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        bounds: (1.0, 1.0),
+        dimensions: 2,
+        seed: Some(1),
+    });
+    assert!(
+        matches!(result, Err(OptimizerError::InvalidBounds { .. })),
+        "empty Adam bounds should be rejected, got {result:?}"
+    );
+}
+
+#[test]
 fn linear_parameter_shift_matches_analytic_gradient() {
     // For CosSum (fitness = Σ cos θᵢ) the parameter-shift rule is exact in
     // closed form: ∂/∂θᵢ = −sin θᵢ, and [cos(θ+π/2) − cos(θ−π/2)]/2 = −sin θ.
@@ -722,6 +828,35 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
             .expect("valid QNG args optimize successfully");
         assert_reported_fitness_matches_params(
             "qng/multimodal",
+            seed,
+            &outcome,
+            &Multimodal { target: 1.0 },
+        );
+    }
+}
+
+#[test]
+fn adam_best_params_fitness_invariant_holds_across_seeds() {
+    // Adam updates best_params/best_fitness atomically from the same evaluation,
+    // so this should pass — asserted here so all four optimizers are covered on
+    // the rough Multimodal surface where a desynced champion would diverge.
+    for seed in 0..20 {
+        let outcome = AlgorithmAdam
+            .optimize(AlgorithmAdamArgs {
+                oracle: Box::new(Multimodal { target: 1.0 }),
+                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
+                max_iters: 120,
+                learning_rate: 0.05,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (0.0, 2.0),
+                dimensions: 4,
+                seed: Some(seed),
+            })
+            .expect("valid Adam args optimize successfully");
+        assert_reported_fitness_matches_params(
+            "adam/multimodal",
             seed,
             &outcome,
             &Multimodal { target: 1.0 },

@@ -8,6 +8,7 @@
 //! - [`AlgorithmDifferentialEvolution`] — Differential Evolution (DE)
 //! - [`AlgorithmPSO`] — Particle Swarm Optimization (PSO)
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
+//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation)
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
 //! Python interpreter. They only depend on two input contracts:
@@ -19,13 +20,13 @@
 //! - [`VarianceOracle`] (QNG only) returns the diagonal elements of the
 //!   Fubini–Study metric (QFIM). It abstracts the one algorithm-specific
 //!   callback QNG needs, so no runtime detail leaks into this crate.
-//! - [`GradientOracle`] (QNG only) returns the exact gradient of the fitness
+//! - [`GradientOracle`] (QNG and Adam) returns the exact gradient of the fitness
 //!   with respect to each parameter (parameter-shift, in the noiseless limit).
-//!   QNG uses it in place of a finite-difference stencil; like
-//!   [`VarianceOracle`], the caller guarantees the value is the true gradient
-//!   of whatever its companion [`EvaluationOracle`] scores. The free function
-//!   [`linear_parameter_shift_gradient`] builds it for any oracle whose fitness
-//!   is linear in the shifted expectations (no nonlinear loss on top).
+//!   Both gradient optimizers use it in place of a finite-difference stencil;
+//!   like [`VarianceOracle`], the caller guarantees the value is the true
+//!   gradient of whatever its companion [`EvaluationOracle`] scores. The free
+//!   function [`linear_parameter_shift_gradient`] builds it for any oracle whose
+//!   fitness is linear in the shifted expectations (no nonlinear loss on top).
 //!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
@@ -76,6 +77,7 @@
 
 #![deny(clippy::all)]
 
+pub mod adam;
 pub mod differential_evolution;
 pub mod error;
 pub mod objective;
@@ -86,6 +88,7 @@ pub mod quantum_natural_gradient;
 mod rng;
 mod util;
 
+pub use adam::{AlgorithmAdam, AlgorithmAdamArgs};
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
 };
