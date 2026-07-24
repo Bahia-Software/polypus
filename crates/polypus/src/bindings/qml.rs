@@ -29,8 +29,10 @@ use crate::bindings::adam::Adam;
 use crate::bindings::de::DE;
 use crate::bindings::pso::PSO;
 use crate::bindings::qng::{PyVarianceOracle, QNG};
-use crate::evaluation::{EvaluationOracle, NativeQmlOracle, OracleErrorSlot, QmlOracle};
-use crate::infrastructure::{ExecutionConfig, Infrastructure, OptLevel};
+use crate::evaluation::{
+    EvaluationOracle, ExactNativeQmlOracle, NativeQmlOracle, OracleErrorSlot, QmlOracle,
+};
+use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
 use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
     AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
@@ -284,6 +286,14 @@ impl Dataset {
 /// too, which the shared `#[pyfunction]` signature requires once an earlier
 /// positional argument (`x_train`) becomes optional — a backward-compatible
 /// relaxation, since every existing caller passes them explicitly.
+///
+/// `exact` (default `False`) selects the shot-free exact-expectation path
+/// (design doc §17). It is supported **only** on the native Model+Dataset path
+/// with `infrastructure="local"` and a native `backend` (`polypus`); any other
+/// combination — including the Qiskit path — rejects `exact=True` with a clear
+/// error rather than silently ignoring it. In exact mode `shots`/`seed` no
+/// longer affect the result (there is no sampling), so two runs with the same
+/// configuration produce byte-identical `best_params`.
 #[pyfunction(name = "train", signature = (
     feature_map,
     ansatz,
@@ -302,6 +312,7 @@ impl Dataset {
     backend="aer",
     seed=None,
     loss=None,
+    exact=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn qml_train<'py>(
@@ -322,6 +333,7 @@ pub fn qml_train<'py>(
     backend: &str,
     seed: Option<u64>,
     loss: Option<&str>,
+    exact: bool,
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
@@ -353,6 +365,7 @@ pub fn qml_train<'py>(
             backend,
             seed,
             loss,
+            exact,
         )
     } else {
         qml_train_qiskit(
@@ -372,6 +385,7 @@ pub fn qml_train<'py>(
             noise_model,
             backend,
             seed,
+            exact,
         )
     }
 }
@@ -397,6 +411,7 @@ fn qml_train_native(
     backend: &str,
     seed: Option<u64>,
     loss: Option<&str>,
+    exact: bool,
 ) -> PyResult<PyObject> {
     let py = model.py();
     // Reject kwargs that belong to the Qiskit path: on the native path the
@@ -476,21 +491,51 @@ fn qml_train_native(
         opt_level: OptLevel::default(),
         seed: Some(effective_seed),
     });
-    let backend = Infrastructure::create_backend(&config)?;
     let errors = OracleErrorSlot::new();
-    // One concrete oracle behind an `Arc`, handed to `dispatch_optimizer` as two
-    // independent trait-object boxes via the `Arc<T>` blanket impls: the same
-    // NativeQmlOracle scores fitness (EvaluationOracle) and its exact
-    // parameter-shift gradient (GradientOracle) for the gradient optimizers
-    // (QNG, Adam).
-    let oracle = Arc::new(NativeQmlOracle {
-        problem,
-        config: Arc::clone(&config),
-        backend,
-        errors: errors.clone(),
-    });
-    let eval_oracle: Box<dyn EvaluationOracle> = Box::new(Arc::clone(&oracle));
-    let gradient_oracle: Box<dyn GradientOracle> = Box::new(oracle);
+    // Build the pair of trait-object boxes `dispatch_optimizer` consumes. Both
+    // paths hand it the *same* concrete oracle behind an `Arc`, exposed as two
+    // independent facets via the `Arc<T>` blanket impls: the evaluation box
+    // scores fitness (EvaluationOracle) and the gradient box supplies the exact
+    // parameter-shift gradient (GradientOracle) for QNG/Adam. `dispatch_optimizer`
+    // only ever sees the two boxes, so it needs no knowledge of which concrete
+    // oracle is behind them.
+    let (eval_oracle, gradient_oracle): (Box<dyn EvaluationOracle>, Box<dyn GradientOracle>) =
+        if exact {
+            // Exact mode (design doc §17) is native-only: require local
+            // infrastructure and a native backend, then read exact expectations
+            // straight off the statevector — never through the QuantumBackend
+            // trait (which has no "exact" meaning for noisy Aer or real hardware).
+            if infrastructure != "local" || !is_native_backend(backend) {
+                return Err(PyValueError::new_err(format!(
+                    "exact mode (exact=True) requires the native statevector backend: \
+                     infrastructure=\"local\" and backend=\"polypus\", got \
+                     infrastructure=\"{infrastructure}\", backend=\"{backend}\""
+                )));
+            }
+            // Build the concrete native backend directly. The exact read-out is
+            // an inherent method of `NativeStatevectorBackend`, not on the
+            // `QuantumBackend` trait, so `Infrastructure::create_backend` (which
+            // returns `Arc<dyn QuantumBackend>`) cannot supply it. The seed is
+            // never used in exact mode — there is no sampling — but the
+            // constructor requires one, so we pass the resolved seed anyway.
+            let backend = Arc::new(NativeStatevectorBackend::new(effective_seed));
+            let oracle = Arc::new(ExactNativeQmlOracle {
+                problem,
+                config: Arc::clone(&config),
+                backend,
+                errors: errors.clone(),
+            });
+            (Box::new(Arc::clone(&oracle)), Box::new(oracle))
+        } else {
+            let backend = Infrastructure::create_backend(&config)?;
+            let oracle = Arc::new(NativeQmlOracle {
+                problem,
+                config: Arc::clone(&config),
+                backend,
+                errors: errors.clone(),
+            });
+            (Box::new(Arc::clone(&oracle)), Box::new(oracle))
+        };
 
     dispatch_optimizer(
         py,
@@ -524,7 +569,16 @@ fn qml_train_qiskit(
     noise_model: Option<Bound<'_, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    exact: bool,
 ) -> PyResult<PyObject> {
+    // Exact mode is native-only (design doc §17): the Qiskit path has no
+    // statevector of its own to read exactly, so reject rather than ignore it.
+    if exact {
+        return Err(PyValueError::new_err(
+            "exact mode (exact=True) is only supported on the native Model+Dataset path; \
+             pass a polypus.qml.Model with infrastructure=\"local\" and backend=\"polypus\"",
+        ));
+    }
     // On the Qiskit path these three are required (they default to None only so
     // the shared signature can make `x_train` optional for the native path).
     let x_train = x_train.ok_or_else(|| {
