@@ -1,6 +1,6 @@
 use polypus::algorithms::{
-    AlgorithmArgs, AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG, AlgorithmSingleRun,
-    DistributeByShotsRun,
+    AlgorithmAdam, AlgorithmArgs, AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG,
+    AlgorithmSingleRun, DistributeByShotsRun,
 };
 use polypus::circuit::ParameterizedCircuit;
 use polypus::infrastructure::{
@@ -68,6 +68,16 @@ fn qng_name() {
 #[test]
 fn qng_description_is_non_empty() {
     assert!(!AlgorithmQNG.description().is_empty());
+}
+
+#[test]
+fn adam_name() {
+    assert_eq!(AlgorithmAdam.name(), "Adam");
+}
+
+#[test]
+fn adam_description_is_non_empty() {
+    assert!(!AlgorithmAdam.description().is_empty());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
