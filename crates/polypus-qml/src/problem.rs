@@ -379,6 +379,185 @@ impl QmlProblem {
     pub fn predict_from_counts(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
         self.model.resolved_readout().predict(counts)
     }
+
+    // ── Exact mode (design doc §17) ──────────────────────────────────────────
+    //
+    // Exact mirrors of the counts-based methods above, taking per-sample exact
+    // basis-state `probabilities` (`|amplitude|²`) instead of finite-shot
+    // counts. Each has identical structure, length validation and error
+    // ordering to its counterpart — only the expectation estimator differs
+    // (`expectation_from_probabilities` vs. `expectation_from_counts`). The
+    // native exact `qml.train` path is their sole caller.
+
+    /// Exact-mode mirror of
+    /// [`expectations_from_counts`](Self::expectations_from_counts): the
+    /// per-sample raw expectation `⟨O₀⟩` from exact `probabilities`.
+    pub fn expectations_from_probabilities(
+        &self,
+        probabilities: &[HashMap<String, f64>],
+    ) -> Result<Vec<f64>, QmlError> {
+        if probabilities.len() != self.templates.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.templates.len(),
+                got: probabilities.len(),
+            });
+        }
+        let observable = &self.model.resolved_readout().observables()[0];
+        probabilities
+            .iter()
+            .map(|sample_probs| observable.expectation_from_probabilities(sample_probs))
+            .collect()
+    }
+
+    /// Exact-mode mirror of
+    /// [`expectations_per_class_from_counts`](Self::expectations_per_class_from_counts):
+    /// the per-sample per-class expectation vector from exact `probabilities`.
+    pub fn expectations_per_class_from_probabilities(
+        &self,
+        probabilities: &[HashMap<String, f64>],
+    ) -> Result<Vec<Vec<f64>>, QmlError> {
+        if probabilities.len() != self.templates.len() {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: self.templates.len(),
+                got: probabilities.len(),
+            });
+        }
+        let observables = self.model.resolved_readout().observables();
+        probabilities
+            .iter()
+            .map(|sample_probs| {
+                observables
+                    .iter()
+                    .map(|observable| observable.expectation_from_probabilities(sample_probs))
+                    .collect::<Result<Vec<f64>, QmlError>>()
+            })
+            .collect()
+    }
+
+    /// Exact-mode mirror of [`fitness_from_counts`](Self::fitness_from_counts):
+    /// the fitness `= −mean_loss` from exact `probabilities`, branching on the
+    /// loss exactly as the counts version does so the caller stays agnostic.
+    pub fn fitness_from_probabilities(
+        &self,
+        probabilities: &[HashMap<String, f64>],
+    ) -> Result<f64, QmlError> {
+        if self.loss == Loss::CategoricalCrossEntropy {
+            let per_class = self.expectations_per_class_from_probabilities(probabilities)?;
+            let labels = self.train.labels();
+            let total: f64 = per_class
+                .iter()
+                .zip(labels)
+                .map(|(expectations, &label)| {
+                    categorical_cross_entropy(expectations, label as usize)
+                })
+                .sum();
+            return Ok(-total / per_class.len() as f64);
+        }
+
+        let expectations = self.expectations_from_probabilities(probabilities)?;
+        let labels = self.train.labels();
+        let total: f64 = expectations
+            .iter()
+            .zip(labels)
+            .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
+            .sum::<Result<f64, QmlError>>()?;
+        Ok(-total / expectations.len() as f64)
+    }
+
+    /// Exact-mode mirror of [`param_gradient`](Self::param_gradient): the exact
+    /// parameter-shift gradient component from exact `probabilities`. Same
+    /// length-validation order (plus, minus, base) as its counterpart.
+    ///
+    /// Here "exact" is doubly so: the parameter-shift identity holds exactly in
+    /// the noiseless limit, and the probabilities carry no shot noise, so the
+    /// returned value is the true gradient component rather than an estimator.
+    pub fn param_gradient_exact(
+        &self,
+        base_expectations: &[f64],
+        plus_probs: &[HashMap<String, f64>],
+        minus_probs: &[HashMap<String, f64>],
+    ) -> Result<f64, QmlError> {
+        let n = self.num_circuits();
+        if plus_probs.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: plus_probs.len(),
+            });
+        }
+        if minus_probs.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: minus_probs.len(),
+            });
+        }
+        if base_expectations.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: base_expectations.len(),
+            });
+        }
+
+        let plus_expectations = self.expectations_from_probabilities(plus_probs)?;
+        let minus_expectations = self.expectations_from_probabilities(minus_probs)?;
+        let labels = self.train.labels();
+
+        let total: f64 = (0..n)
+            .map(|i| -> Result<f64, QmlError> {
+                Ok(self.loss.gradient(base_expectations[i], labels[i])?
+                    * (plus_expectations[i] - minus_expectations[i])
+                    / 2.0)
+            })
+            .sum::<Result<f64, QmlError>>()?;
+        Ok(-total / n as f64)
+    }
+
+    /// Exact-mode mirror of
+    /// [`param_gradient_categorical`](Self::param_gradient_categorical): the
+    /// exact parameter-shift gradient component of the categorical fitness from
+    /// exact `probabilities`. Same length-validation order as its counterpart.
+    pub fn param_gradient_categorical_exact(
+        &self,
+        base_expectations: &[Vec<f64>],
+        plus_probs: &[HashMap<String, f64>],
+        minus_probs: &[HashMap<String, f64>],
+    ) -> Result<f64, QmlError> {
+        let n = self.num_circuits();
+        if plus_probs.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: plus_probs.len(),
+            });
+        }
+        if minus_probs.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: minus_probs.len(),
+            });
+        }
+        if base_expectations.len() != n {
+            return Err(QmlError::CountsLengthMismatch {
+                expected: n,
+                got: base_expectations.len(),
+            });
+        }
+
+        let plus_per_class = self.expectations_per_class_from_probabilities(plus_probs)?;
+        let minus_per_class = self.expectations_per_class_from_probabilities(minus_probs)?;
+        let labels = self.train.labels();
+
+        let total: f64 = (0..n)
+            .map(|i| {
+                let g =
+                    categorical_cross_entropy_gradient(&base_expectations[i], labels[i] as usize);
+                g.iter()
+                    .zip(plus_per_class[i].iter())
+                    .zip(minus_per_class[i].iter())
+                    .map(|((&g_j, &plus_j), &minus_j)| g_j * (plus_j - minus_j) / 2.0)
+                    .sum::<f64>()
+            })
+            .sum();
+        Ok(-total / n as f64)
+    }
 }
 
 #[cfg(test)]
@@ -825,6 +1004,226 @@ mod tests {
         assert_eq!(
             problem.predict_from_counts(&counts(&[("01", 10)])),
             Ok(-1.0)
+        );
+    }
+
+    // ── Exact mode (design doc §17) ──────────────────────────────────────────
+
+    fn probs(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    /// Regression tying the two estimators together: for a real problem and a
+    /// fixed `θ`, `expectations_from_counts` at a very high shot count (fixed
+    /// seed) converges to the exact `expectations_from_probabilities`. Same
+    /// spirit as Phase 5's `counts_expectation_matches_exact_expectation`, but
+    /// comparing the two `QmlProblem` estimators directly. The exact
+    /// probabilities and the counts both come from the same statevector, so any
+    /// gap is pure sampling noise, tamed by the shot count and the loose
+    /// tolerance.
+    #[test]
+    fn counts_expectations_converge_to_exact_probability_expectations() {
+        use polypus_sim::{Simulator, SplitMix64, StatevectorSimulator};
+
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let theta: Vec<f64> = (0..problem.num_params())
+            .map(|k| 0.1 + 0.13 * k as f64)
+            .collect();
+        let circuits = problem.bind_batch(&theta).unwrap();
+
+        let sim = StatevectorSimulator::new();
+        let mut exact_probs = Vec::with_capacity(circuits.len());
+        let mut sampled_counts = Vec::with_capacity(circuits.len());
+        let mut rng = SplitMix64::new(0xC0FFEE_u64);
+        for circuit in &circuits {
+            let sv = sim.run(circuit).unwrap();
+            let width = circuit.num_qubits;
+            // Exact probabilities, keyed exactly as the native backend does.
+            let probs_map: HashMap<String, f64> = sv
+                .probabilities()
+                .into_iter()
+                .enumerate()
+                .map(|(state, p)| (format!("{state:0width$b}"), p))
+                .collect();
+            exact_probs.push(probs_map);
+            // High-shot counts drawn from the same state.
+            let counts_map: HashMap<String, u64> = sv
+                .sample(400_000, &mut rng)
+                .into_iter()
+                .map(|(state, c)| (format!("{state:0width$b}"), c))
+                .collect();
+            sampled_counts.push(counts_map);
+        }
+
+        let exact = problem
+            .expectations_from_probabilities(&exact_probs)
+            .unwrap();
+        let estimated = problem.expectations_from_counts(&sampled_counts).unwrap();
+        assert_eq!(exact.len(), estimated.len());
+        for (e, s) in exact.iter().zip(&estimated) {
+            assert!(
+                (e - s).abs() < 0.01,
+                "counts estimate {s} deviates from exact {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn expectations_from_probabilities_reads_raw_z0_and_checks_length() {
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        // "0":0.75,"1":0.25 → +0.5 ; "0":0.25,"1":0.75 → −0.5.
+        let p = vec![
+            probs(&[("0", 0.75), ("1", 0.25)]),
+            probs(&[("0", 0.25), ("1", 0.75)]),
+        ];
+        let exps = problem.expectations_from_probabilities(&p).unwrap();
+        assert!((exps[0] - 0.5).abs() < 1e-12);
+        assert!((exps[1] + 0.5).abs() < 1e-12);
+
+        let err = problem
+            .expectations_from_probabilities(&p[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn fitness_from_probabilities_is_neg_mean_loss() {
+        // Mirror of `fitness_from_counts_is_neg_mean_loss_over_expectations`
+        // with exact probabilities that reproduce the same ⟨O₀⟩ = ±0.5.
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let p = vec![
+            probs(&[("0", 0.75), ("1", 0.25)]),
+            probs(&[("0", 0.25), ("1", 0.75)]),
+        ];
+        // SquaredError: (0.5−1)² = 0.25 ; (−0.5−(−1))² = 0.25 → mean 0.25.
+        let expected = -(0.25 + 0.25) / 2.0;
+        let fitness = problem.fitness_from_probabilities(&p).unwrap();
+        assert!((fitness - expected).abs() < 1e-12, "fitness={fitness}");
+    }
+
+    #[test]
+    fn param_gradient_exact_matches_hand_computation() {
+        // Mirror of `param_gradient_matches_hand_computation` with exact probs:
+        //   sample 0 (y=+1): base=0.5, plus=+1.0, minus=0.0
+        //   sample 1 (y=−1): base=−0.5, plus=0.0, minus=+1.0  → grad = +0.5
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let base = vec![0.5, -0.5];
+        let plus = vec![probs(&[("0", 1.0)]), probs(&[("0", 0.5), ("1", 0.5)])];
+        let minus = vec![probs(&[("0", 0.5), ("1", 0.5)]), probs(&[("0", 1.0)])];
+        let grad = problem.param_gradient_exact(&base, &plus, &minus).unwrap();
+        assert!((grad - 0.5).abs() < 1e-12, "grad={grad}");
+    }
+
+    #[test]
+    fn param_gradient_exact_checks_lengths_in_documented_order() {
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]); // num_circuits() == 2
+        let ok_pair = vec![probs(&[("0", 1.0)]), probs(&[("1", 1.0)])];
+        let base_ok = vec![0.0, 0.0];
+
+        // plus wrong → reported first.
+        let err = problem
+            .param_gradient_exact(&base_ok, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        // plus ok, minus wrong → reported next.
+        let err = problem
+            .param_gradient_exact(&base_ok, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        // plus/minus ok, base wrong → reported last.
+        let err = problem
+            .param_gradient_exact(&base_ok[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+    }
+
+    #[test]
+    fn fitness_from_probabilities_categorical_matches_hand_computation() {
+        // Mirror of `fitness_from_counts_categorical_matches_hand_computation`
+        // with exact probs reproducing z=[1.0,0.5] and z=[−0.5,−1.0].
+        let problem = categorical_two_class_problem();
+        let p = vec![
+            probs(&[("00", 0.75), ("10", 0.25)]),
+            probs(&[("10", 0.25), ("11", 0.75)]),
+        ];
+        let fitness = problem.fitness_from_probabilities(&p).unwrap();
+        assert!(fitness.is_finite());
+        assert!((fitness + 0.724074).abs() < 1e-3, "fitness={fitness}");
+    }
+
+    #[test]
+    fn param_gradient_categorical_exact_matches_hand_computation() {
+        // Mirror of `param_gradient_categorical_matches_hand_computation`.
+        let problem = categorical_two_class_problem();
+        let base = vec![vec![1.0, 0.5], vec![-0.5, -1.0]];
+        // plus ("10") → z=[1.0,−1.0] ; minus ("01") → z=[−1.0,1.0].
+        let plus = vec![probs(&[("10", 1.0)]), probs(&[("10", 1.0)])];
+        let minus = vec![probs(&[("01", 1.0)]), probs(&[("01", 1.0)])];
+        let grad = problem
+            .param_gradient_categorical_exact(&base, &plus, &minus)
+            .unwrap();
+        assert!((grad + 0.244918).abs() < 1e-3, "grad={grad}");
+    }
+
+    #[test]
+    fn param_gradient_categorical_exact_checks_lengths_in_documented_order() {
+        let problem = categorical_two_class_problem(); // num_circuits() == 2
+        let ok_pair = vec![probs(&[("00", 1.0)]), probs(&[("11", 1.0)])];
+        let base_ok = vec![vec![0.0, 0.0], vec![0.0, 0.0]];
+
+        let err = problem
+            .param_gradient_categorical_exact(&base_ok, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        let err = problem
+            .param_gradient_categorical_exact(&base_ok, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        let err = problem
+            .param_gradient_categorical_exact(&base_ok[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
         );
     }
 }
