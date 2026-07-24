@@ -82,8 +82,9 @@ fn parse_loss(loss: &str) -> PyResult<Loss> {
         "squared_error" => Ok(Loss::SquaredError),
         "binary_cross_entropy" => Ok(Loss::BinaryCrossEntropy),
         "hinge" => Ok(Loss::Hinge),
+        "categorical_cross_entropy" => Ok(Loss::CategoricalCrossEntropy),
         other => Err(PyValueError::new_err(format!(
-            "unknown loss '{other}'; expected \"squared_error\", \"binary_cross_entropy\" or \"hinge\""
+            "unknown loss '{other}'; expected \"squared_error\", \"binary_cross_entropy\", \"hinge\" or \"categorical_cross_entropy\""
         ))),
     }
 }
