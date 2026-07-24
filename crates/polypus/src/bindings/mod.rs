@@ -4,6 +4,7 @@ use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
 
+pub mod adam;
 pub mod circuit;
 pub mod de;
 pub mod logging;
@@ -11,6 +12,7 @@ pub mod pso;
 pub mod qml;
 pub mod qng;
 
+use adam::Adam;
 use circuit::{statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
@@ -27,9 +29,9 @@ use crate::infrastructure::{
     BackendConfig, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
 };
 use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, GradientOracle, OptimizationOutcome,
-    Optimizer, OptimizerError,
+    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
+    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
+    AlgorithmQNGArgs, GradientOracle, OptimizationOutcome, Optimizer, OptimizerError,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -172,8 +174,9 @@ fn unique_id(base: &str) -> String {
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
-/// whichever of `DE`/`PSO`/`QNG` it is (`None` if it is none of them — the type
-/// error is surfaced later by the dispatch that actually runs the optimizer).
+/// whichever of `DE`/`PSO`/`QNG`/`Adam` it is (`None` if it is none of them —
+/// the type error is surfaced later by the dispatch that actually runs the
+/// optimizer).
 fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         return de.seed;
@@ -183,6 +186,9 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     }
     if let Ok(qng) = method.extract::<PyRef<QNG>>() {
         return qng.seed;
+    }
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        return adam.seed;
     }
     None
 }
@@ -521,7 +527,7 @@ pub fn run_quantum_circuit<'py>(
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
-/// `method` must be an instance of `DE`, `PSO`, or `QNG`.
+/// `method` must be an instance of `DE`, `PSO`, `QNG`, or `Adam`.
 ///
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
@@ -643,9 +649,10 @@ pub fn train<'py>(
     let errors = OracleErrorSlot::new();
     // One concrete VqcOracle behind an `Arc`, exposed as two independent
     // trait-object boxes via the `Arc<T>` blanket impls: the same oracle scores
-    // fitness (EvaluationOracle) and, for QNG, its parameter-shift gradient
-    // (GradientOracle, exact by linearity — the VQC fitness is a raw expectation
-    // with no nonlinear loss on top). DE/PSO ignore the gradient box.
+    // fitness (EvaluationOracle) and, for the gradient optimizers (QNG, Adam),
+    // its parameter-shift gradient (GradientOracle, exact by linearity — the VQC
+    // fitness is a raw expectation with no nonlinear loss on top). DE/PSO ignore
+    // the gradient box.
     let oracle = Arc::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
@@ -727,8 +734,33 @@ pub fn train<'py>(
         );
     }
 
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        // Same two facets of the one Arc as QNG: `eval_oracle` scores fitness,
+        // `gradient_oracle` supplies the exact parameter-shift gradient. No
+        // VarianceOracle — Adam's adaptive step comes from the gradient moments.
+        let args = AlgorithmAdamArgs {
+            oracle: eval_oracle,
+            gradient_oracle,
+            max_iters: adam.max_iters,
+            learning_rate: adam.learning_rate,
+            beta1: adam.beta1,
+            beta2: adam.beta2,
+            epsilon: adam.epsilon,
+            bounds: adam.bounds,
+            dimensions,
+            seed: Some(effective_seed),
+        };
+        return finish_optimization(
+            method.py(),
+            method.py().allow_threads(|| AlgorithmAdam.optimize(args)),
+            &errors,
+            effective_seed,
+            effective_id.clone(),
+        );
+    }
+
     Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
+        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
     ))
 }
 
@@ -747,6 +779,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
     m.add_class::<QNG>()?;
+    m.add_class::<Adam>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
     m.add_class::<RunResult>()?;

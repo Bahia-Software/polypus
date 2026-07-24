@@ -1,13 +1,13 @@
 pub mod orchestration;
 pub use crate::algorithms::orchestration::*;
 
-// The VQC optimizers (DE, PSO, QNG) now live in the pure-Rust `polypus-optimizers`
-// crate. Re-export them so the `polypus::algorithms::*` and `polypus::*` paths keep
-// resolving for existing consumers.
+// The VQC optimizers (DE, PSO, QNG, Adam) now live in the pure-Rust
+// `polypus-optimizers` crate. Re-export them so the `polypus::algorithms::*` and
+// `polypus::*` paths keep resolving for existing consumers.
 pub use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
-    Optimizer, VarianceOracle,
+    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
+    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
+    AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome, Optimizer, VarianceOracle,
 };
 
 use crate::infrastructure::{BoundCircuit, ExecutionConfig};

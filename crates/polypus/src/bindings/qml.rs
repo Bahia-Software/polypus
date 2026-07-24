@@ -7,7 +7,7 @@
 //! `QuantumCircuit` feature map and takes the original Qiskit/Aer path unchanged.
 //!
 //! The shared plumbing (seed resolution, `ExecutionConfig`/backend construction,
-//! the DE/PSO/QNG dispatch, `finish_optimization`) lives in the parent
+//! the DE/PSO/QNG/Adam dispatch, `finish_optimization`) lives in the parent
 //! [`bindings`](super) module and is reached through `super::`; only the
 //! QML-specific wrappers and the native path live here.
 
@@ -25,14 +25,16 @@ use super::{
     build_backend_config, finish_optimization, is_native_backend, method_seed,
     resolve_optimizer_seed, unique_id, validate_cunqa_allocation, validate_shots_and_qpus,
 };
+use crate::bindings::adam::Adam;
 use crate::bindings::de::DE;
 use crate::bindings::pso::PSO;
 use crate::bindings::qng::{PyVarianceOracle, QNG};
 use crate::evaluation::{EvaluationOracle, NativeQmlOracle, OracleErrorSlot, QmlOracle};
 use crate::infrastructure::{ExecutionConfig, Infrastructure, OptLevel};
 use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, GradientOracle, Optimizer,
+    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
+    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
+    AlgorithmQNGArgs, GradientOracle, Optimizer,
 };
 
 /// Map a `polypus-qml` [`ValidationError`] (a construction/compilation failure —
@@ -326,7 +328,7 @@ pub fn qml_train<'py>(
     // signature needs one once `x_train` (an earlier positional) is optional.
     let method = method.ok_or_else(|| {
         PyTypeError::new_err(
-            "method is required: pass an instance of polypus.DE, polypus.PSO, or polypus.QNG",
+            "method is required: pass an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
         )
     })?;
 
@@ -478,7 +480,8 @@ fn qml_train_native(
     // One concrete oracle behind an `Arc`, handed to `dispatch_optimizer` as two
     // independent trait-object boxes via the `Arc<T>` blanket impls: the same
     // NativeQmlOracle scores fitness (EvaluationOracle) and its exact
-    // parameter-shift gradient (GradientOracle) for QNG.
+    // parameter-shift gradient (GradientOracle) for the gradient optimizers
+    // (QNG, Adam).
     let oracle = Arc::new(NativeQmlOracle {
         problem,
         config: Arc::clone(&config),
@@ -604,8 +607,9 @@ fn qml_train_qiskit(
     let backend = Infrastructure::create_backend(&config)?;
     let errors = OracleErrorSlot::new();
     // Same Arc + two-boxes pattern as the native path: the QmlOracle scores
-    // fitness and, for QNG, its parameter-shift gradient (exact by linearity of
-    // the mean expectation — this path has no nonlinear loss).
+    // fitness and, for the gradient optimizers (QNG, Adam), its parameter-shift
+    // gradient (exact by linearity of the mean expectation — this path has no
+    // nonlinear loss).
     let oracle = Arc::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
@@ -627,16 +631,16 @@ fn qml_train_qiskit(
     )
 }
 
-/// Run `oracle` under the optimizer named by `method` (DE/PSO/QNG), releasing the
-/// GIL for the whole `optimize()` call (see `train` and ENGINEERING §3) and
-/// surfacing any recorded oracle error afterwards.
+/// Run `oracle` under the optimizer named by `method` (DE/PSO/QNG/Adam),
+/// releasing the GIL for the whole `optimize()` call (see `train` and
+/// ENGINEERING §3) and surfacing any recorded oracle error afterwards.
 ///
 /// Shared verbatim by both `qml.train` paths — the only difference between them
 /// is which oracle and `dimensions` are passed in.
 ///
 /// `gradient_oracle` is the same underlying oracle as `oracle` (built from one
-/// `Arc` via the blanket impls); it is consumed only by the QNG branch and
-/// ignored by DE/PSO, which are gradient-free.
+/// `Arc` via the blanket impls); it is consumed by the gradient optimizers
+/// (QNG, Adam) and ignored by DE/PSO, which are gradient-free.
 fn dispatch_optimizer(
     py: Python<'_>,
     method: &Bound<'_, PyAny>,
@@ -647,8 +651,8 @@ fn dispatch_optimizer(
     effective_id: String,
 ) -> PyResult<PyObject> {
     // The two boxes are the same underlying oracle (one Arc, two blanket-impl
-    // facets): the evaluation box for DE/PSO/QNG fitness, the gradient box for
-    // QNG only. Passed as a pair to keep the argument count in check.
+    // facets): the evaluation box for DE/PSO/QNG/Adam fitness, the gradient box
+    // for QNG and Adam. Passed as a pair to keep the argument count in check.
     let (oracle, gradient_oracle) = oracles;
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         let args = AlgorithmDifferentialEvolutionArgs {
@@ -714,7 +718,32 @@ fn dispatch_optimizer(
         );
     }
 
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        // Same two facets of the one Arc as QNG: the evaluation box scores
+        // fitness, the gradient box supplies the exact parameter-shift gradient.
+        // No VarianceOracle — Adam's adaptive step comes from the gradient moments.
+        let args = AlgorithmAdamArgs {
+            oracle,
+            gradient_oracle,
+            max_iters: adam.max_iters,
+            learning_rate: adam.learning_rate,
+            beta1: adam.beta1,
+            beta2: adam.beta2,
+            epsilon: adam.epsilon,
+            bounds: adam.bounds,
+            dimensions,
+            seed: Some(effective_seed),
+        };
+        return finish_optimization(
+            py,
+            py.allow_threads(|| AlgorithmAdam.optimize(args)),
+            errors,
+            effective_seed,
+            effective_id,
+        );
+    }
+
     Err(PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
+        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
     ))
 }
