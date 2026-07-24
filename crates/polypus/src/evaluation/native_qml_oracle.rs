@@ -1,7 +1,7 @@
 use crate::evaluation::{EvaluationError, EvaluationOracle, OracleErrorSlot};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_optimizers::GradientOracle;
-use polypus_qml::QmlProblem;
+use polypus_qml::{Loss, QmlProblem};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -246,16 +246,34 @@ impl NativeQmlOracle {
 
             // Assemble the gradient from the counts (cheap, no circuits): base
             // expectations once, then one chain-rule component per requested k.
-            let base_expectations = problem.expectations_from_counts(&all_counts[0])?;
-            let grad = param_indices
-                .iter()
-                .enumerate()
-                .map(|(j, _)| {
-                    let plus = &all_counts[1 + 2 * j];
-                    let minus = &all_counts[1 + 2 * j + 1];
-                    problem.param_gradient(&base_expectations, plus, minus)
-                })
-                .collect::<Result<Vec<f64>, _>>()?;
+            // The number of circuit batches (2·dims + 1) is identical for both
+            // losses — only how the counts are interpreted differs. The
+            // categorical loss reads every class's expectation and combines them
+            // via the multiclass chain rule; every scalar loss reads only ⟨O₀⟩.
+            let grad = if problem.loss() == Loss::CategoricalCrossEntropy {
+                let base_expectations =
+                    problem.expectations_per_class_from_counts(&all_counts[0])?;
+                param_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(j, _)| {
+                        let plus = &all_counts[1 + 2 * j];
+                        let minus = &all_counts[1 + 2 * j + 1];
+                        problem.param_gradient_categorical(&base_expectations, plus, minus)
+                    })
+                    .collect::<Result<Vec<f64>, _>>()?
+            } else {
+                let base_expectations = problem.expectations_from_counts(&all_counts[0])?;
+                param_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(j, _)| {
+                        let plus = &all_counts[1 + 2 * j];
+                        let minus = &all_counts[1 + 2 * j + 1];
+                        problem.param_gradient(&base_expectations, plus, minus)
+                    })
+                    .collect::<Result<Vec<f64>, _>>()?
+            };
             Ok(grad)
         })
     }
@@ -337,6 +355,42 @@ mod tests {
         QmlProblem::new(compiled, ds, Loss::Hinge).unwrap()
     }
 
+    /// A categorical counterpart of [`small_problem`]: the same 2-qubit
+    /// angle-encoder + hardware-efficient ansatz, but reading **two** observables
+    /// (`⟨Z₀⟩`, `⟨Z₁⟩`) with an `Argmax` decision and trained with
+    /// `CategoricalCrossEntropy` over two class-{0,1} samples. Exercises the
+    /// multiclass branch of `try_gradient`. Its compiled model reserves the same
+    /// 8 trainable parameters.
+    fn categorical_problem() -> QmlProblem {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+                Observable::new(vec![(1.0, PauliString::new(vec![(1, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Argmax,
+        )
+        .unwrap();
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout);
+        let ds = Dataset::from_rows(&[vec![0.4, 0.5], vec![2.6, 2.7]], &[0.0, 1.0]).unwrap();
+        let compiled = model.compile(ds.num_features()).unwrap();
+        QmlProblem::new(compiled, ds, Loss::CategoricalCrossEntropy).unwrap()
+    }
+
+    /// A `NativeQmlOracle` over [`categorical_problem`] with a chosen shot count.
+    fn categorical_oracle_with_shots(errors: OracleErrorSlot, shots: u32) -> NativeQmlOracle {
+        NativeQmlOracle {
+            problem: categorical_problem(),
+            config: native_config_with_shots(shots),
+            backend: Arc::new(NativeStatevectorBackend::new(7)),
+            errors,
+        }
+    }
+
     /// A `LocalNative` execution config seeded deterministically, with a
     /// caller-chosen shot count (the gradient test wants many more shots than
     /// the fitness tests to tame sampling noise).
@@ -394,6 +448,42 @@ mod tests {
         pyo3::prepare_freethreaded_python();
         let oracle = oracle_with_shots(OracleErrorSlot::new(), 65536);
         // small_problem() reserves 8 trainable parameters.
+        let dims = 8;
+        let theta = vec![0.15_f64; dims];
+
+        let grad = oracle.gradient_batch(&theta, dims);
+        assert_eq!(grad.len(), dims);
+        assert!(grad.iter().all(|g| g.is_finite()));
+
+        let h = 0.1_f64;
+        for k in 0..dims {
+            let mut tp = theta.clone();
+            let mut tm = theta.clone();
+            tp[k] += h;
+            tm[k] -= h;
+            let fp = oracle.evaluate_batch(&[tp])[0];
+            let fm = oracle.evaluate_batch(&[tm])[0];
+            let fd = (fp - fm) / (2.0 * h);
+            assert!(
+                (grad[k] - fd).abs() < 5e-2,
+                "param {k}: parameter-shift {} vs finite difference {fd}",
+                grad[k]
+            );
+        }
+    }
+
+    /// The categorical branch of `try_gradient` produces a finite parameter-shift
+    /// gradient that tracks a central finite difference of the (categorical)
+    /// fitness. Mirrors [`gradient_batch_matches_finite_difference`] but over
+    /// [`categorical_problem`], so it exercises the multiclass path
+    /// (`expectations_per_class_from_counts` and `param_gradient_categorical`)
+    /// rather than the scalar path. The same noise/step reasoning applies:
+    /// `h=0.1` with `shots=65536` keeps the true `2h·f'` signal above the
+    /// (independent, non-cancelling) shot noise.
+    #[test]
+    fn gradient_batch_matches_finite_difference_categorical() {
+        pyo3::prepare_freethreaded_python();
+        let oracle = categorical_oracle_with_shots(OracleErrorSlot::new(), 65536);
         let dims = 8;
         let theta = vec![0.15_f64; dims];
 
