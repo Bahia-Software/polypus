@@ -702,6 +702,7 @@ fn dispatch_optimizer(
             learning_rate: qng.learning_rate,
             bounds: qng.bounds,
             dimensions,
+            tolerance: qng.tolerance,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(py),
                 errors: errors.clone(),
@@ -732,6 +733,7 @@ fn dispatch_optimizer(
             epsilon: adam.epsilon,
             bounds: adam.bounds,
             dimensions,
+            tolerance: adam.tolerance,
             seed: Some(effective_seed),
         };
         return finish_optimization(

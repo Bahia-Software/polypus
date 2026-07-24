@@ -15,6 +15,10 @@ pub struct Adam {
     pub epsilon: f64,
     #[pyo3(get, set)]
     pub bounds: (f64, f64),
+    /// Early-stopping tolerance on the gradient norm. Defaults to `0.01`, the
+    /// same default DE/PSO use for their convergence test.
+    #[pyo3(get, set)]
+    pub tolerance: f64,
     /// Optional RNG seed pinned on the optimizer object. Consumed by
     /// `train`/`qml.train` per the precedence rule (contract C-7): the explicit
     /// `seed` kwarg passed to the call wins; this field is the fallback; a fresh
@@ -30,7 +34,7 @@ impl Adam {
     // parameters are circuit rotation angles in radians, not neural-network
     // weights, so a larger step is well-scaled here. `beta1`/`beta2`/`epsilon`
     // are the standard values from the literature.
-    #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), seed = None))]
+    #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, seed = None))]
     pub fn new(
         max_iters: u32,
         learning_rate: f64,
@@ -38,6 +42,7 @@ impl Adam {
         beta2: f64,
         epsilon: f64,
         bounds: (f64, f64),
+        tolerance: f64,
         seed: Option<u64>,
     ) -> Self {
         Adam {
@@ -47,6 +52,7 @@ impl Adam {
             beta2,
             epsilon,
             bounds,
+            tolerance,
             seed,
         }
     }

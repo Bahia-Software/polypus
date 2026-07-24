@@ -14,6 +14,10 @@ pub struct QNG {
     pub learning_rate: f64,
     #[pyo3(get, set)]
     pub tikhonov_reg: f64,
+    /// Early-stopping tolerance on the gradient norm. Defaults to `0.01`, the
+    /// same default DE/PSO use for their convergence test.
+    #[pyo3(get, set)]
+    pub tolerance: f64,
     #[pyo3(get, set)]
     pub variance_function: Py<PyAny>,
     /// Optional RNG seed pinned on the optimizer object. Consumed by
@@ -27,13 +31,14 @@ pub struct QNG {
 #[pymethods]
 impl QNG {
     #[new]
-    #[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, tikhonov_reg = 0.05, seed = None))]
+    #[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, tikhonov_reg = 0.05, tolerance = 0.01, seed = None))]
     pub fn new(
         variance_function: Py<PyAny>,
         max_iters: u32,
         bounds: (f64, f64),
         learning_rate: f64,
         tikhonov_reg: f64,
+        tolerance: f64,
         seed: Option<u64>,
     ) -> Self {
         QNG {
@@ -42,6 +47,7 @@ impl QNG {
             bounds,
             learning_rate,
             tikhonov_reg,
+            tolerance,
             seed,
         }
     }
