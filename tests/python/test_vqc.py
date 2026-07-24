@@ -176,6 +176,42 @@ class TestTrainQNG:
         assert len(result.best_params) == _DIMENSIONS
 
 
+class TestTrainAdam:
+    def test_train_returns_list(self, parametrized_circuit, simple_expectation_fn):
+        import polypus
+
+        result = polypus.train(
+            parametrized_circuit,
+            polypus.Adam(max_iters=3, learning_rate=0.1, bounds=(0.0, math.pi)),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=simple_expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id="test_adam",
+        )
+        assert isinstance(result.best_params, list)
+
+    def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
+        import polypus
+
+        result = polypus.train(
+            parametrized_circuit,
+            polypus.Adam(max_iters=3, bounds=(0.0, math.pi)),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=simple_expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id="test_adam_len",
+        )
+        assert len(result.best_params) == _DIMENSIONS
+
+
 class TestTrainInvalidMethod:
     def test_invalid_method_raises_type_error(
         self, parametrized_circuit, simple_expectation_fn

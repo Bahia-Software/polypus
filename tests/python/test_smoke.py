@@ -43,6 +43,11 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "QNG")
 
+    def test_Adam_class_exists(self):
+        import polypus
+
+        assert hasattr(polypus, "Adam")
+
 
 class TestPolypusInstantiation:
     def test_DE_default_instantiation(self):
@@ -98,6 +103,30 @@ class TestPolypusInstantiation:
         )
         assert qng.max_iters == 50
         assert qng.learning_rate == pytest.approx(0.01)
+
+    def test_Adam_instantiation(self):
+        import polypus
+
+        adam = polypus.Adam()
+        assert adam.max_iters == 100
+        assert adam.learning_rate == pytest.approx(0.05)
+        assert adam.beta1 == pytest.approx(0.9)
+        assert adam.beta2 == pytest.approx(0.999)
+        assert adam.epsilon == pytest.approx(1e-8)
+
+    def test_Adam_custom_instantiation(self):
+        import polypus
+
+        adam = polypus.Adam(
+            max_iters=50,
+            learning_rate=0.01,
+            beta1=0.8,
+            beta2=0.99,
+        )
+        assert adam.max_iters == 50
+        assert adam.learning_rate == pytest.approx(0.01)
+        assert adam.beta1 == pytest.approx(0.8)
+        assert adam.beta2 == pytest.approx(0.99)
 
 
 # ---------------------------------------------------------------------------

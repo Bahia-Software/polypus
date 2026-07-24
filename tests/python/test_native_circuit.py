@@ -270,6 +270,18 @@ class TestTrainNativeCircuit:
         )
         assert isinstance(result.best_params, list) and len(result.best_params) == 1
 
+    def test_train_adam(self, native_parametrized_circuit, simple_expectation_fn):
+        import polypus
+
+        result = polypus.train(
+            native_parametrized_circuit,
+            polypus.Adam(max_iters=2, bounds=(0.0, math.pi)),
+            expectation_function=simple_expectation_fn,
+            id="test_native_adam",
+            **_TRAIN_KW,
+        )
+        assert isinstance(result.best_params, list) and len(result.best_params) == 1
+
     def test_dimension_mismatch_raises_before_training(
         self, native_parametrized_circuit, simple_expectation_fn
     ):
