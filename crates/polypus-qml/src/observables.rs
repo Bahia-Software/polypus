@@ -262,9 +262,20 @@ pub(crate) fn expectation_from_probabilities(
         }
     }
 
+    // Accumulate in a deterministic order. Unlike the counts estimator — where
+    // the weights are integers and the sum is exact regardless of order — here
+    // the weights are arbitrary `f64` and floating-point addition is not
+    // associative, so iterating a `HashMap` (whose order is randomised per map)
+    // would make the result differ by a ULP between two otherwise-identical
+    // calls. Sorting by key (fixed-width bitstrings, so lexicographic == basis
+    // order) pins the summation order, which is what lets the exact `qml.train`
+    // path guarantee byte-for-byte reproducibility (C-7) with no seed at all.
+    let mut entries: Vec<(&String, f64)> = probabilities.iter().map(|(k, &p)| (k, p)).collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
     let mut weighted = 0.0;
     let mut total = 0.0;
-    for (key, &p) in probabilities {
+    for (key, p) in entries {
         let bytes = key.as_bytes();
         let mut parity = 0u32;
         for &(position, _) in &string.0 {
@@ -434,8 +445,8 @@ mod tests {
     #[test]
     fn width_mismatch_across_probability_keys() {
         let string = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
-        let err =
-            expectation_from_probabilities(&probs(&[("00", 0.5), ("0", 0.5)]), &string).unwrap_err();
+        let err = expectation_from_probabilities(&probs(&[("00", 0.5), ("0", 0.5)]), &string)
+            .unwrap_err();
         assert!(matches!(err, QmlError::CountsWidthMismatch { .. }));
     }
 
@@ -500,6 +511,37 @@ mod tests {
         let z0 = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
         let e = expectation_from_probabilities(&probs(&[("0", 0.3), ("1", 0.1)]), &z0).unwrap();
         assert!((e - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn probability_expectation_sums_in_deterministic_basis_order() {
+        // A many-outcome distribution with values chosen so naive HashMap-order
+        // summation would round differently from run to run. The estimator must
+        // equal the reference computed by summing in explicit basis order — the
+        // property the exact path's byte-for-byte reproducibility rests on.
+        let z0 = ResolvedPauliString::new(vec![(0, Pauli::Z)]);
+        let width = 3usize;
+        let raw: Vec<f64> = (0..8).map(|i| 0.03 + 0.017 * (i as f64).sin()).collect();
+        let sum: f64 = raw.iter().sum();
+        let map: HashMap<String, f64> = raw
+            .iter()
+            .enumerate()
+            .map(|(state, &p)| (format!("{state:0width$b}"), p))
+            .collect();
+
+        // Reference: sum sign·p in ascending basis order (matching the sort).
+        let mut weighted = 0.0;
+        for (state, &p) in raw.iter().enumerate() {
+            let sign = if (state & 1) == 0 { 1.0 } else { -1.0 };
+            weighted += sign * p;
+        }
+        let reference = weighted / sum;
+
+        // Bit-for-bit equality (not a tolerance): the order must match exactly.
+        assert_eq!(
+            expectation_from_probabilities(&map, &z0).unwrap(),
+            reference
+        );
     }
 
     #[test]
