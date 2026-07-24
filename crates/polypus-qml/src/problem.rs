@@ -232,7 +232,7 @@ impl QmlProblem {
             .iter()
             .zip(labels)
             .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
-            .sum();
+            .sum::<Result<f64, QmlError>>()?;
         // `counts.len() == templates.len() >= 1` (the dataset is non-empty), so
         // the mean is well defined and finite.
         Ok(-total / expectations.len() as f64)
@@ -300,12 +300,12 @@ impl QmlProblem {
         let labels = self.train.labels();
 
         let total: f64 = (0..n)
-            .map(|i| {
-                self.loss.gradient(base_expectations[i], labels[i])
+            .map(|i| -> Result<f64, QmlError> {
+                Ok(self.loss.gradient(base_expectations[i], labels[i])?
                     * (plus_expectations[i] - minus_expectations[i])
-                    / 2.0
+                    / 2.0)
             })
-            .sum();
+            .sum::<Result<f64, QmlError>>()?;
         Ok(-total / n as f64)
     }
 

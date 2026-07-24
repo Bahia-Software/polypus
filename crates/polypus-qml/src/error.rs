@@ -407,6 +407,18 @@ pub enum QmlError {
         /// The number of counts maps supplied.
         got: usize,
     },
+    /// [`Loss::evaluate`](crate::Loss::evaluate) or
+    /// [`Loss::gradient`](crate::Loss::gradient) was reached with
+    /// `Loss::CategoricalCrossEntropy`, which has no scalar form: it scores a
+    /// whole per-class expectation vector, not a single `⟨O₀⟩`, and is served
+    /// instead by the free `categorical_cross_entropy`/
+    /// `categorical_cross_entropy_gradient` functions. `QmlProblem` always
+    /// routes the categorical loss to those *before* reaching the scalar
+    /// methods (see `fitness_from_counts`/`param_gradient`), so this should
+    /// never actually surface — it is typed rather than assumed away with
+    /// `unreachable!`, so an internal dispatch bug becomes a typed error
+    /// instead of a panic crossing the FFI boundary.
+    CategoricalLossHasNoScalarForm,
 }
 
 impl fmt::Display for QmlError {
@@ -434,6 +446,11 @@ impl fmt::Display for QmlError {
             QmlError::CountsLengthMismatch { expected, got } => write!(
                 f,
                 "counts length mismatch: expected {expected} counts map(s), got {got}"
+            ),
+            QmlError::CategoricalLossHasNoScalarForm => write!(
+                f,
+                "internal error: CategoricalCrossEntropy has no scalar evaluate/gradient form; \
+                 QmlProblem should always route it through the categorical path instead"
             ),
         }
     }
@@ -603,6 +620,9 @@ mod tests {
         }
         .to_string();
         assert!(s.contains('8') && s.contains('7'));
+        assert!(QmlError::CategoricalLossHasNoScalarForm
+            .to_string()
+            .contains("scalar"));
     }
 
     #[test]
