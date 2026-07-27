@@ -449,8 +449,18 @@ validation, so a spec that no longer compiles surfaces as a clean
 deserialization error (a `ValueError` at the Python boundary) instead of a panic
 or a silently-accepted broken model. `serde_json`'s `float_roundtrip` feature is
 enabled wherever this JSON is parsed, so a saved `theta` reloads bit-for-bit and
-the loaded model's predictions reproduce under C-7. End-to-end inference (bind +
-execute on a backend + decide) is not part of this phase: `predict_from_counts`
-takes counts the caller already obtained.
+the loaded model's predictions reproduce under C-7.
+
+**End-to-end inference — `predict(X, ...)`.** `TrainedModel.predict(X, ...)` is
+the one-call inference path: given a batch of **new** samples `X`
+(`List[List[float]]`, one row per sample), it binds each to the trained `theta`,
+runs it on a backend, and applies the model's readout decision, returning one
+prediction per sample in `X`'s order. Seed resolution and backend construction
+match `run_quantum_circuit` (direct `seed.unwrap_or_else(random_seed)`; `qmio`
+rejects an explicit seed), and it reuses the **exact same** `exact=True` guard as
+`qml.train` — exact mode requires `infrastructure="local"` and the native
+`backend="polypus"`, and any other combination is rejected rather than silently
+ignored. `predict_from_counts` remains the lower-level entry for a caller who
+obtained counts themselves.
 
 [`QmlProblem`]: ../crates/polypus-qml/src/problem.rs
