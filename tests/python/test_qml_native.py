@@ -520,11 +520,17 @@ class TestTrainedModelSaveLoad:
     def test_load_rejects_corrupt_file(self, tmp_path):
         # A file whose spec no longer compiles (empty layers) must fail loading
         # with a ValueError — recompilation revalidates, never a silent accept.
+        # The "model" wrapper matches TrainedModel's real wire shape
+        # ({"model": {"spec", "num_features"}, "theta"}); a bare {"spec": ...}
+        # at the top level fails for the wrong reason (a missing "model" field,
+        # not the recompiled-and-rejected spec this test means to exercise) —
+        # confirmed by checking the exact error message below.
         import polypus
 
         path = tmp_path / "corrupt.json"
         path.write_text(
-            '{"spec": {"num_qubits": 2, "layers": [], "readout": null}, "theta": []}'
+            '{"model": {"spec": {"num_qubits": 2, "layers": [], "readout": null}, '
+            '"num_features": 2}, "theta": []}'
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="no layers"):
             polypus.qml.TrainedModel.load(str(path))
