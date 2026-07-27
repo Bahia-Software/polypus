@@ -30,14 +30,31 @@ use crate::bindings::de::DE;
 use crate::bindings::pso::PSO;
 use crate::bindings::qng::{PyVarianceOracle, QNG};
 use crate::evaluation::{
-    EvaluationOracle, ExactNativeQmlOracle, NativeQmlOracle, OracleErrorSlot, QmlOracle,
+    EvaluationOracle, ExactNativeQmlOracle, MinibatchConfig, NativeQmlOracle, OracleErrorSlot,
+    QmlOracle,
 };
 use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
 use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
     AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
-    AlgorithmQNGArgs, GradientOracle, Optimizer,
+    AlgorithmQNGArgs, GradientOracle, OptimizationOutcome, Optimizer, OptimizerError,
 };
+
+/// The final-fitness recompute (design doc §17): re-score a parameter vector
+/// against the **full** training set once optimization ends, replacing a
+/// minibatched `best_fitness`. Aliased so the boxed owner, the borrowed
+/// dispatcher argument and the oracle-branch tuple all name one unsized type.
+type RecomputeFn = dyn Fn(&[f64]) -> f64;
+
+/// The three things the native oracle branch hands to [`dispatch_optimizer`]:
+/// the two trait-object facets of the one oracle `Arc` (fitness + gradient) and
+/// the optional full-dataset recompute (design doc §17). Aliased to keep the
+/// `let` binding's type readable.
+type NativeOracleParts = (
+    Box<dyn EvaluationOracle>,
+    Box<dyn GradientOracle>,
+    Option<Box<RecomputeFn>>,
+);
 
 /// Map a `polypus-qml` [`ValidationError`] (a construction/compilation failure —
 /// `Model.readout`, `compile`, `QmlProblem::new`) onto a Python `ValueError`.
@@ -294,6 +311,17 @@ impl Dataset {
 /// error rather than silently ignoring it. In exact mode `shots`/`seed` no
 /// longer affect the result (there is no sampling), so two runs with the same
 /// configuration produce byte-identical `best_params`.
+///
+/// `batch_size` (default `None`) enables deterministic minibatching on the
+/// **native** path (design doc §17): each optimizer evaluation scores a fresh
+/// pseudo-random subset of `batch_size` samples (derived from `seed` + a
+/// per-oracle call counter, so the run stays reproducible under C-7), instead of
+/// the whole training set. It must satisfy `1 <= batch_size < num_samples` — a
+/// batch as large as the dataset is just the non-minibatch path with more code
+/// and is rejected. The reported `best_fitness` is **not** a minibatch estimate:
+/// after the optimizer finishes, it is recomputed once against the full dataset,
+/// so it stays comparable to a non-minibatch run (contract C-5). `batch_size` is
+/// rejected on the Qiskit path, which does not use a `QmlProblem`.
 #[pyfunction(name = "train", signature = (
     feature_map,
     ansatz,
@@ -313,6 +341,7 @@ impl Dataset {
     seed=None,
     loss=None,
     exact=false,
+    batch_size=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn qml_train<'py>(
@@ -334,6 +363,7 @@ pub fn qml_train<'py>(
     seed: Option<u64>,
     loss: Option<&str>,
     exact: bool,
+    batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
@@ -366,6 +396,7 @@ pub fn qml_train<'py>(
             seed,
             loss,
             exact,
+            batch_size,
         )
     } else {
         qml_train_qiskit(
@@ -386,6 +417,7 @@ pub fn qml_train<'py>(
             backend,
             seed,
             exact,
+            batch_size,
         )
     }
 }
@@ -412,6 +444,7 @@ fn qml_train_native(
     seed: Option<u64>,
     loss: Option<&str>,
     exact: bool,
+    batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
     let py = model.py();
     // Reject kwargs that belong to the Qiskit path: on the native path the
@@ -469,6 +502,20 @@ fn qml_train_native(
     let problem =
         QmlProblem::new(compiled, dataset.inner.clone(), loss).map_err(validation_to_py_err)?;
 
+    // Validate `batch_size` once, here at the Python-facing boundary, against the
+    // full problem's sample count — so `QmlProblem::minibatch_indices` need not
+    // re-check its precondition on every call (design doc §17). A batch of `0`,
+    // or one as large as (or larger than) the dataset, is rejected: the latter is
+    // just the non-minibatch path with more code, never what the caller wants.
+    if let Some(b) = batch_size {
+        let n = problem.num_circuits();
+        if b < 1 || b >= n {
+            return Err(PyValueError::new_err(format!(
+                "batch_size must satisfy 1 <= batch_size < num_samples ({n}); got {b}"
+            )));
+        }
+    }
+
     // From here on, the seed / config / backend / dispatch is exactly the shared
     // logic `train` and the Qiskit path use — only the oracle and `dimensions`
     // differ (decision E/G).
@@ -491,63 +538,131 @@ fn qml_train_native(
         opt_level: OptLevel::default(),
         seed: Some(effective_seed),
     });
+    // Deterministic minibatch config (design doc §17), seeded by the same
+    // resolved seed that drives the optimizer and shot sampling, so a minibatched
+    // run reproduces byte-for-byte (C-7). Built once and moved into whichever
+    // oracle branch runs; `None` keeps the full-dataset path untouched.
+    let minibatch = batch_size.map(|b| MinibatchConfig::new(b, effective_seed));
     let errors = OracleErrorSlot::new();
-    // Build the pair of trait-object boxes `dispatch_optimizer` consumes. Both
-    // paths hand it the *same* concrete oracle behind an `Arc`, exposed as two
-    // independent facets via the `Arc<T>` blanket impls: the evaluation box
-    // scores fitness (EvaluationOracle) and the gradient box supplies the exact
-    // parameter-shift gradient (GradientOracle) for QNG/Adam. `dispatch_optimizer`
-    // only ever sees the two boxes, so it needs no knowledge of which concrete
-    // oracle is behind them.
-    let (eval_oracle, gradient_oracle): (Box<dyn EvaluationOracle>, Box<dyn GradientOracle>) =
-        if exact {
-            // Exact mode (design doc §17) is native-only: require local
-            // infrastructure and a native backend, then read exact expectations
-            // straight off the statevector — never through the QuantumBackend
-            // trait (which has no "exact" meaning for noisy Aer or real hardware).
-            if infrastructure != "local" || !is_native_backend(backend) {
-                return Err(PyValueError::new_err(format!(
-                    "exact mode (exact=True) requires the native statevector backend: \
-                     infrastructure=\"local\" and backend=\"polypus\", got \
-                     infrastructure=\"{infrastructure}\", backend=\"{backend}\""
-                )));
-            }
-            // Build the concrete native backend directly. The exact read-out is
-            // an inherent method of `NativeStatevectorBackend`, not on the
-            // `QuantumBackend` trait, so `Infrastructure::create_backend` (which
-            // returns `Arc<dyn QuantumBackend>`) cannot supply it. The seed is
-            // never used in exact mode — there is no sampling — but the
-            // constructor requires one, so we pass the resolved seed anyway.
-            let backend = Arc::new(NativeStatevectorBackend::new(effective_seed));
-            let oracle = Arc::new(ExactNativeQmlOracle {
-                problem,
-                config: Arc::clone(&config),
-                backend,
-                errors: errors.clone(),
-                minibatch: None,
-            });
-            (Box::new(Arc::clone(&oracle)), Box::new(oracle))
-        } else {
-            let backend = Infrastructure::create_backend(&config)?;
-            let oracle = Arc::new(NativeQmlOracle {
-                problem,
-                config: Arc::clone(&config),
-                backend,
-                errors: errors.clone(),
-                minibatch: None,
-            });
-            (Box::new(Arc::clone(&oracle)), Box::new(oracle))
-        };
+    // Build the pair of trait-object boxes `dispatch_optimizer` consumes, plus an
+    // optional `recompute` closure. Both paths hand it the *same* concrete oracle
+    // behind an `Arc`, exposed as two independent facets via the `Arc<T>` blanket
+    // impls: the evaluation box scores fitness (EvaluationOracle) and the gradient
+    // box supplies the exact parameter-shift gradient (GradientOracle) for
+    // QNG/Adam. `recompute`, present only under minibatching, re-scores the final
+    // `best_params` against the full dataset (via a third `Arc` facet calling the
+    // oracle's inherent `evaluate_full`) so the reported `best_fitness` is honest
+    // rather than the last iteration's minibatch estimate (design doc §17).
+    let (eval_oracle, gradient_oracle, recompute): NativeOracleParts = if exact {
+        // Exact mode (design doc §17) is native-only: require local
+        // infrastructure and a native backend, then read exact expectations
+        // straight off the statevector — never through the QuantumBackend
+        // trait (which has no "exact" meaning for noisy Aer or real hardware).
+        if infrastructure != "local" || !is_native_backend(backend) {
+            return Err(PyValueError::new_err(format!(
+                "exact mode (exact=True) requires the native statevector backend: \
+                 infrastructure=\"local\" and backend=\"polypus\", got \
+                 infrastructure=\"{infrastructure}\", backend=\"{backend}\""
+            )));
+        }
+        // Build the concrete native backend directly. The exact read-out is
+        // an inherent method of `NativeStatevectorBackend`, not on the
+        // `QuantumBackend` trait, so `Infrastructure::create_backend` (which
+        // returns `Arc<dyn QuantumBackend>`) cannot supply it. The seed is
+        // never used in exact mode — there is no sampling — but the
+        // constructor requires one, so we pass the resolved seed anyway.
+        let backend = Arc::new(NativeStatevectorBackend::new(effective_seed));
+        let oracle = Arc::new(ExactNativeQmlOracle {
+            problem,
+            config: Arc::clone(&config),
+            backend,
+            errors: errors.clone(),
+            minibatch,
+        });
+        let recompute = recompute_full_fitness(batch_size, &oracle, &errors);
+        (Box::new(Arc::clone(&oracle)), Box::new(oracle), recompute)
+    } else {
+        let backend = Infrastructure::create_backend(&config)?;
+        let oracle = Arc::new(NativeQmlOracle {
+            problem,
+            config: Arc::clone(&config),
+            backend,
+            errors: errors.clone(),
+            minibatch,
+        });
+        let recompute = recompute_full_fitness(batch_size, &oracle, &errors);
+        (Box::new(Arc::clone(&oracle)), Box::new(oracle), recompute)
+    };
 
     dispatch_optimizer(
         py,
         method,
         (eval_oracle, gradient_oracle),
+        recompute.as_deref(),
         dimensions,
         &errors,
         effective_seed,
         effective_id,
     )
+}
+
+/// Build the final-fitness recompute closure for a minibatched native run
+/// (design doc §17), or `None` when `batch_size` is off.
+///
+/// When present, `dispatch_optimizer` applies it to the optimizer's
+/// `best_params` **after** the run, replacing the last iteration's minibatch
+/// `best_fitness` with an honest full-dataset value (contract C-5). It captures
+/// a dedicated `Arc` facet of the oracle so it can call the inherent
+/// `evaluate_full`, and the shared error slot: a failure there is recorded and a
+/// finite sentinel returned, so `finish_optimization` surfaces the real error
+/// rather than a bogus fitness — the same discipline the trait paths use.
+///
+/// Generic over the concrete oracle type (`NativeQmlOracle` /
+/// `ExactNativeQmlOracle`); both expose `evaluate_full` inherently.
+fn recompute_full_fitness<O>(
+    batch_size: Option<usize>,
+    oracle: &Arc<O>,
+    errors: &OracleErrorSlot,
+) -> Option<Box<RecomputeFn>>
+where
+    O: FullDatasetEvaluator + Send + Sync + 'static,
+{
+    batch_size.map(|_| {
+        let oracle = Arc::clone(oracle);
+        let errors = errors.clone();
+        let closure: Box<RecomputeFn> = Box::new(move |theta: &[f64]| {
+            match oracle.evaluate_full(theta) {
+                Ok(fitness) => fitness,
+                // Record and return a finite sentinel; `finish_optimization` sees
+                // the recorded error and raises it instead of using this value.
+                Err(e) => {
+                    errors.record(e);
+                    0.0
+                }
+            }
+        });
+        closure
+    })
+}
+
+/// The inherent `evaluate_full` shared by both native oracles, abstracted so
+/// [`recompute_full_fitness`] can build one closure type over either. Not part of
+/// the `EvaluationOracle` trait: full-dataset re-scoring is a native-path concern
+/// (the Qiskit path never minibatches), not a general oracle capability.
+trait FullDatasetEvaluator {
+    fn evaluate_full(&self, theta: &[f64]) -> Result<f64, crate::evaluation::EvaluationError>;
+}
+
+impl FullDatasetEvaluator for NativeQmlOracle {
+    fn evaluate_full(&self, theta: &[f64]) -> Result<f64, crate::evaluation::EvaluationError> {
+        NativeQmlOracle::evaluate_full(self, theta)
+    }
+}
+
+impl FullDatasetEvaluator for ExactNativeQmlOracle {
+    fn evaluate_full(&self, theta: &[f64]) -> Result<f64, crate::evaluation::EvaluationError> {
+        ExactNativeQmlOracle::evaluate_full(self, theta)
+    }
 }
 
 /// The Qiskit/Aer path: compose the feature map with the ansatz, pre-bind each
@@ -572,6 +687,7 @@ fn qml_train_qiskit(
     backend: &str,
     seed: Option<u64>,
     exact: bool,
+    batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
     // Exact mode is native-only (design doc §17): the Qiskit path has no
     // statevector of its own to read exactly, so reject rather than ignore it.
@@ -579,6 +695,16 @@ fn qml_train_qiskit(
         return Err(PyValueError::new_err(
             "exact mode (exact=True) is only supported on the native Model+Dataset path; \
              pass a polypus.qml.Model with infrastructure=\"local\" and backend=\"polypus\"",
+        ));
+    }
+    // Minibatching is native-only too (design doc §17): it selects a subset of a
+    // `QmlProblem`'s precompiled templates, which the Qiskit path has none of —
+    // it prebinds Qiskit circuits per sample. Reject rather than silently ignore,
+    // mirroring the `exact` cross-path rejection above.
+    if batch_size.is_some() {
+        return Err(PyValueError::new_err(
+            "batch_size (minibatching) is only supported on the native Model+Dataset path; \
+             pass a polypus.qml.Model",
         ));
     }
     // On the Qiskit path these three are required (they default to None only so
@@ -681,6 +807,9 @@ fn qml_train_qiskit(
         py,
         method,
         (eval_oracle, gradient_oracle),
+        // The Qiskit path never minibatches (batch_size is rejected above), so
+        // its reported best_fitness is already the full-dataset value.
+        None,
         dimensions,
         &errors,
         effective_seed,
@@ -698,10 +827,19 @@ fn qml_train_qiskit(
 /// `gradient_oracle` is the same underlying oracle as `oracle` (built from one
 /// `Arc` via the blanket impls); it is consumed by the gradient optimizers
 /// (QNG, Adam) and ignored by DE/PSO, which are gradient-free.
+///
+/// `recompute`, present only for a minibatched native run (design doc §17),
+/// re-scores the optimizer's `best_params` against the **full** dataset once the
+/// run ends, replacing the last iteration's minibatch `best_fitness` — so the
+/// reported fitness is comparable to a non-minibatch run (contract C-5). It is
+/// applied uniformly at the single convergence point below, regardless of which
+/// optimizer ran; the Qiskit path passes `None`.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_optimizer(
     py: Python<'_>,
     method: &Bound<'_, PyAny>,
     oracles: (Box<dyn EvaluationOracle>, Box<dyn GradientOracle>),
+    recompute: Option<&RecomputeFn>,
     dimensions: u32,
     errors: &OracleErrorSlot,
     effective_seed: u64,
@@ -711,98 +849,90 @@ fn dispatch_optimizer(
     // facets): the evaluation box for DE/PSO/QNG/Adam fitness, the gradient box
     // for QNG and Adam. Passed as a pair to keep the argument count in check.
     let (oracle, gradient_oracle) = oracles;
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            errors,
-            effective_seed,
-            effective_id,
-        );
-    }
 
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
+    // Run the selected optimizer, converging every branch on a single raw
+    // `Result<OptimizationOutcome, _>` so the final-fitness recompute and
+    // `finish_optimization` happen in exactly one place (design doc §17). The GIL
+    // is released around each `optimize()` exactly as before (ENGINEERING §3).
+    let result: Result<OptimizationOutcome, OptimizerError> =
+        if let Ok(de) = method.extract::<PyRef<DE>>() {
+            let args = AlgorithmDifferentialEvolutionArgs {
+                oracle,
+                population_size: de.population_size,
+                generations: de.generations,
+                dimensions,
+                tolerance: de.tolerance,
+                seed: Some(effective_seed),
+            };
+            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args))
+        } else if let Ok(pso) = method.extract::<PyRef<PSO>>() {
+            let args = AlgorithmPSOArgs {
+                oracle,
+                population_size: pso.population_size,
+                generations: pso.generations,
+                dimensions,
+                bounds: pso.bounds,
+                inertia_weight: pso.inertia_weight,
+                cognitive_weight: pso.cognitive_weight,
+                social_weight: pso.social_weight,
+                tolerance: pso.tolerance,
+                seed: Some(effective_seed),
+            };
+            py.allow_threads(|| AlgorithmPSO.optimize(args))
+        } else if let Ok(qng) = method.extract::<PyRef<QNG>>() {
+            let args = AlgorithmQNGArgs {
+                oracle,
+                gradient_oracle,
+                max_iters: qng.max_iters,
+                learning_rate: qng.learning_rate,
+                bounds: qng.bounds,
+                dimensions,
+                tolerance: qng.tolerance,
+                variance_oracle: Box::new(PyVarianceOracle {
+                    variance_function: qng.variance_function.clone_ref(py),
+                    errors: errors.clone(),
+                }),
+                tikhonov_reg: qng.tikhonov_reg,
+                seed: Some(effective_seed),
+            };
+            py.allow_threads(|| AlgorithmQNG.optimize(args))
+        } else if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+            // Same two facets of the one Arc as QNG: the evaluation box scores
+            // fitness, the gradient box supplies the exact parameter-shift
+            // gradient. No VarianceOracle — Adam's step comes from the moments.
+            let args = AlgorithmAdamArgs {
+                oracle,
+                gradient_oracle,
+                max_iters: adam.max_iters,
+                learning_rate: adam.learning_rate,
+                beta1: adam.beta1,
+                beta2: adam.beta2,
+                epsilon: adam.epsilon,
+                bounds: adam.bounds,
+                dimensions,
+                tolerance: adam.tolerance,
+                seed: Some(effective_seed),
+            };
+            py.allow_threads(|| AlgorithmAdam.optimize(args))
+        } else {
+            return Err(PyTypeError::new_err(
+            "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
+        ));
         };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmPSO.optimize(args)),
-            errors,
-            effective_seed,
-            effective_id,
-        );
-    }
 
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            gradient_oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            bounds: qng.bounds,
-            dimensions,
-            tolerance: qng.tolerance,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(py),
-                errors: errors.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmQNG.optimize(args)),
-            errors,
-            effective_seed,
-            effective_id,
-        );
-    }
+    // Final-fitness recompute (design doc §17): only when minibatching is active
+    // (`recompute` is `Some`), the optimizer produced a valid outcome, and no
+    // oracle error is pending. If the optimizer already recorded a failure the
+    // `best_params` are meaningless, so skip the recompute and let
+    // `finish_optimization` surface that error. A failure *inside* the recompute
+    // records into the same slot and is surfaced there too.
+    let result = match (result, recompute) {
+        (Ok(mut outcome), Some(recompute)) if !errors.failed() => {
+            outcome.best_fitness = recompute(&outcome.best_params);
+            Ok(outcome)
+        }
+        (other, _) => other,
+    };
 
-    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
-        // Same two facets of the one Arc as QNG: the evaluation box scores
-        // fitness, the gradient box supplies the exact parameter-shift gradient.
-        // No VarianceOracle — Adam's adaptive step comes from the gradient moments.
-        let args = AlgorithmAdamArgs {
-            oracle,
-            gradient_oracle,
-            max_iters: adam.max_iters,
-            learning_rate: adam.learning_rate,
-            beta1: adam.beta1,
-            beta2: adam.beta2,
-            epsilon: adam.epsilon,
-            bounds: adam.bounds,
-            dimensions,
-            tolerance: adam.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmAdam.optimize(args)),
-            errors,
-            effective_seed,
-            effective_id,
-        );
-    }
-
-    Err(PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
-    ))
+    finish_optimization(py, result, errors, effective_seed, effective_id)
 }

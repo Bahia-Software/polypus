@@ -322,3 +322,152 @@ class TestNativeQmlTrainExact:
                 seed=7,
                 exact=True,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Deterministic minibatching (batch_size=N) — design doc §17
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestNativeQmlTrainMinibatch:
+    """`batch_size=N` scores a deterministic N-sample subset per optimizer
+    evaluation, but the reported `best_fitness` is recomputed **once** against
+    the whole dataset when the run ends — so it stays a genuine full-dataset
+    value, never the last iteration's minibatch estimate (design doc §17)."""
+
+    @staticmethod
+    def _hard_dataset():
+        """Six samples: four trivially separable ones plus a **contradictory**
+        pair (identical features, opposite labels). The pair alone contributes
+        hinge loss exactly 2 for *every* θ (``max(0,1−e)+max(0,1+e)=2`` for
+        ``e=⟨Z₀⟩∈[−1,1]``), so the best achievable **full-dataset** fitness is
+        bounded at ``−2/6 ≈ −0.333`` — no θ can beat it. A minibatch that omits
+        the pair looks separable (fitness ≈ 0); a 3-sample minibatch that
+        includes it scores on a ``−2/3`` scale. Either would leak a value far
+        from −0.333 into ``best_fitness`` if the full-dataset recompute were
+        missing, which is exactly what these tests catch."""
+        import polypus
+
+        x = [
+            [0.30, 0.35],
+            [0.40, 0.30],  # class −1, easy
+            [2.80, 2.75],
+            [2.90, 2.80],  # class +1, easy
+            [1.55, 1.60],
+            [1.55, 1.60],  # contradictory pair (identical features)
+        ]
+        y = [-1.0, -1.0, 1.0, 1.0, -1.0, 1.0]
+        return polypus.qml.Dataset(x, y)
+
+    @classmethod
+    def _train(cls, *, batch_size, seed, generations=120, population=24):
+        # Exact mode: no shot noise, so the run is fully deterministic and the
+        # full-dataset recompute is an exact number — the cleanest setting to
+        # assert the reported fitness against the analytic −1/3 bound.
+        import polypus
+
+        return polypus.qml.train(
+            _model(),
+            cls._hard_dataset(),
+            method=polypus.DE(
+                generations=generations, population_size=population, tolerance=1e-12
+            ),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_native_minibatch",
+            seed=seed,
+            exact=True,
+            batch_size=batch_size,
+        )
+
+    def test_trains_on_dataset_larger_than_batch(self):
+        # 6 samples, batch_size 3 → a genuine subset each evaluation.
+        import math
+
+        r = self._train(batch_size=3, seed=7)
+        assert len(r.best_params) == 8
+        assert math.isfinite(r.best_fitness)
+
+    def test_reported_fitness_is_full_dataset_not_minibatch(self):
+        # Full-batch reference (the trusted non-minibatch path) and a minibatch
+        # run over the *same* problem.
+        full = self._train(batch_size=None, seed=7)
+        mb = self._train(batch_size=3, seed=7)
+
+        # The full-batch optimum sits just below the analytic −1/3 bound.
+        assert -0.5 < full.best_fitness < -0.30
+
+        # The minibatch run's reported fitness is a real full-dataset value:
+        #   • clearly on the full scale, never a rosy ≈ 0 (a separable subset)
+        #     nor a ≈ −2/3 three-sample value; and
+        #   • essentially the same optimum the full-batch run reached.
+        # Both would be violated if best_fitness were the last minibatch value
+        # instead of the full-dataset recompute.
+        assert mb.best_fitness < -0.20
+        assert abs(mb.best_fitness - full.best_fitness) < 0.15
+
+    def test_reproducible_for_fixed_seed(self):
+        # Exact mode + fixed seed/batch_size → byte-identical outcome, including
+        # the deterministic minibatch selection (C-7).
+        r1 = self._train(batch_size=3, seed=7)
+        r2 = self._train(batch_size=3, seed=7)
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+
+    def test_batch_size_zero_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="batch_size"):
+            polypus.qml.train(
+                _model(),
+                self._hard_dataset(),
+                method=polypus.DE(generations=2, population_size=4),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_zero",
+                seed=7,
+                batch_size=0,
+            )
+
+    def test_batch_size_equal_to_dataset_rejected(self):
+        # A batch as large as the dataset is just the non-minibatch path.
+        import polypus
+
+        with pytest.raises(ValueError, match="batch_size"):
+            polypus.qml.train(
+                _model(),
+                self._hard_dataset(),  # 6 samples
+                method=polypus.DE(generations=2, population_size=4),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_full",
+                seed=7,
+                batch_size=6,
+            )
+
+    def test_batch_size_rejected_on_qiskit_path(self):
+        import numpy as np
+        import polypus
+        from qiskit.circuit.library import real_amplitudes, zz_feature_map
+
+        feature_map = zz_feature_map(feature_dimension=2, reps=1)
+        ansatz = real_amplitudes(num_qubits=2, reps=1)
+        with pytest.raises(ValueError, match="batch_size"):
+            polypus.qml.train(
+                feature_map,
+                ansatz,
+                np.zeros((2, 2)),
+                polypus.DE(generations=2, population_size=4),
+                dimensions=len(ansatz.parameters),
+                expectation_function=lambda b: sum(int(c) for c in b) / len(b),
+                infrastructure="local",
+                backend="aer",
+                id="qml_mb_qiskit",
+                seed=7,
+                batch_size=1,
+            )
