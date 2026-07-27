@@ -129,6 +129,45 @@ impl ResolvedReadout {
             }
         }
     }
+
+    /// Turn exact basis-state `probabilities` into a prediction according to the
+    /// decision — the exact-mode mirror of [`predict`](Self::predict) (design doc
+    /// §17). Line-for-line identical to `predict`, substituting each observable's
+    /// [`expectation`](ResolvedObservable::expectation) for
+    /// [`expectation_from_probabilities`](ResolvedObservable::expectation_from_probabilities).
+    ///
+    /// `observables[0]` is always present: a [`Readout`] cannot be built with
+    /// zero observables (see [`Readout::new`]).
+    pub(crate) fn predict_from_probabilities(
+        &self,
+        probabilities: &HashMap<String, f64>,
+    ) -> Result<f64, QmlError> {
+        match self.decision {
+            Decision::Sign => {
+                let e = self.observables[0].expectation_from_probabilities(probabilities)?;
+                Ok(if e >= 0.0 { 1.0 } else { -1.0 })
+            }
+            Decision::Threshold(t) => {
+                let e = self.observables[0].expectation_from_probabilities(probabilities)?;
+                Ok(if e >= t { 1.0 } else { -1.0 })
+            }
+            Decision::Raw => self.observables[0].expectation_from_probabilities(probabilities),
+            Decision::Argmax => {
+                let mut best_index = 0usize;
+                let mut best_value =
+                    self.observables[0].expectation_from_probabilities(probabilities)?;
+                for (index, observable) in self.observables.iter().enumerate().skip(1) {
+                    let value = observable.expectation_from_probabilities(probabilities)?;
+                    // Strict `>`: ties keep the first (lowest) index.
+                    if value > best_value {
+                        best_value = value;
+                        best_index = index;
+                    }
+                }
+                Ok(best_index as f64)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +176,10 @@ mod tests {
     use crate::observables::{Pauli, PauliString, ResolvedPauliString};
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn probabilities(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
         pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
     }
 
@@ -217,5 +260,64 @@ mod tests {
         assert_eq!(readout.predict(&counts(&[("01", 10)])), Ok(1.0));
         // Tie (both +1 over "00") → lowest index 0.
         assert_eq!(readout.predict(&counts(&[("00", 10)])), Ok(0.0));
+    }
+
+    // ── Exact-mode mirror: `predict_from_probabilities` (design doc §17) ──────
+    //
+    // Same decisions as the `predict` tests above, but fed synthetic exact
+    // probabilities instead of counts. Each mirrors its counts counterpart's
+    // expectation so the two paths are checked to agree on identical inputs.
+
+    #[test]
+    fn sign_from_probabilities_breaks_ties_positive() {
+        let readout = ResolvedReadout::new(vec![resolved_z(0)], Decision::Sign);
+        // ⟨Z_0⟩ = 0 (even split) → tie → +1.
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("0", 0.5), ("1", 0.5)])),
+            Ok(1.0)
+        );
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("1", 1.0)])),
+            Ok(-1.0)
+        );
+    }
+
+    #[test]
+    fn threshold_from_probabilities_compares_against_t() {
+        let readout = ResolvedReadout::new(vec![resolved_z(0)], Decision::Threshold(0.5));
+        // ⟨Z_0⟩ = 1.0 ≥ 0.5 → +1.
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("0", 1.0)])),
+            Ok(1.0)
+        );
+        // ⟨Z_0⟩ = 0 < 0.5 → −1.
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("0", 0.5), ("1", 0.5)])),
+            Ok(-1.0)
+        );
+    }
+
+    #[test]
+    fn raw_from_probabilities_returns_expectation_unchanged() {
+        let readout = ResolvedReadout::new(vec![resolved_z(0)], Decision::Raw);
+        let p = readout
+            .predict_from_probabilities(&probabilities(&[("0", 0.75), ("1", 0.25)]))
+            .unwrap();
+        assert!((p - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn argmax_from_probabilities_returns_winning_index_and_breaks_ties_low() {
+        let readout = ResolvedReadout::new(vec![resolved_z(0), resolved_z(1)], Decision::Argmax);
+        // "01": ⟨Z_0⟩ = −1, ⟨Z_1⟩ = +1 → argmax is index 1.
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("01", 1.0)])),
+            Ok(1.0)
+        );
+        // Tie (both +1 over "00") → lowest index 0.
+        assert_eq!(
+            readout.predict_from_probabilities(&probabilities(&[("00", 1.0)])),
+            Ok(0.0)
+        );
     }
 }

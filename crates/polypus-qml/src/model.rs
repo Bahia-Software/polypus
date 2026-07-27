@@ -336,6 +336,19 @@ impl CompiledModel {
     pub fn predict_from_counts(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
         self.resolved_readout().predict(counts)
     }
+
+    /// Infer a prediction from one sample's exact basis-state `probabilities`
+    /// (design doc §17) — the exact-mode mirror of
+    /// [`predict_from_counts`](Self::predict_from_counts).
+    ///
+    /// Not gated behind `serde`: it is inference, independent of serialization.
+    pub fn predict_from_probabilities(
+        &self,
+        probabilities: &HashMap<String, f64>,
+    ) -> Result<f64, QmlError> {
+        self.resolved_readout()
+            .predict_from_probabilities(probabilities)
+    }
 }
 
 /// Serialize a [`CompiledModel`] as just `{spec, num_features}` — never its
@@ -614,7 +627,33 @@ mod tests {
         assert_eq!(model.predict_from_counts(&counts(&[("01", 10)])), Ok(-1.0));
     }
 
+    #[test]
+    fn predict_from_probabilities_applies_decision() {
+        // The exact-mode mirror of `predict_from_counts_applies_decision`, fed
+        // exact basis-state probabilities instead of counts.
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        // ⟨Z₀⟩ over "00" (width 2) = +1 → Sign → +1.
+        assert_eq!(
+            model.predict_from_probabilities(&probabilities(&[("00", 1.0)])),
+            Ok(1.0)
+        );
+        // ⟨Z₀⟩ over "01" = −1 → Sign → −1.
+        assert_eq!(
+            model.predict_from_probabilities(&probabilities(&[("01", 1.0)])),
+            Ok(-1.0)
+        );
+    }
+
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn probabilities(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
         pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
     }
 }
