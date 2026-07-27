@@ -149,14 +149,30 @@ pub enum ValidationError {
         /// The position referenced more than once.
         position: usize,
     },
-    /// A readout observable uses a Pauli the v1 readout does not support. Only
-    /// `Z` (computational-basis) readout exists today; `X`/`Y` arrive with the
-    /// base-grouping phase (design doc §7.2).
-    UnsupportedPauli {
-        /// The unsupported Pauli.
-        pauli: Pauli,
-        /// The logical position it was requested on.
+    /// A single readout observable mixes measurement bases on the same qubit:
+    /// two of its terms require different Paulis on the same logical position
+    /// (e.g. `0.5·Z₀ + 0.5·X₀`), so no single basis change can measure them
+    /// together. Reports the qubit and the two conflicting bases (design doc
+    /// §7.2).
+    ObservableHasIncompatibleBases {
+        /// The logical position asked for in two different bases.
         position: usize,
+        /// The basis the first term to touch this position requires.
+        first: Pauli,
+        /// The conflicting basis a later term requires on the same position.
+        second: Pauli,
+    },
+    /// The readout's observables cannot all be measured under a single basis
+    /// change: they partition into more than one basis group (e.g. one class in
+    /// `Z` and another in `X` on the *same* qubit). Measuring them would need
+    /// one circuit per group, and multi-circuit base grouping is not
+    /// implemented yet (design doc §7.2) — so this is rejected rather than
+    /// returning a silently mismeasured result. A single-group readout (any
+    /// all-`Z` readout, or one whose classes share a compatible non-`Z` basis)
+    /// is accepted and measured with one circuit.
+    ReadoutNeedsMultipleBasisGroups {
+        /// The number of distinct measurement bases the readout would require.
+        groups: usize,
     },
     /// An [`Observable`](crate::Observable) was constructed with a non-finite
     /// coefficient (`NaN` or infinite). Reports the first offending term.
@@ -293,9 +309,17 @@ impl fmt::Display for ValidationError {
                 f,
                 "Pauli string has more than one factor on position {position}"
             ),
-            ValidationError::UnsupportedPauli { pauli, position } => write!(
+            ValidationError::ObservableHasIncompatibleBases {
+                position,
+                first,
+                second,
+            } => write!(
                 f,
-                "unsupported Pauli {pauli:?} on position {position}: the v1 readout only supports Z (computational basis)"
+                "observable mixes measurement bases on qubit {position}: one term requires {first:?} and another requires {second:?}; every observable must resolve to a single Pauli per qubit"
+            ),
+            ValidationError::ReadoutNeedsMultipleBasisGroups { groups } => write!(
+                f,
+                "readout needs {groups} distinct measurement bases (e.g. Z on one class and X on another for the same qubit): multi-circuit base grouping is not implemented yet (design doc §7.2), so this is rejected rather than silently mismeasured"
             ),
             ValidationError::NonFiniteCoefficient { term_index } => write!(
                 f,
@@ -545,12 +569,15 @@ mod tests {
         assert!(ValidationError::DuplicatePauliPosition { position: 5 }
             .to_string()
             .contains('5'));
-        let s = ValidationError::UnsupportedPauli {
-            pauli: Pauli::X,
+        let s = ValidationError::ObservableHasIncompatibleBases {
             position: 1,
+            first: Pauli::Z,
+            second: Pauli::X,
         }
         .to_string();
-        assert!(s.contains('X') && s.contains('1'));
+        assert!(s.contains('1') && s.contains('Z') && s.contains('X'));
+        let s = ValidationError::ReadoutNeedsMultipleBasisGroups { groups: 2 }.to_string();
+        assert!(s.contains('2'));
         assert!(ValidationError::NonFiniteCoefficient { term_index: 4 }
             .to_string()
             .contains('4'));

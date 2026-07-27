@@ -203,8 +203,10 @@ impl QuantumModel {
 
         // The readout's logical positions are resolved against the *final*
         // active qubits (after any layer that removed some, e.g. a future
-        // pooling), so this must run after the plan loop.
-        let resolved_readout = resolve_readout(readout, &ctx.active)?;
+        // pooling), so this must run after the plan loop. Resolution also yields
+        // the single basis change the readout is measured under (design doc
+        // §7.2) — empty for an all-`Z` readout.
+        let (resolved_readout, basis_change) = resolve_readout(readout, &ctx.active)?;
 
         log::debug!(
             "compiled model: {} qubit(s), {} layer(s), {num_params} trainable parameter(s), {} feature(s), {} readout observable(s)",
@@ -220,23 +222,55 @@ impl QuantumModel {
             num_params,
             allocations,
             resolved_readout,
+            basis_change,
         })
     }
 }
 
 /// Resolve a [`Readout`]'s logical qubit positions to physical indices against
-/// the model's final `active` qubits, validating as it goes:
+/// the model's final `active` qubits, and work out the single basis change the
+/// whole readout is measured under (design doc §7.2).
+///
+/// Returns the [`ResolvedReadout`] plus the *basis change*: the `(physical
+/// index, Pauli)` pairs — sorted ascending by physical index, only the `X`/`Y`
+/// entries that actually need a gate — that
+/// [`template_for`](CompiledModel::template_for) inserts before the terminal
+/// measurement (`H` for `X`; `Sdg` then `H` for `Y`). An all-`Z` readout — the
+/// only case before this phase — yields an empty basis change, so its circuit
+/// is byte-identical to before.
+///
+/// Validation, in order:
 ///
 /// - a position `>= active.len()` is [`ValidationError::ObservableQubitOutOfRange`];
-/// - any Pauli other than `Z` is [`ValidationError::UnsupportedPauli`] (v1
-///   readout is computational-basis only, design doc §7.2).
+/// - an observable that asks for two different Paulis on the same qubit across
+///   its terms is [`ValidationError::ObservableHasIncompatibleBases`];
+/// - a readout whose observables do not all fit one basis group is
+///   [`ValidationError::ReadoutNeedsMultipleBasisGroups`] — the multi-circuit
+///   case, not implemented yet.
+///
+/// ## Grouping rule (single group only)
+///
+/// A *basis group* is a `position → Pauli` assignment such that every term of
+/// every observable in the group requires, on each qubit it touches, exactly
+/// the Pauli the group assigns there (untouched qubits impose nothing — they
+/// measure in `Z` with no gate). Each observable is first collapsed to its own
+/// per-qubit basis (checking internal compatibility), then placed greedily into
+/// the first existing compatible group, opening a new one only when it fits
+/// none. This phase supports a readout that resolves to **exactly one** group;
+/// two or more (e.g. one class in `Z`, another in `X` on the same qubit) is the
+/// rejected multi-circuit case.
 fn resolve_readout(
     readout: &Readout,
     active: &[usize],
-) -> Result<ResolvedReadout, ValidationError> {
+) -> Result<(ResolvedReadout, Vec<(usize, Pauli)>), ValidationError> {
     let mut resolved_observables = Vec::with_capacity(readout.observables.len());
+    // One per-qubit basis map per observable (logical positions), built in
+    // declaration order so the greedy grouping below is deterministic.
+    let mut observable_bases: Vec<HashMap<usize, Pauli>> =
+        Vec::with_capacity(readout.observables.len());
     for observable in &readout.observables {
         let mut resolved_terms = Vec::with_capacity(observable.terms.len());
+        let mut bases: HashMap<usize, Pauli> = HashMap::new();
         for (coeff, string) in &observable.terms {
             let mut resolved_positions = Vec::with_capacity(string.terms().len());
             for &(position, pauli) in string.terms() {
@@ -246,16 +280,64 @@ fn resolve_readout(
                         num_active: active.len(),
                     });
                 }
-                if pauli != Pauli::Z {
-                    return Err(ValidationError::UnsupportedPauli { pauli, position });
+                // Every term of one observable must agree on the basis of each
+                // qubit it touches: `Z₀ + X₀` cannot be one measurement.
+                match bases.get(&position) {
+                    Some(&existing) if existing != pauli => {
+                        return Err(ValidationError::ObservableHasIncompatibleBases {
+                            position,
+                            first: existing,
+                            second: pauli,
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        bases.insert(position, pauli);
+                    }
                 }
                 resolved_positions.push((active[position], pauli));
             }
             resolved_terms.push((*coeff, ResolvedPauliString::new(resolved_positions)));
         }
         resolved_observables.push(ResolvedObservable::new(resolved_terms));
+        observable_bases.push(bases);
     }
-    Ok(ResolvedReadout::new(resolved_observables, readout.decision))
+
+    // Greedy first-fit grouping over the per-observable basis maps.
+    let mut groups: Vec<HashMap<usize, Pauli>> = Vec::new();
+    for bases in observable_bases {
+        let fits = groups.iter_mut().find(|group| {
+            bases
+                .iter()
+                .all(|(pos, pauli)| group.get(pos).is_none_or(|g| g == pauli))
+        });
+        match fits {
+            Some(group) => group.extend(bases),
+            None => groups.push(bases),
+        }
+    }
+    if groups.len() > 1 {
+        return Err(ValidationError::ReadoutNeedsMultipleBasisGroups {
+            groups: groups.len(),
+        });
+    }
+
+    // The single group's non-`Z` entries become the circuit's basis change,
+    // resolved to physical indices and sorted for a deterministic emission.
+    let mut basis_change: Vec<(usize, Pauli)> = groups
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&(_, pauli)| pauli != Pauli::Z)
+        .map(|(position, pauli)| (active[position], pauli))
+        .collect();
+    basis_change.sort_unstable_by_key(|&(index, _)| index);
+
+    Ok((
+        ResolvedReadout::new(resolved_observables, readout.decision),
+        basis_change,
+    ))
 }
 
 /// A validated, immutable model: it cannot be in an invalid state, so
@@ -270,6 +352,14 @@ pub struct CompiledModel {
     allocations: Vec<LayerAllocation>,
     /// The readout resolved to physical qubit indices (design doc §5.2).
     resolved_readout: ResolvedReadout,
+    /// The pre-measurement basis change the readout is measured under: the
+    /// `(physical index, Pauli)` pairs — sorted by index, only the `X`/`Y`
+    /// entries that need a gate — that [`template_for`](Self::template_for)
+    /// emits before `measure_all` (design doc §7.2). Empty for an all-`Z`
+    /// readout. Derived in [`compile`](QuantumModel::compile) alongside
+    /// `resolved_readout`, so serde (which stores only `{spec, num_features}`
+    /// and recompiles) regenerates it for free.
+    basis_change: Vec<(usize, Pauli)>,
 }
 
 impl CompiledModel {
@@ -307,8 +397,23 @@ impl CompiledModel {
         for (layer, alloc) in self.spec.layers.iter().zip(self.allocations.iter()) {
             layer.emit(&mut qc, alloc, x)?;
         }
-        // v1 readout is computational-basis only (design doc §7.2): no basis
-        // change, just a terminal measurement.
+        // Rotate each non-`Z` qubit into the computational basis before the
+        // terminal measurement (design doc §7.2): `H` measures `X`; `Sdg` then
+        // `H` measures `Y`. `basis_change` is sorted by physical index, so the
+        // emission is deterministic; it is empty for an all-`Z` readout, leaving
+        // the circuit byte-identical to a bare computational-basis measurement.
+        for &(qubit, pauli) in &self.basis_change {
+            match pauli {
+                Pauli::X => qc.try_push(GateInstruction::H(qubit))?,
+                Pauli::Y => {
+                    qc.try_push(GateInstruction::Sdg(qubit))?;
+                    qc.try_push(GateInstruction::H(qubit))?;
+                }
+                // Z entries are filtered out in `resolve_readout`: they need no
+                // gate. Guarded here so a future change cannot silently drop one.
+                Pauli::Z => {}
+            }
+        }
         qc.try_push(GateInstruction::MeasureAll)?;
         Ok(qc)
     }
@@ -569,29 +674,116 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compile_rejects_unsupported_pauli() {
-        // v1 readout is Z-only; an X factor is rejected at compile time.
-        let readout = Readout::new(
-            vec![
-                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::X)]).unwrap())])
-                    .unwrap(),
-            ],
-            Decision::Sign,
-        )
-        .unwrap();
-        let err = QuantumModel::new(2)
+    /// Compile a 2-qubit `angle_encoder + real_amplitudes(1)` model with the
+    /// given readout. `real_amplitudes` emits only `Ry`/`Cx`, so any terminal
+    /// `H`/`Sdg` in the circuit can only be a basis change.
+    fn compile_with_readout(readout: Readout) -> Result<CompiledModel, ValidationError> {
+        QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
-            .hardware_efficient(1)
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
             .readout(readout)
             .compile(2)
-            .unwrap_err();
+    }
+
+    fn readout_of(observables: Vec<Observable>, decision: Decision) -> Readout {
+        Readout::new(observables, decision).unwrap()
+    }
+
+    fn single(position: usize, pauli: Pauli) -> Observable {
+        Observable::new(vec![(
+            1.0,
+            PauliString::new(vec![(position, pauli)]).unwrap(),
+        )])
+        .unwrap()
+    }
+
+    #[test]
+    fn z_readout_records_no_basis_change() {
+        // The pre-phase case: an all-Z readout adds no gate, so the emitted
+        // circuit is byte-identical to a bare computational-basis measurement.
+        let model = compile_with_readout(z0_readout()).unwrap();
+        assert!(model.basis_change.is_empty());
+        let template = model.template_for(&[0.1, 0.2]).unwrap();
+        // Nothing but the layer gates precedes the terminal measurement — in
+        // particular no H/Sdg was inserted (real_amplitudes emits neither).
+        assert_eq!(*template.gates.last().unwrap(), GateInstruction::MeasureAll);
+        assert!(!template
+            .gates
+            .iter()
+            .any(|g| matches!(g, GateInstruction::H(_) | GateInstruction::Sdg(_))));
+    }
+
+    #[test]
+    fn x_readout_inserts_hadamard_before_measure() {
+        let model =
+            compile_with_readout(readout_of(vec![single(0, Pauli::X)], Decision::Sign)).unwrap();
+        // active == [0, 1], so logical position 0 is physical qubit 0.
+        assert_eq!(model.basis_change, vec![(0, Pauli::X)]);
+        let g = model.template_for(&[0.1, 0.2]).unwrap().gates;
+        let n = g.len();
+        assert_eq!(g[n - 2], GateInstruction::H(0));
+        assert_eq!(g[n - 1], GateInstruction::MeasureAll);
+    }
+
+    #[test]
+    fn y_readout_inserts_sdg_then_hadamard_before_measure() {
+        let model =
+            compile_with_readout(readout_of(vec![single(1, Pauli::Y)], Decision::Sign)).unwrap();
+        assert_eq!(model.basis_change, vec![(1, Pauli::Y)]);
+        let g = model.template_for(&[0.1, 0.2]).unwrap().gates;
+        let n = g.len();
+        // Temporal order: Sdg first, then H, then the measurement.
+        assert_eq!(g[n - 3], GateInstruction::Sdg(1));
+        assert_eq!(g[n - 2], GateInstruction::H(1));
+        assert_eq!(g[n - 1], GateInstruction::MeasureAll);
+    }
+
+    #[test]
+    fn shared_non_z_basis_groups_into_one_circuit() {
+        // Two Argmax classes both measured in X, on different qubits, share one
+        // basis group — the rule is not tied to Sign/Threshold/Raw.
+        let model = compile_with_readout(readout_of(
+            vec![single(0, Pauli::X), single(1, Pauli::X)],
+            Decision::Argmax,
+        ))
+        .unwrap();
+        assert_eq!(model.basis_change, vec![(0, Pauli::X), (1, Pauli::X)]);
+    }
+
+    #[test]
+    fn compile_rejects_observable_with_incompatible_bases() {
+        // A single observable asking for both Z and X on qubit 0 cannot be one
+        // measurement.
+        let observable = Observable::new(vec![
+            (0.5, PauliString::new(vec![(0, Pauli::Z)]).unwrap()),
+            (0.5, PauliString::new(vec![(0, Pauli::X)]).unwrap()),
+        ])
+        .unwrap();
+        let err = compile_with_readout(readout_of(vec![observable], Decision::Sign)).unwrap_err();
         assert_eq!(
             err,
-            ValidationError::UnsupportedPauli {
-                pauli: Pauli::X,
+            ValidationError::ObservableHasIncompatibleBases {
                 position: 0,
+                first: Pauli::Z,
+                second: Pauli::X,
             }
+        );
+    }
+
+    #[test]
+    fn compile_rejects_readout_needing_two_basis_groups() {
+        // One class in Z and another in X on the *same* qubit needs two distinct
+        // measurement bases — the multi-circuit case, not implemented yet.
+        let err = compile_with_readout(readout_of(
+            vec![single(0, Pauli::Z), single(0, Pauli::X)],
+            Decision::Argmax,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ReadoutNeedsMultipleBasisGroups { groups: 2 }
         );
     }
 

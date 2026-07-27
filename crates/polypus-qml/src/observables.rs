@@ -25,10 +25,12 @@ use std::collections::HashMap;
 
 use crate::error::{QmlError, ValidationError};
 
-/// A single-qubit Pauli operator. v1 readout only supports `Z`; `X`/`Y` are
-/// carried so the type is complete and so `compile` can reject them with a
-/// clear [`ValidationError::UnsupportedPauli`] until the base-grouping phase
-/// (design doc §7.2) lands.
+/// A single-qubit Pauli operator. All three bases are measurable: `compile`
+/// inserts the basis change before the terminal measurement (`H` for `X`; `Sdg`
+/// then `H` for `Y`), provided the whole readout resolves to a single basis
+/// group. A readout that would need more than one group (e.g. `Z` and `X` on the
+/// same qubit) is still rejected — that is the multi-circuit case, not
+/// implemented yet (design doc §7.2, [`ValidationError::ReadoutNeedsMultipleBasisGroups`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pauli {
