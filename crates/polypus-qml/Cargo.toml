@@ -21,7 +21,11 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 polypus-sim = { workspace = true }
 polypus-optimizers = { workspace = true }
 # Only for this phase's round-trip serde tests; not a production dependency.
-serde_json = "1.0"
+# `float_roundtrip` is required for the θ vector to round-trip bit-for-bit:
+# serde_json's default parser trades last-ULP accuracy for speed, so a plain
+# `1.0` would fail the exact-equality round-trip assertions (the production I/O
+# in `crates/polypus` enables the same feature for the same reason).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 
 [features]
 default = []

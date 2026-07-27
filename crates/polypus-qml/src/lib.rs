@@ -54,6 +54,8 @@ pub use layers::{
     HardwareEfficientAnsatz, KeepRule, Layer, Pairing, PoolBlock, PoolLayer, RotationAxis,
 };
 pub use loss::Loss;
+#[cfg(feature = "serde")]
+pub use model::TrainedModel;
 pub use model::{CompiledModel, QuantumModel};
 pub use observables::{Observable, Pauli, PauliString};
 pub use problem::QmlProblem;

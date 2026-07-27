@@ -27,6 +27,7 @@
 //! `CircuitError`, which would turn an internal bookkeeping bug into an
 //! unrecoverable crash instead of a typed error crossing the FFI boundary.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
@@ -322,6 +323,75 @@ impl CompiledModel {
         let template = self.template_for(x)?;
         Ok(template.assign_parameters(theta)?)
     }
+
+    /// Infer a prediction from one sample's `counts`, applying the readout's
+    /// [`Decision`](crate::Decision) (design doc §7.1) — the inference-only
+    /// counterpart of
+    /// [`QmlProblem::predict_from_counts`](crate::QmlProblem::predict_from_counts),
+    /// usable directly on a `CompiledModel` (e.g. one loaded via
+    /// [`TrainedModel`]) without a `Dataset`/`Loss`.
+    ///
+    /// Not gated behind `serde`: inference from counts is useful whether or not
+    /// the model was loaded from disk.
+    pub fn predict_from_counts(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
+        self.resolved_readout().predict(counts)
+    }
+}
+
+/// Serialize a [`CompiledModel`] as just `{spec, num_features}` — never its
+/// derived fields (`num_params`, `allocations`, `resolved_readout`), which
+/// [`Deserialize`](CompiledModel) recomputes by re-running `compile`. Written by
+/// hand rather than derived so that loading always repeats the full validation
+/// of [`compile`](QuantumModel::compile): a corrupt or tampered file can never
+/// produce an internally inconsistent model (design doc §17).
+#[cfg(feature = "serde")]
+impl serde::Serialize for CompiledModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            spec: &'a QuantumModel,
+            num_features: usize,
+        }
+        Wire {
+            spec: &self.spec,
+            num_features: self.num_features,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Deserialize a [`CompiledModel`] by recompiling `{spec, num_features}`: the
+/// spec and feature count are read from the wire and fed straight back through
+/// [`compile`](QuantumModel::compile), so every structural invariant is
+/// revalidated on load. A spec that no longer compiles surfaces as a
+/// deserialization error (via [`serde::de::Error::custom`] over the
+/// [`ValidationError`]'s `Display`), never as a panic or a silently-accepted
+/// inconsistent model.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for CompiledModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            spec: QuantumModel,
+            num_features: usize,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        wire.spec
+            .compile(wire.num_features)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// A trained model ready for inference: a compiled model plus its optimal
+/// trainable parameters (design doc §17). Exists only under the `serde`
+/// feature — saving/loading is its only purpose.
+#[cfg(feature = "serde")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrainedModel {
+    /// The compiled model (round-tripped as `{spec, num_features}`).
+    pub model: CompiledModel,
+    /// The optimal trainable parameters, `θ`.
+    pub theta: Vec<f64>,
 }
 
 #[cfg(test)]
@@ -526,5 +596,148 @@ mod tests {
         assert_eq!(model.resolved_readout().observables().len(), 1);
         let cloned = model.clone();
         assert_eq!(cloned.num_params(), model.num_params());
+    }
+
+    #[test]
+    fn predict_from_counts_applies_decision() {
+        // Mirrors `QmlProblem::predict_from_counts`'s test, but straight on a
+        // `CompiledModel` — no `Dataset`/`Loss` involved.
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        // ⟨Z₀⟩ over "00" (width 2) = +1 → Sign → +1.
+        assert_eq!(model.predict_from_counts(&counts(&[("00", 10)])), Ok(1.0));
+        // ⟨Z₀⟩ over "01" = −1 → Sign → −1.
+        assert_eq!(model.predict_from_counts(&counts(&[("01", 10)])), Ok(-1.0));
+    }
+
+    fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+}
+
+/// Round-trip serialization tests (design doc §17). Gated behind `serde` — the
+/// only feature under which `CompiledModel`/`TrainedModel` serialize — and using
+/// `serde_json` as the concrete format, exactly as a real save/load would.
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use crate::layers::{ConvBlock, PoolBlock};
+    use crate::observables::{Observable, Pauli, PauliString};
+    use crate::readout::{Decision, Readout};
+
+    /// A model exercising the entire serializable type tree: angle encoder,
+    /// convolution, pooling, a hardware-efficient ansatz, and a multi-observable
+    /// readout whose first observable is a weighted two-term sum with a `Z₀Z₁`
+    /// string (so coefficients ≠ 1 and multi-factor strings both round-trip).
+    fn full_model() -> CompiledModel {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![
+                    (0.5, PauliString::new(vec![(0, Pauli::Z)]).unwrap()),
+                    (
+                        1.5,
+                        PauliString::new(vec![(0, Pauli::Z), (1, Pauli::Z)]).unwrap(),
+                    ),
+                ])
+                .unwrap(),
+                Observable::new(vec![(1.0, PauliString::new(vec![(1, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Argmax,
+        )
+        .unwrap();
+        // 4 qubits, 4 features; pooling halves the active set to 2, which the
+        // two-position readout resolves against.
+        QuantumModel::new(4)
+            .angle_encoder(RotationAxis::Ry)
+            .conv(ConvBlock::Basic)
+            .pool(PoolBlock::Basic)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(4)
+            .unwrap()
+    }
+
+    #[test]
+    fn compiled_model_round_trips_and_binds_identically() {
+        let model = full_model();
+        let json = serde_json::to_string(&model).unwrap();
+        let loaded: CompiledModel = serde_json::from_str(&json).unwrap();
+
+        // Derived fields recomputed on load must match the original.
+        assert_eq!(loaded.num_params(), model.num_params());
+        assert_eq!(loaded.num_features(), model.num_features());
+
+        // The reloaded model must produce byte-identical circuits, not merely
+        // compile: compare the concrete `template_for`/`bind` outputs.
+        let x = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(
+            loaded.template_for(&x).unwrap(),
+            model.template_for(&x).unwrap()
+        );
+        let theta: Vec<f64> = (0..model.num_params()).map(|i| 0.05 * i as f64).collect();
+        assert_eq!(
+            loaded.bind(&x, &theta).unwrap(),
+            model.bind(&x, &theta).unwrap()
+        );
+    }
+
+    #[test]
+    fn deserialization_revalidates_via_recompile() {
+        // Take a valid serialized model and corrupt its spec to an empty-layer
+        // model, which `compile` rejects with `EmptyModel`. Deserialization must
+        // surface that as a clean error, never a panic or an accepted model.
+        let json = serde_json::to_string(&full_model()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["spec"]["layers"] = serde_json::json!([]);
+        let corrupted = serde_json::to_string(&value).unwrap();
+
+        let err = serde_json::from_str::<CompiledModel>(&corrupted).unwrap_err();
+        // The `ValidationError::EmptyModel` Display flows through `Error::custom`.
+        assert!(
+            err.to_string().contains("no layers") || err.to_string().contains("empty"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn serialization_omits_derived_fields() {
+        let value: serde_json::Value = serde_json::to_value(full_model()).unwrap();
+        let object = value
+            .as_object()
+            .expect("CompiledModel serializes as a map");
+        // Exactly the two wire fields, none of the derived ones.
+        assert!(object.contains_key("spec"));
+        assert!(object.contains_key("num_features"));
+        assert!(!object.contains_key("allocations"));
+        assert!(!object.contains_key("num_params"));
+        assert!(!object.contains_key("resolved_readout"));
+        assert_eq!(object.len(), 2);
+    }
+
+    #[test]
+    fn trained_model_round_trips_model_and_theta() {
+        let model = full_model();
+        let theta: Vec<f64> = (0..model.num_params())
+            .map(|i| 0.1 * (i as f64 + 1.0))
+            .collect();
+        let trained = TrainedModel {
+            model,
+            theta: theta.clone(),
+        };
+        let json = serde_json::to_string(&trained).unwrap();
+        let loaded: TrainedModel = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.theta, theta);
+        // The reloaded model still binds identically with the reloaded θ.
+        let x = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(
+            loaded.model.bind(&x, &loaded.theta).unwrap(),
+            trained.model.bind(&x, &theta).unwrap()
+        );
     }
 }
