@@ -432,4 +432,25 @@ the real failure in its shared `OracleErrorSlot` when a candidate cannot be
 evaluated, and is byte-reproducible for a fixed seed. The public-API path is
 exercised end-to-end from Python in `tests/python/test_qml_native.py`.
 
+### Model save format (design doc §17)
+
+A trained model is persisted as JSON — `polypus.qml.TrainedModel(model,
+dataset, theta).save(path)` / `.load(path)`, with the file I/O and the concrete
+JSON format living in `crates/polypus` (the pure `polypus-qml` crate only gains
+an optional `serde` feature deriving `Serialize`/`Deserialize` on the model
+tree). A `CompiledModel` serializes to **only** `{spec, num_features}`: its
+derived fields (`num_params`, per-layer allocations, resolved readout) are never
+written. Loading recompiles from those two fields via `QuantumModel::compile`,
+so the derived state is regenerated, never trusted from the file.
+
+The safety guarantee this buys: a corrupt or hand-tampered file can never
+produce an internally inconsistent model. Loading re-runs the full `compile`
+validation, so a spec that no longer compiles surfaces as a clean
+deserialization error (a `ValueError` at the Python boundary) instead of a panic
+or a silently-accepted broken model. `serde_json`'s `float_roundtrip` feature is
+enabled wherever this JSON is parsed, so a saved `theta` reloads bit-for-bit and
+the loaded model's predictions reproduce under C-7. End-to-end inference (bind +
+execute on a backend + decide) is not part of this phase: `predict_from_counts`
+takes counts the caller already obtained.
+
 [`QmlProblem`]: ../crates/polypus-qml/src/problem.rs
