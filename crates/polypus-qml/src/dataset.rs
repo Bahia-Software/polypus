@@ -158,7 +158,11 @@ impl Dataset {
     }
 
     /// Build a new dataset from the samples at `indices`, preserving order.
-    fn select(&self, indices: &[usize]) -> Dataset {
+    ///
+    /// `pub(crate)` so [`QmlProblem::from_subset`](crate::QmlProblem) (another
+    /// module of this crate) can carve a minibatch out of a validated dataset;
+    /// `train_test_split` above is the other in-crate caller.
+    pub(crate) fn select(&self, indices: &[usize]) -> Dataset {
         let num_features = self.num_features;
         let mut features = Vec::with_capacity(indices.len() * num_features);
         let mut labels = Vec::with_capacity(indices.len());

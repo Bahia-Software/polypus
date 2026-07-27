@@ -19,6 +19,7 @@ use crate::error::{QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::CompiledModel;
 use crate::readout::Decision;
+use crate::rng::{shuffle, SplitMix64};
 
 /// A trainable QML problem: a compiled model, a training set and a loss, with
 /// one circuit template precompiled per training sample (features fixed, `θ`
@@ -121,6 +122,47 @@ impl QmlProblem {
     /// without re-deriving it. [`Loss`] is `Copy`, so this is a cheap read.
     pub fn loss(&self) -> Loss {
         self.loss
+    }
+
+    /// Deterministic minibatch selection (design doc §17): a pseudo-random subset
+    /// of `batch_size` sample indices out of `num_circuits()`, one call = one
+    /// minibatch. `call_index` must be a value that increments by exactly one per
+    /// oracle call (the caller's job — see `NativeQmlOracle`); combined with
+    /// `seed` it derives an independent, deterministic shuffle per call via
+    /// `SplitMix64`. Assumes `0 < batch_size <= num_circuits()` — that precondition
+    /// is validated once at construction time by the Python-facing boundary, not
+    /// re-checked here on every call.
+    pub fn minibatch_indices(&self, seed: u64, call_index: u64, batch_size: usize) -> Vec<usize> {
+        // Mixing constant: SplitMix64's own golden-ratio increment
+        // (0x9E3779B97F4A7C15), reused here to decorrelate `call_index` values
+        // without an O(call_index) fast-forward.
+        let mixed = seed ^ call_index.wrapping_mul(0x9E3779B97F4A7C15);
+        let mut rng = SplitMix64::new(mixed);
+        let mut indices: Vec<usize> = (0..self.num_circuits()).collect();
+        shuffle(&mut indices, &mut rng);
+        indices.truncate(batch_size);
+        indices
+    }
+
+    /// Build a smaller `QmlProblem` from the samples at `indices` (design doc
+    /// §17): the minibatch counterpart of using the full problem. Reuses the
+    /// *already-compiled* templates at those indices — no recompilation, no
+    /// re-validation (the full problem was already validated by `new`, and a
+    /// subset of an already-valid dataset can never violate a per-sample check
+    /// that isn't already excluded). Cheaper than the full-problem clone
+    /// `try_evaluate`/`try_gradient` already do today for the non-minibatch case.
+    // `from_*` on `&self` trips `wrong_self_convention`, but this is genuinely a
+    // "derive a smaller problem *from* this one's samples" operation, not a
+    // constructor — the same API-naming exception the crate already takes for
+    // `Infrastructure::from_str`. It weakens no correctness check.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_subset(&self, indices: &[usize]) -> QmlProblem {
+        QmlProblem {
+            model: self.model.clone(),
+            train: self.train.select(indices),
+            loss: self.loss,
+            templates: indices.iter().map(|&i| self.templates[i].clone()).collect(),
+        }
     }
 
     /// Bind `theta` into one [`ConcreteCircuit`] per training sample, in stable
@@ -1004,6 +1046,100 @@ mod tests {
         assert_eq!(
             problem.predict_from_counts(&counts(&[("01", 10)])),
             Ok(-1.0)
+        );
+    }
+
+    // ── Minibatching (design doc §17) ────────────────────────────────────────
+
+    /// A 1-qubit `⟨Z₀⟩` / `SquaredError` problem whose samples carry **distinct**
+    /// feature values, so every precompiled template differs. That is what makes
+    /// `from_subset`'s template selection observable: a subset built from the
+    /// wrong indices would bind different circuits.
+    fn distinct_feature_problem(features: &[f64], labels: &[f64]) -> QmlProblem {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let model = QuantumModel::new(1)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout)
+            .compile(1)
+            .unwrap();
+        let rows: Vec<Vec<f64>> = features.iter().map(|&f| vec![f]).collect();
+        let ds = Dataset::from_rows(&rows, labels).unwrap();
+        QmlProblem::new(model, ds, Loss::SquaredError).unwrap()
+    }
+
+    #[test]
+    fn minibatch_indices_is_deterministic_for_seed_and_call_index() {
+        let problem = distinct_feature_problem(&[0.1, 0.2, 0.3, 0.4, 0.5], &[1.0; 5]);
+        // Same (seed, call_index) → byte-identical index vector.
+        let a = problem.minibatch_indices(42, 3, 3);
+        let b = problem.minibatch_indices(42, 3, 3);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 3);
+        // Every index is in range and the subset has no duplicates.
+        assert!(a.iter().all(|&i| i < problem.num_circuits()));
+        let mut sorted = a.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), a.len());
+    }
+
+    #[test]
+    fn minibatch_indices_differs_across_call_index() {
+        // Different `call_index` values (same seed) draw different minibatches
+        // with overwhelming probability. Over a 20-sample dataset choosing 5,
+        // at least one of the first few call indices must differ from call 0 —
+        // asserting "not all identical" avoids a spurious failure if one pair
+        // happens to coincide.
+        let problem = distinct_feature_problem(
+            &(0..20).map(|k| 0.1 * k as f64).collect::<Vec<_>>(),
+            &[1.0; 20],
+        );
+        let base = problem.minibatch_indices(7, 0, 5);
+        let differs = (1..8).any(|c| problem.minibatch_indices(7, c, 5) != base);
+        assert!(differs, "every call_index produced the same minibatch");
+    }
+
+    #[test]
+    fn from_subset_reproduces_the_full_problem_on_those_samples() {
+        // Full problem over 4 distinct-feature samples with distinct labels.
+        let features = [0.15, 0.25, 0.35, 0.45];
+        let labels = [1.0, -1.0, 1.0, -1.0];
+        let full = distinct_feature_problem(&features, &labels);
+
+        // Carve out samples 2 and 0 (order preserved), the shape a minibatch has.
+        let indices = [2usize, 0usize];
+        let subset = full.from_subset(&indices);
+        assert_eq!(subset.num_circuits(), indices.len());
+
+        // `bind_batch` on the subset binds exactly the full problem's templates
+        // at those indices — proving the correct templates were selected, since
+        // distinct features make every template distinct.
+        let theta: Vec<f64> = (0..full.num_params())
+            .map(|k| 0.1 + 0.07 * k as f64)
+            .collect();
+        let full_circuits = full.bind_batch(&theta).unwrap();
+        let subset_circuits = subset.bind_batch(&theta).unwrap();
+        assert_eq!(subset_circuits[0], full_circuits[2]);
+        assert_eq!(subset_circuits[1], full_circuits[0]);
+
+        // `fitness_from_counts` on the subset equals `−mean_loss` over exactly
+        // those two samples (with their labels 1.0 and -1.0), computed by hand
+        // from the same synthetic counts.
+        //   sample 2 (y=+1): "0":3,"1":1 → ⟨Z₀⟩=+0.5, SquaredError=(0.5−1)²=0.25
+        //   sample 0 (y=+1): "0":1,"1":3 → ⟨Z₀⟩=−0.5, SquaredError=(−0.5−1)²=2.25
+        let c = vec![counts(&[("0", 3), ("1", 1)]), counts(&[("0", 1), ("1", 3)])];
+        let fitness = subset.fitness_from_counts(&c).unwrap();
+        assert!(
+            (fitness + (0.25 + 2.25) / 2.0).abs() < 1e-12,
+            "fitness={fitness}"
         );
     }
 
