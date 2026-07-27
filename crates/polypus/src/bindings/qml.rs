@@ -34,6 +34,8 @@ use crate::evaluation::{
     EvaluationOracle, ExactNativeQmlOracle, MinibatchConfig, NativeQmlOracle, OracleErrorSlot,
     QmlOracle,
 };
+use crate::infrastructure::execution_config::random_seed;
+use crate::infrastructure::{BackendError, BoundCircuit};
 use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
 use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
@@ -275,9 +277,11 @@ impl Dataset {
 /// `polypus-qml` recompiles on load, so a corrupt or tampered file surfaces as a
 /// `ValueError` rather than an inconsistent model (design doc §17).
 ///
-/// End-to-end inference (bind + execute on a backend + decide) is intentionally
-/// out of scope for this phase: [`predict_from_counts`](Self::predict_from_counts)
-/// takes counts the caller obtained on their own.
+/// [`predict`](Self::predict) is the end-to-end inference path: given a batch of
+/// new samples it binds each to `θ`, runs them on a backend, and applies the
+/// model's readout decision — all in one call.
+/// [`predict_from_counts`](Self::predict_from_counts) is the lower-level entry
+/// for a caller who obtained counts on their own.
 ///
 /// [`TrainedModel`]: polypus_qml::TrainedModel
 #[pyclass(module = "polypus.qml", name = "TrainedModel")]
@@ -341,6 +345,164 @@ impl TrainedModel {
             .model
             .predict_from_counts(&counts)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// End-to-end inference (design doc §17): predict on a batch of **new**
+    /// samples `x` in one call — bind each to `θ`, run it on a backend, and apply
+    /// the model's readout decision. `x` is always a list of samples
+    /// (`List[List[float]]`), never a flat vector, so its shape is unambiguous.
+    ///
+    /// Seed resolution and backend construction follow
+    /// [`run_quantum_circuit`](super::run_quantum_circuit), not the optimizer
+    /// paths: there is no "method" object here, so the seed is resolved directly
+    /// (`seed.unwrap_or_else(random_seed)`, with `infrastructure="qmio"` rejecting
+    /// an explicit seed), and the backend is built the usual way
+    /// (`build_backend_config` + `Infrastructure::create_backend`).
+    ///
+    /// `exact=True` reuses the **same** guard as
+    /// [`qml.train`](super::qml_train): it requires `infrastructure="local"` and
+    /// the native `backend="polypus"`, and reads exact basis-state probabilities
+    /// straight off the statevector (`shots`/`seed` are then irrelevant — two
+    /// calls are byte-identical). Any other combination rejects `exact=True` with
+    /// a clear error rather than silently ignoring it.
+    ///
+    /// A sample with the wrong number of features surfaces as a `ValueError`
+    /// (`QmlError::FeatureCountMismatch` from `bind`), never a panic. Predictions
+    /// come back in the same order as `x`.
+    #[pyo3(signature = (
+        x, shots=1024, n_qpus=1, infrastructure="local".to_string(), nodes=1,
+        cores_per_qpu=1, id="qml_predict".to_string(), sim_method="automatic",
+        noise_model=None, backend="aer", seed=None, exact=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn predict(
+        &self,
+        py: Python<'_>,
+        x: Vec<Vec<f64>>,
+        shots: u32,
+        n_qpus: u32,
+        infrastructure: String,
+        nodes: u32,
+        cores_per_qpu: u32,
+        id: String,
+        sim_method: &str,
+        noise_model: Option<Bound<'_, PyAny>>,
+        backend: &str,
+        seed: Option<u64>,
+        exact: bool,
+    ) -> PyResult<Vec<f64>> {
+        // Same guards `qml.train` applies at the Python-facing boundary.
+        validate_shots_and_qpus(shots, n_qpus)?;
+        validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+
+        // Bind each new sample to the trained θ, producing one native circuit per
+        // sample (C-8 (a)). A sample of the wrong feature count fails here with a
+        // `QmlError::FeatureCountMismatch`, mapped to `ValueError` — `bind`
+        // already validates, so there is no separate check to add.
+        let bound: Vec<BoundCircuit> = x
+            .iter()
+            .map(|xi| {
+                self.inner
+                    .model
+                    .bind(xi, &self.inner.theta)
+                    .map(BoundCircuit::Native)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        // Resolve the shot-sampling seed exactly as `run_quantum_circuit` does
+        // (not via a "method" object, which does not exist here): `qmio` is real
+        // hardware and rejects an explicit seed; every simulated backend draws a
+        // fresh OS-entropy seed when none is given.
+        let effective_seed: Option<u64> = if infrastructure == "qmio" {
+            if seed.is_some() {
+                return Err(PyValueError::new_err(
+                    "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
+                ));
+            }
+            None
+        } else {
+            Some(seed.unwrap_or_else(random_seed))
+        };
+
+        // Build the execution config once and share it across both paths (same
+        // pattern as `qml_train_native`: exact mode ignores the config's
+        // backend_config/shots/seed, but the config is still built once).
+        let backend_config = build_backend_config(
+            &infrastructure,
+            backend,
+            sim_method,
+            noise_model.map(|nm| nm.unbind()),
+            nodes,
+            cores_per_qpu,
+        )?;
+        let config = ExecutionConfig {
+            id: unique_id(&id),
+            shots,
+            n_qpus,
+            infrastructure: infrastructure.clone(),
+            backend_config,
+            opt_level: OptLevel::default(),
+            seed: effective_seed,
+        };
+
+        if exact {
+            // Exact mode is native-only, gated by the *same* condition
+            // `qml.train` uses: local infrastructure + the native backend.
+            if infrastructure != "local" || !is_native_backend(backend) {
+                return Err(PyValueError::new_err(format!(
+                    "exact mode (exact=True) requires the native statevector backend: \
+                     infrastructure=\"local\" and backend=\"polypus\", got \
+                     infrastructure=\"{infrastructure}\", backend=\"{backend}\""
+                )));
+            }
+            // The exact read-out is an inherent method of the concrete backend
+            // (not on the `QuantumBackend` trait). The seed is unused in exact
+            // mode; a resolved value is passed only because the constructor
+            // requires one (`effective_seed` is `Some` since infra is "local").
+            let native_backend =
+                NativeStatevectorBackend::new(effective_seed.unwrap_or_else(random_seed));
+            // Whole batch at once, no chunking — same behaviour as
+            // `ExactNativeQmlOracle`. Release the GIL around the blocking read-out
+            // (ENGINEERING §3) and check signals once afterwards.
+            let all_probs =
+                py.allow_threads(|| native_backend.run_circuits_exact(&bound, &config))?;
+            py.check_signals()?;
+            all_probs
+                .iter()
+                .map(|probs| {
+                    self.inner
+                        .model
+                        .predict_from_probabilities(probs)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))
+                })
+                .collect()
+        } else {
+            let backend = Infrastructure::create_backend(&config)?;
+            // Chunk by the backend's max batch size, exactly as
+            // `run_native_qml_counts` does. Release the GIL around the whole
+            // (potentially slow) run and check signals once afterwards.
+            let batch_size = backend.max_batch_size(bound.len()).max(1);
+            let all_counts = py.allow_threads(|| {
+                let mut all: Vec<HashMap<String, u64>> = Vec::with_capacity(bound.len());
+                for chunk in bound.chunks(batch_size) {
+                    // Counts come back one dict per circuit in submission order
+                    // (C-3), so extending preserves the sample order.
+                    all.extend(backend.run_circuits(chunk, &config)?);
+                }
+                Ok::<_, BackendError>(all)
+            })?;
+            py.check_signals()?;
+            all_counts
+                .iter()
+                .map(|counts| {
+                    self.inner
+                        .model
+                        .predict_from_counts(counts)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))
+                })
+                .collect()
+        }
     }
 }
 

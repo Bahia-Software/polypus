@@ -534,3 +534,107 @@ class TestTrainedModelSaveLoad:
         )
         with pytest.raises(ValueError, match="no layers"):
             polypus.qml.TrainedModel.load(str(path))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. End-to-end inference: TrainedModel.predict(X, ...) (design doc §17)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _trained_model():
+    """Train the small angle-encoder model to separation and wrap it as a
+    `TrainedModel` ready for inference. Trained on the exact path so the θ is
+    deterministic run to run."""
+    import polypus
+
+    result = polypus.qml.train(
+        _model(),
+        _dataset(),
+        method=polypus.DE(generations=30, population_size=16, tolerance=1e-9),
+        loss="hinge",
+        infrastructure="local",
+        backend="polypus",
+        id="qml_predict_train",
+        seed=7,
+        exact=True,
+    )
+    return polypus.qml.TrainedModel(_model(), _dataset(), result.best_params)
+
+
+# New samples the model never trained on: one near each cluster of `_dataset()`.
+_NEW_SAMPLES = [[0.32, 0.33], [2.85, 2.82]]
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestTrainedModelPredict:
+    """`TrainedModel.predict(X, ...)` — bind new samples to θ, run them on a
+    backend, and apply the readout decision, all in one call."""
+
+    def test_predict_native_backend_returns_finite_sign_labels(self):
+        # A `Sign` readout: every prediction is exactly ±1 and finite.
+        trained = _trained_model()
+        preds = trained.predict(
+            _NEW_SAMPLES,
+            shots=2048,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_predict_native",
+            seed=7,
+        )
+        assert isinstance(preds, list)
+        assert len(preds) == len(_NEW_SAMPLES)
+        assert all(isinstance(p, float) and p in (-1.0, 1.0) for p in preds)
+
+    def test_predict_exact_is_deterministic(self):
+        # Exact mode draws no shot noise → two identical calls are byte-identical.
+        trained = _trained_model()
+        kwargs = dict(
+            infrastructure="local",
+            backend="polypus",
+            id="qml_predict_exact",
+            exact=True,
+        )
+        a = trained.predict(_NEW_SAMPLES, **kwargs)
+        b = trained.predict(_NEW_SAMPLES, **kwargs)
+        assert a == b
+
+    def test_predict_exact_rejected_on_aer_backend(self):
+        # `exact=True` reuses the same guard `qml.train` applies: aer is rejected.
+        trained = _trained_model()
+        with pytest.raises(ValueError, match="exact"):
+            trained.predict(
+                _NEW_SAMPLES,
+                infrastructure="local",
+                backend="aer",
+                id="qml_predict_exact_aer",
+                exact=True,
+            )
+
+    def test_predict_wrong_feature_count_raises_value_error(self):
+        # A sample with 3 features where the model compiled for 2: `bind`'s
+        # `FeatureCountMismatch` surfaces as a clean ValueError, never a panic.
+        trained = _trained_model()
+        with pytest.raises(ValueError):
+            trained.predict(
+                [[0.1, 0.2, 0.3]],
+                infrastructure="local",
+                backend="polypus",
+                id="qml_predict_bad_features",
+                seed=7,
+            )
+
+    def test_predict_aer_backend_with_shots_runs(self):
+        # The non-exact shot path on aer must also work end to end (not required
+        # to be bit-identical — just finite ±1 labels in the right shape).
+        trained = _trained_model()
+        preds = trained.predict(
+            _NEW_SAMPLES,
+            shots=2048,
+            infrastructure="local",
+            backend="aer",
+            id="qml_predict_aer",
+            seed=7,
+        )
+        assert len(preds) == len(_NEW_SAMPLES)
+        assert all(isinstance(p, float) and p in (-1.0, 1.0) for p in preds)
