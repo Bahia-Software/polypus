@@ -54,6 +54,52 @@ impl OracleErrorSlot {
     }
 }
 
+/// Deterministic minibatch configuration for a
+/// [`NativeQmlOracle`]/[`ExactNativeQmlOracle`] (design doc §17). `counter`
+/// advances by one per call to `evaluate_batch` or `gradient_batch` — the two
+/// traits do **not** share a counter, so a given iteration's fitness-tracking
+/// call and its gradient call may see different minibatches (accepted: see the
+/// final full-dataset re-evaluation in `bindings/qml.rs`).
+///
+/// Defined once here rather than duplicated in each oracle module: both oracles
+/// embed it and `bindings/qml.rs` constructs it, so a single definition avoids
+/// an ambiguous import and keeps the counter semantics documented in one place.
+pub struct MinibatchConfig {
+    pub batch_size: usize,
+    pub seed: u64,
+    counter: std::sync::atomic::AtomicU64,
+}
+
+impl MinibatchConfig {
+    pub fn new(batch_size: usize, seed: u64) -> Self {
+        MinibatchConfig {
+            batch_size,
+            seed,
+            counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Draw the next minibatch's sample indices out of `problem`, advancing the
+    /// per-oracle call counter by exactly one. One call == one minibatch: the
+    /// mathematical requirement that a single `gradient_batch` (all its `dims`
+    /// parameters and both `θ±π/2` shifts) shares one minibatch is met by
+    /// calling this **once** per oracle call and reusing the reduced problem for
+    /// the whole call.
+    pub fn next_indices(&self, problem: &polypus_qml::QmlProblem) -> Vec<usize> {
+        let call_index = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        problem.minibatch_indices(self.seed, call_index, self.batch_size)
+    }
+
+    /// How many minibatches have been drawn so far (the current counter value).
+    /// White-box hook for tests asserting that one oracle call draws exactly one
+    /// minibatch — never one per parameter or per parameter-shift.
+    pub fn calls_so_far(&self) -> u64 {
+        self.counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// A parameterised circuit template, in one of the representations Polypus
 /// supports as optimisation targets.
 ///

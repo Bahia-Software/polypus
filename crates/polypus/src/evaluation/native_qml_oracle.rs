@@ -1,4 +1,4 @@
-use crate::evaluation::{EvaluationError, EvaluationOracle, OracleErrorSlot};
+use crate::evaluation::{EvaluationError, EvaluationOracle, MinibatchConfig, OracleErrorSlot};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_optimizers::GradientOracle;
 use polypus_qml::{Loss, QmlProblem};
@@ -49,6 +49,11 @@ pub struct NativeQmlOracle {
     /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
     /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
     pub errors: OracleErrorSlot,
+    /// Optional deterministic minibatching (design doc §17). When `Some`, each
+    /// `evaluate_batch`/`gradient_batch` call scores a fresh minibatch drawn from
+    /// its own counter; when `None`, every call scores the full training set (the
+    /// pre-minibatch behaviour, unchanged).
+    pub minibatch: Option<MinibatchConfig>,
 }
 
 impl EvaluationOracle for NativeQmlOracle {
@@ -113,8 +118,17 @@ impl NativeQmlOracle {
         // Clone the problem once per batch into an `Arc` so every candidate's
         // `spawn_blocking` task holds an owned, `'static`, cheaply-shared handle
         // to it — the native counterpart to how `QmlOracle` hands its already-
-        // `Arc` config/backend (and `clone_ref`'d circuits) to its workers.
-        let problem = Arc::new(self.problem.clone());
+        // `Arc` config/backend (and `clone_ref`'d circuits) to its workers. With
+        // minibatching (design doc §17) the shared handle is a fresh minibatch
+        // instead of the full problem, drawn once here so all candidates in this
+        // batch score the *same* minibatch (a per-call decision, not per-candidate).
+        let problem = Arc::new(match &self.minibatch {
+            Some(mb) => {
+                let indices = mb.next_indices(&self.problem);
+                self.problem.from_subset(&indices)
+            }
+            None => self.problem.clone(),
+        });
 
         let handles: Vec<_> = candidates
             .iter()
@@ -189,8 +203,18 @@ impl NativeQmlOracle {
 
         // Clone the problem once per gradient into an `Arc`, exactly as
         // `try_evaluate` does, so every `spawn_blocking` task owns a cheap,
-        // `'static` handle to it.
-        let problem = Arc::new(self.problem.clone());
+        // `'static` handle to it. With minibatching the shared handle is a fresh
+        // minibatch drawn **once per gradient call** — so the base θ and every
+        // θ±π/2·e_k shift score the *same* minibatch, which parameter-shift
+        // requires for a coherent gradient (design doc §17). Advancing the
+        // counter once here (not once per parameter/shift) is what guarantees it.
+        let problem = Arc::new(match &self.minibatch {
+            Some(mb) => {
+                let indices = mb.next_indices(&self.problem);
+                self.problem.from_subset(&indices)
+            }
+            None => self.problem.clone(),
+        });
 
         // The parameter vectors to run: base θ first, then θ ± π/2·e_k for each
         // requested k. The base batch is what makes this cost 2·|indices| + 1.
@@ -276,6 +300,18 @@ impl NativeQmlOracle {
             };
             Ok(grad)
         })
+    }
+
+    /// Evaluate `theta` against the **full** dataset, bypassing any configured
+    /// minibatch. Used once, after optimization ends, to report an honest final
+    /// fitness (design doc §17) — see `bindings/qml.rs`.
+    ///
+    /// This deliberately ignores `self.minibatch` and scores `&self.problem`
+    /// directly (via the same per-candidate helper the trait path uses), so the
+    /// reported `best_fitness` is the true full-dataset value, not the last
+    /// iteration's cheap minibatch heuristic.
+    pub fn evaluate_full(&self, theta: &[f64]) -> Result<f64, EvaluationError> {
+        evaluate_native_qml_single(&self.problem, &self.config, self.backend.as_ref(), theta)
     }
 }
 
@@ -388,6 +424,7 @@ mod tests {
             config: native_config_with_shots(shots),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
+            minibatch: None,
         }
     }
 
@@ -417,6 +454,7 @@ mod tests {
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
+            minibatch: None,
         }
     }
 
@@ -427,6 +465,51 @@ mod tests {
             config: native_config_with_shots(shots),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
+            minibatch: None,
+        }
+    }
+
+    /// Oracle over a **larger** problem (more samples than the minibatch size)
+    /// with minibatching active. Six well-separated samples so a batch of 3 is a
+    /// genuine subset; a fixed seed makes the whole run reproducible (C-7).
+    fn oracle_with_minibatch(
+        errors: OracleErrorSlot,
+        shots: u32,
+        batch_size: usize,
+        seed: u64,
+    ) -> NativeQmlOracle {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout);
+        let ds = Dataset::from_rows(
+            &[
+                vec![0.30, 0.35],
+                vec![0.40, 0.30],
+                vec![0.35, 0.40],
+                vec![2.80, 2.75],
+                vec![2.90, 2.80],
+                vec![2.75, 2.90],
+            ],
+            &[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let compiled = model.compile(ds.num_features()).unwrap();
+        let problem = QmlProblem::new(compiled, ds, Loss::Hinge).unwrap();
+        NativeQmlOracle {
+            problem,
+            config: native_config_with_shots(shots),
+            backend: Arc::new(NativeStatevectorBackend::new(seed)),
+            errors,
+            minibatch: Some(MinibatchConfig::new(batch_size, seed)),
         }
     }
 
@@ -566,5 +649,79 @@ mod tests {
         let b = oracle(OracleErrorSlot::new());
         let candidates: Vec<Vec<f64>> = (0..12).map(|k| vec![0.05 + 0.03 * k as f64; 8]).collect();
         assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
+    }
+
+    // ── Minibatching (design doc §17) ────────────────────────────────────────
+
+    /// With minibatching active, each `evaluate_batch` call draws a fresh
+    /// minibatch (advancing the counter by one per call), while `evaluate_full`
+    /// stays anchored to the whole dataset: it returns the same value for a fixed
+    /// `theta` no matter how many minibatch calls preceded it. We don't assert
+    /// the two minibatch fitnesses *differ* (a small dataset could coincide) —
+    /// the observable, robust facts are "counter advanced twice" and
+    /// "`evaluate_full` is call-count-invariant".
+    #[test]
+    fn minibatch_advances_per_call_while_evaluate_full_is_stable() {
+        pyo3::prepare_freethreaded_python();
+        let oracle = oracle_with_minibatch(OracleErrorSlot::new(), 4096, 3, 20);
+        let theta = vec![0.15_f64; 8];
+
+        let full_before = oracle.evaluate_full(&theta).unwrap();
+        assert!(full_before.is_finite());
+
+        // Two minibatch evaluations of the *same* theta.
+        let _ = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        let _ = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        assert_eq!(
+            oracle.minibatch.as_ref().unwrap().calls_so_far(),
+            2,
+            "each evaluate_batch call must draw exactly one minibatch"
+        );
+
+        // evaluate_full ignores the minibatch entirely: same theta, same value,
+        // regardless of how many minibatch draws happened in between.
+        let full_after = oracle.evaluate_full(&theta).unwrap();
+        assert_eq!(full_before, full_after);
+        assert!(oracle.errors.take().is_none());
+    }
+
+    /// A single `gradient_batch` call over `dims > 1` draws **one** minibatch —
+    /// not one per parameter and not one per ±π/2 shift. Parameter-shift is only
+    /// a coherent gradient when the base θ and both shifts of every component are
+    /// scored on the *same* samples, so the counter must advance by exactly one
+    /// per call. White-box: inspect the counter directly.
+    #[test]
+    fn gradient_batch_draws_one_minibatch_for_the_whole_call() {
+        pyo3::prepare_freethreaded_python();
+        let oracle = oracle_with_minibatch(OracleErrorSlot::new(), 4096, 3, 20);
+        let dims = 8;
+        let theta = vec![0.15_f64; dims];
+
+        let grad = oracle.gradient_batch(&theta, dims);
+        assert_eq!(grad.len(), dims);
+        assert!(grad.iter().all(|g| g.is_finite()));
+        assert_eq!(
+            oracle.minibatch.as_ref().unwrap().calls_so_far(),
+            1,
+            "one gradient_batch call must draw exactly one minibatch, \
+             not one per parameter/shift"
+        );
+    }
+
+    /// C-7 under minibatching: two oracles built with the *same* seed and
+    /// batch_size and called in the same sequence produce byte-identical results.
+    /// Analogous to `evaluate_batch_is_reproducible_for_a_fixed_seed`, but now the
+    /// minibatch selection itself is part of what must reproduce.
+    #[test]
+    fn minibatch_is_reproducible_for_a_fixed_seed() {
+        pyo3::prepare_freethreaded_python();
+        let a = oracle_with_minibatch(OracleErrorSlot::new(), 4096, 3, 20);
+        let b = oracle_with_minibatch(OracleErrorSlot::new(), 4096, 3, 20);
+        let candidates: Vec<Vec<f64>> = (0..5).map(|k| vec![0.05 + 0.03 * k as f64; 8]).collect();
+        // Same call sequence on both: first an evaluate, then a gradient — each
+        // advances its own counter identically on the two oracles.
+        assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
+        let theta = vec![0.2_f64; 8];
+        assert_eq!(a.gradient_batch(&theta, 8), b.gradient_batch(&theta, 8));
     }
 }
