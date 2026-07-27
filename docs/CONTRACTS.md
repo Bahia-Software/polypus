@@ -402,11 +402,12 @@ backend, shots, batching, distribution — is `crates/polypus`' concern. The fou
 guarantees:
 
 - **(a) `bind_batch` shape and order.** `bind_batch(θ)` returns exactly
-  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order** (in v1,
-  one circuit per training sample; when X/Y base grouping lands it becomes
-  sample-major × base-group-minor). Counts handed back to
-  `fitness_from_counts` must be in the **same order** — misaligned counts are a
-  corrupt result, so the order is specified and tested, never assumed.
+  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order** (one
+  circuit per training sample; full multi-circuit X/Y base grouping — one
+  circuit per base group — is still future, see the readout-basis note below).
+  Counts handed back to `fitness_from_counts` must be in the **same order** —
+  misaligned counts are a corrupt result, so the order is specified and tested,
+  never assumed.
 - **(b) Finite fitness or typed error.** `fitness_from_counts` returns a finite
   `f64` (`= −mean_loss`, since the optimizers maximise) or a typed `QmlError` —
   **never `NaN`**. `BinaryCrossEntropy` clamps its probability away from the
@@ -421,6 +422,21 @@ guarantees:
   `compile` time, always `> 0` (a model with no trainable parameters is
   rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
   the optimizer consumes under C-5.
+
+**Readout measurement basis (single group).** A readout may measure `X`/`Y`
+Paulis, not just `Z`: `compile` inserts the basis change (`H` for `X`; `Sdg`
+then `H` for `Y`) before the terminal measurement. This is supported **only when
+the whole readout resolves to exactly one basis group** — a qubit→Pauli
+assignment every observable's every term agrees with on the qubits it touches
+(untouched qubits measure in `Z`, no gate). Any all-`Z` readout, or one whose
+observables share a compatible non-`Z` basis (e.g. a multiclass `Argmax` with
+every class in `X`), stays a single circuit per sample and keeps `num_circuits`
+unchanged. Two conflicting bases **inside one observable** (e.g. `Z₀ + X₀`) is a
+typed `ValidationError::ObservableHasIncompatibleBases`; a readout that would
+need **more than one group** (e.g. one class in `Z`, another in `X` on the same
+qubit) is a typed `ValidationError::ReadoutNeedsMultipleBasisGroups { groups }`
+— the multi-circuit case is not implemented yet (design doc §7.2), and is
+rejected rather than mismeasured.
 
 **Enforcing test:** `crates/polypus-qml/tests/contracts.rs` covers the QML side —
 `bind_batch` length/order, C-4/C-2 on every bound circuit, finite fitness, and
