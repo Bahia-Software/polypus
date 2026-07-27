@@ -32,13 +32,16 @@ trace-logs = ["polypus-logger/trace-logs"]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
-polypus-qml = { workspace = true }
+polypus-qml = { workspace = true, features = ["serde"] }
 polypus-logger = { workspace = true }
 pyo3 = { version = "0.24.2", features = ["num-complex"] }
 rand = "0.8"
 ndarray = "0.16"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `float_roundtrip` makes serde_json's parser reproduce f64 bit-for-bit (its
+# default parser trades last-ULP accuracy for speed); required so a saved
+# TrainedModel's θ reloads exactly and its predictions reproduce (C-7).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 log = { workspace = true }
 uuid = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }

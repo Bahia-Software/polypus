@@ -799,6 +799,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     qml_module.add_function(wrap_pyfunction!(qml_train, &qml_module)?)?;
     qml_module.add_class::<qml::Model>()?;
     qml_module.add_class::<qml::Dataset>()?;
+    qml_module.add_class::<qml::TrainedModel>()?;
     m.add_submodule(&qml_module)?;
     // Register in sys.modules so `import polypus.qml` also works
     let sys = PyModule::import(py, "sys")?;

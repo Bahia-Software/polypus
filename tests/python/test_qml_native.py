@@ -471,3 +471,60 @@ class TestNativeQmlTrainMinibatch:
                 seed=7,
                 batch_size=1,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Model serialization: TrainedModel save / load (design doc §17)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestTrainedModelSaveLoad:
+    def test_save_load_round_trips_theta(self, tmp_path):
+        """Train a small model, wrap it with its best parameters, save it,
+        reload it, and confirm θ survives byte-for-byte."""
+        import polypus
+
+        result = polypus.qml.train(
+            _model(),
+            _dataset(),
+            method=polypus.DE(generations=20, population_size=12, tolerance=1e-9),
+            loss="hinge",
+            shots=1024,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_trained_save",
+            seed=7,
+        )
+
+        # A fresh builder + the same dataset the model was compiled against.
+        trained = polypus.qml.TrainedModel(_model(), _dataset(), result.best_params)
+        assert trained.theta == result.best_params
+
+        path = str(tmp_path / "model.json")
+        trained.save(path)
+        loaded = polypus.qml.TrainedModel.load(path)
+
+        # `float_roundtrip` guarantees exact equality, not just approximate.
+        assert loaded.theta == result.best_params
+
+    def test_predict_from_counts_applies_decision(self):
+        # ⟨Z₀⟩ over "00" (width 2) = +1 → sign decision → +1; "01" → −1.
+        import polypus
+
+        trained = polypus.qml.TrainedModel(_model(), _dataset(), [0.0] * 8)
+        assert trained.predict_from_counts({"00": 10}) == 1.0
+        assert trained.predict_from_counts({"01": 10}) == -1.0
+
+    def test_load_rejects_corrupt_file(self, tmp_path):
+        # A file whose spec no longer compiles (empty layers) must fail loading
+        # with a ValueError — recompilation revalidates, never a silent accept.
+        import polypus
+
+        path = tmp_path / "corrupt.json"
+        path.write_text(
+            '{"spec": {"num_qubits": 2, "layers": [], "readout": null}, "theta": []}'
+        )
+        with pytest.raises(ValueError):
+            polypus.qml.TrainedModel.load(str(path))

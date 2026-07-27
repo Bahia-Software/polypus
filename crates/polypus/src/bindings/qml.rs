@@ -14,6 +14,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyModule};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use polypus_qml::{
@@ -261,6 +262,85 @@ impl Dataset {
             self.inner.num_samples(),
             self.inner.num_features()
         )
+    }
+}
+
+/// A trained model saved for inference: a compiled `polypus.qml.Model` bound to
+/// its optimal parameters `theta`, mirroring `polypus-qml`'s [`TrainedModel`].
+///
+/// Constructed from a `Model`, the `Dataset` it was trained on (its feature
+/// count is what the model compiles against) and the optimizer's `best_params`.
+/// [`save`](Self::save) writes it as JSON and [`load`](Self::load) reads it back;
+/// the file carries only `{spec, num_features}` for the model, which
+/// `polypus-qml` recompiles on load, so a corrupt or tampered file surfaces as a
+/// `ValueError` rather than an inconsistent model (design doc §17).
+///
+/// End-to-end inference (bind + execute on a backend + decide) is intentionally
+/// out of scope for this phase: [`predict_from_counts`](Self::predict_from_counts)
+/// takes counts the caller obtained on their own.
+///
+/// [`TrainedModel`]: polypus_qml::TrainedModel
+#[pyclass(module = "polypus.qml", name = "TrainedModel")]
+pub struct TrainedModel {
+    inner: polypus_qml::TrainedModel,
+}
+
+#[pymethods]
+impl TrainedModel {
+    #[new]
+    fn new(
+        model: PyRef<'_, Model>,
+        dataset: PyRef<'_, Dataset>,
+        theta: Vec<f64>,
+    ) -> PyResult<Self> {
+        let compiled = model
+            .inner
+            .as_ref()
+            .expect("Model.inner is always Some between calls")
+            .clone()
+            .compile(dataset.inner.num_features())
+            .map_err(validation_to_py_err)?;
+        Ok(TrainedModel {
+            inner: polypus_qml::TrainedModel {
+                model: compiled,
+                theta,
+            },
+        })
+    }
+
+    /// Write the trained model to `path` as pretty-printed JSON.
+    fn save(&self, path: &str) -> PyResult<()> {
+        let json = serde_json::to_string_pretty(&self.inner)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        std::fs::write(path, json).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    }
+
+    /// Load a trained model from a JSON file at `path`. The model is recompiled
+    /// from its `{spec, num_features}`, so a malformed or tampered file fails
+    /// here with a `ValueError` instead of yielding an inconsistent model.
+    #[staticmethod]
+    fn load(path: &str) -> PyResult<Self> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let inner: polypus_qml::TrainedModel =
+            serde_json::from_str(&contents).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(TrainedModel { inner })
+    }
+
+    /// The optimal trainable parameters `θ`.
+    #[getter]
+    fn theta(&self) -> Vec<f64> {
+        self.inner.theta.clone()
+    }
+
+    /// Infer a prediction from one sample's measurement `counts`, applying the
+    /// model's readout decision (design doc §7.1). The caller supplies counts
+    /// they obtained by running the bound circuit themselves.
+    fn predict_from_counts(&self, counts: HashMap<String, u64>) -> PyResult<f64> {
+        self.inner
+            .model
+            .predict_from_counts(&counts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }
 
