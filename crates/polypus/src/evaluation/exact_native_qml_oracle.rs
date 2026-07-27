@@ -1,4 +1,4 @@
-use crate::evaluation::{EvaluationError, EvaluationOracle, OracleErrorSlot};
+use crate::evaluation::{EvaluationError, EvaluationOracle, MinibatchConfig, OracleErrorSlot};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, NativeStatevectorBackend};
 use polypus_optimizers::GradientOracle;
 use polypus_qml::{Loss, QmlProblem};
@@ -42,6 +42,13 @@ pub struct ExactNativeQmlOracle {
     /// Shared with the `qml.train` entry point: the first evaluation failure is
     /// recorded here and surfaced as a `PyErr` after `optimize` returns.
     pub errors: OracleErrorSlot,
+    /// Optional deterministic minibatching (design doc §17), identical in
+    /// meaning to [`NativeQmlOracle`](crate::evaluation::NativeQmlOracle)'s: when
+    /// `Some`, each `evaluate_batch`/`gradient_batch` call scores a fresh
+    /// minibatch from its own counter; when `None`, every call scores the full
+    /// training set. Exact mode removes shot noise, not the dataset, so
+    /// minibatching applies here exactly as on the sampled path.
+    pub minibatch: Option<MinibatchConfig>,
 }
 
 impl EvaluationOracle for ExactNativeQmlOracle {
@@ -103,7 +110,16 @@ impl ExactNativeQmlOracle {
             )))
         })?;
 
-        let problem = Arc::new(self.problem.clone());
+        // With minibatching (design doc §17) the shared handle is a fresh
+        // minibatch drawn once here, so every candidate in this batch scores the
+        // same minibatch — identical policy to `NativeQmlOracle::try_evaluate`.
+        let problem = Arc::new(match &self.minibatch {
+            Some(mb) => {
+                let indices = mb.next_indices(&self.problem);
+                self.problem.from_subset(&indices)
+            }
+            None => self.problem.clone(),
+        });
 
         let handles: Vec<_> = candidates
             .iter()
@@ -158,7 +174,16 @@ impl ExactNativeQmlOracle {
             )))
         })?;
 
-        let problem = Arc::new(self.problem.clone());
+        // One minibatch per gradient call, drawn once so the base θ and every
+        // θ±π/2·e_k shift score the same samples — the parameter-shift coherence
+        // constraint, identical to `NativeQmlOracle::try_gradient`.
+        let problem = Arc::new(match &self.minibatch {
+            Some(mb) => {
+                let indices = mb.next_indices(&self.problem);
+                self.problem.from_subset(&indices)
+            }
+            None => self.problem.clone(),
+        });
 
         let shift = std::f64::consts::PI / 2.0;
         let mut thetas: Vec<Vec<f64>> = Vec::with_capacity(1 + 2 * param_indices.len());
@@ -233,6 +258,15 @@ impl ExactNativeQmlOracle {
             };
             Ok(grad)
         })
+    }
+
+    /// Evaluate `theta` against the **full** dataset, bypassing any configured
+    /// minibatch — the exact-mode twin of
+    /// [`NativeQmlOracle::evaluate_full`](crate::evaluation::NativeQmlOracle).
+    /// Used once, after optimization ends, to report an honest final fitness
+    /// (design doc §17) — see `bindings/qml.rs`.
+    pub fn evaluate_full(&self, theta: &[f64]) -> Result<f64, EvaluationError> {
+        evaluate_exact_native_qml_single(&self.problem, &self.config, self.backend.as_ref(), theta)
     }
 }
 
@@ -345,6 +379,48 @@ mod tests {
             // Any seed: the exact path never samples, so it does not matter.
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
+            minibatch: None,
+        }
+    }
+
+    /// A six-sample problem (well-separated) so a batch of 3 is a genuine subset.
+    fn six_sample_problem() -> QmlProblem {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout);
+        let ds = Dataset::from_rows(
+            &[
+                vec![0.30, 0.35],
+                vec![0.40, 0.30],
+                vec![0.35, 0.40],
+                vec![2.80, 2.75],
+                vec![2.90, 2.80],
+                vec![2.75, 2.90],
+            ],
+            &[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let compiled = model.compile(ds.num_features()).unwrap();
+        QmlProblem::new(compiled, ds, Loss::Hinge).unwrap()
+    }
+
+    /// An exact oracle over [`six_sample_problem`] with minibatching active.
+    fn oracle_with_minibatch(batch_size: usize, seed: u64) -> ExactNativeQmlOracle {
+        ExactNativeQmlOracle {
+            problem: six_sample_problem(),
+            config: native_config(),
+            backend: Arc::new(NativeStatevectorBackend::new(seed)),
+            errors: OracleErrorSlot::new(),
+            minibatch: Some(MinibatchConfig::new(batch_size, seed)),
         }
     }
 
@@ -423,16 +499,82 @@ mod tests {
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(1)),
             errors: OracleErrorSlot::new(),
+            minibatch: None,
         };
         let b = ExactNativeQmlOracle {
             problem: small_problem(),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(999)),
             errors: OracleErrorSlot::new(),
+            minibatch: None,
         };
         let candidates: Vec<Vec<f64>> = (0..6).map(|k| vec![0.05 + 0.03 * k as f64; 8]).collect();
         assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
 
+        let theta = vec![0.2_f64; 8];
+        assert_eq!(a.gradient_batch(&theta, 8), b.gradient_batch(&theta, 8));
+    }
+
+    // ── Minibatching (design doc §17) ────────────────────────────────────────
+
+    /// `gradient_batch` draws exactly one minibatch per call over `dims > 1`
+    /// (white-box on the counter), mirroring the sampled oracle's guarantee. The
+    /// exact path removes shot noise, not the minibatch coherence requirement.
+    #[test]
+    fn gradient_batch_draws_one_minibatch_for_the_whole_call() {
+        pyo3::prepare_freethreaded_python();
+        let oracle = oracle_with_minibatch(3, 20);
+        let dims = 8;
+        let theta = vec![0.15_f64; dims];
+        let grad = oracle.gradient_batch(&theta, dims);
+        assert_eq!(grad.len(), dims);
+        assert!(grad.iter().all(|g| g.is_finite()));
+        assert_eq!(oracle.minibatch.as_ref().unwrap().calls_so_far(), 1);
+    }
+
+    /// Each `evaluate_batch` advances the counter by one, and `evaluate_full`
+    /// scores the whole dataset regardless of how many minibatches were drawn.
+    /// In exact mode `evaluate_full` is also seed-independent (no sampling).
+    #[test]
+    fn evaluate_full_ignores_minibatch_and_is_exact() {
+        pyo3::prepare_freethreaded_python();
+        let oracle = oracle_with_minibatch(3, 20);
+        let theta = vec![0.15_f64; 8];
+        let full_before = oracle.evaluate_full(&theta).unwrap();
+
+        let _ = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        let _ = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        assert_eq!(oracle.minibatch.as_ref().unwrap().calls_so_far(), 2);
+
+        let full_after = oracle.evaluate_full(&theta).unwrap();
+        assert_eq!(full_before, full_after);
+        assert!(oracle.errors.take().is_none());
+    }
+
+    /// C-7 (stronger on the exact path): two oracles with the same batch_size and
+    /// the same call sequence are byte-identical even with **different** backend
+    /// seeds — the minibatch selection depends only on `MinibatchConfig`'s seed,
+    /// and there is no shot noise. Uses the same minibatch seed but different
+    /// backend seeds to prove the result is a function of the former alone.
+    #[test]
+    fn minibatch_is_reproducible_and_seed_independent_for_sampling() {
+        pyo3::prepare_freethreaded_python();
+        let a = ExactNativeQmlOracle {
+            problem: six_sample_problem(),
+            config: native_config(),
+            backend: Arc::new(NativeStatevectorBackend::new(1)),
+            errors: OracleErrorSlot::new(),
+            minibatch: Some(MinibatchConfig::new(3, 20)),
+        };
+        let b = ExactNativeQmlOracle {
+            problem: six_sample_problem(),
+            config: native_config(),
+            backend: Arc::new(NativeStatevectorBackend::new(999)),
+            errors: OracleErrorSlot::new(),
+            minibatch: Some(MinibatchConfig::new(3, 20)),
+        };
+        let candidates: Vec<Vec<f64>> = (0..5).map(|k| vec![0.05 + 0.03 * k as f64; 8]).collect();
+        assert_eq!(a.evaluate_batch(&candidates), b.evaluate_batch(&candidates));
         let theta = vec![0.2_f64; 8];
         assert_eq!(a.gradient_batch(&theta, 8), b.gradient_batch(&theta, 8));
     }

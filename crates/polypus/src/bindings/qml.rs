@@ -524,6 +524,7 @@ fn qml_train_native(
                 config: Arc::clone(&config),
                 backend,
                 errors: errors.clone(),
+                minibatch: None,
             });
             (Box::new(Arc::clone(&oracle)), Box::new(oracle))
         } else {
