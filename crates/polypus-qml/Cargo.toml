@@ -13,9 +13,16 @@ name = "polypus_qml"
 [dependencies]
 polypus-circuit = { workspace = true }
 log = { workspace = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
 
 [dev-dependencies]
 # Statevector simulation and the DE optimizer drive the end-to-end native
 # training test (tests/end_to_end.rs); neither touches the public API.
 polypus-sim = { workspace = true }
 polypus-optimizers = { workspace = true }
+# Only for this phase's round-trip serde tests; not a production dependency.
+serde_json = "1.0"
+
+[features]
+default = []
+serde = ["dep:serde"] # opt-in serialization of compiled models (design doc §17)

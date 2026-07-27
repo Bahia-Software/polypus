@@ -19,6 +19,7 @@ use crate::observables::{Observable, ResolvedObservable};
 /// inference-time projection of the expectations, applied by
 /// [`ResolvedReadout::predict`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Decision {
     /// Binary: `sign(⟨O₀⟩) → {−1, +1}`, with a tie at `0` resolving to `+1`.
     Sign,
@@ -33,6 +34,7 @@ pub enum Decision {
 
 /// The observables a model reads out, plus the decision rule.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Readout {
     /// One or more observables. `Argmax` uses all of them (one per class); the
     /// binary/regression decisions use only `observables[0]`.

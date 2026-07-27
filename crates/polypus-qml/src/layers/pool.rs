@@ -20,6 +20,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pooled pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PoolBlock {
     /// Three shared rotations around a `cx` from the discarded to the retained
     /// qubit (`rz(θ0) desc · ry(θ1) ret · cx(desc→ret) · ry(θ2) ret`).
@@ -28,6 +29,7 @@ pub enum PoolBlock {
 
 /// Which position of each adjacent pair survives pooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum KeepRule {
     /// Retain the **first** (lower) position of each pair; discard the second
     /// (the default).
@@ -42,6 +44,7 @@ pub enum KeepRule {
 /// an odd number of active qubits the last one is left unpaired and stays
 /// active untouched.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PoolLayer {
     /// The two-qubit block emitted on every pooled pair.
     pub block: PoolBlock,

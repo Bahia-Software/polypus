@@ -9,6 +9,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit entangling gate used between rotation blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Entangler {
     /// Controlled-NOT (`cx`).
     Cx,
@@ -19,6 +20,7 @@ pub enum Entangler {
 /// The connectivity pattern of the entangling block, over logical positions of
 /// the active qubits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Entanglement {
     /// Nearest-neighbour chain: `(0,1),(1,2),…,(n-2,n-1)`.
     Linear,
@@ -36,6 +38,7 @@ pub enum Entanglement {
 /// rotation bound to a new `θ` index — axis-major, qubit-minor, like Qiskit's
 /// `TwoLocal`. There is no parameter sharing here.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HardwareEfficientAnsatz {
     /// Number of `(rotation, entangling)` repetitions.
     pub reps: usize,

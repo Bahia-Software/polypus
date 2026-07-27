@@ -30,6 +30,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 /// (see [`plan`](LayerOps::plan)). Consumes **no** trainable parameters: every
 /// angle is a [`Fixed`] value derived from the sample.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AmplitudeEncoder;
 
 impl LayerOps for AmplitudeEncoder {

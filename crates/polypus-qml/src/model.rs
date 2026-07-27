@@ -96,6 +96,7 @@ pub(crate) trait LayerOps {
 /// The [`Readout`] (observables + decision) is attached with
 /// [`readout`](Self::readout); [`compile`](Self::compile) requires one.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct QuantumModel {
     num_qubits: usize,
     layers: Vec<Layer>,

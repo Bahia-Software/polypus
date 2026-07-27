@@ -30,6 +30,7 @@ use crate::error::{QmlError, ValidationError};
 /// clear [`ValidationError::UnsupportedPauli`] until the base-grouping phase
 /// (design doc §7.2) lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pauli {
     /// Pauli-X.
     X,
@@ -46,6 +47,7 @@ pub enum Pauli {
 /// [`PauliString::new`] rejects duplicates and sorts the factors, so no other
 /// code has to re-check it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PauliString(Vec<(usize, Pauli)>);
 
 impl PauliString {
@@ -77,6 +79,7 @@ impl PauliString {
 /// A Hermitian observable `O = Σ_k c_k · P_k`: a real-weighted sum of Pauli
 /// strings.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Observable {
     /// The weighted Pauli-string terms, `(coefficient, string)`.
     ///

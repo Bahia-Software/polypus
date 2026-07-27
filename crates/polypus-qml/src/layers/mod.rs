@@ -44,6 +44,7 @@ pub(crate) fn odd_pairs(n: usize) -> Vec<(usize, usize)> {
 
 /// The rotation axis of a single-qubit rotation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RotationAxis {
     /// Rotation about the X axis (`rx`).
     Rx,
@@ -62,6 +63,7 @@ pub enum RotationAxis {
 ///
 /// [`QuantumModel`]: crate::QuantumModel
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Layer {
     /// Feature encoding via single-qubit rotations (consumes no `θ`).
     AngleEncoder(AngleEncoder),

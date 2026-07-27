@@ -15,6 +15,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pair of a [`ConvLayer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ConvBlock {
     /// A cheap block of four shared rotations around a single `cx`
     /// (`ry(θ0) a · ry(θ1) b · cx(a,b) · ry(θ2) a · ry(θ3) b`).
@@ -27,6 +28,7 @@ pub enum ConvBlock {
 
 /// How a [`ConvLayer`] pairs up its active qubits (over logical positions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pairing {
     /// `(0,1),(2,3),…` — [`even_pairs`](crate::layers::even_pairs).
     EvenPairs,
@@ -42,6 +44,7 @@ pub enum Pairing {
 /// indices (parameter sharing), so the layer's parameter count is fixed by the
 /// block alone, independent of the number of qubits.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConvLayer {
     /// The two-qubit block emitted on every pair.
     pub block: ConvBlock,

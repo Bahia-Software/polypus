@@ -19,6 +19,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 /// `[0, π]`) is the caller's responsibility, via
 /// [`Dataset::scale_features_to`](crate::Dataset::scale_features_to).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AngleEncoder {
     /// The rotation axis applied to every encoded feature.
     pub axis: RotationAxis,
