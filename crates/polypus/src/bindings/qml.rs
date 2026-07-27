@@ -84,8 +84,10 @@ fn parse_axis(axis: &str) -> PyResult<RotationAxis> {
 }
 
 /// Parse a single-qubit Pauli string into a [`Pauli`]. Accepts `"x"`/`"y"`/`"z"`;
-/// `compile` rejects X/Y readout with its own `UnsupportedPauli`, so this does
-/// not duplicate that check (decision D).
+/// `compile` validates the readout's measurement bases itself (an X/Y readout is
+/// supported when the whole readout resolves to a single basis group, else a
+/// typed `ObservableHasIncompatibleBases`/`ReadoutNeedsMultipleBasisGroups`), so
+/// this does not duplicate that check (decision D).
 fn parse_pauli(pauli: &str) -> PyResult<Pauli> {
     match pauli {
         "x" => Ok(Pauli::X),
