@@ -242,6 +242,21 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   QNG now consumes the exact parameter-shift gradient above instead of a
   central finite-difference stencil — a deliberate contract change with no
   compatibility shim.
+- **Breaking change:** `AlgorithmQNGArgs`/`AlgorithmAdamArgs` require a
+  `patience: usize` field, and the Python `QNG`/`Adam` pyclasses expose it as a
+  kwarg defaulting to **`3`**. Gradient-norm early stopping now needs `patience`
+  **consecutive** iterations with `‖∇fitness(θ)‖₂ < tolerance` before reporting
+  `converged = true`, where it previously needed one. The counter increments on
+  each sub-tolerance iteration and **resets to `0`** on any iteration that is
+  not, so three sub-tolerance iterations scattered among larger ones never stop
+  a run at `patience = 3`. `patience = 1` reproduces the previous
+  single-iteration rule exactly (pinned by its own test); `0` behaves as `1`,
+  since the streak is only tested after an iteration that was itself below the
+  tolerance. Runs whose gradient norm decreases smoothly are unaffected beyond
+  spending the extra iterations it takes to make the streak consecutive.
+  A deliberate behaviour change for **every** caller — minibatched or not,
+  because the optimizer cannot tell the two apart — with no compatibility shim.
+  Motivation and limits: the minibatch note below.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/`.
@@ -350,18 +365,19 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   minibatch is only the cheap per-iteration heuristic that steers the search.
 
   **Minibatching interacts badly with gradient-norm early stopping — evaluated,
-  reproduces, fix pending a design decision.** `AlgorithmQNG` and
-  `AlgorithmAdam` set `converged` by comparing that iteration's
-  `‖∇fitness(θ)‖₂` against `tolerance`; under `batch_size` that is a *minibatch*
-  gradient, so a minibatch whose samples cancel each other can stop the run at
-  an arbitrary point. This is now measured rather than suspected. It is **not**
-  driven by shot noise: for a hinge loss, two samples with identical features and
-  opposite labels have their loss derivatives cancel term by term, so a minibatch
-  of exactly that pair has gradient **exactly** zero while the full-dataset norm
-  is O(0.1–0.5) — two orders of magnitude above the `tolerance = 0.01` that
-  `polypus.Adam`/`polypus.QNG` default to. Consequences, all reproducible from
-  the public API (`test_qml_native.py::TestNativeQmlTrainMinibatch`, plus the
-  norms themselves in `exact_native_qml_oracle.rs`):
+  reproduces, mitigated by `patience` (not eliminated).** `AlgorithmQNG` and
+  `AlgorithmAdam` set `converged` from that iteration's `‖∇fitness(θ)‖₂` against
+  `tolerance`; under `batch_size` that is a *minibatch* gradient, so a minibatch
+  whose samples cancel each other can stop the run at an arbitrary point. This is
+  measured rather than suspected. It is **not** driven by shot noise: for a hinge
+  loss, two samples with identical features and opposite labels have their loss
+  derivatives cancel term by term, so a minibatch of exactly that pair has
+  gradient **exactly** zero while the full-dataset norm is O(0.1–0.5) — two
+  orders of magnitude above the `tolerance = 0.01` that `polypus.Adam`/
+  `polypus.QNG` default to. Consequences, all reproducible from the public API
+  (`test_qml_native.py::TestNativeQmlTrainMinibatch`, plus the norms themselves
+  in `exact_native_qml_oracle.rs`), stated for the pre-`patience` rule that
+  `patience = 1` still selects:
 
   - the run stops on iteration 1 with `converged = True`, having barely moved
     from its random initialization, where the same configuration without
@@ -374,15 +390,30 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     such: on a separable dataset with no contradictory samples, no seed in a
     ten-seed sweep stopped early.
 
-  **C-5 is not violated.** `best_fitness` remains the full-dataset fitness of
+  **C-5 was never violated.** `best_fitness` remains the full-dataset fitness of
   the returned `best_params` thanks to the final recompute above, so the reported
-  number is honest; what a spurious stop costs is the optimization itself and the
-  meaning of the `converged` flag. Changing the convergence rule (e.g. testing
-  the norm against the full dataset, or requiring N consecutive sub-tolerance
-  iterations) would alter `AlgorithmQNG`/`AlgorithmAdam` semantics for **every**
-  caller, minibatched or not, so it is deliberately left open here rather than
-  patched. Until it is decided, treat `converged = True` from a minibatched
-  gradient-optimizer run as unreliable and read `best_fitness` instead.
+  number stayed honest throughout; what a spurious stop costs is the optimization
+  itself and the meaning of the `converged` flag.
+
+  **The fix is the `patience = 3` default** documented under C-5 above: a stop
+  now needs three *consecutive* sub-tolerance iterations, so one cancelling
+  minibatch no longer ends the run. It is applied uniformly to every QNG/Adam
+  run rather than only under `batch_size`, because the optimizer has no way to
+  tell the two apart — `GradientOracle::gradient_batch` deliberately hides
+  whether its result came from a minibatch or the full dataset.
+
+  **`patience` reduces the probability; it does not eliminate the failure.**
+  Nothing stops the same cancelling minibatch from being redrawn `patience`
+  times in a row, and that is demonstrated, not conceded: on the six-sample
+  dataset with one contradictory pair, `batch_size=2`, `max_iters=60`, spurious
+  stops fall from **194/200 seeds at `patience=1` to 39/200 at `2` and 4/200 at
+  `3`** — a ~50× reduction with four survivors. `seed=140` is one, stopping on
+  iteration 8 at fitness ≈ −0.94 where the run should reach ≈ −0.34, and
+  `test_patience_is_a_probabilistic_mitigation_not_a_guarantee` pins it. So
+  `converged = True` from a minibatched gradient-optimizer run is *much* more
+  trustworthy than before but still not a guarantee: `best_fitness` remains the
+  number to read, and a small `batch_size` over contradictory labels remains the
+  configuration to avoid.
 
 ### The run manifest (return shapes)
 
