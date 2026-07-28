@@ -1155,6 +1155,172 @@ def _conv_raw_model(num_qubits, block, pairing=None):
     return model.readout(observables=[[("z", 0)]], decision="raw")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Dataset: train/test split and feature scaling
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `Dataset` exposes no row accessor, so these read the data back through
+# `feature_ranges()` — which is exactly enough to pin the scaling arithmetic down
+# to exact float equality, and (for a 1- or 2-sample partition) to identify the
+# selected samples outright.
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestDatasetSplit:
+    @staticmethod
+    def _indexed(n=6):
+        """`n` samples whose first feature *is* the sample index, so a partition's
+        `feature_ranges()[0]` reports which samples it received."""
+        import polypus
+
+        x = [[float(i), 1.0 + 0.5 * i] for i in range(n)]
+        y = [1.0 if i % 2 else -1.0 for i in range(n)]
+        return polypus.qml.Dataset(x, y)
+
+    def test_sizes_and_test_partition_rounds_down(self):
+        # floor(6 × 0.4) = 2 test, so 4 train — the documented rounding rule.
+        train, test = self._indexed().train_test_split(0.4, seed=7)
+        assert (train.num_samples, test.num_samples) == (4, 2)
+        # Both keep the full feature width.
+        assert train.num_features == test.num_features == 2
+
+    def test_fixed_seed_reproduces_the_partition(self):
+        a_train, a_test = self._indexed().train_test_split(1 / 3, seed=7)
+        b_train, b_test = self._indexed().train_test_split(1 / 3, seed=7)
+        # The index feature's range identifies the two selected test samples.
+        assert a_test.feature_ranges() == b_test.feature_ranges()
+        assert a_train.feature_ranges() == b_train.feature_ranges()
+
+    def test_different_seeds_give_different_partitions(self):
+        # SplitMix64 is deterministic, so this is a property of the shuffle, not
+        # a probabilistic hope: across a handful of seeds the 2-sample test
+        # partition cannot be the same one every time.
+        picks = {
+            self._indexed().train_test_split(1 / 3, seed=s)[1].feature_ranges()[0]
+            for s in range(1, 9)
+        }
+        assert len(picks) > 1
+
+    def test_single_sample_test_partition_is_excluded_from_train(self):
+        # floor(6 × 0.2) = 1 test sample, so its `feature_ranges()[0]` is
+        # (i, i) — the exact index. Splitting is a partition, so that index must
+        # be missing from the 5-sample train set; with the index as feature 0 the
+        # train range proves it whenever the drawn index is an endpoint, and
+        # bounds it otherwise.
+        train, test = self._indexed().train_test_split(0.2, seed=7)
+        assert test.num_samples == 1 and train.num_samples == 5
+        lo, hi = test.feature_ranges()[0]
+        assert lo == hi and lo in {float(i) for i in range(6)}
+        train_lo, train_hi = train.feature_ranges()[0]
+        if lo == 0.0:
+            assert train_lo == 1.0
+        elif lo == 5.0:
+            assert train_hi == 4.0
+
+    def test_unseeded_split_still_splits(self):
+        # `seed=None` draws OS entropy: the partition is not reproducible, but it
+        # is still a valid split of the right sizes.
+        train, test = self._indexed().train_test_split(1 / 3)
+        assert (train.num_samples, test.num_samples) == (4, 2)
+
+    @pytest.mark.parametrize("fraction", [0.0, 1.0, -0.1, 1.5, float("nan")])
+    def test_test_fraction_outside_the_open_unit_interval_rejected(self, fraction):
+        # Either endpoint would leave a partition empty; NaN fails every
+        # comparison and is rejected by the same guard.
+        with pytest.raises(ValueError, match="test_fraction|fraction"):
+            self._indexed().train_test_split(fraction, seed=7)
+
+    def test_train_partition_trains(self):
+        # The seam's real job: a split partition is a usable Dataset.
+        import math
+
+        import polypus
+
+        train, _ = self._indexed(n=8).train_test_split(0.25, seed=7)
+        result = polypus.qml.train(
+            _model(),
+            train,
+            method=polypus.DE(generations=10, population_size=8, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_split_train",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 8
+        assert math.isfinite(result.best_fitness)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestDatasetScaling:
+    @staticmethod
+    def _ds(rows):
+        import polypus
+
+        return polypus.qml.Dataset(rows, [1.0] * len(rows))
+
+    def test_feature_ranges_reports_per_feature_min_max(self):
+        ds = self._ds([[0.0, 20.0], [10.0, 5.0], [4.0, 30.0]])
+        assert ds.feature_ranges() == [(0.0, 10.0), (5.0, 30.0)]
+
+    def test_scale_features_to_maps_each_feature_onto_the_interval(self):
+        # In place, and every non-constant feature ends spanning exactly [lo, hi].
+        ds = self._ds([[0.0, 20.0], [10.0, 5.0], [4.0, 30.0]])
+        ds.scale_features_to(0.0, 1.0)
+        assert ds.feature_ranges() == [(0.0, 1.0), (0.0, 1.0)]
+
+    def test_scale_features_to_is_exact_on_known_values(self):
+        # (v − min)/span × (hi − lo) + lo, with values chosen so the arithmetic is
+        # exact in binary floating point: 0 → 0, 5 → 0.5, 10 → 1.
+        ds = self._ds([[0.0], [5.0], [10.0]])
+        ds.scale_features_to(0.0, 1.0)
+        # After scaling the range is [0, 1]; scaling again is then the identity,
+        # which pins the midpoint too: a mid value of anything but 0.5 would move.
+        before = ds.feature_ranges()
+        ds.scale_features_to(0.0, 1.0)
+        assert ds.feature_ranges() == before == [(0.0, 1.0)]
+
+    def test_constant_feature_maps_to_lo(self):
+        # A constant column has no range to normalize against.
+        ds = self._ds([[7.0, 1.0], [7.0, 2.0]])
+        ds.scale_features_to(3.0, 9.0)
+        assert ds.feature_ranges() == [(3.0, 3.0), (3.0, 9.0)]
+
+    def test_scale_features_with_replays_a_frozen_scaler(self):
+        # The train set's ranges, replayed on a test set: test values beyond the
+        # frozen range land *outside* [lo, hi] — the intended behaviour, and the
+        # observable difference from `scale_features_to`, which would have
+        # rescaled the test set onto [0, 1] using its own min/max.
+        train = self._ds([[0.0], [10.0]])
+        test = self._ds([[5.0], [15.0]])
+        ranges = train.feature_ranges()
+        assert ranges == [(0.0, 10.0)]
+        test.scale_features_with(ranges, 0.0, 1.0)
+        assert test.feature_ranges() == [(0.5, 1.5)]
+
+    def test_scale_features_with_wrong_range_count_rejected(self):
+        ds = self._ds([[0.0, 1.0], [2.0, 3.0]])
+        with pytest.raises(ValueError, match="feature"):
+            ds.scale_features_with([(0.0, 1.0)], 0.0, 1.0)
+
+    def test_split_then_freeze_train_ranges_onto_test(self):
+        # The workflow the two methods exist for, end to end.
+        ds = TestDatasetSplit._indexed(n=8)
+        train, test = ds.train_test_split(0.25, seed=7)
+        ranges = train.feature_ranges()
+        train.scale_features_to(0.0, 3.141592653589793)
+        test.scale_features_with(ranges, 0.0, 3.141592653589793)
+        # The train set now spans exactly [0, π]; the test set is on the *same*
+        # scale, so its values stay within a sane band around it rather than
+        # being independently stretched onto [0, π].
+        assert train.feature_ranges()[0] == (0.0, 3.141592653589793)
+        test_lo, test_hi = test.feature_ranges()[0]
+        assert -3.2 < test_lo <= test_hi < 6.3
+
+
 def _pool_raw_model(num_qubits, keep, position=0):
     """An angle-encoder + single pool-layer model reading ⟨Z at `position`⟩ raw,
     where `position` indexes the **surviving** active qubits."""

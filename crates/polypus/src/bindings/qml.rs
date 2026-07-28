@@ -470,6 +470,57 @@ impl Dataset {
         self.inner.num_features()
     }
 
+    /// Split into `(train, test)`, shuffling sample indices with `seed` and
+    /// cutting `test_fraction` of them off for the test set.
+    ///
+    /// `test_fraction` must lie in the **open** interval `(0, 1)` — either
+    /// endpoint would leave a partition empty — and the test partition rounds
+    /// **down** (`floor(num_samples * test_fraction)`). Both partitions are fresh
+    /// `Dataset`s; this one is left untouched.
+    ///
+    /// `seed` follows the same convention as everywhere else at this seam (C-7):
+    /// an explicit value makes the split reproducible byte for byte, and omitting
+    /// it draws a fresh OS-entropy seed — the resolution the pure crate
+    /// deliberately leaves to the bindings layer, which is why its own
+    /// `train_test_split` takes a mandatory `u64`.
+    #[pyo3(signature = (test_fraction, seed=None))]
+    fn train_test_split(&self, test_fraction: f64, seed: Option<u64>) -> PyResult<(Self, Self)> {
+        let (train, test) = self
+            .inner
+            .train_test_split(test_fraction, seed.unwrap_or_else(random_seed))
+            .map_err(validation_to_py_err)?;
+        Ok((Dataset { inner: train }, Dataset { inner: test }))
+    }
+
+    /// Min–max scale every feature **in place** into `[lo, hi]`, using ranges
+    /// computed over this dataset. A constant feature (min equals max) has no
+    /// range to normalize against and maps to `lo`. The convention recommended
+    /// for angle encoding is `[0, π]`.
+    fn scale_features_to(&mut self, lo: f64, hi: f64) {
+        self.inner.scale_features_to(lo, hi);
+    }
+
+    /// The current `(min, max)` of each feature, in feature order — the scaler to
+    /// freeze on a train set and replay on a test set with
+    /// [`scale_features_with`](Self::scale_features_with).
+    fn feature_ranges(&self) -> Vec<(f64, f64)> {
+        self.inner.feature_ranges()
+    }
+
+    /// Apply the min–max scaling described by `ranges` **in place**, mapping into
+    /// `[lo, hi]`.
+    ///
+    /// `ranges` is typically a train set's [`feature_ranges`](Self::feature_ranges)
+    /// replayed on a test set so both are scaled identically; its length must
+    /// equal `num_features`, otherwise a `ValueError`. Test values outside the
+    /// supplied range map linearly and may land outside `[lo, hi]` — the intended
+    /// behaviour of a frozen scaler, not an error.
+    fn scale_features_with(&mut self, ranges: Vec<(f64, f64)>, lo: f64, hi: f64) -> PyResult<()> {
+        self.inner
+            .scale_features_with(&ranges, lo, hi)
+            .map_err(validation_to_py_err)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Dataset(num_samples={}, num_features={})",
