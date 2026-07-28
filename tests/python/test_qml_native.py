@@ -1156,7 +1156,91 @@ def _conv_raw_model(num_qubits, block, pairing=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. Dataset: train/test split and feature scaling
+# 9. TrainedModel.predict_from_probabilities — the exact mirror of ...from_counts
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestPredictFromProbabilities:
+    """The readout reads counts only through their relative frequencies, so a
+    probability dict and a counts dict describing the **same** distribution must
+    give the same prediction. These pick distributions where that correspondence
+    is exact in binary floating point, so the assertions are `==`, not `approx`."""
+
+    @staticmethod
+    def _raw_trained():
+        # `decision="raw"` so the comparison is over a continuous expectation
+        # rather than a ±1 label two different values could share. θ is irrelevant
+        # here: neither entry point runs a circuit.
+        import polypus
+
+        model = _raw_model(2, lambda m: m.hardware_efficient(reps=1))
+        return polypus.qml.TrainedModel(model, _dataset(), [0.0] * 8)
+
+    @staticmethod
+    def _sign_trained():
+        import polypus
+
+        return polypus.qml.TrainedModel(_model(), _dataset(), [0.0] * 8)
+
+    def test_matches_counts_on_the_same_distribution(self):
+        # Little-endian keys (C-3): qubit 0 is the last character, so "00" reads
+        # ⟨Z₀⟩ = +1 and "01" reads −1. A 3:1 split gives 0.75 − 0.25 = 0.5 both
+        # ways — exactly representable, hence the equality.
+        trained = self._raw_trained()
+        from_probs = trained.predict_from_probabilities({"00": 0.75, "01": 0.25})
+        from_counts = trained.predict_from_counts({"00": 3, "01": 1})
+        assert from_probs == 0.5
+        assert from_probs == from_counts
+
+    def test_deterministic_extremes(self):
+        # An all-mass distribution reproduces the pure-state readings the counts
+        # entry point gives for a single key.
+        trained = self._raw_trained()
+        assert trained.predict_from_probabilities({"00": 1.0, "01": 0.0}) == 1.0
+        assert trained.predict_from_probabilities({"00": 0.0, "01": 1.0}) == -1.0
+        assert trained.predict_from_probabilities({"00": 0.5, "01": 0.5}) == 0.0
+
+    def test_applies_the_sign_decision_like_counts(self):
+        # The decision rule is applied to the expectation identically on both
+        # entry points, including the `e >= 0 → +1` tie convention.
+        trained = self._sign_trained()
+        cases = [
+            ({"00": 0.75, "01": 0.25}, {"00": 3, "01": 1}, 1.0),
+            ({"00": 0.25, "01": 0.75}, {"00": 1, "01": 3}, -1.0),
+            ({"00": 0.5, "01": 0.5}, {"00": 1, "01": 1}, 1.0),
+        ]
+        for probs, counts, expected in cases:
+            assert trained.predict_from_probabilities(probs) == expected
+            assert trained.predict_from_counts(counts) == expected
+
+    def test_probabilities_over_the_full_register_agree_with_counts(self):
+        # All four basis states present, with a distribution whose ⟨Z₀⟩ is exact:
+        # p(q0=0) = 0.125 + 0.375 = 0.5 → ⟨Z₀⟩ = 0.
+        trained = self._raw_trained()
+        probs = {"00": 0.125, "01": 0.25, "10": 0.375, "11": 0.25}
+        counts = {"00": 1, "01": 2, "10": 3, "11": 2}
+        assert trained.predict_from_probabilities(probs) == 0.0
+        assert trained.predict_from_probabilities(probs) == trained.predict_from_counts(
+            counts
+        )
+
+    def test_empty_probabilities_rejected(self):
+        trained = self._raw_trained()
+        with pytest.raises(ValueError):
+            trained.predict_from_probabilities({})
+
+    def test_inconsistent_key_widths_rejected(self):
+        # Same C-3 width rule the counts path enforces — a clean ValueError,
+        # never a panic across the FFI boundary.
+        trained = self._raw_trained()
+        with pytest.raises(ValueError, match="width|counts"):
+            trained.predict_from_probabilities({"00": 0.5, "010": 0.5})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Dataset: train/test split and feature scaling
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # `Dataset` exposes no row accessor, so these read the data back through

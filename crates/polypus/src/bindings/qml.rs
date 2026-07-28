@@ -610,6 +610,22 @@ impl TrainedModel {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Infer a prediction from one sample's exact basis-state `probabilities` —
+    /// the exact-mode mirror of
+    /// [`predict_from_counts`](Self::predict_from_counts) (design doc §17).
+    ///
+    /// The lower-level entry for a caller who obtained exact probabilities on
+    /// their own, as [`predict(..., exact=True)`](Self::predict) does internally.
+    /// Since counts enter the readout only through their relative frequencies, a
+    /// `probabilities` dict and a `counts` dict with the same distribution yield
+    /// the same prediction.
+    fn predict_from_probabilities(&self, probabilities: HashMap<String, f64>) -> PyResult<f64> {
+        self.inner
+            .model
+            .predict_from_probabilities(&probabilities)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// End-to-end inference (design doc §17): predict on a batch of **new**
     /// samples `x` in one call — bind each to `θ`, run it on a backend, and apply
     /// the model's readout decision. `x` is always a list of samples
