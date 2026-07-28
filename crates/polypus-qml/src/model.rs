@@ -856,14 +856,15 @@ mod tests {
 #[cfg(all(test, feature = "serde"))]
 mod serde_tests {
     use super::*;
-    use crate::layers::{ConvBlock, PoolBlock};
+    use crate::layers::{ConvBlock, IqpEncoder, PoolBlock};
     use crate::observables::{Observable, Pauli, PauliString};
     use crate::readout::{Decision, Readout};
 
-    /// A model exercising the entire serializable type tree: angle encoder,
-    /// convolution, pooling, a hardware-efficient ansatz, and a multi-observable
-    /// readout whose first observable is a weighted two-term sum with a `Z₀Z₁`
-    /// string (so coefficients ≠ 1 and multi-factor strings both round-trip).
+    /// A model exercising the entire serializable type tree: angle encoder, IQP
+    /// encoder, convolution, pooling, a hardware-efficient ansatz, and a
+    /// multi-observable readout whose first observable is a weighted two-term sum
+    /// with a `Z₀Z₁` string (so coefficients ≠ 1 and multi-factor strings both
+    /// round-trip).
     fn full_model() -> CompiledModel {
         let readout = Readout::new(
             vec![
@@ -885,6 +886,7 @@ mod serde_tests {
         // two-position readout resolves against.
         QuantumModel::new(4)
             .angle_encoder(RotationAxis::Ry)
+            .layer(Layer::Iqp(IqpEncoder::new()))
             .conv(ConvBlock::Basic)
             .pool(PoolBlock::Basic)
             .hardware_efficient(1)

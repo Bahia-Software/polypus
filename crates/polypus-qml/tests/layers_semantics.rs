@@ -3,7 +3,7 @@
 //! instruction-list golden tests, but the actual quantum state and its
 //! measured expectations.
 //!
-//! Five checks:
+//! Seven checks:
 //! 1. the [`AngleEncoder`] produces the expected tensor-product state;
 //! 2. the [`ConvBlock::Cartan`] block (including the synthesized `ryy`) matches
 //!    an independently hand-applied gate sequence on every canonical basis
@@ -14,7 +14,11 @@
 //!    the global state;
 //! 5. the `AmplitudeEncoder` prepares exactly the L2-normalized, zero-padded
 //!    target state (real, imaginary part ~0) — the empirical guarantee of the
-//!    Möttönen state preparation.
+//!    Möttönen state preparation;
+//! 6. the [`IqpEncoder`] produces the closed-form IQP state, amplitude by
+//!    amplitude, for all three [`Entanglement`] patterns;
+//! 7. the `IqpEncoder`'s `⟨X₀⟩` is the non-linear closed form
+//!    `cos(x₀)·cos(x₀·x₁)` — the data non-linearity that motivates the layer.
 //!
 //! `polypus-sim` enters only as a dev-dependency — the crate's public API never
 //! executes a circuit.
@@ -28,8 +32,9 @@ use std::f64::consts::PI;
 
 use polypus_circuit::{Fixed, GateInstruction};
 use polypus_qml::{
-    ConvBlock, ConvLayer, Dataset, Decision, HardwareEfficientAnsatz, Layer, Loss, Observable,
-    Pauli, PauliString, PoolBlock, PoolLayer, QmlProblem, QuantumModel, Readout, RotationAxis,
+    ConvBlock, ConvLayer, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
+    IqpEncoder, Layer, Loss, Observable, Pauli, PauliString, PoolBlock, PoolLayer, QmlProblem,
+    QuantumModel, Readout, RotationAxis,
 };
 use polypus_sim::{Simulator, SplitMix64, Statevector, StatevectorSimulator, C64};
 
@@ -302,6 +307,169 @@ fn assert_amplitude_encoding(k: usize, x: &[f64]) {
             "amplitude {j}: got real {} vs expected {}",
             a.re,
             target[j]
+        );
+    }
+}
+
+/// A trainable layer that is the **exact identity** at `θ = 0`: `reps = 0` (so
+/// no entangling block is ever emitted) plus a final `Rz` rotation layer. It
+/// exists only to satisfy `compile`'s `NoTrainableParams` check, and
+/// `rz(0) = diag(1, 1)`, so the simulated state is the encoder's alone — no
+/// fixed `Cx` chain to strip back off (contrast with
+/// [`assert_amplitude_encoding`], which has to undo one).
+fn identity_ansatz() -> HardwareEfficientAnsatz {
+    HardwareEfficientAnsatz {
+        reps: 0,
+        rotations: vec![RotationAxis::Rz],
+        entangler: Entangler::Cx,
+        entanglement: Entanglement::Linear,
+        final_rotation_layer: true,
+    }
+}
+
+/// (6) The [`IqpEncoder`] produces the closed-form IQP state.
+///
+/// The expected amplitudes are **not** built by replaying gates: they come from
+/// the analytic form of `H⊗n` followed by the diagonal `Rz`/`Rzz` phases. With
+/// `s_k = 2·b_k − 1` the sign of qubit `k` in basis state `|b⟩`,
+///
+/// ```text
+/// ⟨b|ψ⟩ = 2^(−n/2) · exp( (i/2) · [ Σ_k s_k·x_k − Σ_(a,b)∈pairs s_a·s_b·x_a·x_b ] )
+/// ```
+///
+/// because `H⊗n|0…0⟩` is the uniform superposition and each subsequent gate is
+/// diagonal: `Rz(θ)` contributes `exp(i·s_k·θ/2)` (it is
+/// `diag(e^(−iθ/2), e^(+iθ/2))`), and `Rzz(θ)` on `(a,b)` contributes
+/// `exp(−i·s_a·s_b·θ/2)` (`e^(−iθ/2)` on equal bits, `e^(+iθ/2)` on differing
+/// ones — and `s_a·s_b` is `+1` exactly when the bits are equal). The encoder's
+/// `Rzz` angle is the product `x_a·x_b`, which is where the map's non-linearity
+/// in the data comes from.
+///
+/// `pairs` is passed in literally per case, never taken from
+/// `entanglement_pairs`, so the pattern is verified too and not assumed.
+fn assert_iqp_state(
+    num_qubits: usize,
+    entanglement: Entanglement,
+    x: &[f64],
+    pairs: &[(usize, usize)],
+) {
+    let model = QuantumModel::new(num_qubits)
+        .layer(Layer::Iqp(IqpEncoder { entanglement }))
+        .layer(Layer::HardwareEfficient(identity_ansatz()))
+        .readout(z0_readout(Decision::Raw))
+        .compile(x.len())
+        .unwrap();
+
+    let theta = vec![0.0; model.num_params()];
+    let circuit = model.bind(x, &theta).unwrap();
+    let actual = StatevectorSimulator::new().run(&circuit).unwrap();
+
+    let dim = 1usize << num_qubits;
+    let amplitude = 1.0 / (dim as f64).sqrt();
+    let amps = actual.amplitudes();
+    assert_eq!(amps.len(), dim);
+    for (index, got) in amps.iter().enumerate() {
+        // s_k = +1 when bit k of `index` is set, −1 otherwise (the simulator's
+        // convention: bit k of the state index is qubit k).
+        let s = |k: usize| if index >> k & 1 == 1 { 1.0 } else { -1.0 };
+        let single: f64 = (0..num_qubits).map(|k| s(k) * x[k]).sum();
+        let interaction: f64 = pairs.iter().map(|&(a, b)| s(a) * s(b) * x[a] * x[b]).sum();
+        let want = C64::from_polar(amplitude, (single - interaction) / 2.0);
+        assert!(
+            close(*got, want),
+            "{entanglement:?}, x={x:?}, |{index:0num_qubits$b}⟩: got {got} vs expected {want}"
+        );
+    }
+}
+
+#[test]
+fn iqp_encoder_matches_the_closed_form_iqp_state() {
+    // Full on 2 qubits: the single pair (0,1).
+    assert_iqp_state(2, Entanglement::Full, &[0.3, 0.5], &[(0, 1)]);
+    assert_iqp_state(2, Entanglement::Full, &[1.3, -0.7], &[(0, 1)]);
+    // Full on 3 qubits: every i < j.
+    assert_iqp_state(
+        3,
+        Entanglement::Full,
+        &[0.2, 0.4, 0.8],
+        &[(0, 1), (0, 2), (1, 2)],
+    );
+    // Linear on 3 qubits: the chain only — a strictly smaller pair set, so a
+    // mixed-up pattern could not pass both this case and the previous one.
+    assert_iqp_state(3, Entanglement::Linear, &[0.2, 0.4, 0.8], &[(0, 1), (1, 2)]);
+    // Circular on 3 qubits: the chain plus the wrap-around (2,0). `Rzz` is
+    // symmetric and its angle is a product, so the pair's order is immaterial
+    // to the state — only its presence is.
+    assert_iqp_state(
+        3,
+        Entanglement::Circular,
+        &[0.2, 0.4, 0.8],
+        &[(0, 1), (1, 2), (2, 0)],
+    );
+    // 4 qubits, Full: six pairs, a feature at 0 (all its products vanish, so
+    // its Rzz factors are identity) and a negative feature.
+    assert_iqp_state(
+        4,
+        Entanglement::Full,
+        &[0.5, -1.1, 0.0, 0.25],
+        &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+    );
+}
+
+/// (7) The `IqpEncoder`'s `⟨X₀⟩` on 2 qubits with `Entanglement::Full` is
+/// `cos(x₀)·cos(x₀·x₁)`.
+///
+/// An `X` readout is what makes this non-trivial: the IQP state is `H⊗n`
+/// followed by *diagonal* gates, so every basis-state probability stays `2^−n`
+/// and **every** `Z` expectation is exactly `0` — the whole encoding lives in
+/// the phases, which only a non-`Z` basis can see.
+///
+/// Derived from the amplitudes of check (6): with `ψ(b₁,b₀) = ½·e^(iφ)`,
+/// `⟨X₀⟩ = Σ_(b₁) 2·Re(ψ*(b₁,0)·ψ(b₁,1)) = ½·[cos(Δφ|b₁=0) + cos(Δφ|b₁=1)]`,
+/// where `Δφ = x₀·(1 − s₁·x₁)`. That is
+/// `½·[cos(x₀(1+x₁)) + cos(x₀(1−x₁))] = cos(x₀)·cos(x₀·x₁)` by the
+/// sum-to-product identity. Note the dependence on `x₀·x₁`: a bare product
+/// kernel, which no `AngleEncoder` can produce.
+#[test]
+fn iqp_encoder_x_expectation_is_the_non_linear_closed_form() {
+    let readout = Readout::new(
+        vec![Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::X)]).unwrap())]).unwrap()],
+        Decision::Raw,
+    )
+    .unwrap();
+    let model = QuantumModel::new(2)
+        .layer(Layer::Iqp(IqpEncoder::new()))
+        .layer(Layer::HardwareEfficient(identity_ansatz()))
+        .readout(readout)
+        .compile(2)
+        .unwrap();
+
+    for x in [[0.3, 0.5], [1.3, -0.7], [0.0, 2.0], [2.5, 1.25]] {
+        let theta = vec![0.0; model.num_params()];
+        let circuit = model.bind(&x, &theta).unwrap();
+        let sv = StatevectorSimulator::new().run(&circuit).unwrap();
+
+        // The compiled model inserts the X→Z basis change (an `H` on qubit 0)
+        // before the measurement, so a `Z` expectation on the *simulated* state
+        // is the `X` expectation of the encoded one.
+        let exact = sv.expectation_z(&[0]);
+        let want = x[0].cos() * (x[0] * x[1]).cos();
+        assert!(
+            (exact - want).abs() < 1e-10,
+            "x={x:?}: exact ⟨X₀⟩ {exact} vs closed form {want}"
+        );
+
+        // And the same value survives the counts path the trainer actually uses.
+        let dataset = Dataset::from_rows(&[x.to_vec()], &[0.0]).unwrap();
+        let problem = QmlProblem::new(model.clone(), dataset, Loss::SquaredError).unwrap();
+        let bound = &problem.bind_batch(&theta).unwrap()[0];
+        let sampled = StatevectorSimulator::new().run(bound).unwrap();
+        let raw = sampled.sample(200_000, &mut SplitMix64::new(0xB0BACAFE));
+        let counts = to_bitstring_counts(raw, bound.num_qubits);
+        let estimate = problem.predict_from_counts(&counts).unwrap();
+        assert!(
+            (want - estimate).abs() < 0.01,
+            "x={x:?}: counts estimate {estimate} deviates from closed form {want}"
         );
     }
 }

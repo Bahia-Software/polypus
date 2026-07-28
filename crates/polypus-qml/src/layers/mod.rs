@@ -14,7 +14,7 @@ mod pool;
 
 pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz};
 pub use conv::{ConvBlock, ConvLayer, Pairing};
-pub use encoders::{AmplitudeEncoder, AngleEncoder};
+pub use encoders::{AmplitudeEncoder, AngleEncoder, IqpEncoder};
 pub use pool::{KeepRule, PoolBlock, PoolLayer};
 
 use polypus_circuit::ParameterizedCircuit;
@@ -100,6 +100,10 @@ pub enum Layer {
     /// State-preparation feature encoding via multiplexed `Ry` rotations
     /// (consumes no `θ`; must be the first layer).
     AmplitudeEncoder(AmplitudeEncoder),
+    /// IQP / `ZZFeatureMap` feature encoding: `H⊗n`, `Rz(x_i)` and
+    /// `Rzz(x_i·x_j)` over the pairs of an [`Entanglement`] pattern (consumes
+    /// no `θ`).
+    Iqp(IqpEncoder),
     /// A hardware-efficient variational block (consumes `θ`).
     HardwareEfficient(HardwareEfficientAnsatz),
     /// A convolution block with parameter sharing across pairs (consumes `θ`).
@@ -113,6 +117,7 @@ impl LayerOps for Layer {
         match self {
             Layer::AngleEncoder(l) => l.plan(ctx),
             Layer::AmplitudeEncoder(l) => l.plan(ctx),
+            Layer::Iqp(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
             Layer::Conv(l) => l.plan(ctx),
             Layer::Pool(l) => l.plan(ctx),
@@ -128,6 +133,7 @@ impl LayerOps for Layer {
         match self {
             Layer::AngleEncoder(l) => l.emit(qc, alloc, x),
             Layer::AmplitudeEncoder(l) => l.emit(qc, alloc, x),
+            Layer::Iqp(l) => l.emit(qc, alloc, x),
             Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
             Layer::Conv(l) => l.emit(qc, alloc, x),
             Layer::Pool(l) => l.emit(qc, alloc, x),

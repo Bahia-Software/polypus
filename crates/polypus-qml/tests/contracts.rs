@@ -1,9 +1,10 @@
 //! Cross-cutting contract tests over a battery of compiled models.
 //!
 //! These assert the crate-level invariants that no single unit test covers,
-//! against a catalogue that varies rotations, entangler, entanglement, the
-//! final rotation layer, and qubit counts (including the 1-qubit case where
-//! entanglement is a no-op):
+//! against a catalogue that varies the encoder, rotations, entangler,
+//! entanglement, the final rotation layer, and qubit counts (including the
+//! 1-qubit case where entanglement is a no-op, and a stack of two IQP encoders
+//! around an ansatz — the data re-uploading pattern):
 //!
 //! - **C-4** (terminal measurement): every emitted template is terminal.
 //! - **C-2** (gate vocabulary / QASM round-trip): a bound circuit's QASM is a
@@ -21,8 +22,8 @@ use polypus_circuit::{
 use std::collections::HashMap;
 
 use polypus_qml::{
-    CompiledModel, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, Layer,
-    Loss, Observable, Pauli, PauliString, QmlProblem, QuantumModel, Readout, RotationAxis,
+    CompiledModel, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, IqpEncoder,
+    Layer, Loss, Observable, Pauli, PauliString, QmlProblem, QuantumModel, Readout, RotationAxis,
 };
 
 /// A minimal `⟨Z₀⟩` / `Sign` readout, valid for every catalogue model (all
@@ -112,6 +113,37 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
                 .compile(1)
                 .unwrap(),
             samples(1),
+        ),
+        // 6. 3 qubits: IQP encoder (Full) + real_amplitudes(1) — the only
+        //    catalogue entry emitting `Rzz` with `Fixed` angles.
+        (
+            QuantumModel::new(3)
+                .layer(Layer::Iqp(IqpEncoder::new()))
+                .layer(Layer::HardwareEfficient(
+                    HardwareEfficientAnsatz::real_amplitudes(1),
+                ))
+                .readout(z0_readout())
+                .compile(3)
+                .unwrap(),
+            samples(3),
+        ),
+        // 7. 4 qubits, 3 features (one surplus qubit the IQP encoder leaves
+        //    entirely alone): two stacked IQP encoders around an ansatz — the
+        //    data re-uploading pattern that replaces a `reps` field (§6.6), and
+        //    with it the case of an encoder that is *not* the first layer.
+        (
+            QuantumModel::new(4)
+                .layer(Layer::Iqp(IqpEncoder {
+                    entanglement: Entanglement::Linear,
+                }))
+                .hardware_efficient(1)
+                .layer(Layer::Iqp(IqpEncoder {
+                    entanglement: Entanglement::Circular,
+                }))
+                .readout(z0_readout())
+                .compile(3)
+                .unwrap(),
+            samples(3),
         ),
     ]
 }

@@ -24,7 +24,7 @@
 //! End-to-end training in pure Rust is now possible. On top of [`Dataset`]
 //! (validated construction, deterministic splits, feature scaling) and the
 //! layered model builder ([`QuantumModel`] → [`CompiledModel`]) with its
-//! [`Layer`] catalogue ([`AngleEncoder`], [`AmplitudeEncoder`],
+//! [`Layer`] catalogue ([`AngleEncoder`], [`AmplitudeEncoder`], [`IqpEncoder`],
 //! [`HardwareEfficientAnsatz`], [`ConvLayer`], [`PoolLayer`]), a model
 //! now carries a [`Readout`] — Pauli [`Observable`]s plus a [`Decision`] — and
 //! a [`Loss`] closes the loop: [`QmlProblem`] bundles a compiled model, a
@@ -33,9 +33,11 @@
 //! fitness), producing a fully trainable model without any Python in the loop.
 //!
 //! The convolution ([`ConvLayer`]) and unitary-pooling ([`PoolLayer`]) layers
-//! that build QCNNs are now available, as is the amplitude-encoding layer
-//! ([`AmplitudeEncoder`], `O(2^k)` state preparation). The X/Y readout bases
-//! arrive in later phases.
+//! that build QCNNs are now available, as are the amplitude-encoding layer
+//! ([`AmplitudeEncoder`], `O(2^k)` state preparation) and the IQP /
+//! `ZZFeatureMap` encoder ([`IqpEncoder`], a non-linear feature map). Readout
+//! observables may be measured in the `X`/`Y` bases as long as the whole
+//! readout resolves to a single basis group (design doc §7.2).
 
 mod dataset;
 mod error;
@@ -51,7 +53,8 @@ pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
-    HardwareEfficientAnsatz, KeepRule, Layer, Pairing, PoolBlock, PoolLayer, RotationAxis,
+    HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,
+    RotationAxis,
 };
 pub use loss::Loss;
 #[cfg(feature = "serde")]
