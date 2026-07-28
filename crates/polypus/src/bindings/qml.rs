@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use polypus_qml::{
-    Decision, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, Loss, Observable, Pauli,
-    PauliString, QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
+    ConvBlock, ConvLayer, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, IqpEncoder,
+    KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString, PoolBlock, PoolLayer,
+    QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
 };
 
 use super::{
@@ -104,6 +105,54 @@ fn parse_entanglement(entanglement: &str) -> PyResult<Entanglement> {
         "full" => Ok(Entanglement::Full),
         other => Err(PyValueError::new_err(format!(
             "unknown entanglement '{other}'; expected \"linear\", \"circular\" or \"full\""
+        ))),
+    }
+}
+
+/// Parse a convolution-block string into a [`ConvBlock`].
+fn parse_conv_block(block: &str) -> PyResult<ConvBlock> {
+    match block {
+        "basic" => Ok(ConvBlock::Basic),
+        "cartan" => Ok(ConvBlock::Cartan),
+        other => Err(PyValueError::new_err(format!(
+            "unknown conv block '{other}'; expected \"basic\" or \"cartan\""
+        ))),
+    }
+}
+
+/// Parse a convolution pairing string into a [`Pairing`].
+fn parse_pairing(pairing: &str) -> PyResult<Pairing> {
+    match pairing {
+        "even_pairs" => Ok(Pairing::EvenPairs),
+        "odd_pairs" => Ok(Pairing::OddPairs),
+        "alternating" => Ok(Pairing::Alternating),
+        other => Err(PyValueError::new_err(format!(
+            "unknown pairing '{other}'; expected \"even_pairs\", \"odd_pairs\" or \"alternating\""
+        ))),
+    }
+}
+
+/// Parse a pooling-block string into a [`PoolBlock`].
+///
+/// A `match` even though [`PoolBlock`] has a single variant today: written open
+/// to the variants the design doc anticipates, so adding one is a new arm rather
+/// than a rewrite from `if` to `match`.
+fn parse_pool_block(block: &str) -> PyResult<PoolBlock> {
+    match block {
+        "basic" => Ok(PoolBlock::Basic),
+        other => Err(PyValueError::new_err(format!(
+            "unknown pool block '{other}'; expected \"basic\""
+        ))),
+    }
+}
+
+/// Parse a pooling keep-rule string into a [`KeepRule`].
+fn parse_keep_rule(keep: &str) -> PyResult<KeepRule> {
+    match keep {
+        "even_positions" => Ok(KeepRule::EvenPositions),
+        "odd_positions" => Ok(KeepRule::OddPositions),
+        other => Err(PyValueError::new_err(format!(
+            "unknown keep rule '{other}'; expected \"even_positions\" or \"odd_positions\""
         ))),
     }
 }
@@ -207,6 +256,80 @@ impl Model {
     ) -> PyResult<PyRefMut<'py, Self>> {
         let axis = parse_axis(axis)?;
         Model::apply(&mut slf, |model| model.angle_encoder(axis));
+        Ok(slf)
+    }
+
+    /// Append an amplitude encoder, which loads a sample into the amplitudes of
+    /// the state.
+    ///
+    /// It takes no configuration, and must be the model's **first** layer over
+    /// enough qubits for the feature count (`num_features <= 2^num_qubits`);
+    /// `compile` enforces both, so a misplaced or undersized one is a `ValueError`
+    /// there rather than a check duplicated at this boundary.
+    fn amplitude_encoder(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        Model::apply(&mut slf, |model| model.amplitude_encoder());
+        Ok(slf)
+    }
+
+    /// Append an IQP / `ZZFeatureMap` feature encoder over the `entanglement`
+    /// pattern (`"linear"`/`"circular"`/`"full"`).
+    ///
+    /// The `"full"` default is the original `ZZFeatureMap` connectivity, i.e. the
+    /// one `IqpEncoder::new` picks. The encoder consumes no `θ`.
+    #[pyo3(signature = (entanglement="full"))]
+    fn iqp_encoder<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        entanglement: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let encoder = IqpEncoder {
+            entanglement: parse_entanglement(entanglement)?,
+        };
+        Model::apply(&mut slf, |model| model.layer(Layer::Iqp(encoder)));
+        Ok(slf)
+    }
+
+    /// Append a QCNN convolution layer: one shared `block` (`"basic"`/`"cartan"`)
+    /// applied to every pair of active qubits chosen by `pairing`
+    /// (`"even_pairs"`/`"odd_pairs"`/`"alternating"`).
+    ///
+    /// Parameters are **shared** across pairs, so the layer's `θ` count depends
+    /// on the block alone (4 for `"basic"`, 3 for `"cartan"`), never on the qubit
+    /// count. `"alternating"` — all even pairs then all odd — is the
+    /// Cong–Choi–Lukin default, matching `ConvLayer::new`.
+    #[pyo3(signature = (block, pairing="alternating"))]
+    fn conv<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        block: &str,
+        pairing: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let layer = ConvLayer {
+            block: parse_conv_block(block)?,
+            pairing: parse_pairing(pairing)?,
+        };
+        Model::apply(&mut slf, |model| model.layer(Layer::Conv(layer)));
+        Ok(slf)
+    }
+
+    /// Append a QCNN unitary pooling layer: adjacent pairs of active qubits are
+    /// each reduced to one, `keep` (`"even_positions"`/`"odd_positions"`) deciding
+    /// which position of each pair survives.
+    ///
+    /// The discarded qubit's information flows into the retained one through the
+    /// shared `block` (`"basic"`), after which it leaves the active set and
+    /// receives no further gate — pooling without the mid-circuit measurement
+    /// that contract C-4 forbids. `"even_positions"` (retain the lower position)
+    /// is the default, matching `PoolLayer::new`.
+    #[pyo3(signature = (block, keep="even_positions"))]
+    fn pool<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        block: &str,
+        keep: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let layer = PoolLayer {
+            block: parse_pool_block(block)?,
+            keep: parse_keep_rule(keep)?,
+        };
+        Model::apply(&mut slf, |model| model.layer(Layer::Pool(layer)));
         Ok(slf)
     }
 

@@ -667,12 +667,18 @@ def _raw_model(num_qubits, ansatz):
     return model.readout(observables=[[("z", 0)]], decision="raw")
 
 
-def _exact_expectation(model, theta, sample=(0.7, 1.1), dataset=None):
+def _exact_expectation(model, theta, sample=None, dataset=None):
     """The exact ⟨Z₀⟩ of `model` bound to `theta` on one sample. Deterministic
-    (no sampling), and raises `ValueError` if `theta` has the wrong length."""
+    (no sampling), and raises `ValueError` if `theta` has the wrong length.
+
+    `sample=None` builds one of the dataset's own width, so a caller who only
+    cares about θ cannot accidentally trip the feature-count check instead."""
     import polypus
 
-    trained = polypus.qml.TrainedModel(model, dataset or _dataset(), list(theta))
+    dataset = dataset or _dataset()
+    if sample is None:
+        sample = [0.1 * (i + 1) for i in range(dataset.num_features)]
+    trained = polypus.qml.TrainedModel(model, dataset, list(theta))
     return trained.predict(
         [list(sample)],
         infrastructure="local",
@@ -837,3 +843,327 @@ class TestHardwareEfficientConfiguration:
 
         with pytest.raises(ValueError, match="unknown rotation axis"):
             polypus.qml.Model(2).hardware_efficient(reps=1, rotations=["ry", "rw"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. The layers that had no Python sugar: amplitude / IQP encoders, conv, pool
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _dataset_4f():
+    """Two well-separated clusters in ``[0, π]`` over **four** features — the
+    width the QCNN and the IQP entanglement test need (see the note on
+    `TestIqpEncoderLayer`)."""
+    import polypus
+
+    x = [
+        [0.30, 0.35, 0.25, 0.30],
+        [0.40, 0.30, 0.35, 0.25],
+        [0.35, 0.40, 0.30, 0.35],
+        [2.80, 2.75, 2.85, 2.80],
+        [2.90, 2.80, 2.75, 2.85],
+        [2.75, 2.90, 2.80, 2.75],
+    ]
+    y = [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+    return polypus.qml.Dataset(x, y)
+
+
+_SAMPLE_4F = (0.7, 1.1, 0.4, 1.3)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestAmplitudeEncoderLayer:
+    def test_encoding_is_scale_invariant(self):
+        # The characteristic property of amplitude encoding: the sample is
+        # normalized before it becomes amplitudes, so two positive multiples of
+        # the same vector prepare the *identical* state and must predict the same
+        # value bit for bit. An angle encoder has no such invariance — the
+        # companion assertion below pins that difference down.
+        amplitude = _amplitude_raw_model(2, reps=1)
+        theta = [0.1 * (i + 1) for i in range(8)]
+        a = _exact_expectation(amplitude, theta, sample=(0.3, 0.4))
+        b = _exact_expectation(amplitude, theta, sample=(0.6, 0.8))
+        assert a == b
+
+    def test_angle_encoder_is_not_scale_invariant(self):
+        # Guards the test above against passing for a trivial reason (e.g. a
+        # readout that ignores the encoder entirely).
+        angle = _raw_model(2, lambda m: m.hardware_efficient(reps=1))
+        theta = [0.1 * (i + 1) for i in range(8)]
+        assert _exact_expectation(angle, theta, sample=(0.3, 0.4)) != (
+            _exact_expectation(angle, theta, sample=(0.6, 0.8))
+        )
+
+    def test_reserves_no_parameters_of_its_own(self):
+        # An encoder consumes no θ: the count is the ansatz's alone (2 × 2 × 2).
+        assert _num_params(_amplitude_raw_model(2, reps=1)) == 8
+
+    def test_rejected_when_not_the_first_layer(self):
+        # `compile` owns this rule; from Python it must surface as a ValueError.
+        import polypus
+
+        model = (
+            polypus.qml.Model(2)
+            .hardware_efficient(reps=1)
+            .amplitude_encoder()
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        with pytest.raises(ValueError, match="first"):
+            polypus.qml.TrainedModel(model, _dataset(), [0.0] * 8)
+
+
+def _amplitude_raw_model(num_qubits, reps):
+    """An amplitude-encoder model reading ⟨Z₀⟩ raw."""
+    import polypus
+
+    return (
+        polypus.qml.Model(num_qubits)
+        .amplitude_encoder()
+        .hardware_efficient(reps=reps)
+        .readout(observables=[[("z", 0)]], decision="raw")
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestIqpEncoderLayer:
+    """The IQP encoder's `Rzz` gates are diagonal (they commute) and symmetric in
+    their two qubits, so two patterns selecting the same *unordered* pairs build
+    the same unitary regardless of order. That is why this class needs **four**
+    features: at n = 3, `circular` = {01,12,20} and `full` = {01,02,12} are the
+    same unordered set and genuinely coincide, while at n = 4 `full` has six pairs
+    against `circular`'s four and all three patterns differ."""
+
+    THETA_4Q = [0.1 * (i + 1) for i in range(16)]
+
+    def test_entanglement_patterns_build_different_circuits(self):
+        values = {}
+        for pattern in ("linear", "circular", "full"):
+            model = _iqp_raw_model(4, pattern)
+            assert _num_params(model, dataset=_dataset_4f()) == 16
+            values[pattern] = _exact_expectation(
+                model, self.THETA_4Q, sample=_SAMPLE_4F, dataset=_dataset_4f()
+            )
+        assert len(set(values.values())) == 3, (
+            f"IQP entanglement patterns collapsed to the same circuit: {values}"
+        )
+
+    def test_default_entanglement_is_full(self):
+        # `IqpEncoder::new`'s connectivity — the original ZZFeatureMap.
+        default = _iqp_raw_model(4, None)
+        full = _iqp_raw_model(4, "full")
+        args = dict(sample=_SAMPLE_4F, dataset=_dataset_4f())
+        assert _exact_expectation(default, self.THETA_4Q, **args) == (
+            _exact_expectation(full, self.THETA_4Q, **args)
+        )
+
+    def test_trains_end_to_end(self):
+        import math
+
+        import polypus
+
+        model = (
+            polypus.qml.Model(4)
+            .iqp_encoder()
+            .hardware_efficient(reps=1)
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        result = polypus.qml.train(
+            model,
+            _dataset_4f(),
+            method=polypus.DE(generations=30, population_size=16, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_iqp_train",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 16
+        assert math.isfinite(result.best_fitness)
+
+    def test_unknown_entanglement_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown entanglement"):
+            polypus.qml.Model(4).iqp_encoder(entanglement="star")
+
+
+def _iqp_raw_model(num_qubits, entanglement):
+    """An IQP-encoder model reading ⟨Z₀⟩ raw. `entanglement=None` leaves the
+    kwarg off entirely, exercising the default."""
+    import polypus
+
+    model = polypus.qml.Model(num_qubits)
+    model = (
+        model.iqp_encoder()
+        if entanglement is None
+        else model.iqp_encoder(entanglement=entanglement)
+    )
+    return model.hardware_efficient(reps=1).readout(
+        observables=[[("z", 0)]], decision="raw"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestConvAndPoolLayers:
+    def test_conv_theta_count_is_the_block_width_only(self):
+        # Parameter sharing: the block reserves its θ once per *layer*, so the
+        # count is fixed by the block and independent of the qubit count —
+        # 4 for "basic", 3 for "cartan", on 2 qubits and on 4 alike.
+        for num_qubits in (2, 4):
+            assert _num_params(_conv_raw_model(num_qubits, "basic")) == 4
+            assert _num_params(_conv_raw_model(num_qubits, "cartan")) == 3
+
+    def test_conv_pairings_build_different_circuits(self):
+        # On 4 qubits: even {(0,1),(2,3)}, odd {(1,2)}, alternating = even + odd.
+        theta = [0.3, 0.7, 1.1, 1.5]
+        values = {
+            pairing: _exact_expectation(
+                _conv_raw_model(4, "basic", pairing=pairing), theta
+            )
+            for pairing in ("even_pairs", "odd_pairs", "alternating")
+        }
+        assert len(set(values.values())) == 3, (
+            f"conv pairings collapsed to the same circuit: {values}"
+        )
+
+    def test_pool_theta_count_is_the_block_width_only(self):
+        for num_qubits in (2, 4):
+            assert _num_params(_pool_raw_model(num_qubits, keep=None)) == 3
+
+    def test_pool_shrinks_the_active_set(self):
+        # 4 qubits pooled in adjacent pairs leave 2 active, so a readout at
+        # logical position 1 still resolves and position 2 no longer does.
+        import polypus
+
+        assert _num_params(_pool_raw_model(4, keep=None, position=1)) == 3
+        with pytest.raises(ValueError, match="logical qubit 2"):
+            polypus.qml.TrainedModel(
+                _pool_raw_model(4, keep=None, position=2), _dataset(), [0.0] * 3
+            )
+
+    def test_pool_keep_rule_selects_which_qubit_survives(self):
+        # Logical position 0 of the pooled set is physical qubit 0 under
+        # "even_positions" and physical qubit 1 under "odd_positions", and the
+        # block's discarded/retained roles swap with it — so the same θ reads a
+        # different expectation.
+        theta = [0.3, 0.7, 1.1]
+        even = _exact_expectation(_pool_raw_model(4, keep="even_positions"), theta)
+        odd = _exact_expectation(_pool_raw_model(4, keep="odd_positions"), theta)
+        assert even != odd
+
+    def test_qcnn_trains_end_to_end_from_python(self):
+        # conv → pool → conv over 4 features: the whole QCNN stack reached from
+        # Python, trained through `polypus.qml.train` on the native exact path.
+        # (Rust already covers the layers' semantics; what is new here is that
+        # the Python spelling arrives and trains.)
+        import math
+
+        import polypus
+
+        model = (
+            polypus.qml.Model(4)
+            .angle_encoder(axis="ry")
+            .conv(block="basic")
+            .pool(block="basic")
+            .conv(block="basic", pairing="even_pairs")
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        result = polypus.qml.train(
+            model,
+            _dataset_4f(),
+            method=polypus.DE(generations=40, population_size=16, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_qcnn_train",
+            seed=7,
+            exact=True,
+        )
+        # 4 (conv) + 3 (pool) + 4 (conv) shared parameters — no per-pair blow-up.
+        assert len(result.best_params) == 11
+        assert math.isfinite(result.best_fitness)
+        # The clusters are well separated, so the QCNN reaches near-zero hinge.
+        assert result.best_fitness > -0.2
+
+    def test_qcnn_reproducible_for_fixed_seed(self):
+        # Same guarantee as every other native run (C-7), now via conv/pool.
+        import polypus
+
+        def run():
+            model = (
+                polypus.qml.Model(4)
+                .angle_encoder(axis="ry")
+                .conv(block="cartan")
+                .pool(block="basic", keep="odd_positions")
+                .readout(observables=[[("z", 0)]], decision="sign")
+            )
+            return polypus.qml.train(
+                model,
+                _dataset_4f(),
+                method=polypus.DE(generations=20, population_size=12, tolerance=1e-12),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_qcnn_seed",
+                seed=13,
+                exact=True,
+            )
+
+        a, b = run(), run()
+        assert a.best_params == b.best_params
+        assert a.best_fitness == b.best_fitness
+
+    def test_unknown_conv_block_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown conv block"):
+            polypus.qml.Model(4).conv(block="fancy")
+
+    def test_unknown_pairing_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown pairing"):
+            polypus.qml.Model(4).conv(block="basic", pairing="every_pair")
+
+    def test_unknown_pool_block_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown pool block"):
+            polypus.qml.Model(4).pool(block="max")
+
+    def test_unknown_keep_rule_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown keep rule"):
+            polypus.qml.Model(4).pool(block="basic", keep="first_half")
+
+
+def _conv_raw_model(num_qubits, block, pairing=None):
+    """An angle-encoder + single conv-layer model reading ⟨Z₀⟩ raw."""
+    import polypus
+
+    model = polypus.qml.Model(num_qubits).angle_encoder(axis="ry")
+    model = (
+        model.conv(block=block)
+        if pairing is None
+        else model.conv(block=block, pairing=pairing)
+    )
+    return model.readout(observables=[[("z", 0)]], decision="raw")
+
+
+def _pool_raw_model(num_qubits, keep, position=0):
+    """An angle-encoder + single pool-layer model reading ⟨Z at `position`⟩ raw,
+    where `position` indexes the **surviving** active qubits."""
+    import polypus
+
+    model = polypus.qml.Model(num_qubits).angle_encoder(axis="ry")
+    model = (
+        model.pool(block="basic")
+        if keep is None
+        else model.pool(block="basic", keep=keep)
+    )
+    return model.readout(observables=[[("z", position)]], decision="raw")
