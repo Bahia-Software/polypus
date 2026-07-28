@@ -351,9 +351,12 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   §17)** does not weaken this reproducibility. Each oracle call
   (`evaluate_batch` or `gradient_batch`) draws its own minibatch from `seed`
   combined with a per-oracle call counter that advances by exactly one per call
-  — no state is shared between the two, so a given iteration's fitness-tracking
-  call and its gradient call may see *different* minibatches (accepted). Because
-  the derivation is `seed` + a deterministic counter, two runs with the same
+  — the same counter is shared by both, not one each, so a given iteration's
+  fitness-tracking call and its gradient call consume two different counter
+  values and may see *different* minibatches (accepted); two independent
+  counters would instead put both calls of the same iteration on the same
+  value and make them see the *same* minibatch every time. Because the
+  derivation is `seed` + a deterministic counter, two runs with the same
   seed and `batch_size` draw the identical sequence of minibatches and reproduce
   byte-for-byte. Within a single `gradient_batch` call, all `dims` parameters and
   both `θ±π/2` shifts share **one** minibatch — a correctness requirement of
