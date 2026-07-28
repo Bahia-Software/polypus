@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use polypus_qml::{
-    Decision, Loss, Observable, Pauli, PauliString, QmlProblem, QuantumModel, Readout,
-    RotationAxis, ValidationError,
+    Decision, Entanglement, Entangler, HardwareEfficientAnsatz, Layer, Loss, Observable, Pauli,
+    PauliString, QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
 };
 
 use super::{
@@ -79,6 +79,31 @@ fn parse_axis(axis: &str) -> PyResult<RotationAxis> {
         "rz" => Ok(RotationAxis::Rz),
         other => Err(PyValueError::new_err(format!(
             "unknown rotation axis '{other}'; expected \"rx\", \"ry\" or \"rz\""
+        ))),
+    }
+}
+
+/// Parse an entangling-gate string into an [`Entangler`]. Strict, like
+/// [`parse_axis`]: an unrecognised value is a `ValueError` listing the options.
+fn parse_entangler(entangler: &str) -> PyResult<Entangler> {
+    match entangler {
+        "cx" => Ok(Entangler::Cx),
+        "cz" => Ok(Entangler::Cz),
+        other => Err(PyValueError::new_err(format!(
+            "unknown entangler '{other}'; expected \"cx\" or \"cz\""
+        ))),
+    }
+}
+
+/// Parse an entanglement-pattern string into an [`Entanglement`]. Shared by the
+/// hardware-efficient ansatz and the IQP encoder, which both take one.
+fn parse_entanglement(entanglement: &str) -> PyResult<Entanglement> {
+    match entanglement {
+        "linear" => Ok(Entanglement::Linear),
+        "circular" => Ok(Entanglement::Circular),
+        "full" => Ok(Entanglement::Full),
+        other => Err(PyValueError::new_err(format!(
+            "unknown entanglement '{other}'; expected \"linear\", \"circular\" or \"full\""
         ))),
     }
 }
@@ -150,6 +175,22 @@ pub struct Model {
     inner: Option<QuantumModel>,
 }
 
+impl Model {
+    /// Apply one consuming [`QuantumModel`] builder call in place: take the model
+    /// out, hand it to `build`, and put the result back.
+    ///
+    /// Every builder method funnels through here, so the `inner: Option<_>`
+    /// dance — and the single place where the "always `Some` between calls"
+    /// invariant is asserted — is written once instead of once per method.
+    fn apply(slf: &mut Self, build: impl FnOnce(QuantumModel) -> QuantumModel) {
+        let model = slf
+            .inner
+            .take()
+            .expect("Model.inner is always Some between calls");
+        slf.inner = Some(build(model));
+    }
+}
+
 #[pymethods]
 impl Model {
     #[new]
@@ -165,24 +206,70 @@ impl Model {
         axis: &str,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let axis = parse_axis(axis)?;
-        let model = slf
-            .inner
-            .take()
-            .expect("Model.inner is always Some between calls");
-        slf.inner = Some(model.angle_encoder(axis));
+        Model::apply(&mut slf, |model| model.angle_encoder(axis));
         Ok(slf)
     }
 
     /// Append a hardware-efficient ansatz with `reps` repetitions.
-    fn hardware_efficient(
-        mut slf: PyRefMut<'_, Self>,
+    ///
+    /// All five of the Rust struct's fields are configurable, and every default
+    /// is the `TwoLocal` default `HardwareEfficientAnsatz::new` uses — so
+    /// `hardware_efficient(reps)` alone behaves exactly as it did before the
+    /// kwargs existed: `rotations=["ry","rz"]`, `entangler="cx"`,
+    /// `entanglement="linear"`, `final_rotation_layer=True`.
+    ///
+    /// `rotations` is a list of axes emitted per rotation block, in order
+    /// (axis-major, qubit-minor, like Qiskit's `TwoLocal`). An empty list
+    /// reserves no `θ` here, which `compile` catches model-wide as
+    /// `NoTrainableParams` if no other layer contributes any — so, as with the
+    /// readout's bases, that check is not duplicated at this boundary.
+    #[pyo3(signature = (
+        reps, rotations=None, entangler="cx", entanglement="linear",
+        final_rotation_layer=true,
+    ))]
+    fn hardware_efficient<'py>(
+        mut slf: PyRefMut<'py, Self>,
         reps: usize,
-    ) -> PyResult<PyRefMut<'_, Self>> {
-        let model = slf
-            .inner
-            .take()
-            .expect("Model.inner is always Some between calls");
-        slf.inner = Some(model.hardware_efficient(reps));
+        rotations: Option<Vec<String>>,
+        entangler: &str,
+        entanglement: &str,
+        final_rotation_layer: bool,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let rotations = match rotations {
+            Some(axes) => axes
+                .iter()
+                .map(|axis| parse_axis(axis))
+                .collect::<PyResult<Vec<_>>>()?,
+            // `None` means "keep the default", read off the Rust constructor
+            // itself so the two can never drift apart.
+            None => HardwareEfficientAnsatz::new(reps).rotations,
+        };
+        let ansatz = HardwareEfficientAnsatz {
+            reps,
+            rotations,
+            entangler: parse_entangler(entangler)?,
+            entanglement: parse_entanglement(entanglement)?,
+            final_rotation_layer,
+        };
+        Model::apply(&mut slf, |model| {
+            model.layer(Layer::HardwareEfficient(ansatz))
+        });
+        Ok(slf)
+    }
+
+    /// Append the `RealAmplitudes` preset: a single `Ry` per rotation block,
+    /// linear `Cx` entanglement and a final rotation layer.
+    ///
+    /// A separate method rather than a flag on
+    /// [`hardware_efficient`](Self::hardware_efficient), mirroring
+    /// `HardwareEfficientAnsatz::real_amplitudes`: it is a preset that *fixes*
+    /// four of the five fields, so exposing it as a kwarg would mean kwargs that
+    /// silently override each other.
+    fn real_amplitudes(mut slf: PyRefMut<'_, Self>, reps: usize) -> PyResult<PyRefMut<'_, Self>> {
+        let ansatz = HardwareEfficientAnsatz::real_amplitudes(reps);
+        Model::apply(&mut slf, |model| {
+            model.layer(Layer::HardwareEfficient(ansatz))
+        });
         Ok(slf)
     }
 

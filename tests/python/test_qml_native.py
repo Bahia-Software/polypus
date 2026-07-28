@@ -638,3 +638,202 @@ class TestTrainedModelPredict:
         )
         assert len(preds) == len(_NEW_SAMPLES)
         assert all(isinstance(p, float) and p in (-1.0, 1.0) for p in preds)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Builder coverage: every layer and every ansatz knob reachable from Python
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These assert *semantics*, not just "the call does not raise", and they do it
+# without running an optimizer, using two properties of the exact inference path:
+#
+#   • `TrainedModel.predict(..., exact=True)` on a `decision="raw"` readout is a
+#     deterministic function of the circuit — the exact ⟨Z₀⟩ of the bound state,
+#     no shot noise. Two spellings that build the *same* circuit agree bit for
+#     bit; two that build different circuits disagree. (`Raw` rather than `Sign`
+#     precisely because a ±1 sign could coincide for two different circuits.)
+#   • `bind` validates θ's length, so `predict` raises unless `len(theta)` equals
+#     the compiled model's parameter count — an exact, optimizer-free probe of
+#     the θ count each ansatz configuration reserves.
+
+
+def _raw_model(num_qubits, ansatz):
+    """An angle-encoder model whose variational block is appended by `ansatz`,
+    reading ⟨Z₀⟩ out **unchanged** (`decision="raw"`)."""
+    import polypus
+
+    model = polypus.qml.Model(num_qubits).angle_encoder(axis="ry")
+    model = ansatz(model)
+    return model.readout(observables=[[("z", 0)]], decision="raw")
+
+
+def _exact_expectation(model, theta, sample=(0.7, 1.1), dataset=None):
+    """The exact ⟨Z₀⟩ of `model` bound to `theta` on one sample. Deterministic
+    (no sampling), and raises `ValueError` if `theta` has the wrong length."""
+    import polypus
+
+    trained = polypus.qml.TrainedModel(model, dataset or _dataset(), list(theta))
+    return trained.predict(
+        [list(sample)],
+        infrastructure="local",
+        backend="polypus",
+        id="qml_builder_raw",
+        exact=True,
+    )[0]
+
+
+def _num_params(model, dataset=None, limit=16):
+    """The compiled model's θ count, found by the only length `predict` accepts.
+
+    `bind` rejects every other length with a `ValueError`, so the accepted one is
+    unique and this is an exact measurement, not an estimate. `limit` bounds the
+    search — every configuration tested here stays well under it."""
+    accepted = [
+        n for n in range(limit + 1) if _accepts_theta_length(model, n, dataset=dataset)
+    ]
+    assert len(accepted) == 1, f"expected exactly one accepted θ length, got {accepted}"
+    return accepted[0]
+
+
+def _accepts_theta_length(model, n, dataset=None):
+    try:
+        _exact_expectation(model, [0.1] * n, dataset=dataset)
+        return True
+    except ValueError:
+        return False
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestHardwareEfficientConfiguration:
+    """`hardware_efficient` exposes all five fields of the Rust struct; its
+    defaults are exactly the `TwoLocal` defaults it had before the kwargs."""
+
+    # 3 qubits, reps=1, default [ry, rz] → 2 axes × 3 qubits × (1 + 1) blocks.
+    THETA_3Q = [0.1 * (i + 1) for i in range(12)]
+
+    def test_defaults_are_unchanged_by_the_new_kwargs(self):
+        # Passing every default explicitly must build the *same* circuit as
+        # passing none — the guarantee that no existing caller changed behaviour.
+        implicit = _raw_model(3, lambda m: m.hardware_efficient(reps=1))
+        explicit = _raw_model(
+            3,
+            lambda m: m.hardware_efficient(
+                reps=1,
+                rotations=["ry", "rz"],
+                entangler="cx",
+                entanglement="linear",
+                final_rotation_layer=True,
+            ),
+        )
+        a = _exact_expectation(implicit, self.THETA_3Q)
+        b = _exact_expectation(explicit, self.THETA_3Q)
+        assert a == b
+
+    def test_default_theta_count_is_axes_times_qubits_times_blocks(self):
+        assert _num_params(_raw_model(3, lambda m: m.hardware_efficient(reps=1))) == 12
+        # The 2-qubit model the rest of this file trains: 2 × 2 × 2 = 8.
+        assert _num_params(_raw_model(2, lambda m: m.hardware_efficient(reps=1))) == 8
+
+    def test_rotations_list_sets_the_theta_count(self):
+        # One axis instead of two halves the count; three axes multiply it by 3/2.
+        one = _raw_model(2, lambda m: m.hardware_efficient(reps=1, rotations=["ry"]))
+        three = _raw_model(
+            2, lambda m: m.hardware_efficient(reps=1, rotations=["rx", "ry", "rz"])
+        )
+        assert _num_params(one) == 4
+        assert _num_params(three) == 12
+
+    def test_final_rotation_layer_false_drops_one_rotation_block(self):
+        # blocks = reps + final_rotation_layer → 2 × 2 × 1 = 4 instead of 8.
+        model = _raw_model(
+            2, lambda m: m.hardware_efficient(reps=1, final_rotation_layer=False)
+        )
+        assert _num_params(model) == 4
+
+    def test_entanglement_patterns_build_different_circuits(self):
+        # On 3 qubits the three patterns select different pair sets — linear
+        # {(0,1),(1,2)}, circular adds (2,0), full has (0,2) instead — so the same
+        # θ yields three different exact expectations. The θ count is identical
+        # for all three (entanglers consume no θ), which `_num_params` confirms.
+        values = {}
+        for pattern in ("linear", "circular", "full"):
+            model = _raw_model(
+                3, lambda m, p=pattern: m.hardware_efficient(reps=1, entanglement=p)
+            )
+            assert _num_params(model) == 12
+            values[pattern] = _exact_expectation(model, self.THETA_3Q)
+        assert len(set(values.values())) == 3, (
+            f"entanglement patterns collapsed to the same circuit: {values}"
+        )
+
+    def test_entangler_cz_builds_a_different_circuit_than_cx(self):
+        cx = _raw_model(3, lambda m: m.hardware_efficient(reps=1, entangler="cx"))
+        cz = _raw_model(3, lambda m: m.hardware_efficient(reps=1, entangler="cz"))
+        assert _exact_expectation(cx, self.THETA_3Q) != _exact_expectation(
+            cz, self.THETA_3Q
+        )
+
+    def test_real_amplitudes_is_the_single_ry_preset(self):
+        # The preset must equal the explicit spelling of its four fixed fields,
+        # bit for bit, and differ from the [ry, rz] default (which needs 8 θ).
+        preset = _raw_model(2, lambda m: m.real_amplitudes(reps=1))
+        explicit = _raw_model(
+            2,
+            lambda m: m.hardware_efficient(
+                reps=1,
+                rotations=["ry"],
+                entangler="cx",
+                entanglement="linear",
+                final_rotation_layer=True,
+            ),
+        )
+        theta = [0.3, 0.7, 1.1, 1.5]
+        assert _num_params(preset) == 4
+        assert _exact_expectation(preset, theta) == _exact_expectation(explicit, theta)
+
+    def test_real_amplitudes_trains_end_to_end(self):
+        import math
+
+        import polypus
+
+        model = (
+            polypus.qml.Model(2)
+            .angle_encoder(axis="ry")
+            .real_amplitudes(reps=2)
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        result = polypus.qml.train(
+            model,
+            _dataset(),
+            method=polypus.DE(generations=30, population_size=16, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_real_amplitudes",
+            seed=7,
+            exact=True,
+        )
+        # reps=2 → 1 axis × 2 qubits × 3 blocks = 6 trainable parameters, and the
+        # well-separated dataset is reachable: near-zero hinge loss.
+        assert len(result.best_params) == 6
+        assert math.isfinite(result.best_fitness)
+        assert result.best_fitness > -0.2
+
+    def test_unknown_entangler_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown entangler"):
+            polypus.qml.Model(2).hardware_efficient(reps=1, entangler="cy")
+
+    def test_unknown_entanglement_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown entanglement"):
+            polypus.qml.Model(2).hardware_efficient(reps=1, entanglement="mesh")
+
+    def test_unknown_rotation_axis_in_list_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown rotation axis"):
+            polypus.qml.Model(2).hardware_efficient(reps=1, rotations=["ry", "rw"])
