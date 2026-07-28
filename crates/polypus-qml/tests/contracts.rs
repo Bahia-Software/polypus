@@ -118,7 +118,7 @@ fn catalogue() -> Vec<(CompiledModel, Vec<Vec<f64>>)> {
         //    catalogue entry emitting `Rzz` with `Fixed` angles.
         (
             QuantumModel::new(3)
-                .layer(Layer::Iqp(IqpEncoder::new()))
+                .iqp_encoder()
                 .layer(Layer::HardwareEfficient(
                     HardwareEfficientAnsatz::real_amplitudes(1),
                 ))

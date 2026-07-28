@@ -34,8 +34,8 @@ use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{
-    AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, Layer,
-    PoolBlock, PoolLayer, RotationAxis,
+    AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, IqpEncoder,
+    Layer, PoolBlock, PoolLayer, RotationAxis,
 };
 use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Readout, ResolvedReadout};
@@ -139,6 +139,13 @@ impl QuantumModel {
     /// layer of the model.
     pub fn amplitude_encoder(self) -> Self {
         self.layer(Layer::AmplitudeEncoder(AmplitudeEncoder))
+    }
+
+    /// Sugar for `.layer(Layer::Iqp(IqpEncoder::new()))`, with the default
+    /// [`Entanglement::Full`](crate::Entanglement) connectivity. Pass the
+    /// variant explicitly for another pattern.
+    pub fn iqp_encoder(self) -> Self {
+        self.layer(Layer::Iqp(IqpEncoder::new()))
     }
 
     /// Sugar for a default [`HardwareEfficientAnsatz::new`] with `reps`
@@ -529,6 +536,22 @@ mod tests {
             Decision::Sign,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn layer_sugar_matches_the_explicit_layer() {
+        // Every sugar must be exactly `.layer(...)` of the corresponding
+        // default-constructed layer — `QuantumModel`'s `PartialEq` compares the
+        // layer list, so a drifting default would show up here.
+        let sugared = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .iqp_encoder()
+            .hardware_efficient(1);
+        let explicit = QuantumModel::new(2)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::Iqp(IqpEncoder::new()))
+            .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)));
+        assert_eq!(sugared, explicit);
     }
 
     #[test]
