@@ -19,6 +19,13 @@ pub struct Adam {
     /// same default DE/PSO use for their convergence test.
     #[pyo3(get, set)]
     pub tolerance: f64,
+    /// Consecutive sub-`tolerance` iterations required before the run reports
+    /// `converged`. Defaults to `3`: one iteration is not trusted, because the
+    /// gradient the optimizer sees may be a minibatch gradient that cancelled to
+    /// zero (see the minibatch note beside C-5/C-7 in `docs/CONTRACTS.md`).
+    /// `patience=1` restores the single-iteration rule.
+    #[pyo3(get, set)]
+    pub patience: usize,
     /// Optional RNG seed pinned on the optimizer object. Consumed by
     /// `train`/`qml.train` per the precedence rule (contract C-7): the explicit
     /// `seed` kwarg passed to the call wins; this field is the fallback; a fresh
@@ -34,10 +41,10 @@ impl Adam {
     // parameters are circuit rotation angles in radians, not neural-network
     // weights, so a larger step is well-scaled here. `beta1`/`beta2`/`epsilon`
     // are the standard values from the literature.
-    #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, seed = None))]
+    #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, patience = 3, seed = None))]
     // Constructor mirrors Adam's full hyper-parameter set as Python kwargs; the
-    // added `tolerance` pushes it one past the lint threshold, exactly as `seed`
-    // does for `PSO::new`.
+    // added `tolerance`/`patience` push it past the lint threshold, exactly as
+    // `seed` does for `PSO::new`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_iters: u32,
@@ -47,6 +54,7 @@ impl Adam {
         epsilon: f64,
         bounds: (f64, f64),
         tolerance: f64,
+        patience: usize,
         seed: Option<u64>,
     ) -> Self {
         Adam {
@@ -57,6 +65,7 @@ impl Adam {
             epsilon,
             bounds,
             tolerance,
+            patience,
             seed,
         }
     }

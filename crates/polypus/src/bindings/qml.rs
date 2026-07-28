@@ -1409,6 +1409,7 @@ fn dispatch_optimizer(
                 bounds: qng.bounds,
                 dimensions,
                 tolerance: qng.tolerance,
+                patience: qng.patience,
                 variance_oracle: Box::new(PyVarianceOracle {
                     variance_function: qng.variance_function.clone_ref(py),
                     errors: errors.clone(),
@@ -1432,6 +1433,7 @@ fn dispatch_optimizer(
                 bounds: adam.bounds,
                 dimensions,
                 tolerance: adam.tolerance,
+                patience: adam.patience,
                 seed: Some(effective_seed),
             };
             py.allow_threads(|| AlgorithmAdam.optimize(args))

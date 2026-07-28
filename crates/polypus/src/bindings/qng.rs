@@ -18,6 +18,13 @@ pub struct QNG {
     /// same default DE/PSO use for their convergence test.
     #[pyo3(get, set)]
     pub tolerance: f64,
+    /// Consecutive sub-`tolerance` iterations required before the run reports
+    /// `converged`. Defaults to `3`: one iteration is not trusted, because the
+    /// gradient the optimizer sees may be a minibatch gradient that cancelled to
+    /// zero (see the minibatch note beside C-5/C-7 in `docs/CONTRACTS.md`).
+    /// `patience=1` restores the single-iteration rule.
+    #[pyo3(get, set)]
+    pub patience: usize,
     #[pyo3(get, set)]
     pub variance_function: Py<PyAny>,
     /// Optional RNG seed pinned on the optimizer object. Consumed by
@@ -31,7 +38,11 @@ pub struct QNG {
 #[pymethods]
 impl QNG {
     #[new]
-    #[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, tikhonov_reg = 0.05, tolerance = 0.01, seed = None))]
+    #[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, tikhonov_reg = 0.05, tolerance = 0.01, patience = 3, seed = None))]
+    // Constructor mirrors QNG's full hyper-parameter set as Python kwargs; the
+    // added `patience` pushes it one past the lint threshold, exactly as
+    // `tolerance` does for `Adam::new` and `seed` does for `PSO::new`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         variance_function: Py<PyAny>,
         max_iters: u32,
@@ -39,6 +50,7 @@ impl QNG {
         learning_rate: f64,
         tikhonov_reg: f64,
         tolerance: f64,
+        patience: usize,
         seed: Option<u64>,
     ) -> Self {
         QNG {
@@ -48,6 +60,7 @@ impl QNG {
             learning_rate,
             tikhonov_reg,
             tolerance,
+            patience,
             seed,
         }
     }

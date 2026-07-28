@@ -719,6 +719,7 @@ pub fn train<'py>(
             bounds: qng.bounds,
             dimensions,
             tolerance: qng.tolerance,
+            patience: qng.patience,
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(method.py()),
                 errors: errors.clone(),
@@ -750,6 +751,7 @@ pub fn train<'py>(
             bounds: adam.bounds,
             dimensions,
             tolerance: adam.tolerance,
+            patience: adam.patience,
             seed: Some(effective_seed),
         };
         return finish_optimization(
