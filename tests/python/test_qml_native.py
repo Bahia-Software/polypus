@@ -451,12 +451,9 @@ class TestNativeQmlTrainMinibatch:
             )
 
     def test_gradient_norm_early_stop_can_fire_on_a_minibatch(self):
-        """**Characterization test, not an endorsement.** `AlgorithmAdam` and
-        `AlgorithmQNG` decide convergence by comparing `‖∇fitness(θ)‖₂` against
-        `tolerance`, and under `batch_size` that norm is a *minibatch* gradient.
-        This pins what today's code then does, so the behaviour cannot change
-        unnoticed while the fix is an open design decision (design doc §17, and
-        the note beside C-5/C-7 in `CONTRACTS.md`).
+        """The minibatch / gradient-norm early-stopping interaction, and what
+        `patience` does to it (design doc §17, and the note beside C-5/C-7 in
+        `CONTRACTS.md`).
 
         The trigger is structural, not shot noise. `_hard_dataset`'s last two
         samples are contradictory — identical features, opposite labels — so for a
@@ -466,20 +463,25 @@ class TestNativeQmlTrainMinibatch:
         (`crates/polypus/src/evaluation/exact_native_qml_oracle.rs` proves the two
         norms directly: 0 for the pair against > 0.2 for the full dataset.)
 
-        The consequence is that the optimizer stops on iteration 1 and reports
-        `converged=True` having barely moved from its random initialization, while
-        the same run without `batch_size` uses all 60 iterations and reaches the
-        analytic optimum near −1/3. The reported `best_fitness` stays honest
-        either way — the full-dataset recompute guarantees C-5 — so what is lost
-        is the optimization itself and the meaning of `converged`, not the
-        fitness number."""
+        Under the old one-iteration rule — which `patience=1` still selects, so
+        the behaviour stays pinned and cannot regress unnoticed — the optimizer
+        stopped on iteration 1 reporting `converged=True`, having barely moved
+        from its random initialization. With the `patience=3` default the same
+        seed no longer stops at all: it spends all 60 iterations and lands on the
+        analytic optimum near −1/3, matching the run without `batch_size`.
+
+        The reported `best_fitness` was honest either way — the full-dataset
+        recompute guarantees C-5 — so what a spurious stop cost was the
+        optimization itself and the meaning of `converged`, not the number."""
         import polypus
 
-        def run(batch_size, tolerance=0.01):
+        def run(batch_size, tolerance=0.01, patience=3):
             return polypus.qml.train(
                 _model(),
                 self._hard_dataset(),
-                method=polypus.Adam(max_iters=60, tolerance=tolerance),
+                method=polypus.Adam(
+                    max_iters=60, tolerance=tolerance, patience=patience
+                ),
                 loss="hinge",
                 infrastructure="local",
                 backend="polypus",
@@ -494,30 +496,44 @@ class TestNativeQmlTrainMinibatch:
         # Near the analytic −1/3 bound the contradictory pair imposes.
         assert -0.40 < full.best_fitness < -0.30
 
-        mb = run(batch_size=2)
-        assert mb.converged and mb.iterations_run == 1
-        # Far worse than the full run: this is essentially the random init.
-        assert mb.best_fitness < -1.0
+        # `patience=1` is the pre-fix rule: the cancelling minibatch on the very
+        # first gradient call ends the run there, at essentially the random init.
+        legacy = run(batch_size=2, patience=1)
+        assert legacy.converged and legacy.iterations_run == 1
+        assert legacy.best_fitness < -1.0
 
-        # A tighter tolerance is *not* a mitigation: the minibatch norm is exactly
-        # zero, so it falls below any threshold whatsoever.
+        # A tighter tolerance was never the mitigation: the minibatch norm is
+        # exactly zero, so it falls below any threshold whatsoever.
         for tolerance in (1e-6, 1e-12):
-            tight = run(batch_size=2, tolerance=tolerance)
+            tight = run(batch_size=2, tolerance=tolerance, patience=1)
             assert tight.converged and tight.iterations_run == 1
-            assert tight.best_fitness == mb.best_fitness
+            assert tight.best_fitness == legacy.best_fitness
+
+        # `patience=3` (the default) is: three *consecutive* sub-tolerance
+        # iterations are needed, and iteration 2 draws a different minibatch, so
+        # this seed no longer stops early — it reaches the same optimum the
+        # full-batch run does.
+        mb = run(batch_size=2)
+        assert not mb.converged and mb.iterations_run == 60
+        assert -0.40 < mb.best_fitness < -0.30
+        assert abs(mb.best_fitness - full.best_fitness) < 0.05
 
     def test_gradient_norm_early_stop_affects_qng_identically(self):
-        # QNG shares the same `‖∇fitness‖ < tolerance` rule, so it stops the same
-        # way on the same minibatch — the interaction is a property of the
-        # convergence check, not of one optimizer.
+        # QNG shares the same convergence rule, so both the old failure and the
+        # `patience` fix behave identically on the same minibatch — the
+        # interaction is a property of the convergence check, not of one
+        # optimizer.
         import polypus
 
-        def run(batch_size):
+        def run(batch_size, patience=3):
             return polypus.qml.train(
                 _model(),
                 self._hard_dataset(),
                 method=polypus.QNG(
-                    variance_function=lambda *_: 0.25, max_iters=60, tolerance=0.01
+                    variance_function=lambda *_: 0.25,
+                    max_iters=60,
+                    tolerance=0.01,
+                    patience=patience,
                 ),
                 loss="hinge",
                 infrastructure="local",
@@ -529,22 +545,88 @@ class TestNativeQmlTrainMinibatch:
             )
 
         assert not run(batch_size=None).converged
+
+        legacy = run(batch_size=2, patience=1)
+        assert legacy.converged and legacy.iterations_run == 1
+
         mb = run(batch_size=2)
-        assert mb.converged and mb.iterations_run == 1
+        assert not mb.converged and mb.iterations_run == 60
+        assert -0.40 < mb.best_fitness < -0.30
+
+    def test_patience_is_a_probabilistic_mitigation_not_a_guarantee(self):
+        """`patience` makes the spurious stop unlikely, not impossible — and that
+        limit is demonstrated here rather than merely conceded in the docs.
+
+        Nothing prevents the cancelling minibatch from being redrawn `patience`
+        times in a row. `seed=140` is such a case, constructed rather than found
+        by luck: the oracle's `MinibatchConfig` counter is shared by
+        `evaluate_batch` and `gradient_batch` (one object serves both facets of
+        the `Arc`), so gradient calls land on the **even** counter values — the
+        gradient of iteration `n` uses `call_index = 2(n−1)`. Replaying
+        `minibatch_indices`' SplitMix64 shuffle outside the crate and searching
+        for seeds whose calls `2(n−1)`, `2n`, `2(n+1)` all draw the contradictory
+        pair yields `seed=140` at `n = 6`, so the streak completes on iteration 8.
+
+        Measured over 200 seeds on this dataset with `batch_size=2`, spurious
+        stops fall from 194 at `patience=1` to 39 at `2` and 4 at `3` — a ~50×
+        reduction with four survivors, of which this is one. So `converged=True`
+        under minibatching is far more trustworthy than before, but still not a
+        guarantee: `best_fitness` remains the number to read."""
+        import polypus
+
+        def run(batch_size, opt="adam"):
+            method = (
+                polypus.Adam(max_iters=60, tolerance=0.01, patience=3)
+                if opt == "adam"
+                else polypus.QNG(
+                    variance_function=lambda *_: 0.25,
+                    max_iters=60,
+                    tolerance=0.01,
+                    patience=3,
+                )
+            )
+            return polypus.qml.train(
+                _model(),
+                self._hard_dataset(),
+                method=method,
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_patience_survivor",
+                seed=140,
+                exact=True,
+                batch_size=batch_size,
+            )
+
+        # The stop still fires with the default patience, on the predicted
+        # iteration, and it is genuinely spurious: ≈ −0.94 where the same
+        # configuration without `batch_size` reaches ≈ −0.34.
+        for opt in ("adam", "qng"):
+            mb = run(batch_size=2, opt=opt)
+            assert mb.converged, f"{opt}: expected the survivor case to stop"
+            assert mb.iterations_run == 8, f"{opt}: {mb.iterations_run}"
+            assert mb.best_fitness < -0.5, f"{opt}: {mb.best_fitness}"
+
+        full = run(batch_size=None)
+        assert not full.converged and full.iterations_run == 60
+        assert -0.40 < full.best_fitness < -0.30
 
     def test_early_stop_does_not_fire_without_cancelling_structure(self):
         # The scope of the interaction: on a separable dataset with no
         # contradictory samples, minibatch gradient norms stay well above the
-        # default tolerance, and no seed in this sweep stops early. So the risk
-        # tracks *cancellation between samples of one minibatch*, not minibatching
-        # in general — the distinction the design doc's conclusion rests on.
+        # default tolerance, and no seed in this sweep stops early — under either
+        # rule. Asserted at `patience=1` because that is the *strict* case: if the
+        # single-iteration rule never fires here, the three-consecutive rule
+        # cannot either, so this pins the scope of the interaction independently
+        # of the mitigation. The risk tracks *cancellation between samples of one
+        # minibatch*, not minibatching in general.
         import polypus
 
         for seed in range(1, 11):
             r = polypus.qml.train(
                 _model(),
                 _dataset(),  # 6 well-separated samples, no contradictory pair
-                method=polypus.Adam(max_iters=40, tolerance=0.01),
+                method=polypus.Adam(max_iters=40, tolerance=0.01, patience=1),
                 loss="hinge",
                 infrastructure="local",
                 backend="polypus",

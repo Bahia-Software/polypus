@@ -623,12 +623,18 @@ mod tests {
     /// `tolerance = 0.01` that `polypus.Adam`/`polypus.QNG` default to.
     ///
     /// `AlgorithmQNGArgs`/`AlgorithmAdamArgs` compare exactly this per-iteration
-    /// norm against `tolerance` to set `converged`, so when minibatching hands
-    /// them the pair they stop on iteration 1. Because the norm is *exactly* zero,
-    /// no `tolerance`, however small, avoids it — see the write-up in the design
-    /// doc §17 and the note beside C-5/C-7 in `CONTRACTS.md`. This test pins the
-    /// numerical fact those documents rest on; it asserts nothing about whether
-    /// the convergence rule should change, which is an open design decision.
+    /// norm against `tolerance` to set `converged`. Because the norm is *exactly*
+    /// zero, no `tolerance`, however small, keeps a single such iteration below
+    /// the bar — which is why the fix was `patience` (requiring `patience`
+    /// *consecutive* sub-tolerance iterations, default 3) rather than a tighter
+    /// threshold. See the write-up in the design doc §17 and the note beside
+    /// C-5/C-7 in `CONTRACTS.md`.
+    ///
+    /// This test goes through **no optimizer** — it reads the two gradient norms
+    /// straight off the oracle — so `patience` does not touch what it asserts, and
+    /// the numerical fact both documents rest on is unchanged by the fix: the
+    /// cancellation is still exact, and it is still what `patience` has to
+    /// tolerate rather than prevent.
     #[test]
     fn minibatch_gradient_can_vanish_where_the_full_gradient_does_not() {
         pyo3::prepare_freethreaded_python();
