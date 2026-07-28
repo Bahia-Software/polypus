@@ -13,6 +13,7 @@ use polypus_optimizers::{
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, GradientOracle,
     OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
 /// exactly at `xᵢ = target`. The optimizers maximise, so this has a unique,
@@ -128,6 +129,60 @@ impl GradientOracle for ShortGradientOracle {
     }
 }
 
+/// Gradient oracle with a **scripted** norm sequence, the stateful counterpart of
+/// the analytic oracles above: the `n`-th [`GradientOracle::gradient_batch`] call
+/// returns `[norms[n], 0, …, 0]`, whose L2 norm is exactly `norms[n]`. Once the
+/// script runs out the last entry repeats forever, so a run may outlive it.
+///
+/// This is what lets the `patience` tests drive the convergence check
+/// iteration-by-iteration — small, large, small, … — instead of hoping a smooth
+/// analytic landscape happens to produce the sequence under test. The counter is
+/// an [`AtomicUsize`] because [`GradientOracle`] is `Send + Sync`; QNG and Adam
+/// both call `gradient_batch` exactly once per iteration, so call index ==
+/// iteration index. [`gradient`](GradientOracle::gradient) is provided for
+/// completeness and does **not** advance the script.
+struct ScriptedGradient {
+    norms: Vec<f64>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedGradient {
+    fn new(norms: &[f64]) -> Self {
+        assert!(
+            !norms.is_empty(),
+            "a scripted gradient needs at least one norm"
+        );
+        ScriptedGradient {
+            norms: norms.to_vec(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// The norm scheduled for call `index`, clamped to the last scripted entry.
+    fn norm_at(&self, index: usize) -> f64 {
+        self.norms[index.min(self.norms.len() - 1)]
+    }
+}
+
+impl GradientOracle for ScriptedGradient {
+    fn gradient(&self, _theta: &[f64], param_index: usize) -> f64 {
+        if param_index == 0 {
+            self.norm_at(self.calls.load(Ordering::SeqCst))
+        } else {
+            0.0
+        }
+    }
+
+    fn gradient_batch(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut grad = vec![0.0; dims];
+        if dims > 0 {
+            grad[0] = self.norm_at(index);
+        }
+        grad
+    }
+}
+
 /// Fitness `= Σᵢ cos(θᵢ)`: a separable, raw-expectation-like objective for which
 /// the parameter-shift rule is *exact* in closed form (`∂/∂θᵢ = −sin(θᵢ)`, since
 /// `[cos(θ+π/2) − cos(θ−π/2)]/2 = −sin(θ)`). Used to check
@@ -211,6 +266,7 @@ fn qng_converges_to_known_optimum() {
             // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
             // exhausts its full iteration budget — the behaviour this test asserts.
             tolerance: 0.0,
+            patience: 3,
             variance_oracle: Box::new(ConstVariance(1.0)),
             tikhonov_reg: 0.05,
             seed: Some(42),
@@ -247,6 +303,7 @@ fn adam_converges_to_known_optimum() {
             // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
             // exhausts its full iteration budget — the behaviour this test asserts.
             tolerance: 0.0,
+            patience: 3,
             seed: Some(42),
         })
         .expect("valid Adam args optimize successfully");
@@ -323,6 +380,7 @@ fn adam_is_deterministic_for_a_fixed_seed() {
                 bounds: (0.0, 2.0),
                 dimensions: 4,
                 tolerance: 0.0,
+                patience: 3,
                 seed: Some(123),
             })
             .expect("valid Adam args optimize successfully")
@@ -406,7 +464,9 @@ fn qng_early_stops_on_small_gradient() {
     // A generous tolerance makes the gradient-norm test ‖∇fitness(θ)‖ < tolerance
     // fire once QNG has descended close enough to the optimum, well before the
     // iteration budget is exhausted. QuadraticGradient is exact, so the norm
-    // shrinks monotonically toward zero as θ → target.
+    // shrinks monotonically toward zero as θ → target — which also means the
+    // default `patience = 3` costs only the two extra iterations it takes to make
+    // the streak consecutive, never the stop itself.
     let make = || {
         AlgorithmQNG
             .optimize(AlgorithmQNGArgs {
@@ -417,6 +477,7 @@ fn qng_early_stops_on_small_gradient() {
                 bounds: (0.0, 2.0),
                 dimensions: 3,
                 tolerance: 0.5,
+                patience: 3,
                 variance_oracle: Box::new(ConstVariance(1.0)),
                 tikhonov_reg: 0.05,
                 seed: Some(7),
@@ -438,7 +499,9 @@ fn qng_early_stops_on_small_gradient() {
 fn adam_early_stops_on_small_gradient() {
     // Mirror of `qng_early_stops_on_small_gradient`: a generous tolerance makes
     // Adam's gradient-norm test fire before the iteration budget is exhausted,
-    // once the exact QuadraticGradient has shrunk near the optimum.
+    // once the exact QuadraticGradient has shrunk near the optimum. The
+    // monotonically shrinking norm satisfies the default `patience = 3` a couple
+    // of iterations later, not never.
     let make = || {
         AlgorithmAdam
             .optimize(AlgorithmAdamArgs {
@@ -452,6 +515,7 @@ fn adam_early_stops_on_small_gradient() {
                 bounds: (0.0, 2.0),
                 dimensions: 3,
                 tolerance: 0.5,
+                patience: 3,
                 seed: Some(7),
             })
             .expect("valid Adam args optimize successfully")
@@ -465,6 +529,144 @@ fn adam_early_stops_on_small_gradient() {
     );
     // The recorded iteration count is identical across runs with the same seed.
     assert_eq!(outcome.iterations_run, make().iterations_run);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `patience`: consecutive sub-tolerance iterations, not just one
+//
+// A single sub-tolerance gradient norm cannot be trusted, because the norm may
+// come from a minibatch that cancelled to exactly zero at a θ whose full-dataset
+// gradient is far from zero (the minibatch note beside C-5/C-7 in
+// `docs/CONTRACTS.md`). The optimizers cannot tell the two apart — `GradientOracle`
+// deliberately hides it — so they require `patience` *consecutive* iterations
+// below `tolerance`. These tests drive that rule directly with `ScriptedGradient`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Run QNG over a scripted gradient-norm sequence, returning the outcome. All
+/// non-`patience` knobs are fixed so only the script and `patience` vary.
+fn qng_over_script(norms: &[f64], patience: usize, max_iters: u32) -> OptimizationOutcome {
+    AlgorithmQNG
+        .optimize(AlgorithmQNGArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(ScriptedGradient::new(norms)),
+            max_iters,
+            learning_rate: 0.1,
+            bounds: (0.0, 2.0),
+            dimensions: 3,
+            tolerance: 0.01,
+            patience,
+            variance_oracle: Box::new(ConstVariance(1.0)),
+            tikhonov_reg: 0.05,
+            seed: Some(7),
+        })
+        .expect("valid QNG args optimize successfully")
+}
+
+/// Adam mirror of [`qng_over_script`].
+fn adam_over_script(norms: &[f64], patience: usize, max_iters: u32) -> OptimizationOutcome {
+    AlgorithmAdam
+        .optimize(AlgorithmAdamArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(ScriptedGradient::new(norms)),
+            max_iters,
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (0.0, 2.0),
+            dimensions: 3,
+            tolerance: 0.01,
+            patience,
+            seed: Some(7),
+        })
+        .expect("valid Adam args optimize successfully")
+}
+
+#[test]
+fn qng_patience_of_one_reproduces_the_single_iteration_rule() {
+    // `patience = 1` must be *exactly* the pre-`patience` behaviour — a design
+    // property of the field, not an accident of the counter's arithmetic. With a
+    // norm already below `tolerance` on the very first iteration, the run stops
+    // there, as the old `if grad_norm < tolerance { break }` did.
+    let outcome = qng_over_script(&[0.001], 1, 500);
+    assert!(outcome.converged, "expected convergence on iteration 1");
+    assert_eq!(outcome.iterations_run, 1);
+}
+
+#[test]
+fn qng_one_sub_tolerance_iteration_is_not_enough_beyond_patience_one() {
+    // The whole point of the fix: iteration 1 dips below `tolerance` (the shape a
+    // cancelling minibatch produces) and iteration 2 is back above it. With
+    // `patience = 3` the run must *not* stop on iteration 1 — it exhausts its
+    // budget, because the script never yields three consecutive small norms.
+    let outcome = qng_over_script(&[0.001, 5.0], 3, 6);
+    assert!(
+        !outcome.converged,
+        "a single sub-tolerance iteration must not report convergence"
+    );
+    assert_eq!(outcome.iterations_run, 6);
+}
+
+#[test]
+fn qng_patience_counts_consecutive_not_cumulative_sub_tolerance_iterations() {
+    // small, large, small, small → three sub-tolerance iterations in *total* but
+    // never three in a row, so the streak reset must keep `converged` false.
+    let interrupted = qng_over_script(&[0.001, 5.0, 0.001, 0.001], 3, 4);
+    assert!(
+        !interrupted.converged,
+        "three non-consecutive sub-tolerance iterations must not converge"
+    );
+    assert_eq!(interrupted.iterations_run, 4);
+
+    // The same prefix plus one more small iteration *does* reach three in a row,
+    // on iteration 5 — proving the counter resumed from 0 after the large norm
+    // rather than carrying the first small iteration over.
+    let sustained = qng_over_script(&[0.001, 5.0, 0.001, 0.001, 0.001], 3, 10);
+    assert!(
+        sustained.converged,
+        "expected convergence once 3 are consecutive"
+    );
+    assert_eq!(sustained.iterations_run, 5);
+}
+
+#[test]
+fn qng_converges_after_patience_consecutive_sub_tolerance_iterations() {
+    // Symmetric positive case: one large norm, then exactly `patience` small
+    // ones. The stop lands on the last of the three, never earlier.
+    let outcome = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
+    assert!(outcome.converged, "expected convergence on iteration 4");
+    assert_eq!(outcome.iterations_run, 4);
+
+    // With `patience = 2` the same script stops one iteration sooner, so the
+    // field really is what sets the streak length.
+    let impatient = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 2, 10);
+    assert!(impatient.converged);
+    assert_eq!(impatient.iterations_run, 3);
+}
+
+#[test]
+fn adam_patience_of_one_reproduces_the_single_iteration_rule() {
+    // Adam mirror: the rule lives in the shared convergence check, so both
+    // optimizers must honour `patience = 1` as the pre-`patience` behaviour.
+    let outcome = adam_over_script(&[0.001], 1, 500);
+    assert!(outcome.converged, "expected convergence on iteration 1");
+    assert_eq!(outcome.iterations_run, 1);
+}
+
+#[test]
+fn adam_converges_after_patience_consecutive_sub_tolerance_iterations() {
+    // Adam mirror of the positive case, including the reset: a lone small norm
+    // followed by a large one buys nothing.
+    let outcome = adam_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
+    assert!(outcome.converged, "expected convergence on iteration 4");
+    assert_eq!(outcome.iterations_run, 4);
+
+    let interrupted = adam_over_script(&[0.001, 5.0], 3, 6);
+    assert!(
+        !interrupted.converged,
+        "a single sub-tolerance iteration must not report convergence"
+    );
+    assert_eq!(interrupted.iterations_run, 6);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -625,6 +827,7 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
             bounds: (0.0, 2.0),
             dimensions: 2,
             tolerance: 0.0,
+            patience: 3,
             variance_oracle: Box::new(ConstVariance(0.0)),
             tikhonov_reg: 0.05,
             seed: Some(1),
@@ -650,6 +853,7 @@ fn qng_short_gradient_oracle_returns_error_not_panic() {
         bounds: (0.0, 2.0),
         dimensions: 2,
         tolerance: 0.0,
+        patience: 3,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -703,6 +907,7 @@ fn qng_rejects_empty_bounds() {
         bounds: (1.0, 1.0),
         dimensions: 2,
         tolerance: 0.0,
+        patience: 3,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -732,6 +937,7 @@ fn adam_short_gradient_oracle_returns_error_not_panic() {
         bounds: (0.0, 2.0),
         dimensions: 2,
         tolerance: 0.0,
+        patience: 3,
         seed: Some(1),
     });
     assert!(
@@ -761,6 +967,7 @@ fn adam_rejects_empty_bounds() {
         bounds: (1.0, 1.0),
         dimensions: 2,
         tolerance: 0.0,
+        patience: 3,
         seed: Some(1),
     });
     assert!(
@@ -902,6 +1109,7 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
                 bounds: (0.0, 2.0),
                 dimensions: 4,
                 tolerance: 0.0,
+                patience: 3,
                 variance_oracle: Box::new(ConstVariance(1.0)),
                 tikhonov_reg: 0.05,
                 seed: Some(seed),
@@ -934,6 +1142,7 @@ fn adam_best_params_fitness_invariant_holds_across_seeds() {
                 bounds: (0.0, 2.0),
                 dimensions: 4,
                 tolerance: 0.0,
+                patience: 3,
                 seed: Some(seed),
             })
             .expect("valid Adam args optimize successfully");
