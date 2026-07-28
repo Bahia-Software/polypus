@@ -4,7 +4,7 @@
 use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
-use crate::layers::RotationAxis;
+use crate::layers::{entanglement_pairs, RotationAxis};
 use crate::model::{LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit entangling gate used between rotation blocks.
@@ -134,35 +134,15 @@ fn emit_rotation_block(
 }
 
 /// Emit one entangling block over the logical positions of `active`. A no-op
-/// when fewer than two qubits are active.
+/// when fewer than two qubits are active — [`entanglement_pairs`] returns an
+/// empty list there, so the loop below simply does not run.
 fn emit_entangling_block(
     qc: &mut ParameterizedCircuit,
     active: &[usize],
     entangler: Entangler,
     entanglement: Entanglement,
 ) -> Result<(), QmlError> {
-    if active.len() < 2 {
-        return Ok(());
-    }
-    let n = active.len();
-    let pairs: Vec<(usize, usize)> = match entanglement {
-        Entanglement::Linear => (0..n - 1).map(|i| (i, i + 1)).collect(),
-        Entanglement::Circular => {
-            let mut pairs: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
-            pairs.push((n - 1, 0));
-            pairs
-        }
-        Entanglement::Full => {
-            let mut pairs = Vec::new();
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    pairs.push((i, j));
-                }
-            }
-            pairs
-        }
-    };
-    for (a, b) in pairs {
+    for (a, b) in entanglement_pairs(active.len(), entanglement) {
         // First position is control, second is target (both logical → physical
         // via `active`).
         let (control, target) = (active[a], active[b]);

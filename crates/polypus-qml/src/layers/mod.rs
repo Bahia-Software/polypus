@@ -42,6 +42,36 @@ pub(crate) fn odd_pairs(n: usize) -> Vec<(usize, usize)> {
     (0..(n - 1) / 2).map(|k| (2 * k + 1, 2 * k + 2)).collect()
 }
 
+/// The pairs of logical positions an [`Entanglement`] pattern selects over `n`
+/// active qubits: `Linear` → `(0,1),…,(n-2,n-1)`; `Circular` → `Linear` plus
+/// the wrap-around `(n-1,0)`; `Full` → every `(i,j)` with `i < j`, in
+/// `i`-major order. Fewer than two positions yields an empty list — the sole
+/// guard for the degenerate cases, so callers need none of their own (`n == 0`
+/// would underflow `n - 1`, and `Circular` on `n == 1` would emit the
+/// self-pair `(0,0)`). Shared by [`ansatz`] and [`encoders`].
+pub(crate) fn entanglement_pairs(n: usize, entanglement: Entanglement) -> Vec<(usize, usize)> {
+    if n < 2 {
+        return Vec::new();
+    }
+    match entanglement {
+        Entanglement::Linear => (0..n - 1).map(|i| (i, i + 1)).collect(),
+        Entanglement::Circular => {
+            let mut pairs: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
+            pairs.push((n - 1, 0));
+            pairs
+        }
+        Entanglement::Full => {
+            let mut pairs = Vec::new();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    pairs.push((i, j));
+                }
+            }
+            pairs
+        }
+    }
+}
+
 /// The rotation axis of a single-qubit rotation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -101,6 +131,69 @@ impl LayerOps for Layer {
             Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
             Layer::Conv(l) => l.emit(qc, alloc, x),
             Layer::Pool(l) => l.emit(qc, alloc, x),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_pairs_form_a_chain() {
+        assert_eq!(
+            entanglement_pairs(4, Entanglement::Linear),
+            vec![(0, 1), (1, 2), (2, 3)]
+        );
+        assert_eq!(
+            entanglement_pairs(3, Entanglement::Linear),
+            vec![(0, 1), (1, 2)]
+        );
+        assert_eq!(entanglement_pairs(2, Entanglement::Linear), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn circular_pairs_add_the_wraparound() {
+        assert_eq!(
+            entanglement_pairs(4, Entanglement::Circular),
+            vec![(0, 1), (1, 2), (2, 3), (3, 0)]
+        );
+        assert_eq!(
+            entanglement_pairs(3, Entanglement::Circular),
+            vec![(0, 1), (1, 2), (2, 0)]
+        );
+        // n == 2: the wrap-around (1,0) is a second, reversed pair on the same
+        // two positions — kept, since the gate is not always symmetric.
+        assert_eq!(
+            entanglement_pairs(2, Entanglement::Circular),
+            vec![(0, 1), (1, 0)]
+        );
+    }
+
+    #[test]
+    fn full_pairs_are_every_i_lt_j_in_i_major_order() {
+        assert_eq!(
+            entanglement_pairs(4, Entanglement::Full),
+            vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        );
+        assert_eq!(
+            entanglement_pairs(3, Entanglement::Full),
+            vec![(0, 1), (0, 2), (1, 2)]
+        );
+        assert_eq!(entanglement_pairs(2, Entanglement::Full), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn fewer_than_two_positions_yields_no_pairs() {
+        // The guard every caller relies on: `n - 1` must not underflow at
+        // n == 0, and `Circular` must not emit the self-pair (0,0) at n == 1.
+        for entanglement in [
+            Entanglement::Linear,
+            Entanglement::Circular,
+            Entanglement::Full,
+        ] {
+            assert_eq!(entanglement_pairs(0, entanglement), vec![]);
+            assert_eq!(entanglement_pairs(1, entanglement), vec![]);
         }
     }
 }
