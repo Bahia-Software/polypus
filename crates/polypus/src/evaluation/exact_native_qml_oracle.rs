@@ -578,4 +578,84 @@ mod tests {
         let theta = vec![0.2_f64; 8];
         assert_eq!(a.gradient_batch(&theta, 8), b.gradient_batch(&theta, 8));
     }
+
+    /// A six-sample problem whose last two samples are **contradictory**:
+    /// identical features, opposite labels. Used by the minibatch/early-stopping
+    /// investigation below.
+    fn contradictory_pair_problem() -> QmlProblem {
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(readout);
+        let ds = Dataset::from_rows(
+            &[
+                vec![0.30, 0.35],
+                vec![0.40, 0.30],
+                vec![2.80, 2.75],
+                vec![2.90, 2.80],
+                vec![1.55, 1.60],
+                vec![1.55, 1.60],
+            ],
+            &[-1.0, -1.0, 1.0, 1.0, -1.0, 1.0],
+        )
+        .unwrap();
+        let compiled = model.compile(ds.num_features()).unwrap();
+        QmlProblem::new(compiled, ds, Loss::Hinge).unwrap()
+    }
+
+    /// The analytic core of the minibatch / gradient-norm early-stopping
+    /// interaction (design doc §17): **a minibatch gradient can be exactly zero
+    /// at a `θ` where the full-dataset gradient is nowhere near zero.**
+    ///
+    /// For a hinge loss, two samples with identical features and opposite labels
+    /// have `e` and `de/dθ` in common, and their loss derivatives are `−y·de/dθ`,
+    /// so they cancel **term by term**: the pair's gradient is `0` in exact
+    /// arithmetic, not merely small. Every other sample keeps contributing, so the
+    /// full-dataset norm stays O(0.1–0.5) — two orders of magnitude above the
+    /// `tolerance = 0.01` that `polypus.Adam`/`polypus.QNG` default to.
+    ///
+    /// `AlgorithmQNGArgs`/`AlgorithmAdamArgs` compare exactly this per-iteration
+    /// norm against `tolerance` to set `converged`, so when minibatching hands
+    /// them the pair they stop on iteration 1. Because the norm is *exactly* zero,
+    /// no `tolerance`, however small, avoids it — see the write-up in the design
+    /// doc §17 and the note beside C-5/C-7 in `CONTRACTS.md`. This test pins the
+    /// numerical fact those documents rest on; it asserts nothing about whether
+    /// the convergence rule should change, which is an open design decision.
+    #[test]
+    fn minibatch_gradient_can_vanish_where_the_full_gradient_does_not() {
+        pyo3::prepare_freethreaded_python();
+        let norm = |g: &[f64]| g.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let dims = 8;
+
+        let full = oracle(contradictory_pair_problem(), OracleErrorSlot::new());
+        // The contradictory pair on its own — what a `batch_size = 2` minibatch
+        // draws whenever the shuffle puts samples 4 and 5 first.
+        let pair_only = full.problem.from_subset(&[4, 5]);
+        let pair = oracle(pair_only, OracleErrorSlot::new());
+
+        // Checked across several θ so the cancellation is shown to be structural,
+        // not a coincidence at one point of parameter space.
+        for theta_value in [0.15_f64, 0.5, 1.0, 2.0] {
+            let theta = vec![theta_value; dims];
+            let pair_norm = norm(&pair.gradient_batch(&theta, dims));
+            let full_norm = norm(&full.gradient_batch(&theta, dims));
+            assert_eq!(
+                pair_norm, 0.0,
+                "the contradictory pair's gradient must cancel exactly at θ = {theta_value}"
+            );
+            assert!(
+                full_norm > 0.2,
+                "the full-dataset gradient must stay far from zero at θ = {theta_value}, \
+                 got {full_norm}"
+            );
+        }
+    }
 }

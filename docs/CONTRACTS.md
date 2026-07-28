@@ -349,6 +349,41 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   against the whole training set, exactly as for a non-minibatch run — the
   minibatch is only the cheap per-iteration heuristic that steers the search.
 
+  **Minibatching interacts badly with gradient-norm early stopping — evaluated,
+  reproduces, fix pending a design decision.** `AlgorithmQNG` and
+  `AlgorithmAdam` set `converged` by comparing that iteration's
+  `‖∇fitness(θ)‖₂` against `tolerance`; under `batch_size` that is a *minibatch*
+  gradient, so a minibatch whose samples cancel each other can stop the run at
+  an arbitrary point. This is now measured rather than suspected. It is **not**
+  driven by shot noise: for a hinge loss, two samples with identical features and
+  opposite labels have their loss derivatives cancel term by term, so a minibatch
+  of exactly that pair has gradient **exactly** zero while the full-dataset norm
+  is O(0.1–0.5) — two orders of magnitude above the `tolerance = 0.01` that
+  `polypus.Adam`/`polypus.QNG` default to. Consequences, all reproducible from
+  the public API (`test_qml_native.py::TestNativeQmlTrainMinibatch`, plus the
+  norms themselves in `exact_native_qml_oracle.rs`):
+
+  - the run stops on iteration 1 with `converged = True`, having barely moved
+    from its random initialization, where the same configuration without
+    `batch_size` uses all its iterations and reaches the optimum;
+  - lowering `tolerance` is **not** a mitigation — the norm is exactly zero, so
+    it falls below any threshold, `1e-12` included;
+  - QNG and Adam behave identically, since the rule lives in the convergence
+    check rather than in one optimizer;
+  - the trigger is *cancellation within one minibatch*, not minibatching as
+    such: on a separable dataset with no contradictory samples, no seed in a
+    ten-seed sweep stopped early.
+
+  **C-5 is not violated.** `best_fitness` remains the full-dataset fitness of
+  the returned `best_params` thanks to the final recompute above, so the reported
+  number is honest; what a spurious stop costs is the optimization itself and the
+  meaning of the `converged` flag. Changing the convergence rule (e.g. testing
+  the norm against the full dataset, or requiring N consecutive sub-tolerance
+  iterations) would alter `AlgorithmQNG`/`AlgorithmAdam` semantics for **every**
+  caller, minibatched or not, so it is deliberately left open here rather than
+  patched. Until it is decided, treat `converged = True` from a minibatched
+  gradient-optimizer run as unreliable and read `best_fitness` instead.
+
 ### The run manifest (return shapes)
 
 - `run_quantum_circuit` returns a **`RunResult`** exposing:

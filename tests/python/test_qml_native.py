@@ -450,6 +450,114 @@ class TestNativeQmlTrainMinibatch:
                 batch_size=6,
             )
 
+    def test_gradient_norm_early_stop_can_fire_on_a_minibatch(self):
+        """**Characterization test, not an endorsement.** `AlgorithmAdam` and
+        `AlgorithmQNG` decide convergence by comparing `‖∇fitness(θ)‖₂` against
+        `tolerance`, and under `batch_size` that norm is a *minibatch* gradient.
+        This pins what today's code then does, so the behaviour cannot change
+        unnoticed while the fix is an open design decision (design doc §17, and
+        the note beside C-5/C-7 in `CONTRACTS.md`).
+
+        The trigger is structural, not shot noise. `_hard_dataset`'s last two
+        samples are contradictory — identical features, opposite labels — so for a
+        hinge loss their gradient contributions cancel term by term and a
+        `batch_size=2` minibatch that draws exactly that pair has a gradient of
+        **exactly** zero. `seed=11` is such a case on the first gradient call.
+        (`crates/polypus/src/evaluation/exact_native_qml_oracle.rs` proves the two
+        norms directly: 0 for the pair against > 0.2 for the full dataset.)
+
+        The consequence is that the optimizer stops on iteration 1 and reports
+        `converged=True` having barely moved from its random initialization, while
+        the same run without `batch_size` uses all 60 iterations and reaches the
+        analytic optimum near −1/3. The reported `best_fitness` stays honest
+        either way — the full-dataset recompute guarantees C-5 — so what is lost
+        is the optimization itself and the meaning of `converged`, not the
+        fitness number."""
+        import polypus
+
+        def run(batch_size, tolerance=0.01):
+            return polypus.qml.train(
+                _model(),
+                self._hard_dataset(),
+                method=polypus.Adam(max_iters=60, tolerance=tolerance),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_early_stop",
+                seed=11,
+                exact=True,
+                batch_size=batch_size,
+            )
+
+        full = run(batch_size=None)
+        assert not full.converged and full.iterations_run == 60
+        # Near the analytic −1/3 bound the contradictory pair imposes.
+        assert -0.40 < full.best_fitness < -0.30
+
+        mb = run(batch_size=2)
+        assert mb.converged and mb.iterations_run == 1
+        # Far worse than the full run: this is essentially the random init.
+        assert mb.best_fitness < -1.0
+
+        # A tighter tolerance is *not* a mitigation: the minibatch norm is exactly
+        # zero, so it falls below any threshold whatsoever.
+        for tolerance in (1e-6, 1e-12):
+            tight = run(batch_size=2, tolerance=tolerance)
+            assert tight.converged and tight.iterations_run == 1
+            assert tight.best_fitness == mb.best_fitness
+
+    def test_gradient_norm_early_stop_affects_qng_identically(self):
+        # QNG shares the same `‖∇fitness‖ < tolerance` rule, so it stops the same
+        # way on the same minibatch — the interaction is a property of the
+        # convergence check, not of one optimizer.
+        import polypus
+
+        def run(batch_size):
+            return polypus.qml.train(
+                _model(),
+                self._hard_dataset(),
+                method=polypus.QNG(
+                    variance_function=lambda *_: 0.25, max_iters=60, tolerance=0.01
+                ),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_early_stop_qng",
+                seed=11,
+                exact=True,
+                batch_size=batch_size,
+            )
+
+        assert not run(batch_size=None).converged
+        mb = run(batch_size=2)
+        assert mb.converged and mb.iterations_run == 1
+
+    def test_early_stop_does_not_fire_without_cancelling_structure(self):
+        # The scope of the interaction: on a separable dataset with no
+        # contradictory samples, minibatch gradient norms stay well above the
+        # default tolerance, and no seed in this sweep stops early. So the risk
+        # tracks *cancellation between samples of one minibatch*, not minibatching
+        # in general — the distinction the design doc's conclusion rests on.
+        import polypus
+
+        for seed in range(1, 11):
+            r = polypus.qml.train(
+                _model(),
+                _dataset(),  # 6 well-separated samples, no contradictory pair
+                method=polypus.Adam(max_iters=40, tolerance=0.01),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_mb_no_early_stop",
+                seed=seed,
+                exact=True,
+                batch_size=2,
+            )
+            assert r.iterations_run > 3, (
+                f"seed {seed} stopped after {r.iterations_run} iterations on a "
+                "dataset with no cancelling structure"
+            )
+
     def test_batch_size_rejected_on_qiskit_path(self):
         import numpy as np
         import polypus
