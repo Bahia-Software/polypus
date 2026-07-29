@@ -189,6 +189,126 @@ fn parse_pauli_string(factors: Vec<(String, usize)>) -> PyResult<PauliString> {
     PauliString::new(terms).map_err(validation_to_py_err)
 }
 
+/// Build the [`Observable`] a **bare** `[(pauli, position), …]` list denotes:
+/// exactly one Pauli string with coefficient `1.0`.
+///
+/// The single definition of that "implicit `1.0`" rule, shared by
+/// [`Model::readout`]'s bare-list branch and its [`PauliTerm`] branch — a
+/// `PauliTerm` *is* the bare form with a nicer spelling, so the two must build
+/// the identical observable, and they do because they run the same code.
+fn bare_observable(factors: Vec<(String, usize)>) -> PyResult<Observable> {
+    let string = parse_pauli_string(factors)?;
+    Observable::new(vec![(1.0, string)]).map_err(validation_to_py_err)
+}
+
+/// A pure product of Pauli factors on distinct qubits — `Z₀`, `Z₀Z₁`, `X₁Y₂` —
+/// spelled in Python as `Z(0)`, `Z(0) @ Z(1)`, `X(1) @ Y(2)` (design doc §17).
+///
+/// This is the *ergonomic* spelling of the bare `[(pauli, position), …]` list
+/// that [`Model::readout`] has always accepted, and it is exactly equivalent to
+/// it: one term, coefficient `1.0` implicit. `[("z", 0), ("z", 1)]` and
+/// `Z(0) @ Z(1)` build the identical observable, because
+/// [`Model::readout`] runs both through the same [`bare_observable`].
+///
+/// **Deliberately no coefficient and no sum.** `+`, `*` and `__rmul__` are *not*
+/// implemented: a symbolic algebra over Pauli terms is a much larger surface
+/// than this type is meant to be, and the weighted sum `Σ cᵢ·Pᵢ` already has an
+/// explicit spelling in [`Observable`](PyObservable), whose constructor takes
+/// `(coefficient, term)` pairs. So the three spellings divide cleanly: bare list
+/// for the literal form, `PauliTerm` for a coefficient-free product, and
+/// `Observable` as soon as coefficients or several terms are involved.
+///
+/// The factors are stored in the Python spelling (`Vec<(String, usize)>`) rather
+/// than as a [`PauliString`]: that is what keeps `@` and `readout` able to reuse
+/// [`parse_pauli_string`] — the one place a Pauli string is decoded and
+/// validated — and it is also forced by `PauliString`'s factors being
+/// `pub(crate)` in `polypus-qml`, hence unreadable from here. Validation is
+/// therefore **eager**, in `@` itself: `Z(0) @ Z(0)` is a `ValueError` at the
+/// `@`, not a surprise deferred to `readout()`.
+#[pyclass(module = "polypus.qml", name = "PauliTerm", frozen)]
+pub struct PauliTerm {
+    /// The factors in the order written, each `(pauli, position)` — the same
+    /// spelling `readout`'s bare form uses. Unsorted by design: it keeps
+    /// [`__repr__`](Self::__repr__) faithful to how the term was built, and the
+    /// canonical order is `PauliString::new`'s business, applied downstream.
+    factors: Vec<(String, usize)>,
+}
+
+impl PauliTerm {
+    /// The single-factor term a `Z`/`X`/`Y` call produces.
+    ///
+    /// Takes the Pauli already spelled the Python way; the three constructors
+    /// pass a literal, so no factor built here can fail [`parse_pauli`] and the
+    /// constructor needs no `Result`. A single factor cannot repeat a position
+    /// either, so there is nothing else to validate until two terms meet in
+    /// [`__matmul__`](Self::__matmul__).
+    fn single(pauli: &str, position: usize) -> Self {
+        PauliTerm {
+            factors: vec![(pauli.to_string(), position)],
+        }
+    }
+}
+
+#[pymethods]
+impl PauliTerm {
+    /// `self @ other`: the product of the two terms, i.e. the union of their
+    /// factors.
+    ///
+    /// Validated **here**, not at `readout()`: the combined factors go through
+    /// [`parse_pauli_string`] immediately, so a position claimed by both operands
+    /// (`Z(0) @ Z(0)`, `Z(0) @ X(0)`) raises `ValueError`
+    /// (`ValidationError::DuplicatePauliPosition`) at the point the mistake was
+    /// written. The parsed string is discarded — it is built again, from the same
+    /// factors and the same function, when the term reaches `readout()`; a Pauli
+    /// string is a handful of pairs, and one shared validation path is worth more
+    /// than saving that.
+    fn __matmul__(&self, other: PyRef<'_, Self>) -> PyResult<Self> {
+        let mut factors = self.factors.clone();
+        factors.extend(other.factors.iter().cloned());
+        bare_observable(factors.clone())?;
+        Ok(PauliTerm { factors })
+    }
+
+    /// `PauliTerm(Z0 @ Z1)` — the factors in the order written, echoing the
+    /// syntax that builds them.
+    fn __repr__(&self) -> String {
+        let factors: Vec<String> = self
+            .factors
+            .iter()
+            .map(|(pauli, position)| format!("{}{}", pauli.to_uppercase(), position))
+            .collect();
+        format!("PauliTerm({})", factors.join(" @ "))
+    }
+}
+
+/// `polypus.qml.Z(position)` — the single-factor Pauli-`Z` term on `position`.
+///
+/// A free function rather than a `PauliTerm` classmethod or a `Pauli` enum, so
+/// the readout reads as the algebra does: `Z(0) @ Z(1)` instead of
+/// `[("z", 0), ("z", 1)]`.
+#[pyfunction(name = "Z")]
+pub fn pauli_z(position: usize) -> PauliTerm {
+    PauliTerm::single("z", position)
+}
+
+/// `polypus.qml.X(position)` — the single-factor Pauli-`X` term on `position`.
+///
+/// An `X` readout is measured by inserting the basis change at `compile` time,
+/// and is supported only when the whole readout resolves to one basis group
+/// (contract C-8) — a constraint of the readout, not of this spelling, and
+/// reported by `compile` exactly as it is for the bare form.
+#[pyfunction(name = "X")]
+pub fn pauli_x(position: usize) -> PauliTerm {
+    PauliTerm::single("x", position)
+}
+
+/// `polypus.qml.Y(position)` — the single-factor Pauli-`Y` term on `position`.
+/// The basis-group constraint noted on [`pauli_x`] applies equally.
+#[pyfunction(name = "Y")]
+pub fn pauli_y(position: usize) -> PauliTerm {
+    PauliTerm::single("y", position)
+}
+
 /// Parse a loss string into a [`Loss`]. Strict: an unrecognised value is a
 /// `ValueError` listing the valid options (decision D).
 fn parse_loss(loss: &str) -> PyResult<Loss> {
@@ -467,14 +587,21 @@ impl Model {
 
     /// Attach the readout: the `observables` to measure plus the `decision` rule.
     ///
-    /// Each observable is **either** a bare list of `(pauli, position)` factors —
-    /// one Pauli string with implicit coefficient `1.0`, the form this method has
-    /// always accepted — **or** a [`polypus.qml.Observable`](PyObservable), the
-    /// weighted sum `Σ cᵢ·Pᵢ` (design doc §17). The two are distinguished by
-    /// *type*, never by guessing at the shape of the tuples: an element that is
-    /// an `Observable` instance is used as such, and anything else is extracted
-    /// as the bare form. The two forms may be mixed freely in one call — a
-    /// multiclass `"argmax"` can spell one class bare and another weighted.
+    /// Each observable is **one of three** forms (design doc §17):
+    ///
+    /// - a bare list of `(pauli, position)` factors — one Pauli string with
+    ///   implicit coefficient `1.0`, the form this method has always accepted;
+    /// - a [`polypus.qml.PauliTerm`](PauliTerm), i.e. `Z(0)` or `Z(0) @ Z(1)`,
+    ///   which is the *exact* equivalent of the bare form (one term, coefficient
+    ///   `1.0`) written as the algebra reads;
+    /// - a [`polypus.qml.Observable`](PyObservable), the weighted sum
+    ///   `Σ cᵢ·Pᵢ` — the only form that can carry coefficients or several terms.
+    ///
+    /// The three are distinguished by *type*, never by guessing at the shape of
+    /// the tuples: `Observable` first, then `PauliTerm`, and anything else is
+    /// extracted as the bare form. They may be mixed freely in one call — a
+    /// multiclass `"argmax"` can spell one class bare, one as a `PauliTerm` and
+    /// one weighted.
     ///
     /// `decision` is `"sign"`/`"threshold"`/`"argmax"`/`"raw"`; `threshold` is
     /// required for `"threshold"` and rejected otherwise.
@@ -489,20 +616,26 @@ impl Model {
         let mut parsed = Vec::with_capacity(observables.len());
         for observable in observables {
             // Type dispatch, in the same spirit as `qml.train`'s first-argument
-            // dispatch: try the dedicated type first, fall back to the bare form.
-            let observable = match observable.extract::<PyRef<'_, PyObservable>>() {
-                Ok(weighted) => weighted.inner.clone(),
-                Err(_) => {
-                    let factors = observable.extract::<Vec<(String, usize)>>().map_err(|_| {
-                        PyTypeError::new_err(
-                            "each observable must be a list of (pauli, position) factors \
-                             (e.g. [(\"z\", 0)]) or a polypus.qml.Observable",
-                        )
-                    })?;
-                    let string = parse_pauli_string(factors)?;
-                    // The bare form is exactly one term with coefficient 1.0.
-                    Observable::new(vec![(1.0, string)]).map_err(validation_to_py_err)?
-                }
+            // dispatch: try each dedicated type first, fall back to the bare form.
+            // The order (Observable → PauliTerm → bare) is the order of
+            // decreasing specificity; the two dedicated types are unrelated
+            // pyclasses and neither extracts as a sequence, so no element can be
+            // claimed by the wrong branch.
+            let observable = if let Ok(weighted) = observable.extract::<PyRef<'_, PyObservable>>() {
+                weighted.inner.clone()
+            } else if let Ok(term) = observable.extract::<PyRef<'_, PauliTerm>>() {
+                // A `PauliTerm` is the bare form, so it takes the bare form's
+                // path verbatim — same parse, same implicit coefficient 1.0.
+                bare_observable(term.factors.clone())?
+            } else {
+                let factors = observable.extract::<Vec<(String, usize)>>().map_err(|_| {
+                    PyTypeError::new_err(
+                        "each observable must be a list of (pauli, position) factors \
+                         (e.g. [(\"z\", 0)]), a polypus.qml.PauliTerm (e.g. Z(0) @ Z(1)) \
+                         or a polypus.qml.Observable",
+                    )
+                })?;
+                bare_observable(factors)?
             };
             parsed.push(observable);
         }

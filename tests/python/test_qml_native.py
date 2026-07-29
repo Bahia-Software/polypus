@@ -2033,6 +2033,7 @@ class TestQiskitPathStillReturnsTrainResult:
         # And the generic `polypus.train` is untouched as well.
         assert not isinstance(result, polypus.qml.QmlTrainResult)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 14. `Model.train(dataset, ...)` — the fluent spelling of the native path (§17)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2270,3 +2271,212 @@ class TestModelTrainValidation:
                 **_method_train_kwargs(),
             )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. `Z(0)`, `X(0)`, `Y(0)` and `@` — the Pauli-term spelling (§17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Even with `Observable`, the *simple* readout was still nested tuples:
+# `[("z", 0)]`, `[("z", 0), ("z", 1)]`. `polypus.qml.Z/X/Y(position)` build a
+# `PauliTerm`, and `@` multiplies two of them — so `Z(0) @ Z(1)` spells `Z₀Z₁`.
+#
+# A `PauliTerm` is the *exact* equivalent of the bare list: one term, coefficient
+# `1.0`. That is what these tests pin — bit-for-bit equality of the exact
+# expectation, the same technique section 12 used for `Observable`, not merely
+# "the call does not raise". Coefficients and sums stay `Observable`'s job:
+# `PauliTerm` deliberately has no `+`, `*` or `__rmul__`.
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestPauliTermEqualsTheBareForm:
+    @pytest.mark.parametrize("pauli", ["z", "x", "y"])
+    def test_single_factor_matches_its_bare_spelling(self, pauli):
+        # All three constructors, so none of them is wired to the wrong Pauli.
+        # A single-Pauli readout is one basis group, so X and Y compile too (C-8).
+        import polypus
+
+        term = getattr(polypus.qml, pauli.upper())(0)
+        assert _obs_predict([[(pauli, 0)]]) == _obs_predict([term])
+
+    def test_z0_matches_the_analytic_expectation(self):
+        import polypus
+
+        got = _obs_predict([polypus.qml.Z(0)])
+        assert got == _obs_predict([[("z", 0)]])
+        assert got == _expected_z(_OBS_SAMPLE, _OBS_THETA, [0])
+
+    def test_matmul_product_matches_the_two_factor_bare_form(self):
+        import polypus
+
+        got = _obs_predict([polypus.qml.Z(0) @ polypus.qml.Z(1)])
+        assert got == _obs_predict([[("z", 0), ("z", 1)]])
+        assert got == _expected_z(_OBS_SAMPLE, _OBS_THETA, [0, 1])
+
+    def test_matmul_is_order_insensitive_like_the_bare_form(self):
+        # `PauliString::new` canonicalises by position, so the written order of
+        # commuting factors on distinct qubits cannot change the observable.
+        import polypus
+
+        assert _obs_predict([polypus.qml.Z(1) @ polypus.qml.Z(0)]) == _obs_predict(
+            [[("z", 0), ("z", 1)]]
+        )
+
+    def test_explicit_observable_spelling_agrees_as_well(self):
+        # The three spellings of the *same* one-term observable, pinned together.
+        import polypus
+
+        assert (
+            _obs_predict([[("z", 0), ("z", 1)]])
+            == _obs_predict([polypus.qml.Z(0) @ polypus.qml.Z(1)])
+            == _obs_predict(
+                [polypus.qml.Observable([(1.0, [("z", 0), ("z", 1)])])]
+            )
+        )
+
+    def test_repr_echoes_the_construction_syntax(self):
+        import polypus
+
+        assert repr(polypus.qml.Z(0)) == "PauliTerm(Z0)"
+        assert repr(polypus.qml.X(1) @ polypus.qml.Y(2)) == "PauliTerm(X1 @ Y2)"
+
+    def test_pauli_term_trains_end_to_end(self):
+        # The term travels the whole native training path, not just inference.
+        import math
+
+        import polypus
+
+        model = _product_state_model(
+            [polypus.qml.Z(0) @ polypus.qml.Z(1)], decision="sign"
+        )
+        result = model.train(
+            _dataset(),
+            method=polypus.DE(population_size=6, generations=4),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_pauli_term_train",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 2
+        assert math.isfinite(result.best_fitness)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestPauliTermValidatesEagerly:
+    """A repeated position is rejected by `@` itself, not deferred to
+    `readout()` — the error lands where the mistake was written."""
+
+    @pytest.mark.parametrize(
+        "second", ["Z", "X", "Y"], ids=["same_pauli", "x_on_z", "y_on_z"]
+    )
+    def test_repeated_position_rejected_at_the_matmul(self, second):
+        import polypus
+
+        left = polypus.qml.Z(0)
+        right = getattr(polypus.qml, second)(0)
+        with pytest.raises(ValueError, match="position"):
+            left @ right
+
+    def test_the_error_happens_with_no_readout_in_sight(self):
+        # The proof of eagerness: the expression raises on its own, with no
+        # `Model` and no `readout()` anywhere — so the check cannot be coming
+        # from there, and a caller never has to reach `readout` to hear about it.
+        import polypus
+
+        with pytest.raises(ValueError, match="position"):
+            polypus.qml.Z(0) @ polypus.qml.Z(0)
+
+    def test_the_bare_form_by_contrast_is_only_checked_at_readout(self):
+        # The contrast that makes "eager" mean something: the *same* mistake
+        # written as a bare list cannot be caught until `readout()` parses it,
+        # because building the list is just building a list. Both end at the same
+        # `ValueError` — the difference is only when.
+        import polypus
+
+        bad = [("z", 0), ("z", 0)]  # constructing this cannot fail
+        model = polypus.qml.Model(2).angle_encoder(axis="ry").real_amplitudes(reps=1)
+        with pytest.raises(ValueError, match="position"):
+            model.readout(observables=[bad], decision="raw")
+
+    def test_a_longer_chain_is_validated_at_every_step(self):
+        import polypus
+
+        # Valid all the way: three distinct positions.
+        assert repr(
+            polypus.qml.Z(0) @ polypus.qml.Z(1) @ polypus.qml.X(2)
+        ) == "PauliTerm(Z0 @ Z1 @ X2)"
+        # The clash appears only at the third factor, and is caught there.
+        with pytest.raises(ValueError, match="position"):
+            polypus.qml.Z(0) @ polypus.qml.Z(1) @ polypus.qml.X(1)
+
+    def test_matmul_with_a_non_term_is_a_type_error(self):
+        import polypus
+
+        with pytest.raises(TypeError):
+            polypus.qml.Z(0) @ [("z", 1)]
+        with pytest.raises(TypeError):
+            polypus.qml.Z(0) @ polypus.qml.Observable([(1.0, [("z", 1)])])
+
+    def test_no_symbolic_sum_or_scaling(self):
+        # Deliberately out of scope: `Observable(...)` is the spelling for those,
+        # and this pins that no half-finished algebra crept in.
+        import polypus
+
+        with pytest.raises(TypeError):
+            polypus.qml.Z(0) + polypus.qml.Z(1)
+        with pytest.raises(TypeError):
+            2.0 * polypus.qml.Z(0)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestThreeReadoutFormsCoexist:
+    """All three spellings in the *same* `readout` call, on a 3-class `argmax`:
+    class 0 bare `⟨Z₀⟩`, class 1 the `PauliTerm` `Z(1)`, class 2 a weighted
+    `Observable`. Each sample below is chosen so a different class wins, so a
+    silently-dropped observable could not pass."""
+
+    # (sample, winning class) — computed analytically below, one win per form.
+    CASES = [([0.0, 0.1], 0), ([0.8, 0.0], 1), ([1.0, 0.8], 2)]
+
+    @staticmethod
+    def _observables():
+        import polypus
+
+        return [
+            [("z", 0)],
+            polypus.qml.Z(1),
+            polypus.qml.Observable([(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])]),
+        ]
+
+    def test_argmax_picks_the_analytic_winner(self):
+        observables = self._observables()
+        winners = set()
+        for sample, expected_class in self.CASES:
+            z0 = _expected_z(sample, _OBS_THETA, [0])
+            z1 = _expected_z(sample, _OBS_THETA, [1])
+            z0z1 = _expected_z(sample, _OBS_THETA, [0, 1])
+            scores = [z0, z1, 0.5 * z0 + 1.5 * z0z1]
+            # The hand-computed winner, so the assertion is pinned to the
+            # analytic values rather than to whatever the model returns.
+            assert max(range(3), key=lambda i: scores[i]) == expected_class
+            got = _obs_predict(observables, sample=sample, decision="argmax")
+            assert got == float(expected_class)
+            winners.add(expected_class)
+        # Every form won at least once.
+        assert winners == {0, 1, 2}
+
+    def test_readout_still_rejects_an_element_that_is_no_form_at_all(self):
+        # The message now names all three forms; the `Observable` mention the
+        # phase-17 test pins is still there.
+        import polypus
+
+        model = polypus.qml.Model(2).angle_encoder(axis="ry").real_amplitudes(reps=1)
+        with pytest.raises(TypeError) as excinfo:
+            model.readout(observables=[42], decision="raw")
+        message = str(excinfo.value)
+        for form in ("(pauli, position)", "polypus.qml.PauliTerm", "polypus.qml.Observable"):
+            assert form in message
