@@ -453,6 +453,14 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     pyclasses, so `isinstance(result, TrainResult)` is `False` on the native
     path. Read the fields, not the type. `polypus.train` (the generic entry
     point) is untouched and always returns `TrainResult`.
+  - **`Model.train(dataset, ...)`** is the method spelling of that native path
+    and therefore returns the same `QmlTrainResult`. It is the *same* run:
+    identical arguments and seed produce a byte-identical result either way,
+    since the method delegates to the same native implementation. Its kwargs are
+    `qml.train`'s minus `ansatz` (the dataset takes that positional slot) and the
+    two Qiskit-path ones, and `method` is a required positional argument there.
+    `qml.train` remains the only entry point for a Qiskit feature map, which has
+    no `Model` to hang a method off.
 
 The effective `seed` on every one of these result types is what lets a caller log
 a run and replay it exactly.
@@ -518,24 +526,41 @@ guarantees:
   the optimizer consumes under C-5.
 
 **Readout observables from Python (`Model.readout`).** Each element of
-`observables` is **either** a bare list of `(pauli, position)` factors — one
-Pauli string with implicit coefficient `1.0` — **or** a `polypus.qml.Observable`,
-the weighted sum `O = Σ cᵢ·Pᵢ` the Rust `Observable` has always supported
-(`Observable([(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])])` is `0.5·Z₀ +
-1.5·Z₀Z₁`). Each term of an `Observable` is exactly the same `(pauli, position)`
-list the bare form is, so `Observable([(1.0, [("z", 0)])])` builds the identical
-observable as `[("z", 0)]`.
+`observables` is **one of three** forms:
 
-The type is **additive**, not a replacement: the bare form's meaning is
-unchanged, and the two spellings may be mixed inside one `readout` call (a
-multiclass `"argmax"` may spell one class bare and another weighted). The two
-are distinguished by **type** — an element that is an `Observable` instance is
-used as such, anything else is extracted as the bare form — never by guessing at
-the shape of the tuples, so neither form can be silently reinterpreted as the
-other. A non-finite coefficient is a `ValueError`
-(`ValidationError::NonFiniteCoefficient`, reporting the offending term index),
-as are an unknown Pauli and a position repeated inside one term; an element that
-is neither form is a `TypeError`.
+- a bare list of `(pauli, position)` factors — one Pauli string with implicit
+  coefficient `1.0`;
+- a `polypus.qml.PauliTerm`, built by the free functions
+  `polypus.qml.Z/X/Y(position)` and multiplied with `@`: `Z(0)` and
+  `Z(0) @ Z(1)`. This is the *exact* equivalent of the bare form — one term,
+  coefficient `1.0` — so `Z(0)` builds the identical observable as `[("z", 0)]`
+  and `Z(0) @ Z(1)` the identical one as `[("z", 0), ("z", 1)]`, guaranteed
+  structurally: both go through one shared helper on the bindings side. A
+  `PauliTerm` carries **no** coefficient and is **never** a sum — it has no `+`,
+  `*` or `__rmul__`;
+- a `polypus.qml.Observable`, the weighted sum `O = Σ cᵢ·Pᵢ` the Rust
+  `Observable` has always supported (`Observable([(0.5, [("z", 0)]), (1.5,
+  [("z", 0), ("z", 1)])])` is `0.5·Z₀ + 1.5·Z₀Z₁`) — the only form that can
+  carry coefficients or several terms. Each term of an `Observable` is exactly
+  the same `(pauli, position)` list the bare form is, so
+  `Observable([(1.0, [("z", 0)])])` builds the identical observable as
+  `[("z", 0)]`.
+
+The two dedicated types are **additive**, not replacements: the bare form's
+meaning is unchanged, and all three spellings may be mixed inside one `readout`
+call (a multiclass `"argmax"` may spell one class bare, one as a `PauliTerm` and
+one weighted). They are distinguished by **type**, in order of decreasing
+specificity — `Observable`, then `PauliTerm`, then anything else extracted as the
+bare form — never by guessing at the shape of the tuples, so no form can be
+silently reinterpreted as another. A non-finite coefficient is a `ValueError`
+(`ValidationError::NonFiniteCoefficient`, reporting the offending term index), as
+are an unknown Pauli and a position repeated inside one term; an element that is
+none of the three forms is a `TypeError` naming all three.
+
+A repeated position is rejected **eagerly** in the `PauliTerm` form: `Z(0) @ Z(0)`
+raises at the `@`, before any `readout` call, where the bare form's equivalent
+`[("z", 0), ("z", 0)]` can only be caught once `readout` parses it. Same error,
+earlier.
 
 **Readout measurement basis (single group).** A readout may measure `X`/`Y`
 Paulis, not just `Z`: `compile` inserts the basis change (`H` for `X`; `Sdg`
