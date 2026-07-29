@@ -173,6 +173,21 @@ fn parse_pauli(pauli: &str) -> PyResult<Pauli> {
     }
 }
 
+/// Parse a list of `(pauli, position)` factors into a [`PauliString`].
+///
+/// The one place the Python spelling of a Pauli string is decoded: both
+/// [`Model::readout`]'s bare form and [`PyObservable::new`]'s per-term lists go
+/// through it, so the two can never drift apart in what they accept or in the
+/// error they raise (an unknown Pauli from [`parse_pauli`], a repeated position
+/// from `PauliString::new`).
+fn parse_pauli_string(factors: Vec<(String, usize)>) -> PyResult<PauliString> {
+    let mut terms = Vec::with_capacity(factors.len());
+    for (pauli, position) in factors {
+        terms.push((position, parse_pauli(&pauli)?));
+    }
+    PauliString::new(terms).map_err(validation_to_py_err)
+}
+
 /// Parse a loss string into a [`Loss`]. Strict: an unrecognised value is a
 /// `ValueError` listing the valid options (decision D).
 fn parse_loss(loss: &str) -> PyResult<Loss> {
@@ -208,6 +223,49 @@ fn parse_decision(decision: &str, threshold: Option<f64>) -> PyResult<Decision> 
         other => Err(PyValueError::new_err(format!(
             "unknown decision '{other}'; expected \"sign\", \"threshold\", \"argmax\" or \"raw\""
         ))),
+    }
+}
+
+/// A weighted sum of Pauli strings, `O = Σ cᵢ·Pᵢ`, mirroring `polypus-qml`'s
+/// [`Observable`] for Python.
+///
+/// This is the **additive** way to spell a readout observable: `Model.readout`
+/// still accepts the bare `[(pauli, position), …]` list it always has (one Pauli
+/// string, coefficient `1.0`), and this type is what a caller reaches for when
+/// they need more than one term — `0.5·Z₀ + 1.5·Z₀Z₁`, say, which the bare form
+/// cannot express. The Rust `Observable` has supported weighted sums since
+/// phase 1; only the Python spelling was missing (design doc §17).
+///
+/// The constructor takes `[(coefficient, term), …]`, where each `term` is
+/// exactly the same `(pauli, position)` list `readout` accepts on its own — so
+/// `Observable([(1.0, [("z", 0)])])` is the explicit spelling of the bare
+/// `[("z", 0)]`, and builds the identical observable.
+///
+/// A non-finite coefficient (`NaN`/`inf`) is a `ValueError`
+/// (`ValidationError::NonFiniteCoefficient`), never a panic; so is an unknown
+/// Pauli or a position repeated inside one term.
+///
+/// The name is `PyObservable` in Rust only because `Observable` here is the
+/// `polypus-qml` type it wraps; Python sees `polypus.qml.Observable`.
+#[pyclass(module = "polypus.qml", name = "Observable")]
+pub struct PyObservable {
+    inner: Observable,
+}
+
+#[pymethods]
+impl PyObservable {
+    #[new]
+    fn new(terms: Vec<(f64, Vec<(String, usize)>)>) -> PyResult<Self> {
+        let mut parsed = Vec::with_capacity(terms.len());
+        for (coefficient, factors) in terms {
+            parsed.push((coefficient, parse_pauli_string(factors)?));
+        }
+        let inner = Observable::new(parsed).map_err(validation_to_py_err)?;
+        Ok(PyObservable { inner })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Observable(num_terms={})", self.inner.terms.len())
     }
 }
 
@@ -408,27 +466,44 @@ impl Model {
 
     /// Attach the readout: the `observables` to measure plus the `decision` rule.
     ///
-    /// Each observable is a list of `(pauli, position)` factors of a single Pauli
-    /// string with implicit coefficient `1.0` (no weighted sums from Python in
-    /// v1 — decision C). `decision` is `"sign"`/`"threshold"`/`"argmax"`/`"raw"`;
-    /// `threshold` is required for `"threshold"` and rejected otherwise.
+    /// Each observable is **either** a bare list of `(pauli, position)` factors —
+    /// one Pauli string with implicit coefficient `1.0`, the form this method has
+    /// always accepted — **or** a [`polypus.qml.Observable`](PyObservable), the
+    /// weighted sum `Σ cᵢ·Pᵢ` (design doc §17). The two are distinguished by
+    /// *type*, never by guessing at the shape of the tuples: an element that is
+    /// an `Observable` instance is used as such, and anything else is extracted
+    /// as the bare form. The two forms may be mixed freely in one call — a
+    /// multiclass `"argmax"` can spell one class bare and another weighted.
+    ///
+    /// `decision` is `"sign"`/`"threshold"`/`"argmax"`/`"raw"`; `threshold` is
+    /// required for `"threshold"` and rejected otherwise.
     #[pyo3(signature = (observables, decision, threshold=None))]
     fn readout<'py>(
         mut slf: PyRefMut<'py, Self>,
-        observables: Vec<Vec<(String, usize)>>,
+        observables: Vec<Bound<'py, PyAny>>,
         decision: &str,
         threshold: Option<f64>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let decision = parse_decision(decision, threshold)?;
         let mut parsed = Vec::with_capacity(observables.len());
-        for factors in observables {
-            let mut terms = Vec::with_capacity(factors.len());
-            for (pauli, position) in factors {
-                terms.push((position, parse_pauli(&pauli)?));
-            }
-            let string = PauliString::new(terms).map_err(validation_to_py_err)?;
-            // Single-term observable, coefficient 1.0 (decision C).
-            parsed.push(Observable::new(vec![(1.0, string)]).map_err(validation_to_py_err)?);
+        for observable in observables {
+            // Type dispatch, in the same spirit as `qml.train`'s first-argument
+            // dispatch: try the dedicated type first, fall back to the bare form.
+            let observable = match observable.extract::<PyRef<'_, PyObservable>>() {
+                Ok(weighted) => weighted.inner.clone(),
+                Err(_) => {
+                    let factors = observable.extract::<Vec<(String, usize)>>().map_err(|_| {
+                        PyTypeError::new_err(
+                            "each observable must be a list of (pauli, position) factors \
+                             (e.g. [(\"z\", 0)]) or a polypus.qml.Observable",
+                        )
+                    })?;
+                    let string = parse_pauli_string(factors)?;
+                    // The bare form is exactly one term with coefficient 1.0.
+                    Observable::new(vec![(1.0, string)]).map_err(validation_to_py_err)?
+                }
+            };
+            parsed.push(observable);
         }
         let readout = Readout::new(parsed, decision).map_err(validation_to_py_err)?;
         let model = slf

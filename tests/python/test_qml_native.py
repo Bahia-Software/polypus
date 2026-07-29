@@ -1607,3 +1607,219 @@ def _pool_raw_model(num_qubits, keep, position=0):
         else model.pool(block="basic", keep=keep)
     )
     return model.readout(observables=[[("z", position)]], decision="raw")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. `polypus.qml.Observable` — weighted multi-term readout observables (§17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `readout` used to force one Pauli string with coefficient 1.0 per observable;
+# `polypus.qml.Observable([(c, term), …])` now spells the weighted sum
+# `Σ cᵢ·Pᵢ` the Rust `Observable` always supported. The type is **additive**: the
+# bare `[("z", 0)]` form is unchanged, and the two may be mixed in one call.
+#
+# The exactness these tests lean on is the same as section 7's: a `decision="raw"`
+# readout under `predict(..., exact=True)` returns the observable's exact
+# expectation, no shot noise — so the weighted sum can be checked against a value
+# computed analytically rather than merely asserted finite.
+
+
+def _product_state_model(observables, decision="raw"):
+    """A 2-qubit model whose bound state is an exactly-known **product** state.
+
+    `angle_encoder(ry)` puts `Ry(x_j)` on qubit `j`; the ansatz is a single
+    rotation block of one `Ry` per qubit and **no entangler** (`reps=0` leaves
+    the entangling loop empty, `final_rotation_layer=True` keeps the block). So
+    the state is `Ry(x₀+θ₀)|0⟩ ⊗ Ry(x₁+θ₁)|0⟩` and every Pauli-`Z` expectation
+    is a closed form: ⟨Z_j⟩ = cos(x_j + θ_j), and ⟨Z₀Z₁⟩ = ⟨Z₀⟩·⟨Z₁⟩ because the
+    state factorises. That is what `_expected_z` below computes.
+    """
+    import polypus
+
+    return (
+        polypus.qml.Model(2)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=0, rotations=["ry"], final_rotation_layer=True)
+        .readout(observables=observables, decision=decision)
+    )
+
+
+def _expected_z(sample, theta, positions):
+    """The analytic ⟨Π_j Z_j⟩ of `_product_state_model`'s state over `positions`."""
+    import math
+
+    value = 1.0
+    for j in positions:
+        value *= math.cos(sample[j] + theta[j])
+    return value
+
+
+_OBS_THETA = [0.7, 1.3]
+_OBS_SAMPLE = [0.4, 0.9]
+
+
+def _obs_predict(observables, sample=None, decision="raw"):
+    """The exact prediction of `_product_state_model(observables)` on one sample."""
+    import polypus
+
+    dataset = _dataset()
+    trained = polypus.qml.TrainedModel(
+        _product_state_model(observables, decision=decision), dataset, list(_OBS_THETA)
+    )
+    return trained.predict(
+        [list(sample or _OBS_SAMPLE)],
+        infrastructure="local",
+        backend="polypus",
+        id="qml_observable",
+        exact=True,
+    )[0]
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestObservableIsAdditive:
+    """The bare form keeps working exactly as before, and its explicit
+    `Observable` spelling builds the identical observable."""
+
+    def test_bare_form_and_explicit_single_term_agree_bit_for_bit(self):
+        import polypus
+
+        bare = _obs_predict([[("z", 0)]])
+        explicit = _obs_predict([polypus.qml.Observable([(1.0, [("z", 0)])])])
+        # Not merely close: the same circuit and the same coefficient, so the
+        # exact expectation must be the identical float.
+        assert bare == explicit
+        assert bare == _expected_z(_OBS_SAMPLE, _OBS_THETA, [0])
+
+    def test_repr_reports_the_term_count(self):
+        import polypus
+
+        assert (
+            repr(
+                polypus.qml.Observable([(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])])
+            )
+            == "Observable(num_terms=2)"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestObservableWeightedSum:
+    """A genuine `Σ cᵢ·Pᵢ`, checked against the analytic value — not just
+    "the call does not raise"."""
+
+    def test_weighted_sum_matches_the_hand_computed_expectation(self):
+        import polypus
+
+        observable = polypus.qml.Observable(
+            [(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])]
+        )
+        got = _obs_predict([observable])
+        expected = 0.5 * _expected_z(_OBS_SAMPLE, _OBS_THETA, [0]) + 1.5 * _expected_z(
+            _OBS_SAMPLE, _OBS_THETA, [0, 1]
+        )
+        assert got == pytest.approx(expected, abs=1e-12)
+        # And it is genuinely a sum: neither term alone reproduces it.
+        assert got != pytest.approx(_obs_predict([[("z", 0)]]), abs=1e-9)
+
+    def test_coefficients_scale_the_expectation_linearly(self):
+        # Doubling every coefficient doubles ⟨O⟩ — the defining property of the
+        # weighted sum, and impossible to express with the bare form.
+        import polypus
+
+        single = _obs_predict([polypus.qml.Observable([(1.0, [("z", 0)])])])
+        doubled = _obs_predict([polypus.qml.Observable([(2.0, [("z", 0)])])])
+        assert doubled == pytest.approx(2.0 * single, abs=1e-12)
+
+    def test_weighted_observable_trains_end_to_end(self):
+        # The weighted observable travels the whole native training path, not
+        # just inference: compile → QmlProblem → oracle → optimizer.
+        import math
+
+        import polypus
+
+        model = _product_state_model(
+            [polypus.qml.Observable([(0.5, [("z", 0)]), (0.5, [("z", 0), ("z", 1)])])],
+            decision="sign",
+        )
+        result = polypus.qml.train(
+            model,
+            _dataset(),
+            method=polypus.DE(population_size=6, generations=4),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_observable_train",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 2
+        assert math.isfinite(result.best_fitness)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestObservableMixedWithBareFormInArgmax:
+    """Both spellings in the *same* `readout` call, on a multiclass `argmax`."""
+
+    # Class 0 is the bare ⟨Z₀⟩; class 1 is the weighted sum. The two samples are
+    # chosen so each class wins once — a test where one class always won would
+    # pass even if the other observable were silently dropped.
+    CASES = [([0.4, 0.9], 0), ([2.9, 0.2], 1)]
+
+    def test_argmax_picks_the_class_with_the_larger_expectation(self):
+        import polypus
+
+        observables = [
+            [("z", 0)],
+            polypus.qml.Observable([(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])]),
+        ]
+        for sample, expected_class in self.CASES:
+            z0 = _expected_z(sample, _OBS_THETA, [0])
+            z0z1 = _expected_z(sample, _OBS_THETA, [0, 1])
+            scores = [z0, 0.5 * z0 + 1.5 * z0z1]
+            # The hand-computed winner, so the assertion below is pinned to the
+            # analytic values and not to whatever the model happens to return.
+            assert max(range(2), key=lambda i: scores[i]) == expected_class
+            got = _obs_predict(observables, sample=sample, decision="argmax")
+            assert got == float(expected_class)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestObservableValidation:
+    """Every rejection is a clean Python exception, never a panic."""
+
+    @pytest.mark.parametrize("coefficient", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_coefficient_rejected(self, coefficient):
+        import polypus
+
+        with pytest.raises(ValueError, match="non-finite coefficient"):
+            polypus.qml.Observable([(coefficient, [("z", 0)])])
+
+    def test_non_finite_coefficient_reported_with_its_term_index(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="term 1"):
+            polypus.qml.Observable(
+                [(1.0, [("z", 0)]), (float("nan"), [("z", 0), ("z", 1)])]
+            )
+
+    def test_unknown_pauli_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown Pauli"):
+            polypus.qml.Observable([(1.0, [("w", 0)])])
+
+    def test_repeated_position_within_one_term_rejected(self):
+        import polypus
+
+        with pytest.raises(ValueError, match="position"):
+            polypus.qml.Observable([(1.0, [("z", 0), ("x", 0)])])
+
+    def test_readout_rejects_an_element_that_is_neither_form(self):
+        import polypus
+
+        model = polypus.qml.Model(2).angle_encoder(axis="ry").real_amplitudes(reps=1)
+        with pytest.raises(TypeError, match="polypus.qml.Observable"):
+            model.readout(observables=[42], decision="raw")
