@@ -219,6 +219,16 @@ fn parse_decision(decision: &str, threshold: Option<f64>) -> PyResult<Decision> 
 /// consuming builder call, and puts the result back — the model is always `Some`
 /// between calls (decision B). Methods return `self` for chaining, exactly like
 /// `polypus.Circuit`.
+///
+/// **A `Model` instance is reusable without limit** — this is a deliberate
+/// property, not an accident of the `Option` dance above. Compiling a model
+/// (inside [`train`](qml_train) and [`TrainedModel::new`]) always clones
+/// `self.inner` before the consuming [`QuantumModel::compile`] call, so the
+/// original Python object is never consumed: the same `Model` can be trained
+/// more than once, wrapped in more than one `TrainedModel`, and even extended
+/// with further builder calls (`.layer(...)`, `.hardware_efficient(...)`, …)
+/// after any of that — each use starts from an independent clone of whatever
+/// the builder currently holds.
 #[pyclass(module = "polypus.qml", name = "Model")]
 pub struct Model {
     inner: Option<QuantumModel>,
