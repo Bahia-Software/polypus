@@ -515,6 +515,111 @@ impl Model {
         Ok(slf)
     }
 
+    /// Train this model on `dataset` — the method form of
+    /// [`polypus.qml.train`](qml_train)'s **native** path (design doc §17).
+    ///
+    /// `Model` is a fluent builder everywhere else
+    /// (`.angle_encoder().hardware_efficient().readout()`), so training it
+    /// through a free function that takes the model back as its first argument
+    /// was the one break in that shape. This method closes it:
+    ///
+    /// ```python
+    /// result = model.train(ds, method=polypus.DE(...), loss="hinge",
+    ///                      infrastructure="local", backend="polypus", exact=True)
+    /// preds = result.trained_model.predict(x_new, infrastructure="local",
+    ///                                      backend="polypus", exact=True)
+    /// ```
+    ///
+    /// It is **purely additive**: `polypus.qml.train(model, dataset, ...)` is
+    /// unchanged and remains the only entry point for a Qiskit `QuantumCircuit`
+    /// feature map, which has no `Model` to hang a method off. The two spellings
+    /// are the *same* run — this method delegates straight to
+    /// [`qml_train_native`], passing `None` for the two Qiskit-path arguments
+    /// (`x_train`/`expectation_function`) that the native path rejects anyway, so
+    /// there is no second copy of the training logic to drift. With the same
+    /// arguments and the same seed both produce byte-identical
+    /// [`QmlTrainResult`]s.
+    ///
+    /// Consequently the kwargs are `qml.train`'s minus the three that cannot
+    /// apply here: `ansatz` (the dataset takes its positional slot), `x_train`
+    /// and `expectation_function`. `method` is required — it is a genuine
+    /// positional argument here, not a kwarg with a placeholder default as in the
+    /// free function, whose signature only needs one because the optional
+    /// `x_train` precedes it. `loss` is required by the native path itself and is
+    /// reported as such by [`qml_train_native`] when omitted, not duplicated
+    /// here.
+    ///
+    /// Like `qml.train`, the model is **not consumed**: `compile` clones the
+    /// builder, so the same `Model` can be trained again, extended with further
+    /// layers afterwards, or both.
+    #[pyo3(signature = (
+        dataset,
+        method,
+        shots=1024,
+        n_qpus=1,
+        dimensions=None,
+        infrastructure="local".to_string(),
+        nodes=1,
+        cores_per_qpu=1,
+        id="qml".to_string(),
+        sim_method="automatic",
+        noise_model=None,
+        backend="aer",
+        seed=None,
+        loss=None,
+        exact=false,
+        batch_size=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn train(
+        slf: PyRef<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        method: &Bound<'_, PyAny>,
+        shots: u32,
+        n_qpus: u32,
+        dimensions: Option<u32>,
+        infrastructure: String,
+        nodes: u32,
+        cores_per_qpu: u32,
+        id: String,
+        sim_method: &str,
+        noise_model: Option<Bound<'_, PyAny>>,
+        backend: &str,
+        seed: Option<u64>,
+        loss: Option<&str>,
+        exact: bool,
+        batch_size: Option<usize>,
+    ) -> PyResult<PyObject> {
+        // The two guards `qml.train` applies before dispatching to a path; they
+        // live in the free function rather than in `qml_train_native`, so this
+        // entry point applies them itself to stay equivalent.
+        validate_shots_and_qpus(shots, n_qpus)?;
+        validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+        qml_train_native(
+            slf,
+            dataset,
+            // `x_train` and `expectation_function`: absent by construction here,
+            // rather than accepted and then rejected.
+            None,
+            method,
+            shots,
+            n_qpus,
+            dimensions,
+            None,
+            &infrastructure,
+            nodes,
+            cores_per_qpu,
+            id,
+            sim_method,
+            noise_model,
+            backend,
+            seed,
+            loss,
+            exact,
+            batch_size,
+        )
+    }
+
     fn __repr__(&self) -> String {
         match &self.inner {
             Some(_) => "Model(...)".to_string(),

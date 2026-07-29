@@ -2032,3 +2032,241 @@ class TestQiskitPathStillReturnsTrainResult:
         assert not hasattr(result, "trained_model")
         # And the generic `polypus.train` is untouched as well.
         assert not isinstance(result, polypus.qml.QmlTrainResult)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. `Model.train(dataset, ...)` — the fluent spelling of the native path (§17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `Model` is a fluent builder everywhere else, so training it through a free
+# function that takes the model back as its first argument was the one break in
+# that shape. `model.train(ds, ...)` closes it. The method is **additive**:
+# `polypus.qml.train(model, ds, ...)` is unchanged and stays the only entry point
+# for a Qiskit feature map, and the two spellings are the *same* run — the method
+# delegates to the very same native implementation, so with the same arguments
+# and seed they agree byte for byte.
+
+
+def _method_train_kwargs(**overrides):
+    """The shared kwargs for one short, byte-reproducible native run.
+
+    A function, not a module constant: the `method` object must be freshly built
+    per call so no optimizer state can leak between the two spellings under
+    comparison.
+    """
+    import polypus
+
+    kwargs = dict(
+        method=polypus.DE(generations=20, population_size=12, tolerance=1e-9),
+        loss="hinge",
+        infrastructure="local",
+        backend="polypus",
+        id="qml_model_train",
+        seed=7,
+        exact=True,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+_METHOD_TRAIN_FIELDS = (
+    "best_params",
+    "best_fitness",
+    "iterations_run",
+    "converged",
+    "seed",
+)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelTrainMatchesTheFreeFunction:
+    """Not merely "both work": the method and the free function must produce the
+    identical `QmlTrainResult` from the identical arguments."""
+
+    def test_returns_a_qml_train_result(self):
+        import polypus
+
+        result = _model().train(_dataset(), **_method_train_kwargs())
+        assert isinstance(result, polypus.qml.QmlTrainResult)
+        assert result.trained_model.theta == result.best_params
+
+    def test_every_outcome_field_agrees(self):
+        import polypus
+
+        method_result = _model().train(_dataset(), **_method_train_kwargs())
+        free_result = polypus.qml.train(
+            _model(), _dataset(), **_method_train_kwargs()
+        )
+        # The exact path with a fixed seed is byte-reproducible, so these are
+        # equalities, not approximations.
+        for field in _METHOD_TRAIN_FIELDS:
+            assert getattr(method_result, field) == getattr(free_result, field), field
+        # `id` is the sixth field and cannot be *equal*: `unique_id` appends a
+        # fresh UUID v4 per run (#75). What must match is the caller's prefix —
+        # so the method forwards `id` rather than substituting one of its own.
+        assert method_result.id.startswith("qml_model_train_")
+        assert free_result.id.startswith("qml_model_train_")
+        assert method_result.id != free_result.id
+
+    def test_trained_model_predictions_are_bit_identical(self):
+        # The real payload: the two `trained_model`s must be the same model, so
+        # they predict identically — in exact mode and on the seeded shot path.
+        import polypus
+
+        method_result = _model().train(_dataset(), **_method_train_kwargs())
+        free_result = polypus.qml.train(
+            _model(), _dataset(), **_method_train_kwargs()
+        )
+        exact_kwargs = dict(
+            infrastructure="local",
+            backend="polypus",
+            id="qml_model_train_predict",
+            exact=True,
+        )
+        assert method_result.trained_model.predict(
+            _NEW_SAMPLES, **exact_kwargs
+        ) == free_result.trained_model.predict(_NEW_SAMPLES, **exact_kwargs)
+        shot_kwargs = dict(
+            shots=2048,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_model_train_predict_shots",
+            seed=11,
+        )
+        assert method_result.trained_model.predict(
+            _NEW_SAMPLES, **shot_kwargs
+        ) == free_result.trained_model.predict(_NEW_SAMPLES, **shot_kwargs)
+
+    def test_minibatched_and_shot_paths_agree_too(self):
+        # The method forwards *every* kwarg, not just the ones the happy path
+        # touches: `batch_size` (native-only) and the shot path both agree.
+        import polypus
+
+        for overrides in (
+            dict(batch_size=2, seed=5),
+            dict(exact=False, shots=512, seed=3),
+        ):
+            method_result = _model().train(
+                _dataset(), **_method_train_kwargs(**overrides)
+            )
+            free_result = polypus.qml.train(
+                _model(), _dataset(), **_method_train_kwargs(**overrides)
+            )
+            for field in _METHOD_TRAIN_FIELDS:
+                assert getattr(method_result, field) == getattr(
+                    free_result, field
+                ), (overrides, field)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelTrainKeepsTheModelReusable:
+    """`Model` reuse (§17) survives the method form: `train` compiles a clone, so
+    the builder it was called on is untouched."""
+
+    def test_same_model_trains_twice_with_the_same_outcome(self):
+        model = _model()
+        first = model.train(_dataset(), **_method_train_kwargs())
+        second = model.train(_dataset(), **_method_train_kwargs())
+        assert first.best_params == second.best_params
+        assert first.best_fitness == second.best_fitness
+
+    def test_model_can_be_extended_after_training_and_trained_again(self):
+        # Chaining more layers onto a model that has already been trained works,
+        # and the extra layer is genuinely in the retrained model: its θ count
+        # grows by the width of the added ansatz — 4 more for `real_amplitudes`
+        # with `reps=1` on 2 qubits (2 rotation blocks × 1 axis × 2 qubits).
+        model = _model()
+        before = model.train(_dataset(), **_method_train_kwargs())
+        assert len(before.best_params) == 8
+        extended = model.real_amplitudes(reps=1)
+        assert extended is model
+        after = model.train(_dataset(), **_method_train_kwargs())
+        assert len(after.best_params) == 12
+
+    def test_chained_construction_then_train_in_one_expression(self):
+        # The whole point of the method: build and train without ever naming the
+        # model, which the free function cannot express.
+        import math
+
+        import polypus
+
+        result = (
+            polypus.qml.Model(2)
+            .angle_encoder(axis="ry")
+            .real_amplitudes(reps=1)
+            .readout(observables=[[("z", 0)]], decision="sign")
+            .train(_dataset(), **_method_train_kwargs())
+        )
+        assert isinstance(result, polypus.qml.QmlTrainResult)
+        assert math.isfinite(result.best_fitness)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelTrainValidation:
+    def test_non_dataset_argument_rejected(self):
+        # Reusing the native path means reusing its type check, and therefore its
+        # error: a clean `TypeError` naming `polypus.qml.Dataset`, never a panic.
+        for not_a_dataset in (42, "ds", [[0.3, 0.35]], None):
+            with pytest.raises(TypeError, match="polypus.qml.Dataset"):
+                _model().train(not_a_dataset, **_method_train_kwargs())
+
+    def test_method_is_required(self):
+        kwargs = _method_train_kwargs()
+        del kwargs["method"]
+        # A genuine positional argument here, so the omission is Python's own
+        # signature error rather than a runtime check.
+        with pytest.raises(TypeError):
+            _model().train(_dataset(), **kwargs)
+
+    def test_loss_is_still_required(self):
+        kwargs = _method_train_kwargs()
+        del kwargs["loss"]
+        with pytest.raises(ValueError, match="loss is required"):
+            _model().train(_dataset(), **kwargs)
+
+    def test_dimensions_must_match_the_compiled_model(self):
+        with pytest.raises(ValueError, match="does not match the model"):
+            _model().train(_dataset(), **_method_train_kwargs(dimensions=3))
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (dict(shots=0), "shots must be >= 1"),
+            (dict(n_qpus=0), "n_qpus must be >= 1"),
+            (dict(infrastructure="cunqa", nodes=0), "nodes must be >= 1"),
+        ],
+    )
+    def test_shared_boundary_guards_apply(self, overrides, message):
+        # These two guards live in the free function, not in the native path, so
+        # the method has to apply them itself; without that they would be silently
+        # skipped for `model.train(...)`.
+        with pytest.raises(ValueError, match=message):
+            _model().train(_dataset(), **_method_train_kwargs(**overrides))
+
+    def test_exact_mode_guard_is_the_same_one(self):
+        with pytest.raises(ValueError, match="exact mode"):
+            _model().train(
+                _dataset(), **_method_train_kwargs(backend="aer", exact=True)
+            )
+
+    def test_batch_size_bounds_are_the_same_ones(self):
+        with pytest.raises(ValueError, match="1 <= batch_size < num_samples"):
+            _model().train(_dataset(), **_method_train_kwargs(batch_size=6))
+
+    def test_free_function_still_rejects_the_qiskit_kwargs(self):
+        # The method has no `x_train`/`expectation_function` at all, and the free
+        # function's rejection of them on the native path is untouched.
+        import polypus
+
+        with pytest.raises(TypeError):
+            _model().train(_dataset(), x_train=[[0.3, 0.35]], **_method_train_kwargs())
+        with pytest.raises(ValueError, match="x_train is not accepted"):
+            polypus.qml.train(
+                _model(),
+                _dataset(),
+                [[0.3, 0.35]],
+                **_method_train_kwargs(),
+            )
+
