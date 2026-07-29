@@ -26,6 +26,7 @@ use polypus_qml::{
 use super::{
     build_backend_config, finish_optimization, is_native_backend, method_seed,
     resolve_optimizer_seed, unique_id, validate_cunqa_allocation, validate_shots_and_qpus,
+    TrainResult,
 };
 use crate::bindings::adam::Adam;
 use crate::bindings::de::DE;
@@ -870,6 +871,75 @@ impl TrainedModel {
     }
 }
 
+/// What the **native** path of [`qml.train`](qml_train) returns: every field a
+/// [`TrainResult`] carries plus the [`TrainedModel`] that run produced, already
+/// built (contract C-7, design doc §17).
+///
+/// Training a native `Model` + `Dataset` used to hand back a bare
+/// [`TrainResult`], which knows nothing about either — so predicting meant
+/// rebuilding `TrainedModel(model, dataset, result.best_params)` by hand, passing
+/// `model` and `dataset` in a second time even though the `train()` call had them
+/// all along. `trained_model` closes that gap: it is built **eagerly**, at the
+/// single point where the training run ends and the model, the dataset and the
+/// optimizer's `best_params` are all in scope at once, so
+/// `train(...).trained_model.predict(x_new, ...)` is the whole
+/// train→predict flow.
+///
+/// This type is deliberately **not** related to [`TrainResult`] by inheritance
+/// (no `#[pyclass(extends = TrainResult)]`): two independent types cost less
+/// PyO3 machinery than an `isinstance` compatibility nobody needs today. The
+/// other two entry points are untouched — the Qiskit path of `qml.train` and the
+/// generic [`train`](super::train) still return a plain [`TrainResult`], since
+/// neither has a `Model`/`Dataset` to wrap.
+#[pyclass(module = "polypus.qml", name = "QmlTrainResult", frozen)]
+pub struct QmlTrainResult {
+    /// Best parameter vector found — the `θ` bound into
+    /// [`trained_model`](Self::trained_model).
+    #[pyo3(get)]
+    pub best_params: Vec<f64>,
+    /// Fitness of [`best_params`](Self::best_params) (higher is better).
+    #[pyo3(get)]
+    pub best_fitness: f64,
+    /// Generations/iterations actually executed.
+    #[pyo3(get)]
+    pub iterations_run: usize,
+    /// Whether the optimizer's convergence criterion was satisfied.
+    #[pyo3(get)]
+    pub converged: bool,
+    /// Effective RNG seed that drove the optimizer and shot sampling (C-7).
+    #[pyo3(get)]
+    pub seed: u64,
+    /// Effective run identifier (the caller-supplied `id` prefix plus a UUID v4).
+    #[pyo3(get)]
+    pub id: String,
+    /// The trained model — the `Model` compiled against the `Dataset`'s feature
+    /// count and bound to [`best_params`](Self::best_params) — ready for
+    /// [`predict`](TrainedModel::predict) or [`save`](TrainedModel::save).
+    #[pyo3(get)]
+    pub trained_model: Py<TrainedModel>,
+}
+
+#[pymethods]
+impl QmlTrainResult {
+    fn __repr__(&self) -> String {
+        // The trained model is summarised by its `θ` width rather than its own
+        // repr, to keep this one line long; that width is `best_params.len()` by
+        // construction (the model is built *from* `best_params`), so reporting it
+        // needs no borrow of the wrapped pyclass.
+        format!(
+            "QmlTrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, \
+             best_params={:?}, trained_model=TrainedModel(num_theta={}))",
+            self.id,
+            self.best_fitness,
+            self.iterations_run,
+            self.converged,
+            self.seed,
+            self.best_params,
+            self.best_params.len()
+        )
+    }
+}
+
 /// QML entry point: train a variational quantum model with a chosen optimizer.
 ///
 /// The first argument is inspected at run time (decision A):
@@ -883,11 +953,17 @@ impl TrainedModel {
 /// - anything else (a Qiskit `QuantumCircuit` feature map) → the **Qiskit path**,
 ///   unchanged: `x_train`, `dimensions` and `expectation_function` are required.
 ///
-/// `seed` follows the same precedence as [`train`](super::train) and returns a
-/// [`TrainResult`](super::TrainResult). On the native path the same seed also
-/// drives shot sampling on every simulated backend, so the run reproduces
-/// byte-for-byte. Ctrl+C interrupts promptly, and a user callback's exception
-/// propagates verbatim (Qiskit path).
+/// `seed` follows the same precedence as [`train`](super::train). On the native
+/// path the same seed also drives shot sampling on every simulated backend, so
+/// the run reproduces byte-for-byte. Ctrl+C interrupts promptly, and a user
+/// callback's exception propagates verbatim (Qiskit path).
+///
+/// **The return type follows the path** (contract C-7): the native path returns a
+/// [`QmlTrainResult`] — the same six fields plus a ready-to-use
+/// [`trained_model`](QmlTrainResult::trained_model) — while the Qiskit path
+/// returns a plain [`TrainResult`](super::TrainResult), unchanged, having no
+/// `Model`/`Dataset` to wrap. This mirrors the kwarg asymmetry the two paths
+/// already have (`x_train`/`expectation_function` versus `loss`/`batch_size`).
 ///
 /// Example (native path):
 ///
@@ -1200,7 +1276,7 @@ fn qml_train_native(
         (Box::new(Arc::clone(&oracle)), Box::new(oracle), recompute)
     };
 
-    dispatch_optimizer(
+    let result = dispatch_optimizer(
         py,
         method,
         (eval_oracle, gradient_oracle),
@@ -1209,7 +1285,46 @@ fn qml_train_native(
         &errors,
         effective_seed,
         effective_id,
+    )?;
+
+    // `dispatch_optimizer` is shared verbatim with the Qiskit path and the generic
+    // `train`, so it still produces the plain `TrainResult`; only this path
+    // upgrades it to a `QmlTrainResult`, here at the one point where the model,
+    // the dataset and the optimizer's `best_params` are all in scope (design doc
+    // §17). `TrainResult` is `frozen`, so reading its fields needs no runtime
+    // borrow — `Bound::get` hands out a plain `&TrainResult`. An `Err` from the
+    // dispatch (a bad `method`, an oracle failure, Ctrl+C) is propagated by the
+    // `?` above exactly as before: the error is already the right one.
+    let outcome = result
+        .bind(py)
+        .downcast::<TrainResult>()
+        .map_err(|_| {
+            PyTypeError::new_err(
+                "internal error: the optimizer dispatch did not return a TrainResult",
+            )
+        })?
+        .get();
+    // Reuse `TrainedModel::new` rather than re-deriving the compile step: it is
+    // the single definition of "this model, compiled against this dataset's
+    // feature count, bound to this θ", and it is what a caller building the
+    // trained model by hand would have called.
+    let trained_model = Py::new(
+        py,
+        TrainedModel::new(model, dataset, outcome.best_params.clone())?,
+    )?;
+    Py::new(
+        py,
+        QmlTrainResult {
+            best_params: outcome.best_params.clone(),
+            best_fitness: outcome.best_fitness,
+            iterations_run: outcome.iterations_run,
+            converged: outcome.converged,
+            seed: outcome.seed,
+            id: outcome.id.clone(),
+            trained_model,
+        },
     )
+    .map(|result| result.into_any())
 }
 
 /// Build the final-fitness recompute closure for a minibatched native run

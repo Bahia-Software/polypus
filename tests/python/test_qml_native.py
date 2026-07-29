@@ -1823,3 +1823,212 @@ class TestObservableValidation:
         model = polypus.qml.Model(2).angle_encoder(axis="ry").real_amplitudes(reps=1)
         with pytest.raises(TypeError, match="polypus.qml.Observable"):
             model.readout(observables=[42], decision="raw")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. `QmlTrainResult` — the native path returns its trained model (§17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `qml.train` used to hand back a bare `TrainResult` on both paths, which knows
+# nothing about the `Model`/`Dataset` it trained — so predicting meant rebuilding
+# `TrainedModel(model, dataset, result.best_params)` by hand, passing back in the
+# two objects the call already had. The native path now returns a
+# `QmlTrainResult`: the same six fields plus `trained_model`, built eagerly at the
+# end of training. The Qiskit path is unchanged and still returns `TrainResult`
+# (contract C-7) — the return type follows the path, like the kwargs already do.
+
+
+def _native_train(seed=7, **kwargs):
+    """One short native run on the exact path, so θ is deterministic."""
+    import polypus
+
+    return polypus.qml.train(
+        _model(),
+        _dataset(),
+        method=polypus.DE(generations=20, population_size=12, tolerance=1e-9),
+        loss="hinge",
+        infrastructure="local",
+        backend="polypus",
+        id="qml_train_result",
+        seed=seed,
+        exact=True,
+        **kwargs,
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestQmlTrainResultNativePath:
+    def test_native_path_returns_a_qml_train_result(self):
+        import polypus
+
+        result = _native_train()
+        assert isinstance(result, polypus.qml.QmlTrainResult)
+        # Two independent types by design (no inheritance), so a `TrainResult`
+        # this is not — pinning that keeps a future `extends = TrainResult`
+        # from being introduced silently.
+        assert not isinstance(result, polypus.TrainResult)
+        assert type(result).__name__ == "QmlTrainResult"
+
+    def test_carries_the_six_train_result_fields(self):
+        result = _native_train()
+        assert result.seed == 7
+        assert isinstance(result.best_params, list)
+        assert len(result.best_params) == 8  # the 8 θ of `_model()`
+        assert all(isinstance(p, float) for p in result.best_params)
+        assert isinstance(result.best_fitness, float)
+        # Exact hinge fitness is `−mean(loss)`, so finite and non-positive.
+        assert result.best_fitness <= 0.0
+        assert 1 <= result.iterations_run <= 20
+        assert isinstance(result.converged, bool)
+        # The effective id is the `id` prefix plus a UUID v4 suffix (#75).
+        assert result.id.startswith("qml_train_result_")
+        assert result.id != "qml_train_result"
+
+    def test_fields_match_a_train_result_from_the_same_run(self):
+        # The upgrade must copy the outcome verbatim, not recompute it: the same
+        # seed on the exact path is byte-reproducible, so every field of two runs
+        # agrees — and `trained_model.theta` is exactly `best_params`.
+        a = _native_train()
+        b = _native_train()
+        assert a.best_params == b.best_params
+        assert a.best_fitness == b.best_fitness
+        assert a.iterations_run == b.iterations_run
+        assert a.converged == b.converged
+        assert a.seed == b.seed
+        assert a.trained_model.theta == a.best_params
+
+    def test_repr_mentions_the_outcome_and_the_trained_model(self):
+        result = _native_train()
+        text = repr(result)
+        assert text.startswith("QmlTrainResult(")
+        for field in ("best_fitness=", "iterations_run=", "converged=", "seed="):
+            assert field in text
+        assert "trained_model=TrainedModel(num_theta=8)" in text
+
+    def test_trained_model_is_reused_not_rebuilt_per_access(self):
+        # The attribute is a stored object, built once: two reads are the same
+        # instance, so `predict`-ing twice does not recompile the model.
+        result = _native_train()
+        assert result.trained_model is result.trained_model
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestQmlTrainResultTrainedModelEquivalence:
+    """`result.trained_model` must be *the same* trained model a caller would
+    have assembled by hand — identical predictions, not merely "it runs"."""
+
+    @staticmethod
+    def _manual(result):
+        import polypus
+
+        return polypus.qml.TrainedModel(_model(), _dataset(), result.best_params)
+
+    def test_exact_predictions_are_bit_identical_to_the_manual_wrapper(self):
+        result = _native_train()
+        kwargs = dict(
+            infrastructure="local",
+            backend="polypus",
+            id="qml_train_result_predict",
+            exact=True,
+        )
+        auto = result.trained_model.predict(_NEW_SAMPLES, **kwargs)
+        manual = self._manual(result).predict(_NEW_SAMPLES, **kwargs)
+        # Exact mode has no shot noise: equality is exact, not approximate.
+        assert auto == manual
+
+    def test_seeded_shot_predictions_are_bit_identical_to_the_manual_wrapper(self):
+        # The shot path with a fixed seed is byte-reproducible too, so the two
+        # wrappers must agree there as well — the same compiled model and θ.
+        result = _native_train()
+        kwargs = dict(
+            shots=2048,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_train_result_predict_shots",
+            seed=11,
+        )
+        auto = result.trained_model.predict(_NEW_SAMPLES, **kwargs)
+        manual = self._manual(result).predict(_NEW_SAMPLES, **kwargs)
+        assert auto == manual
+
+    def test_predict_from_counts_agrees_with_the_manual_wrapper(self):
+        # The lower-level readout entry too, so the equivalence is not specific
+        # to `predict`'s backend plumbing.
+        result = _native_train()
+        manual = self._manual(result)
+        for counts in ({"00": 10}, {"01": 10}, {"00": 7, "11": 3}):
+            assert result.trained_model.predict_from_counts(
+                counts
+            ) == manual.predict_from_counts(counts)
+
+    def test_trained_model_round_trips_through_save_load(self, tmp_path):
+        # It is a fully-fledged `TrainedModel`: serialization works unchanged.
+        import polypus
+
+        result = _native_train()
+        path = str(tmp_path / "auto.json")
+        result.trained_model.save(path)
+        assert polypus.qml.TrainedModel.load(path).theta == result.best_params
+
+    def test_minibatched_run_also_returns_a_usable_trained_model(self):
+        # `batch_size` reaches the same single return point, and the θ it wraps is
+        # the recomputed-fitness `best_params`, not a minibatch artefact.
+        import polypus
+
+        result = _native_train(seed=5, batch_size=2)
+        assert isinstance(result, polypus.qml.QmlTrainResult)
+        assert result.trained_model.theta == result.best_params
+
+    def test_failed_run_propagates_the_original_error(self):
+        # An `Err` out of the optimizer dispatch must surface unchanged — the
+        # upgrade to `QmlTrainResult` never runs, and never masks the cause.
+        import polypus
+
+        with pytest.raises(TypeError, match="method must be an instance"):
+            polypus.qml.train(
+                _model(),
+                _dataset(),
+                method="not-an-optimizer",
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_train_result_bad_method",
+                seed=7,
+                exact=True,
+            )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestQiskitPathStillReturnsTrainResult:
+    """The Qiskit path has no `Model`/`Dataset` to wrap, so it keeps returning a
+    plain `TrainResult`. Pinned explicitly so a future change cannot quietly
+    merge the two paths' return shapes."""
+
+    def test_qiskit_path_returns_a_plain_train_result(self):
+        import numpy as np
+        import polypus
+        from qiskit.circuit.library import real_amplitudes, zz_feature_map
+
+        feature_map = zz_feature_map(feature_dimension=2, reps=1)
+        ansatz = real_amplitudes(num_qubits=2, reps=1)
+        result = polypus.qml.train(
+            feature_map,
+            ansatz,
+            np.array([[0.3, 0.35], [2.8, 2.75]]),
+            polypus.DE(generations=2, population_size=4),
+            dimensions=len(ansatz.parameters),
+            expectation_function=lambda b: sum(int(c) for c in b) / len(b),
+            shots=256,
+            infrastructure="local",
+            backend="aer",
+            id="qml_train_result_qiskit",
+            seed=7,
+        )
+        assert isinstance(result, polypus.TrainResult)
+        assert type(result).__name__ == "TrainResult"
+        assert not hasattr(result, "trained_model")
+        # And the generic `polypus.train` is untouched as well.
+        assert not isinstance(result, polypus.qml.QmlTrainResult)
