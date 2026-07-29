@@ -1382,10 +1382,13 @@ fn qml_train_native(
              is defined by loss=... together with the model's readout",
         ));
     }
-    // The second argument must be a native Dataset on this path.
+    // The dataset argument must be a native Dataset on this path — the second
+    // positional argument on `qml.train(model, dataset, ...)`, the first on
+    // `Model.train(dataset, ...)` (design doc §17), so the message names the
+    // argument rather than its position.
     let dataset = ansatz.extract::<PyRef<'_, Dataset>>().map_err(|_| {
         PyTypeError::new_err(
-            "with a native polypus.qml.Model the second argument must be a polypus.qml.Dataset",
+            "with a native polypus.qml.Model, the dataset argument must be a polypus.qml.Dataset",
         )
     })?;
     // `loss` is required on the native path.
