@@ -492,6 +492,26 @@ guarantees:
   rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
   the optimizer consumes under C-5.
 
+**Readout observables from Python (`Model.readout`).** Each element of
+`observables` is **either** a bare list of `(pauli, position)` factors — one
+Pauli string with implicit coefficient `1.0` — **or** a `polypus.qml.Observable`,
+the weighted sum `O = Σ cᵢ·Pᵢ` the Rust `Observable` has always supported
+(`Observable([(0.5, [("z", 0)]), (1.5, [("z", 0), ("z", 1)])])` is `0.5·Z₀ +
+1.5·Z₀Z₁`). Each term of an `Observable` is exactly the same `(pauli, position)`
+list the bare form is, so `Observable([(1.0, [("z", 0)])])` builds the identical
+observable as `[("z", 0)]`.
+
+The type is **additive**, not a replacement: the bare form's meaning is
+unchanged, and the two spellings may be mixed inside one `readout` call (a
+multiclass `"argmax"` may spell one class bare and another weighted). The two
+are distinguished by **type** — an element that is an `Observable` instance is
+used as such, anything else is extracted as the bare form — never by guessing at
+the shape of the tuples, so neither form can be silently reinterpreted as the
+other. A non-finite coefficient is a `ValueError`
+(`ValidationError::NonFiniteCoefficient`, reporting the offending term index),
+as are an unknown Pauli and a position repeated inside one term; an element that
+is neither form is a `TypeError`.
+
 **Readout measurement basis (single group).** A readout may measure `X`/`Y`
 Paulis, not just `Z`: `compile` inserts the basis change (`H` for `X`; `Sdg`
 then `H` for `Y`) before the terminal measurement. This is supported **only when
