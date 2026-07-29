@@ -1,11 +1,11 @@
-"""Native ``polypus.qml`` pipeline showcase — nine scenarios, all verified.
+"""Native ``polypus.qml`` pipeline showcase — ten scenarios, all verified.
 
 ``examples/basic_qml.py`` demonstrates the *Qiskit* QML path (a
 ``QuantumCircuit`` feature map + ansatz + a user ``expectation_function``). This
 script is its counterpart for the **native** path built in ``polypus-qml``: the
 ``polypus.qml.Model`` builder, ``polypus.qml.Dataset``, the four optimizers, the
-exact and shot-sampled backends, minibatching, ``TrainedModel`` inference and
-the dataset split/scaling utilities.
+exact and shot-sampled backends, minibatching, ``TrainedModel`` inference, the
+dataset split/scaling utilities, and the weighted-sum ``Observable`` readout.
 
 Every scenario *checks learning*, not merely the absence of an exception: the
 toy datasets are two or three well-separated clusters in ``[0, π]``, and each
@@ -13,6 +13,13 @@ scenario asserts a fitness and/or a training-set accuracy that a model can only
 reach by actually fitting the data. Every source of randomness (dataset order is
 fixed, splits, optimizer seeds, shot sampling) is seeded explicitly, so the
 whole script is deterministic run to run.
+
+A ``Model`` is reusable without limit — ``train()``/``TrainedModel`` both clone
+it internally before compiling, so the same object can be trained, wrapped in a
+``TrainedModel``, and even extended with further builder calls afterwards. Every
+scenario below builds its model **once** and reuses that one object; an earlier
+version of this script built a fresh model per use, which was defensive code
+against a limitation that does not exist.
 
 Run it directly::
 
@@ -165,9 +172,9 @@ def sign_model_2q(reps=2):
     """The workhorse binary model: 2 qubits, ``Ry`` angle encoding, a
     hardware-efficient ansatz, and ``sign(⟨Z₀⟩)`` as the decision.
 
-    A *fresh* builder every call: ``train`` / ``TrainedModel`` compile (and so
-    consume) the builder on the Rust side, so one instance cannot serve two
-    calls.
+    Build one instance and reuse it: a ``Model`` is not consumed by ``train``
+    or ``TrainedModel`` (both clone it internally before compiling), so the
+    same object can serve both.
     """
     return (
         polypus.qml.Model(2)
@@ -215,9 +222,11 @@ def scenario_1_angle_de_hinge_exact():
     training-set accuracy read back through ``TrainedModel``.
     """
     x, y = two_clusters_2f()
+    model = sign_model_2q()
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
-        sign_model_2q(),
-        polypus.qml.Dataset(x, y),
+        model,
+        dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
         id="showcase_1_basic",
@@ -225,9 +234,8 @@ def scenario_1_angle_de_hinge_exact():
         exact=True,
         **BACKEND,
     )
-    trained = polypus.qml.TrainedModel(
-        sign_model_2q(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    # `model` is reused as-is: training does not consume it.
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, _ = accuracy(trained, x, y, "showcase_1_predict")
 
     # 12 θ: 2 axes (ry, rz) × 2 qubits × (reps + final rotation layer) blocks.
@@ -268,9 +276,10 @@ def scenario_2_amplitude_pso():
         .hardware_efficient(reps=2)
         .readout(observables=[[("z", 0)]], decision="sign")
     )
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
         model,
-        polypus.qml.Dataset(x, y),
+        dataset,
         method=polypus.PSO(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
         id="showcase_2_amplitude",
@@ -278,18 +287,7 @@ def scenario_2_amplitude_pso():
         exact=True,
         **BACKEND,
     )
-
-    def fresh():
-        return (
-            polypus.qml.Model(2)
-            .amplitude_encoder()
-            .hardware_efficient(reps=2)
-            .readout(observables=[[("z", 0)]], decision="sign")
-        )
-
-    trained = polypus.qml.TrainedModel(
-        fresh(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, preds = accuracy(trained, x, y, "showcase_2_predict")
     # Scale invariance: 2× a sample is the same normalized state, so the same
     # prediction — an angle encoder would answer differently.
@@ -334,9 +332,10 @@ def scenario_3_iqp_adam_shots():
         .hardware_efficient(reps=1)
         .readout(observables=[[("z", 0)]], decision="sign")
     )
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
         model,
-        polypus.qml.Dataset(x, y),
+        dataset,
         method=polypus.Adam(max_iters=40, learning_rate=0.2, tolerance=1e-4),
         loss="hinge",
         shots=4096,
@@ -344,18 +343,7 @@ def scenario_3_iqp_adam_shots():
         seed=5,
         **BACKEND,
     )
-
-    def fresh():
-        return (
-            polypus.qml.Model(2)
-            .iqp_encoder()
-            .hardware_efficient(reps=1)
-            .readout(observables=[[("z", 0)]], decision="sign")
-        )
-
-    trained = polypus.qml.TrainedModel(
-        fresh(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, _ = accuracy(trained, x, y, "showcase_3_predict")
 
     checks = [
@@ -388,20 +376,18 @@ def scenario_4_qcnn_qng():
     second convolution reads only the two surviving qubits.
     """
     x, y = two_clusters_4f()
-
-    def fresh():
-        return (
-            polypus.qml.Model(4)
-            .angle_encoder(axis="ry")
-            .conv(block="basic")
-            .pool(block="basic")
-            .conv(block="basic", pairing="even_pairs")
-            .readout(observables=[[("z", 0)]], decision="sign")
-        )
-
+    model = (
+        polypus.qml.Model(4)
+        .angle_encoder(axis="ry")
+        .conv(block="basic")
+        .pool(block="basic")
+        .conv(block="basic", pairing="even_pairs")
+        .readout(observables=[[("z", 0)]], decision="sign")
+    )
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
-        fresh(),
-        polypus.qml.Dataset(x, y),
+        model,
+        dataset,
         method=polypus.QNG(
             variance_function=qng_variance,
             max_iters=60,
@@ -414,9 +400,7 @@ def scenario_4_qcnn_qng():
         exact=True,
         **BACKEND,
     )
-    trained = polypus.qml.TrainedModel(
-        fresh(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, _ = accuracy(trained, x, y, "showcase_4_predict")
 
     checks = [
@@ -448,21 +432,19 @@ def scenario_5_multiclass_argmax():
     Perfect accuracy is not the bar here; clearly beating the 1/3 of chance is.
     """
     x, y = three_clusters_3f()
-
-    def fresh():
-        return (
-            polypus.qml.Model(3)
-            .angle_encoder(axis="ry")
-            .hardware_efficient(reps=1)
-            .readout(
-                observables=[[("z", 0)], [("z", 1)], [("z", 2)]],
-                decision="argmax",
-            )
+    model = (
+        polypus.qml.Model(3)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=1)
+        .readout(
+            observables=[[("z", 0)], [("z", 1)], [("z", 2)]],
+            decision="argmax",
         )
-
+    )
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
-        fresh(),
-        polypus.qml.Dataset(x, y),
+        model,
+        dataset,
         method=polypus.DE(generations=60, population_size=24, tolerance=1e-9),
         loss="categorical_cross_entropy",
         id="showcase_5_multiclass",
@@ -470,9 +452,7 @@ def scenario_5_multiclass_argmax():
         exact=True,
         **BACKEND,
     )
-    trained = polypus.qml.TrainedModel(
-        fresh(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, preds = accuracy(trained, x, y, "showcase_5_predict")
 
     checks = [
@@ -507,18 +487,16 @@ def scenario_6_x_basis_readout():
     it never saw.
     """
     x, y = two_clusters_2f()
-
-    def fresh():
-        return (
-            polypus.qml.Model(2)
-            .angle_encoder(axis="ry")
-            .hardware_efficient(reps=2)
-            .readout(observables=[[("x", 0)]], decision="sign")
-        )
-
+    model = (
+        polypus.qml.Model(2)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=2)
+        .readout(observables=[[("x", 0)]], decision="sign")
+    )
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
-        fresh(),
-        polypus.qml.Dataset(x, y),
+        model,
+        dataset,
         # A slightly larger budget than scenario 1's: the X-basis expectation of
         # this circuit is a harder surface for DE to flatten to the same hinge
         # loss, and the whole run still takes milliseconds.
@@ -529,9 +507,7 @@ def scenario_6_x_basis_readout():
         exact=True,
         **BACKEND,
     )
-    trained = polypus.qml.TrainedModel(
-        fresh(), polypus.qml.Dataset(x, y), result.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
     acc, _ = accuracy(trained, x, y, "showcase_6_predict")
     # Two fresh samples, one near each cluster, never used in training.
     held_out = [[0.52, 0.58], [2.58, 2.52]]
@@ -574,11 +550,15 @@ def scenario_7_minibatch_adam():
     scaled = [
         [(v - lo) / (hi - lo) * PI for v, (lo, hi) in zip(row, ranges)] for row in x
     ]
+    # One model, one dataset, reused across both `train` calls below and the
+    # final `TrainedModel` — none of the three consumes them.
+    model = sign_model_2q(reps=1)
+    dataset = polypus.qml.Dataset(scaled, y)
 
     def run(batch_size):
         return polypus.qml.train(
-            sign_model_2q(reps=1),
-            polypus.qml.Dataset(scaled, y),
+            model,
+            dataset,
             method=polypus.Adam(max_iters=60, learning_rate=0.2, tolerance=1e-4),
             loss="hinge",
             id="showcase_7_minibatch",
@@ -590,9 +570,7 @@ def scenario_7_minibatch_adam():
 
     full = run(None)
     mini = run(4)
-    trained = polypus.qml.TrainedModel(
-        sign_model_2q(reps=1), polypus.qml.Dataset(scaled, y), mini.best_params
-    )
+    trained = polypus.qml.TrainedModel(model, dataset, mini.best_params)
     acc, _ = accuracy(trained, scaled, y, "showcase_7_predict")
 
     checks = [
@@ -637,9 +615,11 @@ def scenario_8_save_load_predict():
     physical state and must agree with each other and with the expected class.
     """
     x, y = two_clusters_2f()
+    model = sign_model_2q()
+    dataset = polypus.qml.Dataset(x, y)
     result = polypus.qml.train(
-        sign_model_2q(),
-        polypus.qml.Dataset(x, y),
+        model,
+        dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
         id="showcase_8_train",
@@ -647,8 +627,7 @@ def scenario_8_save_load_predict():
         exact=True,
         **BACKEND,
     )
-    dataset = polypus.qml.Dataset(x, y)
-    trained = polypus.qml.TrainedModel(sign_model_2q(), dataset, result.best_params)
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "showcase_model.json")
@@ -660,10 +639,10 @@ def scenario_8_save_load_predict():
         new_x = [[0.52, 0.58], [2.58, 2.52]]
         expected = [-1.0, 1.0]
 
-        # The raw twin: identical circuit and θ, readout returning ⟨Z₀⟩ itself.
-        raw_twin = polypus.qml.TrainedModel(
-            raw_model_2q(), polypus.qml.Dataset(x, y), loaded.theta
-        )
+        # The raw twin is a genuinely different model (a different readout
+        # decision), so it gets its own build — identical circuit and θ, but
+        # returning ⟨Z₀⟩ itself instead of its sign.
+        raw_twin = polypus.qml.TrainedModel(raw_model_2q(), dataset, loaded.theta)
         expectations = raw_twin.predict(
             new_x, id="showcase_8_raw", exact=True, **BACKEND
         )
@@ -747,8 +726,9 @@ def scenario_9_dataset_utilities():
     # partition happens to exceed the train range on some feature.
     outside = any(lo < 0.0 or hi > PI for lo, hi in actual_test_ranges)
 
+    model = sign_model_2q()
     result = polypus.qml.train(
-        sign_model_2q(),
+        model,
         train,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
@@ -760,7 +740,7 @@ def scenario_9_dataset_utilities():
     # Score every original row through the same frozen map — the three the split
     # held back are genuinely unseen.
     all_scaled = [[apply_frozen(v, j) for j, v in enumerate(row)] for row in x]
-    trained = polypus.qml.TrainedModel(sign_model_2q(), train, result.best_params)
+    trained = polypus.qml.TrainedModel(model, train, result.best_params)
     acc, _ = accuracy(trained, all_scaled, y, "showcase_9_predict")
 
     checks = [
@@ -783,6 +763,60 @@ def scenario_9_dataset_utilities():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Scenario 10 — the weighted multi-term Observable
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_10_weighted_observable():
+    """``polypus.qml.Observable`` — the weighted sum ``Σ cᵢ·Pᵢ`` (design doc §17).
+
+    The bare ``[("z", 0)]`` form ``readout`` has always accepted only ever
+    builds a single Pauli string at coefficient ``1.0``.
+    ``Observable([(c, term), …])`` is the additive way to reach a genuine sum
+    — here ``0.5·Z₀ + 0.5·Z₀Z₁``, a readout the bare form cannot express at
+    all — and it trains like any other native model.
+    """
+    x, y = two_clusters_2f()
+    observable = polypus.qml.Observable(
+        [(0.5, [("z", 0)]), (0.5, [("z", 0), ("z", 1)])]
+    )
+    model = (
+        polypus.qml.Model(2)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=2)
+        .readout(observables=[observable], decision="sign")
+    )
+    dataset = polypus.qml.Dataset(x, y)
+    result = polypus.qml.train(
+        model,
+        dataset,
+        method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
+        loss="hinge",
+        id="showcase_10_observable",
+        seed=13,
+        exact=True,
+        **BACKEND,
+    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
+    acc, _ = accuracy(trained, x, y, "showcase_10_predict")
+
+    checks = [
+        # This weighted sum's margin is a harder surface to flatten than a
+        # bare ⟨Z₀⟩ (measured around −0.12 to −0.17 across several seeds), so
+        # the bar sits lower than scenario 1's — but a random θ predicts every
+        # sample's *wrong* class here (fitness ≈ −2), so −0.25 still only
+        # admits a genuinely fitted model.
+        ("hinge fitness > -0.25", result.best_fitness > -0.25),
+        ("train accuracy == 1.0", acc == 1.0),
+    ]
+    return verdict(
+        checks,
+        f"DE/weighted 0.5·Z₀+0.5·Z₀Z₁: fitness={result.best_fitness:+.4f} "
+        f"acc={acc:.0%}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -796,11 +830,12 @@ SCENARIOS = [
     ("7. Minibatching + Adam", scenario_7_minibatch_adam),
     ("8. TrainedModel save/load/predict", scenario_8_save_load_predict),
     ("9. Dataset split + scaling", scenario_9_dataset_utilities),
+    ("10. Weighted Observable", scenario_10_weighted_observable),
 ]
 
 
 def main():
-    print("polypus-qml native pipeline showcase — 9 scenarios\n")
+    print(f"polypus-qml native pipeline showcase — {len(SCENARIOS)} scenarios\n")
     results = []
     for name, scenario in SCENARIOS:
         print(f"▶ {name} ... ", end="", flush=True)
