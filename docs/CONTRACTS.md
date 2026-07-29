@@ -433,9 +433,29 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   SLURM / temp-file identification only, never for correlating runs by content;
   see #75). This replaces the former bare `list[float]`, which discarded
   fitness, iteration count and the convergence flag.
+- **`qml.train`'s return type follows the path it dispatched to** (design doc
+  §17), the same way its accepted kwargs already do — `x_train` /
+  `expectation_function` on the Qiskit path versus `loss` / `batch_size` on the
+  native one. This is an extension of that existing asymmetry, not a new
+  inconsistency:
+  - a native `polypus.qml.Model` (+ `Dataset`) returns a
+    **`polypus.qml.QmlTrainResult`**: the six `TrainResult` fields above, with
+    identical names, types and meanings, plus **`trained_model`** — a
+    ready-to-use `polypus.qml.TrainedModel` (the model compiled against the
+    dataset's feature count and bound to `best_params`), built eagerly at the end
+    of training. So `qml.train(...).trained_model.predict(x_new, ...)` is the
+    whole train→predict flow, where before a caller had to rebuild
+    `TrainedModel(model, dataset, result.best_params)` by hand, passing back in
+    the two objects the `train` call already had.
+  - a Qiskit feature map returns a plain **`TrainResult`**, unchanged: that path
+    has no `Model`/`Dataset` to wrap.
+  - `QmlTrainResult` is **not** a subclass of `TrainResult` — two independent
+    pyclasses, so `isinstance(result, TrainResult)` is `False` on the native
+    path. Read the fields, not the type. `polypus.train` (the generic entry
+    point) is untouched and always returns `TrainResult`.
 
-The effective `seed` on both result types is what lets a caller log a run and
-replay it exactly.
+The effective `seed` on every one of these result types is what lets a caller log
+a run and replay it exactly.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
@@ -452,7 +472,12 @@ be tested from `tests/python/`, and the `cunqa` package isn't installed
 anywhere in this project's CI or dev sandboxes (unlike Aer) — so, unlike the
 Aer path, it has never actually been run. Treat CUNQA's `seed` support as
 unverified until the CUNQA integration follow-up confirms it against a real
-install.
+install. The per-path return shapes of `qml.train` are pinned by
+`tests/python/test_qml_native.py` section 13
+(`TestQmlTrainResultNativePath`, `TestQmlTrainResultTrainedModelEquivalence`,
+`TestQiskitPathStillReturnsTrainResult`): the native path's type and fields, the
+bit-for-bit equality between `result.trained_model`'s predictions and a
+hand-built `TrainedModel`'s, and the Qiskit path still returning `TrainResult`.
 
 ---
 
