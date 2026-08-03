@@ -1,8 +1,8 @@
 use crate::evaluation::{
-    run_and_evaluate, CircuitSource, EvaluationError, EvaluationOracle, OracleErrorSlot,
+    run_and_evaluate, CircuitSource, CostObservable, EvaluationError, EvaluationOracle,
+    OracleErrorSlot,
 };
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
-use pyo3::prelude::*;
 use std::sync::Arc;
 
 /// Oracle for standard VQC training.
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Holds a single parameterised circuit template ([`CircuitSource`]). For each
 /// candidate parameter vector `θ`, it binds `θ` to the template, runs the
 /// resulting circuit through the backend, and returns the expectation value
-/// computed by `expectation_fn`.
+/// computed by `observable`.
 ///
 /// With a [`CircuitSource::Native`] template the per-candidate binding is pure
 /// Rust (no GIL); with [`CircuitSource::Qiskit`] it calls Python's
@@ -24,7 +24,7 @@ pub struct VqcOracle {
     pub circuit: CircuitSource,
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
-    pub expectation_fn: Py<PyAny>,
+    pub observable: Arc<dyn CostObservable>,
     /// Shared with the `train` entry point: the first evaluation failure is
     /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
     /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
@@ -70,7 +70,7 @@ impl VqcOracle {
                 self.backend.as_ref(),
                 chunk,
                 &self.config,
-                &self.expectation_fn,
+                self.observable.as_ref(),
             )?;
             results.extend(ev);
         }

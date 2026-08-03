@@ -7,17 +7,22 @@ use pyo3::PyResult;
 pub mod circuit;
 pub mod de;
 pub mod logging;
+pub mod observable;
 pub mod pso;
 pub mod qng;
 
 use circuit::{statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
+use observable::{CachedCost, Ising, Qubo};
 use pso::PSO;
 use qng::{PyVarianceOracle, QNG};
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
-use crate::evaluation::{CircuitSource, EvaluationOracle, OracleErrorSlot, QmlOracle, VqcOracle};
+use crate::evaluation::{
+    CircuitSource, CostObservable, EvaluationOracle, OracleErrorSlot, PyCallbackObservable,
+    QmlOracle, VqcOracle,
+};
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
@@ -381,6 +386,47 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     Ok(BoundCircuit::Qiskit(qc.clone().unbind()))
 }
 
+/// Interpret the `expectation_function` argument as a cost observable.
+///
+/// A `polypus.Qubo` / `polypus.Ising` becomes the corresponding native,
+/// GIL-free evaluator; any other **callable** becomes a [`PyCallbackObservable`]
+/// (the cost function is invoked once per unique bitstring per batch, then
+/// aggregation runs in Rust). This is the dispatch mirror of
+/// [`extract_circuit_source`], so the existing `expectation_function=<callable>`
+/// API keeps working unchanged while native observables opt into the fast path.
+fn extract_cost_observable(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn CostObservable>> {
+    if let Ok(q) = obj.extract::<PyRef<'_, Qubo>>() {
+        // Clone into the concrete Arc first, then coerce to the trait object
+        // (`Arc::clone`'s generic is pinned by its `&Arc<T>` argument).
+        let concrete = Arc::clone(&q.inner);
+        let obs: Arc<dyn CostObservable> = concrete;
+        return Ok(obs);
+    }
+    if let Ok(i) = obj.extract::<PyRef<'_, Ising>>() {
+        let concrete = Arc::clone(&i.inner);
+        let obs: Arc<dyn CostObservable> = concrete;
+        return Ok(obs);
+    }
+    // A callable wrapped in polypus.CachedCost keeps a cross-generation memo;
+    // a bare callable deduplicates only within each batch.
+    if let Ok(cached) = obj.extract::<PyRef<'_, CachedCost>>() {
+        let obs: Arc<dyn CostObservable> = Arc::new(PyCallbackObservable::new(
+            cached.cost_fn.clone_ref(obj.py()),
+            true,
+        ));
+        return Ok(obs);
+    }
+    if obj.is_callable() {
+        let obs: Arc<dyn CostObservable> =
+            Arc::new(PyCallbackObservable::new(obj.clone().unbind(), false));
+        return Ok(obs);
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "expectation_function must be a callable (bitstring -> float), a \
+         polypus.CachedCost(callable), or a polypus.Qubo / polypus.Ising observable",
+    ))
+}
+
 /// Function to run a quantum circuit called from Python.
 ///
 /// `qc` may be a Qiskit `QuantumCircuit`, a `polypus.Circuit` (fully bound),
@@ -639,11 +685,14 @@ pub fn train<'py>(
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
     let errors = OracleErrorSlot::new();
+    // A callable stays a Python-callback observable (optimized fallback); a
+    // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
+    let observable = extract_cost_observable(&expectation_function)?;
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
-        expectation_fn: expectation_function.unbind(),
+        observable,
         errors: errors.clone(),
     });
 
@@ -873,11 +922,12 @@ pub fn qml_train<'py>(
     // Shared error slot (see `train`): oracles record the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
+    let observable = extract_cost_observable(&expectation_function)?;
     let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
-        expectation_fn: expectation_function.unbind(),
+        observable,
         errors: errors.clone(),
     });
 
@@ -972,6 +1022,9 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Param>()?;
     m.add_class::<RunResult>()?;
     m.add_class::<TrainResult>()?;
+    m.add_class::<Qubo>()?;
+    m.add_class::<Ising>()?;
+    m.add_class::<CachedCost>()?;
     m.add_function(wrap_pyfunction!(train, m)?)?;
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;

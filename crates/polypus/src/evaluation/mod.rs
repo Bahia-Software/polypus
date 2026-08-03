@@ -1,15 +1,21 @@
 pub mod error;
+pub mod py_callback_observable;
 pub mod qml_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
+pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::QmlOracle;
 pub use vqc_oracle::VqcOracle;
+
+/// Re-export the native cost-observable seam so `crate::evaluation::CostObservable`
+/// resolves alongside the oracles that consume it.
+pub use polypus_observable::CostObservable;
 
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::ParameterizedCircuit;
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyModule};
+use pyo3::types::IntoPyDict;
 use std::sync::{Arc, Mutex};
 
 /// Thread-safe holder for the first error an oracle hits during `optimize`.
@@ -144,43 +150,37 @@ pub(crate) fn assign_parameters_qiskit(
 /// native gates, …) implement this trait without touching any algorithm.
 pub use polypus_optimizers::EvaluationOracle;
 
-/// Execute a batch of bound circuits through `backend` and extract expectation
-/// values using the Python `expectation_fn`.
+/// Execute a batch of bound circuits through `backend` and reduce the resulting
+/// counts to expectation values via `observable`.
 ///
-/// This is the **single place** in the codebase that calls
-/// `polypus_python.expectation_values`, eliminating the duplication that
-/// previously existed across DE, PSO, QNG, and the orchestration layer.
+/// This is the **single place** in the codebase that turns measurement counts
+/// into fitness values, shared by [`VqcOracle`] and [`QmlOracle`]. The
+/// expectation is computed natively (rayon, no GIL) for the declarative
+/// observables, or via a single deduplicated GIL section for the Python-callback
+/// fallback — replacing the former per-bitstring `polypus_python.expectation_values`
+/// round-trip (which also required serialising the counts into a `list[dict]`).
 ///
-/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped,
-/// and a Python error (import, `expectation_values`, extraction) is carried
-/// verbatim — never a panic.
+/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped, a
+/// native-evaluation error maps to a typed exception, and a Python callback
+/// error is carried verbatim — never a panic.
 pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
     config: &ExecutionConfig,
-    expectation_fn: &Py<PyAny>,
+    observable: &dyn CostObservable,
 ) -> Result<Vec<f64>, EvaluationError> {
     let counts = backend.run_circuits(qcs, config)?;
-    Python::with_gil(|py| {
-        // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
-        // per-batch boundary. The optimizer entry points release the GIL around
-        // `optimize()`, which lets other Python threads run but does NOT by
-        // itself process signals: CPython only acts on a pending signal while
-        // the main thread runs Python bytecode or when `PyErr_CheckSignals` is
-        // called explicitly. This is that explicit call, so a long native-backend
-        // run stays interruptible instead of ignoring Ctrl+C until it finishes
-        // (see docs/ENGINEERING.md §3). The KeyboardInterrupt is carried verbatim
-        // via `EvaluationError::Python` and re-raised as itself by the entry point.
-        py.check_signals().map_err(EvaluationError::Python)?;
-        // Convert the native counts back into a Python `list[dict]` for the
-        // Python `expectation_values` function. Once expectation computation is
-        // also native this round-trip disappears entirely.
-        let py_counts = counts.into_pyobject(py).map_err(EvaluationError::Python)?;
-        PyModule::import(py, "polypus_python")
-            .map_err(EvaluationError::Python)?
-            .call_method("expectation_values", (py_counts, expectation_fn), None)
-            .map_err(EvaluationError::Python)?
-            .extract::<Vec<f64>>()
-            .map_err(EvaluationError::Python)
-    })
+    // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
+    // per-batch boundary. The optimizer entry points release the GIL around
+    // `optimize()`, which lets other Python threads run but does NOT by itself
+    // process signals: CPython only acts on a pending signal while the main
+    // thread runs Python bytecode or when `PyErr_CheckSignals` is called
+    // explicitly. This is that explicit call, so a long native-backend run stays
+    // interruptible (see docs/ENGINEERING.md §3). It is the *only* GIL touch on
+    // the native path; the aggregation below runs GIL-free (the callback
+    // observable re-acquires the GIL internally for one deduplicated section).
+    Python::with_gil(|py| py.check_signals()).map_err(EvaluationError::Python)?;
+    observable
+        .expectation_batch(&counts)
+        .map_err(EvaluationError::from)
 }

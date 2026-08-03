@@ -1,0 +1,23 @@
+[package]
+name              = "polypus-observable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description       = "Pure-Rust diagonal cost observables (QUBO/Ising) mapping measurement counts to expectation values. rayon-parallel over candidates, GIL-free. No Python."
+
+[lib]
+name = "polypus_observable"
+
+[dependencies]
+# The crate's raison d'être is GIL-free parallel aggregation over the whole
+# candidate population, which always pays off — so rayon is a required (not
+# feature-gated) dependency, unlike polypus-sim's opt-in gate kernels.
+rayon = "1"
+# Logging *facade* only (no sink); stays a no-op until the app layer installs a
+# logger. No dependency on polypus-logger.
+log   = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

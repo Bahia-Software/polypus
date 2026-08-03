@@ -1,5 +1,6 @@
 use crate::evaluation::{
-    assign_parameters_qiskit, run_and_evaluate, EvaluationError, EvaluationOracle, OracleErrorSlot,
+    assign_parameters_qiskit, run_and_evaluate, CostObservable, EvaluationError, EvaluationOracle,
+    OracleErrorSlot,
 };
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
@@ -20,7 +21,7 @@ pub struct QmlOracle {
     pub training_circuits: Vec<Py<PyAny>>,
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
-    pub expectation_fn: Py<PyAny>,
+    pub observable: Arc<dyn CostObservable>,
     /// Shared with the `qml.train` entry point: the first evaluation failure is
     /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
     /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
@@ -67,11 +68,18 @@ impl QmlOracle {
                 });
                 let config = Arc::clone(&self.config);
                 let backend = Arc::clone(&self.backend);
-                let ef = Python::with_gil(|py| self.expectation_fn.clone_ref(py));
+                // GIL-free clone (unlike the Py<T> circuits above).
+                let observable = Arc::clone(&self.observable);
                 let theta = theta.clone();
 
                 rt.spawn_blocking(move || {
-                    evaluate_qml_single(&training_circuits, &config, backend.as_ref(), &ef, &theta)
+                    evaluate_qml_single(
+                        &training_circuits,
+                        &config,
+                        backend.as_ref(),
+                        observable.as_ref(),
+                        &theta,
+                    )
                 })
             })
             .collect();
@@ -118,7 +126,7 @@ fn evaluate_qml_single(
     training_circuits: &[Py<PyAny>],
     config: &ExecutionConfig,
     backend: &dyn QuantumBackend,
-    expectation_fn: &Py<PyAny>,
+    observable: &dyn CostObservable,
     theta: &[f64],
 ) -> Result<f64, EvaluationError> {
     // Training circuits are Qiskit objects (feature-map pre-binding is
@@ -135,7 +143,7 @@ fn evaluate_qml_single(
     let batch_size = backend.max_batch_size(bound.len()).max(1);
     let mut all_ev: Vec<f64> = Vec::with_capacity(bound.len());
     for chunk in bound.chunks(batch_size) {
-        let ev = run_and_evaluate(backend, chunk, config, expectation_fn)?;
+        let ev = run_and_evaluate(backend, chunk, config, observable)?;
         all_ev.extend(ev);
     }
 
