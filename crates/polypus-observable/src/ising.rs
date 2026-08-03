@@ -35,14 +35,19 @@ impl IsingObservable {
         scale: f64,
     ) -> Result<Self, ObservableError> {
         if num_vars == 0 {
-            return Err(ObservableError::Invalid("num_vars must be >= 1".to_string()));
+            return Err(ObservableError::Invalid(
+                "num_vars must be >= 1".to_string(),
+            ));
         }
         if !constant.is_finite() {
-            return Err(ObservableError::Invalid("constant must be finite".to_string()));
+            return Err(ObservableError::Invalid(
+                "constant must be finite".to_string(),
+            ));
         }
 
         let mut q_constant = constant;
-        let mut q_linear: Vec<(usize, f64)> = Vec::with_capacity(fields.len() + 2 * couplings.len());
+        let mut q_linear: Vec<(usize, f64)> =
+            Vec::with_capacity(fields.len() + 2 * couplings.len());
         let mut q_quadratic: Vec<(usize, usize, f64)> = Vec::with_capacity(couplings.len());
 
         for (i, h) in fields {
@@ -151,16 +156,9 @@ mod tests {
         //   constant_q = 0.25 + 1 + 0.5 = 1.75
         //   linear_q[0] = -2*1 + -2*0.5 = -3 ; linear_q[1] = -2*0.5 = -1
         //   quad_q(0,1) = 4*0.5 = 2
-        let ising =
-            IsingObservable::new(2, vec![(0, 1.0)], vec![(0, 1, 0.5)], 0.25, 1.0).unwrap();
-        let qubo = QuboObservable::new(
-            2,
-            vec![(0, -3.0), (1, -1.0)],
-            vec![(0, 1, 2.0)],
-            1.75,
-            1.0,
-        )
-        .unwrap();
+        let ising = IsingObservable::new(2, vec![(0, 1.0)], vec![(0, 1, 0.5)], 0.25, 1.0).unwrap();
+        let qubo = QuboObservable::new(2, vec![(0, -3.0), (1, -1.0)], vec![(0, 1, 2.0)], 1.75, 1.0)
+            .unwrap();
         let batch = [
             counts(&[("00", 3), ("11", 1)]),
             counts(&[("01", 2), ("10", 5)]),

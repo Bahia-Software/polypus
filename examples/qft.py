@@ -1,12 +1,11 @@
-from qiskit import QuantumCircuit, transpile
+import matplotlib.pyplot as plt
 import numpy as np
-from qiskit.qasm2 import dumps
-import polypus
-import time
-from qmiotools.integrations.qiskitqmio import QmioBackend
+
 # from qmiotools.integrations.qiskitqmio import FakeQmio
 import pandas as pd
-import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit, transpile
+from qmiotools.integrations.qiskitqmio import QmioBackend
+
 
 def myqft_inverse(n, swap_qubits=True):
     """Apply the Inverse Quantum Fourier Transform in big-endian convention."""
@@ -25,6 +24,7 @@ def myqft_inverse(n, swap_qubits=True):
     circuit.measure_all()
     return circuit
 
+
 def run_experiments(min_qubits, max_qubits):
     for n in range(min_qubits, max_qubits + 1):
         qft = myqft_inverse(n)
@@ -36,7 +36,7 @@ def run_experiments(min_qubits, max_qubits):
 
         # Print depth and width of the transpiled circuit
         print(f"Transpiled circuit depth: {qft_t.depth()}")
-        
+
         # tic = time.time()
         # job = backend.run(qft_t, shots=1024)
         # tac = time.time()
@@ -60,12 +60,11 @@ def run_experiments(min_qubits, max_qubits):
         # results.close()
 
         # time.sleep(1)  # Sleep for 1 second to avoid overwhelming the backend
-    
+
 
 if __name__ == "__main__":
-
     # Create csv with header method|n_qubits|time
-    results = open(f"qft_results.csv", "w")
+    results = open("qft_results.csv", "w")
     results.write("method|n_qubits|time\n")
     results.close()
 
@@ -83,7 +82,6 @@ if __name__ == "__main__":
     plt.legend()
     plt.grid()
     plt.savefig("qft_execution_time.png")
-
 
 
 # qft = myqft_inverse(12)

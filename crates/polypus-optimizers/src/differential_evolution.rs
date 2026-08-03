@@ -33,7 +33,7 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// DE maximises (higher fitness is better), so this is a threshold on
     /// *quality progress* in the oracle's own fitness units — **not** a
     /// population-spread threshold in parameter units. See
-    /// [`crate::util::fitness_stagnated`] for the exact test.
+    /// `crate::util::fitness_stagnated` for the exact test.
     pub tolerance: f64,
     /// Number of generations over which the best-fitness improvement is measured
     /// for the stagnation early stop. A stop can never fire before generation

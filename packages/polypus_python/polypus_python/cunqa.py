@@ -19,7 +19,13 @@ class Cunqa(Infraestructure):
         n_nodes = kwargs["n_nodes"]
         family_name = kwargs["family_name"]
         family = qraise(
-            n, t, quantum_comm=False, co_located=True, n_nodes=n_nodes, family=family_name, backend="/mnt/netapp2/Store_uni/home/empresa/bah/dfp/quantum/simple_backend.json"
+            n,
+            t,
+            quantum_comm=False,
+            co_located=True,
+            n_nodes=n_nodes,
+            family=family_name,
+            backend="/mnt/netapp2/Store_uni/home/empresa/bah/dfp/quantum/simple_backend.json",
         )
         return family
 
@@ -94,7 +100,8 @@ class Cunqa(Infraestructure):
                     # See the follow-up task for reconciling this file with
                     # the real, deployed CUNQA API.
                     qjob = run(
-                        qcs[i],qpus[i],
+                        qcs[i],
+                        qpus[i],
                         seed=(seed + i) & 0x7FFFFFFFFFFFFFFF,
                         **run_kwargs,
                     )

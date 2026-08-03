@@ -45,7 +45,10 @@ impl fmt::Display for ObservableError {
                  observable over {num_vars} variables"
             ),
             ObservableError::InvalidBitstring(key) => {
-                write!(f, "measurement bitstring contains a non-binary character: {key:?}")
+                write!(
+                    f,
+                    "measurement bitstring contains a non-binary character: {key:?}"
+                )
             }
             ObservableError::Invalid(msg) => write!(f, "invalid observable: {msg}"),
             ObservableError::External(err) => write!(f, "{err}"),

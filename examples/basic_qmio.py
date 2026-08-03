@@ -1,6 +1,6 @@
-import polypus
 import time
 
+import polypus
 
 tic = time.time()
 bell = polypus.Circuit(1).x(0).measure_all()

@@ -55,10 +55,14 @@ impl QuboObservable {
         scale: f64,
     ) -> Result<Self, ObservableError> {
         if num_vars == 0 {
-            return Err(ObservableError::Invalid("num_vars must be >= 1".to_string()));
+            return Err(ObservableError::Invalid(
+                "num_vars must be >= 1".to_string(),
+            ));
         }
         if !constant.is_finite() {
-            return Err(ObservableError::Invalid("constant must be finite".to_string()));
+            return Err(ObservableError::Invalid(
+                "constant must be finite".to_string(),
+            ));
         }
         if !scale.is_finite() {
             return Err(ObservableError::Invalid("scale must be finite".to_string()));
@@ -118,7 +122,9 @@ impl QuboObservable {
     pub fn from_matrix(matrix: &[Vec<f64>], scale: f64) -> Result<Self, ObservableError> {
         let n = matrix.len();
         if n == 0 {
-            return Err(ObservableError::Invalid("matrix must be non-empty".to_string()));
+            return Err(ObservableError::Invalid(
+                "matrix must be non-empty".to_string(),
+            ));
         }
         for (r, row) in matrix.iter().enumerate() {
             if row.len() != n {
@@ -282,7 +288,10 @@ mod tests {
         let obs = QuboObservable::new(3, vec![(2, 1.0)], vec![], 0.0, 1.0).unwrap();
         assert!(matches!(
             obs.expectation_batch(&[counts(&[("01", 1)])]),
-            Err(ObservableError::BitWidthMismatch { num_vars: 3, key_len: 2 })
+            Err(ObservableError::BitWidthMismatch {
+                num_vars: 3,
+                key_len: 2
+            })
         ));
         assert!(matches!(
             obs.expectation_batch(&[counts(&[("0x1", 1)])]),
@@ -302,8 +311,13 @@ mod tests {
     fn from_matrix_matches_sparse() {
         // Q = [[1, 2], [0, 3]] -> f = 1·x0 + 3·x1 + 2·x0·x1.
         let m = QuboObservable::from_matrix(&[vec![1.0, 2.0], vec![0.0, 3.0]], 1.0).unwrap();
-        let s = QuboObservable::new(2, vec![(0, 1.0), (1, 3.0)], vec![(0, 1, 2.0)], 0.0, 1.0).unwrap();
-        let batch = [counts(&[("11", 1)]), counts(&[("01", 1)]), counts(&[("10", 1)])];
+        let s =
+            QuboObservable::new(2, vec![(0, 1.0), (1, 3.0)], vec![(0, 1, 2.0)], 0.0, 1.0).unwrap();
+        let batch = [
+            counts(&[("11", 1)]),
+            counts(&[("01", 1)]),
+            counts(&[("10", 1)]),
+        ];
         assert_eq!(
             m.expectation_batch(&batch).unwrap(),
             s.expectation_batch(&batch).unwrap()
@@ -317,7 +331,9 @@ mod tests {
         let obs = QuboObservable::new(70, vec![(69, 1.0)], vec![], 0.0, 1.0).unwrap();
         let mut key = String::from("1");
         key.push_str(&"0".repeat(69)); // bit 69 set, rest clear
-        let ev = obs.expectation_batch(&[counts(&[(key.as_str(), 1)])]).unwrap();
+        let ev = obs
+            .expectation_batch(&[counts(&[(key.as_str(), 1)])])
+            .unwrap();
         assert_eq!(ev[0], 1.0);
     }
 }

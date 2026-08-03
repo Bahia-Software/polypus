@@ -243,7 +243,10 @@ fn de_early_stops_on_fitness_stagnation() {
             .expect("valid DE args optimize successfully")
     };
     let outcome = make();
-    assert!(outcome.converged, "expected early convergence by stagnation");
+    assert!(
+        outcome.converged,
+        "expected early convergence by stagnation"
+    );
     // Earliest possible stop is generation `patience` (iterations_run ==
     // patience + 1), so the run always exceeds the ~5 generations the old std
     // criterion produced — and it still stops before exhausting the budget.

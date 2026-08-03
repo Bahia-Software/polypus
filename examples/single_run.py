@@ -28,14 +28,18 @@ time.sleep(5)
 # Single run on Cunqa
 print("Running single run cunqa")
 tic2 = time.time()
-result2 = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=1)
+result2 = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=1
+)
 tac2 = time.time()
 time.sleep(5)
 
 # Distribute by shots on Cunqa
 print("Running distribute by shots cunqa")
 tic3 = time.time()
-result3 = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=10)
+result3 = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=10
+)
 tac3 = time.time()
 
 # Results
