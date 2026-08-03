@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` reads `slurm_job_id`, not `family` (C1) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -69,9 +69,11 @@ order** (see C-3 for the dict format).
 ### `disconnect_from_infrastructure(infrastructure: str, **kwargs)`
 
 For `"cunqa"`: single kwarg **`family`** (the handle returned by
-`connect_to_infrastructure`). *Known break (audit C1): the current
-implementation reads `slurm_job_id`. `family` is the canonical name; fix the
-Python side, not the Rust side.*
+`connect_to_infrastructure`), forwarded to CUNQA's `qdrop`. *(Historical break,
+audit C1, now fixed: the Python side used to read `slurm_job_id` — a key the
+Rust side never sends — so a `KeyError` fired before `qdrop` ran and the QPU
+allocation leaked. The Python side was corrected to read `family`; the Rust
+side was already canonical.)*
 
 ### `expectation_values(counts: list[dict], fn) -> list[float]`
 
@@ -208,9 +210,38 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
+  stagnation*, not on population-spread collapse. With `fitness_history[g]` the
+  best fitness at the end of generation `g` (0-indexed; DE maximises, so this
+  series is monotonically non-decreasing), the run stops at the first generation
+  `g` such that
+
+  ```text
+  g >= patience   and   fitness_history[g] - fitness_history[g - patience] < tolerance
+  ```
+
+  i.e. the best fitness improved by less than `tolerance` over the last
+  `patience` generations. Consequences:
+  - `tolerance` is a **minimum cumulative fitness improvement in the oracle's
+    own fitness units** — *not* a population standard deviation in parameter
+    units. (This replaces the former "max per-dimension population std <
+    tolerance" collapse test, which on QAOA-like landscapes fired within ~5
+    generations, long before the fitness had plateaued.)
+  - `patience` (generations; DE binding default **20**) is the look-back window.
+    No early stop can fire before generation `patience`, so a larger value makes
+    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
+  - The search dynamics are unchanged (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles
+    initialised in `[0, 2π)`); only the stopping rule differs. PSO still uses the
+    per-dimension std-collapse test; QNG has no early stop.
+- **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
+  the best fitness at the end of each executed generation/iteration, so
+  `fitness_history.len() == iterations_run` and `fitness_history.last()`
+  equals `best_fitness`. It is surfaced on the Python `TrainResult`.
 
 **Enforcing test:** invariant test with multiple seeds in
-`crates/polypus-optimizers/tests/`.
+`crates/polypus-optimizers/tests/`, plus the DE fitness-stagnation tests there
+(`de_early_stops_on_fitness_stagnation`, `de_large_patience_never_stops_early`)
+and the `fitness_stagnated` unit tests in `crates/polypus-optimizers/src/util.rs`.
 
 ---
 

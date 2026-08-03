@@ -52,14 +52,17 @@ class TestPolypusInstantiation:
         assert de.generations == 100
         assert de.population_size == 50
         assert de.tolerance == pytest.approx(0.01)
+        # Fitness-stagnation look-back window (contract C-5); default 20.
+        assert de.patience == 20
 
     def test_DE_custom_instantiation(self):
         import polypus
 
-        de = polypus.DE(generations=10, population_size=5, tolerance=0.05)
+        de = polypus.DE(generations=10, population_size=5, tolerance=0.05, patience=7)
         assert de.generations == 10
         assert de.population_size == 5
         assert de.tolerance == pytest.approx(0.05)
+        assert de.patience == 7
 
     def test_PSO_default_instantiation(self):
         import polypus

@@ -104,6 +104,12 @@ pub struct TrainResult {
     /// Whether the optimizer's convergence criterion was satisfied.
     #[pyo3(get)]
     pub converged: bool,
+    /// Best fitness recorded at the end of each generation/iteration, in order
+    /// (`len() == iterations_run`). Exposes the optimizer's quality trajectory —
+    /// for DE this is exactly the series its fitness-stagnation early stop is
+    /// computed from (contract C-5).
+    #[pyo3(get)]
+    pub fitness_history: Vec<f64>,
     /// Effective RNG seed that drove the optimizer (and, on the native backend,
     /// shot sampling): the explicit `seed` kwarg, else the optimizer object's
     /// `seed`, else a fresh OS-entropy value (contract C-7).
@@ -148,6 +154,7 @@ fn outcome_to_train_result(
             best_fitness: outcome.best_fitness,
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
+            fitness_history: outcome.fitness_history,
             seed,
             id,
         },
@@ -703,6 +710,7 @@ pub fn train<'py>(
             generations: de.generations,
             dimensions,
             tolerance: de.tolerance,
+            patience: de.patience,
             seed: Some(effective_seed),
         };
         return finish_optimization(
@@ -938,6 +946,7 @@ pub fn qml_train<'py>(
             generations: de.generations,
             dimensions,
             tolerance: de.tolerance,
+            patience: de.patience,
             seed: Some(effective_seed),
         };
         return finish_optimization(
@@ -1328,6 +1337,7 @@ mod tests {
                     generations: 40,
                     dimensions: 3,
                     tolerance: 1e-9,
+                    patience: 20,
                     seed: Some(seed),
                 })
                 .expect("valid DE args optimize successfully")

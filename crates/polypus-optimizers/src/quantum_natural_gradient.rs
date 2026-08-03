@@ -160,6 +160,9 @@ impl AlgorithmQNG {
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;
+        // Best energy at the end of each iteration (see
+        // `OptimizationOutcome::fitness_history`).
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
 
         for iteration in 0..max_iters as usize {
             iterations_run = iteration + 1;
@@ -188,6 +191,8 @@ impl AlgorithmQNG {
                 best_energy = energy;
                 best_theta = theta.clone();
             }
+
+            fitness_history.push(best_energy);
         }
 
         Ok(OptimizationOutcome {
@@ -196,6 +201,7 @@ impl AlgorithmQNG {
             iterations_run,
             // QNG runs a fixed iteration budget; it has no early-stopping test.
             converged: false,
+            fitness_history,
         })
     }
 }

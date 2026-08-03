@@ -6,7 +6,7 @@ from qiskit import QuantumCircuit
 sys.path.append(os.getenv("HOME"))
 
 from cunqa.qjob import gather
-from cunqa.qutils import get_QPUs, qdrop, qraise
+from cunqa.qpu import get_QPUs, qdrop, qraise, run
 
 from .infrastructure import Infraestructure
 
@@ -19,13 +19,18 @@ class Cunqa(Infraestructure):
         n_nodes = kwargs["n_nodes"]
         family_name = kwargs["family_name"]
         family = qraise(
-            n, t, quantum_comm=False, cloud=True, n_nodes=n_nodes, family=family_name
+            n, t, quantum_comm=False, co_located=True, n_nodes=n_nodes, family=family_name, backend="/mnt/netapp2/Store_uni/home/empresa/bah/dfp/quantum/simple_backend.json"
         )
         return family
 
     def drop_qpus(self, **kwargs) -> object:
-        slurm_job_id = kwargs["slurm_job_id"]
-        qdrop(slurm_job_id)
+        # Contract C-1: the Rust side (`drop_qpus` in
+        # crates/polypus/src/infrastructure/cunqa.rs) passes the `family`
+        # handle returned by `get_qpus`/`qraise`, not a SLURM job id. CUNQA's
+        # `qdrop(*families)` accepts family names only (it explicitly does NOT
+        # take a job id), so `family` is what must be forwarded here.
+        family = kwargs["family"]
+        qdrop(family)
         return None
 
     def run_qcs(self, **args) -> object:
@@ -41,14 +46,32 @@ class Cunqa(Infraestructure):
 
         seed = args.get("seed", None)
 
+        # Simulation method for the vQPUs' Aer backend. The Rust side always
+        # sends it (`CunqaBackend::run_circuits` sets kwargs["sim_method"]),
+        # and CUNQA consumes it as the per-job `run_config["method"]`, whose
+        # own default is "automatic" (cunqa/qjob.py). Until this was forwarded
+        # the caller's choice was silently DROPPED: every CUNQA run simulated
+        # with "automatic" no matter what `polypus.train(sim_method=...)`
+        # asked for, while the result metadata recorded the requested value.
+        # Absent/empty keeps CUNQA's own default rather than guessing one.
+        sim_method = args.get("sim_method") or None
+
         sys.path.append(os.getenv("HOME"))
         try:
-            qpus = get_QPUs(local=False, family=family_id)
+            qpus = get_QPUs(co_located=True, family=family_id)
         except Exception as e:
             raise e
 
         # Asynchronously run the quantum circuits on the QPUs
         try:
+            # Shared per-job run configuration. `method` lands in CUNQA's
+            # `run_config` verbatim (QJob merges **run_parameters over its
+            # defaults), so the string must be one Aer understands, e.g.
+            # "statevector" or "matrix_product_state".
+            run_kwargs = {"shots": shots, "transpile": False}
+            if sim_method is not None:
+                run_kwargs["method"] = sim_method
+
             qjobs = []
             for i in range(len(qcs)):
                 if seed is not None:
@@ -70,14 +93,13 @@ class Cunqa(Infraestructure):
                     # integration may not run at all against that version.
                     # See the follow-up task for reconciling this file with
                     # the real, deployed CUNQA API.
-                    qjob = qpus[i].run(
-                        qcs[i],
-                        shots=shots,
-                        transpile=False,
+                    qjob = run(
+                        qcs[i],qpus[i],
                         seed=(seed + i) & 0x7FFFFFFFFFFFFFFF,
+                        **run_kwargs,
                     )
                 else:
-                    qjob = qpus[i].run(qcs[i], shots=shots, transpile=False)
+                    qjob = run(qcs[i], qpus[i], **run_kwargs)
                 qjobs.append(qjob)
 
             results = gather(qjobs)
