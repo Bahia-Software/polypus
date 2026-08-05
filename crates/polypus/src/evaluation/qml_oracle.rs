@@ -139,5 +139,21 @@ fn evaluate_qml_single(
         all_ev.extend(ev);
     }
 
+    // Defense-in-depth (contract C-5): `run_and_evaluate` already guarantees
+    // exactly `chunk.len()` values per chunk, and the chunks partition `bound`
+    // exactly, so this can only ever hold. Unlike `VqcOracle` this function
+    // returns one scalar per *candidate* (the mean over the training circuits),
+    // so the invariant here is `all_ev.len() == bound.len()` (one expectation
+    // per training circuit), not `candidates.len()`. Kept as an explicit,
+    // self-documenting invariant guarding the mean below — do not "simplify" it
+    // away. Reported as a `Result`, never a panic (rule 4; runs under
+    // `OracleErrorSlot`).
+    if all_ev.len() != bound.len() {
+        return Err(EvaluationError::WrongLength {
+            expected: bound.len(),
+            got: all_ev.len(),
+        });
+    }
+
     Ok(all_ev.iter().sum::<f64>() / all_ev.len() as f64)
 }

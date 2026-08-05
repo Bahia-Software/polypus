@@ -24,7 +24,7 @@ Rules of the road:
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-5 | Optimizer ↔ oracle | invariant test, multi-seed | ✅ present | DE `best_fitness` mismatch (C4) |
+| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 | C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
@@ -211,7 +211,14 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   the returned `best_params`** (audit C4).
 
 **Enforcing test:** invariant test with multiple seeds in
-`crates/polypus-optimizers/tests/`.
+`crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
+**plus** `tests/python/test_oracle_contract.py` for the Python-backed length and
+finiteness guarantee: the Rust invariant test never exercises the
+`polypus_python.expectation_values` return path, so it covers only one half of
+the contract. The Python test forces a short return list and a non-finite value
+through `polypus.train` and asserts each surfaces as a typed
+`polypus.EvaluationError` (naming both lengths, or the offending index/value),
+never a `pyo3_runtime.PanicException` and never a silently-poisoned result.
 
 ---
 

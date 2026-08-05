@@ -34,6 +34,12 @@ pub enum EvaluationError {
     /// A Python callback or conversion on the evaluation path raised. Carried
     /// verbatim so the original exception type is preserved across the FFI.
     Python(PyErr),
+    /// The Python-backed oracle returned a different number of expectation
+    /// values than circuits were submitted in this call (contract C-5).
+    WrongLength { expected: usize, got: usize },
+    /// The Python-backed oracle returned a non-finite expectation value
+    /// (contract C-5 requires every output to be a finite f64).
+    NonFinite { index: usize, value: f64 },
 }
 
 impl fmt::Display for EvaluationError {
@@ -42,6 +48,14 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Backend(err) => write!(f, "{err}"),
             EvaluationError::Binding(err) => write!(f, "circuit binding failed: {err}"),
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
+            EvaluationError::WrongLength { expected, got } => write!(
+                f,
+                "oracle returned the wrong number of expectation values: expected {expected} (one per submitted circuit) but got {got} (contract C-5)"
+            ),
+            EvaluationError::NonFinite { index, value } => write!(
+                f,
+                "oracle returned a non-finite expectation value {value} at index {index}; contract C-5 requires every output to be a finite f64"
+            ),
         }
     }
 }
@@ -63,6 +77,43 @@ impl From<EvaluationError> for PyErr {
             }
             // Preserve the original Python exception type raised by the callback.
             EvaluationError::Python(py_err) => py_err,
+            wrong_length @ EvaluationError::WrongLength { .. } => {
+                PyEvaluationError::new_err(wrong_length.to_string())
+            }
+            non_finite @ EvaluationError::NonFinite { .. } => {
+                PyEvaluationError::new_err(non_finite.to_string())
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These tests are deliberately Python-runtime-free (ENGINEERING.md §3): the
+    // `polypus` crate's test suite runs without an initialized interpreter, so
+    // we exercise `Display` only and never construct a `PyErr` / call `.into()`.
+
+    #[test]
+    fn wrong_length_display_names_both_lengths() {
+        let msg = EvaluationError::WrongLength {
+            expected: 4,
+            got: 2,
+        }
+        .to_string();
+        assert!(msg.contains('4'), "expected length missing from: {msg}");
+        assert!(msg.contains('2'), "got length missing from: {msg}");
+    }
+
+    #[test]
+    fn non_finite_display_names_index_and_value() {
+        let msg = EvaluationError::NonFinite {
+            index: 3,
+            value: f64::NAN,
+        }
+        .to_string();
+        assert!(msg.contains('3'), "offending index missing from: {msg}");
+        assert!(msg.contains("NaN"), "offending value missing from: {msg}");
     }
 }
