@@ -38,6 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/ruff-action@v3
+        with:
+          # Pin ruff so a new release's changed default rules / formatter output
+          # cannot turn CI red without a deliberate bump. Keep in sync with the
+          # pin in requirements-dev.txt. Both `ruff check` (run by the action)
+          # and the `ruff format --check` step below use this version.
+          version: "0.16.1"
       - run: ruff format --check
 
   # Security advisories (RustSec), license allowlist and registry sources,

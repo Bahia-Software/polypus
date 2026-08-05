@@ -308,9 +308,9 @@ def make(n, reps):
 # per-shot checks), the circuit is sized to complete in ~1.3s single-threaded:
 # still running when SIGINT arrives `_DELAY_BEFORE_SIGINT_S` after READY, done
 # well inside `_INTERRUPT_DEADLINE_S`. `__N_QPUS__` selects the variant:
-# 1 -> AlgorithmSingleRun, >1 -> DistributeByShotsRun (which duplicates the
-# circuit across QPUs, so its per-QPU `reps` is scaled down to keep the total
-# run time comparable).
+# 1 -> AlgorithmSingleRun, >1 -> DistributeByShotsRun. The latter's
+# single-evolution fast path evolves the shared circuit once (not once per QPU),
+# so both variants use the same `reps` to keep the total run time comparable.
 _RUN_CHILD_TEMPLATE = (
     r"""
 import sys, time
@@ -368,9 +368,12 @@ def test_run_quantum_circuit_single_responds_to_sigint_promptly():
 
 
 def test_run_quantum_circuit_distributed_responds_to_sigint_promptly():
-    # n_qpus > 1 -> DistributeByShotsRun. 4 QPUs x n=18/reps=25 is ~1.3s total.
+    # n_qpus > 1 -> DistributeByShotsRun. Its single-evolution fast path evolves
+    # the shared circuit once (not once per QPU), so this uses the same
+    # n=18/reps=100 as the single-run variant (~1.3s single-threaded) rather than
+    # a per-QPU-scaled reps — otherwise the run finishes inside the SIGINT window.
     _assert_responds_to_sigint_promptly(
-        _run_child(n_qpus=4, n=18, reps=25),
+        _run_child(n_qpus=4, n=18, reps=100),
         failure_hint=(
             "run_quantum_circuit (DistributeByShotsRun) — the GIL is likely "
             "held for the whole run or check_signals is missing before the "
@@ -383,11 +386,15 @@ def test_run_quantum_circuit_distributed_responds_to_sigint_promptly():
 # GIL-release proof: while a native `run_quantum_circuit` call is in flight, a
 # background Python thread spins a tight counter loop. If the GIL were held for
 # the whole run the thread is starved and advances only by the incidental amount
-# the call's Python entry/exit stages allow (measured ~1.4e5, stable across core
-# counts); with the GIL released it advances by tens of millions (measured
-# ~3.6e7 on 32 cores, ~4e7 on 2) over the run. The threshold sits ~35x above the
-# held-GIL value and ~7x below the released-GIL value, so it separates them
-# cleanly with wide margin on either side, independent of the runner's cores.
+# the call's Python entry/exit stages allow (measured ~1.4e5); with the GIL
+# released it keeps advancing at close to its free-running rate. Rather than a
+# brittle absolute count, the child calibrates that free-running rate (via a
+# time.sleep window, which releases the GIL) and reports the *ratio* of counts
+# achieved during the native run to counts expected at the free rate over the
+# same wall-clock. GIL released -> ratio near 1.0 (>=0.5 even under single-core
+# contention with the native thread); GIL held -> ratio ~0. The threshold sits
+# far below the released value and far above the held value, independent of the
+# runner's CPU speed or the native run's duration.
 #
 # Two design points make this robust (see module docstring):
 #   * A subprocess, not an in-process thread, so the measurement starts from a
@@ -399,7 +406,7 @@ def test_run_quantum_circuit_distributed_responds_to_sigint_promptly():
 #     the observation depend on spare cores the CI runner may not have. Depth
 #     comes from `n_qpus` (sequential per-QPU circuits), not qubit count, so the
 #     circuit stays cheap to build.
-_MIN_COUNTER_PROGRESS = 5_000_000
+_MIN_GIL_RELEASE_RATIO = 0.2
 
 _GIL_RELEASE_CHILD = (
     r"""
@@ -413,7 +420,7 @@ polypus.run_quantum_circuit(
     make(2, 1), shots=64, infrastructure="local", n_qpus=1, backend="polypus"
 )
 
-qc = make(11, 1500)  # sub-parallel-threshold; ~1.3-2.6s across 32..2 cores
+qc = make(11, 1500)  # sub-parallel-threshold native run (~1.3-2.6s across 32..2 cores)
 counter = 0
 stop = threading.Event()
 
@@ -425,17 +432,37 @@ def spin():
 worker = threading.Thread(target=spin)
 worker.start()
 try:
-    before = counter
+    import time
+
+    # Calibrate the worker's free-running spin rate: time.sleep releases the
+    # GIL, so the worker runs unobstructed during this window. Comparing the
+    # native run against this per-machine rate makes the test robust to CPU
+    # speed and native-run duration -- an absolute count threshold was not,
+    # and caused spurious CI failures on fast/loaded runners.
+    c0 = counter
+    time.sleep(0.2)
+    free_rate = (counter - c0) / 0.2  # counts/sec with the GIL free
+
     # n_qpus=20 -> 20 sequential single-thread circuits (DistributeByShotsRun),
     # enough wall-clock for the counter to accumulate a decisive lead.
+    before = counter
+    t0 = time.perf_counter()
     polypus.run_quantum_circuit(
         qc, shots=4096, infrastructure="local", n_qpus=20, backend="polypus"
     )
+    dt = time.perf_counter() - t0
     advanced = counter - before
 finally:
     stop.set()
     worker.join()
-print(f"ADVANCED {advanced}", flush=True)
+
+# Fraction of its free-running rate the worker sustained *during* the native
+# run. GIL released -> worker keeps running (ratio near 1.0, or ~0.5 under
+# single-core contention with the native thread); GIL held -> worker starved
+# (ratio ~0).
+expected = free_rate * dt
+ratio = (advanced / expected) if expected > 0 else 0.0
+print(f"ADVANCED {advanced} RATE {free_rate:.0f} DT {dt:.4f} RATIO {ratio:.4f}", flush=True)
 """
 )
 
@@ -451,8 +478,11 @@ def test_run_quantum_circuit_releases_gil_for_other_threads():
         f"GIL-release child did not complete cleanly.\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
-    advanced = int(proc.stdout.split("ADVANCED", 1)[1].split()[0])
-    assert advanced > _MIN_COUNTER_PROGRESS, (
-        f"background thread advanced only {advanced} counts during the native "
-        f"run — the GIL was likely not released around run_quantum_circuit"
+    fields = proc.stdout.split("ADVANCED", 1)[1].split()
+    advanced = int(fields[0])
+    ratio = float(fields[fields.index("RATIO") + 1])
+    assert ratio > _MIN_GIL_RELEASE_RATIO, (
+        f"background thread sustained only {ratio:.3f} of its free-running rate "
+        f"during the native run (advanced {advanced} counts) — the GIL was "
+        f"likely not released around run_quantum_circuit\nstdout:\n{proc.stdout}"
     )
