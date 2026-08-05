@@ -64,6 +64,11 @@ impl AlgorithmTrait for DistributeByShotsRun {
             }
         }
         let merged_pyobj = Python::with_gil(|py| -> PyResult<pyo3::PyObject> {
+            // The runs above execute with the GIL released (see
+            // `run_quantum_circuit`); this reacquire is the first Python
+            // touchpoint, so honor a pending Ctrl+C here before building the
+            // merged dict and propagate it verbatim. See docs/ENGINEERING.md §3.
+            py.check_signals()?;
             let py_dict = PyDict::new(py);
             for (k, v) in total {
                 py_dict.set_item(k, v)?;
