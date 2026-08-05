@@ -53,7 +53,7 @@ mod statevector;
 
 pub use error::SimError;
 pub use rng::SplitMix64;
-pub use simulator::{Simulator, StatevectorSimulator};
+pub use simulator::{sample_projected, Simulator, StatevectorSimulator};
 pub use statevector::Statevector;
 
 /// Maximum number of qubits the statevector backend will allocate.

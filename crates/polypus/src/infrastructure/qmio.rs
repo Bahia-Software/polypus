@@ -22,10 +22,10 @@
 //!     `qat.purr.compiler.config.CompilerConfig` via `$type`/`$data`/`$value`
 //!     tags. `qat` does **not** need to be installed; we build it by hand with
 //!     `serde_json` (see [`build_config_json`]).
-//! - **Reply** = a pickle of a Python `dict` with the results (the live QPU
-//!   pickles the dict directly; some builds may instead pickle a JSON string).
-//!   Decode path: `recv` bytes → `serde_pickle` → `dict`/`String` →
-//!   `serde_json::Value` → per-bitstring counts.
+//! - **Reply** = a pickle of the results (the live QPU pickles a JSON string;
+//!   a server that pickles a `dict` directly instead is also accepted as a
+//!   defensive fallback). Decode path: `recv` bytes → `serde_pickle` →
+//!   `String`/`dict` → `serde_json::Value` → per-bitstring counts.
 //!
 //! ## Security
 //!
@@ -203,8 +203,9 @@ pub struct QmioBackend {
 impl QmioBackend {
     /// Create a backend targeting `endpoint`.
     ///
-    /// Timeouts and retry limits can be overridden via the `QMIO_RECV_TIMEOUT_MS`
-    /// and `QMIO_MAX_RETRIES` environment variables (sensible defaults otherwise).
+    /// Timeouts and retry behaviour can be overridden via the `QMIO_RECV_TIMEOUT_MS`,
+    /// `QMIO_MAX_RETRIES` and `QMIO_RETRY_BACKOFF_MS` environment variables
+    /// (sensible defaults otherwise).
     pub fn new(
         endpoint: String,
         program_format: QmioProgramFormat,

@@ -84,6 +84,9 @@ impl From<EvaluationError> for PyErr {
             // polypus.EvaluationError, not the TypeError PyO3's extract() emits.
             EvaluationError::Conversion(m) => PyEvaluationError::new_err(m),
         }
+        .to_string();
+        assert!(msg.contains('3'), "offending index missing from: {msg}");
+        assert!(msg.contains("NaN"), "offending value missing from: {msg}");
     }
 }
 
