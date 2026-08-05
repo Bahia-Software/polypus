@@ -384,8 +384,11 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// Function to run a quantum circuit called from Python.
 ///
 /// `qc` may be a Qiskit `QuantumCircuit`, a `polypus.Circuit` (fully bound),
-/// or an OpenQASM 2.0 string. `backend` selects the local device: `"aer"`
-/// (default) or the pure-Rust `"polypus"` statevector simulator.
+/// or an OpenQASM 2.0 string. The meaning of `backend` depends on
+/// `infrastructure`: for `"local"` it selects the device — `"aer"` (default)
+/// or the pure-Rust `"polypus"` statevector simulator; for `"qmio"` it
+/// instead selects the program format submitted to the QPU (`"openqasm"`
+/// (default), `"qir"`, or `"qir_bitcode"`); CUNQA ignores it.
 ///
 /// `seed` controls shot sampling (contract C-7) on every simulated backend —
 /// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs

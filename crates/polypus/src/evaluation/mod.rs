@@ -58,8 +58,10 @@ impl OracleErrorSlot {
 /// - [`Qiskit`](CircuitSource::Qiskit): `assign_parameters` is called on the
 ///   Python object — requires the GIL for every candidate.
 /// - [`Native`](CircuitSource::Native): binding + OpenQASM 2.0 generation run
-///   in pure Rust — **no GIL**, so candidates can be bound truly in parallel
-///   and the only remaining Python touchpoint is the simulator call itself.
+///   in pure Rust — **no GIL**, so candidates can be bound without holding the
+///   interpreter lock (binding itself is still sequential today, not
+///   parallel — see `VqcOracle::try_evaluate`) and the only remaining Python
+///   touchpoint is the simulator call itself.
 pub enum CircuitSource {
     /// A Qiskit `QuantumCircuit` with unbound `Parameter`s.
     Qiskit(Py<PyAny>),
