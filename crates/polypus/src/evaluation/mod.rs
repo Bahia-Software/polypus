@@ -58,8 +58,10 @@ impl OracleErrorSlot {
 /// - [`Qiskit`](CircuitSource::Qiskit): `assign_parameters` is called on the
 ///   Python object — requires the GIL for every candidate.
 /// - [`Native`](CircuitSource::Native): binding + OpenQASM 2.0 generation run
-///   in pure Rust — **no GIL**, so candidates can be bound truly in parallel
-///   and the only remaining Python touchpoint is the simulator call itself.
+///   in pure Rust — **no GIL**, so candidates can be bound without holding the
+///   interpreter lock (binding itself is still sequential today, not
+///   parallel — see `VqcOracle::try_evaluate`) and the only remaining Python
+///   touchpoint is the simulator call itself.
 pub enum CircuitSource {
     /// A Qiskit `QuantumCircuit` with unbound `Parameter`s.
     Qiskit(Py<PyAny>),
@@ -176,11 +178,29 @@ pub(crate) fn run_and_evaluate(
         // Python `expectation_values` function. Once expectation computation is
         // also native this round-trip disappears entirely.
         let py_counts = counts.into_pyobject(py).map_err(EvaluationError::Python)?;
-        PyModule::import(py, "polypus_python")
+        let values = PyModule::import(py, "polypus_python")
             .map_err(EvaluationError::Python)?
             .call_method("expectation_values", (py_counts, expectation_fn), None)
             .map_err(EvaluationError::Python)?
             .extract::<Vec<f64>>()
-            .map_err(EvaluationError::Python)
+            .map_err(EvaluationError::Python)?;
+
+        // Contract C-5: the Python-backed oracle must return exactly one finite
+        // f64 per submitted circuit. This is the single choke point that calls
+        // `polypus_python.expectation_values`, so validating here protects every
+        // oracle: a short list would otherwise index out of bounds inside the
+        // pure-Rust optimizer (an uncatchable `PanicException` across the FFI),
+        // and a NaN/inf would silently poison the optimizer and yield a bogus
+        // result with no error at all.
+        if values.len() != qcs.len() {
+            return Err(EvaluationError::WrongLength {
+                expected: qcs.len(),
+                got: values.len(),
+            });
+        }
+        if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(EvaluationError::NonFinite { index, value });
+        }
+        Ok(values)
     })
 }

@@ -74,6 +74,21 @@ impl VqcOracle {
             )?;
             results.extend(ev);
         }
+
+        // Defense-in-depth (contract C-5): `run_and_evaluate` already guarantees
+        // exactly `chunk.len()` values per chunk, and the chunks partition
+        // `bound` (== `candidates`) exactly, so this can only ever hold. It is
+        // kept as an explicit, self-documenting invariant at the point where the
+        // per-candidate results are finally assembled — do not "simplify" it away
+        // on the assumption the centralized check is enough. As with that path,
+        // report it as a `Result` rather than panicking (rule 4: FFI errors are
+        // `PyErr`/`Result`, and this runs under `OracleErrorSlot`).
+        if results.len() != candidates.len() {
+            return Err(EvaluationError::WrongLength {
+                expected: candidates.len(),
+                got: results.len(),
+            });
+        }
         Ok(results)
     }
 }
