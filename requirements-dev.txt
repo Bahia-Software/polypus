@@ -14,5 +14,5 @@ pytest>=8.0
 
 # Lint/format (config in [tool.ruff] in pyproject.toml; CI enforces both
 # `ruff check` and `ruff format --check`)
-ruff>=0.8
+ruff==0.16.1  # pinned; keep in sync with .github/workflows/ci.yml (see pyproject [tool.ruff.lint])
 
