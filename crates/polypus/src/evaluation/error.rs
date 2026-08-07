@@ -44,6 +44,12 @@ pub enum EvaluationError {
     /// Unlike `Python`, this never originated in a raised Python exception, so
     /// it must not be re-raised verbatim.
     Conversion(String),
+    /// The Python-backed oracle returned a different number of expectation
+    /// values than circuits were submitted in this call (contract C-5).
+    WrongLength { expected: usize, got: usize },
+    /// The Python-backed oracle returned a non-finite expectation value
+    /// (contract C-5 requires every output to be a finite f64).
+    NonFinite { index: usize, value: f64 },
 }
 
 impl fmt::Display for EvaluationError {
@@ -56,6 +62,14 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Conversion(m) => {
                 write!(f, "data conversion across the Python boundary failed: {m}")
             }
+            EvaluationError::WrongLength { expected, got } => write!(
+                f,
+                "oracle returned the wrong number of expectation values: expected {expected} (one per submitted circuit) but got {got} (contract C-5)"
+            ),
+            EvaluationError::NonFinite { index, value } => write!(
+                f,
+                "oracle returned a non-finite expectation value {value} at index {index}; contract C-5 requires every output to be a finite f64"
+            ),
         }
     }
 }
@@ -83,10 +97,13 @@ impl From<EvaluationError> for PyErr {
             // A Rust-side data-conversion failure: surface as the typed
             // polypus.EvaluationError, not the TypeError PyO3's extract() emits.
             EvaluationError::Conversion(m) => PyEvaluationError::new_err(m),
+            wrong_length @ EvaluationError::WrongLength { .. } => {
+                PyEvaluationError::new_err(wrong_length.to_string())
+            }
+            non_finite @ EvaluationError::NonFinite { .. } => {
+                PyEvaluationError::new_err(non_finite.to_string())
+            }
         }
-        .to_string();
-        assert!(msg.contains('3'), "offending index missing from: {msg}");
-        assert!(msg.contains("NaN"), "offending value missing from: {msg}");
     }
 }
 
@@ -153,5 +170,27 @@ mod tests {
                 "the descriptive message must be preserved"
             );
         });
+    }
+
+    #[test]
+    fn wrong_length_display_names_both_lengths() {
+        let msg = EvaluationError::WrongLength {
+            expected: 4,
+            got: 2,
+        }
+        .to_string();
+        assert!(msg.contains('4'), "expected length missing from: {msg}");
+        assert!(msg.contains('2'), "got length missing from: {msg}");
+    }
+
+    #[test]
+    fn non_finite_display_names_index_and_value() {
+        let msg = EvaluationError::NonFinite {
+            index: 3,
+            value: f64::NAN,
+        }
+        .to_string();
+        assert!(msg.contains('3'), "offending index missing from: {msg}");
+        assert!(msg.contains("NaN"), "offending value missing from: {msg}");
     }
 }

@@ -192,6 +192,24 @@ pub(crate) fn run_and_evaluate(
                 EvaluationError::Conversion(format!(
                     "expected expectation_values() to return list[float]: {e}"
                 ))
-            })
+            })?;
+
+        // Contract C-5: the Python-backed oracle must return exactly one finite
+        // f64 per submitted circuit. This is the single choke point that calls
+        // `polypus_python.expectation_values`, so validating here protects every
+        // oracle: a short list would otherwise index out of bounds inside the
+        // pure-Rust optimizer (an uncatchable `PanicException` across the FFI),
+        // and a NaN/inf would silently poison the optimizer and yield a bogus
+        // result with no error at all.
+        if values.len() != qcs.len() {
+            return Err(EvaluationError::WrongLength {
+                expected: qcs.len(),
+                got: values.len(),
+            });
+        }
+        if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(EvaluationError::NonFinite { index, value });
+        }
+        Ok(values)
     })
 }
