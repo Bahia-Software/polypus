@@ -12,7 +12,7 @@ use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::StatevectorSimulator;
+use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,29 +66,33 @@ impl NativeStatevectorBackend {
     /// [`simulate_one`](Self::simulate_one) and
     /// [`run_shots_distributed`](Self::run_shots_distributed) so both paths
     /// handle the `Native`/`Qasm2`/`Qiskit` variants and transpile identically.
-    fn concrete_circuit(
+    ///
+    /// Returns a borrow of `circuit` whenever possible instead of an owned
+    /// clone: the `Native` variant borrows directly, and when the transpiler
+    /// is a guaranteed no-op ([`Transpiler::is_identity`]) that borrow is
+    /// returned as-is, skipping the trait-dispatch clone entirely (the default
+    /// hot path). Only the `Qasm2` variant (which must be parsed into a local)
+    /// and a non-identity transpiler (which must produce a new circuit) force
+    /// an owned result.
+    fn concrete_circuit<'a>(
         &self,
-        circuit: &BoundCircuit,
+        circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
-    ) -> Result<HashMap<String, u64>, BackendError> {
-        // Obtain a borrow of the source ConcreteCircuit without touching Python.
-        // `parsed_from_qasm` owns the parsed circuit for the Qasm2 case so that
-        // `source` can borrow it for the rest of the function (parsing is
-        // unavoidable to simulate QASM natively).
-        let parsed_from_qasm;
-        let source: &ConcreteCircuit = match circuit {
-            BoundCircuit::Native(cc) => cc,
-            BoundCircuit::Qasm2(qasm) => {
-                parsed_from_qasm = ParameterizedCircuit::from_qasm2(qasm)
+    ) -> Result<Cow<'a, ConcreteCircuit>, BackendError> {
+        // Obtain a ConcreteCircuit without touching Python, borrowing the
+        // source directly for the Native variant.
+        let source: Cow<'a, ConcreteCircuit> = match circuit {
+            BoundCircuit::Native(cc) => Cow::Borrowed(cc),
+            BoundCircuit::Qasm2(qasm) => Cow::Owned(
+                ParameterizedCircuit::from_qasm2(qasm)
                     .and_then(|pc| pc.assign_parameters(&[]))
                     .map_err(|e| {
                         log::error!("native backend could not parse OpenQASM 2.0: {e}");
                         BackendError::NativeCircuit(format!(
                             "native backend could not parse OpenQASM 2.0: {e}"
                         ))
-                    })?;
-                &parsed_from_qasm
-            }
+                    })?,
+            ),
             BoundCircuit::Qiskit(_) => {
                 return Err(BackendError::UnsupportedCircuit(
                     "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
@@ -99,14 +103,14 @@ impl NativeStatevectorBackend {
         };
 
         // Transpile the native circuit (GIL-free) before simulating. When the
-        // transpiler is a guaranteed no-op, borrow the source directly and skip
-        // the trait-dispatch clone entirely (the default hot path).
-        let concrete: Cow<'_, ConcreteCircuit> = if self.transpiler.is_identity() {
-            Cow::Borrowed(source)
+        // transpiler is a guaranteed no-op, keep the borrow and skip the
+        // trait-dispatch clone entirely.
+        if self.transpiler.is_identity() {
+            Ok(source)
         } else {
-            Cow::Owned(self.transpiler.transpile(source, opts))
-        };
-        let concrete = concrete.as_ref();
+            Ok(Cow::Owned(self.transpiler.transpile(source.as_ref(), opts)))
+        }
+    }
 
     /// Run one bound circuit and return Aer-compatible bitstring counts.
     ///
@@ -123,12 +127,12 @@ impl NativeStatevectorBackend {
         let concrete = self.concrete_circuit(circuit, opts)?;
         let raw = self
             .simulator
-            .run_and_sample(concrete, shots as usize, seed)
+            .run_and_sample(concrete.as_ref(), shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
-        Ok(format_counts(&concrete, raw))
+        Ok(format_counts(concrete.as_ref(), raw))
     }
 }
 
@@ -191,7 +195,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         // Evolve the shared circuit exactly once; the statevector is reused for
         // every batch's sampling.
         let concrete = self.concrete_circuit(qc, &opts)?;
-        let sv = self.simulator.run(&concrete).map_err(|e| {
+        let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
         })?;
@@ -206,8 +210,8 @@ impl QuantumBackend for NativeStatevectorBackend {
             .enumerate()
             .map(|(i, &shots)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                let raw = sample_projected(&concrete, &sv, shots as usize, seed);
-                Ok(format_counts(&concrete, raw))
+                let raw = sample_projected(concrete.as_ref(), &sv, shots as usize, seed);
+                Ok(format_counts(concrete.as_ref(), raw))
             })
             .collect()
     }
