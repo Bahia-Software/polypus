@@ -14,12 +14,19 @@ reach by actually fitting the data. Every source of randomness (dataset order is
 fixed, splits, optimizer seeds, shot sampling) is seeded explicitly, so the
 whole script is deterministic run to run.
 
-A ``Model`` is reusable without limit — ``train()``/``TrainedModel`` both clone
-it internally before compiling, so the same object can be trained, wrapped in a
-``TrainedModel``, and even extended with further builder calls afterwards. Every
-scenario below builds its model **once** and reuses that one object; an earlier
-version of this script built a fresh model per use, which was defensive code
-against a limitation that does not exist.
+A ``Model`` is reusable without limit — ``Model.train()``/``TrainedModel`` both
+clone it internally before compiling, so the same object can be trained,
+wrapped in a ``TrainedModel``, and even extended with further builder calls
+afterwards. Every scenario below builds its model **once** and reuses that one
+object; an earlier version of this script built a fresh model per use, which
+was defensive code against a limitation that does not exist.
+
+Training reads as a fluent step on the model itself — ``model.train(dataset,
+...)`` — rather than the free ``polypus.qml.train(model, dataset, ...)``, and a
+simple readout term is ``Z(0)`` / ``Z(0) @ Z(1)`` rather than the bare
+``[("z", 0)]`` tuple form; both older spellings still work everywhere (every
+change in this crate's Python ergonomics is additive), this script just uses
+the more idiomatic one throughout.
 
 Run it directly::
 
@@ -42,6 +49,10 @@ PI = math.pi
 # seeded end to end by Polypus (contract C-7), needs no Aer, and supports the
 # shot-free `exact=True` path.
 BACKEND = dict(infrastructure="local", backend="polypus")
+
+# `Z(0)`, `X(0) @ Y(1)`, … — the idiomatic spelling of a simple Pauli readout
+# term, in place of the bare `[("z", 0)]` tuple form both still accept.
+Z, X, Y = polypus.qml.Z, polypus.qml.X, polypus.qml.Y
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +191,7 @@ def sign_model_2q(reps=2):
         polypus.qml.Model(2)
         .angle_encoder(axis="ry")
         .hardware_efficient(reps=reps)
-        .readout(observables=[[("z", 0)]], decision="sign")
+        .readout(observables=[Z(0)], decision="sign")
     )
 
 
@@ -192,7 +203,7 @@ def raw_model_2q(reps=2):
         polypus.qml.Model(2)
         .angle_encoder(axis="ry")
         .hardware_efficient(reps=reps)
-        .readout(observables=[[("z", 0)]], decision="raw")
+        .readout(observables=[Z(0)], decision="raw")
     )
 
 
@@ -224,8 +235,7 @@ def scenario_1_angle_de_hinge_exact():
     x, y = two_clusters_2f()
     model = sign_model_2q()
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
@@ -274,11 +284,10 @@ def scenario_2_amplitude_pso():
         polypus.qml.Model(2)
         .amplitude_encoder()
         .hardware_efficient(reps=2)
-        .readout(observables=[[("z", 0)]], decision="sign")
+        .readout(observables=[Z(0)], decision="sign")
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.PSO(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
@@ -330,11 +339,10 @@ def scenario_3_iqp_adam_shots():
         polypus.qml.Model(2)
         .iqp_encoder()
         .hardware_efficient(reps=1)
-        .readout(observables=[[("z", 0)]], decision="sign")
+        .readout(observables=[Z(0)], decision="sign")
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.Adam(max_iters=40, learning_rate=0.2, tolerance=1e-4),
         loss="hinge",
@@ -382,11 +390,10 @@ def scenario_4_qcnn_qng():
         .conv(block="basic")
         .pool(block="basic")
         .conv(block="basic", pairing="even_pairs")
-        .readout(observables=[[("z", 0)]], decision="sign")
+        .readout(observables=[Z(0)], decision="sign")
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.QNG(
             variance_function=qng_variance,
@@ -437,13 +444,12 @@ def scenario_5_multiclass_argmax():
         .angle_encoder(axis="ry")
         .hardware_efficient(reps=1)
         .readout(
-            observables=[[("z", 0)], [("z", 1)], [("z", 2)]],
+            observables=[Z(0), Z(1), Z(2)],
             decision="argmax",
         )
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.DE(generations=60, population_size=24, tolerance=1e-9),
         loss="categorical_cross_entropy",
@@ -491,11 +497,10 @@ def scenario_6_x_basis_readout():
         polypus.qml.Model(2)
         .angle_encoder(axis="ry")
         .hardware_efficient(reps=2)
-        .readout(observables=[[("x", 0)]], decision="sign")
+        .readout(observables=[X(0)], decision="sign")
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         # A slightly larger budget than scenario 1's: the X-basis expectation of
         # this circuit is a harder surface for DE to flatten to the same hinge
@@ -556,8 +561,7 @@ def scenario_7_minibatch_adam():
     dataset = polypus.qml.Dataset(scaled, y)
 
     def run(batch_size):
-        return polypus.qml.train(
-            model,
+        return model.train(
             dataset,
             method=polypus.Adam(max_iters=60, learning_rate=0.2, tolerance=1e-4),
             loss="hinge",
@@ -617,8 +621,7 @@ def scenario_8_save_load_predict():
     x, y = two_clusters_2f()
     model = sign_model_2q()
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
@@ -727,8 +730,7 @@ def scenario_9_dataset_utilities():
     outside = any(lo < 0.0 or hi > PI for lo, hi in actual_test_ranges)
 
     model = sign_model_2q()
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         train,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
@@ -787,8 +789,7 @@ def scenario_10_weighted_observable():
         .readout(observables=[observable], decision="sign")
     )
     dataset = polypus.qml.Dataset(x, y)
-    result = polypus.qml.train(
-        model,
+    result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
         loss="hinge",
