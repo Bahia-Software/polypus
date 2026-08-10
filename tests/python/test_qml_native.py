@@ -2480,3 +2480,505 @@ class TestThreeReadoutFormsCoexist:
         message = str(excinfo.value)
         for form in ("(pauli, position)", "polypus.qml.PauliTerm", "polypus.qml.Observable"):
             assert form in message
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Named constants for the string-typed kwargs (§17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `polypus.qml.Axis.RY`, `polypus.qml.Loss.HINGE`, … — nine namespace types, one
+# per string-typed builder/train kwarg, each carrying exactly the values its
+# `parse_*` accepts. Purely additive: every constant **is** the plain string, so
+# these tests do not merely check that the constants exist, they check that each
+# one is the same string and therefore builds the same circuit / the same run as
+# the literal it replaces.
+
+# The full expected surface, written out rather than derived from the module, so
+# a constant silently renamed, dropped or wired to the wrong string fails here.
+_QML_CONSTANTS = {
+    "Axis": {"RX": "rx", "RY": "ry", "RZ": "rz"},
+    "Decision": {
+        "SIGN": "sign",
+        "THRESHOLD": "threshold",
+        "ARGMAX": "argmax",
+        "RAW": "raw",
+    },
+    "Loss": {
+        "SQUARED_ERROR": "squared_error",
+        "BINARY_CROSS_ENTROPY": "binary_cross_entropy",
+        "HINGE": "hinge",
+        "CATEGORICAL_CROSS_ENTROPY": "categorical_cross_entropy",
+    },
+    "Entanglement": {"LINEAR": "linear", "CIRCULAR": "circular", "FULL": "full"},
+    "Entangler": {"CX": "cx", "CZ": "cz"},
+    "ConvBlock": {"BASIC": "basic", "CARTAN": "cartan"},
+    "Pairing": {
+        "EVEN_PAIRS": "even_pairs",
+        "ODD_PAIRS": "odd_pairs",
+        "ALTERNATING": "alternating",
+    },
+    "PoolBlock": {"BASIC": "basic"},
+    "KeepRule": {"EVEN_POSITIONS": "even_positions", "ODD_POSITIONS": "odd_positions"},
+}
+
+_NAMESPACE_NAMES = sorted(_QML_CONSTANTS)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+@pytest.mark.parametrize("namespace", _NAMESPACE_NAMES)
+class TestNamedConstantSurface:
+    """What the nine namespaces expose, before any of it is used in a call."""
+
+    def test_every_constant_is_the_plain_string(self, namespace):
+        import polypus
+
+        cls = getattr(polypus.qml, namespace)
+        for name, expected in _QML_CONSTANTS[namespace].items():
+            got = getattr(cls, name)
+            # `is` a `str`, not a wrapper type that merely compares equal: that
+            # is what makes the constant usable anywhere the literal is.
+            assert type(got) is str, f"{namespace}.{name} is {type(got)}"
+            assert got == expected
+
+    def test_no_other_constants_are_exposed(self, namespace):
+        # Pins the surface in the other direction too, so an extra value (say a
+        # decision `parse_decision` does not accept) cannot appear unnoticed.
+        import polypus
+
+        cls = getattr(polypus.qml, namespace)
+        exposed = {a for a in dir(cls) if not a.startswith("_") and a.isupper()}
+        assert exposed == set(_QML_CONSTANTS[namespace])
+
+    def test_constants_are_attributes_not_callables(self, namespace):
+        # `Axis.RY`, never `Axis.RY()`: the whole point of the spelling is that it
+        # drops into a kwarg exactly where the literal did.
+        import polypus
+
+        cls = getattr(polypus.qml, namespace)
+        for name in _QML_CONSTANTS[namespace]:
+            assert not callable(getattr(cls, name))
+
+    def test_namespace_cannot_be_instantiated(self, namespace):
+        # These are namespaces, not values: there is no `__new__`, so the only
+        # thing to do with them is read their constants.
+        import polypus
+
+        cls = getattr(polypus.qml, namespace)
+        with pytest.raises(TypeError):
+            cls()
+
+    def test_namespace_is_registered_under_polypus_qml(self, namespace):
+        import polypus
+
+        cls = getattr(polypus.qml, namespace)
+        assert cls.__module__ == "polypus.qml"
+        assert cls.__name__ == namespace
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestConvBlockAndPoolBlockAreSeparateNamespaces:
+    """`ConvBlock.BASIC` and `PoolBlock.BASIC` both spell `"basic"`, but they are
+    two namespaces on purpose — they stand for two independent Rust enums
+    (`ConvBlock`/`PoolBlock`) that happen to agree on that one value today. A
+    single shared `BASIC` would tie them together and imply `conv` and `pool`
+    accept the same vocabulary, which they do not."""
+
+    def test_both_spell_basic(self):
+        import polypus
+
+        assert polypus.qml.ConvBlock.BASIC == "basic"
+        assert polypus.qml.PoolBlock.BASIC == "basic"
+
+    def test_neither_carries_the_other_vocabulary(self):
+        # The observable consequence of being separate: `cartan` is a conv block
+        # and nothing else, so it is reachable only through `ConvBlock`.
+        import polypus
+
+        assert hasattr(polypus.qml.ConvBlock, "CARTAN")
+        assert not hasattr(polypus.qml.PoolBlock, "CARTAN")
+
+    def test_each_is_accepted_only_by_its_own_parameter(self):
+        # `pool` rejects `ConvBlock.CARTAN` exactly as it rejects the literal
+        # `"cartan"` — the constants change nothing about which parser runs.
+        import polypus
+
+        with pytest.raises(ValueError, match="unknown pool block"):
+            polypus.qml.Model(4).pool(block=polypus.qml.ConvBlock.CARTAN)
+        with pytest.raises(ValueError, match="unknown pool block"):
+            polypus.qml.Model(4).pool(block="cartan")
+
+
+def _axis_raw_model(axis):
+    """An angle-encoder model over `axis`, reading ⟨Z₀⟩ raw."""
+    import polypus
+
+    return (
+        polypus.qml.Model(2)
+        .angle_encoder(axis=axis)
+        .hardware_efficient(reps=1)
+        .readout(observables=[[("z", 0)]], decision="raw")
+    )
+
+
+def _decision_predict(decision, threshold=None):
+    """The exact prediction of a two-observable readout under `decision`.
+
+    Two observables, not one, so the same helper serves `argmax` (which needs at
+    least two) and the three scalar decisions (which read ⟨O₀⟩ and are unaffected
+    by the second)."""
+    import polypus
+
+    observables = [[("z", 0)], [("z", 1)]]
+    model = (
+        polypus.qml.Model(2)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=0, rotations=["ry"], final_rotation_layer=True)
+        .readout(observables=observables, decision=decision, threshold=threshold)
+    )
+    trained = polypus.qml.TrainedModel(model, _dataset(), list(_OBS_THETA))
+    return trained.predict(
+        [list(_OBS_SAMPLE)],
+        infrastructure="local",
+        backend="polypus",
+        id="qml_named_constants",
+        exact=True,
+    )[0]
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestConstantsAreInterchangeableAtEveryCallSite:
+    """Each constant used where the literal used to go, checked against the
+    literal's own result bit for bit — the exact inference path of section 7, so
+    two spellings that build the same circuit agree exactly and two that build
+    different circuits cannot.
+
+    A constant wired to the wrong string would still be *a* valid value and would
+    still train, so "it does not raise" proves nothing here; equality with the
+    intended literal is what proves it."""
+
+    # `hardware_efficient(reps=1)` reserves axes × qubits × blocks = 2 × n × 2.
+    THETA_2Q = [0.1 * (i + 1) for i in range(8)]
+    THETA_4Q = [0.1 * (i + 1) for i in range(16)]
+
+    @pytest.mark.parametrize(
+        "constant,literal", [("RX", "rx"), ("RY", "ry"), ("RZ", "rz")]
+    )
+    def test_axis_in_angle_encoder(self, constant, literal):
+        import polypus
+
+        axis = getattr(polypus.qml.Axis, constant)
+        assert _exact_expectation(_axis_raw_model(axis), self.THETA_2Q) == (
+            _exact_expectation(_axis_raw_model(literal), self.THETA_2Q)
+        )
+
+    def test_the_three_axes_are_distinguishable(self):
+        # Guards the equality above against being vacuous: if all three axes
+        # built the same circuit, a mis-wired constant would pass unnoticed.
+        values = {
+            axis: _exact_expectation(_axis_raw_model(axis), self.THETA_2Q)
+            for axis in ("rx", "ry", "rz")
+        }
+        assert len(set(values.values())) == 3, f"axes collapsed: {values}"
+
+    def test_axis_in_the_hardware_efficient_rotations_list(self):
+        # `rotations` is a *list* of axis strings, so the constants have to work
+        # inside a sequence too, not only as a scalar kwarg.
+        import polypus
+
+        def build(axes):
+            return _raw_model(2, lambda m: m.hardware_efficient(reps=1, rotations=axes))
+
+        constants = [polypus.qml.Axis.RY, polypus.qml.Axis.RZ]
+        theta = [0.1 * (i + 1) for i in range(8)]
+        assert _exact_expectation(build(constants), theta) == _exact_expectation(
+            build(["ry", "rz"]), theta
+        )
+
+    @pytest.mark.parametrize("constant,literal", [("CX", "cx"), ("CZ", "cz")])
+    def test_entangler_in_hardware_efficient(self, constant, literal):
+        import polypus
+
+        entangler = getattr(polypus.qml.Entangler, constant)
+
+        def build(value):
+            return _raw_model(
+                2, lambda m: m.hardware_efficient(reps=1, entangler=value)
+            )
+
+        assert _exact_expectation(build(entangler), self.THETA_2Q) == (
+            _exact_expectation(build(literal), self.THETA_2Q)
+        )
+
+    @pytest.mark.parametrize(
+        "constant,literal",
+        [("LINEAR", "linear"), ("CIRCULAR", "circular"), ("FULL", "full")],
+    )
+    def test_entanglement_in_hardware_efficient(self, constant, literal):
+        import polypus
+
+        pattern = getattr(polypus.qml.Entanglement, constant)
+
+        def build(value):
+            return _raw_model(
+                4, lambda m: m.hardware_efficient(reps=1, entanglement=value)
+            )
+
+        args = dict(sample=_SAMPLE_4F, dataset=_dataset_4f())
+        assert _exact_expectation(build(pattern), self.THETA_4Q, **args) == (
+            _exact_expectation(build(literal), self.THETA_4Q, **args)
+        )
+
+    @pytest.mark.parametrize(
+        "constant,literal",
+        [("LINEAR", "linear"), ("CIRCULAR", "circular"), ("FULL", "full")],
+    )
+    def test_entanglement_in_iqp_encoder(self, constant, literal):
+        # The same namespace serves the IQP encoder's `entanglement`, which is a
+        # second parser call site for one set of constants.
+        import polypus
+
+        pattern = getattr(polypus.qml.Entanglement, constant)
+        args = dict(sample=_SAMPLE_4F, dataset=_dataset_4f())
+        assert _exact_expectation(
+            _iqp_raw_model(4, pattern), self.THETA_4Q, **args
+        ) == _exact_expectation(_iqp_raw_model(4, literal), self.THETA_4Q, **args)
+
+    @pytest.mark.parametrize(
+        "constant,literal,threshold",
+        [
+            ("SIGN", "sign", None),
+            ("RAW", "raw", None),
+            ("ARGMAX", "argmax", None),
+            # 0.8 sits *above* ⟨Z₀⟩ (see the analytic test below), so this lands
+            # on the `-1.0` branch — a different value from `sign`'s, which is
+            # what makes the equality below discriminating.
+            ("THRESHOLD", "threshold", 0.8),
+        ],
+    )
+    def test_decision_in_readout(self, constant, literal, threshold):
+        import polypus
+
+        decision = getattr(polypus.qml.Decision, constant)
+        assert _decision_predict(decision, threshold) == _decision_predict(
+            literal, threshold
+        )
+
+    def test_the_four_decisions_give_four_analytic_values(self):
+        # The equalities above are only meaningful if the four decisions do
+        # different things, so each is pinned to its hand-computed value on this
+        # product state: ⟨Z₀⟩ = cos(0.4+0.7) ≈ 0.454 and ⟨Z₁⟩ = cos(0.9+1.3) < 0.
+        z0 = _expected_z(_OBS_SAMPLE, _OBS_THETA, [0])
+        z1 = _expected_z(_OBS_SAMPLE, _OBS_THETA, [1])
+        assert z0 > 0.0 > z1
+        assert _decision_predict("raw") == z0
+        assert _decision_predict("sign") == 1.0  # ⟨Z₀⟩ ≥ 0
+        assert _decision_predict("threshold", 0.25) == 1.0  # ⟨Z₀⟩ ≥ 0.25
+        assert _decision_predict("threshold", 0.8) == -1.0  # ⟨Z₀⟩ < 0.8
+        assert _decision_predict("argmax") == 0.0  # ⟨Z₀⟩ > ⟨Z₁⟩
+        # Four distinct outputs, so no constant can be passing by landing on a
+        # value some other decision would have produced anyway.
+        assert len({z0, 1.0, -1.0, 0.0}) == 4
+
+    def test_threshold_constant_still_requires_its_threshold_value(self):
+        # The constants add no leniency: `parse_decision`'s rule is unchanged.
+        import polypus
+
+        model = polypus.qml.Model(2).angle_encoder(axis="ry").real_amplitudes(reps=1)
+        with pytest.raises(ValueError, match="requires a threshold"):
+            model.readout(
+                observables=[[("z", 0)]], decision=polypus.qml.Decision.THRESHOLD
+            )
+        with pytest.raises(ValueError, match='only valid with decision="threshold"'):
+            model.readout(
+                observables=[[("z", 0)]],
+                decision=polypus.qml.Decision.SIGN,
+                threshold=0.5,
+            )
+
+    @pytest.mark.parametrize(
+        # The θ width is the block's own (4 for basic, 3 for cartan — section 8),
+        # and `bind` rejects any other length, so passing it is itself a check
+        # that the constant selected the block it names.
+        "constant,literal,num_theta",
+        [("BASIC", "basic", 4), ("CARTAN", "cartan", 3)],
+    )
+    def test_conv_block(self, constant, literal, num_theta):
+        import polypus
+
+        block = getattr(polypus.qml.ConvBlock, constant)
+        theta = [0.3, 0.7, 1.1, 1.5][:num_theta]
+        assert _exact_expectation(_conv_raw_model(4, block), theta) == (
+            _exact_expectation(_conv_raw_model(4, literal), theta)
+        )
+
+    @pytest.mark.parametrize(
+        "constant,literal",
+        [
+            ("EVEN_PAIRS", "even_pairs"),
+            ("ODD_PAIRS", "odd_pairs"),
+            ("ALTERNATING", "alternating"),
+        ],
+    )
+    def test_conv_pairing(self, constant, literal):
+        import polypus
+
+        pairing = getattr(polypus.qml.Pairing, constant)
+        theta = [0.3, 0.7, 1.1, 1.5]
+        assert _exact_expectation(
+            _conv_raw_model(4, polypus.qml.ConvBlock.BASIC, pairing=pairing), theta
+        ) == _exact_expectation(_conv_raw_model(4, "basic", pairing=literal), theta)
+
+    @pytest.mark.parametrize(
+        "constant,literal",
+        [("EVEN_POSITIONS", "even_positions"), ("ODD_POSITIONS", "odd_positions")],
+    )
+    def test_pool_block_and_keep_rule(self, constant, literal):
+        # Both pool constants at once: `PoolBlock.BASIC` for the block and the
+        # `KeepRule` under test for `keep`.
+        import polypus
+
+        keep = getattr(polypus.qml.KeepRule, constant)
+        theta = [0.3, 0.7, 1.1]
+
+        def build(block, keep_value):
+            return (
+                polypus.qml.Model(4)
+                .angle_encoder(axis="ry")
+                .pool(block=block, keep=keep_value)
+                .readout(observables=[[("z", 0)]], decision="raw")
+            )
+
+        assert _exact_expectation(
+            build(polypus.qml.PoolBlock.BASIC, keep), theta
+        ) == _exact_expectation(build("basic", literal), theta)
+
+
+# The two label domains the scalar losses accept, over `_dataset()`'s samples:
+# `hinge` (and `squared_error`) want {−1, 1}, `binary_cross_entropy` {0, 1}.
+_BINARY_LABELS = [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+_ZERO_ONE_LABELS = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+
+
+def _relabelled_dataset(labels):
+    """`_dataset()`'s two clusters carrying `labels` — the same samples, so only
+    the loss and its label domain differ between runs."""
+    import polypus
+
+    x = [
+        [0.3, 0.35],
+        [0.4, 0.3],
+        [0.35, 0.4],
+        [2.8, 2.75],
+        [2.9, 2.8],
+        [2.75, 2.9],
+    ]
+    return polypus.qml.Dataset(x, list(labels))
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestLossConstantsTrainIdentically:
+    """`Loss` is the one namespace whose call site is `train`, not a builder, so
+    its equivalence is pinned on a whole run: the same seed and the constant give
+    a byte-identical `QmlTrainResult` to the same seed and the literal."""
+
+    @staticmethod
+    def _train(loss, decision="sign", observables=None, dataset=None, num_qubits=2):
+        import polypus
+
+        dataset = dataset if dataset is not None else _dataset()
+        model = (
+            polypus.qml.Model(num_qubits)
+            .angle_encoder(axis="ry")
+            .hardware_efficient(reps=1)
+            .readout(
+                observables=observables or [[("z", 0)]],
+                decision=decision,
+            )
+        )
+        return model.train(
+            dataset,
+            method=polypus.DE(population_size=6, generations=4, tolerance=1e-12),
+            loss=loss,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_loss_constant",
+            seed=11,
+            exact=True,
+        )
+
+    @pytest.mark.parametrize(
+        # Each scalar loss brings the label domain it accepts (`squared_error`
+        # any finite value, `hinge` exactly {−1, 1}, `binary_cross_entropy`
+        # exactly {0, 1}), so the run is a valid one for the loss under test.
+        "constant,literal,labels",
+        [
+            ("SQUARED_ERROR", "squared_error", _BINARY_LABELS),
+            ("BINARY_CROSS_ENTROPY", "binary_cross_entropy", _ZERO_ONE_LABELS),
+            ("HINGE", "hinge", _BINARY_LABELS),
+        ],
+    )
+    def test_scalar_losses_reproduce_the_literal_run(self, constant, literal, labels):
+        import polypus
+
+        loss = getattr(polypus.qml.Loss, constant)
+        with_constant = self._train(loss, dataset=_relabelled_dataset(labels))
+        with_literal = self._train(literal, dataset=_relabelled_dataset(labels))
+        assert with_constant.best_params == with_literal.best_params
+        assert with_constant.best_fitness == with_literal.best_fitness
+
+    def test_two_losses_on_one_dataset_score_differently(self):
+        # The anti-vacuity guard: `squared_error` and `hinge` are the two scalar
+        # losses whose label domains overlap, so they can be run on the *same*
+        # dataset — and they must disagree, or the equalities above would hold
+        # for any pair of loss strings. (`binary_cross_entropy` needs {0, 1}
+        # labels, so it cannot join this comparison.)
+        squared = self._train("squared_error").best_fitness
+        hinge = self._train("hinge").best_fitness
+        assert squared != hinge, f"losses collapsed: {squared}"
+
+    def test_categorical_cross_entropy_reproduces_the_literal_run(self):
+        # The multiclass loss needs its multiclass partner (`argmax` + integer
+        # class labels, contract C-8), so it gets its own run rather than joining
+        # the parametrized three.
+        import math
+
+        import polypus
+
+        dataset = polypus.qml.Dataset(
+            [[0.3, 0.35], [2.8, 2.75], [1.5, 1.55], [0.4, 0.3], [2.9, 2.8], [1.6, 1.5]],
+            [0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+        )
+        args = dict(
+            decision="argmax",
+            observables=[[("z", 0)], [("z", 1)], [("z", 0), ("z", 1)]],
+            dataset=dataset,
+        )
+        with_constant = self._train(
+            polypus.qml.Loss.CATEGORICAL_CROSS_ENTROPY, **args
+        )
+        with_literal = self._train("categorical_cross_entropy", **args)
+        assert math.isfinite(with_constant.best_fitness)
+        assert with_constant.best_params == with_literal.best_params
+        assert with_constant.best_fitness == with_literal.best_fitness
+
+    def test_the_free_function_takes_the_constants_too(self):
+        # `polypus.qml.train(model, dataset, ...)` is the other `loss` call site
+        # and is unchanged by the method form, so it is checked separately.
+        import polypus
+
+        result = polypus.qml.train(
+            _model(),
+            _dataset(),
+            method=polypus.DE(population_size=6, generations=4, tolerance=1e-12),
+            loss=polypus.qml.Loss.HINGE,
+            infrastructure="local",
+            backend="polypus",
+            id="qml_loss_constant",
+            seed=11,
+            exact=True,
+        )
+        assert result.best_fitness == self._train("hinge").best_fitness

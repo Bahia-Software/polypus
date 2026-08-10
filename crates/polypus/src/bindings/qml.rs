@@ -347,6 +347,172 @@ fn parse_decision(decision: &str, threshold: Option<f64>) -> PyResult<Decision> 
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Named constants for the string-typed builder kwargs (design doc §17)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Nine namespace types — `polypus.qml.Axis.RY`, `polypus.qml.Loss.HINGE`, … —
+// each carrying the exact set of values the matching `parse_*` above accepts.
+// They exist so the valid values are **discoverable** (`dir(polypus.qml.Axis)`,
+// an editor's completion, a docstring) instead of only being recoverable from a
+// `ValueError` after guessing wrong.
+//
+// The constants are the plain strings, not a new type: `Axis.RY` *is* `"ry"`.
+// That keeps the change purely additive — every method still takes the string it
+// always took, `parse_axis` is untouched, and no call site that spells the string
+// literally has to change. The alternative (a real enum pyclass accepted
+// alongside the string) would mean a second accepted type in nine signatures and
+// nine parsers, for no gain over a name that evaluates to the same string.
+//
+// Written as `#[classattr] const` in `#[pymethods]`, which is PyO3's mechanism
+// for a plain class attribute: the value is materialised once when the class
+// object is built, so `Axis.RY` is an attribute lookup returning a `str`, not a
+// call. None of the nine has a `#[new]` — they are namespaces, never instances,
+// so `Axis()` is a `TypeError` from Python's side with nothing to write here.
+//
+// Eight of the nine are named `Py*` in Rust purely because the plain names are
+// already taken in this file by the `polypus-qml` enums they mirror (`Loss`,
+// `Decision`, …); `#[pyclass(name = "…")]` fixes what Python sees, exactly as it
+// does for `PyObservable` → `polypus.qml.Observable`. `Axis` needs no prefix:
+// the Rust enum is `RotationAxis`.
+
+/// The rotation axes `Model.angle_encoder(axis=…)` and
+/// `Model.hardware_efficient(rotations=[…])` accept.
+///
+/// `polypus.qml.Axis.RY` is the string `"ry"`, so it is interchangeable with it
+/// everywhere.
+#[pyclass(module = "polypus.qml", name = "Axis", frozen)]
+pub struct Axis;
+
+#[pymethods]
+impl Axis {
+    #[classattr]
+    const RX: &'static str = "rx";
+    #[classattr]
+    const RY: &'static str = "ry";
+    #[classattr]
+    const RZ: &'static str = "rz";
+}
+
+/// The decision rules `Model.readout(decision=…)` accepts.
+///
+/// `THRESHOLD` is the one that needs the companion `threshold=` value;
+/// `parse_decision` owns that rule and is unchanged by this spelling.
+#[pyclass(module = "polypus.qml", name = "Decision", frozen)]
+pub struct PyDecision;
+
+#[pymethods]
+impl PyDecision {
+    #[classattr]
+    const SIGN: &'static str = "sign";
+    #[classattr]
+    const THRESHOLD: &'static str = "threshold";
+    #[classattr]
+    const ARGMAX: &'static str = "argmax";
+    #[classattr]
+    const RAW: &'static str = "raw";
+}
+
+/// The losses `polypus.qml.train(loss=…)` / `Model.train(loss=…)` accept.
+///
+/// `CATEGORICAL_CROSS_ENTROPY` is the multiclass one, and pairs only with
+/// `Decision.ARGMAX` (contract C-8); the other three are scalar.
+#[pyclass(module = "polypus.qml", name = "Loss", frozen)]
+pub struct PyLoss;
+
+#[pymethods]
+impl PyLoss {
+    #[classattr]
+    const SQUARED_ERROR: &'static str = "squared_error";
+    #[classattr]
+    const BINARY_CROSS_ENTROPY: &'static str = "binary_cross_entropy";
+    #[classattr]
+    const HINGE: &'static str = "hinge";
+    #[classattr]
+    const CATEGORICAL_CROSS_ENTROPY: &'static str = "categorical_cross_entropy";
+}
+
+/// The entanglement patterns `Model.hardware_efficient(entanglement=…)` and
+/// `Model.iqp_encoder(entanglement=…)` accept.
+#[pyclass(module = "polypus.qml", name = "Entanglement", frozen)]
+pub struct PyEntanglement;
+
+#[pymethods]
+impl PyEntanglement {
+    #[classattr]
+    const LINEAR: &'static str = "linear";
+    #[classattr]
+    const CIRCULAR: &'static str = "circular";
+    #[classattr]
+    const FULL: &'static str = "full";
+}
+
+/// The entangling gates `Model.hardware_efficient(entangler=…)` accepts.
+#[pyclass(module = "polypus.qml", name = "Entangler", frozen)]
+pub struct PyEntangler;
+
+#[pymethods]
+impl PyEntangler {
+    #[classattr]
+    const CX: &'static str = "cx";
+    #[classattr]
+    const CZ: &'static str = "cz";
+}
+
+/// The convolution blocks `Model.conv(block=…)` accepts.
+///
+/// A namespace of its own, not shared with [`PyPoolBlock`]: `ConvBlock` and
+/// `PoolBlock` are two independent Rust enums that happen to both spell a block
+/// `"basic"` today, and `Model.conv` accepts only the former's values.
+#[pyclass(module = "polypus.qml", name = "ConvBlock", frozen)]
+pub struct PyConvBlock;
+
+#[pymethods]
+impl PyConvBlock {
+    #[classattr]
+    const BASIC: &'static str = "basic";
+    #[classattr]
+    const CARTAN: &'static str = "cartan";
+}
+
+/// The qubit pairings `Model.conv(pairing=…)` accepts.
+#[pyclass(module = "polypus.qml", name = "Pairing", frozen)]
+pub struct PyPairing;
+
+#[pymethods]
+impl PyPairing {
+    #[classattr]
+    const EVEN_PAIRS: &'static str = "even_pairs";
+    #[classattr]
+    const ODD_PAIRS: &'static str = "odd_pairs";
+    #[classattr]
+    const ALTERNATING: &'static str = "alternating";
+}
+
+/// The pooling blocks `Model.pool(block=…)` accepts — one today, see the note on
+/// [`PyConvBlock`] for why this is nonetheless a separate namespace.
+#[pyclass(module = "polypus.qml", name = "PoolBlock", frozen)]
+pub struct PyPoolBlock;
+
+#[pymethods]
+impl PyPoolBlock {
+    #[classattr]
+    const BASIC: &'static str = "basic";
+}
+
+/// The keep rules `Model.pool(keep=…)` accepts — which qubit of each pooled pair
+/// stays active.
+#[pyclass(module = "polypus.qml", name = "KeepRule", frozen)]
+pub struct PyKeepRule;
+
+#[pymethods]
+impl PyKeepRule {
+    #[classattr]
+    const EVEN_POSITIONS: &'static str = "even_positions";
+    #[classattr]
+    const ODD_POSITIONS: &'static str = "odd_positions";
+}
+
 /// A weighted sum of Pauli strings, `O = Σ cᵢ·Pᵢ`, mirroring `polypus-qml`'s
 /// [`Observable`] for Python.
 ///
