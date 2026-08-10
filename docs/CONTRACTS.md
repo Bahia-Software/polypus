@@ -562,6 +562,41 @@ raises at the `@`, before any `readout` call, where the bare form's equivalent
 `[("z", 0), ("z", 0)]` can only be caught once `readout` parses it. Same error,
 earlier.
 
+**String-typed kwargs and their named constants.** Nine kwargs on the Python QML
+surface take a string from a closed set, each parsed strictly (an unrecognised
+value is a `ValueError` listing the options):
+
+| kwarg | accepted values | namespace |
+| --- | --- | --- |
+| `Model.angle_encoder(axis=)`, `Model.hardware_efficient(rotations=[…])` | `"rx"`, `"ry"`, `"rz"` | `polypus.qml.Axis` |
+| `Model.readout(decision=)` | `"sign"`, `"threshold"`, `"argmax"`, `"raw"` | `polypus.qml.Decision` |
+| `qml.train(loss=)`, `Model.train(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"` | `polypus.qml.Loss` |
+| `Model.hardware_efficient(entanglement=)`, `Model.iqp_encoder(entanglement=)` | `"linear"`, `"circular"`, `"full"` | `polypus.qml.Entanglement` |
+| `Model.hardware_efficient(entangler=)` | `"cx"`, `"cz"` | `polypus.qml.Entangler` |
+| `Model.conv(block=)` | `"basic"`, `"cartan"` | `polypus.qml.ConvBlock` |
+| `Model.conv(pairing=)` | `"even_pairs"`, `"odd_pairs"`, `"alternating"` | `polypus.qml.Pairing` |
+| `Model.pool(block=)` | `"basic"` | `polypus.qml.PoolBlock` |
+| `Model.pool(keep=)` | `"even_positions"`, `"odd_positions"` | `polypus.qml.KeepRule` |
+
+The namespaces in the last column are **additive and nothing more**: each
+constant *is* the plain string (`polypus.qml.Axis.RY == "ry"`), so the two
+spellings are interchangeable everywhere and the plain string remains the only
+accepted *type*. They exist so the vocabulary is discoverable —
+`dir(polypus.qml.Loss)`, editor completion, a docstring — rather than only
+recoverable from a `ValueError` after guessing wrong. No parser, no signature and
+no default changes because of them.
+
+`ConvBlock` and `PoolBlock` are deliberately separate namespaces even though both
+spell a block `"basic"` today: they stand for two independent Rust enums, and
+`Model.pool` does not accept a conv block (`pool(block=ConvBlock.CARTAN)` is the
+same `ValueError` as `pool(block="cartan")`).
+
+The constants are ordinary class attributes on `#[pyclass]` types with no
+constructor, so `polypus.qml.Axis()` is a `TypeError` — a namespace, never a
+value. They are **not** immutable: PyO3 builds mutable heap types, so
+`polypus.qml.Axis.RY = …` succeeds and corrupts the vocabulary process-wide. That
+is a foot-gun, not a supported operation.
+
 **Readout measurement basis (single group).** A readout may measure `X`/`Y`
 Paulis, not just `Z`: `compile` inserts the basis change (`H` for `X`; `Sdg`
 then `H` for `Y`) before the terminal measurement. This is supported **only when
