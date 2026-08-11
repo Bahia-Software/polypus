@@ -114,6 +114,29 @@ impl QuantumModel {
         }
     }
 
+    /// The number of qubits the model is built over, fixed at
+    /// [construction](Self::new).
+    ///
+    /// An infallible read of the builder's own state: unlike
+    /// [`CompiledModel::num_params`] it needs no compilation, so it answers for
+    /// a model still under construction — or one `compile` would reject. No
+    /// layer can change it either; pooling narrows the *active* set, not the
+    /// register.
+    pub fn num_qubits(&self) -> usize {
+        self.num_qubits
+    }
+
+    /// The number of layers appended so far — everything pushed by
+    /// [`layer`](Self::layer) or one of its sugar methods: encoders, ansätze,
+    /// conv and pool blocks.
+    ///
+    /// The [`Readout`] is *not* a layer, so [`readout`](Self::readout) never
+    /// moves this count. Infallible for the same reason
+    /// [`num_qubits`](Self::num_qubits) is.
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
     /// Append `layer` to the model.
     pub fn layer(mut self, layer: Layer) -> Self {
         self.layers.push(layer);
@@ -552,6 +575,49 @@ mod tests {
             .layer(Layer::Iqp(IqpEncoder::new()))
             .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)));
         assert_eq!(sugared, explicit);
+    }
+
+    #[test]
+    fn num_qubits_is_the_construction_width() {
+        // Available immediately: no layers, no readout, no compile.
+        for n in [1, 2, 5] {
+            assert_eq!(QuantumModel::new(n).num_qubits(), n);
+        }
+    }
+
+    #[test]
+    fn num_layers_counts_layers_and_not_the_readout() {
+        // Starts at zero and advances by exactly one per builder call, whichever
+        // sugar spells it.
+        let model = QuantumModel::new(4);
+        assert_eq!(model.num_layers(), 0);
+        let model = model.angle_encoder(RotationAxis::Ry);
+        assert_eq!(model.num_layers(), 1);
+        let model = model.conv(ConvBlock::Basic);
+        assert_eq!(model.num_layers(), 2);
+        let model = model.pool(PoolBlock::Basic);
+        assert_eq!(model.num_layers(), 3);
+        let model = model.layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)));
+        assert_eq!(model.num_layers(), 4);
+        // A readout is not a layer: attaching one leaves the count alone, and
+        // the qubit count is untouched by any of it (pooling narrowed the
+        // *active* set, not the register).
+        let model = model.readout(z0_readout());
+        assert_eq!(model.num_layers(), 4);
+        assert_eq!(model.num_qubits(), 4);
+    }
+
+    #[test]
+    fn accessors_answer_for_a_model_that_does_not_compile() {
+        // Both are reads of the builder's state, so they are independent of
+        // whether `compile` would accept the model — here it does not.
+        let model = QuantumModel::new(2).angle_encoder(RotationAxis::Ry);
+        assert_eq!(model.num_qubits(), 2);
+        assert_eq!(model.num_layers(), 1);
+        assert_eq!(
+            model.compile(2).unwrap_err(),
+            ValidationError::MissingReadout
+        );
     }
 
     #[test]
