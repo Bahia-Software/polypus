@@ -626,6 +626,21 @@ impl Model {
         Ok(slf)
     }
 
+    /// Append a basis encoder: for each feature `x_j ∈ {0.0, 1.0}`, applies `X`
+    /// to the qubit at that position iff `x_j == 1.0`, so a binary sample `x`
+    /// becomes the computational basis state `|x⟩` (PennyLane calls the
+    /// equivalent operator `BasisEmbedding`).
+    ///
+    /// It takes no configuration and consumes no `θ`. Unlike `amplitude_encoder`
+    /// it is **not** restricted to being the first layer — a conditional `X`
+    /// composes on any state. A feature that is neither `0.0` nor `1.0` is a
+    /// `ValueError` naming its position, raised where the sample is encoded
+    /// (training or inference), never rounded silently.
+    fn basis_encoder(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        Model::apply(&mut slf, |model| model.basis_encoder());
+        Ok(slf)
+    }
+
     /// Append an IQP / `ZZFeatureMap` feature encoder over the `entanglement`
     /// pattern (`"linear"`/`"circular"`/`"full"`).
     ///

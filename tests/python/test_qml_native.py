@@ -3233,3 +3233,168 @@ class TestModelRepr:
         text = repr(model)
         assert text == "Model(num_qubits=2, num_layers=1)"
         assert "param" not in text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 18. `Model.basis_encoder()` — computational-basis encoding of binary features
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The fourth feature encoder (PennyLane's `BasisEmbedding`): feature `x_j` flips
+# the qubit at position `j` with an `X` iff it is exactly `1.0`. Three things are
+# worth pinning from Python, beyond the Rust-side unit tests:
+#
+#   • it reserves no θ of its own and increments `num_layers` like any layer;
+#   • it *learns* — a run on an exhaustively enumerated binary dataset reaches
+#     the analytic optimum and classifies every sample right, so the layer is
+#     wired into training and not merely accepted by the builder;
+#   • the strict 0/1 rule survives the FFI boundary as a `ValueError` naming the
+#     offending feature, rather than being rounded somewhere along the way.
+
+
+def _binary_dataset():
+    """Every 2-bit sample, labelled by its **first** bit.
+
+    Exhaustive rather than sampled: with binary features the whole input domain
+    is four points, so `accuracy == 1.0` below is measured over all of it. A
+    perfect hinge fitness (`0.0`) is reachable — ⟨Z₀⟩ = ±1 exactly, since the
+    encoder prepares a basis state — which is what makes the fitness assertion a
+    real target rather than an arbitrary threshold."""
+    import polypus
+
+    x = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+    y = [-1.0, -1.0, 1.0, 1.0]
+    return polypus.qml.Dataset(x, y)
+
+
+def _basis_model():
+    """A 2-qubit basis-encoder + hardware-efficient model reading ⟨Z₀⟩ with a
+    sign decision (8 trainable parameters), matching `_model()`'s shape so the
+    only difference is the encoder."""
+    import polypus
+
+    return (
+        polypus.qml.Model(2)
+        .basis_encoder()
+        .hardware_efficient(reps=1)
+        .readout(observables=[[("z", 0)]], decision="sign")
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestBasisEncoderLayer:
+    def test_chains_fluently_and_counts_as_one_layer(self):
+        import polypus
+
+        model = polypus.qml.Model(3)
+        assert model.num_layers() == 0
+        model = model.basis_encoder()
+        assert model.num_layers() == 1
+        # Still a builder afterwards: the chain continues.
+        model = model.basis_encoder().hardware_efficient(reps=1)
+        assert model.num_layers() == 3
+
+    def test_reserves_no_parameters_of_its_own(self):
+        # 2 qubits × 2 rotations × (1 rep + final block) = 8, the ansatz's alone.
+        assert _basis_model().num_params() == 8
+
+    def test_trains_to_the_optimum_and_classifies_every_sample(self):
+        import polypus
+
+        dataset = _binary_dataset()
+        result = polypus.qml.train(
+            _basis_model(),
+            dataset,
+            method=polypus.DE(generations=60, population_size=20, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_basis_train",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 8
+        # Hinge fitness is −mean(max(0, 1 − y·⟨Z₀⟩)); the encoder's basis state
+        # makes ⟨Z₀⟩ = ±1 reachable, so the optimum is exactly 0.0.
+        assert result.best_fitness > -0.05, result.best_fitness
+        predictions = result.trained_model.predict(
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+            infrastructure="local",
+            backend="polypus",
+            id="qml_basis_predict",
+            exact=True,
+        )
+        assert predictions == [-1.0, -1.0, 1.0, 1.0]
+
+    def test_non_binary_feature_is_rejected_naming_its_position(self):
+        # 0.5 names no basis state, so it is an error rather than a rounded 0 or
+        # 1 — and the message must say *which* feature to fix.
+        import polypus
+
+        dataset = polypus.qml.Dataset(
+            [[0.0, 0.5], [1.0, 1.0]],
+            [-1.0, 1.0],
+        )
+        with pytest.raises(ValueError) as excinfo:
+            polypus.qml.train(
+                _basis_model(),
+                dataset,
+                method=polypus.DE(generations=5, population_size=8),
+                loss="hinge",
+                infrastructure="local",
+                backend="polypus",
+                id="qml_basis_non_binary",
+                seed=7,
+                exact=True,
+            )
+        message = str(excinfo.value)
+        assert "0.5" in message, message
+        # Feature 1, not feature 0: the index is reported, not merely a count.
+        assert "feature 1" in message, message
+
+    def test_value_outside_the_unit_interval_is_rejected_the_same_way(self):
+        # Not special-cased against the 0.5 above: 2.0 is just as non-binary.
+        # Checked on the *inference* path, so the rule holds wherever a sample is
+        # encoded, not only where the training set is validated.
+        import polypus
+
+        trained = polypus.qml.TrainedModel(
+            _basis_model(), _binary_dataset(), [0.1] * 8
+        )
+        with pytest.raises(ValueError, match="feature 0"):
+            trained.predict(
+                [[2.0, 0.0]],
+                infrastructure="local",
+                backend="polypus",
+                id="qml_basis_non_binary_predict",
+                exact=True,
+            )
+
+    def test_composes_after_another_layer(self):
+        # The property that separates it from `amplitude_encoder`: a conditional
+        # X is an ordinary unitary, so it trains from any position in the stack.
+        import math
+
+        import polypus
+
+        model = (
+            polypus.qml.Model(2)
+            .angle_encoder(axis="ry")
+            .basis_encoder()
+            .hardware_efficient(reps=1)
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        assert model.num_layers() == 3
+        result = polypus.qml.train(
+            model,
+            _binary_dataset(),
+            method=polypus.DE(generations=30, population_size=16, tolerance=1e-9),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_basis_after_angle",
+            seed=7,
+            exact=True,
+        )
+        assert len(result.best_params) == 8
+        assert math.isfinite(result.best_fitness)
