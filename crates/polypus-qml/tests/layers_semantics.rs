@@ -3,7 +3,7 @@
 //! instruction-list golden tests, but the actual quantum state and its
 //! measured expectations.
 //!
-//! Seven checks:
+//! Eight checks:
 //! 1. the [`AngleEncoder`] produces the expected tensor-product state;
 //! 2. the [`ConvBlock::Cartan`] block (including the synthesized `ryy`) matches
 //!    an independently hand-applied gate sequence on every canonical basis
@@ -18,7 +18,10 @@
 //! 6. the [`IqpEncoder`] produces the closed-form IQP state, amplitude by
 //!    amplitude, for all three [`Entanglement`] patterns;
 //! 7. the `IqpEncoder`'s `⟨X₀⟩` is the non-linear closed form
-//!    `cos(x₀)·cos(x₀·x₁)` — the data non-linearity that motivates the layer.
+//!    `cos(x₀)·cos(x₀·x₁)` — the data non-linearity that motivates the layer;
+//! 8. the `BasisEncoder` puts a binary sample on a **computational basis
+//!    state** — a single unit amplitude, matching an independently
+//!    hand-applied `X` on every set bit.
 //!
 //! `polypus-sim` enters only as a dev-dependency — the crate's public API never
 //! executes a circuit.
@@ -472,6 +475,60 @@ fn iqp_encoder_x_expectation_is_the_non_linear_closed_form() {
             "x={x:?}: counts estimate {estimate} deviates from closed form {want}"
         );
     }
+}
+
+/// (8) The [`BasisEncoder`] loads a binary sample onto a computational basis
+/// state.
+///
+/// Same `θ = 0` trick as check (1): every `real_amplitudes(1)` `Ry` becomes the
+/// identity, so the only gates besides the encoder's `X`s are the ansatz's fixed
+/// linear `Cx` chain — hand-applied here too, rather than stripped, since the
+/// point is to compare the *whole* circuit against an independently built state.
+/// Every gate involved (`X`, `Cx`) is a basis permutation, so the result must
+/// still be a single unit amplitude: that is asserted separately, because it is
+/// what distinguishes basis encoding from every other encoder in the catalogue
+/// (an angle or IQP encoder spreads the state over a superposition).
+#[test]
+fn basis_encoder_prepares_the_computational_basis_state() {
+    let model = QuantumModel::new(3)
+        .basis_encoder()
+        .layer(Layer::HardwareEfficient(
+            HardwareEfficientAnsatz::real_amplitudes(1),
+        ))
+        .readout(z0_readout(Decision::Raw))
+        .compile(3)
+        .unwrap();
+
+    let x = [1.0, 0.0, 1.0];
+    let circuit = model.bind(&x, &vec![0.0; model.num_params()]).unwrap();
+    let actual = StatevectorSimulator::new().run(&circuit).unwrap();
+
+    let mut expected = Statevector::new(3).unwrap();
+    // The encoder: one X per feature equal to 1.0 — qubit 1 is left alone.
+    apply(&mut expected, GateInstruction::X(0));
+    apply(&mut expected, GateInstruction::X(2));
+    // The ansatz's fixed linear Cx chain, all its Ry being identity at θ = 0.
+    apply(&mut expected, GateInstruction::Cx(0, 1));
+    apply(&mut expected, GateInstruction::Cx(1, 2));
+
+    for (a, b) in actual.amplitudes().iter().zip(expected.amplitudes()) {
+        assert!(close(*a, *b), "amplitude mismatch: {a} vs {b}");
+    }
+
+    // Every gate above is a basis permutation, so the state is one basis vector
+    // — no superposition anywhere, which is the defining property of the layer.
+    let occupied: Vec<usize> = actual
+        .amplitudes()
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.norm() > 1e-10)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        occupied.len(),
+        1,
+        "basis encoding must leave a single occupied basis state, got {occupied:?}"
+    );
 }
 
 #[test]

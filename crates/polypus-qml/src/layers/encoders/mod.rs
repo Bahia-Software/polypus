@@ -3,8 +3,10 @@
 
 mod amplitude;
 mod angle;
+mod basis;
 mod iqp;
 
 pub use amplitude::AmplitudeEncoder;
 pub use angle::AngleEncoder;
+pub use basis::BasisEncoder;
 pub use iqp::IqpEncoder;

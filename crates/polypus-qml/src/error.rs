@@ -14,16 +14,17 @@
 //!   propagates transparently from every `try_push`/`assign_parameters` call)
 //!   and adds the feature-count check `template_for` performs before dispatch,
 //!   plus — added in phase 3 — the counts-format checks the expectation
-//!   estimator performs.
+//!   estimator performs, and the per-layer `emit` failures (the amplitude
+//!   encoder's zero-norm sample, the basis encoder's non-binary feature).
 //!
-//! `ValidationError` deliberately omits `Eq` because
-//! [`ValidationError::InvalidTestFraction`] carries an `f64`, which is not
-//! `Eq` (nor is [`ValidationError::LabelDomain`], which carries a [`Loss`], or
-//! the [`Decision`]-bearing variants); `QmlError` derives `Eq` (all its
-//! payloads are `Eq`, and `CircuitError` is too). The full error catalogue of
-//! §10 is still completed incrementally — the remaining
-//! amplitude-encoding/pooling variants arrive with the phases that can raise
-//! them.
+//! Neither enum derives `Eq`: [`ValidationError::InvalidTestFraction`] carries
+//! an `f64` (as do [`ValidationError::LabelDomain`], which carries a [`Loss`],
+//! and the [`Decision`]-bearing variants), and so does
+//! [`QmlError::NonBinaryFeature`], which reports the offending feature value.
+//! `QmlError` did derive `Eq` while every payload of its was `Eq`; that variant
+//! traded it for the ability to name the value it rejected, which is what makes
+//! its message actionable. `PartialEq` — the one the tests and the `assert_eq!`
+//! call sites actually use — is unchanged on both.
 
 use std::fmt;
 
@@ -384,7 +385,7 @@ impl From<QmlError> for ValidationError {
 ///
 /// [`ParameterizedCircuit`]: polypus_circuit::ParameterizedCircuit
 /// [`ConcreteCircuit`]: polypus_circuit::ConcreteCircuit
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum QmlError {
     /// A circuit operation failed (out-of-range qubit, non-finite angle, wrong
     /// number of bound parameters, …). Wraps the underlying [`CircuitError`].
@@ -419,6 +420,22 @@ pub enum QmlError {
     /// without widening the [`LayerOps::emit`](crate::model) signature for this
     /// single case.
     ZeroNormSample,
+    /// A feature handed to the [`BasisEncoder`](crate::BasisEncoder) is neither
+    /// `0.0` nor `1.0`, so it names no computational basis state. Never rounded
+    /// or thresholded silently — a non-binary feature is a data error the caller
+    /// must resolve (design doc §6.7).
+    ///
+    /// Unlike [`ZeroNormSample`](Self::ZeroNormSample) — which is about the
+    /// whole sample's norm and so has no position to report — this variant does
+    /// carry one: `emit` walks the features one at a time, so it knows exactly
+    /// which failed. The index is within the sample, not within the dataset
+    /// (`emit` never sees the sample's own position).
+    NonBinaryFeature {
+        /// Index of the offending feature within the sample.
+        feature: usize,
+        /// The rejected value.
+        got: f64,
+    },
     /// The counts map handed to the expectation estimator is empty (or records
     /// zero total shots): there is nothing to estimate an expectation from.
     EmptyCounts,
@@ -460,6 +477,10 @@ impl fmt::Display for QmlError {
             QmlError::ZeroNormSample => write!(
                 f,
                 "amplitude encoding requires a non-zero sample: the L2 norm is zero, so there is no state to prepare"
+            ),
+            QmlError::NonBinaryFeature { feature, got } => write!(
+                f,
+                "basis encoding requires every feature to be exactly 0.0 or 1.0: feature {feature} is {got}"
             ),
             QmlError::EmptyCounts => {
                 write!(
@@ -650,6 +671,26 @@ mod tests {
         assert!(QmlError::CategoricalLossHasNoScalarForm
             .to_string()
             .contains("scalar"));
+    }
+
+    #[test]
+    fn non_binary_feature_displays_its_index_and_value() {
+        // Both halves must be in the message: the index says *which* feature to
+        // fix, the value says what was wrong with it.
+        let s = QmlError::NonBinaryFeature {
+            feature: 2,
+            got: 0.5,
+        }
+        .to_string();
+        assert!(s.contains('2'), "missing the feature index: {s}");
+        assert!(s.contains("0.5"), "missing the offending value: {s}");
+        // A value outside [0, 1] is reported the same way, not special-cased.
+        let s = QmlError::NonBinaryFeature {
+            feature: 0,
+            got: -1.5,
+        }
+        .to_string();
+        assert!(s.contains("-1.5"), "missing the offending value: {s}");
     }
 
     #[test]

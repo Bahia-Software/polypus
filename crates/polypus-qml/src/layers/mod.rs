@@ -14,7 +14,7 @@ mod pool;
 
 pub use ansatz::{Entanglement, Entangler, HardwareEfficientAnsatz};
 pub use conv::{ConvBlock, ConvLayer, Pairing};
-pub use encoders::{AmplitudeEncoder, AngleEncoder, IqpEncoder};
+pub use encoders::{AmplitudeEncoder, AngleEncoder, BasisEncoder, IqpEncoder};
 pub use pool::{KeepRule, PoolBlock, PoolLayer};
 
 use polypus_circuit::ParameterizedCircuit;
@@ -104,6 +104,9 @@ pub enum Layer {
     /// `Rzz(x_i·x_j)` over the pairs of an [`Entanglement`] pattern (consumes
     /// no `θ`).
     Iqp(IqpEncoder),
+    /// Computational-basis feature encoding: an `X` on every qubit whose binary
+    /// feature is `1.0` (consumes no `θ`).
+    Basis(BasisEncoder),
     /// A hardware-efficient variational block (consumes `θ`).
     HardwareEfficient(HardwareEfficientAnsatz),
     /// A convolution block with parameter sharing across pairs (consumes `θ`).
@@ -118,6 +121,7 @@ impl LayerOps for Layer {
             Layer::AngleEncoder(l) => l.plan(ctx),
             Layer::AmplitudeEncoder(l) => l.plan(ctx),
             Layer::Iqp(l) => l.plan(ctx),
+            Layer::Basis(l) => l.plan(ctx),
             Layer::HardwareEfficient(l) => l.plan(ctx),
             Layer::Conv(l) => l.plan(ctx),
             Layer::Pool(l) => l.plan(ctx),
@@ -134,6 +138,7 @@ impl LayerOps for Layer {
             Layer::AngleEncoder(l) => l.emit(qc, alloc, x),
             Layer::AmplitudeEncoder(l) => l.emit(qc, alloc, x),
             Layer::Iqp(l) => l.emit(qc, alloc, x),
+            Layer::Basis(l) => l.emit(qc, alloc, x),
             Layer::HardwareEfficient(l) => l.emit(qc, alloc, x),
             Layer::Conv(l) => l.emit(qc, alloc, x),
             Layer::Pool(l) => l.emit(qc, alloc, x),

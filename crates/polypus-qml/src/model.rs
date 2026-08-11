@@ -34,8 +34,8 @@ use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{
-    AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz, IqpEncoder,
-    Layer, PoolBlock, PoolLayer, RotationAxis,
+    AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, HardwareEfficientAnsatz,
+    IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis,
 };
 use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
 use crate::readout::{Readout, ResolvedReadout};
@@ -162,6 +162,14 @@ impl QuantumModel {
     /// layer of the model.
     pub fn amplitude_encoder(self) -> Self {
         self.layer(Layer::AmplitudeEncoder(AmplitudeEncoder))
+    }
+
+    /// Sugar for `.layer(Layer::Basis(BasisEncoder))`. The [`BasisEncoder`]
+    /// takes no configuration; it flips the qubit at position `j` exactly when
+    /// feature `x_j` is `1.0`, and — unlike [`AmplitudeEncoder`] — may sit
+    /// anywhere in the layer list.
+    pub fn basis_encoder(self) -> Self {
+        self.layer(Layer::Basis(BasisEncoder))
     }
 
     /// Sugar for `.layer(Layer::Iqp(IqpEncoder::new()))`, with the default
@@ -569,10 +577,12 @@ mod tests {
         let sugared = QuantumModel::new(2)
             .angle_encoder(RotationAxis::Ry)
             .iqp_encoder()
+            .basis_encoder()
             .hardware_efficient(1);
         let explicit = QuantumModel::new(2)
             .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
             .layer(Layer::Iqp(IqpEncoder::new()))
+            .layer(Layer::Basis(BasisEncoder))
             .layer(Layer::HardwareEfficient(HardwareEfficientAnsatz::new(1)));
         assert_eq!(sugared, explicit);
     }
@@ -723,6 +733,44 @@ mod tests {
                 got: 1,
             })
         ));
+    }
+
+    #[test]
+    fn basis_encoder_compiles_when_it_is_not_the_first_layer() {
+        // The guarantee that separates it from the `AmplitudeEncoder`: a
+        // conditional `X` composes on whatever state precedes it, so a basis
+        // encoder behind an angle encoder must compile *and* emit — pinned here
+        // at the model level, not only inside the layer's own unit tests.
+        let model = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .basis_encoder()
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(z0_readout())
+            .compile(2)
+            .unwrap();
+        // The two encoders reserve nothing: the count is the ansatz's alone.
+        assert_eq!(model.num_params(), 4);
+
+        // x = [1, 0]: the encoder flips qubit 0 only, and does so *after* the
+        // angle encoder's rotations rather than replacing them.
+        let gates = model.template_for(&[1.0, 0.0]).unwrap().gates;
+        assert_eq!(
+            gates[..3],
+            [
+                GateInstruction::Ry {
+                    qubit: 0,
+                    theta: polypus_circuit::Fixed(1.0),
+                },
+                GateInstruction::Ry {
+                    qubit: 1,
+                    theta: polypus_circuit::Fixed(0.0),
+                },
+                GateInstruction::X(0),
+            ]
+        );
+        assert!(!gates.contains(&GateInstruction::X(1)));
     }
 
     #[test]

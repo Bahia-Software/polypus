@@ -25,8 +25,8 @@
 //! (validated construction, deterministic splits, feature scaling) and the
 //! layered model builder ([`QuantumModel`] → [`CompiledModel`]) with its
 //! [`Layer`] catalogue ([`AngleEncoder`], [`AmplitudeEncoder`], [`IqpEncoder`],
-//! [`HardwareEfficientAnsatz`], [`ConvLayer`], [`PoolLayer`]), a model
-//! now carries a [`Readout`] — Pauli [`Observable`]s plus a [`Decision`] — and
+//! [`BasisEncoder`], [`HardwareEfficientAnsatz`], [`ConvLayer`], [`PoolLayer`]),
+//! a model now carries a [`Readout`] — Pauli [`Observable`]s plus a [`Decision`] — and
 //! a [`Loss`] closes the loop: [`QmlProblem`] bundles a compiled model, a
 //! training set and a loss into the pair of operations an optimizer oracle
 //! needs (bind parameters into circuits; turn measurement counts into a
@@ -34,8 +34,10 @@
 //!
 //! The convolution ([`ConvLayer`]) and unitary-pooling ([`PoolLayer`]) layers
 //! that build QCNNs are now available, as are the amplitude-encoding layer
-//! ([`AmplitudeEncoder`], `O(2^k)` state preparation) and the IQP /
-//! `ZZFeatureMap` encoder ([`IqpEncoder`], a non-linear feature map). Readout
+//! ([`AmplitudeEncoder`], `O(2^k)` state preparation), the IQP /
+//! `ZZFeatureMap` encoder ([`IqpEncoder`], a non-linear feature map) and the
+//! computational-basis encoder ([`BasisEncoder`], one `X` per set bit of a
+//! binary sample) — four feature encoders in all. Readout
 //! observables may be measured in the `X`/`Y` bases as long as the whole
 //! readout resolves to a single basis group (design doc §7.2).
 
@@ -52,7 +54,7 @@ mod rng;
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
 pub use layers::{
-    AmplitudeEncoder, AngleEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
+    AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,
     RotationAxis,
 };
