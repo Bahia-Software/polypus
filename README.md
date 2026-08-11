@@ -198,12 +198,15 @@ result = polypus.train(
 `train()` (and `qml.train()`) return a `TrainResult` carrying the full optimization outcome, not just the tuned parameters:
 
 ```python
-print(result.best_params)     # list[float] — the optimized parameters
-print(result.best_fitness)    # float — cost/fitness at those parameters
-print(result.iterations_run)  # int — iterations actually run (early-stopping aware)
-print(result.converged)       # bool — whether the convergence criterion was met
-print(result.seed)            # int — the effective RNG seed; pass it back as seed=... to reproduce the run
+print(result.best_params)      # list[float] — the optimized parameters
+print(result.best_fitness)     # float — cost/fitness at those parameters
+print(result.fitness_history)  # list[float] — the convergence curve: best fitness so far, one per iteration run
+print(result.iterations_run)   # int — iterations actually run (early-stopping aware)
+print(result.converged)        # bool — whether the convergence criterion was met
+print(result.seed)             # int — the effective RNG seed; pass it back as seed=... to reproduce the run
 ```
+
+`fitness_history` has one entry per iteration actually executed (so `len(result.fitness_history) == result.iterations_run`) and never decreases — each entry is the best fitness found up to that iteration, so the last one is `result.best_fitness`. Plot it directly to see how a run converged.
 
 Pin reproducibility with the `seed` keyword (`polypus.train(..., seed=42)`) or on the optimizer itself (`polypus.DE(..., seed=42)`); with no seed, one is drawn from OS entropy and reported back in `result.seed`.
 
