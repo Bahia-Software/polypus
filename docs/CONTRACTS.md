@@ -224,6 +224,25 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- **Additive:** `OptimizationOutcome` carries a `fitness_history: Vec<f64>`
+  beside `best_fitness` — the convergence curve of the run. No existing field,
+  guarantee or signature changes; every optimizer simply reports the incumbent
+  best it already tracked internally. Its guarantees:
+  - `fitness_history.len() == iterations_run`, on the early-stopping paths
+    included (DE's/PSO's population collapse, QNG's/Adam's `patience` streak) —
+    the entry is recorded before the `break`, never after it. It is empty
+    exactly when `iterations_run == 0`.
+  - `*fitness_history.last() == best_fitness`: both are read from the same
+    incumbent-best variable, not recomputed.
+  - **Monotonically non-decreasing for all four optimizers.** Each entry is the
+    running best — DE's post-selection champion `fitness[argmax]`, PSO's global
+    best over the personal bests, QNG's/Adam's `best_energy` *after* its
+    `if energy > best_energy` update — and **not** the fitness of that
+    iteration's current candidate, which gradient ascent lets oscillate freely.
+    The monotonicity is structural (it is a running maximum), so it holds
+    whatever the oracle returns: a shot estimate, or a minibatch estimate. What
+    a noisy oracle changes is how much each entry *means*, never the shape of
+    the sequence.
 - `GradientOracle::gradient_batch(theta, dims)` (QNG only) returns the fitness
   gradient `∂fitness/∂θ`, **exactly `dims` values**, in order, same ascent-sign
   convention as `EvaluationOracle` (higher fitness is better; the value points
@@ -367,6 +386,17 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   against the whole training set, exactly as for a non-minibatch run — the
   minibatch is only the cheap per-iteration heuristic that steers the search.
 
+  **`fitness_history` is the one field that recompute deliberately leaves
+  alone**, so under `batch_size` it is the only place C-5's
+  `fitness_history[-1] == best_fitness` does not hold. The curve keeps the
+  per-iteration *minibatch* estimates the optimizer actually steered by, which is
+  what a convergence curve is for; splicing the full-dataset number onto its last
+  point would mix two scales and — since a minibatch estimate is typically the
+  rosier of the two — could make the sequence decrease, trading C-5's
+  monotonicity guarantee for a cosmetic endpoint. Length and monotonicity hold
+  under `batch_size` exactly as everywhere else; read `best_fitness` for the
+  honest full-dataset number, as this contract already says.
+
   **Minibatching interacts badly with gradient-norm early stopping — evaluated,
   reproduces, mitigated by `patience` (not eliminated).** `AlgorithmQNG` and
   `AlgorithmAdam` set `converged` from that iteration's `‖∇fitness(θ)‖₂` against
@@ -427,8 +457,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   (str).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
-  `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
-  seed used) and `id` (str, the effective run id: the caller-supplied `id`
+  `fitness_history` (`list[float]`, the convergence curve: one
+  best-fitness-so-far per iteration run, with C-5's length / last-entry /
+  monotonicity guarantees), `iterations_run` (int), `converged` (bool) — plus
+  `seed` (int, the effective seed used) and `id` (str, the effective run id: the caller-supplied `id`
   prefix suffixed with a UUID v4 for uniqueness — a label for logging /
   SLURM / temp-file identification only, never for correlating runs by content;
   see #75). This replaces the former bare `list[float]`, which discarded
@@ -439,7 +471,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   native one. This is an extension of that existing asymmetry, not a new
   inconsistency:
   - a native `polypus.qml.Model` (+ `Dataset`) returns a
-    **`polypus.qml.QmlTrainResult`**: the six `TrainResult` fields above, with
+    **`polypus.qml.QmlTrainResult`**: the seven `TrainResult` fields above, with
     identical names, types and meanings, plus **`trained_model`** — a
     ready-to-use `polypus.qml.TrainedModel` (the model compiled against the
     dataset's feature count and bound to `best_params`), built eagerly at the end
@@ -486,6 +518,13 @@ install. The per-path return shapes of `qml.train` are pinned by
 `TestQiskitPathStillReturnsTrainResult`): the native path's type and fields, the
 bit-for-bit equality between `result.trained_model`'s predictions and a
 hand-built `TrainedModel`'s, and the Qiskit path still returning `TrainResult`.
+`fitness_history` is covered on every one of those paths — the generic `train`
+(`test_vqc.py::TestTrainFitnessHistory`, DE and Adam), the native path and its
+`batch_size` exception (`test_qml_native.py` section 13), the Qiskit path
+(`TestQiskitPathStillReturnsTrainResult`), `Model.train`'s field-by-field
+agreement (section 14) and same-seed reproducibility of the whole curve
+(`test_seed_reproducibility.py`) — with the per-optimizer guarantees themselves
+pinned in `crates/polypus-optimizers/tests/optimizers.rs`.
 
 ---
 
