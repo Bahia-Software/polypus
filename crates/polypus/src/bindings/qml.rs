@@ -919,9 +919,90 @@ impl Model {
         )
     }
 
+    /// The number of qubits this model is built over, fixed at construction.
+    ///
+    /// A plain read of the builder's state: it needs neither a readout nor a
+    /// compilation, so it answers on a model still being chained together.
+    fn num_qubits(&self) -> usize {
+        self.inner
+            .as_ref()
+            .expect("Model.inner is always Some between calls")
+            .num_qubits()
+    }
+
+    /// The number of layers appended so far — encoders, ansätze, conv and pool
+    /// blocks. The [`readout`](Self::readout) is not a layer and never counts
+    /// here. Infallible, like [`num_qubits`](Self::num_qubits).
+    fn num_layers(&self) -> usize {
+        self.inner
+            .as_ref()
+            .expect("Model.inner is always Some between calls")
+            .num_layers()
+    }
+
+    /// The number of trainable parameters `θ` this model compiles to — the
+    /// `dimensions` an optimizer sees (contract C-8(d)) and the length of the
+    /// `best_params` [`train`](Self::train) returns.
+    ///
+    /// Computed by compiling a **clone** of the builder, so the `Model` itself
+    /// is not consumed and stays reusable, exactly as it is across `train`. That
+    /// also means this runs the *same* validation `train` does and raises the
+    /// *same* `ValueError`s: `MissingReadout` until a readout is attached,
+    /// `NoTrainableParams` for an encoder-only model, `NotEnoughQubits`, and so
+    /// on. Deliberate — a parameter count only exists for a model the trainer
+    /// would accept, so reporting one for a model it would reject would be the
+    /// worse answer.
+    ///
+    /// ## Why `num_features = 0` is a safe placeholder
+    ///
+    /// [`QuantumModel::compile`] takes the dataset's feature count, which this
+    /// method cannot know: there may be no `Dataset` yet. Passing `0` is
+    /// nonetheless **exact**, because no layer's parameter count depends on
+    /// `num_features`. All three encoders (`AngleEncoder`, `AmplitudeEncoder`,
+    /// [`IqpEncoder`]) reserve an *empty* `θ` range, leaving the compiler's
+    /// parameter cursor untouched; every layer that does reserve parameters —
+    /// the hardware-efficient ansatz, conv, pool — sizes its range from the
+    /// active-qubit count and its own configuration alone. So the number
+    /// returned here is the model's real trainable-parameter count, whatever
+    /// feature count it is eventually trained with.
+    ///
+    /// What `num_features` *does* feed is validation: an encoder rejects a
+    /// feature count its qubits cannot carry (`NotEnoughQubits`,
+    /// `TooManyFeatures`). Zero features trips neither, so this method is
+    /// strictly more permissive than the caller's eventual `compile` on that one
+    /// axis — it never invents a feature-count rejection the caller did not ask
+    /// about, and never hides a *structural* one.
+    fn num_params(&self) -> PyResult<usize> {
+        let compiled = self
+            .inner
+            .as_ref()
+            .expect("Model.inner is always Some between calls")
+            .clone()
+            .compile(0)
+            .map_err(validation_to_py_err)?;
+        Ok(compiled.num_params())
+    }
+
+    /// `Model(num_qubits=4, num_layers=3)` — the two structural facts that are
+    /// available whatever state the builder is in.
+    ///
+    /// Deliberately **infallible**, and deliberately silent about `θ`: it
+    /// reports nothing that needs compiling, so it works on a half-built model
+    /// — including one with no readout yet, where
+    /// [`num_params`](Self::num_params) raises. A repr that could raise would
+    /// make an incomplete model undebuggable at the REPL, which is precisely
+    /// when its repr earns its keep.
     fn __repr__(&self) -> String {
         match &self.inner {
-            Some(_) => "Model(...)".to_string(),
+            Some(model) => format!(
+                "Model(num_qubits={}, num_layers={})",
+                model.num_qubits(),
+                model.num_layers()
+            ),
+            // Unreachable from Python — `Model::apply` takes `inner` only for
+            // the duration of one builder call, and no Python code runs in
+            // between — but kept as a branch rather than an `expect`, as it was
+            // before: a repr must never be the thing that panics.
             None => "Model(<in flight>)".to_string(),
         }
     }

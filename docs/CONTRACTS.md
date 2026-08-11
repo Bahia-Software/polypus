@@ -562,7 +562,10 @@ guarantees:
 - **(d) `num_params()` is stable and positive.** `num_params()` is fixed at
   `compile` time, always `> 0` (a model with no trainable parameters is
   rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
-  the optimizer consumes under C-5.
+  the optimizer consumes under C-5. `polypus.qml.Model.num_params()` reads that
+  same number from Python before any training happens — it compiles a clone of
+  the builder, so it inherits this guarantee verbatim, positivity included: an
+  ansatz-free model raises `NoTrainableParams` rather than reporting `0`.
 
 **Readout observables from Python (`Model.readout`).** Each element of
 `observables` is **one of three** forms:

@@ -3057,3 +3057,179 @@ class TestLossConstantsTrainIdentically:
             exact=True,
         )
         assert result.best_fitness == self._train("hinge").best_fitness
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. Model introspection: num_qubits / num_layers / num_params and __repr__
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Three read-only accessors plus a structural `__repr__`. The split that matters
+# is fallibility: `num_qubits`/`num_layers`/`__repr__` read the builder's own
+# state and can never raise, while `num_params` compiles a clone of the model and
+# therefore raises exactly what `train()` would on the same incomplete model.
+#
+# `num_params` is pinned against the `best_params` length a real `train()` run
+# returns, on two shapes whose parameter counts come from different formulas — a
+# plausible-but-wrong number would sail through a bare "does not raise" test.
+
+
+def _conv_pool_model():
+    """A 4-qubit ``angle_encoder + conv + pool`` model reading ⟨Z₀⟩.
+
+    Its parameters come from the QCNN blocks' *sharing* rule (one θ set per
+    layer, independent of the qubit count: 4 for a basic conv, 3 for a basic
+    pool) rather than from the hardware-efficient ansatz's
+    ``active × rotations × blocks`` product — which is the point of using it
+    beside ``_model()``. Pooling halves the active set 4 → 2, and the readout
+    resolves position 0 against that.
+    """
+    import polypus
+
+    return (
+        polypus.qml.Model(4)
+        .angle_encoder(axis="ry")
+        .conv(block="basic")
+        .pool(block="basic")
+        .readout(observables=[[("z", 0)]], decision="sign")
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelIntrospectionInfallible:
+    """The accessors that read builder state: available before anything else is."""
+
+    @pytest.mark.parametrize("n", [1, 2, 5])
+    def test_num_qubits_is_the_construction_width(self, n):
+        import polypus
+
+        # Immediately after construction: no layers, no readout, no compile.
+        assert polypus.qml.Model(n).num_qubits() == n
+
+    def test_num_layers_increments_by_one_per_builder_call(self):
+        import polypus
+
+        model = polypus.qml.Model(4)
+        assert model.num_layers() == 0
+        # Each builder call appends exactly one layer, whichever sugar spells it.
+        assert model.angle_encoder(axis="ry").num_layers() == 1
+        assert model.conv(block="basic").num_layers() == 2
+        assert model.pool(block="basic").num_layers() == 3
+        assert model.hardware_efficient(reps=1).num_layers() == 4
+        # A readout is not a layer: attaching one leaves the count alone.
+        model.readout(observables=[[("z", 0)]], decision="sign")
+        assert model.num_layers() == 4
+        # And nothing above touched the register width.
+        assert model.num_qubits() == 4
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelNumParams:
+    """``num_params()`` against the parameter count training actually uses."""
+
+    @staticmethod
+    def _train(model):
+        import polypus
+
+        return model.train(
+            _dataset(),
+            polypus.DE(population_size=6, generations=4, tolerance=1e-12),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_num_params",
+            seed=17,
+            exact=True,
+        )
+
+    def test_hardware_efficient_shape(self):
+        # 2 qubits × 2 default rotations (ry, rz) × (1 rep + final layer) = 8;
+        # the angle encoder reserves none.
+        model = _model()
+        assert model.num_params() == 8
+        # The discriminating assertion: the same number the optimizer sized θ to.
+        assert len(self._train(model).best_params) == 8
+
+    def test_conv_pool_shape(self):
+        # Basic conv (4, shared across pairs) + basic pool (3, likewise) = 7 —
+        # a different formula from the ansatz shape above, so a count derived
+        # the wrong way cannot satisfy both tests.
+        model = _conv_pool_model()
+        assert model.num_params() == 7
+        assert len(self._train(model).best_params) == 7
+
+    def test_num_params_does_not_consume_the_model(self):
+        # It compiles a *clone*, so the builder stays reusable — repeated calls
+        # agree, and the model still trains afterwards.
+        model = _model()
+        assert model.num_params() == model.num_params() == 8
+        assert len(self._train(model).best_params) == 8
+        # ... and can still be extended, the count following the new layer.
+        assert model.hardware_efficient(reps=1).num_params() == 16
+
+    def test_missing_readout_raises_the_same_error_as_train(self):
+        import polypus
+
+        def incomplete():
+            return polypus.qml.Model(2).angle_encoder(axis="ry").hardware_efficient(reps=1)
+
+        with pytest.raises(ValueError) as from_num_params:
+            incomplete().num_params()
+        with pytest.raises(ValueError) as from_train:
+            self._train(incomplete())
+        # Not a second independent wording: the two messages must be the *same*
+        # string, because `num_params` runs the very validation `train` runs.
+        assert str(from_num_params.value) == str(from_train.value)
+        assert "no readout" in str(from_num_params.value)
+
+    def test_ansatz_free_model_is_rejected_like_compile_rejects_it(self):
+        import polypus
+
+        # Encoders reserve zero θ, so a readout-only, ansatz-free model has
+        # num_params == 0 — rejected rather than reported, exactly as `train` and
+        # `compile` reject it.
+        model = (
+            polypus.qml.Model(2)
+            .angle_encoder(axis="ry")
+            .readout(observables=[[("z", 0)]], decision="sign")
+        )
+        with pytest.raises(ValueError) as from_num_params:
+            model.num_params()
+        with pytest.raises(ValueError) as from_train:
+            self._train(model)
+        assert str(from_num_params.value) == str(from_train.value)
+        assert "no trainable parameters" in str(from_num_params.value)
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestModelRepr:
+    """``Model(num_qubits=…, num_layers=…)`` — structural, and never raising."""
+
+    def test_repr_reports_qubits_and_layers(self):
+        import polypus
+
+        text = repr(polypus.qml.Model(4))
+        assert "num_qubits=4" in text
+        assert "num_layers=0" in text
+
+    def test_repr_tracks_the_layers_appended(self):
+        import polypus
+
+        model = polypus.qml.Model(3).angle_encoder(axis="ry").hardware_efficient(reps=1)
+        text = repr(model)
+        assert "num_qubits=3" in text
+        assert "num_layers=2" in text
+
+    def test_repr_never_raises_on_a_model_num_params_rejects(self):
+        import polypus
+
+        # No readout yet, so `num_params()` raises — the repr must not, and must
+        # not claim anything about θ, since it never compiles to find out.
+        model = polypus.qml.Model(2).angle_encoder(axis="ry")
+        with pytest.raises(ValueError):
+            model.num_params()
+        text = repr(model)
+        assert text == "Model(num_qubits=2, num_layers=1)"
+        assert "param" not in text
