@@ -3358,9 +3358,7 @@ class TestBasisEncoderLayer:
         # encoded, not only where the training set is validated.
         import polypus
 
-        trained = polypus.qml.TrainedModel(
-            _basis_model(), _binary_dataset(), [0.1] * 8
-        )
+        trained = polypus.qml.TrainedModel(_basis_model(), _binary_dataset(), [0.1] * 8)
         with pytest.raises(ValueError, match="feature 0"):
             trained.predict(
                 [[2.0, 0.0]],
