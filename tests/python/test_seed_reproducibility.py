@@ -186,10 +186,15 @@ class TestTrainSeed:
         assert r1.best_fitness == r2.best_fitness
         assert r1.iterations_run == r2.iterations_run
         assert r1.converged == r2.converged
+        # The whole convergence curve reproduces too, entry for entry — not just
+        # its endpoint (C-5's fitness_history, reported under C-7).
+        assert r1.fitness_history == r2.fitness_history
+        assert len(r1.fitness_history) == r1.iterations_run
         # The full outcome is exposed now, not just the parameters (C-7).
         assert isinstance(r1.best_fitness, float)
         assert isinstance(r1.iterations_run, int)
         assert isinstance(r1.converged, bool)
+        assert isinstance(r1.fitness_history, list)
 
     def test_no_seed_differs_across_calls(self):
         r1 = self._train(seed=None, ident="train_seed_none")
@@ -283,6 +288,9 @@ class TestQmlTrainSeed:
         assert r1.seed == 123 and r2.seed == 123
         assert r1.best_params == r2.best_params
         assert r1.best_fitness == r2.best_fitness
+        # The Qiskit path reports the same convergence curve, and reproduces it.
+        assert r1.fitness_history == r2.fitness_history
+        assert len(r1.fitness_history) == r1.iterations_run
 
     def test_no_seed_differs_across_calls(self, monkeypatch):
         self._patch_deterministic_backend(monkeypatch)

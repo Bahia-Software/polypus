@@ -64,10 +64,12 @@
 //! ```
 //!
 //! `train()` returns a `TrainResult` exposing `result.best_params`
-//! (`list[float]`) plus `result.best_fitness`, `result.iterations_run`,
-//! `result.converged`, and the effective `result.seed` — the full optimization
-//! outcome, not just the parameters. Pass `seed=...` (or set it on the
-//! optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a run.
+//! (`list[float]`) plus `result.best_fitness`, `result.fitness_history`
+//! (`list[float]`, the best fitness per iteration run — the convergence curve),
+//! `result.iterations_run`, `result.converged`, and the effective `result.seed`
+//! — the full optimization outcome, not just the parameters. Pass `seed=...`
+//! (or set it on the optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a
+//! run.
 //!
 //! # Authors
 //! Diego Beltrán Fernández Prada (<diego.fernandez@bahiasoftware.es>), Víctor Sóñora Pombo, Sergio Figueiras Gómez, Miguel Boubeta Martínez, Galicia Supercomputing Center (CESGA)

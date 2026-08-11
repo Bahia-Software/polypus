@@ -1304,6 +1304,16 @@ pub struct QmlTrainResult {
     /// Fitness of [`best_params`](Self::best_params) (higher is better).
     #[pyo3(get)]
     pub best_fitness: f64,
+    /// The convergence curve: the best fitness found so far at each
+    /// generation/iteration actually executed, so
+    /// `len(fitness_history) == iterations_run`. Monotonically non-decreasing
+    /// (contract C-5), and the last entry is
+    /// [`best_fitness`](Self::best_fitness) — *except* under `batch_size`, where
+    /// the reported `best_fitness` is the full-dataset recompute while the
+    /// history keeps the per-iteration minibatch estimates the optimizer
+    /// actually steered by (contract C-7).
+    #[pyo3(get)]
+    pub fitness_history: Vec<f64>,
     /// Generations/iterations actually executed.
     #[pyo3(get)]
     pub iterations_run: usize,
@@ -1329,16 +1339,20 @@ impl QmlTrainResult {
         // The trained model is summarised by its `θ` width rather than its own
         // repr, to keep this one line long; that width is `best_params.len()` by
         // construction (the model is built *from* `best_params`), so reporting it
-        // needs no borrow of the wrapped pyclass.
+        // needs no borrow of the wrapped pyclass. `fitness_history` is summarised
+        // by its length for the same reason [`TrainResult`](super::TrainResult)
+        // does — one float per iteration would dominate a long run's repr.
         format!(
             "QmlTrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, \
-             best_params={:?}, trained_model=TrainedModel(num_theta={}))",
+             best_params={:?}, fitness_history=<{} values>, \
+             trained_model=TrainedModel(num_theta={}))",
             self.id,
             self.best_fitness,
             self.iterations_run,
             self.converged,
             self.seed,
             self.best_params,
+            self.fitness_history.len(),
             self.best_params.len()
         )
     }
@@ -1363,7 +1377,7 @@ impl QmlTrainResult {
 /// callback's exception propagates verbatim (Qiskit path).
 ///
 /// **The return type follows the path** (contract C-7): the native path returns a
-/// [`QmlTrainResult`] — the same six fields plus a ready-to-use
+/// [`QmlTrainResult`] — the same seven fields plus a ready-to-use
 /// [`trained_model`](QmlTrainResult::trained_model) — while the Qiskit path
 /// returns a plain [`TrainResult`](super::TrainResult), unchanged, having no
 /// `Model`/`Dataset` to wrap. This mirrors the kwarg asymmetry the two paths
@@ -1724,6 +1738,7 @@ fn qml_train_native(
         QmlTrainResult {
             best_params: outcome.best_params.clone(),
             best_fitness: outcome.best_fitness,
+            fitness_history: outcome.fitness_history.clone(),
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             seed: outcome.seed,
@@ -2056,6 +2071,14 @@ fn dispatch_optimizer(
     // `best_params` are meaningless, so skip the recompute and let
     // `finish_optimization` surface that error. A failure *inside* the recompute
     // records into the same slot and is surfaced there too.
+    //
+    // Only `best_fitness` is replaced: `fitness_history` keeps the per-iteration
+    // minibatch estimates the optimizer actually steered by. Overwriting its last
+    // entry with this full-dataset number would splice one point from a different
+    // scale onto the curve — and, since a minibatch estimate is typically the
+    // rosier of the two, could make the sequence decrease, breaking the C-5
+    // monotonicity guarantee to buy a cosmetic `history[-1] == best_fitness`. So
+    // under `batch_size` that equality deliberately does not hold (contract C-7).
     let result = match (result, recompute) {
         (Ok(mut outcome), Some(recompute)) if !errors.failed() => {
             outcome.best_fitness = recompute(&outcome.best_params);

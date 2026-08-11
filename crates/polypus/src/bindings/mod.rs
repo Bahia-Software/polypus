@@ -96,6 +96,13 @@ pub struct TrainResult {
     /// Fitness of [`best_params`](Self::best_params) (higher is better).
     #[pyo3(get)]
     pub best_fitness: f64,
+    /// The convergence curve: the best fitness found so far at each
+    /// generation/iteration actually executed, so
+    /// `len(fitness_history) == iterations_run` and the last entry is
+    /// [`best_fitness`](Self::best_fitness). Monotonically non-decreasing for
+    /// every optimizer (contract C-5).
+    #[pyo3(get)]
+    pub fitness_history: Vec<f64>,
     /// Generations/iterations actually executed (below the budget when an
     /// early-stopping criterion fired).
     #[pyo3(get)]
@@ -120,9 +127,15 @@ pub struct TrainResult {
 #[pymethods]
 impl TrainResult {
     fn __repr__(&self) -> String {
+        // `fitness_history` is summarised by its length rather than spelled out:
+        // it holds one float per iteration, so a 500-iteration run would bury the
+        // rest of the line, and its length is already `iterations_run` above. The
+        // angle brackets mark it as a summary, the way `QmlTrainResult` summarises
+        // its `trained_model`. `best_params` stays in full — it is bounded by the
+        // parameter count, not by the iteration budget.
         format!(
-            "TrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
-            self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
+            "TrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?}, fitness_history=<{} values>)",
+            self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params, self.fitness_history.len()
         )
     }
 }
@@ -131,9 +144,9 @@ impl TrainResult {
 /// [`TrainResult`] that `train` / `qml_train` now return.
 ///
 /// This is the current public Python contract for those entry points (contract
-/// C-7): the whole outcome — `best_params`, `best_fitness`, `iterations_run`,
-/// `converged` — plus the `seed`, rather than the bare best-parameter list the
-/// former `outcome_to_pyobject` produced.
+/// C-7): the whole outcome — `best_params`, `best_fitness`, `fitness_history`,
+/// `iterations_run`, `converged` — plus the `seed`, rather than the bare
+/// best-parameter list the former `outcome_to_pyobject` produced.
 fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
@@ -145,6 +158,7 @@ fn outcome_to_train_result(
         TrainResult {
             best_params: outcome.best_params,
             best_fitness: outcome.best_fitness,
+            fitness_history: outcome.fitness_history,
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             seed,
@@ -533,8 +547,8 @@ pub fn run_quantum_circuit<'py>(
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
 /// OS-entropy value. On the native backend the same seed also drives shot
 /// sampling, so a native-backend run reproduces exactly. Returns a
-/// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
-/// `converged`, the effective `seed` and the effective `id`.
+/// [`TrainResult`] exposing `best_params`, `best_fitness`, `fitness_history`,
+/// `iterations_run`, `converged`, the effective `seed` and the effective `id`.
 ///
 /// The `id` kwarg is a human-readable *prefix*, not the literal effective id:
 /// a UUID v4 is appended for uniqueness (mirroring [`run_quantum_circuit`]),

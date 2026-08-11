@@ -1833,7 +1833,7 @@ class TestObservableValidation:
 # nothing about the `Model`/`Dataset` it trained — so predicting meant rebuilding
 # `TrainedModel(model, dataset, result.best_params)` by hand, passing back in the
 # two objects the call already had. The native path now returns a
-# `QmlTrainResult`: the same six fields plus `trained_model`, built eagerly at the
+# `QmlTrainResult`: the same seven fields plus `trained_model`, built eagerly at the
 # end of training. The Qiskit path is unchanged and still returns `TrainResult`
 # (contract C-7) — the return type follows the path, like the kwargs already do.
 
@@ -1870,7 +1870,9 @@ class TestQmlTrainResultNativePath:
         assert not isinstance(result, polypus.TrainResult)
         assert type(result).__name__ == "QmlTrainResult"
 
-    def test_carries_the_six_train_result_fields(self):
+    def test_carries_the_train_result_fields(self):
+        # The six scalar/vector fields; `fitness_history`, the seventh, has its
+        # own test below.
         result = _native_train()
         assert result.seed == 7
         assert isinstance(result.best_params, list)
@@ -1905,12 +1907,75 @@ class TestQmlTrainResultNativePath:
         for field in ("best_fitness=", "iterations_run=", "converged=", "seed="):
             assert field in text
         assert "trained_model=TrainedModel(num_theta=8)" in text
+        # The curve is summarised by its length, like `trained_model` is by its
+        # θ width — one float per iteration would swamp the line.
+        assert f"fitness_history=<{result.iterations_run} values>" in text
 
     def test_trained_model_is_reused_not_rebuilt_per_access(self):
         # The attribute is a stored object, built once: two reads are the same
         # instance, so `predict`-ing twice does not recompile the model.
         result = _native_train()
         assert result.trained_model is result.trained_model
+
+    def test_carries_the_fitness_history(self):
+        # The seventh outcome field: one best-fitness-so-far per generation run
+        # (C-5), carried across the seam like the other six.
+        result = _native_train()
+        assert isinstance(result.fitness_history, list)
+        assert all(isinstance(f, float) for f in result.fitness_history)
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness
+        assert all(
+            b >= a
+            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+        )
+
+    def test_fitness_history_is_reproducible_and_ends_on_the_optimum(self):
+        # Exact mode + fixed seed is byte-reproducible, so the whole curve
+        # matches entry for entry — and it really is a *training* curve: the run
+        # improves on where it started.
+        a = _native_train()
+        b = _native_train()
+        assert a.fitness_history == b.fitness_history
+        assert len(a.fitness_history) > 1
+        assert a.fitness_history[-1] > a.fitness_history[0]
+
+    def test_gradient_optimizer_history_is_monotonic_too(self):
+        # Adam's incumbent best is tracked separately from its current iterate,
+        # which gradient ascent lets oscillate — so the curve of a gradient
+        # optimizer needs its own check, not DE's.
+        import polypus
+
+        result = _model().train(
+            _dataset(),
+            method=polypus.Adam(max_iters=15, learning_rate=0.1, tolerance=0.0),
+            loss="hinge",
+            infrastructure="local",
+            backend="polypus",
+            id="qml_train_result_adam_history",
+            seed=7,
+            exact=True,
+        )
+        assert result.iterations_run == 15
+        assert len(result.fitness_history) == 15
+        assert result.fitness_history[-1] == result.best_fitness
+        assert all(
+            b >= a
+            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+        )
+
+    def test_minibatched_history_keeps_its_own_scale(self):
+        # Under `batch_size` the reported `best_fitness` is the full-dataset
+        # recompute (C-7) while the history keeps the per-iteration minibatch
+        # estimates the optimizer actually steered by. So the shape guarantees
+        # still hold — length and monotonicity — but the last entry is *not*
+        # required to equal `best_fitness`, and is deliberately not asserted to.
+        result = _native_train(seed=5, batch_size=2)
+        assert len(result.fitness_history) == result.iterations_run
+        assert all(
+            b >= a
+            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+        )
 
 
 @pytest.mark.integration
@@ -2032,6 +2097,15 @@ class TestQiskitPathStillReturnsTrainResult:
         assert not hasattr(result, "trained_model")
         # And the generic `polypus.train` is untouched as well.
         assert not isinstance(result, polypus.qml.QmlTrainResult)
+        # `fitness_history` comes from the shared `outcome_to_train_result`, so
+        # this path reports the convergence curve too — same shape guarantees.
+        assert isinstance(result.fitness_history, list)
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness
+        assert all(
+            b >= a
+            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2072,6 +2146,7 @@ def _method_train_kwargs(**overrides):
 _METHOD_TRAIN_FIELDS = (
     "best_params",
     "best_fitness",
+    "fitness_history",
     "iterations_run",
     "converged",
     "seed",
@@ -2102,7 +2177,7 @@ class TestModelTrainMatchesTheFreeFunction:
         # equalities, not approximations.
         for field in _METHOD_TRAIN_FIELDS:
             assert getattr(method_result, field) == getattr(free_result, field), field
-        # `id` is the sixth field and cannot be *equal*: `unique_id` appends a
+        # `id` is the seventh field and cannot be *equal*: `unique_id` appends a
         # fresh UUID v4 per run (#75). What must match is the caller's prefix —
         # so the method forwards `id` rather than substituting one of its own.
         assert method_result.id.startswith("qml_model_train_")
