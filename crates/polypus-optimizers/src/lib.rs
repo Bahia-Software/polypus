@@ -73,6 +73,11 @@
 //! for x in &outcome.best_params {
 //!     assert!((x - 1.0).abs() < 0.1);
 //! }
+//!
+//! // The convergence curve: the incumbent best fitness of every generation
+//! // actually run, ending on the reported `best_fitness`.
+//! assert_eq!(outcome.fitness_history.len(), outcome.iterations_run);
+//! assert_eq!(outcome.fitness_history.last().copied(), Some(outcome.best_fitness));
 //! ```
 
 #![deny(clippy::all)]

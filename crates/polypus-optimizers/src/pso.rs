@@ -108,6 +108,10 @@ impl AlgorithmPSO {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        // One incumbent-best entry per generation actually run (C-5). Pushed
+        // unconditionally below, so it stays in step with `iterations_run` even
+        // when the collapse `break` cuts the loop short.
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
             iterations_run = generation + 1;
@@ -151,6 +155,10 @@ impl AlgorithmPSO {
             global_best_idx = argmax(&personal_best_fitness);
             global_best_pos = personal_best_positions.row(global_best_idx).to_vec();
 
+            // The global best *is* the incumbent best: a personal best only ever
+            // improves, so this maximum is non-decreasing across generations.
+            fitness_history.push(personal_best_fitness[global_best_idx]);
+
             positions = new_positions;
             velocities = new_velocities;
 
@@ -163,6 +171,7 @@ impl AlgorithmPSO {
         Ok(OptimizationOutcome {
             best_fitness: personal_best_fitness[global_best_idx],
             best_params: global_best_pos,
+            fitness_history,
             iterations_run,
             converged,
         })

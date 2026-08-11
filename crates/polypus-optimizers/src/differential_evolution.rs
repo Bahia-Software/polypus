@@ -93,6 +93,10 @@ impl AlgorithmDifferentialEvolution {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        // One incumbent-best entry per generation actually run (C-5). Pushed
+        // unconditionally below, so it stays in step with `iterations_run` even
+        // when the convergence `break` cuts the loop short.
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
             iterations_run = generation + 1;
@@ -143,6 +147,11 @@ impl AlgorithmDifferentialEvolution {
             best_idx = argmax(&fitness);
             best = pop.row(best_idx).to_vec();
 
+            // The champion's fitness *is* the incumbent best: selection above
+            // only ever raises a slot's fitness, so this maximum is
+            // non-decreasing across generations.
+            fitness_history.push(fitness[best_idx]);
+
             if population_converged(&pop, tolerance, generation) {
                 converged = true;
                 break;
@@ -152,6 +161,7 @@ impl AlgorithmDifferentialEvolution {
         Ok(OptimizationOutcome {
             best_fitness: fitness[best_idx],
             best_params: best,
+            fitness_history,
             iterations_run,
             converged,
         })

@@ -14,6 +14,7 @@ use polypus_optimizers::{
     OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
 /// exactly at `xᵢ = target`. The optimizers maximise, so this has a unique,
@@ -77,6 +78,46 @@ impl EvaluationOracle for ShortOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
         let short = candidates.len().saturating_sub(1);
         candidates.iter().take(short).map(|_| 0.0).collect()
+    }
+}
+
+/// [`Multimodal`] wrapper that records every fitness it hands back, in call
+/// order. QNG and Adam evaluate exactly **one** candidate per iteration, so for
+/// them the recording is precisely the per-iteration *current-iterate* fitness —
+/// the sequence `fitness_history` deliberately does not carry (it carries the
+/// running best instead). Shared behind an `Arc` so the caller can still read the
+/// recording after the oracle has been moved into the optimizer; the blanket
+/// `impl EvaluationOracle for Arc<T>` makes that a `Box::new(Arc::clone(..))`.
+struct Recording {
+    inner: Multimodal,
+    seen: Mutex<Vec<f64>>,
+}
+
+impl Recording {
+    fn new(target: f64) -> Arc<Self> {
+        Arc::new(Recording {
+            inner: Multimodal { target },
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The fitness values handed back so far, in order.
+    fn seen(&self) -> Vec<f64> {
+        self.seen
+            .lock()
+            .expect("recording mutex is not poisoned")
+            .clone()
+    }
+}
+
+impl EvaluationOracle for Recording {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        let values = self.inner.evaluate_batch(candidates);
+        self.seen
+            .lock()
+            .expect("recording mutex is not poisoned")
+            .extend_from_slice(&values);
+        values
     }
 }
 
@@ -340,8 +381,13 @@ fn de_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid DE args optimize successfully")
     };
-    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome.
-    assert_eq!(make(), make());
+    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome,
+    // `fitness_history` included: a Vec<f64> compared for *exact* equality, so
+    // this also pins the whole convergence curve as bit-reproducible. The
+    // non-empty check keeps that half of the assertion from passing vacuously.
+    let outcome = make();
+    assert!(!outcome.fitness_history.is_empty());
+    assert_eq!(outcome, make());
 }
 
 #[test]
@@ -362,7 +408,10 @@ fn pso_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid PSO args optimize successfully")
     };
-    assert_eq!(make(), make());
+    // Same-seed equality covers `fitness_history` too (see the DE case).
+    let outcome = make();
+    assert!(!outcome.fitness_history.is_empty());
+    assert_eq!(outcome, make());
 }
 
 #[test]
@@ -385,8 +434,11 @@ fn adam_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid Adam args optimize successfully")
     };
-    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome.
-    assert_eq!(make(), make());
+    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome,
+    // `fitness_history` included (see the DE case).
+    let outcome = make();
+    assert!(!outcome.fitness_history.is_empty());
+    assert_eq!(outcome, make());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1153,4 +1205,250 @@ fn adam_best_params_fitness_invariant_holds_across_seeds() {
             &Multimodal { target: 1.0 },
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C-5 `fitness_history`: one incumbent-best fitness per iteration actually run
+//
+// Three guarantees, asserted for all four optimizers: the length equals
+// `iterations_run` (early-stopping paths included), the last entry equals the
+// reported `best_fitness`, and the sequence never decreases. The rough
+// `Multimodal` surface is used throughout: it is where an implementation that
+// recorded the *current* candidate's fitness instead of the running best would
+// visibly dip (pinned directly by the two `..._is_the_incumbent_best_...` tests
+// below), so these are discriminating checks rather than tautologies.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Assert the three C-5 `fitness_history` guarantees on one outcome.
+fn assert_fitness_history_tracks_the_run(label: &str, outcome: &OptimizationOutcome) {
+    assert_eq!(
+        outcome.fitness_history.len(),
+        outcome.iterations_run,
+        "{label}: {} history entries for {} iterations run",
+        outcome.fitness_history.len(),
+        outcome.iterations_run,
+    );
+    let last = *outcome
+        .fitness_history
+        .last()
+        .expect("a run of at least one iteration records at least one fitness");
+    assert_eq!(
+        last, outcome.best_fitness,
+        "{label}: history ends at {last} but best_fitness is {}",
+        outcome.best_fitness,
+    );
+    for (i, w) in outcome.fitness_history.windows(2).enumerate() {
+        assert!(
+            w[1] >= w[0],
+            "{label}: history decreased at iteration {}: {} → {}",
+            i + 1,
+            w[0],
+            w[1],
+        );
+    }
+}
+
+#[test]
+fn de_fitness_history_tracks_every_generation() {
+    for seed in 0..5 {
+        let outcome = AlgorithmDifferentialEvolution
+            .optimize(AlgorithmDifferentialEvolutionArgs {
+                oracle: Box::new(Multimodal { target: 1.0 }),
+                population_size: 20,
+                generations: 60,
+                dimensions: 3,
+                // Tight enough that the population never collapses inside the
+                // budget, so the run really does record 60 generations.
+                tolerance: 1e-12,
+                seed: Some(seed),
+            })
+            .expect("valid DE args optimize successfully");
+        assert_eq!(outcome.iterations_run, 60);
+        assert_fitness_history_tracks_the_run("de/multimodal", &outcome);
+    }
+}
+
+#[test]
+fn pso_fitness_history_tracks_every_generation() {
+    for seed in 0..5 {
+        let outcome = AlgorithmPSO
+            .optimize(AlgorithmPSOArgs {
+                oracle: Box::new(Multimodal { target: 1.0 }),
+                population_size: 20,
+                generations: 60,
+                dimensions: 3,
+                bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+                inertia_weight: 0.5,
+                cognitive_weight: 1.0,
+                social_weight: 1.0,
+                tolerance: 1e-12,
+                seed: Some(seed),
+            })
+            .expect("valid PSO args optimize successfully");
+        assert_eq!(outcome.iterations_run, 60);
+        assert_fitness_history_tracks_the_run("pso/multimodal", &outcome);
+    }
+}
+
+#[test]
+fn qng_fitness_history_tracks_every_iteration() {
+    for seed in 0..5 {
+        let outcome = AlgorithmQNG
+            .optimize(AlgorithmQNGArgs {
+                oracle: Box::new(Multimodal { target: 1.0 }),
+                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
+                max_iters: 60,
+                learning_rate: 0.1,
+                bounds: (0.0, 2.0),
+                dimensions: 3,
+                // A zero tolerance can never fire, so all 60 iterations run.
+                tolerance: 0.0,
+                patience: 3,
+                variance_oracle: Box::new(ConstVariance(1.0)),
+                tikhonov_reg: 0.05,
+                seed: Some(seed),
+            })
+            .expect("valid QNG args optimize successfully");
+        assert_eq!(outcome.iterations_run, 60);
+        assert_fitness_history_tracks_the_run("qng/multimodal", &outcome);
+    }
+}
+
+#[test]
+fn adam_fitness_history_tracks_every_iteration() {
+    for seed in 0..5 {
+        let outcome = AlgorithmAdam
+            .optimize(AlgorithmAdamArgs {
+                oracle: Box::new(Multimodal { target: 1.0 }),
+                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
+                max_iters: 60,
+                learning_rate: 0.05,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (0.0, 2.0),
+                dimensions: 3,
+                tolerance: 0.0,
+                patience: 3,
+                seed: Some(seed),
+            })
+            .expect("valid Adam args optimize successfully");
+        assert_eq!(outcome.iterations_run, 60);
+        assert_fitness_history_tracks_the_run("adam/multimodal", &outcome);
+    }
+}
+
+#[test]
+fn qng_fitness_history_is_the_incumbent_best_not_the_current_iterate() {
+    // Gradient ascent has no monotonicity guarantee: on the rippled Multimodal
+    // surface a QNG step overshoots and the *current* iterate's fitness falls.
+    // The recorded oracle calls prove that happens here — so recording `energy`
+    // instead of `best_energy` would produce a decreasing history — while the
+    // history itself stays non-decreasing.
+    let recorder = Recording::new(1.0);
+    let outcome = AlgorithmQNG
+        .optimize(AlgorithmQNGArgs {
+            oracle: Box::new(Arc::clone(&recorder)),
+            gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
+            max_iters: 40,
+            learning_rate: 0.1,
+            bounds: (0.0, 2.0),
+            dimensions: 3,
+            tolerance: 0.0,
+            patience: 3,
+            variance_oracle: Box::new(ConstVariance(1.0)),
+            tikhonov_reg: 0.05,
+            seed: Some(7),
+        })
+        .expect("valid QNG args optimize successfully");
+
+    // QNG evaluates exactly one candidate per iteration.
+    let current = recorder.seen();
+    assert_eq!(current.len(), outcome.iterations_run);
+    assert!(
+        current.windows(2).any(|w| w[1] < w[0]),
+        "the current-iterate fitness never dipped, so this test would not \
+         discriminate: {current:?}"
+    );
+    assert_fitness_history_tracks_the_run("qng/multimodal/recorded", &outcome);
+}
+
+#[test]
+fn adam_fitness_history_is_the_incumbent_best_not_the_current_iterate() {
+    // Adam mirror of the QNG case: the rule lives in each loop separately, so
+    // both need the discriminating check, not just one.
+    let recorder = Recording::new(1.0);
+    let outcome = AlgorithmAdam
+        .optimize(AlgorithmAdamArgs {
+            oracle: Box::new(Arc::clone(&recorder)),
+            gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
+            max_iters: 40,
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (0.0, 2.0),
+            dimensions: 3,
+            tolerance: 0.0,
+            patience: 3,
+            seed: Some(7),
+        })
+        .expect("valid Adam args optimize successfully");
+
+    let current = recorder.seen();
+    assert_eq!(current.len(), outcome.iterations_run);
+    assert!(
+        current.windows(2).any(|w| w[1] < w[0]),
+        "the current-iterate fitness never dipped, so this test would not \
+         discriminate: {current:?}"
+    );
+    assert_fitness_history_tracks_the_run("adam/multimodal/recorded", &outcome);
+}
+
+#[test]
+fn fitness_history_length_survives_every_early_stopping_path() {
+    // The push must happen *before* each loop's `break`, or an early-stopped run
+    // records one entry too few. All four early-stopping paths are exercised:
+    // DE's and PSO's population collapse, and QNG's/Adam's `patience` streak.
+    let de = AlgorithmDifferentialEvolution
+        .optimize(AlgorithmDifferentialEvolutionArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 30,
+            generations: 500,
+            tolerance: 0.5,
+            dimensions: 3,
+            seed: Some(7),
+        })
+        .expect("valid DE args optimize successfully");
+    assert!(de.converged && de.iterations_run < 500);
+    assert_fitness_history_tracks_the_run("de/early-stop", &de);
+
+    let pso = AlgorithmPSO
+        .optimize(AlgorithmPSOArgs {
+            oracle: Box::new(Quadratic { target: 0.0 }),
+            population_size: 40,
+            generations: 2000,
+            dimensions: 3,
+            bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 0.05,
+            seed: Some(42),
+        })
+        .expect("valid PSO args optimize successfully");
+    assert!(pso.converged && pso.iterations_run < 2000);
+    assert_fitness_history_tracks_the_run("pso/early-stop", &pso);
+
+    // Scripted norms stop the gradient optimizers on iteration 4 (one large norm
+    // then `patience = 3` small ones), so the history must hold exactly 4 entries.
+    let qng = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
+    assert!(qng.converged);
+    assert_eq!(qng.iterations_run, 4);
+    assert_fitness_history_tracks_the_run("qng/early-stop", &qng);
+
+    let adam = adam_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
+    assert!(adam.converged);
+    assert_eq!(adam.iterations_run, 4);
+    assert_fitness_history_tracks_the_run("adam/early-stop", &adam);
 }

@@ -127,6 +127,10 @@ impl AlgorithmAdam {
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;
         let mut converged = false;
+        // One incumbent-best entry per iteration actually run (C-5). Pushed
+        // unconditionally below, so it stays in step with `iterations_run` even
+        // when the `patience` streak cuts the loop short.
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
         // Consecutive iterations whose gradient norm stayed below `tolerance`.
         let mut below_tolerance_streak = 0usize;
 
@@ -163,6 +167,12 @@ impl AlgorithmAdam {
                 best_energy = energy;
                 best_theta = theta.clone();
             }
+            // Record the running best, *not* this iteration's `energy`: gradient
+            // ascent has no monotonicity guarantee, so a step that overshoots a
+            // ripple would put a dip in the history. `best_energy` after the
+            // update above keeps the sequence non-decreasing by construction and
+            // makes the last entry the reported `best_fitness`.
+            fitness_history.push(best_energy);
 
             // ── 4. Early stopping on the gradient norm ────────────────────────
             //    Decide after the full iteration's work (the same placement as
@@ -185,6 +195,7 @@ impl AlgorithmAdam {
         Ok(OptimizationOutcome {
             best_params: best_theta,
             best_fitness: best_energy,
+            fitness_history,
             iterations_run,
             converged,
         })
