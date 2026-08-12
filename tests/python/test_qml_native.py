@@ -1926,8 +1926,7 @@ class TestQmlTrainResultNativePath:
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
         assert all(
-            b >= a
-            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
         )
 
     def test_fitness_history_is_reproducible_and_ends_on_the_optimum(self):
@@ -1960,8 +1959,7 @@ class TestQmlTrainResultNativePath:
         assert len(result.fitness_history) == 15
         assert result.fitness_history[-1] == result.best_fitness
         assert all(
-            b >= a
-            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
         )
 
     def test_minibatched_history_keeps_its_own_scale(self):
@@ -1973,8 +1971,7 @@ class TestQmlTrainResultNativePath:
         result = _native_train(seed=5, batch_size=2)
         assert len(result.fitness_history) == result.iterations_run
         assert all(
-            b >= a
-            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
         )
 
 
@@ -2103,8 +2100,7 @@ class TestQiskitPathStillReturnsTrainResult:
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
         assert all(
-            b >= a
-            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
         )
 
 
@@ -2170,9 +2166,7 @@ class TestModelTrainMatchesTheFreeFunction:
         import polypus
 
         method_result = _model().train(_dataset(), **_method_train_kwargs())
-        free_result = polypus.qml.train(
-            _model(), _dataset(), **_method_train_kwargs()
-        )
+        free_result = polypus.qml.train(_model(), _dataset(), **_method_train_kwargs())
         # The exact path with a fixed seed is byte-reproducible, so these are
         # equalities, not approximations.
         for field in _METHOD_TRAIN_FIELDS:
@@ -2190,9 +2184,7 @@ class TestModelTrainMatchesTheFreeFunction:
         import polypus
 
         method_result = _model().train(_dataset(), **_method_train_kwargs())
-        free_result = polypus.qml.train(
-            _model(), _dataset(), **_method_train_kwargs()
-        )
+        free_result = polypus.qml.train(_model(), _dataset(), **_method_train_kwargs())
         exact_kwargs = dict(
             infrastructure="local",
             backend="polypus",
@@ -2229,9 +2221,10 @@ class TestModelTrainMatchesTheFreeFunction:
                 _model(), _dataset(), **_method_train_kwargs(**overrides)
             )
             for field in _METHOD_TRAIN_FIELDS:
-                assert getattr(method_result, field) == getattr(
-                    free_result, field
-                ), (overrides, field)
+                assert getattr(method_result, field) == getattr(free_result, field), (
+                    overrides,
+                    field,
+                )
 
 
 @pytest.mark.integration
@@ -2404,9 +2397,7 @@ class TestPauliTermEqualsTheBareForm:
         assert (
             _obs_predict([[("z", 0), ("z", 1)]])
             == _obs_predict([polypus.qml.Z(0) @ polypus.qml.Z(1)])
-            == _obs_predict(
-                [polypus.qml.Observable([(1.0, [("z", 0), ("z", 1)])])]
-            )
+            == _obs_predict([polypus.qml.Observable([(1.0, [("z", 0), ("z", 1)])])])
         )
 
     def test_repr_echoes_the_construction_syntax(self):
@@ -2480,9 +2471,10 @@ class TestPauliTermValidatesEagerly:
         import polypus
 
         # Valid all the way: three distinct positions.
-        assert repr(
-            polypus.qml.Z(0) @ polypus.qml.Z(1) @ polypus.qml.X(2)
-        ) == "PauliTerm(Z0 @ Z1 @ X2)"
+        assert (
+            repr(polypus.qml.Z(0) @ polypus.qml.Z(1) @ polypus.qml.X(2))
+            == "PauliTerm(Z0 @ Z1 @ X2)"
+        )
         # The clash appears only at the third factor, and is caught there.
         with pytest.raises(ValueError, match="position"):
             polypus.qml.Z(0) @ polypus.qml.Z(1) @ polypus.qml.X(1)
@@ -2553,7 +2545,11 @@ class TestThreeReadoutFormsCoexist:
         with pytest.raises(TypeError) as excinfo:
             model.readout(observables=[42], decision="raw")
         message = str(excinfo.value)
-        for form in ("(pauli, position)", "polypus.qml.PauliTerm", "polypus.qml.Observable"):
+        for form in (
+            "(pauli, position)",
+            "polypus.qml.PauliTerm",
+            "polypus.qml.Observable",
+        ):
             assert form in message
 
 
@@ -3032,9 +3028,7 @@ class TestLossConstantsTrainIdentically:
             observables=[[("z", 0)], [("z", 1)], [("z", 0), ("z", 1)]],
             dataset=dataset,
         )
-        with_constant = self._train(
-            polypus.qml.Loss.CATEGORICAL_CROSS_ENTROPY, **args
-        )
+        with_constant = self._train(polypus.qml.Loss.CATEGORICAL_CROSS_ENTROPY, **args)
         with_literal = self._train("categorical_cross_entropy", **args)
         assert math.isfinite(with_constant.best_fitness)
         assert with_constant.best_params == with_literal.best_params
@@ -3172,7 +3166,9 @@ class TestModelNumParams:
         import polypus
 
         def incomplete():
-            return polypus.qml.Model(2).angle_encoder(axis="ry").hardware_efficient(reps=1)
+            return (
+                polypus.qml.Model(2).angle_encoder(axis="ry").hardware_efficient(reps=1)
+            )
 
         with pytest.raises(ValueError) as from_num_params:
             incomplete().num_params()

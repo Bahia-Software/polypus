@@ -229,8 +229,7 @@ class TestTrainFitnessHistory:
         # Non-decreasing: every entry is the running best, never the fitness of
         # that iteration's current candidate.
         assert all(
-            b >= a
-            for a, b in zip(result.fitness_history, result.fitness_history[1:])
+            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
         )
 
     def test_de_reports_one_fitness_per_generation(
