@@ -1,18 +1,20 @@
-"""Native ``polypus.qml`` pipeline showcase — ten scenarios, all verified.
+"""Native ``polypus.qml`` pipeline showcase — eleven scenarios, all verified.
 
 ``examples/basic_qml.py`` demonstrates the *Qiskit* QML path (a
 ``QuantumCircuit`` feature map + ansatz + a user ``expectation_function``). This
-script is its counterpart for the **native** path built in ``polypus-qml``: the
-``polypus.qml.Model`` builder, ``polypus.qml.Dataset``, the four optimizers, the
-exact and shot-sampled backends, minibatching, ``TrainedModel`` inference, the
-dataset split/scaling utilities, and the weighted-sum ``Observable`` readout.
+script is its counterpart for the **native** path built in ``polypus-qml``: all
+four feature encoders (angle, amplitude, IQP, and computational-basis), the four
+optimizers, the exact and shot-sampled backends, minibatching, ``TrainedModel``
+inference, the dataset split/scaling utilities, the weighted-sum ``Observable``
+readout, model introspection, and the per-iteration convergence curve.
 
 Every scenario *checks learning*, not merely the absence of an exception: the
-toy datasets are two or three well-separated clusters in ``[0, π]``, and each
-scenario asserts a fitness and/or a training-set accuracy that a model can only
-reach by actually fitting the data. Every source of randomness (dataset order is
-fixed, splits, optimizer seeds, shot sampling) is seeded explicitly, so the
-whole script is deterministic run to run.
+toy datasets are two or three well-separated clusters in ``[0, π]`` (or, for the
+``BasisEncoder`` scenario, an exhaustive binary problem that is not linearly
+separable), and each scenario asserts a fitness and/or an accuracy that a model
+can only reach by actually fitting the data. Every source of randomness (dataset
+order is fixed, splits, optimizer seeds, shot sampling) is seeded explicitly, so
+the whole script is deterministic run to run.
 
 A ``Model`` is reusable without limit — ``Model.train()``/``TrainedModel`` both
 clone it internally before compiling, so the same object can be trained,
@@ -26,7 +28,17 @@ Training reads as a fluent step on the model itself — ``model.train(dataset,
 simple readout term is ``Z(0)`` / ``Z(0) @ Z(1)`` rather than the bare
 ``[("z", 0)]`` tuple form; both older spellings still work everywhere (every
 change in this crate's Python ergonomics is additive), this script just uses
-the more idiomatic one throughout.
+the more idiomatic one throughout — including the named constants
+(``Axis.RY``, ``Decision.SIGN``, ``Loss.HINGE``, …) in place of the bare
+strings every builder/train kwarg also still accepts.
+
+Every scenario also checks two things that hold for *any* run, not just this
+one: ``model.num_params()`` (computable before training, from the builder
+alone) matches the θ length the optimizer actually returns, and
+``result.fitness_history`` — the convergence curve, one best-fitness-so-far
+value per iteration — has the right length and never decreases. Scenario 7
+(minibatching) is the one place ``fitness_history`` does *not* end exactly at
+``best_fitness``, and that exception is itself checked, not glossed over.
 
 Run it directly::
 
@@ -53,6 +65,15 @@ BACKEND = dict(infrastructure="local", backend="polypus")
 # `Z(0)`, `X(0) @ Y(1)`, … — the idiomatic spelling of a simple Pauli readout
 # term, in place of the bare `[("z", 0)]` tuple form both still accept.
 Z, X, Y = polypus.qml.Z, polypus.qml.X, polypus.qml.Y
+
+# Named constants for the nine string-typed kwargs — `Axis.RY == "ry"`, so
+# these are interchangeable with the plain string everywhere, purely for
+# discoverability (`dir(polypus.qml.Loss)`, editor completion) rather than a
+# second accepted type.
+Axis, Decision, Loss = polypus.qml.Axis, polypus.qml.Decision, polypus.qml.Loss
+Entanglement, Entangler = polypus.qml.Entanglement, polypus.qml.Entangler
+ConvBlock, Pairing = polypus.qml.ConvBlock, polypus.qml.Pairing
+PoolBlock, KeepRule = polypus.qml.PoolBlock, polypus.qml.KeepRule
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +177,26 @@ def raw_scale_2f():
     return x, y
 
 
+def parity_3bits():
+    """All eight 3-bit combinations, labelled by **parity** (XOR of the three
+    bits). Not linearly separable — no hyperplane in the raw features
+    separates the two classes — so a model that learns it must be using real
+    entanglement, not just fitting clusters an angle encoder already spreads
+    apart. Exhaustive: covers the entire input domain, not a sample of it."""
+    x = [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 1.0, 1.0],
+    ]
+    y = [1.0 if sum(row) % 2 == 0 else -1.0 for row in x]
+    return x, y
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +220,36 @@ def accuracy(trained, rows, labels, run_id):
     return hits / len(labels), preds
 
 
+def fitness_history_checks(result, expect_ends_at_best=True):
+    """The ``fitness_history`` guarantees every native ``QmlTrainResult``
+    satisfies (contract C-5), reused by every scenario below: one entry per
+    iteration actually run, and a non-decreasing sequence (each entry is the
+    best fitness found *so far*, never the current candidate's, which could
+    dip). ``expect_ends_at_best=False`` is for scenario 7 (minibatching): the
+    final full-dataset recompute there overwrites ``best_fitness`` but
+    deliberately leaves the history — built from per-iteration minibatch
+    estimates — alone (contract C-7)."""
+    history = result.fitness_history
+    checks = [
+        (
+            "fitness_history length == iterations_run",
+            len(history) == result.iterations_run,
+        ),
+        (
+            "fitness_history is non-decreasing",
+            all(b >= a for a, b in zip(history, history[1:])),
+        ),
+    ]
+    if expect_ends_at_best:
+        checks.append(
+            (
+                "fitness_history ends at best_fitness",
+                history[-1] == result.best_fitness,
+            )
+        )
+    return checks
+
+
 def sign_model_2q(reps=2):
     """The workhorse binary model: 2 qubits, ``Ry`` angle encoding, a
     hardware-efficient ansatz, and ``sign(⟨Z₀⟩)`` as the decision.
@@ -189,21 +260,22 @@ def sign_model_2q(reps=2):
     """
     return (
         polypus.qml.Model(2)
-        .angle_encoder(axis="ry")
+        .angle_encoder(axis=Axis.RY)
         .hardware_efficient(reps=reps)
-        .readout(observables=[Z(0)], decision="sign")
+        .readout(observables=[Z(0)], decision=Decision.SIGN)
     )
 
 
 def raw_model_2q(reps=2):
-    """``sign_model_2q``'s twin with ``decision="raw"``: the identical circuit
-    and θ layout, but the readout returns ⟨Z₀⟩ unchanged instead of its sign.
-    Used in scenario 8 to obtain the exact expectation of a sample."""
+    """``sign_model_2q``'s twin with ``decision=Decision.RAW``: the identical
+    circuit and θ layout, but the readout returns ⟨Z₀⟩ unchanged instead of
+    its sign. Used in scenario 8 to obtain the exact expectation of a
+    sample."""
     return (
         polypus.qml.Model(2)
-        .angle_encoder(axis="ry")
+        .angle_encoder(axis=Axis.RY)
         .hardware_efficient(reps=reps)
-        .readout(observables=[Z(0)], decision="raw")
+        .readout(observables=[Z(0)], decision=Decision.RAW)
     )
 
 
@@ -230,15 +302,19 @@ def scenario_1_angle_de_hinge_exact():
     The reference native pipeline: no shot noise (``exact=True``), a
     gradient-free optimizer, and a dataset the model must separate to score a
     near-zero hinge loss. Verified by both the reported fitness and a 100 %
-    training-set accuracy read back through ``TrainedModel``.
+    training-set accuracy read back through ``TrainedModel``. Also the one
+    scenario that prints ``repr(model)``/``num_params()`` explicitly, as an
+    introduction to model introspection — every other scenario checks the
+    same guarantee silently, via the ``checks`` list.
     """
     x, y = two_clusters_2f()
     model = sign_model_2q()
+    print(f"  {model!r}, {model.num_params()} trainable parameters")
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_1_basic",
         seed=7,
         exact=True,
@@ -251,12 +327,16 @@ def scenario_1_angle_de_hinge_exact():
     # 12 θ: 2 axes (ry, rz) × 2 qubits × (reps + final rotation layer) blocks.
     checks = [
         ("theta count == 12", len(result.best_params) == 12),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("fitness finite", math.isfinite(result.best_fitness)),
         # Hinge fitness is −mean hinge loss; > −0.1 means every sample sits
         # essentially outside the margin, i.e. the clusters were separated.
         ("hinge fitness > -0.1", result.best_fitness > -0.1),
         ("train accuracy == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"DE/hinge/exact: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -284,13 +364,13 @@ def scenario_2_amplitude_pso():
         polypus.qml.Model(2)
         .amplitude_encoder()
         .hardware_efficient(reps=2)
-        .readout(observables=[Z(0)], decision="sign")
+        .readout(observables=[Z(0)], decision=Decision.SIGN)
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
         method=polypus.PSO(generations=40, population_size=20, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_2_amplitude",
         seed=11,
         exact=True,
@@ -306,10 +386,14 @@ def scenario_2_amplitude_pso():
 
     checks = [
         ("theta count == 12", len(result.best_params) == 12),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("hinge fitness > -0.1", result.best_fitness > -0.1),
         ("train accuracy == 1.0", acc == 1.0),
         ("scale invariant", doubled[0] == preds[0]),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"PSO/amplitude(4f→2q): fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -332,20 +416,23 @@ def scenario_3_iqp_adam_shots():
 
     Learning is judged on the *learned θ*, scored noiselessly afterwards through
     the exact inference path — the training fitness itself is a shot estimate,
-    so the accuracy is the honest signal.
+    so the accuracy is the honest signal. ``entanglement=Entanglement.FULL`` is
+    passed explicitly here even though it is also ``iqp_encoder``'s default —
+    it is the one scenario that showcases the constant on this particular
+    kwarg.
     """
     x, y = two_clusters_2f()
     model = (
         polypus.qml.Model(2)
-        .iqp_encoder()
+        .iqp_encoder(entanglement=Entanglement.FULL)
         .hardware_efficient(reps=1)
-        .readout(observables=[Z(0)], decision="sign")
+        .readout(observables=[Z(0)], decision=Decision.SIGN)
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
         method=polypus.Adam(max_iters=40, learning_rate=0.2, tolerance=1e-4),
-        loss="hinge",
+        loss=Loss.HINGE,
         shots=4096,
         id="showcase_3_iqp_shots",
         seed=5,
@@ -356,13 +443,17 @@ def scenario_3_iqp_adam_shots():
 
     checks = [
         ("theta count == 8", len(result.best_params) == 8),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("fitness finite", math.isfinite(result.best_fitness)),
         # A shot-estimated hinge fitness on separated clusters: −0.35 is well
         # inside what a fitted model reaches and far from an unfitted one (a
         # random θ scores around −1).
         ("shot fitness > -0.35", result.best_fitness > -0.35),
         ("train accuracy == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"Adam/IQP/shots=4096: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -382,15 +473,22 @@ def scenario_4_qcnn_qng():
     blocks alone: 4 (basic conv) + 3 (basic pool) + 4 (basic conv) = 11,
     independent of the 4 qubits. Pooling halves the active set, which is why the
     second convolution reads only the two surviving qubits.
+
+    ``ConvBlock.BASIC`` and ``PoolBlock.BASIC`` both spell ``"basic"``, but they
+    are deliberately two separate namespaces (design doc §17): they name two
+    independent Rust enums, and ``pool`` does not accept a conv block. This
+    scenario is where both appear side by side, along with
+    ``KeepRule.EVEN_POSITIONS`` (the pool's default, made explicit here) and
+    ``Pairing.EVEN_PAIRS`` on the second convolution.
     """
     x, y = two_clusters_4f()
     model = (
         polypus.qml.Model(4)
-        .angle_encoder(axis="ry")
-        .conv(block="basic")
-        .pool(block="basic")
-        .conv(block="basic", pairing="even_pairs")
-        .readout(observables=[Z(0)], decision="sign")
+        .angle_encoder(axis=Axis.RY)
+        .conv(block=ConvBlock.BASIC)
+        .pool(block=PoolBlock.BASIC, keep=KeepRule.EVEN_POSITIONS)
+        .conv(block=ConvBlock.BASIC, pairing=Pairing.EVEN_PAIRS)
+        .readout(observables=[Z(0)], decision=Decision.SIGN)
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
@@ -401,7 +499,7 @@ def scenario_4_qcnn_qng():
             learning_rate=0.3,
             tolerance=1e-4,
         ),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_4_qcnn",
         seed=3,
         exact=True,
@@ -412,9 +510,13 @@ def scenario_4_qcnn_qng():
 
     checks = [
         ("theta count == 11 (shared)", len(result.best_params) == 11),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("hinge fitness > -0.15", result.best_fitness > -0.15),
         ("train accuracy == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"QNG/QCNN(conv→pool→conv): fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -428,8 +530,8 @@ def scenario_4_qcnn_qng():
 
 
 def scenario_5_multiclass_argmax():
-    """Three classes: one observable per class, ``decision="argmax"`` and
-    ``loss="categorical_cross_entropy"``.
+    """Three classes: one observable per class, ``Decision.ARGMAX`` and
+    ``Loss.CATEGORICAL_CROSS_ENTROPY``.
 
     The two must appear together — ``QmlProblem`` rejects ``Argmax`` under a
     scalar loss and a categorical loss under a scalar decision — and the labels
@@ -441,18 +543,18 @@ def scenario_5_multiclass_argmax():
     x, y = three_clusters_3f()
     model = (
         polypus.qml.Model(3)
-        .angle_encoder(axis="ry")
+        .angle_encoder(axis=Axis.RY)
         .hardware_efficient(reps=1)
         .readout(
             observables=[Z(0), Z(1), Z(2)],
-            decision="argmax",
+            decision=Decision.ARGMAX,
         )
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
         method=polypus.DE(generations=60, population_size=24, tolerance=1e-9),
-        loss="categorical_cross_entropy",
+        loss=Loss.CATEGORICAL_CROSS_ENTROPY,
         id="showcase_5_multiclass",
         seed=17,
         exact=True,
@@ -463,6 +565,10 @@ def scenario_5_multiclass_argmax():
 
     checks = [
         ("theta count == 12", len(result.best_params) == 12),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("fitness finite", math.isfinite(result.best_fitness)),
         # Softmax cross-entropy over three near-equal expectations starts around
         # −ln 3 ≈ −1.1 (as fitness); a fitted model beats that clearly.
@@ -470,7 +576,7 @@ def scenario_5_multiclass_argmax():
         # Chance is 1/3 on three balanced classes.
         ("accuracy >= 2/3 (chance 1/3)", acc >= 2 / 3),
         ("predictions are class indices", set(preds) <= {0.0, 1.0, 2.0}),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"DE/argmax/3-class: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -495,9 +601,9 @@ def scenario_6_x_basis_readout():
     x, y = two_clusters_2f()
     model = (
         polypus.qml.Model(2)
-        .angle_encoder(axis="ry")
+        .angle_encoder(axis=Axis.RY)
         .hardware_efficient(reps=2)
-        .readout(observables=[X(0)], decision="sign")
+        .readout(observables=[X(0)], decision=Decision.SIGN)
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
@@ -506,7 +612,7 @@ def scenario_6_x_basis_readout():
         # this circuit is a harder surface for DE to flatten to the same hinge
         # loss, and the whole run still takes milliseconds.
         method=polypus.DE(generations=120, population_size=30, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_6_xbasis",
         seed=23,
         exact=True,
@@ -521,10 +627,14 @@ def scenario_6_x_basis_readout():
     )
 
     checks = [
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("hinge fitness > -0.1", result.best_fitness > -0.1),
         ("train accuracy == 1.0", acc == 1.0),
         ("held-out accuracy == 1.0", held_acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"DE/⟨X₀⟩ readout: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
@@ -547,6 +657,13 @@ def scenario_7_minibatch_adam():
     down by running the identical configuration with and without ``batch_size``
     and requiring the two reported fitnesses to agree, plus the usual accuracy
     check on the minibatched model's θ.
+
+    It is also the **one** scenario where ``fitness_history`` does not end at
+    ``best_fitness``: the final recompute overwrites only ``best_fitness``,
+    leaving the curve as the per-iteration minibatch estimates the optimizer
+    actually steered by (contract C-7) — checked explicitly via
+    ``fitness_history_checks(mini, expect_ends_at_best=False)`` rather than
+    silently skipped.
     """
     x, y = raw_scale_2f()
     # Reuse the 12-sample geometry, already inside [0, π] after scaling — do it
@@ -564,7 +681,7 @@ def scenario_7_minibatch_adam():
         return model.train(
             dataset,
             method=polypus.Adam(max_iters=60, learning_rate=0.2, tolerance=1e-4),
-            loss="hinge",
+            loss=Loss.HINGE,
             id="showcase_7_minibatch",
             seed=31,
             exact=True,
@@ -578,6 +695,7 @@ def scenario_7_minibatch_adam():
     acc, _ = accuracy(trained, scaled, y, "showcase_7_predict")
 
     checks = [
+        ("num_params() matches trained θ", model.num_params() == len(mini.best_params)),
         ("minibatch fitness finite", math.isfinite(mini.best_fitness)),
         # A full-dataset value on separated data, never a rosy ≈ 0 minibatch
         # estimate nor a wild one.
@@ -587,7 +705,7 @@ def scenario_7_minibatch_adam():
             abs(mini.best_fitness - full.best_fitness) < 0.15,
         ),
         ("train accuracy == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(mini, expect_ends_at_best=False)
     return verdict(
         checks,
         f"Adam/batch_size=4 of 12: fitness={mini.best_fitness:+.4f} "
@@ -612,11 +730,12 @@ def scenario_8_save_load_predict():
     * ``predict_from_counts`` — the readout fed integer counts.
 
     The distribution handed to the last two is *derived from the state*, not
-    from the expected label: a ``decision="raw"`` twin of the model (same
-    circuit, same θ) reports the exact ⟨Z₀⟩ of each sample, and ⟨Z₀⟩ fixes the
-    two-outcome distribution ``p("00") = (1 + ⟨Z₀⟩)/2`` over qubit 0 — which is
-    all the readout consumes. So the three entry points are compared on the same
-    physical state and must agree with each other and with the expected class.
+    from the expected label: a ``decision=Decision.RAW`` twin of the model
+    (same circuit, same θ) reports the exact ⟨Z₀⟩ of each sample, and ⟨Z₀⟩
+    fixes the two-outcome distribution ``p("00") = (1 + ⟨Z₀⟩)/2`` over qubit 0
+    — which is all the readout consumes. So the three entry points are
+    compared on the same physical state and must agree with each other and
+    with the expected class.
     """
     x, y = two_clusters_2f()
     model = sign_model_2q()
@@ -624,7 +743,7 @@ def scenario_8_save_load_predict():
     result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_8_train",
         seed=7,
         exact=True,
@@ -666,6 +785,10 @@ def scenario_8_save_load_predict():
             )
 
     checks = [
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("theta round-trips exactly", theta_survived),
         ("predict matches expected class", via_predict == expected),
         ("predict_from_probabilities agrees", via_probs == via_predict),
@@ -673,7 +796,7 @@ def scenario_8_save_load_predict():
         # The expectations must be decisive, or the agreement above would be a
         # coincidence of a near-zero value rounding the same way three times.
         ("|⟨Z₀⟩| > 0.5 on both samples", all(abs(e) > 0.5 for e in expectations)),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         "save/load + 3 inference paths: "
@@ -733,7 +856,7 @@ def scenario_9_dataset_utilities():
     result = model.train(
         train,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_9_scaled_train",
         seed=29,
         exact=True,
@@ -753,9 +876,13 @@ def scenario_9_dataset_utilities():
             train.feature_ranges() == [(0.0, PI), (0.0, PI)],
         ),
         ("frozen scaler replayed exactly", scaler_replayed),
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         ("trains on scaled data (fitness > -0.1)", result.best_fitness > -0.1),
         ("accuracy on all 12 rows == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"split(0.25)+scale[0,π]: sizes=(9,3) test-ranges="
@@ -784,15 +911,15 @@ def scenario_10_weighted_observable():
     )
     model = (
         polypus.qml.Model(2)
-        .angle_encoder(axis="ry")
+        .angle_encoder(axis=Axis.RY)
         .hardware_efficient(reps=2)
-        .readout(observables=[observable], decision="sign")
+        .readout(observables=[observable], decision=Decision.SIGN)
     )
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
         method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
-        loss="hinge",
+        loss=Loss.HINGE,
         id="showcase_10_observable",
         seed=13,
         exact=True,
@@ -802,6 +929,10 @@ def scenario_10_weighted_observable():
     acc, _ = accuracy(trained, x, y, "showcase_10_predict")
 
     checks = [
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
         # This weighted sum's margin is a harder surface to flatten than a
         # bare ⟨Z₀⟩ (measured around −0.12 to −0.17 across several seeds), so
         # the bar sits lower than scenario 1's — but a random θ predicts every
@@ -809,11 +940,72 @@ def scenario_10_weighted_observable():
         # admits a genuinely fitted model.
         ("hinge fitness > -0.25", result.best_fitness > -0.25),
         ("train accuracy == 1.0", acc == 1.0),
-    ]
+    ] + fitness_history_checks(result)
     return verdict(
         checks,
         f"DE/weighted 0.5·Z₀+0.5·Z₀Z₁: fitness={result.best_fitness:+.4f} "
         f"acc={acc:.0%}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 11 — BasisEncoder on a genuinely non-linear problem: 3-bit parity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_11_basis_encoder_parity():
+    """``BasisEncoder`` loads a binary sample straight into a computational
+    basis state — one ``X`` per set bit, no angle arithmetic at all — then a
+    hardware-efficient ansatz with real entanglement learns 3-bit **parity**
+    (XOR).
+
+    Parity is not linearly separable: no hyperplane over the raw features
+    splits the two classes, unlike every clusters-based scenario above. A
+    ``θ = 0`` baseline (the encoder alone, no ansatz contribution) scores 50 %
+    accuracy — chance — so reaching 100 % means the entangling layer is doing
+    real work, not just spreading already-separable clusters apart. The
+    dataset is exhaustive: all eight 3-bit combinations, so the accuracy
+    covers the entire input domain.
+    """
+    x, y = parity_3bits()
+    model = (
+        polypus.qml.Model(3)
+        .basis_encoder()
+        .hardware_efficient(
+            reps=2, entangler=Entangler.CX, entanglement=Entanglement.FULL
+        )
+        .readout(observables=[Z(0)], decision=Decision.SIGN)
+    )
+    dataset = polypus.qml.Dataset(x, y)
+    result = model.train(
+        dataset,
+        method=polypus.DE(generations=150, population_size=40, tolerance=1e-9),
+        loss=Loss.HINGE,
+        id="showcase_11_basis_parity",
+        seed=11,
+        exact=True,
+        **BACKEND,
+    )
+    trained = polypus.qml.TrainedModel(model, dataset, result.best_params)
+    acc, _ = accuracy(trained, x, y, "showcase_11_predict")
+
+    checks = [
+        (
+            "num_params() matches trained θ",
+            model.num_params() == len(result.best_params),
+        ),
+        ("fitness finite", math.isfinite(result.best_fitness)),
+        # A θ=0 baseline scores exactly -1.0 (every sample sits on the margin,
+        # measured directly); the fitness curve's own first entry is already
+        # below -0.5 (measured: ≈ -0.63), so this bar only admits a run that
+        # actually converged, not an early or unfitted one.
+        ("hinge fitness > -0.5", result.best_fitness > -0.5),
+        ("accuracy == 1.0 on all 8 combinations (not linearly separable)", acc == 1.0),
+    ] + fitness_history_checks(result)
+    return verdict(
+        checks,
+        f"DE/BasisEncoder/parity(3-bit XOR): fitness={result.best_fitness:+.4f} "
+        f"acc={acc:.0%} params={model.num_params()}",
     )
 
 
@@ -832,6 +1024,7 @@ SCENARIOS = [
     ("8. TrainedModel save/load/predict", scenario_8_save_load_predict),
     ("9. Dataset split + scaling", scenario_9_dataset_utilities),
     ("10. Weighted Observable", scenario_10_weighted_observable),
+    ("11. BasisEncoder + parity (XOR)", scenario_11_basis_encoder_parity),
 ]
 
 
