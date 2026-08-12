@@ -50,6 +50,7 @@
 #![deny(clippy::all)]
 
 pub mod constants;
+pub mod endf;
 pub mod error;
 pub mod hamiltonians;
 pub mod interactions;

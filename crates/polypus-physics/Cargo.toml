@@ -18,7 +18,10 @@ serde   = { version = "1.0", features = ["derive"], optional = true }
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.
 log     = { workspace = true }
+include_dir = "0.7.4"
+csv = { version = "1", optional = true }
 
 [features]
 default = []
-serde   = ["dep:serde"]    # opt-in serialization of histories / results
+serde     = ["dep:serde"]
+csv-export = ["dep:csv", "dep:serde"]

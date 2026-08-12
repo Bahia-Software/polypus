@@ -36,6 +36,12 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// No embedded ENDF-6 data is available for a given element symbol.
+    UnknownElement { symbol: String },
+    /// The ENDF-6 file does not have the expected format.
+    MalformedEndfData { message: String },
+    /// A CSV export (or other file I/O) operation failed.
+    IoError { message: String },
 }
 
 impl fmt::Display for PhysicsError {
@@ -55,6 +61,15 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::InvalidSpectrum { message } => {
                 write!(f, "invalid spectrum: {message}")
+            }
+            PhysicsError::UnknownElement { symbol } => {
+                write!(f, "unknown element symbol: {symbol}")
+            }
+            PhysicsError::MalformedEndfData { message } => {
+                write!(f, "malformed ENDF-6 data: {message}")
+            }
+            PhysicsError::IoError { message } => {
+                write!(f, "I/O error: {message}")
             }
         }
     }
