@@ -299,13 +299,12 @@ pub fn mu_m_for_element(symbol: &str, mt: u32) -> Result<(u32, f64, Vec<MuPoint>
     Ok((entry.z, a, points))
 }
 
-/// Writes a set of (energy, mu_m) points to a CSV file with two
-/// metadata rows, a blank row, a header row, and one data row per point.
+/// Writes a header consisting of arbitrary metadata rows, a blank row, and
+/// then one CSV row per (energy, mu_m) point. Shared by both
+/// [`write_element_csv`] and [`write_compound_csv`].
 #[cfg(feature = "csv-export")]
-pub fn write_mu_m_csv(
-    symbol: &str,
-    z: u32,
-    a: f64,
+fn write_mu_m_points_csv(
+    metadata_rows: &[[&str; 2]],
     points: &[MuPoint],
     path: &Path,
 ) -> Result<(), PhysicsError> {
@@ -331,15 +330,9 @@ pub fn write_mu_m_csv(
         .from_path(path)
         .map_err(to_csv_error)?;
 
-    writer
-        .write_record(["Element", symbol])
-        .map_err(to_csv_error)?;
-    writer
-        .write_record(["Z", &z.to_string()])
-        .map_err(to_csv_error)?;
-    writer
-        .write_record(["A", &format!("{a:?}")])
-        .map_err(to_csv_error)?;
+    for row in metadata_rows {
+        writer.write_record(row).map_err(to_csv_error)?;
+    }
     writer.write_record([""]).map_err(to_csv_error)?;
 
     for point in points {
@@ -354,6 +347,315 @@ pub fn write_mu_m_csv(
 
     writer.flush().map_err(to_io_error)?;
     Ok(())
+}
+
+/// Writes a single element's (energy, mu_m) points to a CSV file.
+#[cfg(feature = "csv-export")]
+pub fn write_element_csv(
+    symbol: &str,
+    z: u32,
+    a: f64,
+    points: &[MuPoint],
+    path: &Path,
+) -> Result<(), PhysicsError> {
+    let z_text = z.to_string();
+    let a_text = format!("{a:?}");
+    let metadata = [["Element", symbol], ["Z", &z_text], ["A", &a_text]];
+    write_mu_m_points_csv(&metadata, points, path)
+}
+
+/// Writes a compound's (energy, mu_m) points to a CSV file.
+#[cfg(feature = "csv-export")]
+pub fn write_compound_csv(
+    formula: &str,
+    result: &CompoundResult,
+    path: &Path,
+) -> Result<(), PhysicsError> {
+    let molar_mass_text = format!("{:?}", result.molar_mass);
+    let metadata = [["Compound", formula], ["MolarMass", &molar_mass_text]];
+    write_mu_m_points_csv(&metadata, &result.points, path)
+}
+
+/// Parses a chemical formula (e.g. `"H2O"`, `"Fe2O3"`) into a map from
+/// element symbol to atom count.
+fn parse_formula(formula: &str) -> Result<HashMap<String, u32>, PhysicsError> {
+    let mut elements: HashMap<String, u32> = HashMap::new();
+    let chars: Vec<char> = formula.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if !chars[i].is_ascii_uppercase() {
+            return Err(PhysicsError::InvalidChemicalFormula {
+                message: format!(
+                    "unexpected character '{}' at position {} in formula '{formula}': expected an uppercase letter",
+                    chars[i], i
+                ),
+            });
+        }
+
+        let mut symbol = chars[i].to_string();
+        i += 1;
+
+        if let Some(&next) = chars.get(i) {
+            if next.is_ascii_lowercase() {
+                symbol.push(next);
+                i += 1;
+            }
+        }
+
+        let mut count_text = String::new();
+        while let Some(&c) = chars.get(i) {
+            if c.is_ascii_digit() {
+                count_text.push(c);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+
+        let count: u32 = if count_text.is_empty() {
+            1
+        } else {
+            count_text
+                .parse()
+                .map_err(|_| PhysicsError::InvalidChemicalFormula {
+                    message: format!("invalid atom count in formula '{formula}'"),
+                })?
+        };
+
+        *elements.entry(symbol).or_insert(0) += count;
+    }
+
+    Ok(elements)
+}
+
+/// Builds `n` energy points, geometrically (log-)spaced between `e_min`
+/// and `e_max`, inclusive. Mirrors `numpy.geomspace`: the endpoints are
+/// forced to the exact input values afterwards, since `exp(ln(x))` is not
+/// always bit-identical to `x`.
+fn geomspace(e_min: f64, e_max: f64, n: usize) -> Vec<f64> {
+    if n <= 1 {
+        return vec![e_min];
+    }
+
+    let log_min = e_min.ln();
+    let log_max = e_max.ln();
+    let step = (log_max - log_min) / (n - 1) as f64;
+
+    let mut values: Vec<f64> = (0..n).map(|i| (log_min + (i as f64) * step).exp()).collect();
+
+    values[0] = e_min;
+    let last = values.len() - 1;
+    values[last] = e_max;
+
+    values
+}
+
+/// Linear interpolation of `y` at `x`, given sorted `xs`/`ys` arrays.
+/// Values outside `[xs[0], xs[last]]` are clamped to the nearest endpoint.
+fn interpolate_linear(x: f64, xs: &[f64], ys: &[f64]) -> f64 {
+    if x <= xs[0] {
+        return ys[0];
+    }
+    if x >= xs[xs.len() - 1] {
+        return ys[ys.len() - 1];
+    }
+
+    let i = xs.partition_point(|&xi| xi <= x);
+    let (x0, x1) = (xs[i - 1], xs[i]);
+    let (y0, y1) = (ys[i - 1], ys[i]);
+
+    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+}
+
+/// Log-log interpolation of a (energy, mu_m) curve onto a new set of
+/// energies. Interpolating in log-log space, rather than linearly, is the
+/// physically appropriate choice for cross-sections spanning many orders
+/// of magnitude (see EPDL's own documentation for the same convention).
+///
+/// A cross-section of exactly zero (below some threshold) is handled with
+/// a sentinel value rather than `ln(0) = -inf`.
+fn loglog_interpolate(reference: &[f64], energies: &[f64], mu: &[f64]) -> Vec<f64> {
+    const EPSILON: f64 = 1e-300;
+    let log_epsilon = EPSILON.ln();
+
+    let log_energies: Vec<f64> = energies.iter().map(|e| e.ln()).collect();
+    let log_mu: Vec<f64> = mu
+        .iter()
+        .map(|&m| if m == 0.0 { log_epsilon } else { m.ln() })
+        .collect();
+
+    reference
+        .iter()
+        .map(|e_ref| {
+            let log_e_ref = e_ref.ln();
+            let log_result = interpolate_linear(log_e_ref, &log_energies, &log_mu);
+            if log_result == log_epsilon {
+                0.0
+            } else {
+                log_result.exp()
+            }
+        })
+        .collect()
+}
+
+/// The mass attenuation coefficient of a chemical compound or mixture,
+/// computed by combining the ENDF-6 data of its constituent elements,
+/// weighted by mass fraction.
+pub struct CompoundResult {
+    /// The compound's molar mass (g/mol), computed from its formula.
+    pub molar_mass: f64,
+    /// Mass fraction of each element (symbol -> fraction), summing to 1.0.
+    pub mass_fractions: HashMap<String, f64>,
+    /// The (energy, mu_m) points, on a common energy grid shared by all
+    /// constituent elements.
+    pub points: Vec<MuPoint>,
+}
+
+/// Computes the mass attenuation coefficient of a chemical compound or
+/// mixture (e.g. `"H2O"`, `"Fe2O3"`) for a given ENDF-6 reaction type,
+/// interpolating each constituent element onto a common, geometrically
+/// spaced energy grid of `n_points` points.
+pub fn mu_m_for_compound(
+    formula: &str,
+    mt: u32,
+    n_points: usize,
+) -> Result<CompoundResult, PhysicsError> {
+    let composition = parse_formula(formula)?;
+
+    struct ElementData {
+        atom_count: u32,
+        atomic_mass: f64,
+        points: Vec<MuPoint>,
+    }
+
+    let mut elements: HashMap<String, ElementData> = HashMap::new();
+    let mut molar_mass = 0.0;
+
+    for (symbol, &atom_count) in &composition {
+        let (_z, a, points) = mu_m_for_element(symbol, mt)?;
+        molar_mass += (atom_count as f64) * a;
+        elements.insert(
+            symbol.clone(),
+            ElementData {
+                atom_count,
+                atomic_mass: a,
+                points,
+            },
+        );
+    }
+
+    let mut mass_fractions: HashMap<String, f64> = HashMap::new();
+    for (symbol, data) in &elements {
+        let fraction = (data.atom_count as f64) * data.atomic_mass / molar_mass;
+        mass_fractions.insert(symbol.clone(), fraction);
+    }
+
+    let e_min = elements
+        .values()
+        .map(|d| d.points.iter().map(|p| p.energy_ev).fold(f64::INFINITY, f64::min))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let e_max = elements
+        .values()
+        .map(|d| d.points.iter().map(|p| p.energy_ev).fold(f64::NEG_INFINITY, f64::max))
+        .fold(f64::INFINITY, f64::min);
+
+    if e_min >= e_max {
+        return Err(PhysicsError::NoEnergyOverlap);
+    }
+
+    let reference = geomspace(e_min, e_max, n_points);
+    let mut mu_total = vec![0.0; n_points];
+
+    for (symbol, data) in &elements {
+        let energies: Vec<f64> = data.points.iter().map(|p| p.energy_ev).collect();
+        let mu: Vec<f64> = data.points.iter().map(|p| p.mu_m).collect();
+        let interpolated = loglog_interpolate(&reference, &energies, &mu);
+        let fraction = mass_fractions[symbol];
+        for i in 0..n_points {
+            mu_total[i] += fraction * interpolated[i];
+        }
+    }
+
+    let points = reference
+        .iter()
+        .zip(mu_total.iter())
+        .map(|(&energy_ev, &mu_m)| MuPoint { energy_ev, mu_m })
+        .collect();
+
+    Ok(CompoundResult {
+        molar_mass,
+        mass_fractions,
+        points,
+    })
+}
+
+/// Renders a set of (energy, mu_m) points as a log-log line chart, and
+/// saves it as a PNG image.
+#[cfg(feature = "plotters")]
+fn plot_mu_m_points(points: &[MuPoint], title: &str, path: &Path) -> Result<(), PhysicsError> {
+    use plotters::prelude::*;
+
+    if points.is_empty() {
+        return Err(PhysicsError::MalformedEndfData {
+            message: "no points to plot".to_string(),
+        });
+    }
+
+    let to_plot_error = |e: String| PhysicsError::IoError {
+        message: format!("could not render plot: {e}"),
+    };
+
+    let (x_min, x_max, y_min, y_max) = points.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        |(x_min, x_max, y_min, y_max), p| {
+            let x = p.energy_ev * 1e-6;
+            (x_min.min(x), x_max.max(x), y_min.min(p.mu_m), y_max.max(p.mu_m))
+        },
+    );
+
+    let root = BitMapBackend::new(path, (1200, 825)).into_drawing_area();
+    root.fill(&WHITE).map_err(|e| to_plot_error(e.to_string()))?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption(title, ("sans-serif", 22))
+        .margin(20)
+        .x_label_area_size(50)
+        .y_label_area_size(70)
+        .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())
+        .map_err(|e| to_plot_error(e.to_string()))?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Photon energy (MeV)")
+        .y_desc("mu_m (cm2/g)")
+        .light_line_style(RGBColor(220, 220, 220))
+        .draw()
+        .map_err(|e| to_plot_error(e.to_string()))?;
+
+    chart
+        .draw_series(LineSeries::new(
+            points.iter().map(|p| (p.energy_ev * 1e-6, p.mu_m)),
+            RGBColor(37, 99, 235),
+        ))
+        .map_err(|e| to_plot_error(e.to_string()))?;
+
+    root.present().map_err(|e| to_plot_error(e.to_string()))?;
+    Ok(())
+}
+
+/// Renders a single element's mu_m curve and saves it as a PNG image.
+#[cfg(feature = "plotters")]
+pub fn plot_element(symbol: &str, points: &[MuPoint], path: &Path) -> Result<(), PhysicsError> {
+    let title = format!("{symbol}: mass attenuation coefficient");
+    plot_mu_m_points(points, &title, path)
+}
+
+/// Renders a compound's mu_m curve and saves it as a PNG image.
+#[cfg(feature = "plotters")]
+pub fn plot_compound(formula: &str, result: &CompoundResult, path: &Path) -> Result<(), PhysicsError> {
+    let title = format!("{formula}: mass attenuation coefficient");
+    plot_mu_m_points(&result.points, &title, path)
 }
 
 #[cfg(test)]
@@ -458,15 +760,147 @@ mod tests {
         assert!(matches!(result, Err(PhysicsError::UnknownElement { .. })));
     }
 
+    #[test]
+    fn parses_water() {
+        let formula = parse_formula("H2O").unwrap();
+        assert_eq!(formula.get("H"), Some(&2));
+        assert_eq!(formula.get("O"), Some(&1));
+        assert_eq!(formula.len(), 2);
+    }
+
+    #[test]
+    fn parses_iron_oxide() {
+        let formula = parse_formula("Fe2O3").unwrap();
+        assert_eq!(formula.get("Fe"), Some(&2));
+        assert_eq!(formula.get("O"), Some(&3));
+    }
+
+    #[test]
+    fn rejects_lowercase_start() {
+        assert!(parse_formula("fe2o3").is_err());
+    }
+
+    #[test]
+    fn geomspace_endpoints_are_exact() {
+        let values = geomspace(1.0, 100_000_000_000.0, 5000);
+        assert_eq!(values.len(), 5000);
+        assert_eq!(values[0], 1.0);
+        assert_eq!(values[4999], 100_000_000_000.0);
+    }
+
+    #[test]
+    fn geomspace_is_monotonically_increasing() {
+        let values = geomspace(1.0, 1000.0, 10);
+        for i in 1..values.len() {
+            assert!(values[i] > values[i - 1]);
+        }
+    }
+
+    #[test]
+    fn geomspace_with_one_point_returns_e_min() {
+        let values = geomspace(5.0, 10.0, 1);
+        assert_eq!(values, vec![5.0]);
+    }
+
+    #[test]
+    fn interpolate_linear_midpoint() {
+        let result = interpolate_linear(2.0, &[1.0, 3.0], &[10.0, 30.0]);
+        assert_eq!(result, 20.0);
+    }
+
+    #[test]
+    fn interpolate_linear_clamps_below_range() {
+        let result = interpolate_linear(0.0, &[1.0, 3.0], &[10.0, 30.0]);
+        assert_eq!(result, 10.0);
+    }
+
+    #[test]
+    fn interpolate_linear_clamps_above_range() {
+        let result = interpolate_linear(10.0, &[1.0, 3.0], &[10.0, 30.0]);
+        assert_eq!(result, 30.0);
+    }
+
+    #[test]
+    fn loglog_interpolate_reproduces_hydrogen_values() {
+        let (_z, _a, points) = mu_m_for_element("H", 501).unwrap();
+        let energies: Vec<f64> = points.iter().map(|p| p.energy_ev).collect();
+        let mu: Vec<f64> = points.iter().map(|p| p.mu_m).collect();
+
+        // Interpolating exactly at the original data points should reproduce
+        // (almost) the original values.
+        let reference = vec![energies[0], energies[1000], energies[2020]];
+        let result = loglog_interpolate(&reference, &energies, &mu);
+
+        for (r, expected) in result.iter().zip([mu[0], mu[1000], mu[2020]]) {
+            assert!((r - expected).abs() / expected.abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn mu_m_for_water_matches_known_values() {
+        let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
+        assert!((result.molar_mass - 18.015).abs() < 1e-3);
+        assert_eq!(result.points.len(), 5000);
+        assert_eq!(result.points[0].energy_ev, 1.0);
+        assert_eq!(result.points[4999].energy_ev, 100_000_000_000.0);
+
+        let last_mu = result.points[4999].mu_m;
+        assert!((last_mu - 0.02127463725739474).abs() / last_mu < 1e-6);
+    }
+
+    #[test]
+    fn mass_fractions_sum_to_one() {
+        let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
+        let total: f64 = result.mass_fractions.values().sum();
+        assert!((total - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mu_m_for_unknown_formula_errors() {
+        let result = mu_m_for_compound("fe2o3", 501, 5000);
+        assert!(matches!(result, Err(PhysicsError::InvalidChemicalFormula { .. })));
+    }
+
     #[cfg(feature = "csv-export")]
     #[test]
-    fn write_mu_m_csv_produces_a_file() {
+    fn write_element_csv_produces_a_file() {
         let (z, a, points) = mu_m_for_element("H", 501).unwrap();
         let path = std::env::temp_dir().join("H_mu_m_test.csv");
-        write_mu_m_csv("H", z, a, &points, &path).unwrap();
+        write_element_csv("H", z, a, &points, &path).unwrap();
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("Element,H"));
         println!("CSV written to: {}", path.display());
+    }
+
+    #[cfg(feature = "csv-export")]
+    #[test]
+    fn write_compound_csv_produces_a_file() {
+        let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
+        let path = std::env::temp_dir().join("H2O_mu_m_test.csv");
+        write_compound_csv("H2O", &result, &path).unwrap();
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("Compound,H2O"));
+    }
+
+    #[cfg(feature = "plotters")]
+    #[test]
+    fn plot_element_produces_a_png() {
+        let (_z, _a, points) = mu_m_for_element("H", 501).unwrap();
+        let path = std::env::temp_dir().join("H_mu_m_test.png");
+        plot_element("H", &points, &path).unwrap();
+        assert!(path.exists());
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
+
+    #[cfg(feature = "plotters")]
+    #[test]
+    fn plot_compound_produces_a_png() {
+        let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
+        let path = std::env::temp_dir().join("H2O_mu_m_test.png");
+        plot_compound("H2O", &result, &path).unwrap();
+        assert!(path.exists());
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
     }
 }
