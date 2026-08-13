@@ -10,7 +10,7 @@ use crate::constants::{AVOGADRO, BARN_TO_CM2};
 use crate::error::PhysicsError;
 
 /// The 100 ENDF-6 files, embedded in the binary.
-static ENDF_FILES: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/endf_data");
+static ENDF_FILES: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/interactions/photon/endf_data");
 
 /// Extracts (Z, symbol) from a file's first line, e.g. "  26-Fe ...".
 fn read_element_header(first_line: &str) -> Option<(u32, String)> {

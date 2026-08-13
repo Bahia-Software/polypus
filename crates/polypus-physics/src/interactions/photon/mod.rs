@@ -4,6 +4,7 @@
 pub mod compton;
 pub mod pair_production;
 pub mod photoelectric;
+pub mod endf;
 
 use super::{InteractionEvent, InteractionModel};
 use crate::error::PhysicsError;
