@@ -175,9 +175,9 @@ pub fn z_for_symbol(symbol: &str) -> Option<u32> {
 }
 
 /// A single (energy, cross-section) data point straight from an ENDF-6 file.
-struct SectionPoint {
-    energy_ev: f64,
-    sigma_barn: f64,
+pub struct CrossSectionPoint {
+    pub energy_ev: f64,
+    pub sigma_barn: f64,
 }
 
 /// A single (energy, mass attenuation coefficient) data point.
@@ -191,7 +191,7 @@ pub struct MuPoint {
 
 /// Extracts the MF/MT section of interest from an ENDF-6 file's raw
 /// contents, and returns its (energy, cross-section) data points.
-fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<SectionPoint>, PhysicsError> {
+fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<CrossSectionPoint>, PhysicsError> {
     let mf_str = mf.to_string();
     let mt_str = mt.to_string();
 
@@ -255,13 +255,28 @@ fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<SectionPoint>, P
     let points = values
         .chunks_exact(2)
         .take(np)
-        .map(|pair| SectionPoint {
+        .map(|pair| CrossSectionPoint {
             energy_ev: pair[0],
             sigma_barn: pair[1],
         })
         .collect();
 
     Ok(points)
+}
+
+/// Returns the raw (energy, cross-section) points for a given element and
+/// ENDF-6 reaction type, straight from the embedded evaluation.
+pub fn cross_section_for_element(
+    symbol: &str,
+    mt: u32,
+) -> Result<(u32, Vec<CrossSectionPoint>), PhysicsError> {
+    let entry = endf_index()
+        .get(symbol)
+        .ok_or_else(|| PhysicsError::UnknownElement {
+            symbol: symbol.to_string(),
+        })?;
+    let points = read_section(entry.contents, 23, mt)?;
+    Ok((entry.z, points))
 }
 
 /// Computes the mass attenuation coefficient mu_m = sigma_t * N_A / A for a
@@ -275,18 +290,13 @@ fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<SectionPoint>, P
 /// Returns the atomic number, atomic mass (g/mol), and the resulting
 /// (energy, mu_m) points, sorted by increasing energy as given by the
 /// evaluation.
+
 pub fn mu_m_for_element(symbol: &str, mt: u32) -> Result<(u32, f64, Vec<MuPoint>), PhysicsError> {
-    let entry = endf_index()
-        .get(symbol)
-        .ok_or_else(|| PhysicsError::UnknownElement {
-            symbol: symbol.to_string(),
-        })?;
+    let (z, section) = cross_section_for_element(symbol, mt)?;
 
-    let a = atomic_mass(entry.z).ok_or_else(|| PhysicsError::MalformedEndfData {
-        message: format!("no atomic mass known for Z={}", entry.z),
+    let a = atomic_mass(z).ok_or_else(|| PhysicsError::MalformedEndfData {
+        message: format!("no atomic mass known for Z={z}"),
     })?;
-
-    let section = read_section(entry.contents, 23, mt)?;
 
     let points = section
         .iter()
@@ -296,7 +306,7 @@ pub fn mu_m_for_element(symbol: &str, mt: u32) -> Result<(u32, f64, Vec<MuPoint>
         })
         .collect();
 
-    Ok((entry.z, a, points))
+    Ok((z, a, points))
 }
 
 /// Writes a header consisting of arbitrary metadata rows, a blank row, and
@@ -590,74 +600,6 @@ pub fn mu_m_for_compound(
     })
 }
 
-/// Renders a set of (energy, mu_m) points as a log-log line chart, and
-/// saves it as a PNG image.
-#[cfg(feature = "plotters")]
-fn plot_mu_m_points(points: &[MuPoint], title: &str, path: &Path) -> Result<(), PhysicsError> {
-    use plotters::prelude::*;
-
-    if points.is_empty() {
-        return Err(PhysicsError::MalformedEndfData {
-            message: "no points to plot".to_string(),
-        });
-    }
-
-    let to_plot_error = |e: String| PhysicsError::IoError {
-        message: format!("could not render plot: {e}"),
-    };
-
-    let (x_min, x_max, y_min, y_max) = points.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
-        |(x_min, x_max, y_min, y_max), p| {
-            let x = p.energy_ev * 1e-6;
-            (x_min.min(x), x_max.max(x), y_min.min(p.mu_m), y_max.max(p.mu_m))
-        },
-    );
-
-    let root = BitMapBackend::new(path, (1200, 825)).into_drawing_area();
-    root.fill(&WHITE).map_err(|e| to_plot_error(e.to_string()))?;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(title, ("sans-serif", 22))
-        .margin(20)
-        .x_label_area_size(50)
-        .y_label_area_size(70)
-        .build_cartesian_2d((x_min..x_max).log_scale(), (y_min..y_max).log_scale())
-        .map_err(|e| to_plot_error(e.to_string()))?;
-
-    chart
-        .configure_mesh()
-        .x_desc("Photon energy (MeV)")
-        .y_desc("mu_m (cm2/g)")
-        .light_line_style(RGBColor(220, 220, 220))
-        .draw()
-        .map_err(|e| to_plot_error(e.to_string()))?;
-
-    chart
-        .draw_series(LineSeries::new(
-            points.iter().map(|p| (p.energy_ev * 1e-6, p.mu_m)),
-            RGBColor(37, 99, 235),
-        ))
-        .map_err(|e| to_plot_error(e.to_string()))?;
-
-    root.present().map_err(|e| to_plot_error(e.to_string()))?;
-    Ok(())
-}
-
-/// Renders a single element's mu_m curve and saves it as a PNG image.
-#[cfg(feature = "plotters")]
-pub fn plot_element(symbol: &str, points: &[MuPoint], path: &Path) -> Result<(), PhysicsError> {
-    let title = format!("{symbol}: mass attenuation coefficient");
-    plot_mu_m_points(points, &title, path)
-}
-
-/// Renders a compound's mu_m curve and saves it as a PNG image.
-#[cfg(feature = "plotters")]
-pub fn plot_compound(formula: &str, result: &CompoundResult, path: &Path) -> Result<(), PhysicsError> {
-    let title = format!("{formula}: mass attenuation coefficient");
-    plot_mu_m_points(&result.points, &title, path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,25 +824,5 @@ mod tests {
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("Compound,H2O"));
-    }
-
-    #[cfg(feature = "plotters")]
-    #[test]
-    fn plot_element_produces_a_png() {
-        let (_z, _a, points) = mu_m_for_element("H", 501).unwrap();
-        let path = std::env::temp_dir().join("H_mu_m_test.png");
-        plot_element("H", &points, &path).unwrap();
-        assert!(path.exists());
-        assert!(std::fs::metadata(&path).unwrap().len() > 0);
-    }
-
-    #[cfg(feature = "plotters")]
-    #[test]
-    fn plot_compound_produces_a_png() {
-        let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
-        let path = std::env::temp_dir().join("H2O_mu_m_test.png");
-        plot_compound("H2O", &result, &path).unwrap();
-        assert!(path.exists());
-        assert!(std::fs::metadata(&path).unwrap().len() > 0);
     }
 }

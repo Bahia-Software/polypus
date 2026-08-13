@@ -4,7 +4,9 @@
 pub mod compton;
 pub mod pair_production;
 pub mod photoelectric;
-pub mod endf;
+pub mod mass_attenuation_coefficients;
+pub mod mass_attenuation_coefficients_plots;
+pub mod cross_section_plots;
 
 use super::{InteractionEvent, InteractionModel};
 use crate::error::PhysicsError;
