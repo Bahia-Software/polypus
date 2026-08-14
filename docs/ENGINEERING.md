@@ -83,6 +83,15 @@ boundary stays out-of-process and explicit; see
   the first statement before constructing any Python object. A pending Ctrl+C
   surfaces there as a `KeyboardInterrupt` propagated verbatim through the
   function's `Result`, never swallowed or retyped.
+- `statevector` follows the same rule at a smaller scale: it releases the GIL
+  around the `StatevectorSimulator::run` call (parameter binding stays on the
+  GIL side — it is O(gates) and allocates nothing of size `2^n`). It
+  deliberately does **not** call `py.check_signals()`: it is a single
+  simulation with no per-circuit boundary at which a pending Ctrl+C could be
+  honored, its cost is bounded by the qubit ceiling (§4), and the interpreter
+  raises the pending `KeyboardInterrupt` as soon as the call returns into
+  Python bytecode. Making it interruptible *mid-run* would require signal
+  checks inside `polypus-sim`, which must stay Python-free (§2).
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
@@ -101,6 +110,16 @@ boundary stays out-of-process and explicit; see
 - **Parallel == sequential:** kernels under the `parallel` feature (rayon)
   must produce **bit-identical** results to the sequential path. Every new
   parallel kernel is tested against its sequential version.
+- **Qubit ceiling:** a dense statevector needs `2^n` complex amplitudes
+  (`16 · 2^n` bytes), so `polypus-sim` refuses circuits above
+  `polypus_sim::MAX_QUBITS` (30 ≈ 16 GiB) as the **first** thing
+  `StatevectorSimulator::run` does — before any allocation, and low enough that
+  `1 << n` cannot overflow. At the seam this surfaces as a `ValueError` naming
+  the requested and the supported count (`polypus.statevector`;
+  `tests/python/test_statevector.py`). `polypus.Circuit` itself stays
+  unbounded on purpose: it is backend-agnostic IR, and CUNQA/QMIO/Aer have
+  their own, different capacities — the ceiling is enforced where it applies,
+  not in the IR.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting

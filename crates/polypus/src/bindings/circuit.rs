@@ -115,6 +115,17 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// (qubit 0 is the least-significant bit), so it can be compared directly with
 /// `qiskit.quantum_info.Statevector`.
 ///
+/// The simulation runs **GIL-free** — only the cheap parameter binding and the
+/// conversion of the result hold the GIL — so other Python threads keep making
+/// progress while it runs (see `docs/ENGINEERING.md` §3).
+///
+/// **Qubit ceiling.** A dense statevector needs `2^n` complex amplitudes
+/// (`16 · 2^n` bytes), so the backend refuses circuits with more than
+/// [`polypus_sim::MAX_QUBITS`] qubits (30 ≈ 16 GiB) and raises a `ValueError`
+/// naming the requested and the supported count **before** attempting any
+/// allocation. `polypus.Circuit` itself is deliberately unbounded (see
+/// `Circuit::new`): the ceiling belongs to this backend, not to the IR.
+///
 /// ```python
 /// import polypus
 /// qc = polypus.Circuit(2).h(0).cx(0, 1)
@@ -126,15 +137,36 @@ pub fn statevector(
     params: Option<Vec<f64>>,
 ) -> PyResult<Vec<polypus_sim::C64>> {
     let params = params.unwrap_or_default();
+    // Binding stays on this side of the release: it is O(gates), allocates
+    // nothing of size `2^n`, and reads the circuit through the `PyRef`.
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
-    let sv = StatevectorSimulator::new()
-        .run(&concrete)
+    // The simulation is the expensive, pure-Rust part: release the GIL for it
+    // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
+    //
+    // No `py.check_signals()` here, unlike `run_quantum_circuit`: this is a
+    // single simulation with no per-circuit boundary at which a pending Ctrl+C
+    // could be honored, its cost is bounded by the qubit ceiling above, and the
+    // interpreter raises the pending `KeyboardInterrupt` as soon as the call
+    // returns into Python bytecode. Interrupting it *mid-run* would mean signal
+    // checks inside `polypus-sim`, which must stay Python-free (§2).
+    let sv = qc
+        .py()
+        .allow_threads(|| StatevectorSimulator::new().run(&concrete))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(sv.amplitudes().to_vec())
 }
 
 #[pymethods]
 impl Circuit {
+    /// Build an empty circuit on `num_qubits` qubits.
+    ///
+    /// **Intentionally unbounded.** A `Circuit` is backend-agnostic IR: the same
+    /// object is routed by `polypus.run_quantum_circuit` to the native
+    /// statevector simulator, CUNQA, QMIO or Aer, and those capacities differ.
+    /// [`polypus_sim::MAX_QUBITS`] is the dense-statevector limit and is
+    /// enforced where it applies — when a circuit is *simulated* (see
+    /// [`statevector`]) — so checking it here would reject circuits that are
+    /// perfectly valid for the other backends.
     #[new]
     fn new(num_qubits: usize) -> Self {
         Circuit {

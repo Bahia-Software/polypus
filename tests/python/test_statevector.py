@@ -9,10 +9,17 @@ circuit independently with Qiskit gate calls and assert the amplitudes match to
 
 Both backends use the little-endian convention (qubit 0 is the least-significant
 bit), so the amplitude arrays are compared directly.
+
+The two tests at the end cover the *qubit ceiling* at the seam (issue #86): the
+dense statevector backend caps circuits at ``polypus_sim::MAX_QUBITS``
+(30 ≈ 16 GiB) and must reject anything larger with a ``ValueError`` before
+allocating — the Python-visible half of the guard already tested in Rust
+(``crates/polypus-sim/tests/scalability.rs``).
 """
 
 import math
 import random
+import time
 
 import numpy as np
 import pytest
@@ -194,3 +201,49 @@ def test_random_circuits_match_qiskit():
         for _ in range(depth):
             p = _apply_random_gate(p, qc, n, rng)
         _compare(polypus.statevector(p), qc)
+
+
+# ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
+# simulator, not to the seam), so it is mirrored here — keep both in sync.
+_MAX_QUBITS = 30
+
+
+def test_qubit_ceiling_is_documented_at_the_seam():
+    """The ceiling has to be discoverable from Python, not only from the Rust
+    source: `help(polypus.statevector)` must state it."""
+    import polypus
+
+    doc = polypus.statevector.__doc__ or ""
+    assert "MAX_QUBITS" in doc and str(_MAX_QUBITS) in doc, (
+        f"statevector.__doc__ must document the qubit ceiling; got:\n{doc}"
+    )
+
+
+# Comfortably above the ceiling: 31 is the first rejected value, 40 would need
+# 16 TiB and 64 exceeds addressable memory entirely — an unguarded run would not
+# merely be slow, it would take the interpreter down with it.
+@pytest.mark.parametrize("num_qubits", [_MAX_QUBITS + 1, 40, 64])
+def test_rejects_circuits_above_the_qubit_ceiling(num_qubits):
+    """`statevector` must refuse a circuit larger than the backend's ceiling
+    with a `ValueError` (contract C-1's failure mode), raised *before* the
+    `2^n` allocation is attempted."""
+    import polypus
+
+    qc = polypus.Circuit(num_qubits).h(0)
+
+    start = time.perf_counter()
+    with pytest.raises(ValueError) as excinfo:
+        polypus.statevector(qc)
+    elapsed = time.perf_counter() - start
+
+    message = str(excinfo.value)
+    assert str(num_qubits) in message and str(_MAX_QUBITS) in message, (
+        f"the error must name the requested count and the limit; got: {message!r}"
+    )
+    assert "qubit" in message.lower(), f"unexpected error message: {message!r}"
+    # The guard is a single comparison, so the call returns essentially
+    # instantly. A slow failure would mean allocation was attempted first.
+    assert elapsed < 1.0, (
+        f"rejection took {elapsed:.3f}s — the guard must fire before any "
+        f"2^{num_qubits} allocation"
+    )

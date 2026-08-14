@@ -1,6 +1,6 @@
 """
 Ctrl+C responsiveness and GIL release during long-running calls
-(issues #36 and #73).
+(issues #36, #73 and #86).
 
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 ``polypus.train`` (native backend) or ``polypus.qml.train`` (Qiskit/Aer
@@ -27,11 +27,19 @@ run is still in flight when SIGINT arrives ``_DELAY_BEFORE_SIGINT_S`` after
 READY, short enough to complete well inside ``_INTERRUPT_DEADLINE_S`` even on a
 slower CI core.
 
-The GIL-release test instead uses a small (sub-``parallel_threshold``) circuit
+The GIL-release tests instead use a small (sub-``parallel_threshold``) circuit
 that never engages the rayon pool at all, so the native run occupies a single
 core and leaves the others free for the counter thread — the only configuration
 in which a CPU-bound Python thread can be *observed* to make progress, and thus
 prove the GIL was released, even on a 2-core runner.
+
+``polypus.statevector`` (issue #86) gets the same GIL-release proof at the end of
+this module. It has no SIGINT test: it is a single simulation with no per-circuit
+boundary at which a pending Ctrl+C could be honored — its cost is bounded instead
+by the qubit ceiling (``polypus_sim::MAX_QUBITS``, covered in
+``test_statevector.py``), and the interpreter raises the pending
+``KeyboardInterrupt`` as soon as the call returns. See ``docs/ENGINEERING.md``
+§3.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
 share `run_and_evaluate`, but reach it through different paths — a native,
@@ -485,4 +493,99 @@ def test_run_quantum_circuit_releases_gil_for_other_threads():
         f"background thread sustained only {ratio:.3f} of its free-running rate "
         f"during the native run (advanced {advanced} counts) — the GIL was "
         f"likely not released around run_quantum_circuit\nstdout:\n{proc.stdout}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# statevector (issue #86)
+# --------------------------------------------------------------------------- #
+
+# `polypus.statevector` releases the GIL around the simulation only; parameter
+# binding (O(gates)) and the amplitude conversion stay on the GIL side. Proven
+# with the same calibrated-ratio design as the `run_quantum_circuit` child above.
+#
+# Sizing differs, though. `statevector` has no `shots`/`n_qpus` knob to buy
+# wall-clock with, and circuit *construction* cost grows superlinearly with the
+# gate count while simulation cost grows linearly, so a single
+# sub-`parallel_threshold` circuit long enough to measure takes far longer to
+# build than to simulate (42k gates: ~0.8s to build, ~0.09s to run). The child
+# therefore simulates one 11-qubit circuit `_SV_REPEATS` times in sequence — the
+# same "many sequential single-thread runs" trick the run_quantum_circuit child
+# gets from `n_qpus=20` — for ~1.4s of native work in total, with the qubit count
+# below polypus-sim's `parallel_threshold` (12) so the run never engages the
+# rayon pool and leaves the other cores free for the counter thread (see the note
+# above).
+#
+# Measured on the reference machine: ratio 0.97 with the GIL released, 0.05 with
+# `allow_threads` reverted (the residual comes from the interpreter's switch
+# interval at each of the `_SV_REPEATS` call boundaries, so it shrinks as the
+# per-call simulation grows — hence few, long calls rather than many short ones).
+# `_MIN_GIL_RELEASE_RATIO` (0.2) sits ~4x above the regressed value.
+_SV_REPEATS = 15
+
+_SV_GIL_RELEASE_CHILD = (
+    r"""
+import threading
+import time
+import polypus
+"""
+    + _MAKE_CIRCUIT_SRC
+    + r"""
+# Warm up the import/build paths outside the measured window.
+polypus.statevector(make(2, 1))
+
+qc = make(11, 2000)  # sub-parallel-threshold; ~0.09s per simulation
+counter = 0
+stop = threading.Event()
+
+def spin():
+    global counter
+    while not stop.is_set():
+        counter += 1
+
+worker = threading.Thread(target=spin)
+worker.start()
+try:
+    # Calibrate the worker's free-running spin rate (time.sleep releases the
+    # GIL), then compare against it — robust to CPU speed, as above.
+    c0 = counter
+    time.sleep(0.2)
+    free_rate = (counter - c0) / 0.2
+
+    before = counter
+    t0 = time.perf_counter()
+    for _ in range(__REPEATS__):
+        polypus.statevector(qc)
+    dt = time.perf_counter() - t0
+    advanced = counter - before
+finally:
+    stop.set()
+    worker.join()
+
+expected = free_rate * dt
+ratio = (advanced / expected) if expected > 0 else 0.0
+print(f"ADVANCED {advanced} RATE {free_rate:.0f} DT {dt:.4f} RATIO {ratio:.4f}", flush=True)
+""".replace("__REPEATS__", str(_SV_REPEATS))
+)
+
+
+def test_statevector_releases_gil_for_other_threads():
+    proc = subprocess.run(
+        [sys.executable, "-c", _SV_GIL_RELEASE_CHILD],
+        capture_output=True,
+        text=True,
+        timeout=_READY_TIMEOUT_S,
+    )
+    assert proc.returncode == 0 and "ADVANCED" in proc.stdout, (
+        f"GIL-release child did not complete cleanly.\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    fields = proc.stdout.split("ADVANCED", 1)[1].split()
+    advanced = int(fields[0])
+    ratio = float(fields[fields.index("RATIO") + 1])
+    assert ratio > _MIN_GIL_RELEASE_RATIO, (
+        f"background thread sustained only {ratio:.3f} of its free-running rate "
+        f"during {_SV_REPEATS} native simulations (advanced {advanced} counts) — "
+        f"the GIL was likely not released around statevector\n"
+        f"stdout:\n{proc.stdout}"
     )
