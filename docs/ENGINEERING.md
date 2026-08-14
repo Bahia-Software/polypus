@@ -85,13 +85,18 @@ boundary stays out-of-process and explicit; see
   function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
   around the `StatevectorSimulator::run` call (parameter binding stays on the
-  GIL side — it is O(gates) and allocates nothing of size `2^n`). It
-  deliberately does **not** call `py.check_signals()`: it is a single
-  simulation with no per-circuit boundary at which a pending Ctrl+C could be
-  honored, its cost is bounded by the qubit ceiling (§4), and the interpreter
-  raises the pending `KeyboardInterrupt` as soon as the call returns into
-  Python bytecode. Making it interruptible *mid-run* would require signal
-  checks inside `polypus-sim`, which must stay Python-free (§2).
+  GIL side — it is O(gates) and allocates nothing of size `2^n`), then calls
+  `py.check_signals()` the moment the GIL is reacquired, **before** copying and
+  boxing the amplitudes into a Python list — the same
+  "reacquire-then-check-before-building-the-result" boundary
+  `run_quantum_circuit` uses, just with one call instead of a loop. This still
+  isn't *mid-run*: `polypus-sim` has no per-gate hook to check signals against,
+  and adding one would mean signal checks inside that crate, which must stay
+  Python-free (§2). So a Ctrl+C that arrives while the simulation itself is
+  running is only honored once `run` returns — but from there, it fires before
+  the `2^n`-sized list conversion (§4) rather than after, which matters
+  because that conversion's cost scales only with qubit count, independent of
+  how deep or shallow the circuit was.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.

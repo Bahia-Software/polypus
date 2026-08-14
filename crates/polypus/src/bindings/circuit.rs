@@ -143,16 +143,19 @@ pub fn statevector(
     // The simulation is the expensive, pure-Rust part: release the GIL for it
     // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
     //
-    // No `py.check_signals()` here, unlike `run_quantum_circuit`: this is a
-    // single simulation with no per-circuit boundary at which a pending Ctrl+C
-    // could be honored, its cost is bounded by the qubit ceiling above, and the
-    // interpreter raises the pending `KeyboardInterrupt` as soon as the call
-    // returns into Python bytecode. Interrupting it *mid-run* would mean signal
-    // checks inside `polypus-sim`, which must stay Python-free (§2).
+    // There is still no *mid-run* check: `polypus-sim` has no per-gate hook to
+    // call back into, and adding one would mean signal checks inside that
+    // crate, which must stay Python-free (§2). But the GIL is reacquired here
+    // the moment `run` returns, before the amplitudes are copied and boxed
+    // into a Python list (`2^n` allocations for a large qubit count) — so a
+    // Ctrl+C that arrived at any point up to now is honored *before* paying
+    // for that conversion, instead of only once it completes and control
+    // returns to the caller's bytecode.
     let sv = qc
         .py()
         .allow_threads(|| StatevectorSimulator::new().run(&concrete))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    qc.py().check_signals()?;
     Ok(sv.amplitudes().to_vec())
 }
 
