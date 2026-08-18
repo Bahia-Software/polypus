@@ -190,8 +190,24 @@ only to define behaviour for hand-assembled circuits)*.
 
 Backends and exporters **must reject** circuits that violate this with an
 explicit error — never silently reorder, deduplicate or no-op the measurement.
-The single shared check is `polypus_circuit::terminal_measurement_violation`,
-enforced in the builder, the importer, the simulator and the QIR exporter.
+The rule is enforced at four points, which must all reject identically (same
+offending qubit, same error) even though they see the circuit differently:
+
+- **Builder** (`ParameterizedCircuit::try_push`/`push`): incremental,
+  push-time. Each push is checked against the per-circuit record of qubits
+  already measured, which the push itself then updates — the prefix is known to
+  be valid, so only the new instruction can offend. Rescanning here would make
+  building a circuit quadratic in its gate count (issue #109).
+- **QASM importer**: incremental, parse-time, against the parser's own
+  `measured` set (which also carries the offending line number).
+- **Simulator** (`polypus-sim`) and **QIR exporter**: a single full-sequence
+  scan via `polypus_circuit::terminal_measurement_violation`, since both are
+  handed a complete instruction list — possibly hand-assembled, i.e. never
+  validated by the builder or the importer.
+
+`terminal_measurement_violation` is the reference definition of the rule: a
+unitary on a measured qubit is a violation, `Barrier` is always allowed, and
+re-measuring an already-measured qubit is allowed.
 Rationale and alternatives considered: see `docs/adr/0001-terminal-measurements.md`.
 
 **Enforcing test:** rejection tests in
