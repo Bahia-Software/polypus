@@ -8,7 +8,9 @@ circuit independently with Qiskit gate calls and assert the amplitudes match to
 1e-10. The randomized test exercises the whole gate set over many circuits.
 
 Both backends use the little-endian convention (qubit 0 is the least-significant
-bit), so the amplitude arrays are compared directly.
+bit), so the amplitude arrays are compared directly — and both are NumPy arrays
+of ``complex128`` (``test_returns_a_complex128_numpy_array`` pins the Polypus
+side, which the ``np.asarray`` in ``_compare`` would otherwise not notice).
 
 The two tests at the end cover the *qubit ceiling* at the seam (issue #86): the
 dense statevector backend caps circuits at ``polypus_sim::MAX_QUBITS``
@@ -38,6 +40,28 @@ def _compare(polypus_amps, qc, atol=1e-10):
     assert got.shape == ref.shape, f"shape {got.shape} != {ref.shape}"
     assert np.allclose(got, ref, atol=atol), (
         f"\npolypus = {np.round(got, 4)}\nqiskit  = {np.round(ref, 4)}"
+    )
+
+
+def test_returns_a_complex128_numpy_array():
+    """The `2^n` amplitudes cross the seam as a `numpy.ndarray` of `complex128`,
+    not as a `list` of boxed Python `complex` objects: it is the dtype every
+    consumer wants (NumPy, and Qiskit's own `Statevector.data`) and it is far
+    cheaper to hand over, because the Rust buffer is moved into the array instead
+    of being converted element by element (measured at 26-30 qubits: a gateless
+    30-qubit call went from 29.7s to 5.0s — see `docs/ENGINEERING.md` §4).
+
+    Asserted on its own because the correctness tests above all funnel through
+    `np.asarray`, which accepts a list just as happily and would therefore not
+    catch a regression to the old return type."""
+    import polypus
+
+    amps = polypus.statevector(polypus.Circuit(3).h(0).cx(0, 1))
+
+    assert isinstance(amps, np.ndarray), f"expected np.ndarray, got {type(amps)!r}"
+    assert amps.dtype == np.complex128, f"expected complex128, got {amps.dtype}"
+    assert amps.shape == (8,), (
+        f"expected one amplitude per basis state; got {amps.shape}"
     )
 
 

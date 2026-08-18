@@ -37,10 +37,9 @@ prove the GIL was released, even on a 2-core runner.
 of this module, plus a SIGINT test of its own. There is still no per-gate
 boundary at which a pending Ctrl+C could be honored *mid-simulation* (the qubit
 ceiling — ``polypus_sim::MAX_QUBITS``, covered in ``test_statevector.py`` —
-bounds its memory, not its wall-clock time), but ``py.check_signals()`` is
-called the moment the GIL is reacquired, before the amplitudes are copied and
-boxed into a Python list — so a Ctrl+C already pending by then is honored
-*before* that conversion, not only once it completes and the call returns. See
+bounds its memory, not its wall-clock time), so — as with
+``run_quantum_circuit`` — the interrupt is honored when the run *reaches*
+``py.check_signals()``, i.e. when the simulation completes. See
 ``docs/ENGINEERING.md`` §3.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
@@ -220,9 +219,9 @@ def _assert_responds_to_sigint_promptly(
     — they differ only in which entry point/backend the child script exercises
     (and, for run_quantum_circuit, an `env` that pins the sim single-threaded).
     `delay`/`deadline` default to the module-wide `_DELAY_BEFORE_SIGINT_S` /
-    `_INTERRUPT_DEADLINE_S`; the statevector variant overrides both since its
-    timing profile (seconds, not the others' generation/shot budgets) is
-    calibrated separately — see its test for why."""
+    `_INTERRUPT_DEADLINE_S`; the statevector variant overrides `delay` because
+    its whole run lasts about a second (rather than the others' generation/shot
+    budgets), so the SIGINT has to arrive sooner — see its test for why."""
     delay = _DELAY_BEFORE_SIGINT_S if delay is None else delay
     deadline = _INTERRUPT_DEADLINE_S if deadline is None else deadline
     proc = subprocess.Popen(
@@ -601,44 +600,56 @@ def test_statevector_releases_gil_for_other_threads():
     )
 
 
-# `statevector` also calls `py.check_signals()` the moment the GIL is
-# reacquired, *before* copying and boxing the amplitudes into a Python list
-# (see docs/ENGINEERING.md §3/§4) — so a Ctrl+C already pending at that point
-# is honored before paying for that conversion, rather than after.
+# `statevector` also calls `py.check_signals()` the moment the GIL is reacquired,
+# before handing the amplitudes to NumPy (see docs/ENGINEERING.md §3/§4), so a
+# Ctrl+C that arrived while the GIL-free simulation was running surfaces as a
+# `KeyboardInterrupt` out of the call itself — never swallowed into a
+# `PanicException`, and never ignored so the call reports a completed run.
 #
-# Proving this needs a circuit where the (unguarded) list conversion is the
-# dominant cost, not the (also unguarded, but far cheaper here) simulation:
-# `_SV_LARGE_N = 26` qubits with a single Hadamard layer — simulating is fast
-# regardless of qubit count for one gate per qubit, but converting `2^26` ≈ 67M
-# amplitudes into boxed Python complex objects is not. Measured on the
-# reference machine: a completed call takes ~3.8s (dominated by the
-# conversion); with `check_signals()` in place, a SIGINT sent 0.1s after READY
-# is honored at ~1.5s (the simulation's own share) — reverting the fix pushes
-# that back to ~3.3s, i.e. the interrupt is only caught once the whole
-# conversion finishes too. `_SV_DEADLINE_S` (2.5s) sits between those two
-# measurements, not at the module's own `_INTERRUPT_DEADLINE_S` (5.0s, sized
-# for the other children's much longer budgets): here the "full run" is only
-# ~3.8s, so re-using the wider default would let a regressed (post-conversion)
-# interrupt slip in under the deadline and pass anyway.
-_SV_LARGE_N = 26
+# What this test can and cannot pin down. It used to size the child so that the
+# *list* conversion dominated (26 qubits: ~3.8s completed, interrupt honored at
+# ~1.5s with the check in place and ~3.3s without it) and put the deadline
+# between those two numbers, which made the check's presence directly observable.
+# That gap is gone now that the amplitudes cross the seam as a NumPy array: the
+# Rust buffer is *moved* into the array rather than converted element by element,
+# so there is no expensive post-check phase left. Re-measured on the reference
+# machine (26q, full Hadamard layer): completed 1.52s, interrupt latency 1.52s —
+# and, with `check_signals()` temporarily removed and the extension rebuilt,
+# 1.52s again (CPython delivers the pending SIGINT at the very next bytecode
+# after the call returns, which is indistinguishable in wall-clock). No timing
+# threshold can separate the two cases any more, and neither can observing
+# whether the statement after the call ran (checked: it does not, either way).
+#
+# So this now guards the same property as the `run_quantum_circuit` children
+# above — a pending SIGINT is honored as a real `KeyboardInterrupt` when the run
+# reaches the check boundary, i.e. when it completes — and the deadline is a hang
+# guard sized above the full run, not a discriminator. The `check_signals()` call
+# stays because it is the documented boundary and keeps the interrupt ahead of
+# whatever result-building work may be added later; that part is enforced by
+# review and by ENGINEERING.md §3, no longer by a wall-clock assertion.
+#
+# Sizing: 27 qubits with a *single* gate. The finding that motivated dropping the
+# Hadamard layer is that near the ceiling the run's cost is `Statevector::new`'s
+# `2^n` allocation, not the gates — so one gate is enough to make the call last
+# ~0.85s (measured; 1.07s with RAYON_NUM_THREADS=1, i.e. essentially
+# core-count independent, since first-touch of the 2 GiB buffer is single-threaded
+# either way). That is comfortably longer than the 0.1s `delay`, so the SIGINT
+# lands while the simulation is genuinely in flight, and ~5x under the module's
+# `_INTERRUPT_DEADLINE_S` (5.0s) even on a slower runner — which is why, unlike
+# the `run_quantum_circuit` children, this one needs neither a bespoke deadline
+# nor `_SINGLE_THREADED_ENV`. A full Hadamard layer instead swings the run from
+# 1.5s (32 cores) to 3.9s (single-threaded), for no added signal.
+_SV_LARGE_N = 27
 _SV_DELAY_BEFORE_SIGINT_S = 0.1
-_SV_DEADLINE_S = 2.5
 
-_SV_INTERRUPT_CHILD = (
-    r"""
+_SV_INTERRUPT_CHILD = r"""
 import sys, time
 import polypus
 
-def make(n):
-    qc = polypus.Circuit(n)
-    for q in range(n):
-        qc = qc.h(q)
-    return qc
-
 # Warm up the lazy import path outside the timed window.
-polypus.statevector(make(2))
+polypus.statevector(polypus.Circuit(2).h(0))
 
-qc = make(__N__)
+qc = polypus.Circuit(__N__).h(0)
 print("READY", flush=True)
 start = time.time()
 try:
@@ -650,16 +661,15 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed signal
     print(f"OTHER {type(exc).__name__}", flush=True)
     sys.exit(1)
 """.replace("__N__", str(_SV_LARGE_N))
-)
 
 
-def test_statevector_responds_to_sigint_before_the_expensive_conversion():
+def test_statevector_responds_to_sigint_promptly():
     _assert_responds_to_sigint_promptly(
         _SV_INTERRUPT_CHILD,
         failure_hint=(
-            "statevector — py.check_signals() before the amplitude/list "
-            "conversion is likely missing or misplaced"
+            "statevector — the SIGINT was swallowed instead of surfacing as a "
+            "KeyboardInterrupt (py.check_signals() after the GIL is reacquired "
+            "is likely missing, or the GIL is never released)"
         ),
         delay=_SV_DELAY_BEFORE_SIGINT_S,
-        deadline=_SV_DEADLINE_S,
     )

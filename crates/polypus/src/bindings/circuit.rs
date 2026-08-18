@@ -4,6 +4,7 @@
 //! GIL-free circuits and pass them to `polypus.run_quantum_circuit` /
 //! `polypus.train` exactly like a Qiskit `QuantumCircuit`.
 
+use numpy::{IntoPyArray, PyArray1};
 use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
 use polypus_sim::{Simulator, StatevectorSimulator};
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -111,9 +112,11 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// `polypus-sim` backend (no Qiskit, no OpenQASM round-trip).
 ///
 /// `params` supplies one value per free parameter; omit it for a circuit that
-/// has none. Returns the `2^n` complex amplitudes in Qiskit little-endian order
-/// (qubit 0 is the least-significant bit), so it can be compared directly with
-/// `qiskit.quantum_info.Statevector`.
+/// has none. Returns the `2^n` complex amplitudes as a **`numpy.ndarray` of
+/// `dtype=complex128`**, in Qiskit little-endian order (qubit 0 is the
+/// least-significant bit), so it can be compared directly with
+/// `qiskit.quantum_info.Statevector` (whose `.data` is the same dtype) and fed
+/// straight into NumPy without a conversion step.
 ///
 /// The simulation runs **GIL-free** — only the cheap parameter binding and the
 /// conversion of the result hold the GIL — so other Python threads keep making
@@ -124,18 +127,21 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// [`polypus_sim::MAX_QUBITS`] qubits (30 ≈ 16 GiB) and raises a `ValueError`
 /// naming the requested and the supported count **before** attempting any
 /// allocation. `polypus.Circuit` itself is deliberately unbounded (see
-/// `Circuit::new`): the ceiling belongs to this backend, not to the IR.
+/// `Circuit::new`): the ceiling belongs to this backend, not to the IR. Note
+/// that what a call near the ceiling spends its time on is *allocating* that
+/// buffer, not handing it to Python: even a gateless 30-qubit circuit costs ~5s
+/// (measured), essentially all of it `Statevector::new`'s 16 GiB `vec![]`.
 ///
 /// ```python
 /// import polypus
 /// qc = polypus.Circuit(2).h(0).cx(0, 1)
-/// amps = polypus.statevector(qc)          # [0.707…, 0, 0, 0.707…]
+/// amps = polypus.statevector(qc)          # array([0.707…+0j, 0j, 0j, 0.707…+0j])
 /// ```
 #[pyfunction(signature = (qc, params = None))]
-pub fn statevector(
-    qc: PyRef<'_, Circuit>,
+pub fn statevector<'py>(
+    qc: PyRef<'py, Circuit>,
     params: Option<Vec<f64>>,
-) -> PyResult<Vec<polypus_sim::C64>> {
+) -> PyResult<Bound<'py, PyArray1<polypus_sim::C64>>> {
     let params = params.unwrap_or_default();
     // Binding stays on this side of the release: it is O(gates), allocates
     // nothing of size `2^n`, and reads the circuit through the `PyRef`.
@@ -146,17 +152,19 @@ pub fn statevector(
     // There is still no *mid-run* check: `polypus-sim` has no per-gate hook to
     // call back into, and adding one would mean signal checks inside that
     // crate, which must stay Python-free (§2). But the GIL is reacquired here
-    // the moment `run` returns, before the amplitudes are copied and boxed
-    // into a Python list (`2^n` allocations for a large qubit count) — so a
-    // Ctrl+C that arrived at any point up to now is honored *before* paying
-    // for that conversion, instead of only once it completes and control
-    // returns to the caller's bytecode.
+    // the moment `run` returns, before the amplitudes are handed to NumPy — so a
+    // Ctrl+C that arrived at any point up to now is honored *before* paying for
+    // that conversion, instead of only once it completes and control returns to
+    // the caller's bytecode.
     let sv = qc
         .py()
         .allow_threads(|| StatevectorSimulator::new().run(&concrete))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     qc.py().check_signals()?;
-    Ok(sv.amplitudes().to_vec())
+    // `into_amplitudes` (not `amplitudes().to_vec()`) so the `2^n`-element
+    // buffer moves into the array instead of being copied: `sv` is owned here
+    // and dropped immediately after.
+    Ok(sv.into_amplitudes().into_pyarray(qc.py()))
 }
 
 #[pymethods]
