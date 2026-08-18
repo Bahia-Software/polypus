@@ -22,6 +22,16 @@ const NUM_QUBITS: usize = 11;
 /// polluted by scheduling noise.
 const REPEATS: usize = 5;
 
+/// Upper bound on the gate count the calibration loop below will grow to.
+/// Purely a safety net against an unbounded search (e.g. a broken clock
+/// always reading ~0); on any realistic hardware the 2ms floor is reached
+/// far below this (~30-60k gates on current dev/CI machines), so raising it
+/// costs nothing in practice but removes the (very unlikely) risk of the
+/// search being cut off before the floor is reached on unusually fast
+/// hardware, which would leave the ratio comparison on sub-millisecond,
+/// noise-sensitive timings.
+const MAX_CALIBRATION_GATES: usize = 1_000_000;
+
 /// Build a circuit of `num_gates` instructions, alternating single-qubit
 /// rotations with two-qubit entanglers across the whole register. No
 /// measurements: the point is to time the C-4 check on unitaries.
@@ -59,7 +69,7 @@ fn building_a_circuit_scales_linearly_with_its_gate_count() {
     // dominate the ratio. Under the old quadratic behaviour the floor is reached
     // immediately, which only makes the ratio below more pronounced.
     let mut n = 2_000;
-    while best_build_time(n) < Duration::from_millis(2) && n < 64_000 {
+    while best_build_time(n) < Duration::from_millis(2) && n < MAX_CALIBRATION_GATES {
         n *= 2;
     }
 
