@@ -348,6 +348,54 @@ fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u3
     Ok(())
 }
 
+/// Maximum length accepted for the caller-supplied `id` prefix
+/// (`train`/`qml.train`). Bounded so the effective id — prefix plus the 36-char
+/// UUID v4 suffix [`unique_id`] appends — stays comfortably inside the limits
+/// SLURM job names and filesystem path components impose downstream.
+const MAX_ID_LEN: usize = 64;
+
+/// Validate the caller-supplied `id` at the Python-facing boundary
+/// (defense-in-depth, `docs/ENGINEERING.md` §8; contract C-9).
+///
+/// `id` becomes the CUNQA SLURM `family_name`/`family_id` (contract C-1,
+/// `crate::infrastructure::cunqa`) and is documented as naming temp files and
+/// log streams ([`ExecutionConfig::id`]), so an unrestricted string could carry
+/// whitespace, path separators (`../`) or shell metacharacters into whatever
+/// `qraise`/SLURM does with it downstream — which this crate cannot see. The
+/// accepted charset is `[A-Za-z0-9._-]`, non-empty and at most
+/// [`MAX_ID_LEN`] characters.
+///
+/// Checked before [`unique_id`] appends the UUID suffix, so a rejected id never
+/// produces a partially-valid effective id. The charset is checked before the
+/// length so a non-ASCII id gets the specific "invalid character" message
+/// (and, past that check, every character is one byte, making the reported
+/// length exact). Shared by every entry point rather than duplicated per
+/// function, mirroring [`validate_shots_and_qpus`] and
+/// [`validate_cunqa_allocation`].
+fn validate_id(id: &str) -> PyResult<()> {
+    if id.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "id must not be empty",
+        ));
+    }
+    if let Some(c) = id
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "id contains invalid character {c:?}; only ASCII letters, digits, \
+			 '.', '_' and '-' are allowed (got {id:?})"
+        )));
+    }
+    if id.len() > MAX_ID_LEN {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "id must be at most {MAX_ID_LEN} characters, got {} ({id:?})",
+            id.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Interpret the `qc` argument of an entry point as a parameterised circuit
 /// template. A `polypus.Circuit` becomes [`CircuitSource::Native`] (binding
 /// will run GIL-free); any other object is assumed to be a Qiskit
@@ -540,7 +588,11 @@ pub fn run_quantum_circuit<'py>(
 /// The `id` kwarg is a human-readable *prefix*, not the literal effective id:
 /// a UUID v4 is appended for uniqueness (mirroring [`run_quantum_circuit`]),
 /// so `TrainResult.id` differs from what was passed in and names the run's
-/// SLURM allocation / temp files / log stream (see #75).
+/// SLURM allocation / temp files / log stream (see #75). Because it travels
+/// into those downstream names, the prefix is restricted to `[A-Za-z0-9._-]`,
+/// non-empty and at most 64 characters (contract C-9); anything else — a space,
+/// a path separator, a shell metacharacter — raises `ValueError` naming the
+/// offending character, before the UUID suffix is generated.
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -581,6 +633,7 @@ pub fn train<'py>(
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_id(&id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
     // `run_quantum_circuit`, a seed is always meaningful here — it seeds the
@@ -753,7 +806,10 @@ pub fn train<'py>(
 /// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
 /// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
 /// `TrainResult.id` differs from what was passed in and names the run's SLURM
-/// allocation / temp files / log stream (see #75).
+/// allocation / temp files / log stream (see #75). It carries the same charset
+/// restriction as [`train`] — `[A-Za-z0-9._-]`, non-empty, at most 64
+/// characters (contract C-9) — and an invalid prefix raises `ValueError`
+/// naming the offending character.
 ///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
@@ -797,6 +853,7 @@ pub fn qml_train<'py>(
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_id(&id)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
     // below); this seed governs the optimizer's RNG and, since it's threaded

@@ -28,6 +28,7 @@ Rules of the road:
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 | C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
+| C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -55,6 +56,8 @@ Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
 
+`family_name` is `ExecutionConfig::id`, whose charset is constrained by C-9.
+
 ### `run_qcs(infrastructure: str, **kwargs)`
 
 | backend | kwargs (exact names) |
@@ -62,7 +65,8 @@ violation.
 | local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional), `seed: int` (optional, C-7) |
 | cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
-`qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
+`id` / `family_id` are `ExecutionConfig::id`, whose charset is constrained by
+C-9. `qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
 strings; the Python side parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
@@ -355,3 +359,44 @@ legitimate type error and propagates as-is; it is not masked into the messages
 above.
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py`.
+
+---
+
+## C-9 · `id` charset validation (`train` / `qml.train` Python entry points)
+
+The `id` kwarg of `polypus.train` and `polypus.qml.train` is a caller-supplied
+*prefix*: the entry point appends a UUID v4 to it and the result becomes
+`ExecutionConfig::id`, which names the run's temp files and log streams and —
+on `infrastructure="cunqa"` — travels to SLURM as the C-1 kwargs `family_name`
+(`connect_to_infrastructure`) and `family_id` (`run_qcs`), and from there
+verbatim into `qraise`. The crate cannot see how `qraise`/SLURM interpolate that
+name, so the string is constrained at the boundary instead of trusted:
+
+- **Charset.** Every character must be an ASCII letter, an ASCII digit, `.`,
+  `_` or `-` (i.e. `^[A-Za-z0-9._-]+$`). Whitespace, path separators (`/`,
+  `../`) and shell metacharacters (`;`, `|`, `` ` ``, `$`, `&`, newline) are
+  rejected. The `ValueError` names the **offending character** so the caller
+  can see which one failed.
+- **Non-empty.** An empty `id` is rejected: it would degrade the effective id to
+  a bare `_<uuid>` and carries no debugging value.
+- **Length.** At most **64 characters**, measured on the caller-supplied prefix
+  **before** the UUID suffix, keeping the effective id inside the limits SLURM
+  job names and filesystem path components impose.
+
+This is defense-in-depth, not a fix for a known exploit — the July 2026
+technical audit (#89) found the value unvalidated anywhere in the crate, which
+`docs/ENGINEERING.md` §8 ("validate and sanitize all inputs; never trust
+external data") does not allow for a string that leaves the process.
+
+**When it is checked.** Upfront, alongside the other kwarg guards
+(`validate_shots_and_qpus`, `validate_cunqa_allocation`) as the entry point's
+first statements — before any seam call, any backend creation and, crucially,
+before `unique_id` appends the UUID, so a rejected `id` never yields a
+partially-valid effective id. Validation is unconditional: unlike
+`nodes`/`cores_per_qpu` it is not gated on `infrastructure == "cunqa"`, because
+the temp-file and log-stream naming applies to every infrastructure.
+
+`run_quantum_circuit` is not covered: it generates its own `id` internally and
+takes no such kwarg.
+
+**Enforcing test:** `tests/python/test_id_validation.py`.
