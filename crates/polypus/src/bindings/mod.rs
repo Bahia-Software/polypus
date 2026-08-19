@@ -221,6 +221,11 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 /// (an oracle failure was already logged at `error!` where it was recorded).
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
 /// reported duration covers the whole call.
+///
+/// An `OptimizerError` with no oracle failure recorded is a rejected
+/// optimizer configuration (`population_size` too small for DE, empty PSO/QNG
+/// `bounds`, …), caught before any oracle call — unlike an oracle failure, it
+/// has nowhere else to be logged, so it is logged here too.
 fn finish_optimization(
     py: Python<'_>,
     result: Result<OptimizationOutcome, OptimizerError>,
@@ -232,7 +237,10 @@ fn finish_optimization(
     if let Some(eval_err) = errors.take() {
         return Err(eval_err.into());
     }
-    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let outcome = result.map_err(|e| {
+        log::error!("run {id}: optimizer rejected the configuration: {e}");
+        pyo3::exceptions::PyValueError::new_err(e.to_string())
+    })?;
     log::info!(
         "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
         outcome.iterations_run,
