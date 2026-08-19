@@ -41,7 +41,7 @@ impl EvaluationOracle for VqcOracle {
         match self.try_evaluate(candidates) {
             Ok(values) => values,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; candidates.len()]
             }
         }
