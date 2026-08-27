@@ -1322,4 +1322,197 @@ mod tests {
         // Omitted seed ⇒ (almost surely) different outcomes.
         assert_ne!(run(None, None), run(None, None));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Direct unit coverage of the private entry-point helpers.
+    //
+    // `tests/python/test_backend_selection.py` already exercises these through
+    // the full `#[pyfunction]`s end-to-end; these tests pin the helpers
+    // themselves, which the audit flagged as having no unit-level coverage. They
+    // are deliberately lean — the goal is closing that gap, not re-proving the
+    // end-to-end behaviour. Nothing here needs an installed package: the
+    // `Py<PyAny>` arguments are `py.None()` against a bare interpreter.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_shots_and_qpus_accepts_the_minimum() {
+        assert!(validate_shots_and_qpus(1, 1).is_ok());
+        assert!(validate_shots_and_qpus(1024, 8).is_ok());
+    }
+
+    #[test]
+    fn validate_shots_and_qpus_rejects_zero() {
+        // `n_qpus = 0` used to reach `DistributeByShotsRun` and divide by zero;
+        // `shots = 0` silently ran an empty execution (contract C-3).
+        assert!(validate_shots_and_qpus(0, 1).is_err());
+        assert!(validate_shots_and_qpus(1, 0).is_err());
+        assert!(validate_shots_and_qpus(0, 0).is_err());
+    }
+
+    #[test]
+    fn build_backend_config_selects_the_local_variants() {
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2)
+            .expect("aer is a valid local backend");
+        assert!(matches!(
+            aer,
+            BackendConfig::Local {
+                ref backend,
+                ref sim_method,
+                noise_model: None,
+            } if backend == "AerSimulator" && sim_method == "automatic"
+        ));
+
+        for name in ["polypus", "statevector", "polypus_statevector"] {
+            let native = build_backend_config("local", name, "automatic", None, 1, 2)
+                .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
+            assert!(matches!(native, BackendConfig::LocalNative));
+        }
+    }
+
+    #[test]
+    fn build_backend_config_rejects_an_unknown_local_backend() {
+        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2)
+            .expect_err("an unknown local backend must be rejected");
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("unknown local backend"));
+        });
+    }
+
+    #[test]
+    fn build_backend_config_rejects_a_noise_model_on_the_native_backend() {
+        // The native simulator is noiseless by construction, so a noise_model
+        // must be an error rather than silently ignored. Any Python object will
+        // do — the check is `Option::is_some`, not a Qiskit type check.
+        pyo3::prepare_freethreaded_python();
+        let noise_model = Python::with_gil(|py| py.None());
+        let err = build_backend_config("local", "polypus", "automatic", Some(noise_model), 1, 2)
+            .expect_err("a noise model on the native backend must be rejected");
+        Python::with_gil(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("noise_model"),
+                "the message must name the offending kwarg: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn build_backend_config_keeps_a_noise_model_for_aer() {
+        pyo3::prepare_freethreaded_python();
+        let noise_model = Python::with_gil(|py| py.None());
+        let config =
+            build_backend_config("local", "aer", "density_matrix", Some(noise_model), 1, 2)
+                .expect("aer accepts a noise model");
+        assert!(matches!(
+            config,
+            BackendConfig::Local {
+                noise_model: Some(_),
+                ref sim_method,
+                ..
+            } if sim_method == "density_matrix"
+        ));
+    }
+
+    #[test]
+    fn build_backend_config_forwards_the_cunqa_allocation() {
+        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4)
+            .expect("cunqa is a valid infrastructure");
+        assert!(matches!(
+            config,
+            BackendConfig::Cunqa {
+                nodes: 3,
+                cores_per_qpu: 4,
+                ref sim_method,
+                ..
+            } if sim_method == "statevector"
+        ));
+    }
+
+    #[test]
+    fn build_backend_config_rejects_an_unknown_infrastructure() {
+        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2)
+            .expect_err("an unknown infrastructure must be rejected");
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("unknown infrastructure"));
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_reads_a_qasm_string() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let qasm = uniform3_qasm();
+            let bound = extract_bound_circuit(&PyString::new(py, &qasm).into_any())
+                .expect("a str is an OpenQASM 2.0 program");
+            match bound {
+                BoundCircuit::Qasm2(text) => assert_eq!(text, qasm),
+                _ => panic!("a str must become BoundCircuit::Qasm2"),
+            }
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_treats_anything_else_as_a_qiskit_circuit() {
+        // The classification is "not a polypus.Circuit and not a str", so any
+        // other object lands on the Qiskit arm — which is exactly why the
+        // native/qmio guards downstream can reject it without importing Qiskit.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let bound = extract_bound_circuit(py.None().bind(py))
+                .expect("a non-Circuit, non-str object is assumed to be a Qiskit circuit");
+            assert!(matches!(bound, BoundCircuit::Qiskit(_)));
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_reads_a_fully_bound_native_circuit() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let circuit = Py::new(
+                py,
+                Circuit {
+                    inner: polypus_circuit::ParameterizedCircuit::new(1)
+                        .x(0)
+                        .measure_all(),
+                },
+            )
+            .expect("the pyclass instantiates");
+            let bound = extract_bound_circuit(circuit.bind(py).as_any())
+                .expect("a parameter-free polypus.Circuit is executable as-is");
+            assert!(matches!(bound, BoundCircuit::Native(_)));
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_rejects_a_native_circuit_with_free_parameters() {
+        // An unbound `polypus.Circuit` cannot be executed directly; it must be a
+        // clear ValueError pointing at `train`, not a panic inside binding.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let circuit = Py::new(
+                py,
+                Circuit {
+                    inner: polypus_circuit::ParameterizedCircuit::new(1)
+                        .ry(0, polypus_circuit::GateParam::Param(0))
+                        .measure_all(),
+                },
+            )
+            .expect("the pyclass instantiates");
+            // `BoundCircuit` is not `Debug`, so unwrap the `Result` by hand
+            // rather than widening a production type just for a test.
+            let err = match extract_bound_circuit(circuit.bind(py).as_any()) {
+                Err(err) => err,
+                Ok(_) => panic!("an unbound template cannot be executed directly"),
+            };
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("unbound parameters"),
+                "the message must explain what to do instead: {err}"
+            );
+        });
+    }
 }

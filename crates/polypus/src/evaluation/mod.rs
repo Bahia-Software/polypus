@@ -204,3 +204,114 @@ pub(crate) fn run_and_evaluate(
         Ok(values)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `OracleErrorSlot` is plain `Arc<Mutex<Option<EvaluationError>>>` wrapping:
+    // none of it touches `Py<...>`/`PyErr`, so these tests need no interpreter
+    // (ENGINEERING.md §3). `WrongLength`/`NonFinite` are the two variants that
+    // can be constructed without Python, and their `Display` is distinguishable,
+    // which is what lets the first-error-wins assertions below tell them apart.
+
+    fn wrong_length() -> EvaluationError {
+        EvaluationError::WrongLength {
+            expected: 4,
+            got: 2,
+        }
+    }
+
+    fn non_finite() -> EvaluationError {
+        EvaluationError::NonFinite {
+            index: 7,
+            value: f64::NAN,
+        }
+    }
+
+    #[test]
+    fn new_slot_is_empty() {
+        let slot = OracleErrorSlot::new();
+        assert!(!slot.failed(), "a fresh slot must not report a failure");
+        assert!(slot.take().is_none(), "a fresh slot must hold no error");
+    }
+
+    #[test]
+    fn default_slot_is_empty() {
+        let slot = OracleErrorSlot::default();
+        assert!(!slot.failed());
+        assert!(slot.take().is_none());
+    }
+
+    #[test]
+    fn record_marks_the_slot_as_failed() {
+        let slot = OracleErrorSlot::new();
+        slot.record(wrong_length());
+        assert!(slot.failed(), "record() must make failed() true");
+    }
+
+    #[test]
+    fn record_keeps_the_first_error() {
+        let slot = OracleErrorSlot::new();
+        slot.record(wrong_length());
+        slot.record(non_finite());
+        let kept = slot.take().expect("an error was recorded");
+        assert!(
+            matches!(kept, EvaluationError::WrongLength { .. }),
+            "the first recorded error must win, got: {kept}"
+        );
+    }
+
+    #[test]
+    fn take_returns_the_error_and_clears_the_slot() {
+        let slot = OracleErrorSlot::new();
+        slot.record(non_finite());
+        let taken = slot.take().expect("an error was recorded");
+        assert!(matches!(taken, EvaluationError::NonFinite { .. }));
+        assert!(!slot.failed(), "take() must clear the slot");
+        assert!(slot.take().is_none(), "a second take() must yield None");
+    }
+
+    #[test]
+    fn clone_shares_the_same_slot() {
+        // The QML oracle hands a clone to each worker thread; they must all see
+        // (and write to) the same underlying slot.
+        let slot = OracleErrorSlot::new();
+        let handed_out = slot.clone();
+        handed_out.record(wrong_length());
+        assert!(slot.failed(), "a clone must share the original's storage");
+    }
+
+    #[test]
+    fn concurrent_records_keep_exactly_one_error() {
+        // This type exists to be shared across the QML oracle's worker threads
+        // (see `qml_oracle.rs`), so the first-error-wins property must hold
+        // under contention, not just sequentially.
+        let slot = OracleErrorSlot::new();
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let slot = slot.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    slot.record(EvaluationError::NonFinite {
+                        index: i,
+                        value: f64::INFINITY,
+                    });
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("no worker may panic");
+        }
+
+        assert!(slot.failed(), "at least one writer must have recorded");
+        let first = slot.take().expect("exactly one error survives");
+        assert!(matches!(first, EvaluationError::NonFinite { .. }));
+        assert!(
+            slot.take().is_none(),
+            "only one error is ever stored, however many writers raced"
+        );
+    }
+}

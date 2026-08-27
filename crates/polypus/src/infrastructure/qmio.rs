@@ -1158,4 +1158,102 @@ mod tests {
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].values().sum::<u64>(), 1000);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // `counts_from_json` — the rejection half.
+    //
+    // Every case above is a *successful* extraction. These pin the final
+    // `QmioError::Schema` fallback, so a reply the extractor cannot understand
+    // is a typed error (mapped to `polypus.QmioError` at the FFI) rather than
+    // silently-empty counts. Pure `serde_json`: no Python, no network.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn counts_from_json_rejects_an_empty_object() {
+        // `as_counts_object` rejects an empty object, no container key is
+        // present, and there is nothing nested to fall back to.
+        assert!(matches!(
+            counts_from_json(&json!({})),
+            Err(QmioError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_metadata_only_replies() {
+        // Nothing here is `{bitstring: count}`-shaped at any depth: the leaves
+        // are strings, floats and booleans rather than non-negative integers.
+        //
+        // Note the deliberate absence of an integer leaf. A metadata object such
+        // as `{"optimized_instruction_count": 98}` *is* accepted by the naive
+        // `{key: u64}` test and would be picked up by the last-resort nested
+        // scan — that permissiveness is the documented "fall back to the first
+        // nested counts-like object" behaviour, not a case this test asserts on.
+        let reply = json!({
+            "execution_metrics": {
+                "optimized_circuit": "OPENQASM 3.0;",
+                "duration_seconds": 1.5,
+                "cached": false,
+            },
+        });
+        assert!(matches!(
+            counts_from_json(&reply),
+            Err(QmioError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_a_register_container_with_a_bad_register() {
+        // `as_register_counts` requires *every* entry to be a counts object, so
+        // one malformed register invalidates the whole container — and with
+        // nothing else counts-shaped in the reply, this must reach `Schema`
+        // rather than silently returning the registers it could read.
+        let reply = json!({
+            "results": {
+                "c0": {"00": 10, "11": 6},
+                "c1": "unexpected",
+            },
+        });
+        assert!(matches!(
+            counts_from_json(&reply),
+            Err(QmioError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_negative_and_non_integer_counts() {
+        // `as_counts_object` requires `u64` values, so a negative or fractional
+        // count is not a counts object.
+        assert!(matches!(
+            counts_from_json(&json!({"counts": {"00": -1, "11": 6}})),
+            Err(QmioError::Schema(_))
+        ));
+        assert!(matches!(
+            counts_from_json(&json!({"counts": {"00": 1.5}})),
+            Err(QmioError::Schema(_))
+        ));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_a_non_object_reply() {
+        // `value.as_object()` is `None`, so the whole search is skipped.
+        for reply in [json!([1, 2, 3]), json!(42), json!("counts"), json!(null)] {
+            assert!(
+                matches!(counts_from_json(&reply), Err(QmioError::Schema(_))),
+                "a non-object reply must be a schema error: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_errors_map_to_the_qmio_python_exception() {
+        // The whole point of returning `Schema` instead of empty counts: it
+        // reaches Python as a catchable `polypus.QmioError`, never a panic.
+        pyo3::prepare_freethreaded_python();
+        let err = counts_from_json(&json!({})).expect_err("an empty reply is a schema error");
+        let py_err: pyo3::PyErr = BackendError::Qmio(err).into();
+        pyo3::Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<crate::exceptions::QmioError>(py));
+            assert!(py_err.is_instance_of::<crate::exceptions::BackendError>(py));
+        });
+    }
 }

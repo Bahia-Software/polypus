@@ -209,3 +209,87 @@ pub fn init_logger(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `parse_level` / `parse_format` are pure string→enum tables. They return
+    // `PyResult`, but building the `Err` payload is lazy in pyo3, so asserting
+    // accept/reject and the parsed value needs no interpreter at all — which is
+    // what keeps this module inside ENGINEERING.md §3. `init_logger` itself is
+    // covered end-to-end by `tests/python/test_logging.py`; it installs a
+    // process-wide sink exactly once, so it is deliberately not driven from here.
+
+    #[test]
+    fn parse_level_accepts_every_documented_name() {
+        let expected = [
+            ("off", LogLevel::Off),
+            ("error", LogLevel::Error),
+            ("warn", LogLevel::Warn),
+            // `warning` is an accepted alias of `warn` (Python's own spelling).
+            ("warning", LogLevel::Warn),
+            ("info", LogLevel::Info),
+            ("debug", LogLevel::Debug),
+            ("trace", LogLevel::Trace),
+        ];
+        for (name, level) in expected {
+            assert_eq!(
+                parse_level(name).expect("documented level is accepted"),
+                level,
+                "wrong level parsed for '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_level_is_case_insensitive() {
+        for name in ["INFO", "Info", "iNfO"] {
+            assert_eq!(
+                parse_level(name).expect("case is irrelevant"),
+                LogLevel::Info
+            );
+        }
+        assert_eq!(parse_level("Debug").unwrap(), LogLevel::Debug);
+        assert_eq!(parse_level("WARNING").unwrap(), LogLevel::Warn);
+        assert_eq!(parse_level("OFF").unwrap(), LogLevel::Off);
+    }
+
+    #[test]
+    fn parse_level_rejects_unknown_names() {
+        // Including plausible-looking near-misses, which must not silently
+        // degrade to a default level.
+        for name in ["", "verbose", "warnings", "critical", "fatal", "inf o", "1"] {
+            assert!(
+                parse_level(name).is_err(),
+                "'{name}' must be rejected, not silently accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_format_accepts_text_and_json_case_insensitively() {
+        for name in ["text", "TEXT", "Text"] {
+            assert_eq!(
+                parse_format(name).expect("text is accepted"),
+                LogFormat::Text
+            );
+        }
+        for name in ["json", "JSON", "Json"] {
+            assert_eq!(
+                parse_format(name).expect("json is accepted"),
+                LogFormat::Json
+            );
+        }
+    }
+
+    #[test]
+    fn parse_format_rejects_unknown_formats() {
+        for name in ["", "yaml", "plain", "logfmt", "jsonl"] {
+            assert!(
+                parse_format(name).is_err(),
+                "'{name}' must be rejected, not silently accepted"
+            );
+        }
+    }
+}

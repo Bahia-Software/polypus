@@ -129,3 +129,110 @@ impl From<BackendError> for PyErr {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exceptions::PolypusError;
+    use pyo3::prelude::*;
+    use pyo3::PyTypeInfo;
+
+    // The variants exercised here are *defense in depth*: the public entry
+    // points reject the offending input before it can reach the code that builds
+    // them (a Qiskit circuit never gets past `run_quantum_circuit`/`train` to the
+    // native backend; a malformed seam response is not reachable without
+    // monkeypatching `polypus_python`). Rather than contort an end-to-end
+    // scenario to reach them, the enum variant is constructed directly and only
+    // the mapping is asserted — the same pattern as
+    // `running_quantum_circuits_local.rs::distribute_rejects_empty_qcs`.
+    //
+    // `is_instance_of` needs an initialised interpreter but no installed
+    // package, so this stays inside the Python-runtime-free rule of
+    // ENGINEERING.md §3: bare CPython is exactly what CI provides.
+
+    /// Assert `err` crosses the FFI as an instance of the Python class `E`, that
+    /// it is catchable as `polypus.PolypusError`, and that its message survives.
+    fn assert_maps_to<E: PyTypeInfo>(err: BackendError, expected_message: &str) {
+        pyo3::prepare_freethreaded_python();
+        let py_err: PyErr = err.into();
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<E>(py),
+                "wrong exception class for: {py_err}"
+            );
+            assert!(
+                py_err.is_instance_of::<PolypusError>(py),
+                "every polypus.* class must stay catchable as PolypusError: {py_err}"
+            );
+            assert!(
+                py_err.to_string().contains(expected_message),
+                "message lost in translation: {py_err}"
+            );
+        });
+    }
+
+    #[test]
+    fn unsupported_circuit_maps_to_native_circuit_error() {
+        assert_maps_to::<PyNativeCircuitError>(
+            BackendError::UnsupportedCircuit(
+                "the native statevector backend cannot execute a Qiskit QuantumCircuit".to_string(),
+            ),
+            "cannot execute a Qiskit QuantumCircuit",
+        );
+    }
+
+    #[test]
+    fn native_circuit_maps_to_native_circuit_error() {
+        assert_maps_to::<PyNativeCircuitError>(
+            BackendError::NativeCircuit("could not parse OpenQASM 2.0".to_string()),
+            "could not parse OpenQASM 2.0",
+        );
+    }
+
+    #[test]
+    fn conversion_maps_to_the_backend_error_base_class() {
+        assert_maps_to::<PyBackendError>(
+            BackendError::Conversion("counts were not convertible".to_string()),
+            "counts were not convertible",
+        );
+    }
+
+    #[test]
+    fn cunqa_maps_to_cunqa_error() {
+        assert_maps_to::<PyCunqaError>(
+            BackendError::Cunqa("injected release failure".to_string()),
+            "injected release failure",
+        );
+    }
+
+    #[test]
+    fn provider_errors_stay_catchable_as_backend_error() {
+        // The hierarchy is what lets `except polypus.BackendError` catch every
+        // backend-layer failure regardless of which provider raised it.
+        pyo3::prepare_freethreaded_python();
+        let cunqa: PyErr = BackendError::Cunqa("x".to_string()).into();
+        let native: PyErr = BackendError::UnsupportedCircuit("y".to_string()).into();
+        Python::with_gil(|py| {
+            assert!(cunqa.is_instance_of::<PyBackendError>(py));
+            assert!(native.is_instance_of::<PyBackendError>(py));
+        });
+    }
+
+    #[test]
+    fn display_carries_the_variant_context() {
+        // `Display` is what the `PyErr` message is built from for the wrapped
+        // variants, so it is pinned here too.
+        assert_eq!(
+            BackendError::Conversion("boom".to_string()).to_string(),
+            "data conversion across the Python boundary failed: boom"
+        );
+        assert_eq!(
+            BackendError::Cunqa("boom".to_string()).to_string(),
+            "CUNQA backend error: boom"
+        );
+        assert_eq!(
+            BackendError::UnsupportedCircuit("boom".to_string()).to_string(),
+            "boom"
+        );
+    }
+}

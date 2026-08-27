@@ -91,9 +91,10 @@ impl From<EvaluationError> for PyErr {
 mod tests {
     use super::*;
 
-    // These tests are deliberately Python-runtime-free (ENGINEERING.md §3): the
-    // `polypus` crate's test suite runs without an initialized interpreter, so
-    // we exercise `Display` only and never construct a `PyErr` / call `.into()`.
+    // The `Display` tests below deliberately construct no `PyErr` at all, so
+    // they run with no interpreter whatsoever; the `PyErr`-mapping tests further
+    // down need `prepare_freethreaded_python()` but still no installed package
+    // (see the note above them).
 
     #[test]
     fn wrong_length_display_names_both_lengths() {
@@ -115,5 +116,86 @@ mod tests {
         .to_string();
         assert!(msg.contains('3'), "offending index missing from: {msg}");
         assert!(msg.contains("NaN"), "offending value missing from: {msg}");
+    }
+
+    // The mapping tests below do construct a `PyErr`, which the `Display` tests
+    // above deliberately avoid. That is still Python-runtime-free in the sense
+    // ENGINEERING.md §3 means it: `prepare_freethreaded_python()` +
+    // `is_instance_of` need a bare CPython interpreter and no installed package
+    // (neither Qiskit nor `polypus_python`), exactly what CI provides — the same
+    // thing `crates/polypus/tests/running_quantum_circuits_local.rs` already does.
+
+    /// Assert `err` crosses the FFI as `polypus.EvaluationError` and keeps its
+    /// message.
+    fn assert_maps_to_evaluation_error(err: EvaluationError, expected_message: &str) {
+        pyo3::prepare_freethreaded_python();
+        let py_err: PyErr = err.into();
+        pyo3::Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyEvaluationError>(py),
+                "wrong exception class for: {py_err}"
+            );
+            assert!(
+                py_err.is_instance_of::<crate::exceptions::PolypusError>(py),
+                "EvaluationError must stay catchable as PolypusError: {py_err}"
+            );
+            assert!(
+                py_err.to_string().contains(expected_message),
+                "message lost in translation: {py_err}"
+            );
+        });
+    }
+
+    #[test]
+    fn binding_maps_to_evaluation_error() {
+        // Normally unreachable: the entry points validate `dimensions` against
+        // the circuit's free-parameter count before any candidate is bound (see
+        // `CircuitSource::bind`). Constructed directly so the "unlikely" path is
+        // still proven to be a typed exception rather than a panic (§9).
+        assert_maps_to_evaluation_error(
+            EvaluationError::Binding(CircuitError::WrongNumberOfParams {
+                expected: 3,
+                got: 1,
+            }),
+            "circuit declares 3 free parameter(s) but 1 value(s) were provided",
+        );
+    }
+
+    #[test]
+    fn wrong_length_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvaluationError::WrongLength {
+                expected: 4,
+                got: 2,
+            },
+            "contract C-5",
+        );
+    }
+
+    #[test]
+    fn non_finite_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvaluationError::NonFinite {
+                index: 3,
+                value: f64::NAN,
+            },
+            "contract C-5",
+        );
+    }
+
+    #[test]
+    fn backend_variant_delegates_to_the_backend_mapping() {
+        // `EvaluationError::Backend` must not retype the wrapped failure: a
+        // CUNQA error surfacing through an oracle is still a `polypus.CunqaError`.
+        pyo3::prepare_freethreaded_python();
+        let py_err: PyErr =
+            EvaluationError::Backend(BackendError::Cunqa("qraise failed".to_string())).into();
+        pyo3::Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<crate::exceptions::CunqaError>(py));
+            assert!(
+                !py_err.is_instance_of::<PyEvaluationError>(py),
+                "a wrapped backend failure must keep its own class"
+            );
+        });
     }
 }
