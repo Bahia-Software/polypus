@@ -110,7 +110,7 @@ impl From<EvaluationError> for PyErr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+    use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError};
     use pyo3::types::PyAnyMethods;
     use pyo3::Python;
 
@@ -167,6 +167,40 @@ mod tests {
             );
             assert!(
                 err.to_string().contains("not list[float]"),
+                "the descriptive message must be preserved"
+            );
+        });
+    }
+
+    /// The native backend results failing to convert into a Python `list[dict]`
+    /// is also modelled by [`EvaluationError::Conversion`]. This call site
+    /// differs from the `expectation_values` one above: `counts` is our own
+    /// Rust-native `Vec<HashMap<String, u64>>`, never something a Python
+    /// callback handed back, so there is no original raised exception to
+    /// preserve — realistically only allocation failure can trip it, which
+    /// isn't practical to provoke from a test. So we pin the *mapping* for this
+    /// site's message: it must surface as the typed `polypus.EvaluationError`,
+    /// never as the `MemoryError` the pre-fix `EvaluationError::Python` arm
+    /// would have re-raised verbatim. (Issue #98, follow-up to #81.)
+    #[test]
+    fn counts_conversion_failure_maps_to_typed_evaluation_error() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let msg = "failed to convert the backend results into a Python list[dict]: OOM";
+            let err: PyErr = EvaluationError::Conversion(msg.to_string()).into();
+            assert!(
+                err.value(py).is_instance_of::<PyEvaluationError>(),
+                "a counts conversion failure must surface as polypus.EvaluationError"
+            );
+            // ...and specifically not the MemoryError the pre-fix code would
+            // have carried across verbatim via `EvaluationError::Python`.
+            assert!(
+                !err.value(py).is_instance_of::<PyMemoryError>(),
+                "a counts conversion failure must not surface as a raised MemoryError"
+            );
+            assert!(
+                err.to_string()
+                    .contains("backend results into a Python list[dict]"),
                 "the descriptive message must be preserved"
             );
         });

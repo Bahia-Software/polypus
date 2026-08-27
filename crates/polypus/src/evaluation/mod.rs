@@ -156,9 +156,10 @@ pub use polypus_optimizers::EvaluationOracle;
 /// Returns an [`EvaluationError`] on any failure: a backend error is wrapped;
 /// a raised Python exception (import, a pending `KeyboardInterrupt`, or one
 /// thrown by `expectation_values` / the user callback) is carried verbatim; and
-/// a wrong-shaped `expectation_values` return value — a Rust-side conversion
-/// failure, not a raised exception — becomes [`EvaluationError::Conversion`].
-/// Never a panic.
+/// a data-conversion failure across the Rust↔Python boundary — the native
+/// backend results failing to convert into a Python `list[dict]`, or a
+/// wrong-shaped `expectation_values` return value, neither of which is a raised
+/// exception — becomes [`EvaluationError::Conversion`]. Never a panic.
 pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
@@ -179,8 +180,14 @@ pub(crate) fn run_and_evaluate(
         py.check_signals().map_err(EvaluationError::Python)?;
         // Convert the native counts back into a Python `list[dict]` for the
         // Python `expectation_values` function. Once expectation computation is
-        // also native this round-trip disappears entirely.
-        let py_counts = counts.into_pyobject(py).map_err(EvaluationError::Python)?;
+        // also native this round-trip disappears entirely. `counts` is our own
+        // Rust-native value, so a failure here is a Rust-side conversion problem
+        // (realistically allocation failure), not a raised Python exception.
+        let py_counts = counts.into_pyobject(py).map_err(|e| {
+            EvaluationError::Conversion(format!(
+                "failed to convert the native backend results into a Python list[dict]: {e}"
+            ))
+        })?;
         let values = PyModule::import(py, "polypus_python")
             .map_err(EvaluationError::Python)?
             .call_method("expectation_values", (py_counts, expectation_fn), None)
