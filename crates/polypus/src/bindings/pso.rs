@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 /// Particle Swarm Optimization configuration.
-#[pyclass]
+#[pyclass(module = "polypus")]
 #[allow(clippy::upper_case_acronyms)]
 pub struct PSO {
     #[pyo3(get, set)]

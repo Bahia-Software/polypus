@@ -3,7 +3,7 @@ use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
 
 /// Quantum Natural Gradient optimizer configuration.
-#[pyclass]
+#[pyclass(module = "polypus")]
 #[allow(clippy::upper_case_acronyms)]
 pub struct QNG {
     #[pyo3(get, set)]

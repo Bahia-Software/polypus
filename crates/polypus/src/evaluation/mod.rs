@@ -62,6 +62,7 @@ impl OracleErrorSlot {
 ///   interpreter lock (binding itself is still sequential today, not
 ///   parallel — see `VqcOracle::try_evaluate`) and the only remaining Python
 ///   touchpoint is the simulator call itself.
+#[derive(Debug)]
 pub enum CircuitSource {
     /// A Qiskit `QuantumCircuit` with unbound `Parameter`s.
     Qiskit(Py<PyAny>),
