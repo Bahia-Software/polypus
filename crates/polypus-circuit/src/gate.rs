@@ -1,6 +1,7 @@
 //! Core gate data types: [`GateParam`] and [`GateInstruction`].
 
 use crate::error::CircuitError;
+use std::collections::BTreeSet;
 
 /// An angle argument of a rotation gate.
 ///
@@ -173,16 +174,73 @@ impl GateInstruction {
     }
 }
 
-/// Whether `gates` already measured `qubit` (via a matching `Measure` or any
-/// `MeasureAll`). Used for the incremental C-4 check in
-/// [`ParameterizedCircuit::try_push`](crate::ParameterizedCircuit::try_push),
-/// where the existing prefix is known to already respect the contract.
-pub(crate) fn is_qubit_measured(gates: &[GateInstruction], qubit: usize) -> bool {
-    gates.iter().any(|g| match g {
-        GateInstruction::MeasureAll => true,
-        GateInstruction::Measure { qubit: q, .. } => *q == qubit,
-        _ => false,
-    })
+/// Incremental record of which qubits a circuit has already measured, used for
+/// the push-time C-4 check in
+/// [`ParameterizedCircuit::try_push`](crate::ParameterizedCircuit::try_push).
+///
+/// Rescanning the whole instruction list on every push made building a circuit
+/// of `G` gates cost O(G²); this cache makes each push O(log G) in the number of
+/// *distinct measured qubits* (O(1) amortized in the gate count). It mirrors the
+/// `measured: BTreeSet<usize>` the QASM importer's parser already carries, plus
+/// an `all` flag, because unlike the importer the builder is handed
+/// [`GateInstruction::MeasureAll`] directly by user code.
+///
+/// The cache is derived state: it is *not* part of a circuit's identity (see the
+/// `PartialEq` impl for [`ParameterizedCircuit`](crate::ParameterizedCircuit)),
+/// and a default value means "not derived yet" rather than "nothing measured",
+/// so a circuit assembled field-by-field — bypassing `try_push` entirely, as the
+/// QASM importer and several tests do — still gets the exact same answers as the
+/// old full rescan on its first push.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MeasuredQubits {
+    /// `false` in a freshly built value: [`Self::sync`] has not yet reconstructed
+    /// the cache from the circuit's instruction list.
+    derived: bool,
+    /// Qubits covered by an explicit [`GateInstruction::Measure`].
+    qubits: BTreeSet<usize>,
+    /// Set by [`GateInstruction::MeasureAll`], which measures *every* qubit. Kept
+    /// as a flag rather than expanded into `qubits` so that, exactly as before,
+    /// an out-of-range qubit index after a `MeasureAll` is reported as
+    /// already-measured rather than out-of-range.
+    all: bool,
+}
+
+impl MeasuredQubits {
+    /// Reconstruct the cache from `gates` unless it is already up to date. O(G)
+    /// once per circuit that was assembled without going through `try_push`,
+    /// O(1) on every subsequent push.
+    ///
+    /// This deliberately does not validate `gates`: hand-assembled sequences may
+    /// violate C-4, and the builder's job is only to answer "was this qubit
+    /// measured in the prefix", which is what the old rescan did too.
+    pub(crate) fn sync(&mut self, gates: &[GateInstruction]) {
+        if self.derived {
+            return;
+        }
+        for gate in gates {
+            self.record(gate);
+        }
+        self.derived = true;
+    }
+
+    /// Whether `qubit` has already been measured. Only meaningful after
+    /// [`Self::sync`].
+    pub(crate) fn contains(&self, qubit: usize) -> bool {
+        self.all || self.qubits.contains(&qubit)
+    }
+
+    /// Fold one instruction into the cache. Called for every gate the builder
+    /// accepts, on the success path only; non-measurement instructions
+    /// (including `Barrier`, which C-4 always allows) are inert.
+    pub(crate) fn record(&mut self, gate: &GateInstruction) {
+        match gate {
+            GateInstruction::Measure { qubit, .. } => {
+                self.qubits.insert(*qubit);
+            }
+            GateInstruction::MeasureAll => self.all = true,
+            _ => {}
+        }
+    }
 }
 
 /// Scan a full instruction sequence for a violation of the terminal-measurement
@@ -358,5 +416,80 @@ mod tests {
         let result = instruction.max_cbit();
 
         assert_eq!(result, None);
+    }
+
+    // ── MeasuredQubits (push-time C-4 cache) ─────────────────────────────
+
+    #[test]
+    fn measured_qubits_records_only_measurements() {
+        let mut measured = MeasuredQubits::default();
+        measured.sync(&[]);
+
+        measured.record(&GateInstruction::H(0));
+        measured.record(&GateInstruction::Cx(0, 1));
+        measured.record(&GateInstruction::Barrier(vec![0, 1]));
+        assert!(!measured.contains(0));
+        assert!(!measured.contains(1));
+
+        measured.record(&GateInstruction::Measure { qubit: 1, cbit: 0 });
+        assert!(!measured.contains(0));
+        assert!(measured.contains(1));
+
+        // Re-measuring is idempotent, and a barrier on a measured qubit is inert.
+        measured.record(&GateInstruction::Measure { qubit: 1, cbit: 1 });
+        measured.record(&GateInstruction::Barrier(vec![1]));
+        assert!(measured.contains(1));
+        assert!(!measured.contains(0));
+    }
+
+    #[test]
+    fn measured_qubits_measure_all_covers_every_index() {
+        let mut measured = MeasuredQubits::default();
+        measured.sync(&[]);
+
+        measured.record(&GateInstruction::MeasureAll);
+
+        assert!(measured.contains(0));
+        assert!(measured.contains(7));
+        // Deliberately beyond any plausible register: `MeasureAll` answers for
+        // out-of-range indices too, so `try_push` reports them as
+        // already-measured rather than out-of-range, exactly as the old rescan did.
+        assert!(measured.contains(usize::MAX));
+    }
+
+    #[test]
+    fn measured_qubits_sync_derives_from_an_existing_gate_list_once() {
+        let gates = vec![
+            GateInstruction::H(0),
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::Measure { qubit: 2, cbit: 1 },
+        ];
+
+        let mut measured = MeasuredQubits::default();
+        measured.sync(&gates);
+
+        assert!(measured.contains(0));
+        assert!(!measured.contains(1));
+        assert!(measured.contains(2));
+
+        // A second sync is a no-op: once derived, the cache is maintained by
+        // `record` alone and must not re-fold the (now stale) prefix.
+        measured.sync(&[GateInstruction::Measure { qubit: 1, cbit: 2 }]);
+        assert!(!measured.contains(1));
+    }
+
+    #[test]
+    fn measured_qubits_sync_does_not_validate() {
+        // A hand-assembled sequence that violates C-4 still yields the plain
+        // "was this qubit measured in the prefix" answer.
+        let gates = vec![
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::X(0),
+        ];
+
+        let mut measured = MeasuredQubits::default();
+        measured.sync(&gates);
+
+        assert!(measured.contains(0));
     }
 }
