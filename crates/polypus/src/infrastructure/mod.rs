@@ -40,6 +40,7 @@ pub fn cleanup_failure_count() -> u64 {
 }
 
 /// Supported quantum execution infrastructures.
+#[derive(Debug)]
 pub enum Infrastructure {
     Local,
     Cunqa,
@@ -136,6 +137,7 @@ impl Infrastructure {
 /// Being an enum (rather than `Py<PyAny>`) makes the contract explicit: adding
 /// a new circuit representation is a compile-time-checked change in every
 /// backend, not a runtime surprise.
+#[derive(Debug)]
 pub enum BoundCircuit {
     /// A bound Qiskit `QuantumCircuit` (Python object).
     Qiskit(Py<PyAny>),

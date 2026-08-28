@@ -46,7 +46,7 @@ use uuid::Uuid;
 /// any of the native, Aer, or CUNQA (simulated-QPU) backends. `seed` is `None`
 /// only for the `qmio` infrastructure, which runs on real hardware that
 /// Polypus cannot seed.
-#[pyclass(frozen)]
+#[pyclass(module = "polypus", frozen)]
 pub struct RunResult {
     /// Measurement counts. Shape depends on `n_qpus` (see the type docs).
     #[pyo3(get)]
@@ -84,7 +84,7 @@ impl RunResult {
 /// iteration count and convergence flag. `best_params` remains available as a
 /// field; the previously dropped [`OptimizationOutcome`] fields are now exposed
 /// alongside it, and `seed` records the value that drove the optimizer.
-#[pyclass(frozen)]
+#[pyclass(module = "polypus", frozen)]
 pub struct TrainResult {
     /// Best parameter vector found.
     #[pyo3(get)]
@@ -234,7 +234,7 @@ fn build_backend_config(
                 if noise_model.is_some() {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "the native 'polypus' backend is a noiseless statevector simulator \
-						 and does not accept a noise_model; use backend=\"aer\"",
+                         and does not accept a noise_model; use backend=\"aer\"",
                     ));
                 }
                 Ok(BackendConfig::LocalNative)
@@ -274,8 +274,8 @@ fn build_qmio_backend_config(backend: &str) -> PyResult<BackendConfig> {
         "qir_bitcode" | "qir_compiled" => QmioProgramFormat::QirBitcode,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-				"unknown qmio program format '{other}'; expected \"openqasm\", \"qir\", or \"qir_bitcode\""
-			)))
+                "unknown qmio program format '{other}'; expected \"openqasm\", \"qir\", or \"qir_bitcode\""
+            )))
         }
     };
     Ok(BackendConfig::Qmio {
@@ -370,7 +370,7 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
         let concrete = native.native().assign_parameters(&[]).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "circuit has unbound parameters and cannot be executed directly: {e}. \
-				 Bind values first via to_qasm2(params) or use polypus.train"
+                 Bind values first via to_qasm2(params) or use polypus.train"
             ))
         })?;
         return Ok(BoundCircuit::Native(concrete));
@@ -435,7 +435,7 @@ pub fn run_quantum_circuit<'py>(
         if let BoundCircuit::Qiskit(_) = &bound_qc {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
-				 pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
+                 pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
             ));
         }
     }
@@ -445,8 +445,8 @@ pub fn run_quantum_circuit<'py>(
         if let BoundCircuit::Qiskit(_) = &bound_qc {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
-				 serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
-				 2.0 string",
+                 serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+                 2.0 string",
             ));
         }
     }
@@ -594,8 +594,8 @@ pub fn train<'py>(
     if let Some(num_params) = circuit_source.num_params() {
         if num_params != dimensions as usize {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-				"dimensions ({dimensions}) does not match the circuit's free parameters ({num_params})"
-			)));
+                "dimensions ({dimensions}) does not match the circuit's free parameters ({num_params})"
+            )));
         }
     }
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
@@ -604,7 +604,7 @@ pub fn train<'py>(
         if let CircuitSource::Qiskit(_) = &circuit_source {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "the native 'polypus' backend requires a native polypus.Circuit; \
-				 got a Qiskit circuit. Build it with polypus.Circuit or use backend=\"aer\"",
+                 got a Qiskit circuit. Build it with polypus.Circuit or use backend=\"aer\"",
             ));
         }
     }
@@ -614,7 +614,7 @@ pub fn train<'py>(
         if let CircuitSource::Qiskit(_) = &circuit_source {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "the 'qmio' infrastructure requires a native polypus.Circuit (GIL-free \
-				 serialization); got a Qiskit circuit. Build it with polypus.Circuit",
+                 serialization); got a Qiskit circuit. Build it with polypus.Circuit",
             ));
         }
     }
@@ -808,7 +808,7 @@ pub fn qml_train<'py>(
     if is_native_backend(backend) {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "the native 'polypus' backend is not supported for qml.train (feature maps \
-			 and ansätze are Qiskit circuits); use backend=\"aer\"",
+             and ansätze are Qiskit circuits); use backend=\"aer\"",
         ));
     }
     // The optimizer searches a `dimensions`-wide vector and binds it to the
@@ -1015,9 +1015,11 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // qml submodule — exposes polypus.qml.train()
     let py = m.py();
-    let qml = PyModule::new(py, "qml")?;
+    let qml = PyModule::new(py, "polypus.qml")?;
     qml.add_function(wrap_pyfunction!(qml_train, &qml)?)?;
-    m.add_submodule(&qml)?;
+    // Attach under the short key: `add_submodule` would use the dotted `__name__`
+    // verbatim as the attribute name, breaking `polypus.qml.train` access.
+    m.add("qml", &qml)?;
     // Register in sys.modules so `import polypus.qml` also works
     let sys = PyModule::import(py, "sys")?;
     sys.getattr("modules")?.set_item("polypus.qml", &qml)?;
