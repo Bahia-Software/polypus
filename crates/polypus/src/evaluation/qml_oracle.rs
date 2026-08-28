@@ -50,9 +50,9 @@ impl QmlOracle {
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
         let rt = crate::utils::tokio_runtime().map_err(|e| {
-            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            EvaluationError::Runtime(format!(
                 "failed to start the Tokio runtime for QML evaluation: {e}"
-            )))
+            ))
         })?;
 
         let handles: Vec<_> = candidates
@@ -89,9 +89,7 @@ impl QmlOracle {
                         // A `JoinError` means the worker task itself panicked;
                         // turn it into a typed error rather than re-panicking.
                         let single = h.await.map_err(|e| {
-                            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(
-                                format!("QML evaluation task failed: {e}"),
-                            ))
+                            EvaluationError::Runtime(format!("QML evaluation task failed: {e}"))
                         })?;
                         out.push(single?);
                     }

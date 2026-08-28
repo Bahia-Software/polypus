@@ -154,9 +154,13 @@ pub use polypus_optimizers::EvaluationOracle;
 /// `polypus_python.expectation_values`, eliminating the duplication that
 /// previously existed across DE, PSO, QNG, and the orchestration layer.
 ///
-/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped,
-/// and a Python error (import, `expectation_values`, extraction) is carried
-/// verbatim — never a panic.
+/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped;
+/// a raised Python exception (import, a pending `KeyboardInterrupt`, or one
+/// thrown by `expectation_values` / the user callback) is carried verbatim; and
+/// a data-conversion failure across the Rust↔Python boundary — the native
+/// backend results failing to convert into a Python `list[dict]`, or a
+/// wrong-shaped `expectation_values` return value, neither of which is a raised
+/// exception — becomes [`EvaluationError::Conversion`]. Never a panic.
 pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
@@ -177,14 +181,26 @@ pub(crate) fn run_and_evaluate(
         py.check_signals().map_err(EvaluationError::Python)?;
         // Convert the native counts back into a Python `list[dict]` for the
         // Python `expectation_values` function. Once expectation computation is
-        // also native this round-trip disappears entirely.
-        let py_counts = counts.into_pyobject(py).map_err(EvaluationError::Python)?;
+        // also native this round-trip disappears entirely. `counts` is our own
+        // Rust-native value, so a failure here is a Rust-side conversion problem
+        // (realistically allocation failure), not a raised Python exception.
+        let py_counts = counts.into_pyobject(py).map_err(|e| {
+            EvaluationError::Conversion(format!(
+                "failed to convert the native backend results into a Python list[dict]: {e}"
+            ))
+        })?;
         let values = PyModule::import(py, "polypus_python")
             .map_err(EvaluationError::Python)?
             .call_method("expectation_values", (py_counts, expectation_fn), None)
             .map_err(EvaluationError::Python)?
+            // `expectation_values` returned successfully; a wrong-shaped value
+            // is a Rust-side conversion failure, not a raised Python exception.
             .extract::<Vec<f64>>()
-            .map_err(EvaluationError::Python)?;
+            .map_err(|e| {
+                EvaluationError::Conversion(format!(
+                    "expected expectation_values() to return list[float]: {e}"
+                ))
+            })?;
 
         // Contract C-5: the Python-backed oracle must return exactly one finite
         // f64 per submitted circuit. This is the single choke point that calls
