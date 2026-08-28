@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 /// Differential Evolution optimizer configuration.
-#[pyclass]
+#[pyclass(module = "polypus")]
 pub struct DE {
     #[pyo3(get, set)]
     pub generations: u32,

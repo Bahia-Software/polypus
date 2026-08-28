@@ -3,7 +3,7 @@ use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
 
 /// Quantum Natural Gradient optimizer configuration.
-#[pyclass]
+#[pyclass(module = "polypus")]
 #[allow(clippy::upper_case_acronyms)]
 pub struct QNG {
     #[pyo3(get, set)]
@@ -67,6 +67,11 @@ pub struct PyVarianceOracle {
     /// after `optimize` returns, since [`VarianceOracle`] cannot return a
     /// `Result`.
     pub errors: OracleErrorSlot,
+    /// Effective run id (`ExecutionConfig::id`) of the training run this adapter
+    /// serves, so a recorded failure names its run in the log. Owned rather than
+    /// borrowed: the adapter is boxed into the optimizer args and outlives the
+    /// entry-point frame that built it.
+    pub run_id: String,
 }
 
 impl PyVarianceOracle {
@@ -80,7 +85,7 @@ impl PyVarianceOracle {
         match self.try_call(py, theta, param_index) {
             Ok(value) => value,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.run_id);
                 0.0
             }
         }
