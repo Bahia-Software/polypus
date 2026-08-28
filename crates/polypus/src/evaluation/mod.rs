@@ -31,9 +31,24 @@ impl OracleErrorSlot {
     }
 
     /// Record `err` as the failure, keeping the *first* one recorded.
-    pub fn record(&self, err: EvaluationError) {
+    ///
+    /// `run_id` is the effective [`ExecutionConfig::id`] of the run whose oracle
+    /// failed, threaded in from the call site because this slot holds no run
+    /// metadata of its own. The failure is logged at `error!` here, as it is
+    /// recorded: from this point on the oracle only yields sentinel values, so
+    /// without this record the log would simply go quiet until `optimize()`
+    /// returns and the entry point raises.
+    pub fn record(&self, err: EvaluationError, run_id: &str) {
         let mut guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        // Log only when this call actually stores the error, so the message never
+        // claims to have "recorded" a failure it silently dropped.
         if guard.is_none() {
+            // Formatting the `Python(PyErr)` variant reacquires the GIL through
+            // `PyErr`'s own `Display`, and this can run with the GIL released
+            // (the optimizers run inside `allow_threads`). Safe either way:
+            // `Python::with_gil` is re-entrant — the same guarantee `cunqa.rs`
+            // relies on to acquire the GIL from within a `Drop`.
+            log::error!("run {run_id}: oracle evaluation failed: {err}");
             *guard = Some(err);
         }
     }

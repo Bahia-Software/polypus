@@ -30,6 +30,7 @@ use polypus_optimizers::{
     OptimizerError,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Result of [`run_quantum_circuit`]: the measurement counts plus the run
@@ -169,6 +170,27 @@ fn unique_id(base: &str) -> String {
     format!("{}_{}", base, Uuid::new_v4())
 }
 
+/// Announce the start of a training run at the default log level.
+///
+/// The fields are exactly the C-7 manifest data — id, infrastructure, backend,
+/// n_qpus, shots, effective seed — so an operator watching a multi-hour run can
+/// tell from the log alone what was executed where, and with which seed to
+/// replay it. Shared by `train` and `qml_train`, whose start records are
+/// identical; nothing high-volume (no circuit dumps) belongs at this level.
+fn log_training_start(
+    id: &str,
+    infrastructure: &str,
+    backend: &str,
+    n_qpus: u32,
+    shots: u32,
+    seed: u64,
+) {
+    log::info!(
+        "training run {id} starting: infrastructure={infrastructure}, backend={backend}, \
+         n_qpus={n_qpus}, shots={shots}, seed={seed}"
+    );
+}
+
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
 /// whichever of `DE`/`PSO`/`QNG` it is (`None` if it is none of them — the type
 /// error is surfaced later by the dispatch that actually runs the optimizer).
@@ -193,17 +215,38 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 /// [`OracleErrorSlot`] and yields finite sentinels, so `optimize` may return
 /// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
 /// makes the FFI boundary report the real cause instead of that garbage.
+///
+/// Both entry points funnel every DE/PSO/QNG branch through here, so this is
+/// also where the run's completion is logged — once, on the success path only
+/// (an oracle failure was already logged at `error!` where it was recorded).
+/// `start` is the [`Instant`] captured on entry to the entry point, so the
+/// reported duration covers the whole call.
+///
+/// An `OptimizerError` with no oracle failure recorded is a rejected
+/// optimizer configuration (`population_size` too small for DE, empty PSO/QNG
+/// `bounds`, …), caught before any oracle call — unlike an oracle failure, it
+/// has nowhere else to be logged, so it is logged here too.
 fn finish_optimization(
     py: Python<'_>,
     result: Result<OptimizationOutcome, OptimizerError>,
     errors: &OracleErrorSlot,
     seed: u64,
     id: String,
+    start: Instant,
 ) -> PyResult<PyObject> {
     if let Some(eval_err) = errors.take() {
         return Err(eval_err.into());
     }
-    let outcome = result.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let outcome = result.map_err(|e| {
+        log::error!("run {id}: optimizer rejected the configuration: {e}");
+        pyo3::exceptions::PyValueError::new_err(e.to_string())
+    })?;
+    log::info!(
+        "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
+        outcome.iterations_run,
+        outcome.converged,
+        start.elapsed()
+    );
     outcome_to_train_result(py, outcome, seed, id)
 }
 
@@ -470,6 +513,7 @@ pub fn run_quantum_circuit<'py>(
     backend: &str,
     seed: Option<u64>,
 ) -> PyResult<pyo3::PyObject> {
+    let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
     // large and high-volume, so it stays at `debug` rather than the default log.
     log::debug!(
@@ -543,6 +587,14 @@ pub fn run_quantum_circuit<'py>(
         config,
     };
 
+    // Lifecycle record at the default level, carrying the C-7 manifest data only
+    // (the circuit itself stays in the `debug!` above): enough to see what ran
+    // where, and with which seed to replay it.
+    log::info!(
+        "run {id} starting: infrastructure={infrastructure}, backend={backend}, \
+         n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
+    );
+
     let algorithm: Box<
         dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>> + Send,
     > = if n_qpus == 1 {
@@ -559,6 +611,10 @@ pub fn run_quantum_circuit<'py>(
     // taking effect until the run finishes. See docs/ENGINEERING.md §3.
     // Keep the original counts payload intact and wrap it with the run manifest.
     let counts = qc.py().allow_threads(move || algorithm.run(args))?;
+    // Completion counterpart of the start record above. There is no
+    // iterations/convergence notion on this path (those are `TrainResult`
+    // fields), so this reports only the run and how long it took.
+    log::info!("run {id} completed: duration={:?}", start.elapsed());
     Python::with_gil(|py| {
         Py::new(
             py,
@@ -631,6 +687,7 @@ pub fn train<'py>(
     backend: &str,
     seed: Option<u64>,
 ) -> PyResult<PyObject> {
+    let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     validate_id(&id)?;
@@ -696,6 +753,16 @@ pub fn train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
+    // Log before `backend` is shadowed below: the `&str` device selector is what
+    // belongs in the manifest record, not the constructed backend object.
+    log_training_start(
+        &effective_id,
+        &infrastructure,
+        backend,
+        n_qpus,
+        shots,
+        effective_seed,
+    );
     let backend = Infrastructure::create_backend(&config)?;
     // Shared error slot: the oracles record the first evaluation failure here
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
@@ -731,6 +798,7 @@ pub fn train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
@@ -753,6 +821,7 @@ pub fn train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
@@ -767,6 +836,7 @@ pub fn train<'py>(
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(method.py()),
                 errors: errors.clone(),
+                run_id: effective_id.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
@@ -777,6 +847,7 @@ pub fn train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
@@ -851,6 +922,7 @@ pub fn qml_train<'py>(
     backend: &str,
     seed: Option<u64>,
 ) -> PyResult<PyObject> {
+    let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     validate_id(&id)?;
@@ -961,6 +1033,16 @@ pub fn qml_train<'py>(
         // unconditionally so a native-backend training run reproduces exactly.
         seed: Some(effective_seed),
     });
+    // Log before `backend` is shadowed below (see `train`): the device selector
+    // string is the manifest value, not the constructed backend object.
+    log_training_start(
+        &effective_id,
+        &infrastructure,
+        backend,
+        n_qpus,
+        shots,
+        effective_seed,
+    );
     let backend = Infrastructure::create_backend(&config)?;
     // Shared error slot (see `train`): oracles record the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
@@ -991,6 +1073,7 @@ pub fn qml_train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
@@ -1013,6 +1096,7 @@ pub fn qml_train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
@@ -1027,6 +1111,7 @@ pub fn qml_train<'py>(
             variance_oracle: Box::new(PyVarianceOracle {
                 variance_function: qng.variance_function.clone_ref(py),
                 errors: errors.clone(),
+                run_id: effective_id.clone(),
             }),
             tikhonov_reg: qng.tikhonov_reg,
             seed: Some(effective_seed),
@@ -1037,6 +1122,7 @@ pub fn qml_train<'py>(
             &errors,
             effective_seed,
             effective_id.clone(),
+            start,
         );
     }
 
