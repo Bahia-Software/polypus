@@ -13,6 +13,7 @@ use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Tr
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,22 +66,33 @@ impl NativeStatevectorBackend {
     /// [`simulate_one`](Self::simulate_one) and
     /// [`run_shots_distributed`](Self::run_shots_distributed) so both paths
     /// handle the `Native`/`Qasm2`/`Qiskit` variants and transpile identically.
-    fn concrete_circuit(
+    ///
+    /// Returns a borrow of `circuit` whenever possible instead of an owned
+    /// clone: the `Native` variant borrows directly, and when the transpiler
+    /// is a guaranteed no-op ([`Transpiler::is_identity`]) that borrow is
+    /// returned as-is, skipping the trait-dispatch clone entirely (the default
+    /// hot path). Only the `Qasm2` variant (which must be parsed into a local)
+    /// and a non-identity transpiler (which must produce a new circuit) force
+    /// an owned result.
+    fn concrete_circuit<'a>(
         &self,
-        circuit: &BoundCircuit,
+        circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
-    ) -> Result<ConcreteCircuit, BackendError> {
-        // Obtain a ConcreteCircuit without touching Python.
-        let concrete: ConcreteCircuit = match circuit {
-            BoundCircuit::Native(cc) => cc.clone(),
-            BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-                .and_then(|pc| pc.assign_parameters(&[]))
-                .map_err(|e| {
-                    log::error!("native backend could not parse OpenQASM 2.0: {e}");
-                    BackendError::NativeCircuit(format!(
-                        "native backend could not parse OpenQASM 2.0: {e}"
-                    ))
-                })?,
+    ) -> Result<Cow<'a, ConcreteCircuit>, BackendError> {
+        // Obtain a ConcreteCircuit without touching Python, borrowing the
+        // source directly for the Native variant.
+        let source: Cow<'a, ConcreteCircuit> = match circuit {
+            BoundCircuit::Native(cc) => Cow::Borrowed(cc),
+            BoundCircuit::Qasm2(qasm) => Cow::Owned(
+                ParameterizedCircuit::from_qasm2(qasm)
+                    .and_then(|pc| pc.assign_parameters(&[]))
+                    .map_err(|e| {
+                        log::error!("native backend could not parse OpenQASM 2.0: {e}");
+                        BackendError::NativeCircuit(format!(
+                            "native backend could not parse OpenQASM 2.0: {e}"
+                        ))
+                    })?,
+            ),
             BoundCircuit::Qiskit(_) => {
                 return Err(BackendError::UnsupportedCircuit(
                     "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
@@ -90,9 +102,14 @@ impl NativeStatevectorBackend {
             }
         };
 
-        // Transpile the native circuit (GIL-free) before simulating. With the
-        // default IdentityTranspiler this is a clone and changes nothing.
-        Ok(self.transpiler.transpile(&concrete, opts))
+        // Transpile the native circuit (GIL-free) before simulating. When the
+        // transpiler is a guaranteed no-op, keep the borrow and skip the
+        // trait-dispatch clone entirely.
+        if self.transpiler.is_identity() {
+            Ok(source)
+        } else {
+            Ok(Cow::Owned(self.transpiler.transpile(source.as_ref(), opts)))
+        }
     }
 
     /// Run one bound circuit and return Aer-compatible bitstring counts.
@@ -110,12 +127,12 @@ impl NativeStatevectorBackend {
         let concrete = self.concrete_circuit(circuit, opts)?;
         let raw = self
             .simulator
-            .run_and_sample(&concrete, shots as usize, seed)
+            .run_and_sample(concrete.as_ref(), shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
-        Ok(format_counts(&concrete, raw))
+        Ok(format_counts(concrete.as_ref(), raw))
     }
 }
 
@@ -178,7 +195,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         // Evolve the shared circuit exactly once; the statevector is reused for
         // every batch's sampling.
         let concrete = self.concrete_circuit(qc, &opts)?;
-        let sv = self.simulator.run(&concrete).map_err(|e| {
+        let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
         })?;
@@ -193,8 +210,8 @@ impl QuantumBackend for NativeStatevectorBackend {
             .enumerate()
             .map(|(i, &shots)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                let raw = sample_projected(&concrete, &sv, shots as usize, seed);
-                Ok(format_counts(&concrete, raw))
+                let raw = sample_projected(concrete.as_ref(), &sv, shots as usize, seed);
+                Ok(format_counts(concrete.as_ref(), raw))
             })
             .collect()
     }
@@ -348,6 +365,41 @@ mod tests {
             .simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts)
             .unwrap();
         assert_eq!(native, qasm);
+    }
+
+    /// Regression (issue #83): under the identity transpiler, the `Qasm2` path
+    /// of `transpiled` returns the *exact input bytes* without parsing and
+    /// re-serializing. The input carries a comment (dropped on parse) and
+    /// non-canonical spacing, so a parse + re-emit round trip provably changes
+    /// the bytes — asserting byte-identity therefore proves the parse was
+    /// skipped, not merely that the QASM happens to be stable.
+    #[test]
+    fn qasm2_identity_path_returns_input_bytes_without_reserializing() {
+        let original = "OPENQASM 2.0;\n\
+             include \"qelib1.inc\";\n\
+             // this comment is dropped when the QASM is parsed\n\
+             qreg q[2];\n\
+             h q[0];\n\
+             cx q[0], q[1];\n"
+            .to_string();
+
+        // Premise check: a naive parse + re-emit really would change the bytes,
+        // so the byte-identity assertion below is meaningful.
+        let reserialized = ParameterizedCircuit::from_qasm2(&original)
+            .and_then(|pc| pc.assign_parameters(&[]))
+            .unwrap()
+            .to_qasm2();
+        assert_ne!(
+            reserialized, original,
+            "test premise: this QASM must not round-trip byte-identically"
+        );
+
+        let out = BoundCircuit::Qasm2(original.clone())
+            .transpiled(&IdentityTranspiler, &TranspileOptions::default());
+        match out {
+            BoundCircuit::Qasm2(text) => assert_eq!(text, original),
+            _ => panic!("expected the original Qasm2 variant to be preserved"),
+        }
     }
 
     /// An unparseable / unsupported QASM string is passed through untouched by
@@ -524,6 +576,120 @@ mod tests {
         assert_ne!(
             a, b,
             "no-seed runs with the same id must produce independent noise"
+        );
+    }
+
+    /// Micro-benchmark (perf evidence for issue #83, not a correctness check —
+    /// hence `#[ignore]`d and assertion-free). It isolates the exact cost the
+    /// identity-transpiler fix eliminates, side by side within one binary, so
+    /// there is no build-to-build noise and no reliance on the pre-fix code
+    /// still existing on disk.
+    ///
+    /// The full-training benchmarks (`bench_native_vs_qiskit.py`,
+    /// `bench_batching.py`) can't detect this fix: at 4–8 qubits through a DE
+    /// loop, GIL crossings, Aer/Qiskit overhead and optimizer bookkeeping dwarf
+    /// one or two `ConcreteCircuit` clones. This benchmark never calls the
+    /// simulator (qubit count stays at 8); gate *count* — which drives clone and
+    /// QASM cost — is what we scale.
+    ///
+    /// Run with:
+    /// ```text
+    /// LD_LIBRARY_PATH=~/miniconda3/lib cargo test -p polypus --lib \
+    ///   infrastructure::native::tests::bench_identity_path_avoids_clone_and_qasm_roundtrip \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "perf micro-benchmark: prints timings, run explicitly with --ignored --nocapture"]
+    fn bench_identity_path_avoids_clone_and_qasm_roundtrip() {
+        use std::borrow::Cow;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        /// Gate *count* (not qubit count) drives clone/QASM cost, so we keep
+        /// qubits small and pile on gates.
+        fn big_circuit(n_gates: usize) -> ConcreteCircuit {
+            let mut pc = ParameterizedCircuit::new(8);
+            for i in 0..n_gates {
+                pc = pc.h(i % 8).cx(i % 8, (i + 1) % 8).rz(i % 8, 0.123);
+            }
+            pc.assign_parameters(&[]).unwrap()
+        }
+
+        const N: usize = 500;
+        const N_GATES: usize = 20_000;
+        let opts = TranspileOptions::default();
+        let circuit = big_circuit(N_GATES);
+        let qasm = circuit.to_qasm2();
+
+        // --- Native path: two clones (old) vs. borrow (new) ---
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // Exactly what `simulate_one` used to do: clone up front, then the
+            // IdentityTranspiler clones again inside `transpile`.
+            let a = circuit.clone();
+            let b = IdentityTranspiler.transpile(&a, &opts);
+            black_box(&b);
+        }
+        let native_old_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // The `is_identity()` branch: borrow, zero clones.
+            let c: Cow<'_, ConcreteCircuit> = if IdentityTranspiler.is_identity() {
+                Cow::Borrowed(&circuit)
+            } else {
+                Cow::Owned(IdentityTranspiler.transpile(&circuit, &opts))
+            };
+            black_box(c.as_ref());
+        }
+        let native_new_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        // --- Qasm2 path: parse+transpile+re-emit (old) vs. String clone (new) ---
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // Exactly what `BoundCircuit::transpiled` used to do for Qasm2.
+            let parsed = ParameterizedCircuit::from_qasm2(&qasm)
+                .and_then(|pc| pc.assign_parameters(&[]))
+                .unwrap();
+            let out = IdentityTranspiler.transpile(&parsed, &opts).to_qasm2();
+            black_box(&out);
+        }
+        let qasm_old_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // The `is_identity()` short-circuit: a cheap String clone.
+            let out = qasm.clone();
+            black_box(&out);
+        }
+        let qasm_new_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        // Extrapolation to the training scale used by bench_native_vs_qiskit.py
+        // (pop=20, gens=10 => 200 candidate submissions per run).
+        const SUBMISSIONS_PER_RUN: f64 = 200.0;
+        let native_saved_ms = (native_old_us - native_new_us) * SUBMISSIONS_PER_RUN / 1e3;
+        let qasm_saved_ms = (qasm_old_us - qasm_new_us) * SUBMISSIONS_PER_RUN / 1e3;
+
+        println!(
+            "\nissue #83 identity-path micro-benchmark \
+             ({N_GATES} gates, 8 qubits, mean over {N} calls):"
+        );
+        println!(
+            "  native clone+transpile (old): {native_old_us:8.2} us/call\n\
+             native borrow          (new): {native_new_us:8.2} us/call\n\
+             speedup                     : {:8.1}x",
+            native_old_us / native_new_us
+        );
+        println!(
+            "  qasm parse+transpile+emit (old): {qasm_old_us:8.2} us/call\n\
+             qasm String clone         (new): {qasm_new_us:8.2} us/call\n\
+             speedup                        : {:8.1}x",
+            qasm_old_us / qasm_new_us
+        );
+        println!(
+            "  extrapolated saved per training run ({} submissions): \
+             native {native_saved_ms:.2} ms, qasm {qasm_saved_ms:.2} ms",
+            SUBMISSIONS_PER_RUN as u64
         );
     }
 }

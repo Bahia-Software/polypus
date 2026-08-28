@@ -1,6 +1,6 @@
 """
 Ctrl+C responsiveness and GIL release during long-running calls
-(issues #36 and #73).
+(issues #36, #73 and #86).
 
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 ``polypus.train`` (native backend) or ``polypus.qml.train`` (Qiskit/Aer
@@ -27,11 +27,20 @@ run is still in flight when SIGINT arrives ``_DELAY_BEFORE_SIGINT_S`` after
 READY, short enough to complete well inside ``_INTERRUPT_DEADLINE_S`` even on a
 slower CI core.
 
-The GIL-release test instead uses a small (sub-``parallel_threshold``) circuit
+The GIL-release tests instead use a small (sub-``parallel_threshold``) circuit
 that never engages the rayon pool at all, so the native run occupies a single
 core and leaves the others free for the counter thread — the only configuration
 in which a CPU-bound Python thread can be *observed* to make progress, and thus
 prove the GIL was released, even on a 2-core runner.
+
+``polypus.statevector`` (issue #86) gets the same GIL-release proof at the end
+of this module, plus a SIGINT test of its own. There is still no per-gate
+boundary at which a pending Ctrl+C could be honored *mid-simulation* (the qubit
+ceiling — ``polypus_sim::MAX_QUBITS``, covered in ``test_statevector.py`` —
+bounds its memory, not its wall-clock time), so — as with
+``run_quantum_circuit`` — the interrupt is honored when the run *reaches*
+``py.check_signals()``, i.e. when the simulation completes. See
+``docs/ENGINEERING.md`` §3.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
 share `run_and_evaluate`, but reach it through different paths — a native,
@@ -201,12 +210,20 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed error
 """
 
 
-def _assert_responds_to_sigint_promptly(child_code, *, failure_hint, env=None):
+def _assert_responds_to_sigint_promptly(
+    child_code, *, failure_hint, env=None, delay=None, deadline=None
+):
     """Run `child_code` in a subprocess, SIGINT it mid-run, and assert a real
     `KeyboardInterrupt` was raised well before a completed run could finish.
-    Shared by the training and run_quantum_circuit variants below — they differ
-    only in which entry point/backend the child script exercises (and, for
-    run_quantum_circuit, an `env` that pins the sim single-threaded)."""
+    Shared by the training, run_quantum_circuit and statevector variants below
+    — they differ only in which entry point/backend the child script exercises
+    (and, for run_quantum_circuit, an `env` that pins the sim single-threaded).
+    `delay`/`deadline` default to the module-wide `_DELAY_BEFORE_SIGINT_S` /
+    `_INTERRUPT_DEADLINE_S`; the statevector variant overrides `delay` because
+    its whole run lasts about a second (rather than the others' generation/shot
+    budgets), so the SIGINT has to arrive sooner — see its test for why."""
+    delay = _DELAY_BEFORE_SIGINT_S if delay is None else delay
+    deadline = _INTERRUPT_DEADLINE_S if deadline is None else deadline
     proc = subprocess.Popen(
         [sys.executable, "-c", child_code],
         stdout=subprocess.PIPE,
@@ -225,17 +242,17 @@ def _assert_responds_to_sigint_promptly(child_code, *, failure_hint, env=None):
             f"stderr:\n{proc.stderr.read()}"
         )
 
-        time.sleep(_DELAY_BEFORE_SIGINT_S)
+        time.sleep(delay)
         proc.send_signal(signal.SIGINT)
 
         try:
-            out, err = proc.communicate(timeout=_INTERRUPT_DEADLINE_S)
+            out, err = proc.communicate(timeout=deadline)
         except subprocess.TimeoutExpired:
             proc.kill()
             out, err = proc.communicate()
             pytest.fail(
                 f"{failure_hint} did not respond to SIGINT within "
-                f"{_INTERRUPT_DEADLINE_S}s.\nstdout:\n{out}\nstderr:\n{err}"
+                f"{deadline}s.\nstdout:\n{out}\nstderr:\n{err}"
             )
     finally:
         if proc.poll() is None:
@@ -249,7 +266,7 @@ def _assert_responds_to_sigint_promptly(child_code, *, failure_hint, env=None):
         f"expected a KeyboardInterrupt; got stdout:\n{out}\nstderr:\n{err}"
     )
     elapsed = float(out.split("KEYBOARDINTERRUPT", 1)[1].split()[0])
-    assert elapsed < _INTERRUPT_DEADLINE_S, (
+    assert elapsed < deadline, (
         f"interrupt was honored but not promptly: {elapsed:.2f}s "
         f"(a full run would take far longer)"
     )
@@ -485,4 +502,174 @@ def test_run_quantum_circuit_releases_gil_for_other_threads():
         f"background thread sustained only {ratio:.3f} of its free-running rate "
         f"during the native run (advanced {advanced} counts) — the GIL was "
         f"likely not released around run_quantum_circuit\nstdout:\n{proc.stdout}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# statevector (issue #86)
+# --------------------------------------------------------------------------- #
+
+# `polypus.statevector` releases the GIL around the simulation only; parameter
+# binding (O(gates)) and the amplitude conversion stay on the GIL side. Proven
+# with the same calibrated-ratio design as the `run_quantum_circuit` child above.
+#
+# Sizing differs, though. `statevector` has no `shots`/`n_qpus` knob to buy
+# wall-clock with, and circuit *construction* cost grows superlinearly with the
+# gate count while simulation cost grows linearly, so a single
+# sub-`parallel_threshold` circuit long enough to measure takes far longer to
+# build than to simulate (42k gates: ~0.8s to build, ~0.09s to run). The child
+# therefore simulates one 11-qubit circuit `_SV_REPEATS` times in sequence — the
+# same "many sequential single-thread runs" trick the run_quantum_circuit child
+# gets from `n_qpus=20` — for ~1.4s of native work in total, with the qubit count
+# below polypus-sim's `parallel_threshold` (12) so the run never engages the
+# rayon pool and leaves the other cores free for the counter thread (see the note
+# above).
+#
+# Measured on the reference machine: ratio 0.97 with the GIL released, 0.05 with
+# `allow_threads` reverted (the residual comes from the interpreter's switch
+# interval at each of the `_SV_REPEATS` call boundaries, so it shrinks as the
+# per-call simulation grows — hence few, long calls rather than many short ones).
+# `_MIN_GIL_RELEASE_RATIO` (0.2) sits ~4x above the regressed value.
+_SV_REPEATS = 15
+
+_SV_GIL_RELEASE_CHILD = (
+    r"""
+import threading
+import time
+import polypus
+"""
+    + _MAKE_CIRCUIT_SRC
+    + r"""
+# Warm up the import/build paths outside the measured window.
+polypus.statevector(make(2, 1))
+
+qc = make(11, 2000)  # sub-parallel-threshold; ~0.09s per simulation
+counter = 0
+stop = threading.Event()
+
+def spin():
+    global counter
+    while not stop.is_set():
+        counter += 1
+
+worker = threading.Thread(target=spin)
+worker.start()
+try:
+    # Calibrate the worker's free-running spin rate (time.sleep releases the
+    # GIL), then compare against it — robust to CPU speed, as above.
+    c0 = counter
+    time.sleep(0.2)
+    free_rate = (counter - c0) / 0.2
+
+    before = counter
+    t0 = time.perf_counter()
+    for _ in range(__REPEATS__):
+        polypus.statevector(qc)
+    dt = time.perf_counter() - t0
+    advanced = counter - before
+finally:
+    stop.set()
+    worker.join()
+
+expected = free_rate * dt
+ratio = (advanced / expected) if expected > 0 else 0.0
+print(f"ADVANCED {advanced} RATE {free_rate:.0f} DT {dt:.4f} RATIO {ratio:.4f}", flush=True)
+""".replace("__REPEATS__", str(_SV_REPEATS))
+)
+
+
+def test_statevector_releases_gil_for_other_threads():
+    proc = subprocess.run(
+        [sys.executable, "-c", _SV_GIL_RELEASE_CHILD],
+        capture_output=True,
+        text=True,
+        timeout=_READY_TIMEOUT_S,
+    )
+    assert proc.returncode == 0 and "ADVANCED" in proc.stdout, (
+        f"GIL-release child did not complete cleanly.\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    fields = proc.stdout.split("ADVANCED", 1)[1].split()
+    advanced = int(fields[0])
+    ratio = float(fields[fields.index("RATIO") + 1])
+    assert ratio > _MIN_GIL_RELEASE_RATIO, (
+        f"background thread sustained only {ratio:.3f} of its free-running rate "
+        f"during {_SV_REPEATS} native simulations (advanced {advanced} counts) — "
+        f"the GIL was likely not released around statevector\n"
+        f"stdout:\n{proc.stdout}"
+    )
+
+
+# `statevector` also calls `py.check_signals()` the moment the GIL is reacquired,
+# before handing the amplitudes to NumPy (see docs/ENGINEERING.md §3/§4), so a
+# Ctrl+C that arrived while the GIL-free simulation was running surfaces as a
+# `KeyboardInterrupt` out of the call itself — never swallowed into a
+# `PanicException`, and never ignored so the call reports a completed run.
+#
+# What this test can and cannot pin down. It used to size the child so that the
+# *list* conversion dominated (26 qubits: ~3.8s completed, interrupt honored at
+# ~1.5s with the check in place and ~3.3s without it) and put the deadline
+# between those two numbers, which made the check's presence directly observable.
+# That gap is gone now that the amplitudes cross the seam as a NumPy array: the
+# Rust buffer is *moved* into the array rather than converted element by element,
+# so there is no expensive post-check phase left. Re-measured on the reference
+# machine (26q, full Hadamard layer): completed 1.52s, interrupt latency 1.52s —
+# and, with `check_signals()` temporarily removed and the extension rebuilt,
+# 1.52s again (CPython delivers the pending SIGINT at the very next bytecode
+# after the call returns, which is indistinguishable in wall-clock). No timing
+# threshold can separate the two cases any more, and neither can observing
+# whether the statement after the call ran (checked: it does not, either way).
+#
+# So this now guards the same property as the `run_quantum_circuit` children
+# above — a pending SIGINT is honored as a real `KeyboardInterrupt` when the run
+# reaches the check boundary, i.e. when it completes — and the deadline is a hang
+# guard sized above the full run, not a discriminator. The `check_signals()` call
+# stays because it is the documented boundary and keeps the interrupt ahead of
+# whatever result-building work may be added later; that part is enforced by
+# review and by ENGINEERING.md §3, no longer by a wall-clock assertion.
+#
+# Sizing: 27 qubits with a *single* gate. The finding that motivated dropping the
+# Hadamard layer is that near the ceiling the run's cost is `Statevector::new`'s
+# `2^n` allocation, not the gates — so one gate is enough to make the call last
+# ~0.85s (measured; 1.07s with RAYON_NUM_THREADS=1, i.e. essentially
+# core-count independent, since first-touch of the 2 GiB buffer is single-threaded
+# either way). That is comfortably longer than the 0.1s `delay`, so the SIGINT
+# lands while the simulation is genuinely in flight, and ~5x under the module's
+# `_INTERRUPT_DEADLINE_S` (5.0s) even on a slower runner — which is why, unlike
+# the `run_quantum_circuit` children, this one needs neither a bespoke deadline
+# nor `_SINGLE_THREADED_ENV`. A full Hadamard layer instead swings the run from
+# 1.5s (32 cores) to 3.9s (single-threaded), for no added signal.
+_SV_LARGE_N = 27
+_SV_DELAY_BEFORE_SIGINT_S = 0.1
+
+_SV_INTERRUPT_CHILD = r"""
+import sys, time
+import polypus
+
+# Warm up the lazy import path outside the timed window.
+polypus.statevector(polypus.Circuit(2).h(0))
+
+qc = polypus.Circuit(__N__).h(0)
+print("READY", flush=True)
+start = time.time()
+try:
+    polypus.statevector(qc)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a PanicException from a swallowed signal
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+""".replace("__N__", str(_SV_LARGE_N))
+
+
+def test_statevector_responds_to_sigint_promptly():
+    _assert_responds_to_sigint_promptly(
+        _SV_INTERRUPT_CHILD,
+        failure_hint=(
+            "statevector — the SIGINT was swallowed instead of surfacing as a "
+            "KeyboardInterrupt (py.check_signals() after the GIL is reacquired "
+            "is likely missing, or the GIL is never released)"
+        ),
+        delay=_SV_DELAY_BEFORE_SIGINT_S,
     )

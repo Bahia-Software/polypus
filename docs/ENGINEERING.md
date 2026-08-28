@@ -83,6 +83,20 @@ boundary stays out-of-process and explicit; see
   the first statement before constructing any Python object. A pending Ctrl+C
   surfaces there as a `KeyboardInterrupt` propagated verbatim through the
   function's `Result`, never swallowed or retyped.
+- `statevector` follows the same rule at a smaller scale: it releases the GIL
+  around the `StatevectorSimulator::run` call (parameter binding stays on the
+  GIL side — it is O(gates) and allocates nothing of size `2^n`), then calls
+  `py.check_signals()` the moment the GIL is reacquired, **before** handing the
+  amplitudes to NumPy — the same
+  "reacquire-then-check-before-building-the-result" boundary
+  `run_quantum_circuit` uses, just with one call instead of a loop. This still
+  isn't *mid-run*: `polypus-sim` has no per-gate hook to check signals against,
+  and adding one would mean signal checks inside that crate, which must stay
+  Python-free (§2). So a Ctrl+C that arrives while the simulation itself is
+  running is only honored once `run` returns — but from there, it fires before
+  the `2^n`-sized array conversion (§4) rather than after, which matters
+  because that conversion's cost scales only with qubit count, independent of
+  how deep or shallow the circuit was.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
@@ -101,6 +115,27 @@ boundary stays out-of-process and explicit; see
 - **Parallel == sequential:** kernels under the `parallel` feature (rayon)
   must produce **bit-identical** results to the sequential path. Every new
   parallel kernel is tested against its sequential version.
+- **Qubit ceiling:** a dense statevector needs `2^n` complex amplitudes
+  (`16 · 2^n` bytes), so `polypus-sim` refuses circuits above
+  `polypus_sim::MAX_QUBITS` (30 ≈ 16 GiB) as the **first** thing
+  `StatevectorSimulator::run` does — before any allocation, and low enough that
+  `1 << n` cannot overflow. At the seam this surfaces as a `ValueError` naming
+  the requested and the supported count (`polypus.statevector`;
+  `tests/python/test_statevector.py`). Below the ceiling, those amplitudes cross
+  the seam as a **NumPy array of `dtype=complex128`** — one contiguous buffer
+  moved out of the `Statevector` (`into_amplitudes`, no copy) and wrapped by
+  rust-numpy — rather than as a `list` of boxed Python `complex` objects. That
+  removes a `2^n`-sized conversion which, at these sizes, cost more than the
+  simulation: a gateless 30-qubit call went from 29.7s to 5.0s, and a 26-qubit
+  one from 1.9s to 0.4s (one-off measurement on a 32-core dev box, not a tracked
+  `benchmarks/` script; deep circuits gain proportionally less because the gates
+  dominate — 30 qubits with a Hadamard layer: 50.4s → 25.6s). It does not make
+  near-ceiling statevectors cheap, though: what remains is `Statevector::new`'s
+  `2^n` allocation, which is why even a **gateless** 30-qubit call still costs
+  ~5s. The ceiling is a memory bound and says nothing about wall-clock.
+  `polypus.Circuit` itself stays unbounded on purpose: it is backend-agnostic
+  IR, and CUNQA/QMIO/Aer have their own, different capacities — the ceiling is
+  enforced where it applies, not in the IR.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting

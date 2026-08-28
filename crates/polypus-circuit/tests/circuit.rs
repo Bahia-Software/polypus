@@ -106,14 +106,12 @@ fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params() {
 
 #[test]
 fn test_parameterized_circuit_assign_parameters_param_index_out_of_bounds() {
-    let qc = ParameterizedCircuit {
-        num_qubits: 1,
-        num_params: 1,
-        gates: vec![GateInstruction::Rx {
-            qubit: 0,
-            theta: GateParam::Param(5),
-        }],
-    };
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.num_params = 1;
+    qc.gates = vec![GateInstruction::Rx {
+        qubit: 0,
+        theta: GateParam::Param(5),
+    }];
 
     let result = qc.assign_parameters(&[0.1]);
 
@@ -399,6 +397,135 @@ fn test_parameterized_circuit_try_push_track_params() {
     assert_eq!(qc.num_params, 4);
 }
 
+// Push-time C-4 state (contract C-4 enforced incrementally by `try_push`).
+
+#[test]
+fn try_push_rejects_unitary_on_a_measured_qubit() {
+    let mut qc = ParameterizedCircuit::new(2);
+    qc.try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
+        .unwrap();
+
+    assert_eq!(
+        qc.try_push(GateInstruction::X(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+    // The other qubit is untouched by the measurement, and re-measuring and
+    // barriers remain legal on the measured one.
+    assert_eq!(qc.try_push(GateInstruction::H(1)), Ok(()));
+    assert_eq!(
+        qc.try_push(GateInstruction::Measure { qubit: 0, cbit: 1 }),
+        Ok(())
+    );
+    assert_eq!(qc.try_push(GateInstruction::Barrier(vec![0])), Ok(()));
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(1, 0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+}
+
+#[test]
+fn try_push_rejects_any_unitary_after_measure_all() {
+    let mut qc = ParameterizedCircuit::new(3);
+    qc.try_push(GateInstruction::MeasureAll).unwrap();
+
+    for q in 0..3 {
+        assert_eq!(
+            qc.try_push(GateInstruction::H(q)),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: q })
+        );
+    }
+    // Two-qubit gates report the first offending operand, as before.
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(2, 1)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 2 })
+    );
+    // `MeasureAll` covers indices past the register too: the C-4 check runs
+    // before the range check, so this is "already measured", not "out of range".
+    assert_eq!(
+        qc.try_push(GateInstruction::H(9)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 9 })
+    );
+    // Measurements and barriers still go through.
+    assert_eq!(qc.try_push(GateInstruction::MeasureAll), Ok(()));
+    assert_eq!(qc.try_push(GateInstruction::Barrier(vec![])), Ok(()));
+    assert_eq!(qc.gates.len(), 3);
+}
+
+/// A rejected push must leave the circuit — including the incremental C-4
+/// state — exactly as it was, so later legal pushes still behave.
+#[test]
+fn try_push_rejections_do_not_disturb_the_measured_state() {
+    let mut qc = ParameterizedCircuit::new(3);
+    qc.try_push(GateInstruction::H(0)).unwrap();
+    qc.try_push(GateInstruction::Measure { qubit: 1, cbit: 0 })
+        .unwrap();
+
+    // A mix of rejections: C-4, out of range, identical qubits, non-finite angle.
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(0, 1)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 1 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::H(7)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 7,
+            num_qubits: 3
+        })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(2, 2)),
+        Err(CircuitError::IdenticalQubits { qubit: 2 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Rz {
+            qubit: 2,
+            theta: GateParam::Fixed(f64::NAN),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(qc.gates.len(), 2);
+
+    // Unmeasured qubits are still usable, and measuring one more is tracked.
+    assert_eq!(qc.try_push(GateInstruction::Cx(0, 2)), Ok(()));
+    assert_eq!(
+        qc.try_push(GateInstruction::Measure { qubit: 2, cbit: 1 }),
+        Ok(())
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(0, 2)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 2 })
+    );
+    assert_eq!(qc.try_push(GateInstruction::H(0)), Ok(()));
+}
+
+/// The C-4 state is derived from `gates`, not assumed empty: a circuit whose
+/// instruction list was assembled without the builder (hand-written, or produced
+/// by the QASM importer) is still checked against its own measurements.
+#[test]
+fn try_push_derives_the_measured_state_from_existing_gates() {
+    let mut hand_assembled = ParameterizedCircuit::new(2);
+    hand_assembled.gates = vec![
+        GateInstruction::H(0),
+        GateInstruction::Measure { qubit: 0, cbit: 0 },
+    ];
+    assert_eq!(
+        hand_assembled.try_push(GateInstruction::X(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+    assert_eq!(hand_assembled.try_push(GateInstruction::X(1)), Ok(()));
+
+    // Same via the importer, whose `finish` synthesises `MeasureAll`.
+    let mut imported = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\nh q[0];\nmeasure q -> c;\n",
+    )
+    .unwrap();
+    assert_eq!(imported.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(
+        imported.try_push(GateInstruction::H(1)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 1 })
+    );
+}
+
 #[test]
 fn test_parameterized_circuit_push_basic() {
     let qc = ParameterizedCircuit::new(2).push(GateInstruction::H(1));
@@ -500,14 +627,11 @@ fn test_export_rejects_non_finite_angle() {
     // Route 2: a circuit assembled by hand with a fixed non-finite angle,
     // bypassing the builder's construction-time guard — the exporter itself
     // still refuses it, so no `NaN`/`inf` literal is ever serialised.
-    let hand_assembled = ParameterizedCircuit {
-        num_qubits: 1,
-        num_params: 0,
-        gates: vec![GateInstruction::Rx {
-            qubit: 0,
-            theta: GateParam::Fixed(f64::INFINITY),
-        }],
-    };
+    let mut hand_assembled = ParameterizedCircuit::new(1);
+    hand_assembled.gates = vec![GateInstruction::Rx {
+        qubit: 0,
+        theta: GateParam::Fixed(f64::INFINITY),
+    }];
     assert_eq!(
         hand_assembled.to_qasm2_with_params(&[]),
         Err(CircuitError::NonFiniteParam)

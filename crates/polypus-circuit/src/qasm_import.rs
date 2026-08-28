@@ -1035,6 +1035,11 @@ impl Parser {
             num_qubits: n,
             num_params: 0,
             gates,
+            // Left un-derived on purpose: the parser's own `measured` set covers
+            // the per-qubit `Measure`s it validated, but `finish` also synthesises
+            // `MeasureAll`, so the builder's cache is rebuilt from `gates` on the
+            // first push into the imported circuit.
+            measured: Default::default(),
         }
     }
 }
