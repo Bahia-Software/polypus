@@ -84,19 +84,46 @@ boundary stays out-of-process and explicit; see
   surfaces there as a `KeyboardInterrupt` propagated verbatim through the
   function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
-  around the `StatevectorSimulator::run` call (parameter binding stays on the
-  GIL side — it is O(gates) and allocates nothing of size `2^n`), then calls
-  `py.check_signals()` the moment the GIL is reacquired, **before** handing the
-  amplitudes to NumPy — the same
-  "reacquire-then-check-before-building-the-result" boundary
-  `run_quantum_circuit` uses, just with one call instead of a loop. This still
-  isn't *mid-run*: `polypus-sim` has no per-gate hook to check signals against,
-  and adding one would mean signal checks inside that crate, which must stay
-  Python-free (§2). So a Ctrl+C that arrives while the simulation itself is
-  running is only honored once `run` returns — but from there, it fires before
-  the `2^n`-sized array conversion (§4) rather than after, which matters
-  because that conversion's cost scales only with qubit count, independent of
-  how deep or shallow the circuit was.
+  around the `StatevectorSimulator::run_cancellable` call (parameter binding
+  stays on the GIL side — it is O(gates) and allocates nothing of size `2^n`),
+  and calls `py.check_signals()` both *mid-run* and the moment the GIL is
+  reacquired, **before** handing the amplitudes to NumPy — the latter being the
+  same "reacquire-then-check-before-building-the-result" boundary
+  `run_quantum_circuit` uses.
+- The mid-run half is worth spelling out, because it is how a pure-Rust crate
+  stays interruptible without learning about Python (§2). `polypus-sim`'s gate
+  loop takes an `Option<&mut dyn FnMut() -> bool>` and polls it periodically;
+  `true` abandons the run with `SimError::Cancelled`. It knows nothing about
+  *why* — a signal, a deadline, a cancel button all look the same to it. Only
+  `statevector` fills that hook with `Python::with_gil(|py| py.check_signals())`
+  (re-entrant from inside `allow_threads`, the same guarantee `cunqa.rs`'s
+  `Drop` relies on — see §9). Two rules make it work:
+  - **Throttle inside the pure crate, not at the Python boundary.** The hook is
+    called at most once per ~25ms of wall clock (with the clock itself read once
+    per ~64k amplitude updates), so its frequency is decoupled from gate cost —
+    a cheap 1-qubit gate and a 25-qubit gate differ by orders of magnitude — and
+    a circuit that finishes quickly never calls it at all. Interrupt latency is
+    then bounded by a constant instead of by the run's own duration, which
+    matters because `polypus_sim::MAX_QUBITS` bounds a run's *memory*, not its
+    wall-clock time: cost scales with gates × `2^n` and nothing bounds the gate
+    count. The interval is also stretched to a multiple of the hook's *measured*
+    duration, because the simulator cannot know what a hook costs: this one is
+    ~1µs when nothing else wants the GIL and milliseconds when another Python
+    thread holds it (the interpreter only yields on its switch interval), and
+    without that adaptation the latter case measurably slowed a contended run
+    down. Backed by `benchmarks/bench_statevector.py`.
+  - **Recover the real exception at the Python-facing boundary.** `SimError`
+    cannot carry a `PyErr` (§2), so the hook stashes the `PyErr` and
+    `statevector` re-raises *that* verbatim when the run comes back
+    `Cancelled` — never `PyValueError::new_err(e.to_string())`, which would
+    downgrade a `KeyboardInterrupt` into a bogus `ValueError`. Same problem, and
+    the same answer, as `OracleErrorSlot` in
+    `crates/polypus/src/evaluation/mod.rs`; no shared slot is needed here
+    because `statevector` is single-shot and the hook runs on the calling
+    thread. What is *not* interruptible is `Statevector::new`'s `2^n`
+    allocation — one `vec![]` with nowhere to put a checkpoint — which is why
+    the post-run check above stays: near the qubit ceiling that allocation is
+    the whole run.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.

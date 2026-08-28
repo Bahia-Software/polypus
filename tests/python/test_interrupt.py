@@ -1,6 +1,6 @@
 """
 Ctrl+C responsiveness and GIL release during long-running calls
-(issues #36, #73 and #86).
+(issues #36, #73, #86 and #110).
 
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 ``polypus.train`` (native backend) or ``polypus.qml.train`` (Qiskit/Aer
@@ -34,13 +34,20 @@ in which a CPU-bound Python thread can be *observed* to make progress, and thus
 prove the GIL was released, even on a 2-core runner.
 
 ``polypus.statevector`` (issue #86) gets the same GIL-release proof at the end
-of this module, plus a SIGINT test of its own. There is still no per-gate
-boundary at which a pending Ctrl+C could be honored *mid-simulation* (the qubit
-ceiling — ``polypus_sim::MAX_QUBITS``, covered in ``test_statevector.py`` —
-bounds its memory, not its wall-clock time), so — as with
-``run_quantum_circuit`` — the interrupt is honored when the run *reaches*
-``py.check_signals()``, i.e. when the simulation completes. See
-``docs/ENGINEERING.md`` §3.
+of this module, plus two SIGINT tests. Unlike ``run_quantum_circuit``, it *is*
+interruptible mid-run (issue #110): ``polypus-sim``'s gate loop polls an
+injected, Python-agnostic cancellation hook, and ``statevector`` supplies one
+that reacquires the GIL and calls ``py.check_signals()``, so a pending Ctrl+C
+stops the simulation part-way through the gate sequence instead of waiting for
+it to finish. This matters because the qubit ceiling
+(``polypus_sim::MAX_QUBITS``, covered in ``test_statevector.py``) bounds a run's
+*memory*, not its wall-clock time: cost scales with gates × ``2^n`` and nothing
+bounds the gate count. The two tests split along that line —
+``test_statevector_responds_to_sigint_mid_simulation`` proves the gate loop
+itself is cut short (by comparing against a completed run of the same circuit),
+while ``test_statevector_responds_to_sigint_promptly`` covers the remaining
+post-run boundary, which is all a run dominated by ``Statevector::new``'s
+``2^n`` allocation can offer. See ``docs/ENGINEERING.md`` §3.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
 share `run_and_evaluate`, but reach it through different paths — a native,
@@ -219,9 +226,14 @@ def _assert_responds_to_sigint_promptly(
     — they differ only in which entry point/backend the child script exercises
     (and, for run_quantum_circuit, an `env` that pins the sim single-threaded).
     `delay`/`deadline` default to the module-wide `_DELAY_BEFORE_SIGINT_S` /
-    `_INTERRUPT_DEADLINE_S`; the statevector variant overrides `delay` because
-    its whole run lasts about a second (rather than the others' generation/shot
-    budgets), so the SIGINT has to arrive sooner — see its test for why."""
+    `_INTERRUPT_DEADLINE_S`; the statevector variants override `delay` because
+    their whole run lasts a few seconds (rather than the others' generation/shot
+    budgets), so the SIGINT has to arrive sooner — see their tests for why.
+
+    Returns `(elapsed, ready_fields)`: the interrupt latency the child measured
+    itself, and whatever it printed after `READY` on its first line (the mid-run
+    statevector test uses that channel to carry a completed-run baseline it
+    measured in the same process, on the same machine)."""
     delay = _DELAY_BEFORE_SIGINT_S if delay is None else delay
     deadline = _INTERRUPT_DEADLINE_S if deadline is None else deadline
     proc = subprocess.Popen(
@@ -237,7 +249,8 @@ def _assert_responds_to_sigint_promptly(
         if not ready:
             raise AssertionError("child did not start training within the timeout")
         first_line = proc.stdout.readline().strip()
-        assert first_line == "READY", (
+        ready_fields = first_line.split()
+        assert ready_fields[:1] == ["READY"], (
             f"unexpected child startup output {first_line!r}; "
             f"stderr:\n{proc.stderr.read()}"
         )
@@ -270,6 +283,7 @@ def _assert_responds_to_sigint_promptly(
         f"interrupt was honored but not promptly: {elapsed:.2f}s "
         f"(a full run would take far longer)"
     )
+    return elapsed, ready_fields[1:]
 
 
 def test_native_training_responds_to_sigint_promptly():
@@ -606,6 +620,14 @@ def test_statevector_releases_gil_for_other_threads():
 # `KeyboardInterrupt` out of the call itself — never swallowed into a
 # `PanicException`, and never ignored so the call reports a completed run.
 #
+# This is the *post-run* boundary, and since #110 it is no longer the only one:
+# the gate loop is polled mid-run too, which
+# `test_statevector_responds_to_sigint_mid_simulation` below proves. The two
+# tests are complementary rather than redundant, and this one's sizing is exactly
+# why: at 27 qubits the run's cost is `Statevector::new`'s `2^n` allocation — a
+# single `vec![]` with nowhere to put a checkpoint — so this child has *only* the
+# post-run boundary to be caught by, and keeps guarding it.
+#
 # What this test can and cannot pin down. It used to size the child so that the
 # *list* conversion dominated (26 qubits: ~3.8s completed, interrupt honored at
 # ~1.5s with the check in place and ~3.3s without it) and put the deadline
@@ -626,7 +648,10 @@ def test_statevector_releases_gil_for_other_threads():
 # guard sized above the full run, not a discriminator. The `check_signals()` call
 # stays because it is the documented boundary and keeps the interrupt ahead of
 # whatever result-building work may be added later; that part is enforced by
-# review and by ENGINEERING.md §3, no longer by a wall-clock assertion.
+# review and by ENGINEERING.md §3, no longer by a wall-clock assertion. The
+# discriminating-timing role this test lost is now carried by the mid-run test
+# below, which recovers it by comparing against a completed run of its own
+# circuit instead of against a fixed deadline.
 #
 # Sizing: 27 qubits with a *single* gate. The finding that motivated dropping the
 # Hadamard layer is that near the ceiling the run's cost is `Statevector::new`'s
@@ -672,4 +697,88 @@ def test_statevector_responds_to_sigint_promptly():
             "is likely missing, or the GIL is never released)"
         ),
         delay=_SV_DELAY_BEFORE_SIGINT_S,
+    )
+
+
+# Mid-run interruption (issue #110): the SIGINT must cut the *gate loop* short,
+# not merely be honored once the simulation finishes anyway. Since #110,
+# `polypus-sim`'s loop polls a cancellation hook that `statevector` fills with a
+# GIL-reacquiring `py.check_signals()`, and a cancelled run raises the pending
+# `KeyboardInterrupt` verbatim (never the `ValueError` that mapping the new
+# `SimError::Cancelled` through `PyValueError` would have produced, and never a
+# `PanicException`).
+#
+# How this discriminates, where `test_statevector_responds_to_sigint_promptly`
+# above no longer can: the child times a *completed* run of the same circuit
+# before printing READY (which doubles as the warm-up), and the parent asserts
+# the interrupted run came in under `_SV_MID_RUN_MAX_FRACTION` of it. Both
+# numbers come from the same process on the same machine, so the comparison
+# survives any CI speed — a slow runner scales both — where an absolute deadline
+# would only prove the call returned before a hang guard. Without a mid-run
+# checkpoint the ratio is ~1.0 (the interrupt lands when the run ends); with one
+# it is the SIGINT delay plus one ~25ms checkpoint over the full run's duration
+# (measured on the reference machine: 0.31s against 2.75s completed, ratio 0.11,
+# i.e. ~4.5x inside the 0.5 threshold).
+#
+# Sizing, the inverse of the test above: 20 qubits (`2^20` amplitudes = 16 MiB,
+# so `Statevector::new`'s allocation is noise) with 1580 gates, which puts *all*
+# the ~2.8s single-threaded run time in the gate loop — the one place a hook can
+# live. `_SINGLE_THREADED_ENV` keeps that duration core-count independent, as for
+# the run_quantum_circuit children; 20 qubits is above polypus-sim's
+# `parallel_threshold`, so without it the run time would vary with the runner's
+# core count. Building the circuit is free by comparison (<1ms measured), which
+# is what makes the elapsed comparison a statement about simulation alone.
+_SV_MID_RUN_N = 20
+_SV_MID_RUN_REPS = 40
+_SV_MID_RUN_DELAY_BEFORE_SIGINT_S = 0.3
+_SV_MID_RUN_MAX_FRACTION = 0.5
+
+_SV_MID_RUN_CHILD = (
+    r"""
+import sys, time
+import polypus
+"""
+    + _MAKE_CIRCUIT_SRC
+    + r"""
+qc = make(__N__, __REPS__)
+
+# Time a full run of this very circuit: it is both the warm-up (paying the lazy
+# import cost outside the timed window) and the baseline the parent compares the
+# interrupted run against.
+t0 = time.time()
+polypus.statevector(qc)
+completed = time.time() - t0
+
+print(f"READY {completed:.3f}", flush=True)
+start = time.time()
+try:
+    polypus.statevector(qc)
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a ValueError from a downgraded cancellation
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+""".replace("__N__", str(_SV_MID_RUN_N)).replace("__REPS__", str(_SV_MID_RUN_REPS))
+)
+
+
+def test_statevector_responds_to_sigint_mid_simulation():
+    elapsed, ready_fields = _assert_responds_to_sigint_promptly(
+        _SV_MID_RUN_CHILD,
+        failure_hint=(
+            "statevector — the simulation was not interrupted mid-run (the "
+            "cancellation hook passed to polypus-sim's gate loop is likely "
+            "missing, never polled, or its check_signals() never reacquires "
+            "the GIL)"
+        ),
+        env=_SINGLE_THREADED_ENV,
+        delay=_SV_MID_RUN_DELAY_BEFORE_SIGINT_S,
+    )
+    completed = float(ready_fields[0])
+    assert elapsed < completed * _SV_MID_RUN_MAX_FRACTION, (
+        f"the KeyboardInterrupt was raised after {elapsed:.2f}s, but a full run "
+        f"of the same circuit takes {completed:.2f}s — the interrupt was honored "
+        f"when the simulation *finished*, not mid-run: the gate loop's "
+        f"cancellation hook is not stopping it"
     )
