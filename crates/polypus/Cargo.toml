@@ -33,7 +33,17 @@ polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-logger = { workspace = true }
-pyo3 = { version = "0.24.2", features = ["num-complex"] }
+# Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
+# are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).
+# The bump needs no source changes and clears neither of the pyo3 advisories
+# ignored in `deny.toml`; those still want >=0.26 / >=0.29.
+pyo3 = { version = "0.25", features = ["num-complex"] }
+# Zero-copy handover of the `2^n` statevector amplitudes to Python as a
+# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`). Must
+# stay >= 0.25: rust-numpy 0.24.0 still carries the deprecated
+# `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc ICE on current
+# stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
+numpy = "0.25"
 rand = "0.8"
 ndarray = "0.16"
 serde = { version = "1.0", features = ["derive"] }

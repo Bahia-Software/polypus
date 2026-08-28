@@ -150,7 +150,7 @@ impl EvaluationOracle for QmlOracle {
         match self.try_evaluate(candidates) {
             Ok(values) => values,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; candidates.len()]
             }
         }
@@ -163,9 +163,9 @@ impl QmlOracle {
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
         let rt = crate::utils::tokio_runtime().map_err(|e| {
-            EvaluationError::Python(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            EvaluationError::Runtime(format!(
                 "failed to start the Tokio runtime for QML evaluation: {e}"
-            )))
+            ))
         })?;
 
         // At most `candidate_concurrency_limit()` candidates are in flight at
@@ -213,13 +213,13 @@ impl QmlOracle {
                             for h in handles {
                                 // A `JoinError` means the worker task itself
                                 // panicked; turn it into a typed error rather
-                                // than re-panicking.
+                                // than re-panicking. It is a Rust-side runtime
+                                // failure, not a raised Python exception, hence
+                                // `Runtime` and not `Python` (issue #81).
                                 let single = h.await.map_err(|e| {
-                                    EvaluationError::Python(
-                                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                                            "QML evaluation task failed: {e}"
-                                        )),
-                                    )
+                                    EvaluationError::Runtime(format!(
+                                        "QML evaluation task failed: {e}"
+                                    ))
                                 })?;
                                 joined.push(single?);
                             }

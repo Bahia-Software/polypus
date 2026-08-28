@@ -84,9 +84,13 @@ impl QuantumBackend for CunqaBackend {
                     log::error!("CUNQA circuit execution failed: {e}");
                     BackendError::Seam(e)
                 })?;
-            result
-                .extract::<Vec<HashMap<String, u64>>>()
-                .map_err(BackendError::Seam)
+            // `run_qcs` returned successfully; a wrong-shaped value is a
+            // Rust-side conversion failure, not a seam exception (contract C-1).
+            result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
+                BackendError::Conversion(format!(
+                    "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
+                ))
+            })
         })
     }
 
