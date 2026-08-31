@@ -44,13 +44,11 @@ pyo3 = { version = "0.25", features = ["num-complex"] }
 # `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc ICE on current
 # stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
 numpy = "0.25"
-rand = "0.8"
-ndarray = "0.16"
-serde = { version = "1.0", features = ["derive"] }
+rand = { workspace = true }
 serde_json = "1.0"
 log = { workspace = true }
 uuid = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 # --- optional, only compiled with `--features qmio` ---
 # Pure-Rust ZeroMQ (ZMTP 3.x, interoperable with pyzmq/libzmq); avoids a C
 # `libzmq` build dependency at the cost of an async (tokio) API.

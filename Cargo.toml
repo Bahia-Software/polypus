@@ -47,3 +47,5 @@ polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
 log                = "0.4"
 # UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
 uuid               = { version = "1", features = ["v4"] }
+# RNG shared by `polypus` and `polypus-optimizers`; keep default features.
+rand               = "0.8"
