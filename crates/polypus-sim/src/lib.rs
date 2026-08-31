@@ -37,6 +37,21 @@
 //! above [`MAX_QUBITS`] return [`SimError::TooManyQubits`] instead of
 //! attempting a doomed allocation. Gate kernels are applied in place (no
 //! per-gate allocation), with a diagonal fast path and optional parallelism.
+//!
+//! ## Cancellation
+//!
+//! That ceiling bounds *memory*, not time: a run costs gates × `2^n` and
+//! nothing bounds the gate count, so a circuit far below the ceiling can still
+//! run for minutes. [`Simulator::run_cancellable`] therefore takes an optional
+//! `FnMut() -> bool` that the gate loop polls periodically; returning `true`
+//! abandons the run with [`SimError::Cancelled`]. The hook is deliberately
+//! opaque — this crate never learns *why* the caller wants to stop, which is
+//! what lets a signal-driven caller (`polypus`'s `statevector` checks for a
+//! pending Ctrl+C in it) stay on the far side of the Python boundary. Calls are
+//! throttled on a wall-clock cadence — never per gate, so the frequency does not
+//! depend on how expensive a single gate is, and a fast circuit pays nothing —
+//! and the cadence adapts to the hook's own measured cost, so even a hook that
+//! turns out to take milliseconds cannot eat the run.
 
 #![deny(clippy::all)]
 

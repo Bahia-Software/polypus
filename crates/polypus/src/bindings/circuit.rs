@@ -6,7 +6,7 @@
 
 use numpy::{IntoPyArray, PyArray1};
 use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
-use polypus_sim::{Simulator, StatevectorSimulator};
+use polypus_sim::{SimError, Simulator, StatevectorSimulator};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -122,6 +122,18 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// conversion of the result hold the GIL — so other Python threads keep making
 /// progress while it runs (see `docs/ENGINEERING.md` §3).
 ///
+/// **Interruptible.** A `KeyboardInterrupt` takes effect *mid-simulation*
+/// (issue #110): the gate loop calls back into this function at checkpoints at
+/// least ~25ms apart, each of which reacquires the GIL just long enough to
+/// check for a pending signal — and, if one is pending, abandons the run and
+/// raises that original exception verbatim. The throttling lives inside
+/// `polypus-sim` and is what keeps this cheap: a circuit that finishes inside
+/// one interval never calls back at all, the frequency does not depend on how
+/// expensive an individual gate is, and the interval stretches to keep the
+/// callback under ~5% of the run (which matters when another Python thread
+/// holds the GIL and reacquiring it costs milliseconds). What is *not*
+/// interruptible is the `2^n` allocation below, which is a single `vec![]`.
+///
 /// **Qubit ceiling.** A dense statevector needs `2^n` complex amplitudes
 /// (`16 · 2^n` bytes), so the backend refuses circuits with more than
 /// [`polypus_sim::MAX_QUBITS`] qubits (30 ≈ 16 GiB) and raises a `ValueError`
@@ -130,7 +142,10 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// `Circuit::new`): the ceiling belongs to this backend, not to the IR. Note
 /// that what a call near the ceiling spends its time on is *allocating* that
 /// buffer, not handing it to Python: even a gateless 30-qubit circuit costs ~5s
-/// (measured), essentially all of it `Statevector::new`'s 16 GiB `vec![]`.
+/// (measured), essentially all of it `Statevector::new`'s 16 GiB `vec![]`. The
+/// ceiling bounds memory, not wall-clock time — cost scales with gates × `2^n`
+/// and nothing bounds the gate count, which is why the run has to stay
+/// interruptible (see above) rather than relying on being short.
 ///
 /// ```python
 /// import polypus
@@ -149,17 +164,60 @@ pub fn statevector<'py>(
     // The simulation is the expensive, pure-Rust part: release the GIL for it
     // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
     //
-    // There is still no *mid-run* check: `polypus-sim` has no per-gate hook to
-    // call back into, and adding one would mean signal checks inside that
-    // crate, which must stay Python-free (§2). But the GIL is reacquired here
-    // the moment `run` returns, before the amplitudes are handed to NumPy — so a
-    // Ctrl+C that arrived at any point up to now is honored *before* paying for
-    // that conversion, instead of only once it completes and control returns to
-    // the caller's bytecode.
-    let sv = qc
-        .py()
-        .allow_threads(|| StatevectorSimulator::new().run(&concrete))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Cancellation hook: `polypus-sim`'s gate loop calls this closure
+    // periodically (throttled on its side to ≥25ms apart *and* to a small
+    // fraction of the run, so the frequency is decoupled from gate cost and a
+    // fast circuit never pays for it). Reacquiring the GIL from inside
+    // `allow_threads` is safe and re-entrant — the same `Python::with_gil`
+    // guarantee `cunqa.rs` relies on to acquire the GIL from a `Drop` (§9) —
+    // and `check_signals()` here is what turns a pending SIGINT into a
+    // `KeyboardInterrupt` *mid-run*, since releasing the GIL does not by itself
+    // process signals (§3).
+    //
+    // The `PyErr` cannot travel back through `SimError` (`polypus-sim` is
+    // Python-free by design, §2), so it is stashed here and recovered below —
+    // the same problem `OracleErrorSlot` solves for the optimizer oracles, and
+    // the same reason: a generic trait boundary must not downgrade the real
+    // exception. No `Arc<Mutex<...>>` is needed, though: `statevector` is
+    // single-shot, and the hook runs on this very thread (the simulation is
+    // inline in `allow_threads`, not on a worker), so a `&mut` local is enough.
+    // That is also why `check_signals()` is effective at all: it is a no-op off
+    // the main thread, and this closure runs on whichever thread called us.
+    let mut pending: Option<PyErr> = None;
+    let outcome = qc.py().allow_threads(|| {
+        let mut cancelled = || {
+            Python::with_gil(|py| match py.check_signals() {
+                Ok(()) => false,
+                Err(err) => {
+                    pending = Some(err);
+                    true
+                }
+            })
+        };
+        StatevectorSimulator::new().run_cancellable(&concrete, Some(&mut cancelled))
+    });
+    let sv = match outcome {
+        Ok(sv) => sv,
+        // Propagate the *real* pending exception verbatim. Mapping this through
+        // `PyValueError::new_err(e.to_string())` like the variants below would
+        // silently downgrade a `KeyboardInterrupt` into a bogus `ValueError`
+        // (and `check_signals()` cannot be re-run to recover it: raising it
+        // cleared the pending flag).
+        Err(SimError::Cancelled) => {
+            return match pending {
+                Some(err) => Err(err),
+                // Unreachable today — the only hook installed above records a
+                // `PyErr` before it returns `true`. Handled rather than
+                // `unwrap()`ed (§9) so a future cancellation source still
+                // surfaces a typed error instead of a `PanicException`.
+                None => Err(PyValueError::new_err(SimError::Cancelled.to_string())),
+            };
+        }
+        Err(e) => return Err(PyValueError::new_err(e.to_string())),
+    };
+    // A signal that arrived after the last checkpoint (or during the `2^n`
+    // allocation, which has no checkpoint) is still honored here, the moment
+    // the GIL is reacquired and before the amplitudes are handed to NumPy.
     qc.py().check_signals()?;
     // `into_amplitudes` (not `amplitudes().to_vec()`) so the `2^n`-element
     // buffer moves into the array instead of being copied: `sv` is owned here
