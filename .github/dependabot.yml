@@ -8,3 +8,14 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One combined PR per weekly cycle instead of one PR per action.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    ignore:
+      # This action's tag is the Rust toolchain it installs — our MSRV pin
+      # from the workspace Cargo.toml — not a version of the action itself.
+      # "Updating" it would make the msrv CI job check a modern Rust instead
+      # of the declared minimum. Bump it manually together with rust-version.
+      - dependency-name: "dtolnay/rust-toolchain"

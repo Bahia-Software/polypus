@@ -112,14 +112,21 @@ fn infrastructure_from_str_unknown_is_typed_error() {
 // the qmio backend's tests.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Build `AlgorithmArgs` for a native Bell circuit on the pure-Rust backend.
-fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
+/// A native Bell `BoundCircuit`, for assembling `AlgorithmArgs` with any number
+/// of circuits.
+fn native_bell_circuit() -> BoundCircuit {
     let bell = ParameterizedCircuit::new(2)
         .h(0)
         .cx(0, 1)
         .measure_all()
         .assign_parameters(&[])
         .expect("bell circuit has no free parameters");
+    BoundCircuit::Native(bell)
+}
+
+/// Build `AlgorithmArgs` on the pure-Rust backend with an explicit circuit list
+/// (so the degenerate `qcs` lengths can be exercised).
+fn native_args(shots: u32, n_qpus: u32, id: &str, qcs: Vec<BoundCircuit>) -> AlgorithmArgs {
     AlgorithmArgs {
         config: ExecutionConfig {
             id: id.to_string(),
@@ -132,8 +139,13 @@ fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
             // seed keeps the native backend's sampling deterministic across runs.
             seed: Some(7),
         },
-        qcs: vec![BoundCircuit::Native(bell)],
+        qcs,
     }
+}
+
+/// Build `AlgorithmArgs` for a single native Bell circuit on the pure-Rust backend.
+fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
+    native_args(shots, n_qpus, id, vec![native_bell_circuit()])
 }
 
 /// Run the distribute-by-shots algorithm and return the merged counts.
@@ -147,6 +159,43 @@ fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64>
             .extract::<HashMap<String, u64>>(py)
             .expect("distribute-by-shots must return a dict[str, int]")
     })
+}
+
+#[test]
+fn distribute_rejects_empty_qcs() {
+    // Defect #1: an empty `qcs` used to panic on `args.qcs[0]`. It must now be a
+    // typed error (ValueError across the FFI, contract C-1), never a panic.
+    pyo3::prepare_freethreaded_python();
+    let err = DistributeByShotsRun
+        .run(native_args(100, 2, "empty", vec![]))
+        .expect_err("empty qcs must be a typed error, not a panic");
+    Python::with_gil(|py| {
+        assert!(
+            err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+            "empty qcs must surface as a ValueError"
+        );
+    });
+}
+
+#[test]
+fn distribute_rejects_multiple_qcs() {
+    // Defect #2: extra circuits used to be silently ignored (only `qcs[0]` ran).
+    // More than one circuit must now be an explicit typed error.
+    pyo3::prepare_freethreaded_python();
+    let err = DistributeByShotsRun
+        .run(native_args(
+            100,
+            2,
+            "multi",
+            vec![native_bell_circuit(), native_bell_circuit()],
+        ))
+        .expect_err("more than one circuit must be a typed error, not silently truncated");
+    Python::with_gil(|py| {
+        assert!(
+            err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+            "extra circuits must surface as a ValueError"
+        );
+    });
 }
 
 #[test]

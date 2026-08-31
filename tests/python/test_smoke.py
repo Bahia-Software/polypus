@@ -103,6 +103,43 @@ class TestPolypusInstantiation:
         assert qng.learning_rate == pytest.approx(0.01)
 
 
+class TestPolypusModuleMetadata:
+    """
+    The extension's classes and its `qml` submodule must report `polypus` as
+    their module, so `repr()`, tracebacks, `help()` and pickling name them as
+    `polypus.X` rather than `builtins.X`.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        ["DE", "PSO", "QNG", "Circuit", "Param", "RunResult", "TrainResult"],
+    )
+    def test_class_module_is_polypus(self, name):
+        import polypus
+
+        assert getattr(polypus, name).__module__ == "polypus"
+
+    def test_repr_is_qualified_by_module(self):
+        import polypus
+
+        assert "polypus.DE" in repr(polypus.DE())
+
+    def test_qml_submodule_name_is_qualified(self):
+        import polypus
+
+        assert polypus.qml.__name__ == "polypus.qml"
+
+    def test_qml_train_reachable_as_attribute(self):
+        import polypus
+
+        assert callable(polypus.qml.train)
+
+    def test_qml_submodule_is_importable(self):
+        import polypus.qml
+
+        assert callable(polypus.qml.train)
+
+
 # ---------------------------------------------------------------------------
 # polypus_python (pure Python wrapper)
 # ---------------------------------------------------------------------------

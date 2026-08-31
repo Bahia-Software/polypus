@@ -186,14 +186,11 @@ fn c4_importer_rejects_gate_after_measure_with_line() {
 #[test]
 fn c4_qir_exporter_rejects_gate_after_measure() {
     // Hand-assembled (bypasses the builder's own check) to reach the exporter.
-    let qc = ParameterizedCircuit {
-        num_qubits: 1,
-        num_params: 0,
-        gates: vec![
-            GateInstruction::Measure { qubit: 0, cbit: 0 },
-            GateInstruction::X(0),
-        ],
-    };
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.gates = vec![
+        GateInstruction::Measure { qubit: 0, cbit: 0 },
+        GateInstruction::X(0),
+    ];
     let err = qc.to_qir_with_params(&[]).unwrap_err();
     assert_eq!(err, CircuitError::QubitAlreadyMeasured { qubit: 0 });
 }
