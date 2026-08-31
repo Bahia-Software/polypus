@@ -145,7 +145,6 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
     thread_id = false,
     module_path = false,
 ))]
-#[allow(clippy::too_many_arguments)]
 pub fn init_logger(
     py: Python<'_>,
     level: &str,
