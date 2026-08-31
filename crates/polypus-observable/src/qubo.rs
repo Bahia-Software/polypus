@@ -136,12 +136,12 @@ impl QuboObservable {
         }
         let mut linear = Vec::new();
         let mut quadratic = Vec::new();
-        for i in 0..n {
-            if matrix[i][i] != 0.0 {
-                linear.push((i, matrix[i][i]));
+        for (i, row_i) in matrix.iter().enumerate() {
+            if row_i[i] != 0.0 {
+                linear.push((i, row_i[i]));
             }
-            for j in (i + 1)..n {
-                let w = matrix[i][j] + matrix[j][i];
+            for (j, row_j) in matrix.iter().enumerate().skip(i + 1) {
+                let w = row_i[j] + row_j[i];
                 if w != 0.0 {
                     quadratic.push((i, j, w));
                 }
