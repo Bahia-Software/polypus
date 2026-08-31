@@ -100,6 +100,7 @@ fn de_converges_to_known_optimum() {
             generations: 300,
             dimensions: 3,
             tolerance: 1e-9,
+            patience: 20,
             seed: Some(42),
         })
         .expect("valid DE args optimize successfully");
@@ -184,6 +185,7 @@ fn de_is_deterministic_for_a_fixed_seed() {
                 generations: 50,
                 dimensions: 4,
                 tolerance: 1e-9,
+                patience: 20,
                 seed: Some(123),
             })
             .expect("valid DE args optimize successfully")
@@ -218,9 +220,15 @@ fn pso_is_deterministic_for_a_fixed_seed() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn de_early_stops_and_reports_it() {
-    // A loose tolerance makes the per-dimension `std_i < tolerance` test fire
-    // before the generation budget is exhausted.
+fn de_early_stops_on_fitness_stagnation() {
+    // DE now stops on *fitness stagnation*: the best fitness improving by less
+    // than `tolerance` over the last `patience` generations. On the concave
+    // Quadratic the best fitness climbs fast, then plateaus near the optimum
+    // (fitness → 0), so with a modest tolerance the stagnation test fires well
+    // before the 500-generation budget — but never before generation `patience`,
+    // which alone guarantees the run does more than the ~5 generations the old
+    // population-std collapse test would stop after.
+    let patience = 20u32;
     let make = || {
         AlgorithmDifferentialEvolution
             .optimize(AlgorithmDifferentialEvolutionArgs {
@@ -228,20 +236,62 @@ fn de_early_stops_and_reports_it() {
                 population_size: 30,
                 generations: 500,
                 dimensions: 3,
-                tolerance: 0.5,
+                tolerance: 1e-3,
+                patience,
                 seed: Some(7),
             })
             .expect("valid DE args optimize successfully")
     };
     let outcome = make();
-    assert!(outcome.converged, "expected early convergence");
+    assert!(
+        outcome.converged,
+        "expected early convergence by stagnation"
+    );
+    // Earliest possible stop is generation `patience` (iterations_run ==
+    // patience + 1), so the run always exceeds the ~5 generations the old std
+    // criterion produced — and it still stops before exhausting the budget.
+    assert!(
+        outcome.iterations_run > patience as usize,
+        "iterations_run = {} should exceed patience = {patience}",
+        outcome.iterations_run
+    );
     assert!(
         outcome.iterations_run < 500,
         "iterations_run = {}",
         outcome.iterations_run
     );
-    // The recorded iteration count is identical across runs with the same seed.
-    assert_eq!(outcome.iterations_run, make().iterations_run);
+    // fitness_history has one entry per executed generation and its last value
+    // equals the reported best_fitness.
+    assert_eq!(outcome.fitness_history.len(), outcome.iterations_run);
+    assert_eq!(
+        *outcome.fitness_history.last().unwrap(),
+        outcome.best_fitness
+    );
+    // The recorded iteration count (and the whole outcome) is identical across
+    // runs with the same seed.
+    assert_eq!(outcome, make());
+}
+
+#[test]
+fn de_large_patience_never_stops_early() {
+    // A `patience` at least as large as the generation budget can never gather a
+    // full look-back window, so the stagnation test can never fire and DE must
+    // exhaust its budget. This isolates the guarantee that `patience` alone
+    // gates early stopping — even a fully converged, flat run keeps going.
+    let outcome = AlgorithmDifferentialEvolution
+        .optimize(AlgorithmDifferentialEvolutionArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 30,
+            generations: 50,
+            dimensions: 3,
+            tolerance: 1e9, // huge: any improvement is "below" it, yet patience blocks the stop
+            patience: 1_000,
+            seed: Some(7),
+        })
+        .expect("valid DE args optimize successfully");
+    assert!(!outcome.converged, "large patience must prevent early stop");
+    assert_eq!(outcome.iterations_run, 50);
+    assert_eq!(outcome.fitness_history.len(), 50);
 }
 
 #[test]
@@ -296,6 +346,7 @@ fn de_handles_zero_dimensions() {
             generations: 5,
             dimensions: 0,
             tolerance: 1e-9,
+            patience: 20,
             seed: Some(1),
         })
         .expect("valid DE args optimize successfully");
@@ -312,6 +363,7 @@ fn de_handles_minimum_population() {
             generations: 10,
             dimensions: 2,
             tolerance: 1e-9,
+            patience: 20,
             seed: Some(1),
         })
         .expect("valid DE args optimize successfully");
@@ -330,6 +382,7 @@ fn de_rejects_population_below_four() {
             generations: 10,
             dimensions: 2,
             tolerance: 1e-9,
+            patience: 20,
             seed: Some(1),
         });
         assert!(
@@ -351,6 +404,7 @@ fn de_nan_fitness_does_not_panic() {
             generations: 5,
             dimensions: 2,
             tolerance: 1e-9,
+            patience: 20,
             seed: Some(1),
         })
         .expect("valid DE args optimize successfully");
@@ -368,6 +422,7 @@ fn de_short_oracle_returns_error_not_panic() {
         generations: 5,
         dimensions: 2,
         tolerance: 1e-9,
+        patience: 20,
         seed: Some(1),
     });
     assert!(
@@ -567,6 +622,7 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 generations: 120,
                 dimensions: 4,
                 tolerance: 1e-9,
+                patience: 20,
                 seed: Some(seed),
             })
             .expect("valid DE args optimize successfully");
@@ -584,6 +640,7 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 generations: 120,
                 dimensions: 4,
                 tolerance: 1e-9,
+                patience: 20,
                 seed: Some(seed),
             })
             .expect("valid DE args optimize successfully");

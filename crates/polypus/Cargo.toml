@@ -32,6 +32,7 @@ trace-logs = ["polypus-logger/trace-logs"]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
+polypus-observable = { workspace = true }
 polypus-logger = { workspace = true }
 # Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
 # are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).
@@ -45,6 +46,9 @@ pyo3 = { version = "0.25", features = ["num-complex"] }
 # stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
 numpy = "0.25"
 rand = { workspace = true }
+# Parallel aggregation in the Python-callback observable fallback (the native
+# observables' rayon usage lives in polypus-observable).
+rayon = "1"
 serde_json = "1.0"
 log = { workspace = true }
 uuid = { workspace = true }

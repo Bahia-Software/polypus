@@ -1,8 +1,8 @@
 use crate::evaluation::{
-    run_and_evaluate, CircuitSource, EvaluationError, EvaluationOracle, OracleErrorSlot,
+    run_and_evaluate, CircuitSource, CostObservable, EvaluationError, EvaluationOracle,
+    OracleErrorSlot,
 };
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
-use pyo3::prelude::*;
 use std::sync::Arc;
 
 /// Oracle for standard VQC training.
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Holds a single parameterised circuit template ([`CircuitSource`]). For each
 /// candidate parameter vector `θ`, it binds `θ` to the template, runs the
 /// resulting circuit through the backend, and returns the expectation value
-/// computed by `expectation_fn`.
+/// computed by `observable`.
 ///
 /// With a [`CircuitSource::Native`] template the per-candidate binding is pure
 /// Rust (no GIL); with [`CircuitSource::Qiskit`] it calls Python's
@@ -24,7 +24,7 @@ pub struct VqcOracle {
     pub circuit: CircuitSource,
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
-    pub expectation_fn: Py<PyAny>,
+    pub observable: Arc<dyn CostObservable>,
     /// Shared with the `train` entry point: the first evaluation failure is
     /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
     /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
@@ -70,7 +70,7 @@ impl VqcOracle {
                 self.backend.as_ref(),
                 chunk,
                 &self.config,
-                &self.expectation_fn,
+                self.observable.as_ref(),
             )?;
             results.extend(ev);
         }
@@ -98,10 +98,24 @@ mod tests {
     use super::*;
     use crate::infrastructure::{BackendConfig, BackendError, OptLevel};
     use polypus_circuit::{GateParam, ParameterizedCircuit};
-    use pyo3::types::PyModule;
+    use polypus_observable::ObservableError;
     use std::collections::HashMap;
-    use std::ffi::CString;
     use std::sync::Mutex;
+
+    /// Native test double for the reduction step, replacing the former Python
+    /// `expectation_values` seam: it returns the synthetic count the mock backend
+    /// encodes under key "1" as the expectation, so a mis-ordered result vector is
+    /// still detectable without touching Python.
+    struct KeyOneObservable;
+
+    impl CostObservable for KeyOneObservable {
+        fn expectation_batch(
+            &self,
+            counts: &[HashMap<String, u64>],
+        ) -> Result<Vec<f64>, ObservableError> {
+            Ok(counts.iter().map(|c| c["1"] as f64).collect())
+        }
+    }
 
     /// A [`QuantumBackend`] that records the OpenQASM 2.0 text of every circuit
     /// handed to each `run_circuits` call, so a test can assert *how* the oracle
@@ -205,50 +219,18 @@ mod tests {
         (0..5).map(|i| vec![0.1 * (i as f64 + 1.0)]).collect()
     }
 
-    /// Build an oracle over `backend`. `expectation_fn` is `None` — the fake seam
-    /// installed by the success test ignores it, and the failing-backend tests
-    /// never get far enough to call it — but constructing the `Py<PyAny>` still
-    /// needs an initialised interpreter (bare CPython, no packages).
+    /// Build an oracle over `backend`, reducing counts with [`KeyOneObservable`]
+    /// (the native stand-in for the former Python `expectation_values` seam, so
+    /// the tests need no installed package and only a bare interpreter for
+    /// `run_and_evaluate`'s signal check).
     fn oracle(backend: Arc<MockBackend>) -> VqcOracle {
-        let expectation_fn = Python::with_gil(|py| py.None());
         VqcOracle {
             circuit: template(),
             config: config(),
             backend,
-            expectation_fn,
+            observable: Arc::new(KeyOneObservable),
             errors: OracleErrorSlot::new(),
         }
-    }
-
-    /// Register a trivial, Qiskit-free stand-in for the `polypus_python` seam in
-    /// `sys.modules`.
-    ///
-    /// `run_and_evaluate` imports `polypus_python` as soon as a chunk's backend
-    /// call succeeds, but that pip package imports Qiskit at module load and the
-    /// Rust suite runs against a bare interpreter by design (ENGINEERING.md §3).
-    /// Injecting the shim into `sys.modules` makes `PyModule::import` resolve it
-    /// there without ever touching `sys.path`, so no package has to be installed.
-    fn install_fake_seam(py: Python<'_>) -> PyResult<()> {
-        let source = CString::new(
-            "def expectation_values(counts, fn):\n    return [float(c[\"1\"]) for c in counts]\n",
-        )
-        .expect("shim source has no interior NUL");
-        let file_name = CString::new("polypus_python.py").expect("no interior NUL");
-        let module_name = CString::new("polypus_python").expect("no interior NUL");
-        let module = PyModule::from_code(py, &source, &file_name, &module_name)?;
-        py.import("sys")?
-            .getattr("modules")?
-            .set_item("polypus_python", module)
-    }
-
-    /// Remove the shim again so it cannot leak into any other test in this
-    /// binary (nothing else in the Rust suite imports `polypus_python`, but a
-    /// process-global `sys.modules` entry is exactly the kind of cross-test
-    /// coupling that makes execution order matter).
-    fn remove_fake_seam(py: Python<'_>) -> PyResult<()> {
-        py.import("sys")?
-            .getattr("modules")?
-            .del_item("polypus_python")
     }
 
     #[test]
@@ -297,18 +279,15 @@ mod tests {
 
     #[test]
     fn multiple_successful_chunks_preserve_candidate_order() {
+        // `run_and_evaluate` still touches the GIL once for its signal check, so
+        // the interpreter must be initialised even though the reduction is native.
         pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| install_fake_seam(py).expect("the shim installs"));
 
         let backend = Arc::new(MockBackend::new(3, false));
         let oracle = oracle(Arc::clone(&backend));
         let candidates = candidates();
 
         let values = oracle.evaluate_batch(&candidates);
-
-        // Uninstall before asserting so a failed assertion cannot leave the shim
-        // behind for another test in this binary.
-        Python::with_gil(|py| remove_fake_seam(py).expect("the shim uninstalls"));
 
         assert!(
             !oracle.errors.failed(),

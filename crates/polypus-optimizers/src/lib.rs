@@ -56,6 +56,7 @@
 //!         generations: 200,
 //!         dimensions: 2,
 //!         tolerance: 1e-6,
+//!         patience: 20,
 //!         seed: Some(7),
 //!     })
 //!     .expect("valid arguments optimize successfully");

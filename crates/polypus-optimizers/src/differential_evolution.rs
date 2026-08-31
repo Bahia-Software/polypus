@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
+use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
 use ndarray::{Array1, Array2};
 use rand::{seq::SliceRandom, Rng};
 use std::f64::consts::PI;
@@ -27,7 +27,19 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     pub population_size: u32,
     pub generations: u32,
     pub dimensions: u32,
+    /// Minimum cumulative improvement of the **best fitness** over the last
+    /// [`patience`](Self::patience) generations below which the run stops early.
+    ///
+    /// DE maximises (higher fitness is better), so this is a threshold on
+    /// *quality progress* in the oracle's own fitness units — **not** a
+    /// population-spread threshold in parameter units. See
+    /// `crate::util::fitness_stagnated` for the exact test.
     pub tolerance: f64,
+    /// Number of generations over which the best-fitness improvement is measured
+    /// for the stagnation early stop. A stop can never fire before generation
+    /// `patience`, so a larger value makes the optimizer more patient (runs
+    /// longer before giving up). The Python `DE` binding defaults it to 20.
+    pub patience: u32,
     /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
@@ -58,12 +70,14 @@ impl AlgorithmDifferentialEvolution {
             generations,
             dimensions,
             tolerance,
+            patience,
             seed: _,
         } = args;
 
         let popsize = population_size as usize;
         let max_gen = generations as usize;
         let dims = dimensions as usize;
+        let patience = patience as usize;
 
         // Precondition (documented on the struct): sampling 3 distinct other
         // members needs `popsize >= 4`. Reject *before* any RNG draw or oracle
@@ -93,6 +107,9 @@ impl AlgorithmDifferentialEvolution {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        // Best fitness at the end of each generation; drives the fitness-
+        // stagnation early stop and is reported in the outcome.
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
             iterations_run = generation + 1;
@@ -143,7 +160,16 @@ impl AlgorithmDifferentialEvolution {
             best_idx = argmax(&fitness);
             best = pop.row(best_idx).to_vec();
 
-            if population_converged(&pop, tolerance, generation) {
+            // Record this generation's best and stop once the best fitness has
+            // stagnated (improved by < tolerance over the last `patience`
+            // generations). This replaces the former population-std collapse
+            // test, which on QAOA-like landscapes fired within a handful of
+            // generations — long before the fitness had actually plateaued —
+            // and contradicted the C-5 contract's fitness-stagnation prose. The
+            // search dynamics (DE/rand/1, F=0.8, CR=0.7, [0, 2π) init) are
+            // unchanged; only the stopping rule differs.
+            fitness_history.push(fitness[best_idx]);
+            if fitness_stagnated(&fitness_history, tolerance, patience, generation) {
                 converged = true;
                 break;
             }
@@ -154,6 +180,7 @@ impl AlgorithmDifferentialEvolution {
             best_params: best,
             iterations_run,
             converged,
+            fitness_history,
         })
     }
 }

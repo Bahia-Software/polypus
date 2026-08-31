@@ -14,7 +14,7 @@
 #                              the app layer installs it (no PyO3)
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-logger"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -39,6 +39,7 @@ polypus-circuit    = { path = "crates/polypus-circuit", version = "0.6.0" }
 polypus-physics    = { path = "crates/polypus-physics", version = "0.6.0" }
 polypus-sim        = { path = "crates/polypus-sim", version = "0.6.0" }
 polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.6.0" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.6.0" }
 polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
 
 # Shared external dependencies pinned once for the whole workspace.

@@ -9,6 +9,7 @@
 use std::fmt;
 
 use polypus_circuit::CircuitError;
+use polypus_observable::ObservableError;
 use pyo3::PyErr;
 
 use crate::exceptions::EvaluationError as PyEvaluationError;
@@ -31,6 +32,9 @@ pub enum EvaluationError {
     Backend(BackendError),
     /// Native parameter binding failed (wrong count, non-finite value, …).
     Binding(CircuitError),
+    /// Native cost-observable evaluation failed (bad bitstring width/char, or a
+    /// callback observable's error carried in [`ObservableError::External`]).
+    Observable(ObservableError),
     /// A Python callback or conversion on the evaluation path raised. Carried
     /// verbatim so the original exception type is preserved across the FFI.
     Python(PyErr),
@@ -57,6 +61,7 @@ impl fmt::Display for EvaluationError {
         match self {
             EvaluationError::Backend(err) => write!(f, "{err}"),
             EvaluationError::Binding(err) => write!(f, "circuit binding failed: {err}"),
+            EvaluationError::Observable(err) => write!(f, "expectation evaluation failed: {err}"),
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
             EvaluationError::Runtime(m) => write!(f, "QML evaluation runtime error: {m}"),
             EvaluationError::Conversion(m) => {
@@ -82,6 +87,12 @@ impl From<BackendError> for EvaluationError {
     }
 }
 
+impl From<ObservableError> for EvaluationError {
+    fn from(err: ObservableError) -> Self {
+        EvaluationError::Observable(err)
+    }
+}
+
 impl From<EvaluationError> for PyErr {
     fn from(err: EvaluationError) -> PyErr {
         match err {
@@ -89,6 +100,17 @@ impl From<EvaluationError> for PyErr {
             EvaluationError::Binding(circuit_err) => {
                 PyEvaluationError::new_err(circuit_err.to_string())
             }
+            EvaluationError::Observable(obs_err) => match obs_err {
+                // A callback observable boxes its `PyErr` here; recover it so the
+                // original Python exception type re-raises verbatim across the FFI.
+                ObservableError::External(boxed) => match boxed.downcast::<PyErr>() {
+                    Ok(py_err) => *py_err,
+                    Err(other) => PyEvaluationError::new_err(other.to_string()),
+                },
+                // Native evaluation failures (bad bitstring, invalid construction)
+                // map to the typed evaluation exception.
+                other => PyEvaluationError::new_err(other.to_string()),
+            },
             // Preserve the original Python exception type raised by the callback.
             EvaluationError::Python(py_err) => py_err,
             // A Rust-side infrastructure failure: surface as the typed

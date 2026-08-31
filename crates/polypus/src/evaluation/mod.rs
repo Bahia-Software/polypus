@@ -1,15 +1,21 @@
 pub mod error;
+pub mod py_callback_observable;
 pub mod qml_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
+pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::QmlOracle;
 pub use vqc_oracle::VqcOracle;
+
+/// Re-export the native cost-observable seam so `crate::evaluation::CostObservable`
+/// resolves alongside the oracles that consume it.
+pub use polypus_observable::CostObservable;
 
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::ParameterizedCircuit;
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyModule};
+use pyo3::types::IntoPyDict;
 use std::sync::{Arc, Mutex};
 
 /// Thread-safe holder for the first error an oracle hits during `optimize`.
@@ -162,79 +168,64 @@ pub(crate) fn assign_parameters_qiskit(
 /// native gates, …) implement this trait without touching any algorithm.
 pub use polypus_optimizers::EvaluationOracle;
 
-/// Execute a batch of bound circuits through `backend` and extract expectation
-/// values using the Python `expectation_fn`.
+/// Execute a batch of bound circuits through `backend` and reduce the resulting
+/// counts to expectation values via `observable`.
 ///
-/// This is the **single place** in the codebase that calls
-/// `polypus_python.expectation_values`, eliminating the duplication that
-/// previously existed across DE, PSO, QNG, and the orchestration layer.
+/// This is the **single place** in the codebase that turns measurement counts
+/// into fitness values, shared by [`VqcOracle`] and [`QmlOracle`]. The
+/// expectation is computed natively (rayon, no GIL) for the declarative
+/// observables, or via a single deduplicated GIL section for the Python-callback
+/// fallback — replacing the former per-bitstring `polypus_python.expectation_values`
+/// round-trip (which also required serialising the counts into a `list[dict]`).
 ///
-/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped;
-/// a raised Python exception (import, a pending `KeyboardInterrupt`, or one
-/// thrown by `expectation_values` / the user callback) is carried verbatim; and
-/// a data-conversion failure across the Rust↔Python boundary — the native
-/// backend results failing to convert into a Python `list[dict]`, or a
-/// wrong-shaped `expectation_values` return value, neither of which is a raised
-/// exception — becomes [`EvaluationError::Conversion`]. Never a panic.
+/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped; a
+/// native-evaluation error (bad bitstring width/char, invalid construction) maps
+/// to a typed exception via [`EvaluationError::Observable`]; and a Python
+/// callback error is carried verbatim (the callback observable boxes its `PyErr`
+/// in [`ObservableError::External`], recovered on the way out). The resulting
+/// batch is finally checked against contract C-5 — exactly one finite `f64` per
+/// submitted circuit — surfacing [`EvaluationError::WrongLength`] or
+/// [`EvaluationError::NonFinite`] instead of letting a short or non-finite
+/// result poison the pure-Rust optimizer. Never a panic.
 pub(crate) fn run_and_evaluate(
     backend: &dyn QuantumBackend,
     qcs: &[BoundCircuit],
     config: &ExecutionConfig,
-    expectation_fn: &Py<PyAny>,
+    observable: &dyn CostObservable,
 ) -> Result<Vec<f64>, EvaluationError> {
     let counts = backend.run_circuits(qcs, config)?;
-    Python::with_gil(|py| {
-        // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
-        // per-batch boundary. The optimizer entry points release the GIL around
-        // `optimize()`, which lets other Python threads run but does NOT by
-        // itself process signals: CPython only acts on a pending signal while
-        // the main thread runs Python bytecode or when `PyErr_CheckSignals` is
-        // called explicitly. This is that explicit call, so a long native-backend
-        // run stays interruptible instead of ignoring Ctrl+C until it finishes
-        // (see docs/ENGINEERING.md §3). The KeyboardInterrupt is carried verbatim
-        // via `EvaluationError::Python` and re-raised as itself by the entry point.
-        py.check_signals().map_err(EvaluationError::Python)?;
-        // Convert the native counts back into a Python `list[dict]` for the
-        // Python `expectation_values` function. Once expectation computation is
-        // also native this round-trip disappears entirely. `counts` is our own
-        // Rust-native value, so a failure here is a Rust-side conversion problem
-        // (realistically allocation failure), not a raised Python exception.
-        let py_counts = counts.into_pyobject(py).map_err(|e| {
-            EvaluationError::Conversion(format!(
-                "failed to convert the native backend results into a Python list[dict]: {e}"
-            ))
-        })?;
-        let values = PyModule::import(py, "polypus_python")
-            .map_err(EvaluationError::Python)?
-            .call_method("expectation_values", (py_counts, expectation_fn), None)
-            .map_err(EvaluationError::Python)?
-            // `expectation_values` returned successfully; a wrong-shaped value
-            // is a Rust-side conversion failure, not a raised Python exception.
-            .extract::<Vec<f64>>()
-            .map_err(|e| {
-                EvaluationError::Conversion(format!(
-                    "expected expectation_values() to return list[float]: {e}"
-                ))
-            })?;
+    // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
+    // per-batch boundary. The optimizer entry points release the GIL around
+    // `optimize()`, which lets other Python threads run but does NOT by itself
+    // process signals: CPython only acts on a pending signal while the main
+    // thread runs Python bytecode or when `PyErr_CheckSignals` is called
+    // explicitly. This is that explicit call, so a long native-backend run stays
+    // interruptible (see docs/ENGINEERING.md §3). It is the *only* GIL touch on
+    // the native path; the aggregation below runs GIL-free (the callback
+    // observable re-acquires the GIL internally for one deduplicated section).
+    Python::with_gil(|py| py.check_signals()).map_err(EvaluationError::Python)?;
+    let values = observable
+        .expectation_batch(&counts)
+        .map_err(EvaluationError::from)?;
 
-        // Contract C-5: the Python-backed oracle must return exactly one finite
-        // f64 per submitted circuit. This is the single choke point that calls
-        // `polypus_python.expectation_values`, so validating here protects every
-        // oracle: a short list would otherwise index out of bounds inside the
-        // pure-Rust optimizer (an uncatchable `PanicException` across the FFI),
-        // and a NaN/inf would silently poison the optimizer and yield a bogus
-        // result with no error at all.
-        if values.len() != qcs.len() {
-            return Err(EvaluationError::WrongLength {
-                expected: qcs.len(),
-                got: values.len(),
-            });
-        }
-        if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(EvaluationError::NonFinite { index, value });
-        }
-        Ok(values)
-    })
+    // Contract C-5: the oracle must return exactly one finite f64 per submitted
+    // circuit. This is the single choke point that reduces counts to fitness, so
+    // validating here protects every oracle: a short batch would otherwise index
+    // out of bounds inside the pure-Rust optimizer (an uncatchable
+    // `PanicException` across the FFI), and a NaN/inf would silently poison the
+    // optimizer and yield a bogus result with no error at all. The native
+    // observables guarantee this structurally; the Python-callback fallback does
+    // not (a user cost function may return a non-finite value).
+    if values.len() != qcs.len() {
+        return Err(EvaluationError::WrongLength {
+            expected: qcs.len(),
+            got: values.len(),
+        });
+    }
+    if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EvaluationError::NonFinite { index, value });
+    }
+    Ok(values)
 }
 
 #[cfg(test)]
