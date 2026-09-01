@@ -971,6 +971,32 @@ fn qng_rejects_empty_bounds() {
 }
 
 #[test]
+fn qng_rejects_zero_max_iters() {
+    // Precondition: max_iters >= 1. QNG is single-point with no pre-loop
+    // evaluation, so a zero-iteration run never calls the oracle; it would
+    // otherwise return the unevaluated random initial θ paired with the -inf
+    // sentinel best_fitness, violating the C-5 postcondition. Must be a typed
+    // error surfaced before any RNG draw or oracle call.
+    let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
+        oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+        max_iters: 0,
+        learning_rate: 0.1,
+        bounds: (0.0, 2.0),
+        dimensions: 2,
+        tolerance: 0.0,
+        patience: 3,
+        variance_oracle: Box::new(ConstVariance(1.0)),
+        tikhonov_reg: 0.05,
+        seed: Some(1),
+    });
+    assert!(
+        matches!(result, Err(OptimizerError::ZeroMaxIters)),
+        "zero QNG max_iters should be rejected, got {result:?}"
+    );
+}
+
+#[test]
 fn adam_short_gradient_oracle_returns_error_not_panic() {
     // Adam assembles its update from `gradient_oracle.gradient_batch(θ, dims)`
     // and indexes it positionally per parameter, exactly like QNG. A gradient
@@ -1025,6 +1051,33 @@ fn adam_rejects_empty_bounds() {
     assert!(
         matches!(result, Err(OptimizerError::InvalidBounds { .. })),
         "empty Adam bounds should be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn adam_rejects_zero_max_iters() {
+    // Precondition: max_iters >= 1. Adam is single-point with no pre-loop
+    // evaluation, so a zero-iteration run never calls the oracle; it would
+    // otherwise return the unevaluated random initial θ paired with the -inf
+    // sentinel best_fitness, violating the C-5 postcondition. Must be a typed
+    // error surfaced before any RNG draw or oracle call.
+    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
+        oracle: Box::new(Quadratic { target: 1.0 }),
+        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+        max_iters: 0,
+        learning_rate: 0.05,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 1e-8,
+        bounds: (0.0, 2.0),
+        dimensions: 2,
+        tolerance: 0.0,
+        patience: 3,
+        seed: Some(1),
+    });
+    assert!(
+        matches!(result, Err(OptimizerError::ZeroMaxIters)),
+        "zero Adam max_iters should be rejected, got {result:?}"
     );
 }
 

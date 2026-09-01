@@ -24,7 +24,9 @@ pub struct AlgorithmQNG;
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); the initial `θ` is drawn
-/// uniformly from it.
+/// uniformly from it. `max_iters >= 1`: QNG is single-point with no pre-loop
+/// evaluation, so a zero-iteration run never calls the oracle and cannot report
+/// a real `best_fitness` (C-5).
 pub struct AlgorithmQNGArgs {
     /// Oracle that maps parameter vectors → fitness values (used for tracking
     /// the best solution across iterations).
@@ -135,6 +137,16 @@ impl AlgorithmQNG {
 
         let dims = dimensions as usize;
         let (lb, ub) = bounds;
+        // Reject before any RNG draw or oracle call. `max_iters == 0` never
+        // enters the loop below, so it would return the unevaluated random
+        // initial θ with the `-inf` sentinel best_fitness — a C-5 postcondition
+        // violation (best_fitness must be the oracle's value for best_params).
+        // QNG is single-point: unlike DE/PSO it has no initial-population
+        // evaluation to fall back on, so zero iterations cannot yield a real
+        // best_fitness and must be rejected.
+        if max_iters == 0 {
+            return Err(OptimizerError::ZeroMaxIters);
+        }
         // θ is drawn from the half-open interval [lb, ub), which is empty when
         // `lb >= ub` and panics inside the sampler. Reject before any RNG draw
         // or oracle call, as PSO does; requiring `partial_cmp` to be

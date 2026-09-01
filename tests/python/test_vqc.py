@@ -359,3 +359,51 @@ class TestTrainInvalidConfig:
                 cores_per_qpu=_CORES_PER_QPU,
                 id="test_pso_bad_bounds",
             )
+
+    def test_adam_zero_max_iters_raises_value_error(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        # Adam is single-point with no pre-loop evaluation, so max_iters=0 never
+        # calls the oracle and cannot report a real best_fitness (C-5). The Rust
+        # optimizer rejects it with a typed OptimizerError that the binding maps
+        # to PyValueError, exactly like the PSO empty-bounds case above.
+        import polypus
+
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.Adam(max_iters=0, learning_rate=0.1, bounds=(0.0, math.pi)),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_adam_zero_max_iters",
+            )
+
+    def test_qng_zero_max_iters_raises_value_error(
+        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
+    ):
+        # QNG is single-point like Adam: max_iters=0 never evaluates the oracle,
+        # so it is rejected as a typed OptimizerError surfacing as ValueError.
+        import polypus
+
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=simple_variance_fn,
+                    max_iters=0,
+                    bounds=(0.0, math.pi),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_zero_max_iters",
+            )

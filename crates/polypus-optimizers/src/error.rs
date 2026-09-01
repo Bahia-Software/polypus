@@ -6,16 +6,17 @@ use std::fmt;
 ///
 /// Every variant is a *precondition* or *contract* violation surfaced by
 /// [`Optimizer::optimize`](crate::Optimizer::optimize): an invalid
-/// configuration (population too small, empty bounds) detected before any RNG
-/// draw or oracle call, or an [`EvaluationOracle`](crate::EvaluationOracle)
+/// configuration (population too small, empty bounds, zero iterations) detected
+/// before any RNG draw or oracle call, or an [`EvaluationOracle`](crate::EvaluationOracle)
 /// that breaks the "one fitness value per candidate" length contract mid-run.
 /// Returning these instead of panicking is what lets the Python seam map a bad
 /// input to a `PyValueError` instead of unwinding across the FFI boundary.
 ///
 /// A single shared enum (rather than one type per algorithm) matches the
-/// "one seam, one error type" shape of this crate: all three optimizers report
-/// the same three failure kinds, so per-algorithm types would only duplicate
-/// the same variants without tightening anything the seam cares about.
+/// "one seam, one error type" shape of this crate: the optimizers draw from an
+/// overlapping set of failure kinds (some shared across all of them, some
+/// specific to one family), so per-algorithm types would only duplicate the same
+/// variants without tightening anything the seam cares about.
 ///
 /// Mirrors the hand-written style of `CircuitError`/`SimError` (no `thiserror`).
 /// `Eq` is intentionally omitted — [`OptimizerError::InvalidBounds`] carries
@@ -54,6 +55,16 @@ pub enum OptimizerError {
         /// Number of fitness values the oracle actually returned.
         got: usize,
     },
+    /// Adam/QNG were asked to run `max_iters == 0` iterations. These are
+    /// single-point methods with no free pre-loop evaluation, so a zero-iteration
+    /// run never calls the oracle: it would return the unevaluated random initial
+    /// `θ` paired with the `-inf` sentinel `best_fitness`, violating the C-5
+    /// postcondition that `best_fitness` is the oracle's value for `best_params`.
+    /// A unit variant carries all there is to say — the rejected value is always
+    /// zero. DE/PSO do not report this: they evaluate the initial population
+    /// before their generation loop, so `generations == 0` is a valid run for
+    /// them with a real `best_fitness`.
+    ZeroMaxIters,
 }
 
 impl fmt::Display for OptimizerError {
@@ -70,6 +81,10 @@ impl fmt::Display for OptimizerError {
             OptimizerError::OracleLengthMismatch { expected, got } => write!(
                 f,
                 "evaluation oracle returned {got} fitness value(s) for {expected} candidate(s); it must return exactly one value per candidate, in order"
+            ),
+            OptimizerError::ZeroMaxIters => write!(
+                f,
+                "max_iters must be at least 1 (a zero-iteration run never evaluates the oracle, so best_fitness would be the -inf sentinel for an unevaluated θ)"
             ),
         }
     }
