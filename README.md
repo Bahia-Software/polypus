@@ -230,13 +230,13 @@ result = polypus.train(
 
 #### Quantum Natural Gradient
 
-`QNG` requires a `variance_function` callable that estimates the diagonal quantum Fisher information matrix element for each parameter. Default hyperparameters: `learning_rate=0.1`, `finite_difference_step=0.1`, `tikhonov_reg=0.05`.
+`QNG` requires a `variance_function` callable that estimates the diagonal quantum Fisher information matrix element for each parameter. Default hyperparameters: `learning_rate=0.1`, `tikhonov_reg=0.05`, `tolerance=0.01`, `patience=3`.
 
 ```python
 result = polypus.train(
     qc,
     polypus.QNG(variance_fn, max_iters=MAX_GENERATIONS, bounds=(0.0, np.pi),
-                learning_rate=0.1, finite_difference_step=0.1, tikhonov_reg=0.05),
+                learning_rate=0.1, tikhonov_reg=0.05),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
     dimensions=2 * layers,
