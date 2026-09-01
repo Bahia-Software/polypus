@@ -221,7 +221,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   `candidates.len()` finite `f64` values**, in order; higher is better.
   Python-backed oracles must validate length before returning across the FFI.
 - Preconditions validated with an error (not a panic): DE `population_size >= 4`;
-  PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`; Adam/QNG `max_iters >= 1`.
+  PSO/QNG `bounds.0 < bounds.1`; Adam/QNG `max_iters >= 1`. `dimensions == 0` is
+  *not* rejected: all four optimizers treat it as a supported degenerate no-op
+  that succeeds with an empty `best_params` (the oracle is still evaluated on the
+  empty parameter vector, so `best_fitness` stays a real value, not the `-inf`
+  sentinel).
   DE/PSO need no `generations >= 1` check: they evaluate the initial population
   before their generation loop, so `generations == 0` still yields a real
   `best_fitness`. Adam/QNG are single-point with no such pre-loop evaluation, so

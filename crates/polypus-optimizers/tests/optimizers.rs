@@ -741,6 +741,91 @@ fn de_handles_zero_dimensions() {
 }
 
 #[test]
+fn pso_handles_zero_dimensions() {
+    // The same degenerate case as `de_handles_zero_dimensions`: `dimensions = 0`
+    // is a supported no-op, not a rejected precondition. PSO's per-dimension
+    // loops run zero times, `population_converged` reports that a zero-dimension
+    // population is never collapsed, and the run finishes successfully with an
+    // empty `best_params`. `CONTRACTS.md` therefore does not list
+    // `dimensions >= 1` among PSO's validated preconditions.
+    let outcome = AlgorithmPSO
+        .optimize(AlgorithmPSOArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 10,
+            generations: 5,
+            dimensions: 0,
+            bounds: (-1.0, 1.0),
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 1e-9,
+            seed: Some(1),
+        })
+        .expect("valid PSO args optimize successfully");
+    assert!(outcome.best_params.is_empty());
+    // The C-5 postcondition still holds: `best_fitness` is the oracle's value
+    // for the (empty) `best_params`, not the `-inf` sentinel.
+    assert!(outcome.best_fitness.is_finite());
+}
+
+#[test]
+fn qng_handles_zero_dimensions() {
+    // As with DE/PSO, `dimensions = 0` is a supported no-op for QNG: the
+    // gradient, QFIM-diagonal and update loops all range over zero parameters,
+    // the empty-gradient early-stopping norm is a harmless `0.0`, and the run
+    // finishes successfully with an empty `best_params`. It is not a rejected
+    // precondition, so `CONTRACTS.md` does not list `dimensions >= 1` for QNG.
+    let outcome = AlgorithmQNG
+        .optimize(AlgorithmQNGArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+            max_iters: 5,
+            learning_rate: 0.1,
+            bounds: (0.0, 2.0),
+            dimensions: 0,
+            tolerance: 0.0,
+            patience: 3,
+            variance_oracle: Box::new(ConstVariance(1.0)),
+            tikhonov_reg: 0.05,
+            seed: Some(1),
+        })
+        .expect("valid QNG args optimize successfully");
+    assert!(outcome.best_params.is_empty());
+    // The single per-iteration oracle call still runs (on the empty θ), so
+    // `best_fitness` is a real oracle value, not the `-inf` sentinel (C-5).
+    assert!(outcome.best_fitness.is_finite());
+}
+
+#[test]
+fn adam_handles_zero_dimensions() {
+    // Identical degenerate case for Adam: the gradient, moment-update and
+    // parameter loops range over zero parameters, the empty-gradient norm is a
+    // harmless `0.0`, and the run finishes successfully with an empty
+    // `best_params`. Not a rejected precondition, so `CONTRACTS.md` does not
+    // list `dimensions >= 1` for Adam either.
+    let outcome = AlgorithmAdam
+        .optimize(AlgorithmAdamArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
+            max_iters: 5,
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (0.0, 2.0),
+            dimensions: 0,
+            tolerance: 0.0,
+            patience: 3,
+            seed: Some(1),
+        })
+        .expect("valid Adam args optimize successfully");
+    assert!(outcome.best_params.is_empty());
+    // The single per-iteration oracle call still runs (on the empty θ), so
+    // `best_fitness` is a real oracle value, not the `-inf` sentinel (C-5).
+    assert!(outcome.best_fitness.is_finite());
+}
+
+#[test]
 fn de_handles_minimum_population() {
     // DE needs population_size >= 4 to sample 3 distinct other members.
     let outcome = AlgorithmDifferentialEvolution
