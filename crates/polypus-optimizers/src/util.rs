@@ -71,13 +71,18 @@ pub(crate) fn population_converged(
 
 /// Validate that an oracle returned exactly one fitness value per candidate.
 ///
-/// Every optimizer calls [`EvaluationOracle::evaluate_batch`](crate::EvaluationOracle::evaluate_batch)
+/// Every optimizer — and every helper built on the oracle traits, such as
+/// [`linear_parameter_shift_gradient`](crate::linear_parameter_shift_gradient),
+/// whose per-parameter ±π/2 pair makes the expected length `2 * dims` — calls
+/// [`EvaluationOracle::evaluate_batch`](crate::EvaluationOracle::evaluate_batch)
 /// and then indexes the returned slice positionally; a short (or long) return
 /// would otherwise panic with an out-of-bounds index deep inside the loop.
 /// Checking the length immediately after each batch call — for *any* oracle,
 /// Python-backed or not — turns that into the typed
 /// [`OptimizerError::OracleLengthMismatch`] the FFI seam maps to a
-/// `PyValueError`.
+/// `PyValueError` (or, where a [`GradientOracle`](crate::GradientOracle) that
+/// delegates to that helper records the error instead of returning it, to the
+/// bindings' evaluation exception).
 pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), OptimizerError> {
     if expected == got {
         Ok(())

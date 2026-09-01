@@ -52,14 +52,26 @@ impl GradientOracle for QmlOracle {
     /// shifting the whole candidate by `±π/2` and delegating to the existing
     /// `evaluate_batch` is exact by linearity, with no per-sample decomposition.
     fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
-        // A prior failure short-circuits, mirroring `evaluate_batch`. Unlike the
-        // native oracle, no error recording is needed here: any failure inside
-        // the delegated `evaluate_batch` already records itself through the
-        // normal `EvaluationOracle` path.
+        // A prior failure short-circuits, mirroring `evaluate_batch`.
         if self.errors.failed() {
             return vec![0.0; dims];
         }
-        polypus_optimizers::linear_parameter_shift_gradient(self, theta, dims)
+        // A failure *inside* the delegated `evaluate_batch` records itself
+        // through the normal `EvaluationOracle` path, but
+        // `linear_parameter_shift_gradient` can also fail on its own account: it
+        // length-checks the batch `evaluate_batch` handed back (contract C-5)
+        // instead of indexing it blindly, and that check is nothing
+        // `evaluate_batch` could have recorded. The `GradientOracle` trait method
+        // cannot return a `Result`, so this slot is that error's only route to
+        // Python: record it and yield finite sentinels, exactly as
+        // `evaluate_batch` does with its own errors.
+        match polypus_optimizers::linear_parameter_shift_gradient(self, theta, dims) {
+            Ok(gradient) => gradient,
+            Err(e) => {
+                self.errors.record(EvaluationError::from(e));
+                vec![0.0; dims]
+            }
+        }
     }
 
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {

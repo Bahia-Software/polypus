@@ -5,6 +5,9 @@
 //! function, …) drive the optimizers without this crate knowing anything about
 //! circuits or Python.
 
+use crate::error::OptimizerError;
+use crate::util::check_oracle_len;
+
 /// Contract between optimization algorithms and candidate evaluation.
 ///
 /// An oracle encapsulates everything needed to translate a parameter vector
@@ -55,7 +58,7 @@ pub trait VarianceOracle: Send + Sync {
 /// to check it itself), exactly as [`VarianceOracle`]'s caller is responsible
 /// for a mathematically sound QFIM diagonal.
 pub trait GradientOracle: Send + Sync {
-    /// ∂fitness/∂θ[param_index] at `theta` (same sign convention as
+    /// `∂fitness/∂θ[param_index]` at `theta` (same sign convention as
     /// [`EvaluationOracle`]: higher fitness is better, so this is the ascent
     /// direction, not its negation).
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64;
@@ -90,11 +93,24 @@ impl<T: GradientOracle + ?Sized> GradientOracle for std::sync::Arc<T> {
 /// by linearity, with no per-sample decomposition needed. **Not** valid for an
 /// oracle whose fitness composes a nonlinear loss over per-sample
 /// expectations (see `polypus_qml::QmlProblem::param_gradient` for that case).
+///
+/// On success it returns exactly `dims` gradient components, in parameter order.
+///
+/// # Errors
+///
+/// Returns [`OptimizerError::OracleLengthMismatch`] when `oracle` does not
+/// return exactly `2 * dims` fitness values — the `+π/2` and the `-π/2` shift of
+/// every parameter — for the batch it is handed. The two shifted values of each
+/// parameter are read positionally out of that slice, so a short (or long)
+/// return would otherwise panic with an out-of-bounds index. [`EvaluationOracle`]
+/// is a public trait any caller can implement (a wrapped Python callback
+/// included), so the length is checked here for *every* implementation rather
+/// than trusted, exactly as each optimizer checks its own batch calls.
 pub fn linear_parameter_shift_gradient(
     oracle: &dyn EvaluationOracle,
     theta: &[f64],
     dims: usize,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, OptimizerError> {
     let candidates: Vec<Vec<f64>> = (0..dims)
         .flat_map(|i| {
             let mut tp = theta.to_vec();
@@ -105,7 +121,8 @@ pub fn linear_parameter_shift_gradient(
         })
         .collect();
     let results = oracle.evaluate_batch(&candidates);
-    (0..dims)
+    check_oracle_len(2 * dims, results.len())?;
+    Ok((0..dims)
         .map(|i| (results[2 * i] - results[2 * i + 1]) / 2.0)
-        .collect()
+        .collect())
 }

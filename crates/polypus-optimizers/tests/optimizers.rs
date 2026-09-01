@@ -1029,12 +1029,35 @@ fn adam_rejects_empty_bounds() {
 }
 
 #[test]
+fn linear_parameter_shift_short_oracle_returns_error_not_panic() {
+    // `linear_parameter_shift_gradient` submits `2 * dims` shifted candidates and
+    // reads the ±π/2 pair of each parameter positionally out of the result, so an
+    // oracle returning fewer values would make that indexing panic. It is a
+    // public free function over the public `EvaluationOracle` trait — any caller
+    // can hand it any implementation, a wrapped Python callback included — so it
+    // must length-check like every optimizer does instead of trusting its two
+    // in-tree callers to behave.
+    let theta = vec![0.3, -1.1, 2.0];
+    let dims = theta.len();
+    let result = linear_parameter_shift_gradient(&ShortOracle, &theta, dims);
+    assert_eq!(
+        result,
+        Err(OptimizerError::OracleLengthMismatch {
+            expected: 2 * dims,
+            got: 2 * dims - 1
+        }),
+        "expected OracleLengthMismatch, got {result:?}"
+    );
+}
+
+#[test]
 fn linear_parameter_shift_matches_analytic_gradient() {
     // For CosSum (fitness = Σ cos θᵢ) the parameter-shift rule is exact in
     // closed form: ∂/∂θᵢ = −sin θᵢ, and [cos(θ+π/2) − cos(θ−π/2)]/2 = −sin θ.
     // No shot noise is involved (the oracle is analytic), so equality is tight.
     let theta = vec![0.3, -1.1, 2.0, 0.0];
-    let grad = linear_parameter_shift_gradient(&CosSum, &theta, theta.len());
+    let grad = linear_parameter_shift_gradient(&CosSum, &theta, theta.len())
+        .expect("CosSum returns one value per candidate");
     assert_eq!(grad.len(), theta.len());
     for (i, &g) in grad.iter().enumerate() {
         let expected = -theta[i].sin();

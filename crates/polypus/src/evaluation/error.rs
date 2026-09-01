@@ -2,13 +2,15 @@
 //!
 //! See [`crate::infrastructure::error`] for the crate-wide granularity
 //! decision. This enum wraps a [`BackendError`] (the underlying execution
-//! failure), a [`CircuitError`] (native parameter binding) or a raw [`PyErr`]
-//! (a Python callback/conversion), all reachable while an optimizer drives an
-//! oracle across the FFI.
+//! failure), a [`CircuitError`] (native parameter binding), a raw [`PyErr`]
+//! (a Python callback/conversion) or an [`OptimizerError`] raised by a helper of
+//! `polypus-optimizers` called from inside an oracle, all reachable while an
+//! optimizer drives an oracle across the FFI.
 
 use std::fmt;
 
 use polypus_circuit::CircuitError;
+use polypus_optimizers::OptimizerError;
 use polypus_qml::{QmlError, ValidationError};
 use pyo3::PyErr;
 
@@ -46,6 +48,20 @@ pub enum EvaluationError {
     /// (contract C-8). Reached only on the minibatch path of the two native QML
     /// oracles.
     Validation(ValidationError),
+    /// A `polypus-optimizers` helper called from *inside* an oracle failed its
+    /// own contract check — today only
+    /// [`linear_parameter_shift_gradient`](polypus_optimizers::linear_parameter_shift_gradient),
+    /// which length-checks what the oracle's `evaluate_batch` handed back
+    /// (contract C-5) instead of indexing it blindly. The
+    /// [`GradientOracle`](polypus_optimizers::GradientOracle) trait method that
+    /// calls it returns a plain `Vec<f64>`, so this slot is the only route that
+    /// failure has to Python. Note that the *same* [`OptimizerError`] returned by
+    /// `Optimizer::optimize` itself surfaces as a `ValueError` at the bindings
+    /// boundary, exactly as [`EvaluationError::Validation`] is an evaluation
+    /// failure here but a `ValueError` when raised while *building* a problem:
+    /// what a failure recorded mid-evaluation means to the caller is "the oracle
+    /// broke", not "your argument was invalid".
+    Optimizer(OptimizerError),
 }
 
 impl fmt::Display for EvaluationError {
@@ -56,6 +72,7 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
             EvaluationError::Qml(err) => write!(f, "QML evaluation error: {err}"),
             EvaluationError::Validation(err) => write!(f, "QML validation error: {err}"),
+            EvaluationError::Optimizer(err) => write!(f, "optimizer oracle error: {err}"),
         }
     }
 }
@@ -80,6 +97,12 @@ impl From<ValidationError> for EvaluationError {
     }
 }
 
+impl From<OptimizerError> for EvaluationError {
+    fn from(err: OptimizerError) -> Self {
+        EvaluationError::Optimizer(err)
+    }
+}
+
 impl From<EvaluationError> for PyErr {
     fn from(err: EvaluationError) -> PyErr {
         match err {
@@ -96,6 +119,14 @@ impl From<EvaluationError> for PyErr {
             EvaluationError::Qml(qml_err) => PyEvaluationError::new_err(qml_err.to_string()),
             EvaluationError::Validation(validation_err) => {
                 PyEvaluationError::new_err(validation_err.to_string())
+            }
+            // Same reasoning: an optimizer-helper contract violation detected
+            // while an oracle was evaluating is an evaluation failure to the
+            // caller, so it joins the others under the evaluation exception
+            // rather than the `ValueError` the bindings raise for the identical
+            // error coming out of `Optimizer::optimize`.
+            EvaluationError::Optimizer(optimizer_err) => {
+                PyEvaluationError::new_err(optimizer_err.to_string())
             }
             // Preserve the original Python exception type raised by the callback.
             EvaluationError::Python(py_err) => py_err,
