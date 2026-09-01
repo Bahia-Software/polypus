@@ -1,4 +1,3 @@
-
 //! Plotting utilities for raw ENDF-6 photon cross-sections (barns),
 //! rendered as log-log line charts and saved as PNG images.
 
@@ -32,7 +31,10 @@ const KNOWN_CHANNELS: &[(u32, &str, (u8, u8, u8))] = &[
 pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), PhysicsError> {
     use plotters::prelude::*;
 
-    let mut series: Vec<(&str, (u8, u8, u8), Vec<(f64, f64)>)> = Vec::new();
+    /// One channel's plotted series: its label, RGB color, and (energy_MeV,
+    /// value) points.
+    type ChannelSeries<'a> = (&'a str, (u8, u8, u8), Vec<(f64, f64)>);
+    let mut series: Vec<ChannelSeries> = Vec::new();
 
     for &(mt, label, color) in KNOWN_CHANNELS {
         let Ok((_z, points)) = cross_section_for_element(symbol, mt) else {
@@ -59,14 +61,20 @@ pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), Phys
     };
 
     let (x_min, x_max, y_min, y_max) = series.iter().flat_map(|(_, _, xy)| xy.iter()).fold(
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
         |(x_min, x_max, y_min, y_max), &(x, y)| {
             (x_min.min(x), x_max.max(x), y_min.min(y), y_max.max(y))
         },
     );
 
     let root = BitMapBackend::new(path, (1200, 825)).into_drawing_area();
-    root.fill(&WHITE).map_err(|e| to_plot_error(e.to_string()))?;
+    root.fill(&WHITE)
+        .map_err(|e| to_plot_error(e.to_string()))?;
 
     let title = format!("{symbol}: photon cross-sections");
     let mut chart = ChartBuilder::on(&root)

@@ -1,4 +1,3 @@
-
 //! Plotting utilities for ENDF-6 photon mu_m curves, rendered as log-log
 //! line charts and saved as PNG images.
 
@@ -25,15 +24,26 @@ fn plot_mu_m_points(points: &[MuPoint], title: &str, path: &Path) -> Result<(), 
     };
 
     let (x_min, x_max, y_min, y_max) = points.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
         |(x_min, x_max, y_min, y_max), p| {
             let x = p.energy_ev * 1e-6;
-            (x_min.min(x), x_max.max(x), y_min.min(p.mu_m), y_max.max(p.mu_m))
+            (
+                x_min.min(x),
+                x_max.max(x),
+                y_min.min(p.mu_m),
+                y_max.max(p.mu_m),
+            )
         },
     );
 
     let root = BitMapBackend::new(path, (1200, 825)).into_drawing_area();
-    root.fill(&WHITE).map_err(|e| to_plot_error(e.to_string()))?;
+    root.fill(&WHITE)
+        .map_err(|e| to_plot_error(e.to_string()))?;
 
     let mut chart = ChartBuilder::on(&root)
         .caption(title, ("sans-serif", 22))
@@ -73,15 +83,19 @@ pub fn plot_element(symbol: &str, points: &[MuPoint], path: &Path) -> Result<(),
 
 /// Renders a compound's mu_m curve and saves it as a PNG image.
 #[cfg(feature = "plotters")]
-pub fn plot_compound(formula: &str, result: &CompoundResult, path: &Path) -> Result<(), PhysicsError> {
+pub fn plot_compound(
+    formula: &str,
+    result: &CompoundResult,
+    path: &Path,
+) -> Result<(), PhysicsError> {
     let title = format!("{formula}: mass attenuation coefficient");
     plot_mu_m_points(&result.points, &title, path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mass_attenuation_coefficients::{mu_m_for_compound, mu_m_for_element};
+    use super::*;
 
     #[cfg(feature = "plotters")]
     #[test]

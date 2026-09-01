@@ -429,7 +429,7 @@ mod tests {
     use super::*;
     use crate::interactions::photon::PhotonInteractionModel;
     use crate::interactions::InteractionModel;
-    use crate::medium::HomogeneousMedium;
+    use crate::medium::CompoundMedium;
     use crate::particle::photon::Photon;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
@@ -437,10 +437,10 @@ mod tests {
     fn engine(
         n_histories: usize,
         seed: u64,
-    ) -> MonteCarloEngine<Photon, HomogeneousMedium, PhotonInteractionModel> {
+    ) -> MonteCarloEngine<Photon, CompoundMedium, PhotonInteractionModel> {
         MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories,
@@ -537,12 +537,12 @@ mod tests {
     /// Linear attenuation coefficient μ (m⁻¹) of 100 keV photons in water.
     fn mu_100kev_water() -> f64 {
         PhotonInteractionModel
-            .total_cross_section_per_m(
-                &Photon,
-                &Photon::state_along_z(0.1),
-                &HomogeneousMedium::water(),
-            )
+            .total_cross_section_per_m(&Photon, &Photon::state_along_z(0.1), &water_medium())
             .unwrap()
+    }
+
+    fn water_medium() -> CompoundMedium {
+        CompoundMedium::new("H2O", 1000.0, 5000).unwrap()
     }
 
     #[test]
@@ -554,19 +554,10 @@ mod tests {
             seed: 3,
             ..Default::default()
         };
-        let base = MonteCarloEngine::new(
-            Photon,
-            HomogeneousMedium::water(),
-            PhotonInteractionModel,
-            cfg.clone(),
-        );
-        let explicit = MonteCarloEngine::new(
-            Photon,
-            HomogeneousMedium::water(),
-            PhotonInteractionModel,
-            cfg,
-        )
-        .with_geometry(Geometry::Unbounded);
+        let base =
+            MonteCarloEngine::new(Photon, water_medium(), PhotonInteractionModel, cfg.clone());
+        let explicit = MonteCarloEngine::new(Photon, water_medium(), PhotonInteractionModel, cfg)
+            .with_geometry(Geometry::Unbounded);
 
         let mut r1 = StdRng::seed_from_u64(3);
         let mut r2 = StdRng::seed_from_u64(3);
@@ -589,7 +580,7 @@ mod tests {
         let n = 40_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,
@@ -622,7 +613,7 @@ mod tests {
         let n = 5_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,
@@ -668,7 +659,7 @@ mod tests {
         let n = 200_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,

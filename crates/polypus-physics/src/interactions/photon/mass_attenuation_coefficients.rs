@@ -290,7 +290,6 @@ pub fn cross_section_for_element(
 /// Returns the atomic number, atomic mass (g/mol), and the resulting
 /// (energy, mu_m) points, sorted by increasing energy as given by the
 /// evaluation.
-
 pub fn mu_m_for_element(symbol: &str, mt: u32) -> Result<(u32, f64, Vec<MuPoint>), PhysicsError> {
     let (z, section) = cross_section_for_element(symbol, mt)?;
 
@@ -452,7 +451,9 @@ fn geomspace(e_min: f64, e_max: f64, n: usize) -> Vec<f64> {
     let log_max = e_max.ln();
     let step = (log_max - log_min) / (n - 1) as f64;
 
-    let mut values: Vec<f64> = (0..n).map(|i| (log_min + (i as f64) * step).exp()).collect();
+    let mut values: Vec<f64> = (0..n)
+        .map(|i| (log_min + (i as f64) * step).exp())
+        .collect();
 
     values[0] = e_min;
     let last = values.len() - 1;
@@ -509,9 +510,48 @@ fn loglog_interpolate(reference: &[f64], energies: &[f64], mu: &[f64]) -> Vec<f6
         .collect()
 }
 
+/// Precomputes the log-space arrays for repeated single-point queries
+/// against a fixed (energy, mu) curve — see [`interpolate_loglog_precomputed`].
+pub(crate) fn precompute_loglog(points: &[MuPoint]) -> (Vec<f64>, Vec<f64>) {
+    const EPSILON: f64 = 1e-300;
+    let log_epsilon = EPSILON.ln();
+    let log_energies: Vec<f64> = points.iter().map(|p| p.energy_ev.ln()).collect();
+    let log_mu: Vec<f64> = points
+        .iter()
+        .map(|p| {
+            if p.mu_m == 0.0 {
+                log_epsilon
+            } else {
+                p.mu_m.ln()
+            }
+        })
+        .collect();
+    (log_energies, log_mu)
+}
+
+/// Interpolates a single point against arrays already log-transformed by
+/// [`precompute_loglog`] — much cheaper than [`loglog_interpolate`] when
+/// querying the same curve many times, since the log conversion of the
+/// whole curve only happens once, not on every query.
+pub(crate) fn interpolate_loglog_precomputed(
+    log_energies: &[f64],
+    log_mu: &[f64],
+    energy_ev: f64,
+) -> f64 {
+    const EPSILON: f64 = 1e-300;
+    let log_epsilon = EPSILON.ln();
+    let log_result = interpolate_linear(energy_ev.ln(), log_energies, log_mu);
+    if log_result == log_epsilon {
+        0.0
+    } else {
+        log_result.exp()
+    }
+}
+
 /// The mass attenuation coefficient of a chemical compound or mixture,
 /// computed by combining the ENDF-6 data of its constituent elements,
 /// weighted by mass fraction.
+#[derive(Debug, Clone)]
 pub struct CompoundResult {
     /// The compound's molar mass (g/mol), computed from its formula.
     pub molar_mass: f64,
@@ -563,11 +603,21 @@ pub fn mu_m_for_compound(
 
     let e_min = elements
         .values()
-        .map(|d| d.points.iter().map(|p| p.energy_ev).fold(f64::INFINITY, f64::min))
+        .map(|d| {
+            d.points
+                .iter()
+                .map(|p| p.energy_ev)
+                .fold(f64::INFINITY, f64::min)
+        })
         .fold(f64::NEG_INFINITY, f64::max);
     let e_max = elements
         .values()
-        .map(|d| d.points.iter().map(|p| p.energy_ev).fold(f64::NEG_INFINITY, f64::max))
+        .map(|d| {
+            d.points
+                .iter()
+                .map(|p| p.energy_ev)
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
         .fold(f64::INFINITY, f64::min);
 
     if e_min >= e_max {
@@ -800,7 +850,10 @@ mod tests {
     #[test]
     fn mu_m_for_unknown_formula_errors() {
         let result = mu_m_for_compound("fe2o3", 501, 5000);
-        assert!(matches!(result, Err(PhysicsError::InvalidChemicalFormula { .. })));
+        assert!(matches!(
+            result,
+            Err(PhysicsError::InvalidChemicalFormula { .. })
+        ));
     }
 
     #[cfg(feature = "csv-export")]

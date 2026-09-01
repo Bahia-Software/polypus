@@ -99,14 +99,17 @@ fn sample_cos_theta(energy_mev: f64, rng: &mut impl Rng) -> f64 {
 /// Uses the closed-form MCNP direction-cosine rotation ("MCNP — A General
 /// Monte Carlo N-Particle Transport Code"), with an explicit near-polar-axis
 /// special case to avoid dividing by a near-zero `s`.
-
 pub fn rotate_direction(dir: [f64; 3], cos_theta: f64, phi: f64) -> [f64; 3] {
     let [u, v, w] = dir;
     let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
     let (sin_phi, cos_phi) = phi.sin_cos();
 
     let out = if w.abs() > 0.999_999 {
-        [sin_theta * cos_phi, sin_theta * sin_phi, cos_theta * w.signum()]
+        [
+            sin_theta * cos_phi,
+            sin_theta * sin_phi,
+            cos_theta * w.signum(),
+        ]
     } else {
         let s = (1.0 - w * w).sqrt();
         [
