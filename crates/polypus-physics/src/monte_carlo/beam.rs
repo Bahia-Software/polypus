@@ -7,6 +7,7 @@ use rand::Rng;
 
 use crate::particle::{FourMomentum, ParticleState, Position};
 
+#[derive(Debug)]
 pub struct DivergentBeam {
     /// Distance from the source to the surface (m).
     pub source_to_surface_distance_m: f64,
@@ -16,12 +17,24 @@ pub struct DivergentBeam {
     pub energy_mev: f64,
 }
 
+use rand::RngCore;
+
+/// A source of a primary particle's full initial state (position,
+/// direction, and energy), sampled once per Monte Carlo history.
+///
+/// Object-safe: `Box<dyn BeamSource>` and `&dyn BeamSource` are usable — the
+/// same contract already used by [`super::spectrum::EnergySpectrum`].
+pub trait BeamSource: Send + Sync + std::fmt::Debug {
+    /// Sample one primary's full initial state.
+    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState;
+}
+
 impl DivergentBeam {
     /// Sample one photon's initial state: a position uniformly distributed
     /// within the field on the surface, and the direction it would have if
     /// it had actually travelled there from the point source at
     /// `(0, 0, -source_to_surface_distance_m)`.
-    pub fn sample(&self, rng: &mut impl Rng) -> ParticleState {
+    pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
         let half_field = self.field_side_m / 2.0;
         let x0 = rng.gen_range(-half_field..=half_field);
         let y0 = rng.gen_range(-half_field..=half_field);
@@ -40,6 +53,12 @@ impl DivergentBeam {
             },
             alive: true,
         }
+    }
+}
+
+impl BeamSource for DivergentBeam {
+    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState {
+        self.sample(rng)
     }
 }
 

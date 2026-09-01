@@ -36,15 +36,22 @@ pub fn scattered_energy(energy_mev: f64, cos_theta: f64) -> f64 {
     energy_mev / (1.0 + alpha * (1.0 - cos_theta))
 }
 
+/// Klein-Nishina form factor for a free electron (Podgorsak Eq. 7.90).
+fn klein_nishina_form_factor(energy_mev: f64, cos_theta: f64) -> f64 {
+    let epsilon = energy_mev / ELECTRON_MASS_MEV;
+    let denominator_1 = (1.0 + epsilon * (1.0 - cos_theta)).powi(2);
+    let numerator = epsilon * epsilon * (1.0 - cos_theta) * (1.0 - cos_theta);
+    let denominator_2 = (1.0 + epsilon * (1.0 - cos_theta)) * (1.0 + cos_theta * cos_theta);
+    (1.0 / denominator_1) * (1.0 + numerator / denominator_2)
+}
+
 /// Klein–Nishina differential cross-section `dσ/dΩ` per electron
 /// (m²/steradian) at scattering-angle cosine `cos_theta`.
-///
-/// `energy_mev` is the incident photon energy in MeV.
 pub fn differential_cross_section(energy_mev: f64, cos_theta: f64) -> f64 {
-    let e_prime = scattered_energy(energy_mev, cos_theta);
-    let ratio = e_prime / energy_mev;
-    let sin2 = 1.0 - cos_theta * cos_theta;
-    0.5 * R_E * R_E * ratio * ratio * (1.0 / ratio + ratio - sin2)
+    0.5 * R_E
+        * R_E
+        * (1.0 + cos_theta * cos_theta)
+        * klein_nishina_form_factor(energy_mev, cos_theta)
 }
 
 /// Total Klein–Nishina cross-section per electron `σ_C` (m²).
