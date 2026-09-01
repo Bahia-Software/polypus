@@ -126,6 +126,13 @@ impl Dataset {
     /// train set takes the rest, so the rounding rule is: **the test partition
     /// rounds down**.
     ///
+    /// An in-range fraction can still round a partition down to nothing on a
+    /// small dataset (`floor(5 * 0.1) == 0`, and `floor(1 * f) == 0` for every
+    /// `f` in the interval), which the fraction guard cannot see. That is
+    /// [`ValidationError::EmptyDataset`] from `select` (this module's
+    /// crate-internal subset builder) — the split fails rather than handing back
+    /// a zero-sample `Dataset`.
+    ///
     /// The seed is explicit and mandatory in this pure crate; resolving
     /// `None → OS entropy` is the bindings layer's job. The same seed always
     /// produces the same split, byte for byte.
@@ -154,15 +161,28 @@ impl Dataset {
             test_idx.len()
         );
 
-        Ok((self.select(train_idx), self.select(test_idx)))
+        Ok((self.select(train_idx)?, self.select(test_idx)?))
     }
 
     /// Build a new dataset from the samples at `indices`, preserving order.
     ///
+    /// Reasserts the non-empty invariant of the struct doc at this second
+    /// construction point, exactly as [`from_rows`](Self::from_rows) does at the
+    /// first: an empty `indices` is [`ValidationError::EmptyDataset`], never a
+    /// zero-sample `Dataset`. These two are the *only* ways to build a
+    /// `Dataset`, so checking both is what makes `num_samples() >= 1` true of
+    /// every `Dataset` that exists — which is in turn what lets downstream code
+    /// average over the samples without risking `0.0 / 0.0`
+    /// (`QmlProblem::fitness_from_counts`, contract C-8).
+    ///
     /// `pub(crate)` so [`QmlProblem::from_subset`](crate::QmlProblem) (another
     /// module of this crate) can carve a minibatch out of a validated dataset;
     /// `train_test_split` above is the other in-crate caller.
-    pub(crate) fn select(&self, indices: &[usize]) -> Dataset {
+    pub(crate) fn select(&self, indices: &[usize]) -> Result<Dataset, ValidationError> {
+        if indices.is_empty() {
+            return Err(ValidationError::EmptyDataset);
+        }
+
         let num_features = self.num_features;
         let mut features = Vec::with_capacity(indices.len() * num_features);
         let mut labels = Vec::with_capacity(indices.len());
@@ -170,12 +190,12 @@ impl Dataset {
             features.extend_from_slice(self.sample(i));
             labels.push(self.labels[i]);
         }
-        Dataset {
+        Ok(Dataset {
             features,
             labels,
             num_samples: indices.len(),
             num_features,
-        }
+        })
     }
 
     /// Min–max scale every feature of **this** dataset into `[lo, hi]`, using
@@ -380,6 +400,52 @@ mod tests {
                 Err(ValidationError::InvalidTestFraction { .. })
             ));
         }
+    }
+
+    #[test]
+    fn split_rejects_a_partition_the_rounding_leaves_empty() {
+        // `floor(5 * 0.1) == 0`: the fraction is inside the open interval, so
+        // the `InvalidTestFraction` guard cannot see this — the empty test
+        // partition is caught by `select` reasserting the non-empty invariant.
+        let ds = Dataset::from_rows(
+            &rows(&[&[0.0], &[1.0], &[2.0], &[3.0], &[4.0]]),
+            &[0.0, 1.0, 0.0, 1.0, 0.0],
+        )
+        .unwrap();
+        assert_eq!(
+            ds.train_test_split(0.1, 0),
+            Err(ValidationError::EmptyDataset)
+        );
+
+        // A 1-sample dataset is the degenerate case of the same rounding:
+        // `floor(1 * f) == 0` for every `f` in `(0, 1)`, so it can never be
+        // split at all.
+        let single = Dataset::from_rows(&rows(&[&[0.0]]), &[1.0]).unwrap();
+        for f in [0.1, 0.5, 0.9] {
+            assert_eq!(
+                single.train_test_split(f, 0),
+                Err(ValidationError::EmptyDataset),
+                "a 1-sample dataset must not split at test_fraction {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_rejects_an_empty_index_set() {
+        // The train side's half of the same check, exercised directly: through
+        // `train_test_split` only the *test* partition can be emptied by
+        // rounding (`floor(n * f) <= n - 1` for every `f < 1`), so the train
+        // side's identical guard is reached via `select` itself — which is also
+        // the entry point `QmlProblem::from_subset` uses.
+        let ds = Dataset::from_rows(&rows(&[&[0.0], &[1.0]]), &[7.0, 8.0]).unwrap();
+        assert_eq!(ds.select(&[]), Err(ValidationError::EmptyDataset));
+
+        // A non-empty selection is unaffected: same order, same values.
+        let picked = ds.select(&[1, 0]).unwrap();
+        assert_eq!(picked.num_samples(), 2);
+        assert_eq!(picked.sample(0), &[1.0]);
+        assert_eq!(picked.sample(1), &[0.0]);
+        assert_eq!(picked.labels(), &[8.0, 7.0]);
     }
 
     #[test]

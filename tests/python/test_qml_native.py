@@ -1557,6 +1557,22 @@ class TestDatasetSplit:
         with pytest.raises(ValueError, match="test_fraction|fraction"):
             self._indexed().train_test_split(fraction, seed=7)
 
+    def test_partition_emptied_by_the_rounding_rejected(self):
+        # `floor(5 × 0.1) = 0`: an in-range fraction can still round a partition
+        # down to nothing, which the fraction guard above cannot see. The split
+        # fails instead of handing back a zero-sample Dataset — a QmlProblem
+        # built on one would average over no samples and report a NaN fitness
+        # (C-8 forbids it).
+        with pytest.raises(ValueError, match="empty"):
+            self._indexed(n=5).train_test_split(0.1, seed=7)
+
+    @pytest.mark.parametrize("fraction", [0.1, 0.5, 0.9])
+    def test_single_sample_dataset_cannot_be_split(self, fraction):
+        # The degenerate case of the same rounding: `floor(1 × f) = 0` for every
+        # `f` in the open interval, so a 1-sample dataset never splits.
+        with pytest.raises(ValueError, match="empty"):
+            self._indexed(n=1).train_test_split(fraction, seed=7)
+
     def test_train_partition_trains(self):
         # The seam's real job: a split partition is a usable Dataset.
         import math

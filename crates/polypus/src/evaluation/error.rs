@@ -9,7 +9,7 @@
 use std::fmt;
 
 use polypus_circuit::CircuitError;
-use polypus_qml::QmlError;
+use polypus_qml::{QmlError, ValidationError};
 use pyo3::PyErr;
 
 use crate::exceptions::EvaluationError as PyEvaluationError;
@@ -39,6 +39,13 @@ pub enum EvaluationError {
     /// measurement counts into a fitness (contract C-8). Reached only on the
     /// [`NativeQmlOracle`](crate::evaluation::NativeQmlOracle) path.
     Qml(QmlError),
+    /// A derived native QML problem failed its own construction validation —
+    /// today only carving a minibatch out of the full problem
+    /// (`QmlProblem::from_subset`), which rejects an empty index set rather than
+    /// building a zero-sample problem whose mean fitness would be `NaN`
+    /// (contract C-8). Reached only on the minibatch path of the two native QML
+    /// oracles.
+    Validation(ValidationError),
 }
 
 impl fmt::Display for EvaluationError {
@@ -48,6 +55,7 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Binding(err) => write!(f, "circuit binding failed: {err}"),
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
             EvaluationError::Qml(err) => write!(f, "QML evaluation error: {err}"),
+            EvaluationError::Validation(err) => write!(f, "QML validation error: {err}"),
         }
     }
 }
@@ -66,6 +74,12 @@ impl From<QmlError> for EvaluationError {
     }
 }
 
+impl From<ValidationError> for EvaluationError {
+    fn from(err: ValidationError) -> Self {
+        EvaluationError::Validation(err)
+    }
+}
+
 impl From<EvaluationError> for PyErr {
     fn from(err: EvaluationError) -> PyErr {
         match err {
@@ -74,8 +88,15 @@ impl From<EvaluationError> for PyErr {
                 PyEvaluationError::new_err(circuit_err.to_string())
             }
             // A native QML failure maps to the same evaluation exception as a
-            // native binding failure — both are Rust-side evaluation errors.
+            // native binding failure — both are Rust-side evaluation errors, and
+            // so is a derived problem failing its construction validation
+            // mid-evaluation (unlike the same `ValidationError` raised while
+            // *building* a problem at the bindings boundary, which is a
+            // `ValueError` there).
             EvaluationError::Qml(qml_err) => PyEvaluationError::new_err(qml_err.to_string()),
+            EvaluationError::Validation(validation_err) => {
+                PyEvaluationError::new_err(validation_err.to_string())
+            }
             // Preserve the original Python exception type raised by the callback.
             EvaluationError::Python(py_err) => py_err,
         }

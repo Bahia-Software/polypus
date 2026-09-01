@@ -125,7 +125,7 @@ impl NativeQmlOracle {
         let problem = Arc::new(match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.from_subset(&indices)
+                self.problem.from_subset(&indices)?
             }
             None => self.problem.clone(),
         });
@@ -211,7 +211,7 @@ impl NativeQmlOracle {
         let problem = Arc::new(match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.from_subset(&indices)
+                self.problem.from_subset(&indices)?
             }
             None => self.problem.clone(),
         });

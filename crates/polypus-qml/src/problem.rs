@@ -146,23 +146,35 @@ impl QmlProblem {
 
     /// Build a smaller `QmlProblem` from the samples at `indices` (design doc
     /// §17): the minibatch counterpart of using the full problem. Reuses the
-    /// *already-compiled* templates at those indices — no recompilation, no
-    /// re-validation (the full problem was already validated by `new`, and a
-    /// subset of an already-valid dataset can never violate a per-sample check
-    /// that isn't already excluded). Cheaper than the full-problem clone
-    /// `try_evaluate`/`try_gradient` already do today for the non-minibatch case.
+    /// *already-compiled* templates at those indices — no recompilation, and no
+    /// re-validation of the **per-sample** checks (the full problem was already
+    /// validated by `new`, and a subset of an already-valid dataset can never
+    /// violate a per-sample check that isn't already excluded). Cheaper than the
+    /// full-problem clone `try_evaluate`/`try_gradient` already do today for the
+    /// non-minibatch case.
+    ///
+    /// Emptiness is the one thing a subset *can* violate, precisely because it is
+    /// not a per-sample property: an empty `indices` would build a problem with
+    /// zero templates, whose `fitness_from_counts` would divide by zero and hand
+    /// back `Ok(NaN)` against contract C-8. So this is the second entry point at
+    /// which `Dataset`'s non-empty invariant is reasserted (`Dataset::from_rows`
+    /// is the first), and it propagates that
+    /// [`ValidationError::EmptyDataset`] instead of trusting its callers: this
+    /// method is `pub`, and the fact that today's in-crate callers happen to feed
+    /// it an already-validated `batch_size` is not something its contract may
+    /// rest on.
     // `from_*` on `&self` trips `wrong_self_convention`, but this is genuinely a
     // "derive a smaller problem *from* this one's samples" operation, not a
     // constructor — the same API-naming exception the crate already takes for
     // `Infrastructure::from_str`. It weakens no correctness check.
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_subset(&self, indices: &[usize]) -> QmlProblem {
-        QmlProblem {
+    pub fn from_subset(&self, indices: &[usize]) -> Result<QmlProblem, ValidationError> {
+        Ok(QmlProblem {
             model: self.model.clone(),
-            train: self.train.select(indices),
+            train: self.train.select(indices)?,
             loss: self.loss,
             templates: indices.iter().map(|&i| self.templates[i].clone()).collect(),
-        }
+        })
     }
 
     /// Bind `theta` into one [`ConcreteCircuit`] per training sample, in stable
@@ -275,8 +287,10 @@ impl QmlProblem {
             .zip(labels)
             .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
             .sum::<Result<f64, QmlError>>()?;
-        // `counts.len() == templates.len() >= 1` (the dataset is non-empty), so
-        // the mean is well defined and finite.
+        // `counts.len() == templates.len() >= 1`: a `Dataset` is never empty —
+        // `Dataset::from_rows` and `Dataset::select` are the only two ways to
+        // build one and both reject an empty sample set — so the mean is well
+        // defined and finite, never `0.0 / 0.0` (contract C-8).
         Ok(-total / expectations.len() as f64)
     }
 
@@ -1116,7 +1130,7 @@ mod tests {
 
         // Carve out samples 2 and 0 (order preserved), the shape a minibatch has.
         let indices = [2usize, 0usize];
-        let subset = full.from_subset(&indices);
+        let subset = full.from_subset(&indices).unwrap();
         assert_eq!(subset.num_circuits(), indices.len());
 
         // `bind_batch` on the subset binds exactly the full problem's templates
@@ -1141,6 +1155,21 @@ mod tests {
             (fitness + (0.25 + 2.25) / 2.0).abs() < 1e-12,
             "fitness={fitness}"
         );
+    }
+
+    #[test]
+    fn from_subset_rejects_an_empty_index_set() {
+        // An empty minibatch would build a 0-template problem whose
+        // `fitness_from_counts` divides by zero and returns `Ok(NaN)`, breaking
+        // C-8. `from_subset` reasserts `Dataset`'s non-empty invariant instead
+        // of building that degenerate problem.
+        let full = distinct_feature_problem(&[0.15, 0.25, 0.35], &[1.0, -1.0, 1.0]);
+        assert_eq!(
+            full.from_subset(&[]).unwrap_err(),
+            ValidationError::EmptyDataset
+        );
+        // The full problem itself is untouched by the rejected call.
+        assert_eq!(full.num_circuits(), 3);
     }
 
     // ── Exact mode (design doc §17) ──────────────────────────────────────────

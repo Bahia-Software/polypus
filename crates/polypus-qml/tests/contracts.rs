@@ -18,6 +18,10 @@
 //! - **C-8, readout revalidation**: `compile` re-runs the readout's own
 //!   construction checks, so a readout mutated past `Readout::new` cannot reach
 //!   inference.
+//! - **C-8, no zero-sample problem**: a `Dataset` is non-empty at *both* of its
+//!   construction points, so no public path — `train_test_split`'s floor
+//!   rounding included — can reach a `QmlProblem` whose mean fitness would be
+//!   `NaN`.
 
 use polypus_circuit::{
     terminal_measurement_violation, GateInstruction, GateParam, ParameterizedCircuit,
@@ -411,4 +415,64 @@ fn compile_still_accepts_an_untouched_readout_c8() {
     assert!(model_with(z0_readout()).compile(2).is_ok());
     let argmax = Readout::new(vec![z_observable(0), z_observable(1)], Decision::Argmax).unwrap();
     assert!(model_with(argmax).compile(2).is_ok());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C-8 · a zero-sample problem is unreachable, so the mean fitness is never NaN
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `fitness_from_counts` averages the loss over the training samples, so a
+// `QmlProblem` carrying zero of them would compute `-0.0 / 0.0` and return
+// `Ok(NaN)` — exactly what C-8(b) ("a finite `f64` … never `NaN`") forbids. The
+// guarantee rests on `Dataset` being non-empty *by construction*:
+// `Dataset::from_rows` and the in-crate `Dataset::select` are the only two ways
+// to build one and both reject an empty sample set, so no zero-sample `Dataset`
+// — hence no zero-circuit `QmlProblem` — can exist.
+//
+// This walks the public path that used to produce one: a dataset small enough
+// that `train_test_split`'s documented floor rounding empties a partition, which
+// the `(0, 1)` fraction guard cannot see. The failure must land at the
+// construction point, typed, rather than downstream as a `NaN` fitness.
+
+#[test]
+fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c8() {
+    let model = catalogue().swap_remove(0).0;
+    // Five samples of the model's width, so `floor(5 * 0.1) == 0` leaves the
+    // test partition empty while `0.1` sits well inside the open interval.
+    let rows: Vec<Vec<f64>> = (0..5)
+        .map(|i| vec![0.1 * (i as f64 + 1.0); model.num_features()])
+        .collect();
+    let labels = vec![1.0, -1.0, 1.0, -1.0, 1.0];
+    let full = Dataset::from_rows(&rows, &labels).unwrap();
+
+    assert_eq!(
+        full.train_test_split(0.1, 7),
+        Err(ValidationError::EmptyDataset),
+        "a split that rounds a partition down to nothing must fail, \
+         not hand back a zero-sample Dataset"
+    );
+
+    // Every partition that *does* come back is a usable, non-degenerate problem:
+    // at least one circuit, and a finite (never `NaN`) fitness over it.
+    let (train, test) = full.train_test_split(0.4, 7).unwrap();
+    assert_eq!((train.num_samples(), test.num_samples()), (3, 2));
+    for partition in [train, test] {
+        let problem = QmlProblem::new(model.clone(), partition, Loss::SquaredError).unwrap();
+        assert!(
+            problem.num_circuits() >= 1,
+            "a QmlProblem always has at least one circuit (C-8)"
+        );
+        let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
+        let width = circuits[0].num_qubits;
+        let zeros = "0".repeat(width);
+        let counts: Vec<HashMap<String, u64>> = circuits
+            .iter()
+            .map(|_| HashMap::from([(zeros.clone(), 1024u64)]))
+            .collect();
+        let fitness = problem.fitness_from_counts(&counts).unwrap();
+        assert!(
+            fitness.is_finite(),
+            "fitness must be finite (C-8), got {fitness}"
+        );
+    }
 }
