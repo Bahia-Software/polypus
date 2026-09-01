@@ -255,7 +255,17 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   fitness is linear in the shifted expectations (raw expectation or unweighted
   mean, no nonlinear loss on top); an oracle that composes a nonlinear loss over
   per-sample expectations needs the chain rule instead (see
-  `polypus_qml::QmlProblem::param_gradient`).
+  `polypus_qml::QmlProblem::param_gradient`). That helper returns
+  `Result<Vec<f64>, OptimizerError>`: it submits `2 * dims` shifted candidates
+  and reads each parameter's ±π/2 pair positionally out of the result, so it
+  length-checks the batch against `2 * dims` — as every optimizer checks its own
+  batch calls — rather than trusting the oracle it was handed, which is any
+  implementation of a public trait. A `GradientOracle` that delegates to it
+  therefore has a failure to handle that its own trait method cannot return: the
+  two `polypus` oracles that delegate (`QmlOracle`, `VqcOracle`) record it in
+  their shared `OracleErrorSlot` and return finite sentinels, the same discipline
+  `evaluate_batch` already follows, so the entry point surfaces it after
+  `optimize` returns.
 - **Breaking change:** `AlgorithmQNGArgs` no longer accepts
   `finite_difference_step` (and the Python `QNG` pyclass no longer exposes it).
   QNG now consumes the exact parameter-shift gradient above instead of a
