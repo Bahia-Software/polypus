@@ -43,7 +43,7 @@ pub enum EvaluationError {
     Qml(QmlError),
     /// A derived native QML problem failed its own construction validation —
     /// today only carving a minibatch out of the full problem
-    /// (`QmlProblem::from_subset`), which rejects an empty index set rather than
+    /// (`QmlProblem::subset`), which rejects an empty index set rather than
     /// building a zero-sample problem whose mean fitness would be `NaN`
     /// (contract C-8). Reached only on the minibatch path of the two native QML
     /// oracles.

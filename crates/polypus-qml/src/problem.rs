@@ -163,12 +163,10 @@ impl QmlProblem {
     /// method is `pub`, and the fact that today's in-crate callers happen to feed
     /// it an already-validated `batch_size` is not something its contract may
     /// rest on.
-    // `from_*` on `&self` trips `wrong_self_convention`, but this is genuinely a
-    // "derive a smaller problem *from* this one's samples" operation, not a
-    // constructor — the same API-naming exception the crate already takes for
-    // `Infrastructure::from_str`. It weakens no correctness check.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn from_subset(&self, indices: &[usize]) -> Result<QmlProblem, ValidationError> {
+    /// Named `subset` (not `from_subset`): it *derives* a smaller problem from
+    /// `self`, taking `&self`, rather than constructing a `QmlProblem` from
+    /// scratch. A `from_*` name would read as a `&self`-free constructor.
+    pub fn subset(&self, indices: &[usize]) -> Result<QmlProblem, ValidationError> {
         Ok(QmlProblem {
             model: self.model.clone(),
             train: self.train.select(indices)?,
@@ -1183,7 +1181,7 @@ mod tests {
 
     /// A 1-qubit `⟨Z₀⟩` / `SquaredError` problem whose samples carry **distinct**
     /// feature values, so every precompiled template differs. That is what makes
-    /// `from_subset`'s template selection observable: a subset built from the
+    /// `subset`'s template selection observable: a subset built from the
     /// wrong indices would bind different circuits.
     fn distinct_feature_problem(features: &[f64], labels: &[f64]) -> QmlProblem {
         let readout = Readout::new(
@@ -1238,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn from_subset_reproduces_the_full_problem_on_those_samples() {
+    fn subset_reproduces_the_full_problem_on_those_samples() {
         // Full problem over 4 distinct-feature samples with distinct labels.
         let features = [0.15, 0.25, 0.35, 0.45];
         let labels = [1.0, -1.0, 1.0, -1.0];
@@ -1246,7 +1244,7 @@ mod tests {
 
         // Carve out samples 2 and 0 (order preserved), the shape a minibatch has.
         let indices = [2usize, 0usize];
-        let subset = full.from_subset(&indices).unwrap();
+        let subset = full.subset(&indices).unwrap();
         assert_eq!(subset.num_circuits(), indices.len());
 
         // `bind_batch` on the subset binds exactly the full problem's templates
@@ -1274,16 +1272,13 @@ mod tests {
     }
 
     #[test]
-    fn from_subset_rejects_an_empty_index_set() {
+    fn subset_rejects_an_empty_index_set() {
         // An empty minibatch would build a 0-template problem whose
         // `fitness_from_counts` divides by zero and returns `Ok(NaN)`, breaking
-        // C-8. `from_subset` reasserts `Dataset`'s non-empty invariant instead
+        // C-8. `subset` reasserts `Dataset`'s non-empty invariant instead
         // of building that degenerate problem.
         let full = distinct_feature_problem(&[0.15, 0.25, 0.35], &[1.0, -1.0, 1.0]);
-        assert_eq!(
-            full.from_subset(&[]).unwrap_err(),
-            ValidationError::EmptyDataset
-        );
+        assert_eq!(full.subset(&[]).unwrap_err(), ValidationError::EmptyDataset);
         // The full problem itself is untouched by the rejected call.
         assert_eq!(full.num_circuits(), 3);
     }

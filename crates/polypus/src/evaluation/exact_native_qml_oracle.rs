@@ -116,7 +116,7 @@ impl ExactNativeQmlOracle {
         let problem = Arc::new(match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.from_subset(&indices)?
+                self.problem.subset(&indices)?
             }
             None => self.problem.clone(),
         });
@@ -180,7 +180,7 @@ impl ExactNativeQmlOracle {
         let problem = Arc::new(match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.from_subset(&indices)?
+                self.problem.subset(&indices)?
             }
             None => self.problem.clone(),
         });
@@ -644,7 +644,7 @@ mod tests {
         let full = oracle(contradictory_pair_problem(), OracleErrorSlot::new());
         // The contradictory pair on its own — what a `batch_size = 2` minibatch
         // draws whenever the shuffle puts samples 4 and 5 first.
-        let pair_only = full.problem.from_subset(&[4, 5]).unwrap();
+        let pair_only = full.problem.subset(&[4, 5]).unwrap();
         let pair = oracle(pair_only, OracleErrorSlot::new());
 
         // Checked across several θ so the cancellation is shown to be structural,

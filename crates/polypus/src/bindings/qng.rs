@@ -39,10 +39,6 @@ pub struct QNG {
 impl QNG {
     #[new]
     #[pyo3(signature = (variance_function, max_iters = 100, bounds = (-std::f64::consts::PI, std::f64::consts::PI), learning_rate = 0.1, tikhonov_reg = 0.05, tolerance = 0.01, patience = 3, seed = None))]
-    // Constructor mirrors QNG's full hyper-parameter set as Python kwargs; the
-    // added `patience` pushes it one past the lint threshold, exactly as
-    // `tolerance` does for `Adam::new` and `seed` does for `PSO::new`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         variance_function: Py<PyAny>,
         max_iters: u32,

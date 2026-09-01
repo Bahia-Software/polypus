@@ -426,9 +426,6 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
 /// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
 /// effective `seed`, `backend`, `infrastructure`) for logging and replay.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
-// Rich FFI entry point mirroring a many-kwarg Python API; same rationale and
-// convention as `train`/`qml_train` below.
-#[allow(clippy::too_many_arguments)]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -575,7 +572,6 @@ pub fn run_quantum_circuit<'py>(
 ///     )
 /// ```
 #[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
-#[allow(clippy::too_many_arguments)]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,

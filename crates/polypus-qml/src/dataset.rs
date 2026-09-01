@@ -175,7 +175,7 @@ impl Dataset {
     /// average over the samples without risking `0.0 / 0.0`
     /// (`QmlProblem::fitness_from_counts`, contract C-8).
     ///
-    /// `pub(crate)` so [`QmlProblem::from_subset`](crate::QmlProblem) (another
+    /// `pub(crate)` so [`QmlProblem::subset`](crate::QmlProblem) (another
     /// module of this crate) can carve a minibatch out of a validated dataset;
     /// `train_test_split` above is the other in-crate caller.
     pub(crate) fn select(&self, indices: &[usize]) -> Result<Dataset, ValidationError> {
@@ -436,7 +436,7 @@ mod tests {
         // `train_test_split` only the *test* partition can be emptied by
         // rounding (`floor(n * f) <= n - 1` for every `f < 1`), so the train
         // side's identical guard is reached via `select` itself — which is also
-        // the entry point `QmlProblem::from_subset` uses.
+        // the entry point `QmlProblem::subset` uses.
         let ds = Dataset::from_rows(&rows(&[&[0.0], &[1.0]]), &[7.0, 8.0]).unwrap();
         assert_eq!(ds.select(&[]), Err(ValidationError::EmptyDataset));
 

@@ -891,7 +891,6 @@ impl Model {
         exact=false,
         batch_size=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn train(
         slf: PyRef<'_, Self>,
         dataset: &Bound<'_, PyAny>,
@@ -1246,7 +1245,6 @@ impl TrainedModel {
         cores_per_qpu=1, id="qml_predict".to_string(), sim_method="automatic",
         noise_model=None, backend="aer", seed=None, exact=false,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn predict(
         &self,
         py: Python<'_>,
@@ -1546,7 +1544,6 @@ impl QmlTrainResult {
     exact=false,
     batch_size=None,
 ))]
-#[allow(clippy::too_many_arguments)]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1627,7 +1624,6 @@ pub fn qml_train<'py>(
 
 /// The native (pure-Rust) path: a compiled `polypus-qml` model + dataset + loss,
 /// trained through a [`NativeQmlOracle`] on any simulated backend.
-#[allow(clippy::too_many_arguments)]
 fn qml_train_native(
     model: PyRef<'_, Model>,
     ansatz: &Bound<'_, PyAny>,
@@ -1918,7 +1914,6 @@ impl FullDatasetEvaluator for ExactNativeQmlOracle {
 /// The Qiskit/Aer path: compose the feature map with the ansatz, pre-bind each
 /// training sample's feature-map parameters, and train through a [`QmlOracle`].
 /// Behaviour is unchanged from the pre-phase-4 inline `qml_train`.
-#[allow(clippy::too_many_arguments)]
 fn qml_train_qiskit(
     feature_map: &Bound<'_, PyAny>,
     ansatz: &Bound<'_, PyAny>,
@@ -2092,7 +2087,6 @@ fn qml_train_qiskit(
 /// — that check cannot preempt it mid-flight; it raises a pending Ctrl+C the
 /// instant the call returns, rather than leaving it deaf until control unwinds
 /// all the way back to Python.
-#[allow(clippy::too_many_arguments)]
 fn dispatch_optimizer(
     py: Python<'_>,
     method: &Bound<'_, PyAny>,

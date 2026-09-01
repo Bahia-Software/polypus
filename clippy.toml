@@ -8,6 +8,15 @@
 # just to preserve a frozen public API.
 avoid-breaking-exported-api = false
 
+# The PyO3 entry points in `crates/polypus/src/bindings` mirror their Python
+# kwargs one-for-one, so their arity is set by the API they expose (contract C-1
+# for the execution seam), not by design choice -- `qml_train` and its native
+# twin `qml_train_native` are the widest at 19. Tune the threshold once here
+# instead of per-function `#[allow(...)]`: 20 clears today's signatures with
+# room for one more kwarg, while still flagging a genuinely runaway parameter
+# list.
+too-many-arguments-threshold = 20
+
 # Set this to your true Minimum Supported Rust Version so clippy won't suggest
 # APIs newer than you support. Pick the highest floor required by your deps
 # (pyo3 0.24, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you
