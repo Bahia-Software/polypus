@@ -448,6 +448,29 @@ pub enum QmlError {
         /// The number of counts maps supplied.
         got: usize,
     },
+    /// One per-sample entry of the `base_expectations` slice handed to
+    /// [`param_gradient_categorical`](crate::QmlProblem::param_gradient_categorical)
+    /// (or its exact mirror) carries a number of class expectations different
+    /// from the readout's observable count.
+    ///
+    /// Distinct from [`CountsLengthMismatch`](Self::CountsLengthMismatch),
+    /// which is about the *outer* length — how many samples the slice holds.
+    /// This one is about the *inner* width of a single sample's
+    /// class-expectation vector, which the categorical chain rule zips against
+    /// the per-class shifted expectations: a wrong width there would silently
+    /// truncate (or over-extend) the sum instead of failing, yielding a
+    /// plausible but wrong gradient.
+    ///
+    /// Reported for the first offending sample, deterministically — the same
+    /// convention as [`ValidationError::RaggedRows`].
+    ClassCountMismatch {
+        /// Index of the first offending sample.
+        sample: usize,
+        /// The number of classes expected (the readout's observable count).
+        expected: usize,
+        /// The length of the offending sample's expectation vector.
+        got: usize,
+    },
     /// [`Loss::evaluate`](crate::Loss::evaluate) or
     /// [`Loss::gradient`](crate::Loss::gradient) was reached with
     /// `Loss::CategoricalCrossEntropy`, which has no scalar form: it scores a
@@ -491,6 +514,14 @@ impl fmt::Display for QmlError {
             QmlError::CountsLengthMismatch { expected, got } => write!(
                 f,
                 "counts length mismatch: expected {expected} counts map(s), got {got}"
+            ),
+            QmlError::ClassCountMismatch {
+                sample,
+                expected,
+                got,
+            } => write!(
+                f,
+                "class count mismatch: sample {sample} carries {got} class expectation(s), expected {expected} (one per readout observable)"
             ),
             QmlError::CategoricalLossHasNoScalarForm => write!(
                 f,
@@ -671,6 +702,30 @@ mod tests {
         assert!(QmlError::CategoricalLossHasNoScalarForm
             .to_string()
             .contains("scalar"));
+    }
+
+    #[test]
+    fn class_count_mismatch_displays_sample_and_widths() {
+        // All three halves must be in the message: the sample says *which*
+        // expectation vector to fix, the widths say what was wrong with it.
+        let s = QmlError::ClassCountMismatch {
+            sample: 1,
+            expected: 3,
+            got: 2,
+        }
+        .to_string();
+        assert!(s.contains('1'), "missing the sample index: {s}");
+        assert!(s.contains('3'), "missing the expected class count: {s}");
+        assert!(s.contains('2'), "missing the offending width: {s}");
+        // Its wording must not read as the *outer* (per-sample) mismatch that
+        // `CountsLengthMismatch` reports — the two are distinct failures.
+        assert!(
+            s != QmlError::CountsLengthMismatch {
+                expected: 3,
+                got: 2,
+            }
+            .to_string()
+        );
     }
 
     #[test]

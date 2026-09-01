@@ -384,7 +384,14 @@ impl QmlProblem {
     /// Length validation, in this order, each against
     /// [`num_circuits`](Self::num_circuits): `plus_counts`, then `minus_counts`,
     /// then `base_expectations` — the same deterministic ordering as
-    /// [`param_gradient`](Self::param_gradient).
+    /// [`param_gradient`](Self::param_gradient). Then, once those *outer*
+    /// lengths agree, the *inner* width of every `base_expectations[i]` is
+    /// checked against the readout's observable count, reporting the first
+    /// offending sample as
+    /// [`ClassCountMismatch`](crate::QmlError::ClassCountMismatch): the chain
+    /// rule below zips `CE'` against the per-class shifts, so a vector of the
+    /// wrong width would silently drop (or ignore) classes and return a
+    /// plausible but wrong gradient.
     pub fn param_gradient_categorical(
         &self,
         base_expectations: &[Vec<f64>],
@@ -409,6 +416,16 @@ impl QmlProblem {
                 expected: n,
                 got: base_expectations.len(),
             });
+        }
+        let num_classes = self.model.resolved_readout().observables().len();
+        for (i, base) in base_expectations.iter().enumerate() {
+            if base.len() != num_classes {
+                return Err(QmlError::ClassCountMismatch {
+                    sample: i,
+                    expected: num_classes,
+                    got: base.len(),
+                });
+            }
         }
 
         let plus_per_class = self.expectations_per_class_from_counts(plus_counts)?;
@@ -570,7 +587,12 @@ impl QmlProblem {
     /// Exact-mode mirror of
     /// [`param_gradient_categorical`](Self::param_gradient_categorical): the
     /// exact parameter-shift gradient component of the categorical fitness from
-    /// exact `probabilities`. Same length-validation order as its counterpart.
+    /// exact `probabilities`. Same length-validation order as its counterpart:
+    /// `plus_probs`, then `minus_probs`, then `base_expectations` against
+    /// [`num_circuits`](Self::num_circuits), and finally the *inner* width of
+    /// every `base_expectations[i]` against the readout's observable count,
+    /// reporting the first offending sample as
+    /// [`ClassCountMismatch`](crate::QmlError::ClassCountMismatch).
     pub fn param_gradient_categorical_exact(
         &self,
         base_expectations: &[Vec<f64>],
@@ -595,6 +617,16 @@ impl QmlProblem {
                 expected: n,
                 got: base_expectations.len(),
             });
+        }
+        let num_classes = self.model.resolved_readout().observables().len();
+        for (i, base) in base_expectations.iter().enumerate() {
+            if base.len() != num_classes {
+                return Err(QmlError::ClassCountMismatch {
+                    sample: i,
+                    expected: num_classes,
+                    got: base.len(),
+                });
+            }
         }
 
         let plus_per_class = self.expectations_per_class_from_probabilities(plus_probs)?;
@@ -1051,6 +1083,90 @@ mod tests {
     }
 
     #[test]
+    fn param_gradient_categorical_rejects_wrong_class_count() {
+        let problem = categorical_two_class_problem(); // 2 circuits, 2 classes
+        let ok_pair = vec![counts(&[("00", 1)]), counts(&[("11", 1)])];
+
+        // Outer length right (2 samples), inner width short on sample 1: the
+        // chain-rule `zip` would silently drop class 1 and return a plausible
+        // but wrong gradient, so this must be a typed error naming sample 1.
+        let base_short = vec![vec![0.0, 0.0], vec![0.0]];
+        let err = problem
+            .param_gradient_categorical(&base_short, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 1,
+                expected: 2,
+                got: 1,
+            }
+        );
+
+        // Symmetric case: a *longer* inner vector must not pass "by accident"
+        // just because the `zip` truncates in the other direction.
+        let base_long = vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0]];
+        let err = problem
+            .param_gradient_categorical(&base_long, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 0,
+                expected: 2,
+                got: 3,
+            }
+        );
+
+        // The inner check runs *after* the outer ones: with plus (or minus, or
+        // the outer base length) also wrong, the outer mismatch still wins.
+        let err = problem
+            .param_gradient_categorical(&base_short, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        let err = problem
+            .param_gradient_categorical(&base_short, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+        let err = problem
+            .param_gradient_categorical(&base_short[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1,
+            }
+        );
+
+        // First offender wins: both samples are wrong, sample 0 is reported.
+        let base_both = vec![vec![0.0], vec![0.0, 0.0, 0.0]];
+        let err = problem
+            .param_gradient_categorical(&base_both, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 0,
+                expected: 2,
+                got: 1,
+            }
+        );
+    }
+
+    #[test]
     fn predict_from_counts_applies_decision() {
         let model = two_qubit_model(Decision::Sign);
         let problem = QmlProblem::new(model, dataset(&[1.0, -1.0]), Loss::Hinge).unwrap();
@@ -1388,6 +1504,86 @@ mod tests {
             QmlError::CountsLengthMismatch {
                 expected: 2,
                 got: 1
+            }
+        );
+    }
+
+    #[test]
+    fn param_gradient_categorical_exact_rejects_wrong_class_count() {
+        // Mirror of `param_gradient_categorical_rejects_wrong_class_count`.
+        let problem = categorical_two_class_problem(); // 2 circuits, 2 classes
+        let ok_pair = vec![probs(&[("00", 1.0)]), probs(&[("11", 1.0)])];
+
+        let base_short = vec![vec![0.0, 0.0], vec![0.0]];
+        let err = problem
+            .param_gradient_categorical_exact(&base_short, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 1,
+                expected: 2,
+                got: 1,
+            }
+        );
+
+        // A longer inner vector fails too — the `zip` must not hide it.
+        let base_long = vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0]];
+        let err = problem
+            .param_gradient_categorical_exact(&base_long, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 0,
+                expected: 2,
+                got: 3,
+            }
+        );
+
+        // The inner check runs after all three outer ones.
+        let err = problem
+            .param_gradient_categorical_exact(&base_short, &ok_pair[..1], &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        let err = problem
+            .param_gradient_categorical_exact(&base_short, &ok_pair, &ok_pair[..1])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+        let err = problem
+            .param_gradient_categorical_exact(&base_short[..1], &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: 2,
+                got: 1
+            }
+        );
+
+        // First offender wins.
+        let base_both = vec![vec![0.0], vec![0.0, 0.0, 0.0]];
+        let err = problem
+            .param_gradient_categorical_exact(&base_both, &ok_pair, &ok_pair)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::ClassCountMismatch {
+                sample: 0,
+                expected: 2,
+                got: 1,
             }
         );
     }
