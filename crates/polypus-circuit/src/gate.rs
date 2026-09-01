@@ -88,6 +88,8 @@ pub enum GateInstruction {
     Cx(usize, usize),
     /// Controlled-Z: control, target.
     Cz(usize, usize),
+    /// SWAP: exchange the states of two qubits.
+    Swap(usize, usize),
     /// Two-qubit ZZ-interaction rotation, exp(-i θ/2 Z⊗Z).
     Rzz {
         q0: usize,
@@ -164,6 +166,7 @@ impl GateInstruction {
             | GateInstruction::U { qubit: q, .. } => ActsOn::One(*q),
             GateInstruction::Cx(a, b)
             | GateInstruction::Cz(a, b)
+            | GateInstruction::Swap(a, b)
             | GateInstruction::Rzz { q0: a, q1: b, .. }
             | GateInstruction::Rxx { q0: a, q1: b, .. }
             | GateInstruction::Cp { q0: a, q1: b, .. } => ActsOn::Two(*a, *b),

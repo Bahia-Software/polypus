@@ -188,6 +188,12 @@ pub(crate) fn write_qir(
             GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),
             GateInstruction::Cx(c, t) => w.gate2(CNOT, *c, *t),
             GateInstruction::Cz(c, t) => w.gate2(CZ, *c, *t),
+            // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
+            GateInstruction::Swap(q0, q1) => {
+                w.gate2(CNOT, *q0, *q1);
+                w.gate2(CNOT, *q1, *q0);
+                w.gate2(CNOT, *q0, *q1);
+            }
             // rzz(θ) = cnot · rz(θ) · cnot
             GateInstruction::Rzz { q0, q1, theta } => {
                 let t = angle(theta)?;
