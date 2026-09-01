@@ -24,14 +24,10 @@ use polypus_qml::{
 };
 
 use super::{
-    build_backend_config, finish_optimization, is_native_backend, method_seed,
+    build_backend_config, dispatch_optimizer, is_native_backend, method_seed,
     resolve_optimizer_seed, unique_id, validate_cunqa_allocation, validate_shots_and_qpus,
-    TrainResult,
+    RecomputeFn, TrainResult,
 };
-use crate::bindings::adam::Adam;
-use crate::bindings::de::DE;
-use crate::bindings::pso::PSO;
-use crate::bindings::qng::{PyVarianceOracle, QNG};
 use crate::evaluation::{
     EvaluationOracle, ExactNativeQmlOracle, MinibatchConfig, NativeQmlOracle, OracleErrorSlot,
     QmlOracle,
@@ -39,24 +35,7 @@ use crate::evaluation::{
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{BackendError, BoundCircuit};
 use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
-use polypus_optimizers::{
-    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmDifferentialEvolution,
-    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
-    AlgorithmQNGArgs, GradientOracle, OptimizationOutcome, Optimizer, OptimizerError,
-};
-
-/// The final-fitness recompute (design doc §17): re-score a parameter vector
-/// against the **full** training set once optimization ends, replacing a
-/// minibatched `best_fitness`. Aliased so the boxed owner, the borrowed
-/// dispatcher argument and the oracle-branch tuple all name one unsized type.
-///
-/// `+ Send + Sync` so the recompute can run inside `py.allow_threads` in
-/// [`dispatch_optimizer`] (ENGINEERING §3): under pyo3's stable `Ungil` bound
-/// that closure must be `Send`, which for the borrowed `&RecomputeFn` it holds
-/// requires the trait object to be `Sync`. The closure built by
-/// [`recompute_full_fitness`] only captures an `Arc<O>` and an
-/// `OracleErrorSlot`, both `Send + Sync`, so it satisfies the tighter bound.
-type RecomputeFn = dyn Fn(&[f64]) -> f64 + Send + Sync;
+use polypus_optimizers::GradientOracle;
 
 /// The three things the native oracle branch hands to [`dispatch_optimizer`]:
 /// the two trait-object facets of the one oracle `Arc` (fitness + gradient) and
@@ -2060,154 +2039,4 @@ fn qml_train_qiskit(
         effective_seed,
         effective_id,
     )
-}
-
-/// Run `oracle` under the optimizer named by `method` (DE/PSO/QNG/Adam),
-/// releasing the GIL for the whole `optimize()` call (see `train` and
-/// ENGINEERING §3) and surfacing any recorded oracle error afterwards.
-///
-/// Shared verbatim by both `qml.train` paths — the only difference between them
-/// is which oracle and `dimensions` are passed in.
-///
-/// `gradient_oracle` is the same underlying oracle as `oracle` (built from one
-/// `Arc` via the blanket impls); it is consumed by the gradient optimizers
-/// (QNG, Adam) and ignored by DE/PSO, which are gradient-free.
-///
-/// `recompute`, present only for a minibatched native run (design doc §17),
-/// re-scores the optimizer's `best_params` against the **full** dataset once the
-/// run ends, replacing the last iteration's minibatch `best_fitness` — so the
-/// reported fitness is comparable to a non-minibatch run (contract C-5). It is
-/// applied uniformly at the single convergence point below, regardless of which
-/// optimizer ran; the Qiskit path passes `None`. That full-dataset re-score can
-/// be much heavier than a single minibatch step, so it obeys the same GIL
-/// discipline as the optimizer loop (ENGINEERING §3): it runs GIL-free under
-/// `py.allow_threads` (so it never freezes other Python threads for its whole
-/// duration), with a `py.check_signals()` at the boundary. The recompute is one
-/// indivisible native call, so — like the batched read-out in `Model::predict`
-/// — that check cannot preempt it mid-flight; it raises a pending Ctrl+C the
-/// instant the call returns, rather than leaving it deaf until control unwinds
-/// all the way back to Python.
-fn dispatch_optimizer(
-    py: Python<'_>,
-    method: &Bound<'_, PyAny>,
-    oracles: (Box<dyn EvaluationOracle>, Box<dyn GradientOracle>),
-    recompute: Option<&RecomputeFn>,
-    dimensions: u32,
-    errors: &OracleErrorSlot,
-    effective_seed: u64,
-    effective_id: String,
-) -> PyResult<PyObject> {
-    // The two boxes are the same underlying oracle (one Arc, two blanket-impl
-    // facets): the evaluation box for DE/PSO/QNG/Adam fitness, the gradient box
-    // for QNG and Adam. Passed as a pair to keep the argument count in check.
-    let (oracle, gradient_oracle) = oracles;
-
-    // Run the selected optimizer, converging every branch on a single raw
-    // `Result<OptimizationOutcome, _>` so the final-fitness recompute and
-    // `finish_optimization` happen in exactly one place (design doc §17). The GIL
-    // is released around each `optimize()` exactly as before (ENGINEERING §3).
-    let result: Result<OptimizationOutcome, OptimizerError> =
-        if let Ok(de) = method.extract::<PyRef<DE>>() {
-            let args = AlgorithmDifferentialEvolutionArgs {
-                oracle,
-                population_size: de.population_size,
-                generations: de.generations,
-                dimensions,
-                tolerance: de.tolerance,
-                seed: Some(effective_seed),
-            };
-            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args))
-        } else if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-            let args = AlgorithmPSOArgs {
-                oracle,
-                population_size: pso.population_size,
-                generations: pso.generations,
-                dimensions,
-                bounds: pso.bounds,
-                inertia_weight: pso.inertia_weight,
-                cognitive_weight: pso.cognitive_weight,
-                social_weight: pso.social_weight,
-                tolerance: pso.tolerance,
-                seed: Some(effective_seed),
-            };
-            py.allow_threads(|| AlgorithmPSO.optimize(args))
-        } else if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-            let args = AlgorithmQNGArgs {
-                oracle,
-                gradient_oracle,
-                max_iters: qng.max_iters,
-                learning_rate: qng.learning_rate,
-                bounds: qng.bounds,
-                dimensions,
-                tolerance: qng.tolerance,
-                patience: qng.patience,
-                variance_oracle: Box::new(PyVarianceOracle {
-                    variance_function: qng.variance_function.clone_ref(py),
-                    errors: errors.clone(),
-                }),
-                tikhonov_reg: qng.tikhonov_reg,
-                seed: Some(effective_seed),
-            };
-            py.allow_threads(|| AlgorithmQNG.optimize(args))
-        } else if let Ok(adam) = method.extract::<PyRef<Adam>>() {
-            // Same two facets of the one Arc as QNG: the evaluation box scores
-            // fitness, the gradient box supplies the exact parameter-shift
-            // gradient. No VarianceOracle — Adam's step comes from the moments.
-            let args = AlgorithmAdamArgs {
-                oracle,
-                gradient_oracle,
-                max_iters: adam.max_iters,
-                learning_rate: adam.learning_rate,
-                beta1: adam.beta1,
-                beta2: adam.beta2,
-                epsilon: adam.epsilon,
-                bounds: adam.bounds,
-                dimensions,
-                tolerance: adam.tolerance,
-                patience: adam.patience,
-                seed: Some(effective_seed),
-            };
-            py.allow_threads(|| AlgorithmAdam.optimize(args))
-        } else {
-            return Err(PyTypeError::new_err(
-            "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.Adam",
-        ));
-        };
-
-    // Final-fitness recompute (design doc §17): only when minibatching is active
-    // (`recompute` is `Some`), the optimizer produced a valid outcome, and no
-    // oracle error is pending. If the optimizer already recorded a failure the
-    // `best_params` are meaningless, so skip the recompute and let
-    // `finish_optimization` surface that error. A failure *inside* the recompute
-    // records into the same slot and is surfaced there too.
-    //
-    // Only `best_fitness` is replaced: `fitness_history` keeps the per-iteration
-    // minibatch estimates the optimizer actually steered by. Overwriting its last
-    // entry with this full-dataset number would splice one point from a different
-    // scale onto the curve — and, since a minibatch estimate is typically the
-    // rosier of the two, could make the sequence decrease, breaking the C-5
-    // monotonicity guarantee to buy a cosmetic `history[-1] == best_fitness`. So
-    // under `batch_size` that equality deliberately does not hold (contract C-7).
-    //
-    // The recompute follows the same GIL discipline as the optimizer loop above
-    // (ENGINEERING §3): `evaluate_full` re-scores against the whole training set
-    // — potentially far more circuits than one minibatch step — so it runs under
-    // `py.allow_threads` (GIL-free, never freezing other Python threads for its
-    // duration) with a `py.check_signals()` afterwards. It is one indivisible
-    // native call, so the check does not interrupt it mid-flight; it converts a
-    // Ctrl+C landed during the recompute into a `KeyboardInterrupt` the instant
-    // the call returns, instead of leaving it pending until control unwinds back
-    // to Python. The check sits *outside* the `match`: its `PyErr` has no
-    // `OptimizerError` conversion to unify with the `(other, _)` arm, so the `?`
-    // belongs in the enclosing `PyResult` body, after `result` is built.
-    let result = match (result, recompute) {
-        (Ok(mut outcome), Some(recompute)) if !errors.failed() => {
-            outcome.best_fitness = py.allow_threads(|| recompute(&outcome.best_params));
-            Ok(outcome)
-        }
-        (other, _) => other,
-    };
-    py.check_signals()?;
-
-    finish_optimization(py, result, errors, effective_seed, effective_id)
 }
