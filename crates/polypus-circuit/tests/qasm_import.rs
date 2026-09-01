@@ -21,6 +21,7 @@ fn full_vocabulary_circuit() -> ParameterizedCircuit {
         .u(0, 0.1, Param(1), 0.3)
         .cx(0, 1)
         .cz(1, 2)
+        .swap(0, 2)
         .rzz(0, 2, Param(0))
         .rxx(1, 2, 2.0)
         .barrier()
@@ -117,8 +118,8 @@ measure q[2] -> meas[2];
     assert_eq!(qc.num_qubits, 3);
     assert_eq!(qc.num_clbits(), 3);
 
-    // swap → 3 cx; id dropped; explicit full barrier → whole-register form;
-    // 3 contiguous measures → MeasureAll.
+    // swap → native Swap; id dropped; explicit full barrier → whole-register
+    // form; 3 contiguous measures → MeasureAll.
     let expected = [
         GateInstruction::H(0),
         GateInstruction::Rzz {
@@ -142,9 +143,7 @@ measure q[2] -> meas[2];
             phi: GateParam::Fixed(0.0),
             lam: GateParam::Fixed(0.5),
         },
-        GateInstruction::Cx(0, 2),
-        GateInstruction::Cx(2, 0),
-        GateInstruction::Cx(0, 2),
+        GateInstruction::Swap(0, 2),
         GateInstruction::Barrier(Vec::new()),
         GateInstruction::MeasureAll,
     ];

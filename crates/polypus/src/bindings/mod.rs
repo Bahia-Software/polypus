@@ -11,7 +11,7 @@ pub mod observable;
 pub mod pso;
 pub mod qng;
 
-use circuit::{statevector, Circuit, Param};
+use circuit::{qft, statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo};
@@ -1223,6 +1223,18 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register in sys.modules so `import polypus.qml` also works
     let sys = PyModule::import(py, "sys")?;
     sys.getattr("modules")?.set_item("polypus.qml", &qml)?;
+
+    // circuits.templates subpackage — exposes polypus.circuits.templates.qft()
+    let circuits = PyModule::new(py, "polypus.circuits")?;
+    let templates = PyModule::new(py, "polypus.circuits.templates")?;
+    templates.add_function(wrap_pyfunction!(qft, &templates)?)?;
+    // Attach under short keys (see the qml note above) and mirror both levels
+    // into sys.modules so `import polypus.circuits.templates` also resolves.
+    circuits.add("templates", &templates)?;
+    m.add("circuits", &circuits)?;
+    let modules = sys.getattr("modules")?;
+    modules.set_item("polypus.circuits", &circuits)?;
+    modules.set_item("polypus.circuits.templates", &templates)?;
 
     Ok(())
 }

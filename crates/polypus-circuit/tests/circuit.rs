@@ -43,6 +43,29 @@ fn test_parameterized_circuit_gate_param_basic_creation() {
 }
 
 #[test]
+fn test_parameterized_circuit_swap_builder_and_qasm() {
+    let qc = ParameterizedCircuit::new(3).swap(0, 2);
+
+    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(qc.gates[0], GateInstruction::Swap(0, 2));
+
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.contains("swap q[0],q[2];"));
+}
+
+#[test]
+#[should_panic]
+fn test_parameterized_circuit_swap_same_qubit() {
+    let _qc = ParameterizedCircuit::new(2).swap(1, 1);
+}
+
+#[test]
+#[should_panic]
+fn test_parameterized_circuit_swap_qubit_out_of_range() {
+    let _qc = ParameterizedCircuit::new(2).swap(0, 5);
+}
+
+#[test]
 #[should_panic]
 fn test_parameterized_circuit_gate_basic_qubit_out_of_range() {
     let _qc = ParameterizedCircuit::new(2).y(5);

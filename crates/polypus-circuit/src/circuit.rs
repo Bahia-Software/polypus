@@ -183,9 +183,9 @@ impl ParameterizedCircuit {
                 let theta = *theta;
                 self.track_param(&theta);
             }
-            GateInstruction::Cx(q0, q1) | GateInstruction::Cz(q0, q1) => {
-                self.check_pair(*q0, *q1)?
-            }
+            GateInstruction::Cx(q0, q1)
+            | GateInstruction::Cz(q0, q1)
+            | GateInstruction::Swap(q0, q1) => self.check_pair(*q0, *q1)?,
             GateInstruction::Rzz { q0, q1, theta } | GateInstruction::Rxx { q0, q1, theta } => {
                 self.check_pair(*q0, *q1)?;
                 Self::check_finite(theta)?;
@@ -344,6 +344,11 @@ impl ParameterizedCircuit {
     /// Controlled-Z with `control` and `target`.
     pub fn cz(self, control: usize, target: usize) -> Self {
         self.push(GateInstruction::Cz(control, target))
+    }
+
+    /// SWAP: exchange the states of qubits `q0` and `q1`.
+    pub fn swap(self, q0: usize, q1: usize) -> Self {
+        self.push(GateInstruction::Swap(q0, q1))
     }
 
     /// ZZ-interaction rotation on `(q0, q1)`.

@@ -176,6 +176,26 @@ fn cx_leaves_target_when_control_clear() {
 }
 
 #[test]
+fn swap_exchanges_the_two_qubits() {
+    // |00> --X(0)--> |q1=0,q0=1> (index 1) --SWAP(0,1)--> |q1=1,q0=0> (index 2)
+    let a = after(2, &[G::X(0)], G::Swap(0, 1));
+    assert!(close(a[2], C64::new(1.0, 0.0)));
+    for (i, amp) in a.iter().enumerate() {
+        if i != 2 {
+            assert!(close(*amp, C64::new(0.0, 0.0)));
+        }
+    }
+}
+
+#[test]
+fn swap_is_symmetric_in_its_qubits() {
+    // Same result regardless of argument order.
+    let a = after(2, &[G::X(0)], G::Swap(0, 1));
+    let b = after(2, &[G::X(0)], G::Swap(1, 0));
+    assert!(a.iter().zip(&b).all(|(x, y)| close(*x, *y)));
+}
+
+#[test]
 fn cz_phases_eleven() {
     // |11> -> -|11>
     let a = after(2, &[G::X(0), G::X(1)], G::Cz(0, 1));

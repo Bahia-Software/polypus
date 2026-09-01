@@ -792,12 +792,7 @@ impl Parser {
                     self.check_distinct(a, b, line)?;
                     match name {
                         "cz" => self.push_validated(GateInstruction::Cz(a, b), line)?,
-                        // qelib1.inc: swap a,b = cx a,b; cx b,a; cx a,b
-                        "swap" => {
-                            self.push_validated(GateInstruction::Cx(a, b), line)?;
-                            self.push_validated(GateInstruction::Cx(b, a), line)?;
-                            self.push_validated(GateInstruction::Cx(a, b), line)?;
-                        }
+                        "swap" => self.push_validated(GateInstruction::Swap(a, b), line)?,
                         _ => self.push_validated(GateInstruction::Cx(a, b), line)?,
                     }
                 }

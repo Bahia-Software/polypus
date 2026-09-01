@@ -246,8 +246,8 @@ impl Circuit {
     /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
     ///
     /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output
-    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to 3×`cx`, `id` is
-    /// dropped; multiple registers are flattened in declaration order). The
+    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `id` is dropped; multiple
+    /// registers are flattened in declaration order). The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.
     ///
@@ -370,6 +370,11 @@ impl Circuit {
 
     fn cz(slf: PyRefMut<'_, Self>, control: usize, target: usize) -> PyResult<PyRefMut<'_, Self>> {
         push(slf, GateInstruction::Cz(control, target))
+    }
+
+    /// SWAP: exchange the states of qubits `q0` and `q1`.
+    fn swap(slf: PyRefMut<'_, Self>, q0: usize, q1: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Swap(q0, q1))
     }
 
     fn rzz(
@@ -501,5 +506,30 @@ impl Circuit {
             self.inner.num_params,
             self.inner.gates.len()
         )
+    }
+}
+
+/// Quantum Fourier Transform on `num_qubits` qubits, as a `polypus.Circuit`.
+///
+/// Follows the Qiskit `QFT` convention (big-endian, trailing qubit-reversal
+/// swaps). The returned circuit has no free parameters and no measurements, so
+/// it composes like any hand-built circuit — keep chaining gates, add
+/// `measure_all()`, or run it directly.
+///
+/// * `inverse` — build the inverse transform (QFT†), the exact adjoint of the
+///   forward circuit with the same arguments.
+/// * `swaps` — include the qubit-reversal swaps (default `True`); set
+///   `False` when the surrounding circuit already handles bit order.
+///
+/// ```python
+/// import polypus
+/// qft = polypus.circuits.templates.qft(4)
+/// counts = polypus.run_quantum_circuit(qft.measure_all(), shots=1024)
+/// ```
+#[pyfunction]
+#[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
+pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> Circuit {
+    Circuit {
+        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps),
     }
 }

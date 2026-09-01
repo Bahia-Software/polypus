@@ -163,6 +163,9 @@ impl Statevector {
             GateInstruction::Cz(c, t) => {
                 kernels::apply_diagonal_2q(&mut self.data, *c, *t, gates::cz_diag(), par);
             }
+            GateInstruction::Swap(q0, q1) => {
+                kernels::apply_2q(&mut self.data, n, *q0, *q1, &gates::swap(), par);
+            }
             GateInstruction::Rzz { q0, q1, theta } => {
                 let diag = gates::rzz_diag(angle(theta)?);
                 kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
