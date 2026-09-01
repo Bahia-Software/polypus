@@ -13,6 +13,7 @@ use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Tr
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -163,7 +164,16 @@ impl QuantumBackend for NativeStatevectorBackend {
         // Reserve a contiguous block of seeds for this batch so each circuit is
         // sampled independently and deterministically, regardless of order.
         let start = self.counter.fetch_add(qcs.len() as u64, Ordering::Relaxed);
-        qcs.iter()
+        // Evaluate the batch in parallel across circuits. A DE generation submits
+        // its whole population here (one circuit per candidate), so this is the
+        // population axis — embarrassingly parallel, cache-friendly, and the axis
+        // that actually scales, unlike the bandwidth-bound gate-level kernels.
+        // `simulate_one` is pure Rust (no GIL) and `&self`-only; the per-circuit
+        // seed is `start + i`, fixed up front and independent of execution order,
+        // so `par_iter` yields byte-identical counts to the sequential path.
+        // rayon's indexed `collect` preserves order and short-circuits on the
+        // first `Err`.
+        qcs.par_iter()
             .enumerate()
             .map(|(i, qc)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
