@@ -42,7 +42,7 @@ pub const MEV_TO_JOULE: f64 = 1.602_176_634e-13;
 pub const BARN_TO_CM2: f64 = 1.0e-24;
 
 /// Classical electron radius r_e (m).
-pub const CLASSICAL_ELECTRON_RADIUS_M: f64 = 2.817_940_3e-15;
+pub const CLASSICAL_ELECTRON_RADIUS_M: f64 = 2.817_940_320_5e-15; 
 
 /// Avogadro constant N_A (mol⁻¹).
 pub const AVOGADRO: f64 = 6.022_140_76e23;

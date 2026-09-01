@@ -92,48 +92,32 @@ fn sample_cos_theta(energy_mev: f64, rng: &mut impl Rng) -> f64 {
     }
 }
 
-/// Build an orthonormal basis `(u, v)` perpendicular to the unit vector `w`.
+/// The direction cosines of the incident particle (u, v, w) are rotated to
+/// the new direction cosines of the target system at rest (u_new, v_new, w_new)
+/// by means of a polar angle (theta) and a uniformly sampled azimuthal angle (phi).
 ///
-/// Used to rotate a direction by a polar/azimuthal `(θ, φ)` pair while handling
-/// the polar-axis singularity (when `w` is close to `±z`, a different reference
-/// axis is chosen).
-fn perpendicular_basis(w: [f64; 3]) -> ([f64; 3], [f64; 3]) {
-    let [wx, wy, wz] = w;
-    // Choose a reference axis not parallel to w.
-    let reference = if wz.abs() < 0.9 {
-        [0.0, 0.0, 1.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    // u = normalize(w × reference)
-    let ux = wy * reference[2] - wz * reference[1];
-    let uy = wz * reference[0] - wx * reference[2];
-    let uz = wx * reference[1] - wy * reference[0];
-    let u_norm = (ux * ux + uy * uy + uz * uz).sqrt();
-    let u = [ux / u_norm, uy / u_norm, uz / u_norm];
-    // v = w × u (already unit length since w and u are orthonormal).
-    let v = [
-        wy * u[2] - wz * u[1],
-        wz * u[0] - wx * u[2],
-        wx * u[1] - wy * u[0],
-    ];
-    (u, v)
-}
+/// Uses the closed-form MCNP direction-cosine rotation ("MCNP — A General
+/// Monte Carlo N-Particle Transport Code"), with an explicit near-polar-axis
+/// special case to avoid dividing by a near-zero `s`.
 
-/// Rotate unit direction `dir` by polar angle `theta` (about a transverse axis)
-/// and azimuth `phi`, returning a new unit vector.
-///
-/// The new direction is `cosθ·w + sinθ(cosφ·u + sinφ·v)`, where `(u, v, w)` is
-/// an orthonormal frame with `w = dir`.
 pub fn rotate_direction(dir: [f64; 3], cos_theta: f64, phi: f64) -> [f64; 3] {
-    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
-    let (u, v) = perpendicular_basis(dir);
+    let [u, v, w] = dir;
+    let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
     let (sin_phi, cos_phi) = phi.sin_cos();
-    let mut out = [0.0; 3];
-    for i in 0..3 {
-        out[i] = cos_theta * dir[i] + sin_theta * (cos_phi * u[i] + sin_phi * v[i]);
-    }
-    // Renormalize defensively against accumulated floating-point error.
+
+    let out = if w.abs() > 0.999_999 {
+        [sin_theta * cos_phi, sin_theta * sin_phi, cos_theta * w.signum()]
+    } else {
+        let s = (1.0 - w * w).sqrt();
+        [
+            u * cos_theta + sin_theta * (u * w * cos_phi - v * sin_phi) / s,
+            v * cos_theta + sin_theta * (v * w * cos_phi + u * sin_phi) / s,
+            w * cos_theta - sin_theta * cos_phi * s,
+        ]
+    };
+
+    // Renormalize to guard against accumulated floating-point drift over
+    // many chained scattering events.
     let norm = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
     [out[0] / norm, out[1] / norm, out[2] / norm]
 }
