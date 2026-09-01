@@ -90,6 +90,19 @@ pub enum ValidationError {
         /// The length of the supplied slice.
         got: usize,
     },
+    /// The training dataset's feature count does not match the number of
+    /// features the compiled model expects per sample. Raised by
+    /// [`QmlProblem::new`](crate::QmlProblem::new)'s first cross-check — the
+    /// most common construction error a caller can hit (a dataset with the
+    /// wrong number of columns). Distinct from
+    /// [`FeatureCountMismatch`](Self::FeatureCountMismatch), which is about a
+    /// feature-*range* slice, not a dataset↔model mismatch.
+    ModelDatasetFeatureMismatch {
+        /// The feature count the model expects per sample.
+        expected: usize,
+        /// The training dataset's feature count.
+        got: usize,
+    },
     /// A model was compiled with zero qubits. A circuit needs at least one
     /// qubit to carry any gate.
     NoQubits,
@@ -268,6 +281,10 @@ impl fmt::Display for ValidationError {
             ValidationError::FeatureCountMismatch { expected, got } => write!(
                 f,
                 "feature-range count mismatch: dataset has {expected} feature(s), got {got} range(s)"
+            ),
+            ValidationError::ModelDatasetFeatureMismatch { expected, got } => write!(
+                f,
+                "feature count mismatch: model expects {expected} feature(s) per sample, got {got}"
             ),
             ValidationError::NoQubits => {
                 write!(f, "model has no qubits: at least one qubit is required")
@@ -725,6 +742,30 @@ mod tests {
                 got: 2,
             }
             .to_string()
+        );
+    }
+
+    #[test]
+    fn model_dataset_feature_mismatch_displays_values_and_differs_from_feature_range() {
+        // Both counts must be in the message: what the model expects, and what
+        // the dataset actually provides.
+        let s = ValidationError::ModelDatasetFeatureMismatch {
+            expected: 2,
+            got: 3,
+        }
+        .to_string();
+        assert!(s.contains('2'), "missing the expected feature count: {s}");
+        assert!(s.contains('3'), "missing the dataset feature count: {s}");
+        // It must read as the dataset↔model mismatch, not the feature-*range*
+        // mismatch `FeatureCountMismatch` reports for the same numbers — the two
+        // are distinct failures with distinct wording.
+        assert!(
+            s != ValidationError::FeatureCountMismatch {
+                expected: 2,
+                got: 3,
+            }
+            .to_string(),
+            "message must differ from FeatureCountMismatch: {s}"
         );
     }
 

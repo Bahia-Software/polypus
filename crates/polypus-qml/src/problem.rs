@@ -39,7 +39,7 @@ impl QmlProblem {
     /// alone (design doc §9) and precompiling one template per sample:
     ///
     /// 1. `train.num_features() == model.num_features()`
-    ///    ([`ValidationError::FeatureCountMismatch`]).
+    ///    ([`ValidationError::ModelDatasetFeatureMismatch`]).
     /// 2. the readout decision is trainable by *some* v1 loss — i.e. not
     ///    [`Decision::Argmax`], which no v1 loss supports
     ///    ([`ValidationError::DecisionNotSupportedByLoss`], design doc §8).
@@ -52,7 +52,7 @@ impl QmlProblem {
     /// [`ValidationError::Template`] rather than assumed away with an `expect`.
     pub fn new(model: CompiledModel, train: Dataset, loss: Loss) -> Result<Self, ValidationError> {
         if train.num_features() != model.num_features() {
-            return Err(ValidationError::FeatureCountMismatch {
+            return Err(ValidationError::ModelDatasetFeatureMismatch {
                 expected: model.num_features(),
                 got: train.num_features(),
             });
@@ -693,7 +693,7 @@ mod tests {
         let err = QmlProblem::new(model, ds, Loss::SquaredError).unwrap_err();
         assert_eq!(
             err,
-            ValidationError::FeatureCountMismatch {
+            ValidationError::ModelDatasetFeatureMismatch {
                 expected: 2,
                 got: 3,
             }
