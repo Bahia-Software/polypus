@@ -6,6 +6,7 @@
 //! same model works for any material. Adding a new particle species requires
 //! zero changes to this file.
 
+pub mod beam;
 pub mod geometry;
 pub mod history;
 pub mod sampler;
