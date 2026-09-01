@@ -15,6 +15,9 @@
 //!   catalogue, `bind_batch` yields exactly `num_circuits()` circuits (each
 //!   C-4-clean and C-2-valid), `fitness_from_counts` returns a finite `f64`,
 //!   and `num_params()` matches the underlying `CompiledModel`.
+//! - **C-8, readout revalidation**: `compile` re-runs the readout's own
+//!   construction checks, so a readout mutated past `Readout::new` cannot reach
+//!   inference.
 
 use polypus_circuit::{
     terminal_measurement_violation, GateInstruction, GateParam, ParameterizedCircuit,
@@ -24,6 +27,7 @@ use std::collections::HashMap;
 use polypus_qml::{
     CompiledModel, Dataset, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, IqpEncoder,
     Layer, Loss, Observable, Pauli, PauliString, QmlProblem, QuantumModel, Readout, RotationAxis,
+    ValidationError,
 };
 
 /// A minimal `⟨Z₀⟩` / `Sign` readout, valid for every catalogue model (all
@@ -305,4 +309,106 @@ fn num_params_matches_compiled_model_c8() {
         assert_eq!(problem.num_params(), expected);
         assert!(problem.num_params() > 0);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C-8 · `compile` revalidates the readout it is handed
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `Readout::observables` and `Observable::terms` are public and mutable, so a
+// readout can reach `compile` having never passed `Readout::new` /
+// `Observable::new` — mutated in place (below), or deserialized straight from a
+// save file (the `TrainedModel::load` path, covered by the unit tests in
+// `model.rs`). `compile` must therefore re-run those construction checks and
+// fail with the *same* typed `ValidationError`, instead of trusting its input
+// and handing back a `CompiledModel` that indexes past `observables[0]` at the
+// first `predict`, or returns `Ok(NaN)` from `fitness_from_counts` in violation
+// of C-8(b) ("returns a finite f64 … never NaN").
+//
+// Each assertion below doubles as a no-panic assertion: a panic in `compile` or
+// a silently-accepted model would fail the test just as loudly as a wrong error.
+
+/// A 2-qubit, 2-feature model carrying `readout`, ready to compile.
+fn model_with(readout: Readout) -> QuantumModel {
+    QuantumModel::new(2)
+        .angle_encoder(RotationAxis::Ry)
+        .layer(Layer::HardwareEfficient(
+            HardwareEfficientAnsatz::real_amplitudes(1),
+        ))
+        .readout(readout)
+}
+
+/// A unit-weight `⟨Z_position⟩` observable.
+fn z_observable(position: usize) -> Observable {
+    Observable::new(vec![(
+        1.0,
+        PauliString::new(vec![(position, Pauli::Z)]).unwrap(),
+    )])
+    .unwrap()
+}
+
+#[test]
+fn compile_rejects_readout_mutated_to_an_incompatible_observable_count_c8() {
+    // `Sign` reads `observables[0]`; empty the vector after construction.
+    let mut readout = z0_readout();
+    readout.observables.clear();
+    assert_eq!(
+        model_with(readout).compile(2).unwrap_err(),
+        ValidationError::DecisionObservableMismatch {
+            decision: Decision::Sign,
+            num_observables: 0,
+        }
+    );
+
+    // `Argmax` needs two observables; drop one after construction.
+    let mut readout =
+        Readout::new(vec![z_observable(0), z_observable(1)], Decision::Argmax).unwrap();
+    readout.observables.truncate(1);
+    assert_eq!(
+        model_with(readout).compile(2).unwrap_err(),
+        ValidationError::DecisionObservableMismatch {
+            decision: Decision::Argmax,
+            num_observables: 1,
+        }
+    );
+}
+
+#[test]
+fn compile_rejects_readout_mutated_to_a_non_finite_coefficient_c8() {
+    // A `NaN` appended as a second term: reported at its own index, not the
+    // first — the same `term_index` `Observable::new` would have reported.
+    let mut readout = z0_readout();
+    readout.observables[0]
+        .terms
+        .push((f64::NAN, PauliString::new(vec![(1, Pauli::Z)]).unwrap()));
+    assert_eq!(
+        model_with(readout).compile(2).unwrap_err(),
+        ValidationError::NonFiniteCoefficient { term_index: 1 }
+    );
+
+    // Infinities are non-finite too, and are caught wherever they sit.
+    let mut readout = z0_readout();
+    readout.observables[0].terms[0].0 = f64::INFINITY;
+    assert_eq!(
+        model_with(readout).compile(2).unwrap_err(),
+        ValidationError::NonFiniteCoefficient { term_index: 0 }
+    );
+
+    // A non-first observable is checked too, not just `observables[0]`.
+    let mut readout =
+        Readout::new(vec![z_observable(0), z_observable(1)], Decision::Argmax).unwrap();
+    readout.observables[1].terms[0].0 = f64::NEG_INFINITY;
+    assert_eq!(
+        model_with(readout).compile(2).unwrap_err(),
+        ValidationError::NonFiniteCoefficient { term_index: 0 }
+    );
+}
+
+#[test]
+fn compile_still_accepts_an_untouched_readout_c8() {
+    // The guard rejects only what is actually broken: the same readouts, left
+    // as `Readout::new` built them, still compile.
+    assert!(model_with(z0_readout()).compile(2).is_ok());
+    let argmax = Readout::new(vec![z_observable(0), z_observable(1)], Decision::Argmax).unwrap();
+    assert!(model_with(argmax).compile(2).is_ok());
 }

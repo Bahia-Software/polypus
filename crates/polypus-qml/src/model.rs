@@ -279,6 +279,14 @@ impl QuantumModel {
 ///
 /// Validation, in order:
 ///
+/// - the readout's own construction invariants are re-checked first, via
+///   [`Readout::validate`]: the observable count still matches the decision
+///   ([`ValidationError::DecisionObservableMismatch`]), every coefficient is
+///   still finite ([`ValidationError::NonFiniteCoefficient`]) and no Pauli
+///   string repeats a position ([`ValidationError::DuplicatePauliPosition`]).
+///   `Readout::new` is not the only way in — the fields are public and the
+///   `serde` derive builds one straight from the wire — so `compile` re-runs
+///   the checks rather than trusting its input;
 /// - a position `>= active.len()` is [`ValidationError::ObservableQubitOutOfRange`];
 /// - an observable that asks for two different Paulis on the same qubit across
 ///   its terms is [`ValidationError::ObservableHasIncompatibleBases`];
@@ -301,6 +309,13 @@ fn resolve_readout(
     readout: &Readout,
     active: &[usize],
 ) -> Result<(ResolvedReadout, Vec<(usize, Pauli)>), ValidationError> {
+    // Re-establish what `Readout::new`/`Observable::new`/`PauliString::new`
+    // checked at construction. A `Readout` can reach here without ever passing
+    // through them (public mutable fields; `serde` deserialization on load), and
+    // every downstream guarantee — `predict`'s `observables[0]`, C-8(b)'s finite
+    // fitness — rests on these holding at compile time, not merely at build time.
+    readout.validate()?;
+
     let mut resolved_observables = Vec::with_capacity(readout.observables.len());
     // One per-qubit basis map per observable (logical positions), built in
     // declaration order so the greedy grouping below is deterministic.
@@ -1072,6 +1087,74 @@ mod serde_tests {
             err.to_string().contains("no layers") || err.to_string().contains("empty"),
             "unexpected error message: {err}"
         );
+    }
+
+    #[test]
+    fn deserialization_revalidates_the_readout_via_recompile() {
+        // The sibling test above corrupts the *layers*; this one corrupts the
+        // *readout*, the other half of the spec `compile` must revalidate. Each
+        // case would otherwise load "successfully" and only blow up later — the
+        // first `predict` indexing past `observables[0]` — which is exactly the
+        // silently-accepted broken model the save-format contract forbids.
+        fn load_error(corrupt: impl FnOnce(&mut serde_json::Value)) -> String {
+            let json = serde_json::to_string(&full_model()).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            corrupt(&mut value);
+            let corrupted = serde_json::to_string(&value).unwrap();
+            serde_json::from_str::<CompiledModel>(&corrupted)
+                .unwrap_err()
+                .to_string()
+        }
+
+        // `full_model`'s readout is `Argmax` over two observables.
+        //
+        // 1. No observables at all: `predict` would index `observables[0]`.
+        let err = load_error(|v| v["spec"]["readout"]["observables"] = serde_json::json!([]));
+        assert!(
+            err.contains("Argmax") && err.contains('0'),
+            "unexpected error message: {err}"
+        );
+
+        // 2. One observable left, which `Argmax` cannot satisfy.
+        let err = load_error(|v| {
+            let observables = &mut v["spec"]["readout"]["observables"];
+            *observables = serde_json::json!([observables[0].clone()]);
+        });
+        assert!(
+            err.contains("Argmax") && err.contains('1'),
+            "unexpected error message: {err}"
+        );
+
+        // 3. `Sign` paired with an empty observable list — the same mismatch
+        //    reached from the decision's side rather than the observables'.
+        let err = load_error(|v| {
+            v["spec"]["readout"]["decision"] = serde_json::json!("Sign");
+            v["spec"]["readout"]["observables"] = serde_json::json!([]);
+        });
+        assert!(
+            err.contains("Sign") && err.contains('0'),
+            "unexpected error message: {err}"
+        );
+
+        // 4. A Pauli string repeating a position. `PauliString::new` rejects
+        //    this, but the `Deserialize` derive never calls it, so only
+        //    `compile`'s revalidation stands between a tampered file and a
+        //    wrong answer: `Z₀Z₀` counts qubit 0's parity twice and reads a
+        //    constant `+1` instead of `⟨Z₀⟩` — no panic, just silently wrong.
+        let err = load_error(|v| {
+            v["spec"]["readout"]["observables"][0]["terms"] =
+                serde_json::json!([[1.0, [[0, "Z"], [0, "Z"]]]]);
+        });
+        assert!(
+            err.contains("more than one factor on position 0"),
+            "unexpected error message: {err}"
+        );
+
+        // A non-finite coefficient has no JSON case: `serde_json` rejects an
+        // out-of-range literal such as `1e400` with "number out of range"
+        // before our validation ever sees it, and `NaN` has no JSON literal at
+        // all. That invariant is reachable only by mutating `Observable::terms`
+        // in place, and is covered in `tests/contracts.rs`.
     }
 
     #[test]

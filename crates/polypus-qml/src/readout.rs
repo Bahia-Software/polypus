@@ -38,6 +38,13 @@ pub enum Decision {
 pub struct Readout {
     /// One or more observables. `Argmax` uses all of them (one per class); the
     /// binary/regression decisions use only `observables[0]`.
+    ///
+    /// Public and mutable, so a caller can break the count/decision pairing
+    /// [`Readout::new`] checked. That is caught rather than trusted:
+    /// [`compile`](crate::QuantumModel::compile) re-runs [`Readout::validate`],
+    /// so a mutated (or deserialized) readout fails compilation with a typed
+    /// [`ValidationError`] instead of panicking on `observables[0]` at the
+    /// first `predict`.
     pub observables: Vec<Observable>,
     /// How the expectations become a prediction.
     pub decision: Decision,
@@ -54,21 +61,46 @@ impl Readout {
     /// A mismatch is [`ValidationError::DecisionObservableMismatch`]. (Whether
     /// a decision is trainable by the chosen loss is a separate check, made in
     /// [`QmlProblem::new`](crate::QmlProblem::new) where both coexist.)
+    ///
+    /// Delegates to [`validate`](Self::validate), which
+    /// [`compile`](crate::QuantumModel::compile) re-runs on the readout it is
+    /// handed — one rule, checked in both places — and which also re-checks each
+    /// observable (see [`Observable::validate`]).
     pub fn new(observables: Vec<Observable>, decision: Decision) -> Result<Self, ValidationError> {
-        let min_observables = match decision {
+        let readout = Readout {
+            observables,
+            decision,
+        };
+        readout.validate()?;
+        Ok(readout)
+    }
+
+    /// Re-check every invariant [`new`](Self::new) established: the observable
+    /// count matches the decision, and each observable is itself still valid
+    /// (see [`Observable::validate`]).
+    ///
+    /// `new` is not the only way to obtain a `Readout`:
+    /// [`observables`](Self::observables) is public and mutable, and the
+    /// `serde` `Deserialize` derive builds one straight from the wire — the
+    /// route a `TrainedModel::load` of a hand-tampered save file takes.
+    /// [`compile`](crate::QuantumModel::compile) calls this so neither route can
+    /// yield a `CompiledModel` whose [`ResolvedReadout::predict`] would index
+    /// past the end of `observables`.
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        let min_observables = match self.decision {
             Decision::Argmax => 2,
             Decision::Sign | Decision::Threshold(_) | Decision::Raw => 1,
         };
-        if observables.len() < min_observables {
+        if self.observables.len() < min_observables {
             return Err(ValidationError::DecisionObservableMismatch {
-                decision,
-                num_observables: observables.len(),
+                decision: self.decision,
+                num_observables: self.observables.len(),
             });
         }
-        Ok(Readout {
-            observables,
-            decision,
-        })
+        for observable in &self.observables {
+            observable.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -101,8 +133,10 @@ impl ResolvedReadout {
     /// Turn measurement `counts` into a prediction according to the decision
     /// (design doc §7.1, numeric contract in the phase-3 execution plan).
     ///
-    /// `observables[0]` is always present: a [`Readout`] cannot be built with
-    /// zero observables (see [`Readout::new`]).
+    /// `observables[0]` is always present: `compile` runs [`Readout::validate`]
+    /// before building the `ResolvedReadout`, so a readout whose observable
+    /// count does not satisfy its decision is rejected there and never reaches
+    /// this method.
     pub(crate) fn predict(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
         match self.decision {
             Decision::Sign => {
@@ -136,8 +170,10 @@ impl ResolvedReadout {
     /// [`expectation`](ResolvedObservable::expectation) for
     /// [`expectation_from_probabilities`](ResolvedObservable::expectation_from_probabilities).
     ///
-    /// `observables[0]` is always present: a [`Readout`] cannot be built with
-    /// zero observables (see [`Readout::new`]).
+    /// `observables[0]` is always present: `compile` runs [`Readout::validate`]
+    /// before building the `ResolvedReadout`, so a readout whose observable
+    /// count does not satisfy its decision is rejected there and never reaches
+    /// this method.
     pub(crate) fn predict_from_probabilities(
         &self,
         probabilities: &HashMap<String, f64>,

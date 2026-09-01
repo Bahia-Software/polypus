@@ -725,6 +725,58 @@ class TestTrainedModelSaveLoad:
         with pytest.raises(ValueError, match="no layers"):
             polypus.qml.TrainedModel.load(str(path))
 
+    def test_load_rejects_corrupt_readout(self, tmp_path):
+        """The readout is revalidated on load too, not just the layers.
+
+        The sibling test above corrupts the *layers*; this one corrupts the
+        *readout*. A readout whose observable count no longer satisfies its
+        decision used to load "successfully" and only fail later, at the first
+        prediction — precisely the silently-accepted broken model the save
+        format forbids. Round-trips a real save rather than hand-writing the
+        JSON, so the test cannot drift from the actual wire shape.
+        """
+        import json
+
+        import polypus
+
+        path = tmp_path / "model.json"
+        polypus.qml.TrainedModel(_model(), _dataset(), [0.0] * 8).save(str(path))
+
+        def load_corrupted(corrupt):
+            payload = json.loads(path.read_text())
+            corrupt(payload["model"]["spec"]["readout"])
+            corrupt_path = tmp_path / "corrupt.json"
+            corrupt_path.write_text(json.dumps(payload))
+            return polypus.qml.TrainedModel.load(str(corrupt_path))
+
+        # Sanity: untouched, the very same file reloads fine — so the failures
+        # below are the corruption, not a broken fixture.
+        assert load_corrupted(lambda readout: None).theta == [0.0] * 8
+
+        # `_model()`'s readout is `sign` over a single ⟨Z₀⟩ observable, which
+        # needs `observables[0]`; empty the list.
+        def drop_observables(readout):
+            readout["observables"] = []
+
+        with pytest.raises(ValueError, match="incompatible with 0 observable"):
+            load_corrupted(drop_observables)
+
+        # `argmax` needs two observables; the saved readout carries one.
+        def demand_argmax(readout):
+            readout["decision"] = "Argmax"
+
+        with pytest.raises(ValueError, match="incompatible with 1 observable"):
+            load_corrupted(demand_argmax)
+
+        # A Pauli string repeating a position never survives `PauliString::new`,
+        # but deserialization bypasses it: ⟨Z₀Z₀⟩ would read a constant +1
+        # instead of ⟨Z₀⟩ — wrong silently, with no panic to give it away.
+        def repeat_position(readout):
+            readout["observables"][0]["terms"] = [[1.0, [[0, "Z"], [0, "Z"]]]]
+
+        with pytest.raises(ValueError, match="more than one factor on position 0"):
+            load_corrupted(repeat_position)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. End-to-end inference: TrainedModel.predict(X, ...) (design doc §17)

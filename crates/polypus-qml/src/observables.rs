@@ -61,14 +61,35 @@ impl PauliString {
     pub fn new(terms: Vec<(usize, Pauli)>) -> Result<Self, ValidationError> {
         let mut terms = terms;
         terms.sort_by_key(|&(position, _)| position);
-        for window in terms.windows(2) {
-            if window[0].0 == window[1].0 {
+        let string = PauliString(terms);
+        string.validate()?;
+        Ok(string)
+    }
+
+    /// Re-check the invariant [`new`](Self::new) established: no two factors on
+    /// the same position.
+    ///
+    /// `new` is not the only way to obtain a `PauliString`: the `serde`
+    /// `Deserialize` derive builds one straight from the wire, bypassing `new`
+    /// entirely. `compile` therefore re-runs this check on every string it
+    /// resolves, so a hand-tampered save file cannot smuggle in `Z₀Z₀`
+    /// (whose parity is counted twice and always reads `+1`) as a silently
+    /// wrong answer.
+    ///
+    /// Uniqueness only — not sortedness. Sorting is canonicalisation, not a
+    /// correctness invariant: every consumer of the factors (parity, basis
+    /// resolution) is order-independent.
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        let mut positions: Vec<usize> = self.0.iter().map(|&(position, _)| position).collect();
+        positions.sort_unstable();
+        for window in positions.windows(2) {
+            if window[0] == window[1] {
                 return Err(ValidationError::DuplicatePauliPosition {
-                    position: window[0].0,
+                    position: window[0],
                 });
             }
         }
-        Ok(PauliString(terms))
+        Ok(())
     }
 
     /// The factors, sorted by position (crate-internal: `compile` reads them to
@@ -85,9 +106,13 @@ impl PauliString {
 pub struct Observable {
     /// The weighted Pauli-string terms, `(coefficient, string)`.
     ///
-    /// Note: mutating this field after construction can reintroduce a
-    /// non-finite coefficient without passing through [`Observable::new`]'s
-    /// validation; prefer rebuilding the observable over mutating in place.
+    /// Public and mutable, so a caller can reintroduce a non-finite coefficient
+    /// without passing through [`Observable::new`]'s validation. That is caught
+    /// rather than trusted: [`compile`](crate::QuantumModel::compile) re-runs
+    /// [`Observable::validate`] on every observable it resolves, so a mutated
+    /// (or deserialized) observable fails compilation with a typed
+    /// [`ValidationError`] instead of reaching inference. Prefer rebuilding the
+    /// observable over mutating in place all the same.
     pub terms: Vec<(f64, PauliString)>,
 }
 
@@ -98,12 +123,29 @@ impl Observable {
     /// [`ValidationError::NonFiniteCoefficient`], reporting the first offending
     /// term — mirroring C-2's uniform "no non-finite parameter" policy.
     pub fn new(terms: Vec<(f64, PauliString)>) -> Result<Self, ValidationError> {
-        for (term_index, (coeff, _)) in terms.iter().enumerate() {
+        let observable = Observable { terms };
+        observable.validate()?;
+        Ok(observable)
+    }
+
+    /// Re-check the invariants [`new`](Self::new) established: every
+    /// coefficient finite, and every Pauli string free of duplicate positions.
+    ///
+    /// `new` is not the only way to obtain an `Observable`: [`terms`](Self::terms)
+    /// is public and mutable, and the `serde` `Deserialize` derive builds one
+    /// straight from the wire. [`compile`](crate::QuantumModel::compile) calls
+    /// this on every observable it resolves so those two routes cannot produce
+    /// a `CompiledModel` that violates C-8(b) — a `NaN` coefficient would
+    /// otherwise make `fitness_from_counts` return `Ok(NaN)` instead of the
+    /// finite `f64` or typed error the contract promises.
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        for (term_index, (coeff, string)) in self.terms.iter().enumerate() {
             if !coeff.is_finite() {
                 return Err(ValidationError::NonFiniteCoefficient { term_index });
             }
+            string.validate()?;
         }
-        Ok(Observable { terms })
+        Ok(())
     }
 }
 
