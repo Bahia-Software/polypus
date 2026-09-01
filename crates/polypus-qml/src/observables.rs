@@ -198,100 +198,107 @@ impl ResolvedObservable {
     }
 }
 
-/// Estimate `⟨Z_S⟩` from measurement `counts` for a resolved Pauli string `S`
-/// (which is `Z`-only in v1, so the estimator is the computational-basis parity
-/// estimator `Σ_b counts(b)·(−1)^{parity of b over S} / shots`).
+/// A measurement-weight type: finite-shot `u64` counts or exact `f64`
+/// basis-state probabilities. It is what lets the two readout paths — sampled
+/// (`counts`) and exact (`probabilities`) — share one estimator instead of
+/// carrying byte-for-byte duplicate logic that differs only in this type.
+///
+/// [`as_weight`](Self::as_weight) converts one bucket's weight to the `f64` the
+/// parity accumulator sums. [`observable_expectation`](Self::observable_expectation)
+/// dispatches an *observable*-level expectation to the matching concrete
+/// estimator, so the higher layers ([`ResolvedReadout`](crate::readout::ResolvedReadout)
+/// prediction, [`QmlProblem`](crate::QmlProblem) fitness/gradients) stay generic
+/// over the weight type while each concrete path keeps its own `pub(crate)`
+/// entry point ([`ResolvedObservable::expectation`] /
+/// [`ResolvedObservable::expectation_from_probabilities`]) as the single place it
+/// is spelled out.
+pub(crate) trait BitstringWeight: Copy {
+    /// This bucket's contribution to the running weight, as `f64`.
+    fn as_weight(self) -> f64;
+
+    /// Estimate `⟨O⟩` for `observable` from a weight map of this type, routing to
+    /// the concrete estimator (counts vs probabilities) for the type.
+    fn observable_expectation(
+        observable: &ResolvedObservable,
+        weights: &HashMap<String, Self>,
+    ) -> Result<f64, QmlError>;
+}
+
+impl BitstringWeight for u64 {
+    fn as_weight(self) -> f64 {
+        self as f64
+    }
+
+    fn observable_expectation(
+        observable: &ResolvedObservable,
+        weights: &HashMap<String, Self>,
+    ) -> Result<f64, QmlError> {
+        observable.expectation(weights)
+    }
+}
+
+impl BitstringWeight for f64 {
+    fn as_weight(self) -> f64 {
+        self
+    }
+
+    fn observable_expectation(
+        observable: &ResolvedObservable,
+        weights: &HashMap<String, Self>,
+    ) -> Result<f64, QmlError> {
+        observable.expectation_from_probabilities(weights)
+    }
+}
+
+/// Estimate `⟨Z_S⟩` from a `weights` map for a resolved Pauli string `S` — the
+/// single implementation shared by the finite-shot ([`expectation_from_counts`],
+/// `u64`) and exact ([`expectation_from_probabilities`], `f64`) estimators, which
+/// differ only in the weight type. `S` is `Z`-only in v1, so this is the
+/// computational-basis parity estimator `Σ_b w(b)·(−1)^{parity of b over S} /
+/// Σ_b w(b)`.
 ///
 /// Respects the C-3 counts format: keys are Qiskit little-endian bitstrings, so
 /// physical qubit `pos` is the character at index `width − 1 − pos`. The empty
 /// string `S` (identity) has parity 0 for every basis state, so its expectation
-/// is `1.0`.
+/// is `1.0`. The divisor is the sum of the weights present (`shots` for counts,
+/// `≈ 1.0` for a normalised statevector), summed explicitly rather than assumed.
+///
+/// The buckets are summed in a deterministic order — keys sorted (fixed-width
+/// bitstrings, so lexicographic == basis order) — for **both** weight types.
+/// This is required for `f64`, where floating-point addition is not associative
+/// and a per-instance-randomised `HashMap` order would otherwise make two
+/// identical calls differ by a ULP, breaking the byte-for-byte reproducibility
+/// the exact `qml.train` path promises (C-7). For `u64` it changes nothing
+/// numerically: every `sign · count` and every partial sum is an exactly
+/// representable integer (`< 2^53` in practice), so integer addition in `f64` is
+/// exact and order-independent — sorting there is a harmless extra allocation,
+/// not a behaviour change. Ordering is therefore unconditional rather than
+/// branched on the type.
 ///
 /// # Errors
 ///
-/// - [`QmlError::EmptyCounts`] if `counts` is empty or records zero total shots.
+/// - [`QmlError::EmptyCounts`] if `weights` is empty or its weights sum to zero.
+///   The variant is reused for the exact path too: the conceptual failure
+///   ("nothing to estimate from") is the same, even though the message names
+///   "counts".
 /// - [`QmlError::CountsWidthMismatch`] if the keys are not all the same width,
 ///   or if `string` references a position wider than the keys carry.
-pub(crate) fn expectation_from_counts(
-    counts: &HashMap<String, u64>,
+fn expectation_from_weighted<W: BitstringWeight>(
+    weights: &HashMap<String, W>,
     string: &ResolvedPauliString,
 ) -> Result<f64, QmlError> {
-    // Width is derived from the first key; an empty map has none.
-    let width = match counts.keys().next() {
-        Some(key) => key.len(),
-        None => return Err(QmlError::EmptyCounts),
-    };
-    // Every key must share that width.
-    for key in counts.keys() {
-        if key.len() != width {
-            return Err(QmlError::CountsWidthMismatch {
-                expected: width,
-                got: key.len(),
-            });
-        }
-    }
-    // Every referenced position must fit inside the register.
-    for &(position, _) in &string.0 {
-        if position >= width {
-            return Err(QmlError::CountsWidthMismatch {
-                expected: position + 1,
-                got: width,
-            });
-        }
-    }
-
-    let mut weighted = 0.0;
-    let mut shots: u64 = 0;
-    for (key, &count) in counts {
-        let bytes = key.as_bytes();
-        let mut parity = 0u32;
-        for &(position, _) in &string.0 {
-            // C-3: qubit `position` is the character at `width - 1 - position`.
-            if bytes[width - 1 - position] == b'1' {
-                parity ^= 1;
-            }
-        }
-        let sign = if parity == 0 { 1.0 } else { -1.0 };
-        weighted += sign * count as f64;
-        shots += count;
-    }
-    if shots == 0 {
+    if weights.is_empty() {
         return Err(QmlError::EmptyCounts);
     }
-    Ok(weighted / shots as f64)
-}
+    // Fix the summation order up front (see the doc comment): deterministic for
+    // the exact path's reproducibility, harmless for the exact-integer counts
+    // path. Width is then derived from the deterministic first key.
+    let mut entries: Vec<(&String, W)> = weights.iter().map(|(k, &w)| (k, w)).collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
-/// The exact-mode mirror of [`expectation_from_counts`]: estimate `⟨Z_S⟩` from
-/// exact basis-state `probabilities` (`|amplitude|²` per bitstring) instead of
-/// finite-shot counts.
-///
-/// Identical parity logic and C-3 bit order; the only difference is that the
-/// parity sign is weighted by each state's `f64` probability rather than its
-/// `u64` count, and the result is divided by the **sum of the weights present**.
-/// That sum is `≈ 1.0` by construction (a normalised statevector), but it is
-/// summed explicitly rather than assumed — exactly as
-/// [`expectation_from_counts`] sums `shots` explicitly instead of assuming a
-/// total.
-///
-/// # Errors
-///
-/// - [`QmlError::EmptyCounts`] if `probabilities` is empty or its weights sum to
-///   zero. The [`EmptyCounts`](QmlError::EmptyCounts) variant is reused
-///   deliberately: the conceptual failure ("nothing to estimate from") is the
-///   same, even though the message names "counts".
-/// - [`QmlError::CountsWidthMismatch`] if the keys are not all the same width,
-///   or if `string` references a position wider than the keys carry.
-pub(crate) fn expectation_from_probabilities(
-    probabilities: &HashMap<String, f64>,
-    string: &ResolvedPauliString,
-) -> Result<f64, QmlError> {
-    // Width is derived from the first key; an empty map has none.
-    let width = match probabilities.keys().next() {
-        Some(key) => key.len(),
-        None => return Err(QmlError::EmptyCounts),
-    };
+    let width = entries[0].0.len();
     // Every key must share that width.
-    for key in probabilities.keys() {
+    for (key, _) in &entries {
         if key.len() != width {
             return Err(QmlError::CountsWidthMismatch {
                 expected: width,
@@ -308,21 +315,10 @@ pub(crate) fn expectation_from_probabilities(
             });
         }
     }
-
-    // Accumulate in a deterministic order. Unlike the counts estimator — where
-    // the weights are integers and the sum is exact regardless of order — here
-    // the weights are arbitrary `f64` and floating-point addition is not
-    // associative, so iterating a `HashMap` (whose order is randomised per map)
-    // would make the result differ by a ULP between two otherwise-identical
-    // calls. Sorting by key (fixed-width bitstrings, so lexicographic == basis
-    // order) pins the summation order, which is what lets the exact `qml.train`
-    // path guarantee byte-for-byte reproducibility (C-7) with no seed at all.
-    let mut entries: Vec<(&String, f64)> = probabilities.iter().map(|(k, &p)| (k, p)).collect();
-    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
     let mut weighted = 0.0;
     let mut total = 0.0;
-    for (key, p) in entries {
+    for (key, w) in entries {
         let bytes = key.as_bytes();
         let mut parity = 0u32;
         for &(position, _) in &string.0 {
@@ -331,14 +327,36 @@ pub(crate) fn expectation_from_probabilities(
                 parity ^= 1;
             }
         }
+        let weight = w.as_weight();
         let sign = if parity == 0 { 1.0 } else { -1.0 };
-        weighted += sign * p;
-        total += p;
+        weighted += sign * weight;
+        total += weight;
     }
     if total == 0.0 {
         return Err(QmlError::EmptyCounts);
     }
     Ok(weighted / total)
+}
+
+/// Estimate `⟨Z_S⟩` from measurement `counts` for a resolved Pauli string `S`.
+/// A thin `u64` wrapper over [`expectation_from_weighted`]; see it for the parity
+/// estimator, the C-3 bit order, and the error contract.
+pub(crate) fn expectation_from_counts(
+    counts: &HashMap<String, u64>,
+    string: &ResolvedPauliString,
+) -> Result<f64, QmlError> {
+    expectation_from_weighted(counts, string)
+}
+
+/// The exact-mode mirror of [`expectation_from_counts`]: estimate `⟨Z_S⟩` from
+/// exact basis-state `probabilities` (`|amplitude|²` per bitstring) instead of
+/// finite-shot counts. A thin `f64` wrapper over [`expectation_from_weighted`],
+/// which sums both paths in the same deterministic basis order.
+pub(crate) fn expectation_from_probabilities(
+    probabilities: &HashMap<String, f64>,
+    string: &ResolvedPauliString,
+) -> Result<f64, QmlError> {
+    expectation_from_weighted(probabilities, string)
 }
 
 #[cfg(test)]

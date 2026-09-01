@@ -18,6 +18,7 @@ use crate::dataset::Dataset;
 use crate::error::{QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
 use crate::model::CompiledModel;
+use crate::observables::BitstringWeight;
 use crate::readout::Decision;
 use crate::rng::{shuffle, SplitMix64};
 
@@ -205,16 +206,29 @@ impl QmlProblem {
         &self,
         counts: &[HashMap<String, u64>],
     ) -> Result<Vec<f64>, QmlError> {
-        if counts.len() != self.templates.len() {
+        self.expectations_from_weighted(counts)
+    }
+
+    /// The single implementation behind
+    /// [`expectations_from_counts`](Self::expectations_from_counts) and its exact
+    /// mirror [`expectations_from_probabilities`](Self::expectations_from_probabilities),
+    /// generic over the per-sample weight type via [`BitstringWeight`]: the length
+    /// check and the `⟨O₀⟩`-per-sample map are written once instead of mirrored per
+    /// path.
+    fn expectations_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &[HashMap<String, W>],
+    ) -> Result<Vec<f64>, QmlError> {
+        if weights.len() != self.templates.len() {
             return Err(QmlError::CountsLengthMismatch {
                 expected: self.templates.len(),
-                got: counts.len(),
+                got: weights.len(),
             });
         }
         let observable = &self.model.resolved_readout().observables()[0];
-        counts
+        weights
             .iter()
-            .map(|sample_counts| observable.expectation(sample_counts))
+            .map(|sample| W::observable_expectation(observable, sample))
             .collect()
     }
 
@@ -232,19 +246,31 @@ impl QmlProblem {
         &self,
         counts: &[HashMap<String, u64>],
     ) -> Result<Vec<Vec<f64>>, QmlError> {
-        if counts.len() != self.templates.len() {
+        self.expectations_per_class_from_weighted(counts)
+    }
+
+    /// The single implementation behind
+    /// [`expectations_per_class_from_counts`](Self::expectations_per_class_from_counts)
+    /// and its exact mirror
+    /// [`expectations_per_class_from_probabilities`](Self::expectations_per_class_from_probabilities),
+    /// generic over the per-sample weight type via [`BitstringWeight`].
+    fn expectations_per_class_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &[HashMap<String, W>],
+    ) -> Result<Vec<Vec<f64>>, QmlError> {
+        if weights.len() != self.templates.len() {
             return Err(QmlError::CountsLengthMismatch {
                 expected: self.templates.len(),
-                got: counts.len(),
+                got: weights.len(),
             });
         }
         let observables = self.model.resolved_readout().observables();
-        counts
+        weights
             .iter()
-            .map(|sample_counts| {
+            .map(|sample| {
                 observables
                     .iter()
-                    .map(|observable| observable.expectation(sample_counts))
+                    .map(|observable| W::observable_expectation(observable, sample))
                     .collect::<Result<Vec<f64>, QmlError>>()
             })
             .collect()
@@ -259,6 +285,20 @@ impl QmlProblem {
     /// (design doc §8). Returns a finite `f64` for valid counts, or a typed
     /// [`QmlError`] — never `NaN` (contract C-8).
     pub fn fitness_from_counts(&self, counts: &[HashMap<String, u64>]) -> Result<f64, QmlError> {
+        self.fitness_from_weighted(counts)
+    }
+
+    /// The single implementation behind
+    /// [`fitness_from_counts`](Self::fitness_from_counts) and its exact mirror
+    /// [`fitness_from_probabilities`](Self::fitness_from_probabilities), generic
+    /// over the per-sample weight type via [`BitstringWeight`]. It leans on the
+    /// generic [`expectations_from_weighted`](Self::expectations_from_weighted) /
+    /// [`expectations_per_class_from_weighted`](Self::expectations_per_class_from_weighted)
+    /// so neither the loss branch nor the `−mean` aggregation is written twice.
+    fn fitness_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &[HashMap<String, W>],
+    ) -> Result<f64, QmlError> {
         // The categorical loss scores the whole per-class expectation vector, so
         // it takes a wholly separate path (design doc §17): all-class
         // expectations + `categorical_cross_entropy` per sample, then the same
@@ -266,7 +306,7 @@ impl QmlProblem {
         // `NativeQmlOracle::evaluate_batch`) agnostic — they call
         // `fitness_from_counts` identically regardless of the loss.
         if self.loss == Loss::CategoricalCrossEntropy {
-            let per_class = self.expectations_per_class_from_counts(counts)?;
+            let per_class = self.expectations_per_class_from_weighted(weights)?;
             let labels = self.train.labels();
             let total: f64 = per_class
                 .iter()
@@ -278,14 +318,14 @@ impl QmlProblem {
             return Ok(-total / per_class.len() as f64);
         }
 
-        let expectations = self.expectations_from_counts(counts)?;
+        let expectations = self.expectations_from_weighted(weights)?;
         let labels = self.train.labels();
         let total: f64 = expectations
             .iter()
             .zip(labels)
             .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
             .sum::<Result<f64, QmlError>>()?;
-        // `counts.len() == templates.len() >= 1`: a `Dataset` is never empty —
+        // `weights.len() == templates.len() >= 1`: a `Dataset` is never empty —
         // `Dataset::from_rows` and `Dataset::select` are the only two ways to
         // build one and both reject an empty sample set — so the mean is well
         // defined and finite, never `0.0 / 0.0` (contract C-8).
@@ -325,17 +365,33 @@ impl QmlProblem {
         plus_counts: &[HashMap<String, u64>],
         minus_counts: &[HashMap<String, u64>],
     ) -> Result<f64, QmlError> {
+        self.param_gradient_weighted(base_expectations, plus_counts, minus_counts)
+    }
+
+    /// The single implementation behind
+    /// [`param_gradient`](Self::param_gradient) and its exact mirror
+    /// [`param_gradient_exact`](Self::param_gradient_exact), generic over the
+    /// per-sample weight type via [`BitstringWeight`]: the length validation, the
+    /// shift-rule chain and the `−mean` aggregation are written once, differing
+    /// only in whether the shifted expectations come from counts or exact
+    /// probabilities.
+    fn param_gradient_weighted<W: BitstringWeight>(
+        &self,
+        base_expectations: &[f64],
+        plus: &[HashMap<String, W>],
+        minus: &[HashMap<String, W>],
+    ) -> Result<f64, QmlError> {
         let n = self.num_circuits();
-        if plus_counts.len() != n {
+        if plus.len() != n {
             return Err(QmlError::CountsLengthMismatch {
                 expected: n,
-                got: plus_counts.len(),
+                got: plus.len(),
             });
         }
-        if minus_counts.len() != n {
+        if minus.len() != n {
             return Err(QmlError::CountsLengthMismatch {
                 expected: n,
-                got: minus_counts.len(),
+                got: minus.len(),
             });
         }
         if base_expectations.len() != n {
@@ -349,8 +405,8 @@ impl QmlProblem {
         // so the checks above are redundant for `plus`/`minus` — but they keep
         // the documented, deterministic error ordering and guard `base` (which
         // never reaches the helper) before the parallel iteration below.
-        let plus_expectations = self.expectations_from_counts(plus_counts)?;
-        let minus_expectations = self.expectations_from_counts(minus_counts)?;
+        let plus_expectations = self.expectations_from_weighted(plus)?;
+        let minus_expectations = self.expectations_from_weighted(minus)?;
         let labels = self.train.labels();
 
         let total: f64 = (0..n)
@@ -396,17 +452,34 @@ impl QmlProblem {
         plus_counts: &[HashMap<String, u64>],
         minus_counts: &[HashMap<String, u64>],
     ) -> Result<f64, QmlError> {
+        self.param_gradient_categorical_weighted(base_expectations, plus_counts, minus_counts)
+    }
+
+    /// The single implementation behind
+    /// [`param_gradient_categorical`](Self::param_gradient_categorical) and its
+    /// exact mirror
+    /// [`param_gradient_categorical_exact`](Self::param_gradient_categorical_exact),
+    /// generic over the per-sample weight type via [`BitstringWeight`]: the outer
+    /// and inner (class-count) length validation, the per-class chain rule and the
+    /// `−mean` aggregation are written once, differing only in whether the shifted
+    /// per-class expectations come from counts or exact probabilities.
+    fn param_gradient_categorical_weighted<W: BitstringWeight>(
+        &self,
+        base_expectations: &[Vec<f64>],
+        plus: &[HashMap<String, W>],
+        minus: &[HashMap<String, W>],
+    ) -> Result<f64, QmlError> {
         let n = self.num_circuits();
-        if plus_counts.len() != n {
+        if plus.len() != n {
             return Err(QmlError::CountsLengthMismatch {
                 expected: n,
-                got: plus_counts.len(),
+                got: plus.len(),
             });
         }
-        if minus_counts.len() != n {
+        if minus.len() != n {
             return Err(QmlError::CountsLengthMismatch {
                 expected: n,
-                got: minus_counts.len(),
+                got: minus.len(),
             });
         }
         if base_expectations.len() != n {
@@ -426,8 +499,8 @@ impl QmlProblem {
             }
         }
 
-        let plus_per_class = self.expectations_per_class_from_counts(plus_counts)?;
-        let minus_per_class = self.expectations_per_class_from_counts(minus_counts)?;
+        let plus_per_class = self.expectations_per_class_from_weighted(plus)?;
+        let minus_per_class = self.expectations_per_class_from_weighted(minus)?;
         let labels = self.train.labels();
 
         let total: f64 = (0..n)
@@ -467,17 +540,7 @@ impl QmlProblem {
         &self,
         probabilities: &[HashMap<String, f64>],
     ) -> Result<Vec<f64>, QmlError> {
-        if probabilities.len() != self.templates.len() {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: self.templates.len(),
-                got: probabilities.len(),
-            });
-        }
-        let observable = &self.model.resolved_readout().observables()[0];
-        probabilities
-            .iter()
-            .map(|sample_probs| observable.expectation_from_probabilities(sample_probs))
-            .collect()
+        self.expectations_from_weighted(probabilities)
     }
 
     /// Exact-mode mirror of
@@ -487,22 +550,7 @@ impl QmlProblem {
         &self,
         probabilities: &[HashMap<String, f64>],
     ) -> Result<Vec<Vec<f64>>, QmlError> {
-        if probabilities.len() != self.templates.len() {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: self.templates.len(),
-                got: probabilities.len(),
-            });
-        }
-        let observables = self.model.resolved_readout().observables();
-        probabilities
-            .iter()
-            .map(|sample_probs| {
-                observables
-                    .iter()
-                    .map(|observable| observable.expectation_from_probabilities(sample_probs))
-                    .collect::<Result<Vec<f64>, QmlError>>()
-            })
-            .collect()
+        self.expectations_per_class_from_weighted(probabilities)
     }
 
     /// Exact-mode mirror of [`fitness_from_counts`](Self::fitness_from_counts):
@@ -512,27 +560,7 @@ impl QmlProblem {
         &self,
         probabilities: &[HashMap<String, f64>],
     ) -> Result<f64, QmlError> {
-        if self.loss == Loss::CategoricalCrossEntropy {
-            let per_class = self.expectations_per_class_from_probabilities(probabilities)?;
-            let labels = self.train.labels();
-            let total: f64 = per_class
-                .iter()
-                .zip(labels)
-                .map(|(expectations, &label)| {
-                    categorical_cross_entropy(expectations, label as usize)
-                })
-                .sum();
-            return Ok(-total / per_class.len() as f64);
-        }
-
-        let expectations = self.expectations_from_probabilities(probabilities)?;
-        let labels = self.train.labels();
-        let total: f64 = expectations
-            .iter()
-            .zip(labels)
-            .map(|(&expectation, &label)| self.loss.evaluate(expectation, label))
-            .sum::<Result<f64, QmlError>>()?;
-        Ok(-total / expectations.len() as f64)
+        self.fitness_from_weighted(probabilities)
     }
 
     /// Exact-mode mirror of [`param_gradient`](Self::param_gradient): the exact
@@ -548,38 +576,7 @@ impl QmlProblem {
         plus_probs: &[HashMap<String, f64>],
         minus_probs: &[HashMap<String, f64>],
     ) -> Result<f64, QmlError> {
-        let n = self.num_circuits();
-        if plus_probs.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: plus_probs.len(),
-            });
-        }
-        if minus_probs.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: minus_probs.len(),
-            });
-        }
-        if base_expectations.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: base_expectations.len(),
-            });
-        }
-
-        let plus_expectations = self.expectations_from_probabilities(plus_probs)?;
-        let minus_expectations = self.expectations_from_probabilities(minus_probs)?;
-        let labels = self.train.labels();
-
-        let total: f64 = (0..n)
-            .map(|i| -> Result<f64, QmlError> {
-                Ok(self.loss.gradient(base_expectations[i], labels[i])?
-                    * (plus_expectations[i] - minus_expectations[i])
-                    / 2.0)
-            })
-            .sum::<Result<f64, QmlError>>()?;
-        Ok(-total / n as f64)
+        self.param_gradient_weighted(base_expectations, plus_probs, minus_probs)
     }
 
     /// Exact-mode mirror of
@@ -597,52 +594,7 @@ impl QmlProblem {
         plus_probs: &[HashMap<String, f64>],
         minus_probs: &[HashMap<String, f64>],
     ) -> Result<f64, QmlError> {
-        let n = self.num_circuits();
-        if plus_probs.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: plus_probs.len(),
-            });
-        }
-        if minus_probs.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: minus_probs.len(),
-            });
-        }
-        if base_expectations.len() != n {
-            return Err(QmlError::CountsLengthMismatch {
-                expected: n,
-                got: base_expectations.len(),
-            });
-        }
-        let num_classes = self.model.resolved_readout().observables().len();
-        for (i, base) in base_expectations.iter().enumerate() {
-            if base.len() != num_classes {
-                return Err(QmlError::ClassCountMismatch {
-                    sample: i,
-                    expected: num_classes,
-                    got: base.len(),
-                });
-            }
-        }
-
-        let plus_per_class = self.expectations_per_class_from_probabilities(plus_probs)?;
-        let minus_per_class = self.expectations_per_class_from_probabilities(minus_probs)?;
-        let labels = self.train.labels();
-
-        let total: f64 = (0..n)
-            .map(|i| {
-                let g =
-                    categorical_cross_entropy_gradient(&base_expectations[i], labels[i] as usize);
-                g.iter()
-                    .zip(plus_per_class[i].iter())
-                    .zip(minus_per_class[i].iter())
-                    .map(|((&g_j, &plus_j), &minus_j)| g_j * (plus_j - minus_j) / 2.0)
-                    .sum::<f64>()
-            })
-            .sum();
-        Ok(-total / n as f64)
+        self.param_gradient_categorical_weighted(base_expectations, plus_probs, minus_probs)
     }
 }
 

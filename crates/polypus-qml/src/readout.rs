@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::error::{QmlError, ValidationError};
-use crate::observables::{Observable, ResolvedObservable};
+use crate::observables::{BitstringWeight, Observable, ResolvedObservable};
 
 /// How observable expectations become a prediction at inference time.
 ///
@@ -130,29 +130,36 @@ impl ResolvedReadout {
         &self.observables
     }
 
-    /// Turn measurement `counts` into a prediction according to the decision
-    /// (design doc §7.1, numeric contract in the phase-3 execution plan).
+    /// Turn a `weights` map (finite-shot `counts` or exact `probabilities`) into a
+    /// prediction according to the decision — the single implementation behind
+    /// both [`predict`](Self::predict) and
+    /// [`predict_from_probabilities`](Self::predict_from_probabilities), generic
+    /// over the weight type via [`BitstringWeight`] so the `match self.decision`
+    /// is written once instead of mirrored per path.
     ///
     /// `observables[0]` is always present: `compile` runs [`Readout::validate`]
     /// before building the `ResolvedReadout`, so a readout whose observable
     /// count does not satisfy its decision is rejected there and never reaches
     /// this method.
-    pub(crate) fn predict(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
+    fn predict_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &HashMap<String, W>,
+    ) -> Result<f64, QmlError> {
         match self.decision {
             Decision::Sign => {
-                let e = self.observables[0].expectation(counts)?;
+                let e = W::observable_expectation(&self.observables[0], weights)?;
                 Ok(if e >= 0.0 { 1.0 } else { -1.0 })
             }
             Decision::Threshold(t) => {
-                let e = self.observables[0].expectation(counts)?;
+                let e = W::observable_expectation(&self.observables[0], weights)?;
                 Ok(if e >= t { 1.0 } else { -1.0 })
             }
-            Decision::Raw => self.observables[0].expectation(counts),
+            Decision::Raw => W::observable_expectation(&self.observables[0], weights),
             Decision::Argmax => {
                 let mut best_index = 0usize;
-                let mut best_value = self.observables[0].expectation(counts)?;
+                let mut best_value = W::observable_expectation(&self.observables[0], weights)?;
                 for (index, observable) in self.observables.iter().enumerate().skip(1) {
-                    let value = observable.expectation(counts)?;
+                    let value = W::observable_expectation(observable, weights)?;
                     // Strict `>`: ties keep the first (lowest) index.
                     if value > best_value {
                         best_value = value;
@@ -164,45 +171,22 @@ impl ResolvedReadout {
         }
     }
 
+    /// Turn measurement `counts` into a prediction according to the decision
+    /// (design doc §7.1, numeric contract in the phase-3 execution plan). A thin
+    /// `u64` wrapper over [`predict_from_weighted`](Self::predict_from_weighted).
+    pub(crate) fn predict(&self, counts: &HashMap<String, u64>) -> Result<f64, QmlError> {
+        self.predict_from_weighted(counts)
+    }
+
     /// Turn exact basis-state `probabilities` into a prediction according to the
     /// decision — the exact-mode mirror of [`predict`](Self::predict) (design doc
-    /// §17). Line-for-line identical to `predict`, substituting each observable's
-    /// [`expectation`](ResolvedObservable::expectation) for
-    /// [`expectation_from_probabilities`](ResolvedObservable::expectation_from_probabilities).
-    ///
-    /// `observables[0]` is always present: `compile` runs [`Readout::validate`]
-    /// before building the `ResolvedReadout`, so a readout whose observable
-    /// count does not satisfy its decision is rejected there and never reaches
-    /// this method.
+    /// §17). A thin `f64` wrapper over
+    /// [`predict_from_weighted`](Self::predict_from_weighted).
     pub(crate) fn predict_from_probabilities(
         &self,
         probabilities: &HashMap<String, f64>,
     ) -> Result<f64, QmlError> {
-        match self.decision {
-            Decision::Sign => {
-                let e = self.observables[0].expectation_from_probabilities(probabilities)?;
-                Ok(if e >= 0.0 { 1.0 } else { -1.0 })
-            }
-            Decision::Threshold(t) => {
-                let e = self.observables[0].expectation_from_probabilities(probabilities)?;
-                Ok(if e >= t { 1.0 } else { -1.0 })
-            }
-            Decision::Raw => self.observables[0].expectation_from_probabilities(probabilities),
-            Decision::Argmax => {
-                let mut best_index = 0usize;
-                let mut best_value =
-                    self.observables[0].expectation_from_probabilities(probabilities)?;
-                for (index, observable) in self.observables.iter().enumerate().skip(1) {
-                    let value = observable.expectation_from_probabilities(probabilities)?;
-                    // Strict `>`: ties keep the first (lowest) index.
-                    if value > best_value {
-                        best_value = value;
-                        best_index = index;
-                    }
-                }
-                Ok(best_index as f64)
-            }
-        }
+        self.predict_from_weighted(probabilities)
     }
 }
 
