@@ -15,6 +15,20 @@ pending SIGINT turned into `KeyboardInterrupt` (`PyErr_CheckSignals` is a
 no-op off the main thread), so `qml.train` additionally checks signals once on
 the main thread after its workers join. Both paths need their own proof.
 
+A third test covers the native minibatched path (`polypus.qml.train` with a
+`Model` + `Dataset` and `batch_size=`), whose end-of-run **full-dataset fitness
+recompute** (design doc §17) is the one heavy step the optimizer loop above does
+not cover. That recompute is a single, indivisible native call: a
+`check_signals` *after* it cannot preempt it mid-flight, so — unlike the loop
+tests above — it is not measurable by SIGINT latency (a fixed and an unfixed
+build both finish the whole recompute before honouring the signal, at the same
+moment). What the fix actually guarantees, and what that test asserts, is the
+other half of ENGINEERING §3: the recompute runs **GIL-free**
+(`py.allow_threads`). A background Python thread ticking every 50 ms stays live
+throughout a multi-second recompute when the GIL is released, but is frozen for
+the whole recompute when it is held — the pre-fix behaviour. That liveness is
+the observable, backend-independent signature of the GIL being released.
+
 Why a subprocess rather than an in-process background thread:
 
 * Isolation — the SIGINT goes to the child, so a mishandled signal can never
@@ -65,6 +79,18 @@ pytestmark = pytest.mark.integration
 _READY_TIMEOUT_S = 60.0  # child import + one warm-up generation on a cold CI runner
 _DELAY_BEFORE_SIGINT_S = 0.5  # let the GIL-free optimization get going
 _INTERRUPT_DEADLINE_S = 5.0  # hard ceiling; real value <1s, full run far longer
+
+# Sizing for the minibatch-recompute GIL-freedom child (last test). The child
+# runs to completion (no SIGINT), so these only bound the heartbeat's freeze
+# detection, not an interrupt window.
+_HEARTBEAT_INTERVAL_S = 0.05  # background-thread tick period
+_MAX_LIVE_GAP_S = 1.0  # a live thread's max gap is ~_HEARTBEAT_INTERVAL_S; a
+#                        frozen one's is ~the whole recompute (seconds) — 1.0s
+#                        sits far above the former and far below the latter.
+_MIN_RECOMPUTE_S = 1.0  # the recompute must be long enough that a freeze is
+#                         unmistakable; the child self-fails (resize hint) below.
+_RECOMPUTE_CHILD_TIMEOUT_S = 120.0  # import + warm-up + a multi-second recompute,
+#                                     generous for a cold/slow CI runner.
 
 # The child trains on the native backend with a budget whose *completed* run
 # takes far longer than the interrupt window (~a minute), so any prompt exit
@@ -172,6 +198,105 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed error
     sys.exit(1)
 """
 
+# Native minibatched path (`Model` + `Dataset` + `batch_size`), the only path on
+# which `dispatch_optimizer` runs a final full-dataset recompute (design doc
+# §17). This child measures GIL-freedom of that recompute, not SIGINT latency
+# (see the module docstring for why the recompute — a single native call — is not
+# SIGINT-testable): a background thread times itself while the main thread runs
+# the recompute; if the GIL is held the thread freezes for the whole recompute.
+#
+# Sizing note: the minibatch loop is deliberately trivial — `batch_size=1`,
+# `generations=1`, `population_size=8`, so ~16 one-sample circuit evaluations,
+# milliseconds total — while a single full-dataset recompute scores all
+# `_SAMPLES` circuits at `_QUBITS` qubits. 12 qubits + 1400 samples puts that one
+# recompute in the multi-second range (≈6s on the reference dev box), so a frozen
+# heartbeat's gap (≈the recompute) and a live heartbeat's gap (≈50 ms) differ by
+# ~two orders of magnitude — `_MAX_LIVE_GAP_S = 1.0` separates them with a wide
+# margin either way. The child self-fails with a resize hint if the recompute
+# ever falls below `_MIN_RECOMPUTE_S` (e.g. on far faster hardware).
+_QML_MINIBATCH_RECOMPUTE_CHILD = f"""
+import sys, time, threading
+import polypus
+
+_QUBITS = 12
+_SAMPLES = 1400
+_HEARTBEAT_INTERVAL_S = {_HEARTBEAT_INTERVAL_S!r}
+_MAX_LIVE_GAP_S = {_MAX_LIVE_GAP_S!r}
+_MIN_RECOMPUTE_S = {_MIN_RECOMPUTE_S!r}
+
+
+def _model():
+    return (
+        polypus.qml.Model(_QUBITS)
+        .angle_encoder(axis="ry")
+        .hardware_efficient(reps=1)
+        .readout(observables=[[("z", 0)]], decision="sign")
+    )
+
+
+def _dataset(n):
+    # Distinct feature rows so the encoder does real per-sample work; the labels
+    # only need to be valid (the recompute's timing, not its value, is measured).
+    x = [[0.3 + 0.0001 * i + 0.01 * j for j in range(_QUBITS)] for i in range(n)]
+    y = [1.0 if i % 2 else -1.0 for i in range(n)]
+    return polypus.qml.Dataset(x, y)
+
+
+# Warm up the lazy import/setup path with a tiny run down the *same* native
+# minibatch path, so the timed run below reflects only the full-dataset recompute
+# and not one-off process/import warm-up.
+polypus.qml.train(
+    _model(), _dataset(4),
+    method=polypus.DE(generations=1, population_size=8, tolerance=1e-12),
+    loss="hinge", infrastructure="local", backend="polypus",
+    id="warmup", seed=7, exact=True, batch_size=1,
+)
+
+# A background Python thread that timestamps itself every _HEARTBEAT_INTERVAL_S.
+# It can only run when the main thread is not holding the GIL, so the largest gap
+# between its stamps reports the longest stretch the main thread held the GIL.
+_stamps = []
+_stop = False
+
+
+def _heartbeat():
+    while not _stop:
+        _stamps.append(time.time())
+        time.sleep(_HEARTBEAT_INTERVAL_S)
+
+
+_beat = threading.Thread(target=_heartbeat, daemon=True)
+_beat.start()
+time.sleep(0.2)  # let the heartbeat establish its baseline cadence first
+
+_start = time.time()
+polypus.qml.train(
+    _model(), _dataset(_SAMPLES),
+    method=polypus.DE(generations=1, population_size=8, tolerance=1e-12),
+    loss="hinge", infrastructure="local", backend="polypus",
+    id="recompute_gil", seed=7, exact=True, batch_size=1,
+)
+_recompute_dur = time.time() - _start
+_stop = True
+_beat.join()
+
+_gaps = [_stamps[i + 1] - _stamps[i] for i in range(len(_stamps) - 1)]
+_max_gap = max(_gaps) if _gaps else float("inf")
+
+# Sizing sanity: if the recompute was too short, a frozen heartbeat would be
+# indistinguishable from a live one — the test would be meaningless. Fail loudly
+# with a resize hint rather than pass vacuously.
+if _recompute_dur < _MIN_RECOMPUTE_S:
+    print(f"UNSIZED recompute_dur={{_recompute_dur:.3f}} max_gap={{_max_gap:.3f}}", flush=True)
+    sys.exit(2)
+
+if _max_gap < _MAX_LIVE_GAP_S:
+    print(f"PASS recompute_dur={{_recompute_dur:.3f}} max_gap={{_max_gap:.3f}}", flush=True)
+    sys.exit(0)
+print(f"FAIL recompute_dur={{_recompute_dur:.3f}} max_gap={{_max_gap:.3f}}", flush=True)
+sys.exit(1)
+"""
+
 
 def _assert_responds_to_sigint_promptly(child_code, *, failure_hint):
     """Run `child_code` in a subprocess, SIGINT it mid-training, and assert a
@@ -244,3 +369,48 @@ def test_qml_training_responds_to_sigint_promptly():
             "the optimizer"
         ),
     )
+
+
+def _assert_recompute_releases_gil(child_code):
+    """Run `child_code` (a self-checking GIL-freedom probe) to completion and
+    assert it passed. The child freezes a background thread if the final
+    full-dataset recompute holds the GIL, so a non-zero exit means the recompute
+    ran under the GIL — the pre-fix behaviour this guards against."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=_RECOMPUTE_CHILD_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        pytest.fail(
+            "the minibatch-recompute child did not finish within "
+            f"{_RECOMPUTE_CHILD_TIMEOUT_S}s — a frozen heartbeat cannot explain "
+            f"this (it would still finish the recompute), so this is a hang.\n"
+            f"stdout:\n{out}\nstderr:\n{err}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    if "UNSIZED" in out:
+        pytest.fail(
+            "the full-dataset recompute was too short for this hardware to make "
+            "a frozen heartbeat detectable — raise _SAMPLES in the child.\n"
+            f"stdout:\n{out}\nstderr:\n{err}"
+        )
+    assert proc.returncode == 0 and "PASS" in out, (
+        "the full-dataset recompute held the GIL: a background Python thread was "
+        "frozen for ~the whole recompute (the pre-fix behaviour — the recompute "
+        "must run under py.allow_threads, ENGINEERING §3).\n"
+        f"stdout:\n{out}\nstderr:\n{err}"
+    )
+
+
+def test_minibatch_recompute_runs_gil_free():
+    _assert_recompute_releases_gil(_QML_MINIBATCH_RECOMPUTE_CHILD)

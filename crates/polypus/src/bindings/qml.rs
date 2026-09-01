@@ -49,7 +49,14 @@ use polypus_optimizers::{
 /// against the **full** training set once optimization ends, replacing a
 /// minibatched `best_fitness`. Aliased so the boxed owner, the borrowed
 /// dispatcher argument and the oracle-branch tuple all name one unsized type.
-type RecomputeFn = dyn Fn(&[f64]) -> f64;
+///
+/// `+ Send + Sync` so the recompute can run inside `py.allow_threads` in
+/// [`dispatch_optimizer`] (ENGINEERING §3): under pyo3's stable `Ungil` bound
+/// that closure must be `Send`, which for the borrowed `&RecomputeFn` it holds
+/// requires the trait object to be `Sync`. The closure built by
+/// [`recompute_full_fitness`] only captures an `Arc<O>` and an
+/// `OracleErrorSlot`, both `Send + Sync`, so it satisfies the tighter bound.
+type RecomputeFn = dyn Fn(&[f64]) -> f64 + Send + Sync;
 
 /// The three things the native oracle branch hands to [`dispatch_optimizer`]:
 /// the two trait-object facets of the one oracle `Arc` (fitness + gradient) and
@@ -1856,6 +1863,10 @@ fn qml_train_native(
 /// finite sentinel returned, so `finish_optimization` surfaces the real error
 /// rather than a bogus fitness — the same discipline the trait paths use.
 ///
+/// Both captures (`Arc<O>`, `OracleErrorSlot`) are `Send + Sync`, so the boxed
+/// closure satisfies the `Send + Sync` bound on [`RecomputeFn`] — which is what
+/// lets `dispatch_optimizer` run it inside `py.allow_threads` (ENGINEERING §3).
+///
 /// Generic over the concrete oracle type (`NativeQmlOracle` /
 /// `ExactNativeQmlOracle`); both expose `evaluate_full` inherently.
 fn recompute_full_fitness<O>(
@@ -2072,7 +2083,15 @@ fn qml_train_qiskit(
 /// run ends, replacing the last iteration's minibatch `best_fitness` — so the
 /// reported fitness is comparable to a non-minibatch run (contract C-5). It is
 /// applied uniformly at the single convergence point below, regardless of which
-/// optimizer ran; the Qiskit path passes `None`.
+/// optimizer ran; the Qiskit path passes `None`. That full-dataset re-score can
+/// be much heavier than a single minibatch step, so it obeys the same GIL
+/// discipline as the optimizer loop (ENGINEERING §3): it runs GIL-free under
+/// `py.allow_threads` (so it never freezes other Python threads for its whole
+/// duration), with a `py.check_signals()` at the boundary. The recompute is one
+/// indivisible native call, so — like the batched read-out in `Model::predict`
+/// — that check cannot preempt it mid-flight; it raises a pending Ctrl+C the
+/// instant the call returns, rather than leaving it deaf until control unwinds
+/// all the way back to Python.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_optimizer(
     py: Python<'_>,
@@ -2175,13 +2194,26 @@ fn dispatch_optimizer(
     // rosier of the two, could make the sequence decrease, breaking the C-5
     // monotonicity guarantee to buy a cosmetic `history[-1] == best_fitness`. So
     // under `batch_size` that equality deliberately does not hold (contract C-7).
+    //
+    // The recompute follows the same GIL discipline as the optimizer loop above
+    // (ENGINEERING §3): `evaluate_full` re-scores against the whole training set
+    // — potentially far more circuits than one minibatch step — so it runs under
+    // `py.allow_threads` (GIL-free, never freezing other Python threads for its
+    // duration) with a `py.check_signals()` afterwards. It is one indivisible
+    // native call, so the check does not interrupt it mid-flight; it converts a
+    // Ctrl+C landed during the recompute into a `KeyboardInterrupt` the instant
+    // the call returns, instead of leaving it pending until control unwinds back
+    // to Python. The check sits *outside* the `match`: its `PyErr` has no
+    // `OptimizerError` conversion to unify with the `(other, _)` arm, so the `?`
+    // belongs in the enclosing `PyResult` body, after `result` is built.
     let result = match (result, recompute) {
         (Ok(mut outcome), Some(recompute)) if !errors.failed() => {
-            outcome.best_fitness = recompute(&outcome.best_params);
+            outcome.best_fitness = py.allow_threads(|| recompute(&outcome.best_params));
             Ok(outcome)
         }
         (other, _) => other,
     };
+    py.check_signals()?;
 
     finish_optimization(py, result, errors, effective_seed, effective_id)
 }
