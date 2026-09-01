@@ -248,7 +248,7 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     whatever the oracle returns: a shot estimate, or a minibatch estimate. What
     a noisy oracle changes is how much each entry *means*, never the shape of
     the sequence.
-- `GradientOracle::gradient_batch(theta, dims)` (QNG only) returns the fitness
+- `GradientOracle::gradient_batch(theta, dims)` (QNG and Adam) returns the fitness
   gradient `∂fitness/∂θ`, **exactly `dims` values**, in order, same ascent-sign
   convention as `EvaluationOracle` (higher fitness is better; the value points
   uphill). QNG length-checks it like any oracle output. "Exact" is the

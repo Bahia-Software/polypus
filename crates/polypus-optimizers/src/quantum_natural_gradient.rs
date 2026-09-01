@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::check_oracle_len;
+use crate::util::{check_oracle_len, patience_converged};
 use rand::Rng;
 
 /// Quantum Natural Gradient optimizer.
@@ -210,15 +210,9 @@ impl AlgorithmQNG {
             //    iteration is not enough: `patience` consecutive ones are, and
             //    any iteration above the tolerance clears the streak. See the
             //    `patience` doc-comment for why one iteration cannot be trusted.
-            let grad_norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
-            if grad_norm < tolerance {
-                below_tolerance_streak += 1;
-                if below_tolerance_streak >= patience {
-                    converged = true;
-                    break;
-                }
-            } else {
-                below_tolerance_streak = 0;
+            if patience_converged(&grad, tolerance, patience, &mut below_tolerance_streak) {
+                converged = true;
+                break;
             }
         }
 

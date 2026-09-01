@@ -41,8 +41,11 @@ pub struct OptimizationOutcome {
     pub iterations_run: usize,
     /// Whether the algorithm's convergence criterion was satisfied.
     ///
-    /// Optimizers without an early-stopping test (e.g. QNG) always report
-    /// `false` — they simply exhaust their iteration budget.
+    /// Every optimizer in this crate has an early-stopping test and can report
+    /// `true`: DE and PSO once their population collapses below `tolerance` in
+    /// every dimension, QNG and Adam once the gradient norm stays below
+    /// `tolerance` for `patience` consecutive iterations. `false` means the run
+    /// simply exhausted its iteration budget without that criterion firing.
     pub converged: bool,
 }
 

@@ -1,12 +1,15 @@
-//! Internal helpers shared by the population-based optimizers.
+//! Internal helpers shared by the optimizers.
 //!
-//! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution)
-//! and [`AlgorithmPSO`](crate::AlgorithmPSO), not part of the crate's public
-//! API, so the module is `pub(crate)`-scoped. Each helper is a small,
-//! single-purpose free function that used to be inlined (and duplicated) inside
-//! the optimizer loops. The behaviour is preserved exactly — same operation
-//! order, same comparators, same diagnostics — so the determinism the tests pin
-//! (`tests/optimizers.rs`) is unaffected.
+//! These are implementation details of the crate's optimizers —
+//! [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution) and
+//! [`AlgorithmPSO`](crate::AlgorithmPSO) for the population-based convergence
+//! test, [`AlgorithmQNG`](crate::AlgorithmQNG) and [`AlgorithmAdam`](crate::AlgorithmAdam)
+//! for the gradient-norm one — not part of the crate's public API, so the module
+//! is `pub(crate)`-scoped. Each helper is a small, single-purpose free function
+//! that used to be inlined (and duplicated) inside the optimizer loops. The
+//! behaviour is preserved exactly — same operation order, same comparators, same
+//! diagnostics — so the determinism the tests pin (`tests/optimizers.rs`) is
+//! unaffected.
 
 use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
@@ -67,6 +70,43 @@ pub(crate) fn population_converged(
         log::debug!("Stopping early at generation {generation} due to convergence");
     }
     converged
+}
+
+/// Gradient-norm early-stopping test shared by QNG and Adam.
+///
+/// The single-point counterpart of [`population_converged`]: instead of a
+/// population collapsing in every dimension, the convergence signal is the L2
+/// norm `‖∇fitness(θ)‖` of the iteration's gradient dropping below the absolute
+/// threshold `tolerance`. Returns `true` — the loop should stop with
+/// `converged = true` — only once that has held for `patience` **consecutive**
+/// iterations; a single sub-tolerance iteration is deliberately not enough,
+/// since a minibatch gradient can cancel to exactly zero at a `θ` whose
+/// full-dataset gradient is far from zero (see the minibatch note beside
+/// C-5/C-7 in `docs/CONTRACTS.md`).
+///
+/// `below_tolerance_streak` is the caller's persistent counter, threaded by
+/// `&mut` across iterations: it is incremented on each sub-tolerance iteration
+/// and reset to `0` on any iteration that is not, so the required iterations
+/// must be *consecutive*. The gradient norm is computed here rather than by the
+/// caller so the whole rule — norm, streak bookkeeping and the `>= patience`
+/// decision — lives in one place; `CONTRACTS.md` states QNG and Adam behave
+/// identically precisely because it does. `patience = 0` behaves like `1`: the
+/// streak is only ever tested right after being incremented, so it is always
+/// `>= 1` at the comparison.
+pub(crate) fn patience_converged(
+    grad: &[f64],
+    tolerance: f64,
+    patience: usize,
+    below_tolerance_streak: &mut usize,
+) -> bool {
+    let grad_norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+    if grad_norm < tolerance {
+        *below_tolerance_streak += 1;
+        *below_tolerance_streak >= patience
+    } else {
+        *below_tolerance_streak = 0;
+        false
+    }
 }
 
 /// Validate that an oracle returned exactly one fitness value per candidate.
@@ -208,6 +248,68 @@ mod tests {
         // the zero-dimension DE edge case (`de_handles_zero_dimensions`).
         let pop = Array2::<f64>::zeros((3, 0));
         assert!(!population_converged(&pop, 1e-9, 0));
+    }
+
+    #[test]
+    fn patience_converged_streak_fires_exactly_at_patience() {
+        // A gradient whose norm is below tolerance every call: the streak must
+        // accumulate and fire on exactly the `patience`-th consecutive call —
+        // not before, not after.
+        let below = [0.0, 0.0];
+        let mut streak = 0usize;
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
+        assert!(patience_converged(&below, 1e-6, 3, &mut streak)); // streak 3 → fire
+        assert_eq!(streak, 3);
+    }
+
+    #[test]
+    fn patience_converged_above_tolerance_resets_streak_mid_run() {
+        // An iteration above tolerance resets the streak to 0 even partway
+        // through a run, so the `patience` consecutive iterations must restart.
+        let below = [0.0, 0.0];
+        let above = [1.0, 0.0];
+        let mut streak = 0usize;
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
+        assert!(!patience_converged(&above, 1e-6, 3, &mut streak)); // reset → 0
+        assert_eq!(streak, 0);
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1 again
+        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
+        assert!(patience_converged(&below, 1e-6, 3, &mut streak)); // streak 3 → fire
+    }
+
+    #[test]
+    fn patience_converged_patience_one_fires_immediately() {
+        // `patience = 1` reproduces the pre-`patience` single-iteration rule:
+        // the first sub-tolerance iteration fires.
+        let below = [0.0, 0.0];
+        let mut streak = 0usize;
+        assert!(patience_converged(&below, 1e-6, 1, &mut streak));
+        assert_eq!(streak, 1);
+    }
+
+    #[test]
+    fn patience_converged_streak_persists_across_calls() {
+        // Passing the same `&mut usize` on successive calls (as the optimizer
+        // loop does) must carry the streak forward rather than starting over.
+        let below = [0.0];
+        let mut streak = 0usize;
+        assert!(!patience_converged(&below, 1e-6, 2, &mut streak));
+        assert_eq!(streak, 1);
+        assert!(patience_converged(&below, 1e-6, 2, &mut streak));
+        assert_eq!(streak, 2);
+    }
+
+    #[test]
+    fn patience_converged_norm_is_l2_over_all_components() {
+        // The norm absorbed into the helper is the L2 norm over every gradient
+        // component: a vector each of whose components is individually below
+        // tolerance can still have a norm above it, so no stop.
+        let grad = [0.4, 0.4, 0.4]; // ‖·‖ ≈ 0.69 > 0.5, though each |g| < 0.5
+        let mut streak = 0usize;
+        assert!(!patience_converged(&grad, 0.5, 1, &mut streak));
+        assert_eq!(streak, 0);
     }
 
     #[test]
