@@ -360,7 +360,7 @@ where
         Ok(finalize(histories))
     }
     /// Run all primary histories, drawing each primary's **full** initial state
-    /// (position, direction, and energy) from a [`BeamSource`], while tallying
+    /// (position, direction, and energy) from a [`beam::BeamSource`], while tallying
     /// every local energy deposit into `grid`.
     ///
     /// Unlike [`run_with_spectrum`](Self::run_with_spectrum) (which only varies
