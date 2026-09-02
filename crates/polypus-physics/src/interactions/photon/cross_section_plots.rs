@@ -1,12 +1,6 @@
 //! Plotting utilities for raw ENDF-6 photon cross-sections (barns),
 //! rendered as log-log line charts and saved as PNG images.
 
-use std::path::Path;
-
-use crate::error::PhysicsError;
-
-use super::mass_attenuation_coefficients::cross_section_for_element;
-
 #[cfg(feature = "plotters")]
 const KNOWN_CHANNELS: &[(u32, &str, (u8, u8, u8))] = &[
     (501, "Total", (37, 99, 235)),
@@ -117,8 +111,6 @@ pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), Phys
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_element_cross_sections_produces_a_png() {

@@ -1,9 +1,5 @@
 //! Plotting utilities for VoxelGrid depth-dose (PDD) profiles.
 
-use std::path::Path;
-
-use crate::error::PhysicsError;
-
 /// Renders a relative percentage-depth-dose (PDD) curve and saves it as a
 /// PNG image.
 ///
@@ -81,8 +77,6 @@ pub fn plot_relative_pdd(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_relative_pdd_produces_a_png() {

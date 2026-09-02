@@ -1,12 +1,6 @@
 //! Plotting utilities for ENDF-6 photon mu_m curves, rendered as log-log
 //! line charts and saved as PNG images.
 
-use std::path::Path;
-
-use crate::error::PhysicsError;
-
-use super::mass_attenuation_coefficients::{CompoundResult, MuPoint};
-
 /// Renders a set of (energy, mu_m) points as a log-log line chart, and
 /// saves it as a PNG image.
 #[cfg(feature = "plotters")]
@@ -94,9 +88,6 @@ pub fn plot_compound(
 
 #[cfg(test)]
 mod tests {
-    use super::super::mass_attenuation_coefficients::{mu_m_for_compound, mu_m_for_element};
-    use super::*;
-
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_element_produces_a_png() {
