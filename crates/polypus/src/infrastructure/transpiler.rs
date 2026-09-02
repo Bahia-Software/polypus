@@ -82,6 +82,19 @@ pub trait Transpiler: Send + Sync {
     /// Rewrite `circuit` into an equivalent one valid for the backend's target,
     /// honoring `opts` (e.g. optimization [`OptLevel`]).
     fn transpile(&self, circuit: &ConcreteCircuit, opts: &TranspileOptions) -> ConcreteCircuit;
+
+    /// Whether this transpiler is a guaranteed no-op — i.e. `transpile` always
+    /// returns a circuit equal to its input.
+    ///
+    /// Defaults to `false`: a strategy is assumed to rewrite unless it opts in.
+    /// Callers use it to skip the `transpile` call (and its clone) entirely when
+    /// the answer would be an unchanged copy — see
+    /// [`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend)'s
+    /// borrow-or-transpile path. Overriding it is a pure optimization and never
+    /// changes any observable result.
+    fn is_identity(&self) -> bool {
+        false
+    }
 }
 
 /// No-op transpiler: returns the circuit unchanged, ignoring `opts`.
@@ -95,6 +108,11 @@ impl Transpiler for IdentityTranspiler {
     #[inline]
     fn transpile(&self, circuit: &ConcreteCircuit, _opts: &TranspileOptions) -> ConcreteCircuit {
         circuit.clone()
+    }
+
+    #[inline]
+    fn is_identity(&self) -> bool {
+        true
     }
 }
 

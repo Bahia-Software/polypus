@@ -13,6 +13,7 @@ use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Tr
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{Simulator, StatevectorSimulator};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
@@ -107,30 +108,39 @@ impl NativeStatevectorBackend {
     ///
     /// 1. turn the variant into a [`ConcreteCircuit`] (a `Qiskit` circuit is
     ///    rejected — reading its gates would require the interpreter);
-    /// 2. run the injected [`Transpiler`] with the per-run [`TranspileOptions`]
-    ///    (a clone under the default [`IdentityTranspiler`]);
+    /// 2. run the injected [`Transpiler`] with the per-run [`TranspileOptions`],
+    ///    **unless** it is a guaranteed no-op ([`Transpiler::is_identity`]) — in
+    ///    which case the circuit is borrowed straight through, avoiding the
+    ///    identity clone entirely (the default [`IdentityTranspiler`] path);
     /// 3. compute the read-out width — the classical-register width, falling
     ///    back to the qubit count when the circuit has no measurements
     ///    (full-register read-out convention, matching C-3).
     ///
+    /// The result is a [`Cow`]: `Borrowed` for a native circuit under an identity
+    /// transpiler (zero copies), `Owned` when the circuit had to be parsed from
+    /// OpenQASM or genuinely rewritten by a non-identity strategy.
+    ///
     /// The width is computed **after** transpiling, so a strategy that changes
     /// the register width is reflected.
-    fn resolve_and_transpile(
+    fn resolve_and_transpile<'a>(
         &self,
-        circuit: &BoundCircuit,
+        circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
-    ) -> Result<(ConcreteCircuit, usize), BackendError> {
-        // Obtain a ConcreteCircuit without touching Python.
-        let concrete: ConcreteCircuit = match circuit {
-            BoundCircuit::Native(cc) => cc.clone(),
-            BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-                .and_then(|pc| pc.assign_parameters(&[]))
-                .map_err(|e| {
-                    log::error!("native backend could not parse OpenQASM 2.0: {e}");
-                    BackendError::NativeCircuit(format!(
-                        "native backend could not parse OpenQASM 2.0: {e}"
-                    ))
-                })?,
+    ) -> Result<(Cow<'a, ConcreteCircuit>, usize), BackendError> {
+        // Obtain a ConcreteCircuit without touching Python. A native circuit is
+        // borrowed; an OpenQASM string must be parsed into an owned circuit.
+        let source: Cow<'a, ConcreteCircuit> = match circuit {
+            BoundCircuit::Native(cc) => Cow::Borrowed(cc),
+            BoundCircuit::Qasm2(qasm) => Cow::Owned(
+                ParameterizedCircuit::from_qasm2(qasm)
+                    .and_then(|pc| pc.assign_parameters(&[]))
+                    .map_err(|e| {
+                        log::error!("native backend could not parse OpenQASM 2.0: {e}");
+                        BackendError::NativeCircuit(format!(
+                            "native backend could not parse OpenQASM 2.0: {e}"
+                        ))
+                    })?,
+            ),
             BoundCircuit::Qiskit(_) => {
                 return Err(BackendError::UnsupportedCircuit(
                     "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
@@ -140,9 +150,15 @@ impl NativeStatevectorBackend {
             }
         };
 
-        // Transpile the native circuit (GIL-free) before simulating. With the
-        // default IdentityTranspiler this is a clone and changes nothing.
-        let concrete = self.transpiler.transpile(&concrete, opts);
+        // Transpile the native circuit (GIL-free) before simulating — but only
+        // when the strategy actually rewrites. Under the default
+        // IdentityTranspiler this would be an identity clone, so borrow straight
+        // through instead of cloning.
+        let concrete: Cow<'a, ConcreteCircuit> = if self.transpiler.is_identity() {
+            source
+        } else {
+            Cow::Owned(self.transpiler.transpile(source.as_ref(), opts))
+        };
 
         // Bitstring length = classical register width (qubit count when the
         // circuit has no measurements, mirroring a full-register read-out).
@@ -169,7 +185,7 @@ impl NativeStatevectorBackend {
 
         let raw = self
             .simulator
-            .run_and_sample(&concrete, shots as usize, seed)
+            .run_and_sample(concrete.as_ref(), shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
@@ -220,7 +236,7 @@ impl NativeStatevectorBackend {
                 concrete.num_qubits
             )));
         }
-        let sv = self.simulator.run(&concrete).map_err(|e| {
+        let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
         })?;
