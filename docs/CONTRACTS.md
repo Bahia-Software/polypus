@@ -125,7 +125,7 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
+h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
 barrier  measure  measure_all
 ```
 

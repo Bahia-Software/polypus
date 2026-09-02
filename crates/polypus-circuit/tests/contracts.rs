@@ -14,7 +14,8 @@ use polypus_circuit::{CircuitError, GateInstruction, GateParam, Param, Parameter
 
 // ─────────────────────────── C-2 · round-trip ─────────────────────────────
 
-/// One circuit exercising the whole vocabulary, including `cp` (audit item C2).
+/// One circuit exercising the whole vocabulary, including `cp` (audit item C2)
+/// and `swap` (native gate added alongside the QFT template).
 /// Free parameters cover the `Param` path; everything else is fixed.
 fn full_vocabulary() -> ParameterizedCircuit {
     ParameterizedCircuit::new(3)
@@ -32,6 +33,7 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .u(0, 0.1, Param(1), 0.3)
         .cx(0, 1)
         .cz(1, 2)
+        .swap(0, 2)
         .rzz(0, 2, Param(0))
         .rxx(1, 2, 2.0)
         .cp(0, 1, 0.75)
@@ -81,6 +83,7 @@ fn c2_every_gate_roundtrips_individually() {
         ("rz", ParameterizedCircuit::new(1).rz(0, 0.3)),
         ("cx", ParameterizedCircuit::new(2).cx(0, 1)),
         ("cz", ParameterizedCircuit::new(2).cz(0, 1)),
+        ("swap", ParameterizedCircuit::new(2).swap(0, 1)),
         ("rzz", ParameterizedCircuit::new(2).rzz(0, 1, 0.3)),
         ("rxx", ParameterizedCircuit::new(2).rxx(0, 1, 0.3)),
         ("cp", ParameterizedCircuit::new(2).cp(0, 1, 0.3)),
