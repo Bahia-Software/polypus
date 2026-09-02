@@ -20,7 +20,12 @@ serde   = { version = "1.0", features = ["derive"], optional = true }
 log     = { workspace = true }
 include_dir = "0.7.4"
 csv = { version = "1", optional = true }
-plotters = { version = "0.3.7", optional = true }
+plotters = { version = "0.3.7", default-features = false, features = [
+    "bitmap_backend",
+    "bitmap_encoder",
+    "line_series",
+    "ab_glyph",
+], optional = true }
 
 [features]
 default = []
