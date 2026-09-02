@@ -174,8 +174,11 @@ except BaseException as exc:  # e.g. a PanicException from a swallowed error
 # backend rejected — see `docs/CONTRACTS.md` C-7) instead of `VqcOracle`. Each
 # generation here costs ~10ms (measured: 4 training circuits x population_size=6
 # through Aer), so 100000 generations is far beyond anything the interrupt
-# window (well under a second) could let complete, without needing a slow or
-# large circuit.
+# window (well under a second) could let complete on iteration count alone —
+# but this landscape is degenerate enough (all-zero `x_train`, a 4-parameter
+# ansatz) that DE's default `patience=20` early-stops it in ~40 generations
+# (measured), well under `_DELAY_BEFORE_SIGINT_S`. `patience` is set far above
+# `generations` below so only the interrupt (never convergence) can end the run.
 _QML_CHILD = r"""
 import sys, time
 import numpy as np
@@ -203,7 +206,9 @@ start = time.time()
 try:
     polypus.qml.train(
         feature_map, ansatz, x_train,
-        polypus.DE(generations=100000, population_size=6, tolerance=1e-12),
+        polypus.DE(
+            generations=100000, population_size=6, tolerance=1e-12, patience=200000
+        ),
         shots=64, n_qpus=1, dimensions=len(ansatz.parameters),
         expectation_function=expect,
         infrastructure="local", nodes=1, cores_per_qpu=1, id="qml_interrupt_test",
