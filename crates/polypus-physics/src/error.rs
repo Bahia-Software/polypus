@@ -36,6 +36,30 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// No embedded ENDF-6 data is available for a given element symbol.
+    UnknownElement {
+        symbol: String,
+    },
+    /// The ENDF-6 file does not have the expected format.
+    MalformedEndfData {
+        message: String,
+    },
+    /// A CSV export (or other file I/O) operation failed.
+    IoError {
+        message: String,
+    },
+    /// A chemical formula string is not well-formed (e.g. does not start
+    /// with an uppercase letter, or has an invalid atom count).
+    InvalidChemicalFormula {
+        message: String,
+    },
+    /// The constituent elements of a compound/mixture have no overlapping
+    /// energy range in their ENDF-6 evaluations, so no common energy grid
+    /// can be built.
+    NoEnergyOverlap,
+    UntabulatedMedium {
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -55,6 +79,24 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::InvalidSpectrum { message } => {
                 write!(f, "invalid spectrum: {message}")
+            }
+            PhysicsError::UnknownElement { symbol } => {
+                write!(f, "unknown element symbol: {symbol}")
+            }
+            PhysicsError::MalformedEndfData { message } => {
+                write!(f, "malformed ENDF-6 data: {message}")
+            }
+            PhysicsError::IoError { message } => {
+                write!(f, "I/O error: {message}")
+            }
+            PhysicsError::InvalidChemicalFormula { message } => {
+                write!(f, "invalid chemical formula: {message}")
+            }
+            PhysicsError::NoEnergyOverlap => {
+                write!(f, "constituent elements have no overlapping energy range")
+            }
+            PhysicsError::UntabulatedMedium { message } => {
+                write!(f, "untabulated medium: {message}")
             }
         }
     }

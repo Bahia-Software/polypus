@@ -18,16 +18,17 @@
 //! ```
 //! use polypus_physics::{
 //!     particle::photon::Photon,
-//!     medium::simple::HomogeneousMedium,
+//!     medium::compound::CompoundMedium,
 //!     interactions::photon::PhotonInteractionModel,
 //!     monte_carlo::{MonteCarloEngine, RunConfig},
 //! };
 //! use rand::SeedableRng;
 //! use rand::rngs::StdRng;
 //!
+//! let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
 //! let engine = MonteCarloEngine::new(
 //!     Photon,
-//!     HomogeneousMedium::water(),
+//!     water,
 //!     PhotonInteractionModel,
 //!     RunConfig { n_histories: 1_000, seed: 42, ..Default::default() },
 //! );
@@ -56,3 +57,6 @@ pub mod interactions;
 pub mod medium;
 pub mod monte_carlo;
 pub mod particle;
+
+#[cfg(feature = "plotters")]
+pub(crate) mod fonts;

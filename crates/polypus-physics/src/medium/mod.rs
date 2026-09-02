@@ -1,5 +1,6 @@
 //! Material definitions through which particles are transported.
 
+pub mod compound;
 pub mod simple;
 
 /// A material through which particles are transported.
@@ -28,6 +29,18 @@ pub trait Medium: Send + Sync + std::fmt::Debug {
             * crate::constants::AVOGADRO
             / (self.effective_a()) // g/mol
     }
+    /// Tabulated mass attenuation coefficient (cm²/g) for a photon reaction
+    /// channel, at a given energy (MeV), if this medium has real ENDF-6 data.
+    /// Returns `None` by default (only for protons)
+    fn tabulated_mu_m_cm2_g(
+        &self,
+        channel: crate::medium::compound::PhotonChannel,
+        energy_mev: f64,
+    ) -> Option<f64> {
+        let _ = (channel, energy_mev);
+        None
+    }
 }
 
+pub use compound::{CompoundMedium, PhotonChannel};
 pub use simple::HomogeneousMedium;

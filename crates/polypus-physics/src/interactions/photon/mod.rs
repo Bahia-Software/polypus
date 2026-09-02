@@ -1,12 +1,17 @@
 //! Photon interaction model: combines photoelectric, Compton, and pair
 //! production into a single [`InteractionModel`].
 
+pub mod coherent;
 pub mod compton;
+pub mod cross_section_plots;
+pub mod mass_attenuation_coefficients;
+pub mod mass_attenuation_coefficients_plots;
 pub mod pair_production;
 pub mod photoelectric;
 
 use super::{InteractionEvent, InteractionModel};
 use crate::error::PhysicsError;
+use crate::medium::compound::PhotonChannel;
 use crate::medium::Medium;
 use crate::particle::photon::Photon;
 use crate::particle::ParticleState;
@@ -20,16 +25,28 @@ use rand::Rng;
 /// cross-sections.
 pub struct PhotonInteractionModel;
 
+impl PhotonInteractionModel {
+    /// Macroscopic cross-section (m⁻¹) contribution from one channel,
+    /// straight from the medium's embedded ENDF-6 data.
+    fn macroscopic_cross_section(
+        &self,
+        medium: &dyn Medium,
+        channel: PhotonChannel,
+        e: f64,
+    ) -> Result<f64, PhysicsError> {
+        let mu_m = medium.tabulated_mu_m_cm2_g(channel, e).ok_or_else(|| {
+            PhysicsError::UntabulatedMedium {
+                message: format!("no tabulated data for channel {channel:?} at E = {e} MeV"),
+            }
+        })?;
+        Ok(mu_m * medium.density_kg_m3() * 0.1)
+    }
+}
+
 impl InteractionModel for PhotonInteractionModel {
     type P = Photon;
     type M = dyn Medium;
 
-    /// Total macroscopic cross-section `Σ_tot` (m⁻¹), the sum of the three
-    /// atomic process cross-sections multiplied by the atom number density.
-    ///
-    /// # Errors
-    ///
-    /// [`PhysicsError::NonPositiveEnergy`] if the photon energy is `≤ 0`.
     fn total_cross_section_per_m(
         &self,
         _particle: &Self::P,
@@ -40,26 +57,14 @@ impl InteractionModel for PhotonInteractionModel {
         if e <= 0.0 {
             return Err(PhysicsError::NonPositiveEnergy { energy_mev: e });
         }
-        let z = medium.effective_z();
-        let n = medium.number_density();
-        let sigma_atom = photoelectric::cross_section(e, z)
-            + compton::cross_section(e, z)
-            + pair_production::cross_section(e, z);
-        Ok(sigma_atom * n) // m⁻¹
+        Ok(
+            self.macroscopic_cross_section(medium, PhotonChannel::Photoelectric, e)?
+                + self.macroscopic_cross_section(medium, PhotonChannel::Coherent, e)?
+                + self.macroscopic_cross_section(medium, PhotonChannel::Incoherent, e)?
+                + self.macroscopic_cross_section(medium, PhotonChannel::PairProductionTotal, e)?,
+        )
     }
 
-    /// Sample one photon interaction.
-    ///
-    /// 1. Compute the three partial atomic cross-sections.
-    /// 2. Draw `u ~ Uniform(0, σ_tot)` and select the process by cumulative
-    ///    roulette: photoelectric, then Compton, then pair production.
-    /// 3. Dispatch to the corresponding sub-module sampler.
-    ///
-    /// # Errors
-    ///
-    /// [`PhysicsError::NonPositiveEnergy`] if the photon energy is `≤ 0`, or
-    /// [`PhysicsError::CrossSectionUndefined`] if all partial cross-sections
-    /// vanish (no interaction is possible).
     fn sample_interaction(
         &self,
         _particle: &Self::P,
@@ -71,12 +76,13 @@ impl InteractionModel for PhotonInteractionModel {
         if e <= 0.0 {
             return Err(PhysicsError::NonPositiveEnergy { energy_mev: e });
         }
-        let z = medium.effective_z();
 
-        let tau = photoelectric::cross_section(e, z);
-        let sigma = compton::cross_section(e, z);
-        let kappa = pair_production::cross_section(e, z);
-        let total = tau + sigma + kappa;
+        let tau = self.macroscopic_cross_section(medium, PhotonChannel::Photoelectric, e)?;
+        let rayleigh = self.macroscopic_cross_section(medium, PhotonChannel::Coherent, e)?;
+        let sigma = self.macroscopic_cross_section(medium, PhotonChannel::Incoherent, e)?;
+        let kappa =
+            self.macroscopic_cross_section(medium, PhotonChannel::PairProductionTotal, e)?;
+        let total = tau + rayleigh + sigma + kappa;
 
         if total <= 0.0 {
             return Err(PhysicsError::CrossSectionUndefined {
@@ -91,7 +97,14 @@ impl InteractionModel for PhotonInteractionModel {
                 energy_deposit_mev: deposit,
                 secondaries,
             })
-        } else if u < tau + sigma {
+        } else if u < tau + rayleigh {
+            let (new_state, deposit, secondaries) = coherent::sample(state, rng);
+            Ok(InteractionEvent::Scattered {
+                new_state,
+                energy_deposit_mev: deposit,
+                secondaries,
+            })
+        } else if u < tau + rayleigh + sigma {
             let (new_state, deposit, secondaries) = compton::sample(state, rng);
             Ok(InteractionEvent::Scattered {
                 new_state,
@@ -111,33 +124,41 @@ impl InteractionModel for PhotonInteractionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::medium::HomogeneousMedium;
+    use crate::medium::CompoundMedium;
     use crate::particle::photon::Photon;
+
+    fn water() -> CompoundMedium {
+        CompoundMedium::new("H2O", 1000.0, 5000).unwrap()
+    }
+
+    fn lead() -> CompoundMedium {
+        CompoundMedium::new("Pb", 11_350.0, 5000).unwrap()
+    }
 
     #[test]
     fn compton_dominates_in_water_at_100kev() {
-        let z = HomogeneousMedium::water().effective_z;
-        assert!(compton::cross_section(0.1, z) > photoelectric::cross_section(0.1, z));
+        let medium = water();
+        let compton_mu = medium.mu_m_cm2_g(PhotonChannel::Incoherent, 0.1);
+        let photoelectric_mu = medium.mu_m_cm2_g(PhotonChannel::Photoelectric, 0.1);
+        assert!(compton_mu > photoelectric_mu);
     }
 
     #[test]
     fn photoelectric_dominates_in_lead_at_10kev() {
-        let z = HomogeneousMedium::lead().effective_z;
-        assert!(photoelectric::cross_section(0.01, z) > compton::cross_section(0.01, z));
+        let medium = lead();
+        let compton_mu = medium.mu_m_cm2_g(PhotonChannel::Incoherent, 0.01);
+        let photoelectric_mu = medium.mu_m_cm2_g(PhotonChannel::Photoelectric, 0.01);
+        assert!(photoelectric_mu > compton_mu);
     }
 
     #[test]
     fn total_cross_section_one_mev_water_matches_nist() {
         let model = PhotonInteractionModel;
-        let medium = HomogeneousMedium::water();
+        let medium = water();
         let state = Photon::state_along_z(1.0);
         let sigma_tot = model
             .total_cross_section_per_m(&Photon, &state, &medium)
             .unwrap();
-        // NIST XCOM linear attenuation for 1 MeV in water is μ ≈ 7.07 m⁻¹
-        // (mean free path ≈ 0.14 m). At 1 MeV water attenuation is ~99 %
-        // Compton; with the electron-density-consistent A_eff the free-electron
-        // Klein–Nishina total reproduces NIST to ~1 % (≈ 7.06 m⁻¹).
         assert!(
             (6.8..=7.4).contains(&sigma_tot),
             "Σ_tot = {sigma_tot} m⁻¹ outside [6.8, 7.4]"
