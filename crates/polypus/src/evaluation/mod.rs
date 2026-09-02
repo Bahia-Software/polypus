@@ -4,6 +4,9 @@ pub mod native_qml_oracle;
 pub mod qml_oracle;
 pub mod vqc_oracle;
 
+#[cfg(test)]
+mod test_support;
+
 pub use error::EvaluationError;
 pub use exact_native_qml_oracle::ExactNativeQmlOracle;
 pub use native_qml_oracle::NativeQmlOracle;

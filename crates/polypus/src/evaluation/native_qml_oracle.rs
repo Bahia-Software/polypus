@@ -370,52 +370,9 @@ mod tests {
         RotationAxis,
     };
 
-    /// A tiny, fully-Rust `QmlProblem`: a 2-qubit angle-encoder + hardware-efficient
-    /// ansatz reading `⟨Z₀⟩` with a `Sign` decision, trained with `Hinge` over two
-    /// well-separated samples. Its compiled model reserves 8 trainable parameters.
-    fn small_problem() -> QmlProblem {
-        let readout = Readout::new(
-            vec![
-                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-            ],
-            Decision::Sign,
-        )
-        .unwrap();
-        let model = QuantumModel::new(2)
-            .angle_encoder(RotationAxis::Ry)
-            .hardware_efficient(1)
-            .readout(readout);
-        let ds = Dataset::from_rows(&[vec![0.4, 0.5], vec![2.6, 2.7]], &[-1.0, 1.0]).unwrap();
-        let compiled = model.compile(ds.num_features()).unwrap();
-        QmlProblem::new(compiled, ds, Loss::Hinge).unwrap()
-    }
-
-    /// A categorical counterpart of [`small_problem`]: the same 2-qubit
-    /// angle-encoder + hardware-efficient ansatz, but reading **two** observables
-    /// (`⟨Z₀⟩`, `⟨Z₁⟩`) with an `Argmax` decision and trained with
-    /// `CategoricalCrossEntropy` over two class-{0,1} samples. Exercises the
-    /// multiclass branch of `try_gradient`. Its compiled model reserves the same
-    /// 8 trainable parameters.
-    fn categorical_problem() -> QmlProblem {
-        let readout = Readout::new(
-            vec![
-                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-                Observable::new(vec![(1.0, PauliString::new(vec![(1, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-            ],
-            Decision::Argmax,
-        )
-        .unwrap();
-        let model = QuantumModel::new(2)
-            .angle_encoder(RotationAxis::Ry)
-            .hardware_efficient(1)
-            .readout(readout);
-        let ds = Dataset::from_rows(&[vec![0.4, 0.5], vec![2.6, 2.7]], &[0.0, 1.0]).unwrap();
-        let compiled = model.compile(ds.num_features()).unwrap();
-        QmlProblem::new(compiled, ds, Loss::CategoricalCrossEntropy).unwrap()
-    }
+    // `small_problem`/`categorical_problem` are shared with the exact oracle's
+    // tests, so they live in one place rather than being copied per file.
+    use crate::evaluation::test_support::{categorical_problem, small_problem};
 
     /// A `NativeQmlOracle` over [`categorical_problem`] with a chosen shot count.
     fn categorical_oracle_with_shots(errors: OracleErrorSlot, shots: u32) -> NativeQmlOracle {

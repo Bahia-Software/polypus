@@ -314,49 +314,9 @@ mod tests {
         RotationAxis,
     };
 
-    /// A tiny fully-Rust `QmlProblem`: 2-qubit angle-encoder + hardware-efficient
-    /// ansatz reading `⟨Z₀⟩` with a `Sign` decision, trained with `Hinge` over
-    /// two well-separated samples. Reserves 8 trainable parameters.
-    fn small_problem() -> QmlProblem {
-        let readout = Readout::new(
-            vec![
-                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-            ],
-            Decision::Sign,
-        )
-        .unwrap();
-        let model = QuantumModel::new(2)
-            .angle_encoder(RotationAxis::Ry)
-            .hardware_efficient(1)
-            .readout(readout);
-        let ds = Dataset::from_rows(&[vec![0.4, 0.5], vec![2.6, 2.7]], &[-1.0, 1.0]).unwrap();
-        let compiled = model.compile(ds.num_features()).unwrap();
-        QmlProblem::new(compiled, ds, Loss::Hinge).unwrap()
-    }
-
-    /// A categorical counterpart of [`small_problem`]: two observables
-    /// (`⟨Z₀⟩`, `⟨Z₁⟩`), an `Argmax` decision and `CategoricalCrossEntropy` over
-    /// two class-{0,1} samples. Also reserves 8 trainable parameters.
-    fn categorical_problem() -> QmlProblem {
-        let readout = Readout::new(
-            vec![
-                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-                Observable::new(vec![(1.0, PauliString::new(vec![(1, Pauli::Z)]).unwrap())])
-                    .unwrap(),
-            ],
-            Decision::Argmax,
-        )
-        .unwrap();
-        let model = QuantumModel::new(2)
-            .angle_encoder(RotationAxis::Ry)
-            .hardware_efficient(1)
-            .readout(readout);
-        let ds = Dataset::from_rows(&[vec![0.4, 0.5], vec![2.6, 2.7]], &[0.0, 1.0]).unwrap();
-        let compiled = model.compile(ds.num_features()).unwrap();
-        QmlProblem::new(compiled, ds, Loss::CategoricalCrossEntropy).unwrap()
-    }
+    // `small_problem`/`categorical_problem` are shared with the sampled oracle's
+    // tests, so they live in one place rather than being copied per file.
+    use crate::evaluation::test_support::{categorical_problem, small_problem};
 
     /// A `LocalNative` execution config. `shots`/`seed` are irrelevant to the
     /// exact path, so their values here are arbitrary and never observed.
