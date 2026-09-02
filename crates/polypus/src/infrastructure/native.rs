@@ -352,10 +352,22 @@ mod tests {
         let circuit = BoundCircuit::Native(bell());
         assert_eq!(
             default_backend
-                .simulate_one(&circuit, 1000, 42, &opts, default_backend.simulator.parallel_threshold)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    default_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
             explicit_backend
-                .simulate_one(&circuit, 1000, 42, &opts, explicit_backend.simulator.parallel_threshold)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    explicit_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
         );
     }
@@ -389,10 +401,22 @@ mod tests {
         let backend = NativeStatevectorBackend::new(0);
         let opts = TranspileOptions::default();
         let native = backend
-            .simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts, backend.simulator.parallel_threshold)
+            .simulate_one(
+                &BoundCircuit::Native(bell()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         let qasm = backend
-            .simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts, backend.simulator.parallel_threshold)
+            .simulate_one(
+                &BoundCircuit::Qasm2(bell().to_qasm2()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         assert_eq!(native, qasm);
     }
