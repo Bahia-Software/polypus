@@ -124,10 +124,18 @@ impl NativeStatevectorBackend {
         shots: u32,
         seed: u64,
         opts: &TranspileOptions,
+        parallel_threshold: usize,
     ) -> Result<HashMap<String, u64>, BackendError> {
         let concrete = self.concrete_circuit(circuit, opts)?;
-        let raw = self
-            .simulator
+        // Simulate with the gate-parallel threshold the caller picked: `run_circuits` raises it to
+        // `usize::MAX` (gate kernels off) for a population batch whose across-circuit `par_iter`
+        // already owns the cores, and keeps the default for a lone circuit. Gate-parallel is
+        // numerically identical to sequential, so this trades only speed, never results.
+        let simulator = StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold,
+        };
+        let raw = simulator
             .run_and_sample(concrete.as_ref(), shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
@@ -164,20 +172,30 @@ impl QuantumBackend for NativeStatevectorBackend {
         // Reserve a contiguous block of seeds for this batch so each circuit is
         // sampled independently and deterministically, regardless of order.
         let start = self.counter.fetch_add(qcs.len() as u64, Ordering::Relaxed);
-        // Evaluate the batch in parallel across circuits. A DE generation submits
-        // its whole population here (one circuit per candidate), so this is the
-        // population axis — embarrassingly parallel, cache-friendly, and the axis
-        // that actually scales, unlike the bandwidth-bound gate-level kernels.
-        // `simulate_one` is pure Rust (no GIL) and `&self`-only; the per-circuit
-        // seed is `start + i`, fixed up front and independent of execution order,
-        // so `par_iter` yields byte-identical counts to the sequential path.
-        // rayon's indexed `collect` preserves order and short-circuits on the
+        // Evaluate the batch in parallel ACROSS circuits. A DE generation submits its whole
+        // population here (one circuit per candidate), so this is the population axis —
+        // embarrassingly parallel and the axis that actually scales. `simulate_one` is pure Rust
+        // (no GIL) and `&self`-only; the per-circuit seed is `start + i`, fixed up front and
+        // independent of execution order, so `par_iter` yields byte-identical counts to the
+        // sequential path, and rayon's indexed `collect` preserves order and short-circuits on the
         // first `Err`.
+        //
+        // Gate-level parallelism competes with this across-circuit par_iter on the same rayon pool.
+        // Once the batch has at least as many circuits as pool threads (a population saturating the
+        // node) the gate kernels only add nested-rayon contention, so evolve each circuit's gates
+        // SEQUENTIALLY (`parallel_threshold = MAX`). A smaller batch leaves cores idle, so keep the
+        // normal threshold and let rayon's nesting fill them; a lone circuit (n == 1) keeps full
+        // gate-level parallelism.
+        let parallel_threshold = if qcs.len() >= rayon::current_num_threads() {
+            usize::MAX
+        } else {
+            self.simulator.parallel_threshold
+        };
         qcs.par_iter()
             .enumerate()
             .map(|(i, qc)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                self.simulate_one(qc, config.shots, seed, &opts)
+                self.simulate_one(qc, config.shots, seed, &opts, parallel_threshold)
             })
             .collect()
     }
@@ -312,6 +330,7 @@ mod tests {
                 2000,
                 7,
                 &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
             )
             .unwrap();
         let total: u64 = counts.values().sum();
@@ -333,10 +352,22 @@ mod tests {
         let circuit = BoundCircuit::Native(bell());
         assert_eq!(
             default_backend
-                .simulate_one(&circuit, 1000, 42, &opts)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    default_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
             explicit_backend
-                .simulate_one(&circuit, 1000, 42, &opts)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    explicit_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
         );
     }
@@ -356,6 +387,7 @@ mod tests {
                 128,
                 1,
                 &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
             )
             .unwrap();
         // X|0> = |1>: every shot reads "1".
@@ -369,10 +401,22 @@ mod tests {
         let backend = NativeStatevectorBackend::new(0);
         let opts = TranspileOptions::default();
         let native = backend
-            .simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts)
+            .simulate_one(
+                &BoundCircuit::Native(bell()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         let qasm = backend
-            .simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts)
+            .simulate_one(
+                &BoundCircuit::Qasm2(bell().to_qasm2()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         assert_eq!(native, qasm);
     }
