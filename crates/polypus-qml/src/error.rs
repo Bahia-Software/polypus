@@ -241,6 +241,20 @@ pub enum ValidationError {
         /// The number of classes (readout observables) available.
         num_classes: usize,
     },
+    /// A subset index handed to
+    /// [`QmlProblem::subset`](crate::QmlProblem::subset) names a circuit that
+    /// does not exist: `index >= num_circuits`. Reported for the first offending
+    /// index, deterministically — the same convention as
+    /// [`RaggedRows`](Self::RaggedRows). `subset` is `pub` and takes an arbitrary
+    /// caller-supplied index slice, so an out-of-range index is rejected as a
+    /// typed error rather than left to panic on the internal template indexing.
+    SubsetIndexOutOfRange {
+        /// The first out-of-range index supplied.
+        index: usize,
+        /// The number of circuits available (`num_circuits`); valid indices are
+        /// `0..num_circuits`.
+        num_circuits: usize,
+    },
     /// Precompiling a training template failed while constructing a
     /// [`QmlProblem`](crate::QmlProblem). Wraps the underlying [`QmlError`] so
     /// the `?` inside `QmlProblem::new` can convert a template failure into a
@@ -369,6 +383,13 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "label class out of range: sample {sample} names class {label} but only {num_classes} class(es) are available"
+            ),
+            ValidationError::SubsetIndexOutOfRange {
+                index,
+                num_circuits,
+            } => write!(
+                f,
+                "subset index {index} is out of range: only {num_circuits} circuit(s) are available"
             ),
             ValidationError::Template(e) => write!(f, "template compilation failed: {e}"),
         }

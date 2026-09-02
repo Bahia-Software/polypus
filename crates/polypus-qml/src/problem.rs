@@ -167,7 +167,20 @@ impl QmlProblem {
     /// Named `subset` (not `from_subset`): it *derives* a smaller problem from
     /// `self`, taking `&self`, rather than constructing a `QmlProblem` from
     /// scratch. A `from_*` name would read as a `&self`-free constructor.
+    ///
+    /// An out-of-range index (`i >= num_circuits()`) is rejected with
+    /// [`ValidationError::SubsetIndexOutOfRange`] rather than panicking on the
+    /// template indexing: `indices` is caller-supplied and `subset` is `pub`, so
+    /// this is the single entry point where an untrusted index can reach both the
+    /// template slice here and `Dataset::select`'s own indexing — validating it
+    /// once here, before either indexing runs, covers both.
     pub fn subset(&self, indices: &[usize]) -> Result<QmlProblem, ValidationError> {
+        if let Some(&index) = indices.iter().find(|&&i| i >= self.templates.len()) {
+            return Err(ValidationError::SubsetIndexOutOfRange {
+                index,
+                num_circuits: self.templates.len(),
+            });
+        }
         Ok(QmlProblem {
             model: self.model.clone(),
             train: self.train.select(indices)?,
@@ -1231,6 +1244,27 @@ mod tests {
         // of building that degenerate problem.
         let full = distinct_feature_problem(&[0.15, 0.25, 0.35], &[1.0, -1.0, 1.0]);
         assert_eq!(full.subset(&[]).unwrap_err(), ValidationError::EmptyDataset);
+        // The full problem itself is untouched by the rejected call.
+        assert_eq!(full.num_circuits(), 3);
+    }
+
+    #[test]
+    fn subset_rejects_an_out_of_range_index() {
+        // `indices` is caller-supplied and `subset` is `pub`, so an index past
+        // the last circuit must surface as a typed error rather than panicking on
+        // the internal template indexing (or `Dataset::select`'s). The first
+        // offending index is reported, deterministically.
+        let full = distinct_feature_problem(&[0.15, 0.25, 0.35], &[1.0, -1.0, 1.0]);
+        assert_eq!(full.num_circuits(), 3);
+        // Index 3 is one past the last valid index (0..3); a valid index (0)
+        // preceding it must not mask the rejection.
+        assert_eq!(
+            full.subset(&[0, 3]).unwrap_err(),
+            ValidationError::SubsetIndexOutOfRange {
+                index: 3,
+                num_circuits: 3,
+            }
+        );
         // The full problem itself is untouched by the rejected call.
         assert_eq!(full.num_circuits(), 3);
     }
