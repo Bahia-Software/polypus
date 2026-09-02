@@ -18,6 +18,7 @@ pub fn plot_relative_pdd(
     title: &str,
     path: &Path,
 ) -> Result<(), PhysicsError> {
+    crate::fonts::register_fonts();
     use plotters::prelude::*;
 
     if pdd.is_empty() {

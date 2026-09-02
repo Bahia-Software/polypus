@@ -57,3 +57,6 @@ pub mod interactions;
 pub mod medium;
 pub mod monte_carlo;
 pub mod particle;
+
+#[cfg(feature = "plotters")]
+pub(crate) mod fonts;

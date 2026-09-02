@@ -13,6 +13,7 @@ use super::mass_attenuation_coefficients::{CompoundResult, MuPoint};
 /// saves it as a PNG image.
 #[cfg(feature = "plotters")]
 fn plot_mu_m_points(points: &[MuPoint], title: &str, path: &Path) -> Result<(), PhysicsError> {
+    crate::fonts::register_fonts();
     use plotters::prelude::*;
 
     if points.is_empty() {

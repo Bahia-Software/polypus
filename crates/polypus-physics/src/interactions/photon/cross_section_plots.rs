@@ -30,6 +30,7 @@ const KNOWN_CHANNELS: &[(u32, &str, (u8, u8, u8))] = &[
 /// cannot be shown on a log axis.
 #[cfg(feature = "plotters")]
 pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), PhysicsError> {
+    crate::fonts::register_fonts();
     use plotters::prelude::*;
 
     /// One channel's plotted series: its label, RGB color, and (energy_MeV,
@@ -118,6 +119,8 @@ pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), Phys
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_element_cross_sections_produces_a_png() {
