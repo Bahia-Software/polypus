@@ -25,15 +25,8 @@ use polypus_qml::{
 };
 use polypus_sim::StatevectorSimulator;
 
-/// Convert `polypus-sim`'s `HashMap<state_index, count>` into the C-3 bitstring
-/// format `expectation_from_counts` expects. Same pattern as
-/// `crates/polypus/src/infrastructure/native.rs`: standard binary formatting,
-/// no bit reversal — the character at `width - 1 - k` is qubit `k`.
-fn to_bitstring_counts(raw: HashMap<usize, u64>, width: usize) -> HashMap<String, u64> {
-    raw.into_iter()
-        .map(|(state, count)| (format!("{state:0width$b}"), count))
-        .collect()
-}
+mod common;
+use common::to_bitstring_counts;
 
 /// A test-only oracle: for each candidate `θ`, bind → simulate → count → score.
 /// It **owns** the problem (the optimizer's `Box<dyn EvaluationOracle>` is

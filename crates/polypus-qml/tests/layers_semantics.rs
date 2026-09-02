@@ -30,7 +30,6 @@
 //! through its public equivalent: [`Decision::Raw`] +
 //! [`QmlProblem::predict_from_counts`], which invokes it internally.
 
-use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use polypus_circuit::{Fixed, GateInstruction};
@@ -46,15 +45,8 @@ fn close(a: C64, b: C64) -> bool {
     (a - b).norm() < 1e-10
 }
 
-/// Convert `polypus-sim`'s `HashMap<state_index, count>` into the C-3 bitstring
-/// format `expectation_from_counts` expects. Same pattern as
-/// `crates/polypus/src/infrastructure/native.rs`: standard binary formatting,
-/// no bit reversal — the character at `width - 1 - k` is qubit `k`.
-fn to_bitstring_counts(raw: HashMap<usize, u64>, width: usize) -> HashMap<String, u64> {
-    raw.into_iter()
-        .map(|(state, count)| (format!("{state:0width$b}"), count))
-        .collect()
-}
+mod common;
+use common::to_bitstring_counts;
 
 /// A `⟨Z₀⟩` readout with the given decision, reused by several tests.
 fn z0_readout(decision: Decision) -> Readout {
