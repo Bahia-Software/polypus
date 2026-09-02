@@ -58,6 +58,23 @@ fn validation_to_py_err(e: ValidationError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// The [`PyErr`] raised if the `Model.inner: Option<_>` builder invariant is
+/// ever observed violated — i.e. `inner` is `None` between builder calls.
+///
+/// This is structurally unreachable: PyO3's `&mut self`/`PyRefMut` exclusivity
+/// means no reentrant call can run while `inner` is momentarily taken out (there
+/// is no yield point between the `take()` and the `slf.inner = Some(..)` that
+/// restores it). But the project forbids a failure crossing the FFI boundary
+/// from being a `panic!`/`unwrap`/`expect`, with no exception, so the `Option`
+/// dance surfaces a typed [`PolypusError`](crate::exceptions::PolypusError)
+/// instead of an `expect`. The root class is deliberate: this is an internal
+/// invariant of the bindings layer, not a backend-execution or oracle-evaluation
+/// failure, so none of the domain subclasses fit — but it still belongs under
+/// `PolypusError` so `except polypus.PolypusError` catches it.
+fn model_inner_taken_err() -> PyErr {
+    crate::exceptions::PolypusError::new_err("Model.inner is always Some between calls")
+}
+
 /// Parse a rotation-axis string into a [`RotationAxis`]. Strict: an unrecognised
 /// value is a `ValueError` listing the valid options (decision D).
 fn parse_axis(axis: &str) -> PyResult<RotationAxis> {
@@ -571,13 +588,15 @@ impl Model {
     ///
     /// Every builder method funnels through here, so the `inner: Option<_>`
     /// dance — and the single place where the "always `Some` between calls"
-    /// invariant is asserted — is written once instead of once per method.
-    fn apply(slf: &mut Self, build: impl FnOnce(QuantumModel) -> QuantumModel) {
-        let model = slf
-            .inner
-            .take()
-            .expect("Model.inner is always Some between calls");
+    /// invariant surfaces as [`model_inner_taken_err`] rather than a panic — is
+    /// written once instead of once per method. Returns `PyResult` so that
+    /// (structurally unreachable) failure crosses the FFI boundary as a typed
+    /// [`PolypusError`](crate::exceptions::PolypusError); callers propagate it
+    /// with `?`.
+    fn apply(slf: &mut Self, build: impl FnOnce(QuantumModel) -> QuantumModel) -> PyResult<()> {
+        let model = slf.inner.take().ok_or_else(model_inner_taken_err)?;
         slf.inner = Some(build(model));
+        Ok(())
     }
 }
 
@@ -596,7 +615,7 @@ impl Model {
         axis: &str,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let axis = parse_axis(axis)?;
-        Model::apply(&mut slf, |model| model.angle_encoder(axis));
+        Model::apply(&mut slf, |model| model.angle_encoder(axis))?;
         Ok(slf)
     }
 
@@ -608,7 +627,7 @@ impl Model {
     /// `compile` enforces both, so a misplaced or undersized one is a `ValueError`
     /// there rather than a check duplicated at this boundary.
     fn amplitude_encoder(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
-        Model::apply(&mut slf, |model| model.amplitude_encoder());
+        Model::apply(&mut slf, |model| model.amplitude_encoder())?;
         Ok(slf)
     }
 
@@ -623,7 +642,7 @@ impl Model {
     /// `ValueError` naming its position, raised where the sample is encoded
     /// (training or inference), never rounded silently.
     fn basis_encoder(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
-        Model::apply(&mut slf, |model| model.basis_encoder());
+        Model::apply(&mut slf, |model| model.basis_encoder())?;
         Ok(slf)
     }
 
@@ -640,7 +659,7 @@ impl Model {
         let encoder = IqpEncoder {
             entanglement: parse_entanglement(entanglement)?,
         };
-        Model::apply(&mut slf, |model| model.layer(Layer::Iqp(encoder)));
+        Model::apply(&mut slf, |model| model.layer(Layer::Iqp(encoder)))?;
         Ok(slf)
     }
 
@@ -662,7 +681,7 @@ impl Model {
             block: parse_conv_block(block)?,
             pairing: parse_pairing(pairing)?,
         };
-        Model::apply(&mut slf, |model| model.layer(Layer::Conv(layer)));
+        Model::apply(&mut slf, |model| model.layer(Layer::Conv(layer)))?;
         Ok(slf)
     }
 
@@ -685,7 +704,7 @@ impl Model {
             block: parse_pool_block(block)?,
             keep: parse_keep_rule(keep)?,
         };
-        Model::apply(&mut slf, |model| model.layer(Layer::Pool(layer)));
+        Model::apply(&mut slf, |model| model.layer(Layer::Pool(layer)))?;
         Ok(slf)
     }
 
@@ -732,7 +751,7 @@ impl Model {
         };
         Model::apply(&mut slf, |model| {
             model.layer(Layer::HardwareEfficient(ansatz))
-        });
+        })?;
         Ok(slf)
     }
 
@@ -748,7 +767,7 @@ impl Model {
         let ansatz = HardwareEfficientAnsatz::real_amplitudes(reps);
         Model::apply(&mut slf, |model| {
             model.layer(Layer::HardwareEfficient(ansatz))
-        });
+        })?;
         Ok(slf)
     }
 
@@ -807,11 +826,7 @@ impl Model {
             parsed.push(observable);
         }
         let readout = Readout::new(parsed, decision).map_err(validation_to_py_err)?;
-        let model = slf
-            .inner
-            .take()
-            .expect("Model.inner is always Some between calls");
-        slf.inner = Some(model.readout(readout));
+        Model::apply(&mut slf, |model| model.readout(readout))?;
         Ok(slf)
     }
 
@@ -923,21 +938,25 @@ impl Model {
     ///
     /// A plain read of the builder's state: it needs neither a readout nor a
     /// compilation, so it answers on a model still being chained together.
-    fn num_qubits(&self) -> usize {
-        self.inner
+    fn num_qubits(&self) -> PyResult<usize> {
+        Ok(self
+            .inner
             .as_ref()
-            .expect("Model.inner is always Some between calls")
-            .num_qubits()
+            .ok_or_else(model_inner_taken_err)?
+            .num_qubits())
     }
 
     /// The number of layers appended so far — encoders, ansätze, conv and pool
     /// blocks. The [`readout`](Self::readout) is not a layer and never counts
-    /// here. Infallible, like [`num_qubits`](Self::num_qubits).
-    fn num_layers(&self) -> usize {
-        self.inner
+    /// here. Like [`num_qubits`](Self::num_qubits), it is a plain read that never
+    /// fails in practice — the `PyResult` only carries the (unreachable) internal
+    /// `Model.inner` invariant, never a `ValueError` about the model's shape.
+    fn num_layers(&self) -> PyResult<usize> {
+        Ok(self
+            .inner
             .as_ref()
-            .expect("Model.inner is always Some between calls")
-            .num_layers()
+            .ok_or_else(model_inner_taken_err)?
+            .num_layers())
     }
 
     /// The number of trainable parameters `θ` this model compiles to — the
@@ -976,7 +995,7 @@ impl Model {
         let compiled = self
             .inner
             .as_ref()
-            .expect("Model.inner is always Some between calls")
+            .ok_or_else(model_inner_taken_err)?
             .clone()
             .compile(0)
             .map_err(validation_to_py_err)?;
@@ -1134,7 +1153,7 @@ impl TrainedModel {
         let compiled = model
             .inner
             .as_ref()
-            .expect("Model.inner is always Some between calls")
+            .ok_or_else(model_inner_taken_err)?
             .clone()
             .compile(dataset.inner.num_features())
             .map_err(validation_to_py_err)?;
@@ -1662,7 +1681,7 @@ fn qml_train_native(
     let compiled = model
         .inner
         .as_ref()
-        .expect("Model.inner is always Some between calls")
+        .ok_or_else(model_inner_taken_err)?
         .clone()
         .compile(dataset.inner.num_features())
         .map_err(validation_to_py_err)?;
