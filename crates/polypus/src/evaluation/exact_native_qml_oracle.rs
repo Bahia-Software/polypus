@@ -32,7 +32,11 @@ use std::sync::Arc;
 /// [`QuantumBackend`]: crate::infrastructure::QuantumBackend
 pub struct ExactNativeQmlOracle {
     /// The trainable problem: bind parameters in, get exact fitness out.
-    pub problem: QmlProblem,
+    ///
+    /// Held behind an [`Arc`] so the common (no-minibatch) evaluation path shares
+    /// it by reference-count bump instead of deep-cloning its per-sample circuit
+    /// templates on every `evaluate_batch`/`gradient_batch` call.
+    pub problem: Arc<QmlProblem>,
     /// Unused fields on this path: `shots`/`seed` (no sampling). Only
     /// `opt_level` is read when building the transpile options.
     pub config: Arc<ExecutionConfig>,
@@ -113,13 +117,13 @@ impl ExactNativeQmlOracle {
         // With minibatching (design doc §17) the shared handle is a fresh
         // minibatch drawn once here, so every candidate in this batch scores the
         // same minibatch — identical policy to `NativeQmlOracle::try_evaluate`.
-        let problem = Arc::new(match &self.minibatch {
+        let problem: Arc<QmlProblem> = match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.subset(&indices)?
+                Arc::new(self.problem.subset(&indices)?)
             }
-            None => self.problem.clone(),
-        });
+            None => Arc::clone(&self.problem),
+        };
 
         let handles: Vec<_> = candidates
             .iter()
@@ -177,13 +181,13 @@ impl ExactNativeQmlOracle {
         // One minibatch per gradient call, drawn once so the base θ and every
         // θ±π/2·e_k shift score the same samples — the parameter-shift coherence
         // constraint, identical to `NativeQmlOracle::try_gradient`.
-        let problem = Arc::new(match &self.minibatch {
+        let problem: Arc<QmlProblem> = match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.subset(&indices)?
+                Arc::new(self.problem.subset(&indices)?)
             }
-            None => self.problem.clone(),
-        });
+            None => Arc::clone(&self.problem),
+        };
 
         let shift = std::f64::consts::PI / 2.0;
         let mut thetas: Vec<Vec<f64>> = Vec::with_capacity(1 + 2 * param_indices.len());
@@ -334,7 +338,7 @@ mod tests {
 
     fn oracle(problem: QmlProblem, errors: OracleErrorSlot) -> ExactNativeQmlOracle {
         ExactNativeQmlOracle {
-            problem,
+            problem: Arc::new(problem),
             config: native_config(),
             // Any seed: the exact path never samples, so it does not matter.
             backend: Arc::new(NativeStatevectorBackend::new(7)),
@@ -376,7 +380,7 @@ mod tests {
     /// An exact oracle over [`six_sample_problem`] with minibatching active.
     fn oracle_with_minibatch(batch_size: usize, seed: u64) -> ExactNativeQmlOracle {
         ExactNativeQmlOracle {
-            problem: six_sample_problem(),
+            problem: Arc::new(six_sample_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(seed)),
             errors: OracleErrorSlot::new(),
@@ -455,14 +459,14 @@ mod tests {
     fn evaluate_and_gradient_are_bit_identical_regardless_of_seed() {
         pyo3::prepare_freethreaded_python();
         let a = ExactNativeQmlOracle {
-            problem: small_problem(),
+            problem: Arc::new(small_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(1)),
             errors: OracleErrorSlot::new(),
             minibatch: None,
         };
         let b = ExactNativeQmlOracle {
-            problem: small_problem(),
+            problem: Arc::new(small_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(999)),
             errors: OracleErrorSlot::new(),
@@ -520,14 +524,14 @@ mod tests {
     fn minibatch_is_reproducible_and_seed_independent_for_sampling() {
         pyo3::prepare_freethreaded_python();
         let a = ExactNativeQmlOracle {
-            problem: six_sample_problem(),
+            problem: Arc::new(six_sample_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(1)),
             errors: OracleErrorSlot::new(),
             minibatch: Some(MinibatchConfig::new(3, 20)),
         };
         let b = ExactNativeQmlOracle {
-            problem: six_sample_problem(),
+            problem: Arc::new(six_sample_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(999)),
             errors: OracleErrorSlot::new(),

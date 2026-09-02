@@ -42,7 +42,11 @@ use std::sync::Arc;
 /// [`NativeStatevectorBackend`]: crate::infrastructure::NativeStatevectorBackend
 pub struct NativeQmlOracle {
     /// The trainable problem: bind parameters in, get fitness out (C-8).
-    pub problem: QmlProblem,
+    ///
+    /// Held behind an [`Arc`] so the common (no-minibatch) evaluation path shares
+    /// it by reference-count bump instead of deep-cloning its per-sample circuit
+    /// templates on every `evaluate_batch`/`gradient_batch` call.
+    pub problem: Arc<QmlProblem>,
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
     /// Shared with the `qml.train` entry point: the first evaluation failure is
@@ -122,13 +126,13 @@ impl NativeQmlOracle {
         // minibatching (design doc §17) the shared handle is a fresh minibatch
         // instead of the full problem, drawn once here so all candidates in this
         // batch score the *same* minibatch (a per-call decision, not per-candidate).
-        let problem = Arc::new(match &self.minibatch {
+        let problem: Arc<QmlProblem> = match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.subset(&indices)?
+                Arc::new(self.problem.subset(&indices)?)
             }
-            None => self.problem.clone(),
-        });
+            None => Arc::clone(&self.problem),
+        };
 
         let handles: Vec<_> = candidates
             .iter()
@@ -208,13 +212,13 @@ impl NativeQmlOracle {
         // θ±π/2·e_k shift score the *same* minibatch, which parameter-shift
         // requires for a coherent gradient (design doc §17). Advancing the
         // counter once here (not once per parameter/shift) is what guarantees it.
-        let problem = Arc::new(match &self.minibatch {
+        let problem: Arc<QmlProblem> = match &self.minibatch {
             Some(mb) => {
                 let indices = mb.next_indices(&self.problem);
-                self.problem.subset(&indices)?
+                Arc::new(self.problem.subset(&indices)?)
             }
-            None => self.problem.clone(),
-        });
+            None => Arc::clone(&self.problem),
+        };
 
         // The parameter vectors to run: base θ first, then θ ± π/2·e_k for each
         // requested k. The base batch is what makes this cost 2·|indices| + 1.
@@ -377,7 +381,7 @@ mod tests {
     /// A `NativeQmlOracle` over [`categorical_problem`] with a chosen shot count.
     fn categorical_oracle_with_shots(errors: OracleErrorSlot, shots: u32) -> NativeQmlOracle {
         NativeQmlOracle {
-            problem: categorical_problem(),
+            problem: Arc::new(categorical_problem()),
             config: native_config_with_shots(shots),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
@@ -407,7 +411,7 @@ mod tests {
 
     fn oracle(errors: OracleErrorSlot) -> NativeQmlOracle {
         NativeQmlOracle {
-            problem: small_problem(),
+            problem: Arc::new(small_problem()),
             config: native_config(),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
@@ -418,7 +422,7 @@ mod tests {
     /// Oracle over `small_problem()` with a caller-chosen shot count.
     fn oracle_with_shots(errors: OracleErrorSlot, shots: u32) -> NativeQmlOracle {
         NativeQmlOracle {
-            problem: small_problem(),
+            problem: Arc::new(small_problem()),
             config: native_config_with_shots(shots),
             backend: Arc::new(NativeStatevectorBackend::new(7)),
             errors,
@@ -462,7 +466,7 @@ mod tests {
         let compiled = model.compile(ds.num_features()).unwrap();
         let problem = QmlProblem::new(compiled, ds, Loss::Hinge).unwrap();
         NativeQmlOracle {
-            problem,
+            problem: Arc::new(problem),
             config: native_config_with_shots(shots),
             backend: Arc::new(NativeStatevectorBackend::new(seed)),
             errors,

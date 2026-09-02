@@ -1699,8 +1699,13 @@ fn qml_train_native(
     }
     let dimensions = num_params as u32;
 
-    let problem =
-        QmlProblem::new(compiled, dataset.inner.clone(), loss).map_err(validation_to_py_err)?;
+    // Wrapped in an `Arc` up front so both oracle branches below move a cheap,
+    // shared handle into their struct — the oracles hold `Arc<QmlProblem>` so the
+    // no-minibatch evaluation path shares the problem by reference-count bump
+    // instead of deep-cloning its per-sample circuit templates on every call.
+    let problem = Arc::new(
+        QmlProblem::new(compiled, dataset.inner.clone(), loss).map_err(validation_to_py_err)?,
+    );
 
     // Validate `batch_size` once, here at the Python-facing boundary, against the
     // full problem's sample count — so `QmlProblem::minibatch_indices` need not
