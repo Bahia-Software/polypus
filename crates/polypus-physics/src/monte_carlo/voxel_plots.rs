@@ -1,5 +1,7 @@
 //! Plotting utilities for VoxelGrid depth-dose (PDD) profiles.
 
+#![cfg(feature = "plotters")]
+
 use std::path::Path;
 
 use crate::error::PhysicsError;

@@ -1,6 +1,8 @@
 //! Plotting utilities for ENDF-6 photon mu_m curves, rendered as log-log
 //! line charts and saved as PNG images.
 
+#![cfg(feature = "plotters")]
+
 use std::path::Path;
 
 use crate::error::PhysicsError;
