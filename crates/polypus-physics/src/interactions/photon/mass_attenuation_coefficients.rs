@@ -1,5 +1,7 @@
 //! ENDF-6 (EPDL) photon cross-section data reading and interpolation.
 
+#![cfg(feature = "plotters")]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
