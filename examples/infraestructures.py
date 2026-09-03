@@ -27,26 +27,43 @@ N_QUBITS = 12
 EDGES = list(itertools.combinations(range(N_QUBITS), 2))
 SHOTS = 8192
 
+# A separate, smaller instance for the distribution-agreement check in section 1
+# below. Total-variation distance between two *independently sampled* empirical
+# distributions is only a meaningful estimator when SHOTS is large relative to
+# the outcome space (2**n): at N_QUBITS qubits (2**12 = 4096 possible outcomes,
+# ~2000 of them live for this circuit) even two samples of the exact *same*
+# distribution disagree by TVD ~0.23 at SHOTS=8192 — pure sampling noise, not a
+# backend discrepancy (confirmed by running Aer against itself and polypus
+# against itself: same ~0.23 either way). A 5-qubit instance keeps 32 possible
+# outcomes, small enough for SHOTS=8192 to make TVD a reliable signal again
+# (empirically <0.035 between backends, comfortably under the 0.05 threshold)
+# without inflating the shot budget just for this check.
+N_QUBITS_CORRECTNESS = 5
+EDGES_CORRECTNESS = list(itertools.combinations(range(N_QUBITS_CORRECTNESS), 2))
 
-def build_qaoa(betas, gammas):
+
+def build_qaoa(betas, gammas, n_qubits=N_QUBITS, edges=None):
     """One-or-more-layer QAOA MaxCut ansatz as a native polypus.Circuit.
 
     Built exactly like ``max_cut_qaoa.py`` (``maxcut_cost_layer`` +
     ``standard_mixer_layer`` from ``polypus_python.qaoa_utils``): each edge
     gets a ``cx; rz(-gamma); cx`` cost term and each qubit an ``rx(2*beta)``
-    mixer rotation.
+    mixer rotation. Defaults to the module-level ``N_QUBITS``/``EDGES``;
+    pass ``n_qubits``/``edges`` explicitly to build a differently-sized
+    instance (see ``N_QUBITS_CORRECTNESS`` above).
     """
-    qc = polypus.Circuit(N_QUBITS)
-    for q in range(N_QUBITS):
+    edges = EDGES if edges is None else edges
+    qc = polypus.Circuit(n_qubits)
+    for q in range(n_qubits):
         qc = qc.h(q)
     for beta, gamma in zip(betas, gammas):
         # Cost layer (maxcut_cost_layer): cx; rz(-gamma); cx for every edge.
-        for a, b in EDGES:
+        for a, b in edges:
             qc = qc.cx(a, b)
             qc = qc.rz(b, -gamma)
             qc = qc.cx(a, b)
         # Mixer layer (standard_mixer_layer): rx(2*beta) on every qubit.
-        for q in range(N_QUBITS):
+        for q in range(n_qubits):
             qc = qc.rx(q, 2 * beta)
     return qc.measure_all()
 
@@ -102,16 +119,37 @@ print("=" * 70)
 
 fixed_circuit = build_qaoa([0.8], [0.4])
 
+# Distribution agreement: checked on the small instance (see
+# N_QUBITS_CORRECTNESS above), where SHOTS is large enough relative to the
+# outcome space for total-variation distance to be a meaningful estimator.
+correctness_circuit = build_qaoa(
+    [0.8], [0.4], n_qubits=N_QUBITS_CORRECTNESS, edges=EDGES_CORRECTNESS
+)
+counts_aer_small = polypus.run_quantum_circuit(
+    correctness_circuit, shots=SHOTS, infrastructure="local", backend="aer"
+).counts[0]
+counts_native_small = polypus.run_quantum_circuit(
+    correctness_circuit, shots=SHOTS, infrastructure="local", backend="polypus"
+).counts[0]
+
+tvd = total_variation(counts_aer_small, counts_native_small, SHOTS)
+print(
+    f"\nTotal-variation distance (Aer vs polypus, {N_QUBITS_CORRECTNESS}q "
+    f"instance): {tvd:.4f}"
+)
+print("  -> distributions agree" if tvd < 0.05 else "  -> MISMATCH")
+
+# Mean cut / approximation ratio: reported on the full N_QUBITS instance used
+# for the performance and training sections below. These are aggregate
+# statistics (one weighted sum over all sampled outcomes), far less sensitive
+# to per-bin shot noise than the raw joint distribution above, so they stay
+# meaningful even where N_QUBITS makes bin-by-bin TVD unreliable.
 counts_aer = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="aer"
 ).counts[0]
 counts_native = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="polypus"
 ).counts[0]
-
-tvd = total_variation(counts_aer, counts_native, SHOTS)
-print(f"\nTotal-variation distance (Aer vs polypus): {tvd:.4f}")
-print("  -> distributions agree" if tvd < 0.05 else "  -> MISMATCH")
 
 exp_aer = sum(maxcut_value(k) * v for k, v in counts_aer.items()) / SHOTS
 exp_native = sum(maxcut_value(k) * v for k, v in counts_native.items()) / SHOTS
