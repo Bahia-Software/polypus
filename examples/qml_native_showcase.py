@@ -313,7 +313,11 @@ def scenario_1_angle_de_hinge_exact():
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
-        method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=40, population_size=20, tolerance=1e-9, patience=40
+        ),
         loss=Loss.HINGE,
         id="showcase_1_basic",
         seed=7,
@@ -553,7 +557,11 @@ def scenario_5_multiclass_argmax():
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
-        method=polypus.DE(generations=60, population_size=24, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=60, population_size=24, tolerance=1e-9, patience=60
+        ),
         loss=Loss.CATEGORICAL_CROSS_ENTROPY,
         id="showcase_5_multiclass",
         seed=17,
@@ -610,8 +618,14 @@ def scenario_6_x_basis_readout():
         dataset,
         # A slightly larger budget than scenario 1's: the X-basis expectation of
         # this circuit is a harder surface for DE to flatten to the same hinge
-        # loss, and the whole run still takes milliseconds.
-        method=polypus.DE(generations=120, population_size=30, tolerance=1e-9),
+        # loss, and the whole run still takes milliseconds. `patience` matches
+        # `generations` so the fitness-stagnation early stop (contract C-5)
+        # never fires inside the budget — DE always spends the full 120
+        # generations grinding the fitness down, which is what the
+        # `best_fitness > -0.1` check below assumes.
+        method=polypus.DE(
+            generations=120, population_size=30, tolerance=1e-9, patience=120
+        ),
         loss=Loss.HINGE,
         id="showcase_6_xbasis",
         seed=23,
@@ -742,7 +756,11 @@ def scenario_8_save_load_predict():
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
-        method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=40, population_size=20, tolerance=1e-9, patience=40
+        ),
         loss=Loss.HINGE,
         id="showcase_8_train",
         seed=7,
@@ -855,7 +873,11 @@ def scenario_9_dataset_utilities():
     model = sign_model_2q()
     result = model.train(
         train,
-        method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=40, population_size=20, tolerance=1e-9, patience=40
+        ),
         loss=Loss.HINGE,
         id="showcase_9_scaled_train",
         seed=29,
@@ -918,7 +940,11 @@ def scenario_10_weighted_observable():
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
-        method=polypus.DE(generations=40, population_size=20, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=40, population_size=20, tolerance=1e-9, patience=40
+        ),
         loss=Loss.HINGE,
         id="showcase_10_observable",
         seed=13,
@@ -979,7 +1005,11 @@ def scenario_11_basis_encoder_parity():
     dataset = polypus.qml.Dataset(x, y)
     result = model.train(
         dataset,
-        method=polypus.DE(generations=150, population_size=40, tolerance=1e-9),
+        # patience=generations: never stop on fitness stagnation inside the
+        # budget (see scenario 6's comment for why).
+        method=polypus.DE(
+            generations=150, population_size=40, tolerance=1e-9, patience=150
+        ),
         loss=Loss.HINGE,
         id="showcase_11_basis_parity",
         seed=11,
