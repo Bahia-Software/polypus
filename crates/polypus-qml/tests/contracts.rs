@@ -11,14 +11,14 @@
 //!   fixed point of export → import → export.
 //! - **num_params consistency**: `num_params()` equals the largest `Param`
 //!   index emitted, plus one.
-//! - **C-8** (problem ↔ oracle): over [`QmlProblem`]s built from the same
+//! - **C-10** (problem ↔ oracle): over [`QmlProblem`]s built from the same
 //!   catalogue, `bind_batch` yields exactly `num_circuits()` circuits (each
 //!   C-4-clean and C-2-valid), `fitness_from_counts` returns a finite `f64`,
 //!   and `num_params()` matches the underlying `CompiledModel`.
-//! - **C-8, readout revalidation**: `compile` re-runs the readout's own
+//! - **C-10, readout revalidation**: `compile` re-runs the readout's own
 //!   construction checks, so a readout mutated past `Readout::new` cannot reach
 //!   inference.
-//! - **C-8, no zero-sample problem**: a `Dataset` is non-empty at *both* of its
+//! - **C-10, no zero-sample problem**: a `Dataset` is non-empty at *both* of its
 //!   construction points, so no public path — `train_test_split`'s floor
 //!   rounding included — can reach a `QmlProblem` whose mean fitness would be
 //!   `NaN`.
@@ -218,7 +218,7 @@ fn num_params_matches_largest_param_index() {
 
 /// Build a `QmlProblem` from each catalogue model plus a small synthetic
 /// dataset of the right width. `SquaredError` accepts any finite label, so the
-/// (arbitrary) labels never trip the domain check — this exercises the C-8
+/// (arbitrary) labels never trip the domain check — this exercises the C-10
 /// surface, not the loss's label validation.
 fn problems() -> Vec<QmlProblem> {
     catalogue()
@@ -239,7 +239,7 @@ fn theta(n: usize) -> Vec<f64> {
 }
 
 #[test]
-fn bind_batch_yields_num_circuits_in_order_c8() {
+fn bind_batch_yields_num_circuits_in_order_c10() {
     // Rebuild the catalogue models in parallel to read back num_params (the
     // problem exposes it too, checked separately below).
     for problem in problems() {
@@ -253,7 +253,7 @@ fn bind_batch_yields_num_circuits_in_order_c8() {
 }
 
 #[test]
-fn bind_batch_circuits_are_c4_clean_and_c2_valid_c8() {
+fn bind_batch_circuits_are_c4_clean_and_c2_valid_c10() {
     for problem in problems() {
         let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
         for concrete in &circuits {
@@ -276,7 +276,7 @@ fn bind_batch_circuits_are_c4_clean_and_c2_valid_c8() {
 }
 
 #[test]
-fn fitness_from_counts_is_finite_c8() {
+fn fitness_from_counts_is_finite_c10() {
     for problem in problems() {
         let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
         // Synthetic counts (hand-built, no simulation): each circuit gets a
@@ -296,13 +296,13 @@ fn fitness_from_counts_is_finite_c8() {
         let fitness = problem.fitness_from_counts(&counts).unwrap();
         assert!(
             fitness.is_finite(),
-            "fitness must be finite (C-8), got {fitness}"
+            "fitness must be finite (C-10), got {fitness}"
         );
     }
 }
 
 #[test]
-fn num_params_matches_compiled_model_c8() {
+fn num_params_matches_compiled_model_c10() {
     // The problem's num_params must equal the underlying compiled model's,
     // and be > 0 (NoTrainableParams is rejected at compile).
     for (model, samples) in catalogue() {
@@ -316,7 +316,7 @@ fn num_params_matches_compiled_model_c8() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C-8 · `compile` revalidates the readout it is handed
+// C-10 · `compile` revalidates the readout it is handed
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // `Readout::observables` and `Observable::terms` are public and mutable, so a
@@ -327,7 +327,7 @@ fn num_params_matches_compiled_model_c8() {
 // fail with the *same* typed `ValidationError`, instead of trusting its input
 // and handing back a `CompiledModel` that indexes past `observables[0]` at the
 // first `predict`, or returns `Ok(NaN)` from `fitness_from_counts` in violation
-// of C-8(b) ("returns a finite f64 … never NaN").
+// of C-10(b) ("returns a finite f64 … never NaN").
 //
 // Each assertion below doubles as a no-panic assertion: a panic in `compile` or
 // a silently-accepted model would fail the test just as loudly as a wrong error.
@@ -352,7 +352,7 @@ fn z_observable(position: usize) -> Observable {
 }
 
 #[test]
-fn compile_rejects_readout_mutated_to_an_incompatible_observable_count_c8() {
+fn compile_rejects_readout_mutated_to_an_incompatible_observable_count_c10() {
     // `Sign` reads `observables[0]`; empty the vector after construction.
     let mut readout = z0_readout();
     readout.observables.clear();
@@ -378,7 +378,7 @@ fn compile_rejects_readout_mutated_to_an_incompatible_observable_count_c8() {
 }
 
 #[test]
-fn compile_rejects_readout_mutated_to_a_non_finite_coefficient_c8() {
+fn compile_rejects_readout_mutated_to_a_non_finite_coefficient_c10() {
     // A `NaN` appended as a second term: reported at its own index, not the
     // first — the same `term_index` `Observable::new` would have reported.
     let mut readout = z0_readout();
@@ -409,7 +409,7 @@ fn compile_rejects_readout_mutated_to_a_non_finite_coefficient_c8() {
 }
 
 #[test]
-fn compile_still_accepts_an_untouched_readout_c8() {
+fn compile_still_accepts_an_untouched_readout_c10() {
     // The guard rejects only what is actually broken: the same readouts, left
     // as `Readout::new` built them, still compile.
     assert!(model_with(z0_readout()).compile(2).is_ok());
@@ -418,12 +418,12 @@ fn compile_still_accepts_an_untouched_readout_c8() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C-8 · a zero-sample problem is unreachable, so the mean fitness is never NaN
+// C-10 · a zero-sample problem is unreachable, so the mean fitness is never NaN
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // `fitness_from_counts` averages the loss over the training samples, so a
 // `QmlProblem` carrying zero of them would compute `-0.0 / 0.0` and return
-// `Ok(NaN)` — exactly what C-8(b) ("a finite `f64` … never `NaN`") forbids. The
+// `Ok(NaN)` — exactly what C-10(b) ("a finite `f64` … never `NaN`") forbids. The
 // guarantee rests on `Dataset` being non-empty *by construction*:
 // `Dataset::from_rows` and the in-crate `Dataset::select` are the only two ways
 // to build one and both reject an empty sample set, so no zero-sample `Dataset`
@@ -435,7 +435,7 @@ fn compile_still_accepts_an_untouched_readout_c8() {
 // construction point, typed, rather than downstream as a `NaN` fitness.
 
 #[test]
-fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c8() {
+fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c10() {
     let model = catalogue().swap_remove(0).0;
     // Five samples of the model's width, so `floor(5 * 0.1) == 0` leaves the
     // test partition empty while `0.1` sits well inside the open interval.
@@ -460,7 +460,7 @@ fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c8() {
         let problem = QmlProblem::new(model.clone(), partition, Loss::SquaredError).unwrap();
         assert!(
             problem.num_circuits() >= 1,
-            "a QmlProblem always has at least one circuit (C-8)"
+            "a QmlProblem always has at least one circuit (C-10)"
         );
         let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
         let width = circuits[0].num_qubits;
@@ -472,7 +472,7 @@ fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c8() {
         let fitness = problem.fitness_from_counts(&counts).unwrap();
         assert!(
             fitness.is_finite(),
-            "fitness must be finite (C-8), got {fitness}"
+            "fitness must be finite (C-10), got {fitness}"
         );
     }
 }

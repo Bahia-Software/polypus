@@ -218,4 +218,28 @@ mod tests {
             Some(GateInstruction::Barrier(_))
         ));
     }
+
+    /// `IdentityTranspiler` advertises itself as a guaranteed no-op, while a
+    /// custom `Transpiler` that does not override the default (even one that
+    /// happens to return the circuit unchanged) reports `false` — the hint is
+    /// opt-in, so callers only skip `transpile` when it is provably safe.
+    #[test]
+    fn is_identity_true_only_for_identity_transpiler() {
+        // A custom strategy that never overrides `is_identity`, keeping the
+        // conservative default. It even returns the circuit unchanged, proving
+        // the hint is about the opt-in, not the observed behavior.
+        struct DefaultingPassthrough;
+        impl Transpiler for DefaultingPassthrough {
+            fn transpile(
+                &self,
+                circuit: &ConcreteCircuit,
+                _opts: &TranspileOptions,
+            ) -> ConcreteCircuit {
+                circuit.clone()
+            }
+        }
+
+        assert!(IdentityTranspiler.is_identity());
+        assert!(!DefaultingPassthrough.is_identity());
+    }
 }

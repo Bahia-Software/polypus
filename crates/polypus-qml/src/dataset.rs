@@ -173,7 +173,7 @@ impl Dataset {
     /// `Dataset`, so checking both is what makes `num_samples() >= 1` true of
     /// every `Dataset` that exists — which is in turn what lets downstream code
     /// average over the samples without risking `0.0 / 0.0`
-    /// (`QmlProblem::fitness_from_counts`, contract C-8).
+    /// (`QmlProblem::fitness_from_counts`, contract C-10).
     ///
     /// `pub(crate)` so [`QmlProblem::subset`](crate::QmlProblem) (another
     /// module of this crate) can carve a minibatch out of a validated dataset;

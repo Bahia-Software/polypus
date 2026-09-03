@@ -312,7 +312,7 @@ fn resolve_readout(
     // Re-establish what `Readout::new`/`Observable::new`/`PauliString::new`
     // checked at construction. A `Readout` can reach here without ever passing
     // through them (public mutable fields; `serde` deserialization on load), and
-    // every downstream guarantee — `predict`'s `observables[0]`, C-8(b)'s finite
+    // every downstream guarantee — `predict`'s `observables[0]`, C-10(b)'s finite
     // fitness — rests on these holding at compile time, not merely at build time.
     readout.validate()?;
 

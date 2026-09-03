@@ -19,6 +19,12 @@ benchmarks/bench_*.csv
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+qft_results.csv
+qft*.png
+
+# SLURM / qraise job artifacts
+slurm-*.out
+qraise_*
 
 # Logger output
 *.log

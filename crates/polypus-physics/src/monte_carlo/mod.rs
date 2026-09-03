@@ -6,11 +6,13 @@
 //! same model works for any material. Adding a new particle species requires
 //! zero changes to this file.
 
+pub mod beam;
 pub mod geometry;
 pub mod history;
 pub mod sampler;
 pub mod spectrum;
 pub mod voxel;
+pub mod voxel_plots;
 
 pub use geometry::Geometry;
 pub use history::{ParticleHistory, TrackPoint};
@@ -357,6 +359,38 @@ where
         }
         Ok(finalize(histories))
     }
+    /// Run all primary histories, drawing each primary's **full** initial state
+    /// (position, direction, and energy) from a [`beam::BeamSource`], while tallying
+    /// every local energy deposit into `grid`.
+    ///
+    /// Unlike [`run_with_spectrum`](Self::run_with_spectrum) (which only varies
+    /// energy, keeping position/direction fixed), this varies all three per
+    /// history — the entry point for a divergent, collimated beam.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`PhysicsError`] raised during transport, or by the
+    /// particle's [`validate_state`](crate::particle::Particle::validate_state)
+    /// on a sampled state.
+    pub fn run_with_source_and_voxels<Src>(
+        &self,
+        source: &Src,
+        mut grid: VoxelGrid,
+        rng: &mut impl Rng,
+    ) -> Result<(SimulationResult, VoxelGrid), PhysicsError>
+    where
+        Src: beam::BeamSource + ?Sized,
+    {
+        self.log_run_start("beam source + voxel tally");
+        let mut histories = Vec::with_capacity(self.config.n_histories);
+        for _ in 0..self.config.n_histories {
+            let state = source.sample_state(rng);
+            self.particle.validate_state(&state)?;
+            let primary = self.transport_one(state, rng, Some(&mut grid))?;
+            histories.push(primary);
+        }
+        Ok((finalize(histories), grid))
+    }
 }
 
 /// PDG ID used for charged secondary stubs (electron). Secondaries produced by
@@ -428,7 +462,7 @@ mod tests {
     use super::*;
     use crate::interactions::photon::PhotonInteractionModel;
     use crate::interactions::InteractionModel;
-    use crate::medium::HomogeneousMedium;
+    use crate::medium::CompoundMedium;
     use crate::particle::photon::Photon;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
@@ -436,10 +470,10 @@ mod tests {
     fn engine(
         n_histories: usize,
         seed: u64,
-    ) -> MonteCarloEngine<Photon, HomogeneousMedium, PhotonInteractionModel> {
+    ) -> MonteCarloEngine<Photon, CompoundMedium, PhotonInteractionModel> {
         MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories,
@@ -536,12 +570,12 @@ mod tests {
     /// Linear attenuation coefficient μ (m⁻¹) of 100 keV photons in water.
     fn mu_100kev_water() -> f64 {
         PhotonInteractionModel
-            .total_cross_section_per_m(
-                &Photon,
-                &Photon::state_along_z(0.1),
-                &HomogeneousMedium::water(),
-            )
+            .total_cross_section_per_m(&Photon, &Photon::state_along_z(0.1), &water_medium())
             .unwrap()
+    }
+
+    fn water_medium() -> CompoundMedium {
+        CompoundMedium::new("H2O", 1000.0, 5000).unwrap()
     }
 
     #[test]
@@ -553,19 +587,10 @@ mod tests {
             seed: 3,
             ..Default::default()
         };
-        let base = MonteCarloEngine::new(
-            Photon,
-            HomogeneousMedium::water(),
-            PhotonInteractionModel,
-            cfg.clone(),
-        );
-        let explicit = MonteCarloEngine::new(
-            Photon,
-            HomogeneousMedium::water(),
-            PhotonInteractionModel,
-            cfg,
-        )
-        .with_geometry(Geometry::Unbounded);
+        let base =
+            MonteCarloEngine::new(Photon, water_medium(), PhotonInteractionModel, cfg.clone());
+        let explicit = MonteCarloEngine::new(Photon, water_medium(), PhotonInteractionModel, cfg)
+            .with_geometry(Geometry::Unbounded);
 
         let mut r1 = StdRng::seed_from_u64(3);
         let mut r2 = StdRng::seed_from_u64(3);
@@ -588,7 +613,7 @@ mod tests {
         let n = 40_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,
@@ -621,7 +646,7 @@ mod tests {
         let n = 5_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,
@@ -629,7 +654,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grid = VoxelGrid::new([-0.05, -0.05, 0.0], 0.01, [10, 10, 10]).unwrap();
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
         let mut rng = StdRng::seed_from_u64(11);
         let (result, grid) = eng
             .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
@@ -667,7 +692,7 @@ mod tests {
         let n = 200_000;
         let eng = MonteCarloEngine::new(
             Photon,
-            HomogeneousMedium::water(),
+            water_medium(),
             PhotonInteractionModel,
             RunConfig {
                 n_histories: n,
@@ -699,6 +724,78 @@ mod tests {
         assert!(
             slope < -0.4 * mu && slope > -mu,
             "fitted depth-profile slope {slope:.2}/m outside (-mu, -0.4*mu) with mu = {mu:.2}/m"
+        );
+    }
+
+    #[test]
+    fn small_water_phantom_depth_dose_experiment() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10, // 10x10 cm, como tu configuración real
+            energy_mev: 0.1,
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.10], // 40x40 cm de sección, 10 cm de profundidad
+        };
+
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400000,
+                seed: 123,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(123);
+        let (result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        println!(
+            "Depósito medio por historia: {:.6} MeV",
+            result.mean_deposit_mev
+        );
+        println!(
+            "Perfil de profundidad (MeV por capa): {:?}",
+            grid.depth_profile_mev()
+        );
+        println!("PDD relativo (%): {:?}", grid.relative_pdd());
+
+        let pdd = grid.relative_pdd();
+
+        #[cfg(feature = "plotters")]
+        crate::monte_carlo::voxel_plots::plot_relative_pdd(
+            &pdd,
+            0.005, // <- antes 0.01
+            "PDD - H2O, 100 keV, campo 10x10 cm (0.5 cm/capa)",
+            std::path::Path::new("/tmp/pdd_rust_fino.png"),
+        )
+        .unwrap();
+
+        assert_eq!(pdd.len(), 20);
+        assert!(
+            pdd.iter().any(|&v| v > 0.0),
+            "no se depositó nada en ningún sitio"
         );
     }
 }

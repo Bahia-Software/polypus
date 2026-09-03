@@ -12,12 +12,14 @@
 #   - crates/polypus-logger  : pure-Rust logging sink (a `log::Log` implementation) shared by
 #                              the whole workspace; libraries emit via the `log` facade, only
 #                              the app layer installs it (no PyO3)
+#   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising) evaluated
+#                              over measurement counts, parallelized with rayon (no PyO3)
 #   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered variational
 #                              models, Pauli readout, losses); produces polypus-circuit circuits,
 #                              execution and optimizers stay decoupled (no PyO3)
 #   - crates/polypus         : the Polypus library and Python extension module (PyO3)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-logger", "crates/polypus-qml"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-logger", "crates/polypus-qml"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -42,6 +44,7 @@ polypus-circuit    = { path = "crates/polypus-circuit", version = "0.6.0" }
 polypus-physics    = { path = "crates/polypus-physics", version = "0.6.0" }
 polypus-sim        = { path = "crates/polypus-sim", version = "0.6.0" }
 polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.6.0" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.6.0" }
 polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
 polypus-qml        = { path = "crates/polypus-qml", version = "0.6.0" }
 
@@ -51,3 +54,5 @@ polypus-qml        = { path = "crates/polypus-qml", version = "0.6.0" }
 log                = "0.4"
 # UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
 uuid               = { version = "1", features = ["v4"] }
+# RNG shared by `polypus` and `polypus-optimizers`; keep default features.
+rand               = "0.8"

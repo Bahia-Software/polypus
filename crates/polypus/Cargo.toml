@@ -33,18 +33,30 @@ polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-qml = { workspace = true, features = ["serde"] }
+polypus-observable = { workspace = true }
 polypus-logger = { workspace = true }
-pyo3 = { version = "0.24.2", features = ["num-complex"] }
-rand = "0.8"
-ndarray = "0.16"
-serde = { version = "1.0", features = ["derive"] }
+# Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
+# are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).
+# The bump needs no source changes and clears neither of the pyo3 advisories
+# ignored in `deny.toml`; those still want >=0.26 / >=0.29.
+pyo3 = { version = "0.25", features = ["num-complex"] }
+# Zero-copy handover of the `2^n` statevector amplitudes to Python as a
+# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`). Must
+# stay >= 0.25: rust-numpy 0.24.0 still carries the deprecated
+# `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc ICE on current
+# stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
+numpy = "0.25"
+rand = { workspace = true }
+# Parallel aggregation in the Python-callback observable fallback (the native
+# observables' rayon usage lives in polypus-observable).
+rayon = "1"
 # `float_roundtrip` makes serde_json's parser reproduce f64 bit-for-bit (its
 # default parser trades last-ULP accuracy for speed); required so a saved
 # TrainedModel's θ reloads exactly and its predictions reproduce (C-7).
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 log = { workspace = true }
 uuid = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 # --- optional, only compiled with `--features qmio` ---
 # Pure-Rust ZeroMQ (ZMTP 3.x, interoperable with pyzmq/libzmq); avoids a C
 # `libzmq` build dependency at the cost of an async (tokio) API.

@@ -4,8 +4,9 @@
 //! GIL-free circuits and pass them to `polypus.run_quantum_circuit` /
 //! `polypus.train` exactly like a Qiskit `QuantumCircuit`.
 
+use numpy::{IntoPyArray, PyArray1};
 use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
-use polypus_sim::{Simulator, StatevectorSimulator};
+use polypus_sim::{SimError, Simulator, StatevectorSimulator};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -111,30 +112,130 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// `polypus-sim` backend (no Qiskit, no OpenQASM round-trip).
 ///
 /// `params` supplies one value per free parameter; omit it for a circuit that
-/// has none. Returns the `2^n` complex amplitudes in Qiskit little-endian order
-/// (qubit 0 is the least-significant bit), so it can be compared directly with
-/// `qiskit.quantum_info.Statevector`.
+/// has none. Returns the `2^n` complex amplitudes as a **`numpy.ndarray` of
+/// `dtype=complex128`**, in Qiskit little-endian order (qubit 0 is the
+/// least-significant bit), so it can be compared directly with
+/// `qiskit.quantum_info.Statevector` (whose `.data` is the same dtype) and fed
+/// straight into NumPy without a conversion step.
+///
+/// The simulation runs **GIL-free** — only the cheap parameter binding and the
+/// conversion of the result hold the GIL — so other Python threads keep making
+/// progress while it runs (see `docs/ENGINEERING.md` §3).
+///
+/// **Interruptible.** A `KeyboardInterrupt` takes effect *mid-simulation*
+/// (issue #110): the gate loop calls back into this function at checkpoints at
+/// least ~25ms apart, each of which reacquires the GIL just long enough to
+/// check for a pending signal — and, if one is pending, abandons the run and
+/// raises that original exception verbatim. The throttling lives inside
+/// `polypus-sim` and is what keeps this cheap: a circuit that finishes inside
+/// one interval never calls back at all, the frequency does not depend on how
+/// expensive an individual gate is, and the interval stretches to keep the
+/// callback under ~5% of the run (which matters when another Python thread
+/// holds the GIL and reacquiring it costs milliseconds). What is *not*
+/// interruptible is the `2^n` allocation below, which is a single `vec![]`.
+///
+/// **Qubit ceiling.** A dense statevector needs `2^n` complex amplitudes
+/// (`16 · 2^n` bytes), so the backend refuses circuits with more than
+/// [`polypus_sim::MAX_QUBITS`] qubits (30 ≈ 16 GiB) and raises a `ValueError`
+/// naming the requested and the supported count **before** attempting any
+/// allocation. `polypus.Circuit` itself is deliberately unbounded (see
+/// `Circuit::new`): the ceiling belongs to this backend, not to the IR. Note
+/// that what a call near the ceiling spends its time on is *allocating* that
+/// buffer, not handing it to Python: even a gateless 30-qubit circuit costs ~5s
+/// (measured), essentially all of it `Statevector::new`'s 16 GiB `vec![]`. The
+/// ceiling bounds memory, not wall-clock time — cost scales with gates × `2^n`
+/// and nothing bounds the gate count, which is why the run has to stay
+/// interruptible (see above) rather than relying on being short.
 ///
 /// ```python
 /// import polypus
 /// qc = polypus.Circuit(2).h(0).cx(0, 1)
-/// amps = polypus.statevector(qc)          # [0.707…, 0, 0, 0.707…]
+/// amps = polypus.statevector(qc)          # array([0.707…+0j, 0j, 0j, 0.707…+0j])
 /// ```
 #[pyfunction(signature = (qc, params = None))]
-pub fn statevector(
-    qc: PyRef<'_, Circuit>,
+pub fn statevector<'py>(
+    qc: PyRef<'py, Circuit>,
     params: Option<Vec<f64>>,
-) -> PyResult<Vec<polypus_sim::C64>> {
+) -> PyResult<Bound<'py, PyArray1<polypus_sim::C64>>> {
     let params = params.unwrap_or_default();
+    // Binding stays on this side of the release: it is O(gates), allocates
+    // nothing of size `2^n`, and reads the circuit through the `PyRef`.
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
-    let sv = StatevectorSimulator::new()
-        .run(&concrete)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(sv.amplitudes().to_vec())
+    // The simulation is the expensive, pure-Rust part: release the GIL for it
+    // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
+    //
+    // Cancellation hook: `polypus-sim`'s gate loop calls this closure
+    // periodically (throttled on its side to ≥25ms apart *and* to a small
+    // fraction of the run, so the frequency is decoupled from gate cost and a
+    // fast circuit never pays for it). Reacquiring the GIL from inside
+    // `allow_threads` is safe and re-entrant — the same `Python::with_gil`
+    // guarantee `cunqa.rs` relies on to acquire the GIL from a `Drop` (§9) —
+    // and `check_signals()` here is what turns a pending SIGINT into a
+    // `KeyboardInterrupt` *mid-run*, since releasing the GIL does not by itself
+    // process signals (§3).
+    //
+    // The `PyErr` cannot travel back through `SimError` (`polypus-sim` is
+    // Python-free by design, §2), so it is stashed here and recovered below —
+    // the same problem `OracleErrorSlot` solves for the optimizer oracles, and
+    // the same reason: a generic trait boundary must not downgrade the real
+    // exception. No `Arc<Mutex<...>>` is needed, though: `statevector` is
+    // single-shot, and the hook runs on this very thread (the simulation is
+    // inline in `allow_threads`, not on a worker), so a `&mut` local is enough.
+    // That is also why `check_signals()` is effective at all: it is a no-op off
+    // the main thread, and this closure runs on whichever thread called us.
+    let mut pending: Option<PyErr> = None;
+    let outcome = qc.py().allow_threads(|| {
+        let mut cancelled = || {
+            Python::with_gil(|py| match py.check_signals() {
+                Ok(()) => false,
+                Err(err) => {
+                    pending = Some(err);
+                    true
+                }
+            })
+        };
+        StatevectorSimulator::new().run_cancellable(&concrete, Some(&mut cancelled))
+    });
+    let sv = match outcome {
+        Ok(sv) => sv,
+        // Propagate the *real* pending exception verbatim. Mapping this through
+        // `PyValueError::new_err(e.to_string())` like the variants below would
+        // silently downgrade a `KeyboardInterrupt` into a bogus `ValueError`
+        // (and `check_signals()` cannot be re-run to recover it: raising it
+        // cleared the pending flag).
+        Err(SimError::Cancelled) => {
+            return match pending {
+                Some(err) => Err(err),
+                // Unreachable today — the only hook installed above records a
+                // `PyErr` before it returns `true`. Handled rather than
+                // `unwrap()`ed (§9) so a future cancellation source still
+                // surfaces a typed error instead of a `PanicException`.
+                None => Err(PyValueError::new_err(SimError::Cancelled.to_string())),
+            };
+        }
+        Err(e) => return Err(PyValueError::new_err(e.to_string())),
+    };
+    // A signal that arrived after the last checkpoint (or during the `2^n`
+    // allocation, which has no checkpoint) is still honored here, the moment
+    // the GIL is reacquired and before the amplitudes are handed to NumPy.
+    qc.py().check_signals()?;
+    // `into_amplitudes` (not `amplitudes().to_vec()`) so the `2^n`-element
+    // buffer moves into the array instead of being copied: `sv` is owned here
+    // and dropped immediately after.
+    Ok(sv.into_amplitudes().into_pyarray(qc.py()))
 }
 
 #[pymethods]
 impl Circuit {
+    /// Build an empty circuit on `num_qubits` qubits.
+    ///
+    /// **Intentionally unbounded.** A `Circuit` is backend-agnostic IR: the same
+    /// object is routed by `polypus.run_quantum_circuit` to the native
+    /// statevector simulator, CUNQA, QMIO or Aer, and those capacities differ.
+    /// [`polypus_sim::MAX_QUBITS`] is the dense-statevector limit and is
+    /// enforced where it applies — when a circuit is *simulated* (see
+    /// [`statevector`]) — so checking it here would reject circuits that are
+    /// perfectly valid for the other backends.
     #[new]
     fn new(num_qubits: usize) -> Self {
         Circuit {
@@ -145,8 +246,8 @@ impl Circuit {
     /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
     ///
     /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output
-    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to 3×`cx`, `id` is
-    /// dropped; multiple registers are flattened in declaration order). The
+    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `id` is dropped; multiple
+    /// registers are flattened in declaration order). The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.
     ///
@@ -269,6 +370,11 @@ impl Circuit {
 
     fn cz(slf: PyRefMut<'_, Self>, control: usize, target: usize) -> PyResult<PyRefMut<'_, Self>> {
         push(slf, GateInstruction::Cz(control, target))
+    }
+
+    /// SWAP: exchange the states of qubits `q0` and `q1`.
+    fn swap(slf: PyRefMut<'_, Self>, q0: usize, q1: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Swap(q0, q1))
     }
 
     fn rzz(
@@ -400,5 +506,30 @@ impl Circuit {
             self.inner.num_params,
             self.inner.gates.len()
         )
+    }
+}
+
+/// Quantum Fourier Transform on `num_qubits` qubits, as a `polypus.Circuit`.
+///
+/// Follows the Qiskit `QFT` convention (big-endian, trailing qubit-reversal
+/// swaps). The returned circuit has no free parameters and no measurements, so
+/// it composes like any hand-built circuit — keep chaining gates, add
+/// `measure_all()`, or run it directly.
+///
+/// * `inverse` — build the inverse transform (QFT†), the exact adjoint of the
+///   forward circuit with the same arguments.
+/// * `swaps` — include the qubit-reversal swaps (default `True`); set
+///   `False` when the surrounding circuit already handles bit order.
+///
+/// ```python
+/// import polypus
+/// qft = polypus.circuits.templates.qft(4)
+/// counts = polypus.run_quantum_circuit(qft.measure_all(), shots=1024)
+/// ```
+#[pyfunction]
+#[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
+pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> Circuit {
+    Circuit {
+        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps),
     }
 }

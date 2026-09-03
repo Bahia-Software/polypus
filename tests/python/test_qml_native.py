@@ -1,6 +1,6 @@
 """
 Native ``polypus.qml.train`` — public-API end-to-end tests (phase 4, contracts
-C-7 and C-8).
+C-7 and C-10).
 
 These exercise the pure-Rust QML path added in phase 4: ``polypus.qml.train``
 now dispatches on its first argument, so a native ``polypus.qml.Model`` +
@@ -1562,7 +1562,7 @@ class TestDatasetSplit:
         # down to nothing, which the fraction guard above cannot see. The split
         # fails instead of handing back a zero-sample Dataset — a QmlProblem
         # built on one would average over no samples and report a NaN fitness
-        # (C-8 forbids it).
+        # (C-10 forbids it).
         with pytest.raises(ValueError, match="empty"):
             self._indexed(n=5).train_test_split(0.1, seed=7)
 
@@ -2429,7 +2429,7 @@ class TestPauliTermEqualsTheBareForm:
     @pytest.mark.parametrize("pauli", ["z", "x", "y"])
     def test_single_factor_matches_its_bare_spelling(self, pauli):
         # All three constructors, so none of them is wired to the wrong Pauli.
-        # A single-Pauli readout is one basis group, so X and Y compile too (C-8).
+        # A single-Pauli readout is one basis group, so X and Y compile too (C-10).
         import polypus
 
         term = getattr(polypus.qml, pauli.upper())(0)
@@ -3081,7 +3081,7 @@ class TestLossConstantsTrainIdentically:
 
     def test_categorical_cross_entropy_reproduces_the_literal_run(self):
         # The multiclass loss needs its multiclass partner (`argmax` + integer
-        # class labels, contract C-8), so it gets its own run rather than joining
+        # class labels, contract C-10), so it gets its own run rather than joining
         # the parametrized three.
         import math
 

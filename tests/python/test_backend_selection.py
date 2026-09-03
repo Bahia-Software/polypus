@@ -95,6 +95,50 @@ class TestRunQuantumCircuitBackends:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# A Qiskit circuit is rejected by the QMIO infrastructure
+#
+# QMIO serialises circuits to QASM/QIR entirely in Rust (GIL-free) and cannot
+# read a Qiskit QuantumCircuit, whose gates are only reachable through the
+# interpreter — the same reason the native `polypus` backend rejects one. Both
+# guards are plain infrastructure-string/variant comparisons that run *before*
+# any backend is built, so they need neither `--features qmio` nor a live QMIO
+# endpoint: an unbuilt feature would fail later, with a different message.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestQmioRejectsQiskitCircuits:
+    def test_qiskit_circuit_rejected_by_qmio_run(self):
+        import polypus
+        from qiskit import QuantumCircuit
+
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure_all()
+        with pytest.raises(ValueError, match="cannot serialize a Qiskit"):
+            polypus.run_quantum_circuit(qc, shots=100, infrastructure="qmio")
+
+    def test_qiskit_template_rejected_by_qmio_train(
+        self, parametrized_circuit, simple_expectation_fn
+    ):
+        import polypus
+
+        with pytest.raises(ValueError, match="requires a native"):
+            polypus.train(
+                parametrized_circuit,
+                polypus.DE(generations=2, population_size=4),
+                shots=100,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="qmio",
+                nodes=1,
+                cores_per_qpu=1,
+                id="test_train_qmio_rejects_qiskit",
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Boundary validation of shots / n_qpus (contract C-3)
 #
 # Validation happens at the Python-facing boundary before any backend work, so

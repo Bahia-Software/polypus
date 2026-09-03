@@ -75,6 +75,55 @@ boundary stays out-of-process and explicit; see
   swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in
   `crates/polypus/src/evaluation/mod.rs`).
+- The same discipline applies to `run_quantum_circuit`: it releases the GIL
+  around the whole `algorithm.run(args)` call and each orchestration variant
+  calls `py.check_signals()` at its per-circuit / pre-result-conversion
+  boundary — the single `Python::with_gil` block where `AlgorithmSingleRun`
+  and `DistributeByShotsRun` reacquire the GIL to build the return value, as
+  the first statement before constructing any Python object. A pending Ctrl+C
+  surfaces there as a `KeyboardInterrupt` propagated verbatim through the
+  function's `Result`, never swallowed or retyped.
+- `statevector` follows the same rule at a smaller scale: it releases the GIL
+  around the `StatevectorSimulator::run_cancellable` call (parameter binding
+  stays on the GIL side — it is O(gates) and allocates nothing of size `2^n`),
+  and calls `py.check_signals()` both *mid-run* and the moment the GIL is
+  reacquired, **before** handing the amplitudes to NumPy — the latter being the
+  same "reacquire-then-check-before-building-the-result" boundary
+  `run_quantum_circuit` uses.
+- The mid-run half is worth spelling out, because it is how a pure-Rust crate
+  stays interruptible without learning about Python (§2). `polypus-sim`'s gate
+  loop takes an `Option<&mut dyn FnMut() -> bool>` and polls it periodically;
+  `true` abandons the run with `SimError::Cancelled`. It knows nothing about
+  *why* — a signal, a deadline, a cancel button all look the same to it. Only
+  `statevector` fills that hook with `Python::with_gil(|py| py.check_signals())`
+  (re-entrant from inside `allow_threads`, the same guarantee `cunqa.rs`'s
+  `Drop` relies on — see §9). Two rules make it work:
+  - **Throttle inside the pure crate, not at the Python boundary.** The hook is
+    called at most once per ~25ms of wall clock (with the clock itself read once
+    per ~64k amplitude updates), so its frequency is decoupled from gate cost —
+    a cheap 1-qubit gate and a 25-qubit gate differ by orders of magnitude — and
+    a circuit that finishes quickly never calls it at all. Interrupt latency is
+    then bounded by a constant instead of by the run's own duration, which
+    matters because `polypus_sim::MAX_QUBITS` bounds a run's *memory*, not its
+    wall-clock time: cost scales with gates × `2^n` and nothing bounds the gate
+    count. The interval is also stretched to a multiple of the hook's *measured*
+    duration, because the simulator cannot know what a hook costs: this one is
+    ~1µs when nothing else wants the GIL and milliseconds when another Python
+    thread holds it (the interpreter only yields on its switch interval), and
+    without that adaptation the latter case measurably slowed a contended run
+    down. Backed by `benchmarks/bench_statevector.py`.
+  - **Recover the real exception at the Python-facing boundary.** `SimError`
+    cannot carry a `PyErr` (§2), so the hook stashes the `PyErr` and
+    `statevector` re-raises *that* verbatim when the run comes back
+    `Cancelled` — never `PyValueError::new_err(e.to_string())`, which would
+    downgrade a `KeyboardInterrupt` into a bogus `ValueError`. Same problem, and
+    the same answer, as `OracleErrorSlot` in
+    `crates/polypus/src/evaluation/mod.rs`; no shared slot is needed here
+    because `statevector` is single-shot and the hook runs on the calling
+    thread. What is *not* interruptible is `Statevector::new`'s `2^n`
+    allocation — one `vec![]` with nowhere to put a checkpoint — which is why
+    the post-run check above stays: near the qubit ceiling that allocation is
+    the whole run.
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
@@ -93,6 +142,27 @@ boundary stays out-of-process and explicit; see
 - **Parallel == sequential:** kernels under the `parallel` feature (rayon)
   must produce **bit-identical** results to the sequential path. Every new
   parallel kernel is tested against its sequential version.
+- **Qubit ceiling:** a dense statevector needs `2^n` complex amplitudes
+  (`16 · 2^n` bytes), so `polypus-sim` refuses circuits above
+  `polypus_sim::MAX_QUBITS` (30 ≈ 16 GiB) as the **first** thing
+  `StatevectorSimulator::run` does — before any allocation, and low enough that
+  `1 << n` cannot overflow. At the seam this surfaces as a `ValueError` naming
+  the requested and the supported count (`polypus.statevector`;
+  `tests/python/test_statevector.py`). Below the ceiling, those amplitudes cross
+  the seam as a **NumPy array of `dtype=complex128`** — one contiguous buffer
+  moved out of the `Statevector` (`into_amplitudes`, no copy) and wrapped by
+  rust-numpy — rather than as a `list` of boxed Python `complex` objects. That
+  removes a `2^n`-sized conversion which, at these sizes, cost more than the
+  simulation: a gateless 30-qubit call went from 29.7s to 5.0s, and a 26-qubit
+  one from 1.9s to 0.4s (one-off measurement on a 32-core dev box, not a tracked
+  `benchmarks/` script; deep circuits gain proportionally less because the gates
+  dominate — 30 qubits with a Hadamard layer: 50.4s → 25.6s). It does not make
+  near-ceiling statevectors cheap, though: what remains is `Statevector::new`'s
+  `2^n` allocation, which is why even a **gateless** 30-qubit call still costs
+  ~5s. The ceiling is a memory bound and says nothing about wall-clock.
+  `polypus.Circuit` itself stays unbounded on purpose: it is backend-agnostic
+  IR, and CUNQA/QMIO/Aer have their own, different capacities — the ceiling is
+  enforced where it applies, not in the IR.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting

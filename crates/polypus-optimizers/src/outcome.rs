@@ -33,7 +33,8 @@ pub struct OptimizationOutcome {
     /// The last entry is therefore always
     /// [`best_fitness`](OptimizationOutcome::best_fitness) — both are read from
     /// the same incumbent — and the vector is empty exactly when
-    /// `iterations_run == 0`.
+    /// `iterations_run == 0`. This is also what DE's fitness-stagnation early
+    /// stop is computed from (contract C-5).
     pub fitness_history: Vec<f64>,
     /// Number of generations/iterations actually executed.
     ///
@@ -42,10 +43,12 @@ pub struct OptimizationOutcome {
     /// Whether the algorithm's convergence criterion was satisfied.
     ///
     /// Every optimizer in this crate has an early-stopping test and can report
-    /// `true`: DE and PSO once their population collapses below `tolerance` in
-    /// every dimension, QNG and Adam once the gradient norm stays below
-    /// `tolerance` for `patience` consecutive iterations. `false` means the run
-    /// simply exhausted its iteration budget without that criterion firing.
+    /// `true`: DE once its best fitness has stagnated (improved by less than
+    /// `tolerance`) over the last `patience` generations, PSO once its
+    /// population collapses below `tolerance` in every dimension, QNG and Adam
+    /// once the gradient norm stays below `tolerance` for `patience`
+    /// consecutive iterations. `false` means the run simply exhausted its
+    /// iteration budget without that criterion firing.
     pub converged: bool,
 }
 

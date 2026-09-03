@@ -130,14 +130,18 @@ Check the [`examples/`](examples/) directory for complete, runnable scripts.
 
 Pass the circuit, the number of shots, the infrastructure and the number of QPUs:
 ```python
-result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=1)
+result = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=1
+)
 ```
 
 ### Distributing Shots Across Multiple QPUs
 
 Set `n_qpus > 1` to split the shots across available QPUs and reduce execution time:
 ```python
-result = polypus.run_quantum_circuit(qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10)
+result = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=10
+)
 ```
 
 When `infrastructure="cunqa"`, two optional kwargs size the SLURM allocation for the distributed QPUs:
@@ -183,7 +187,9 @@ If CUNQA is not available, set `infrastructure="local"`.
 ```python
 result = polypus.train(
     qc,
-    polypus.DE(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE, tolerance=TOL),
+    polypus.DE(
+        generations=MAX_GENERATIONS, population_size=POPULATION_SIZE, tolerance=TOL
+    ),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
     dimensions=2 * layers,
@@ -191,7 +197,7 @@ result = polypus.train(
     infrastructure=infrastructure,
     nodes=NUM_NODES,
     cores_per_qpu=CORES_PER_QPU,
-    id=id
+    id=id,
 )
 ```
 
@@ -215,8 +221,12 @@ Pin reproducibility with the `seed` keyword (`polypus.train(..., seed=42)`) or o
 ```python
 result = polypus.train(
     qc,
-    polypus.PSO(generations=MAX_GENERATIONS, population_size=POPULATION_SIZE,
-                bounds=(0.0, np.pi), tolerance=TOL),
+    polypus.PSO(
+        generations=MAX_GENERATIONS,
+        population_size=POPULATION_SIZE,
+        bounds=(0.0, np.pi),
+        tolerance=TOL,
+    ),
     shots=N_SHOTS,
     n_qpus=N_QPUS,
     dimensions=2 * layers,
@@ -224,7 +234,7 @@ result = polypus.train(
     infrastructure=infrastructure,
     nodes=NUM_NODES,
     cores_per_qpu=CORES_PER_QPU,
-    id=id
+    id=id,
 )
 ```
 
@@ -244,7 +254,7 @@ result = polypus.train(
     infrastructure=infrastructure,
     nodes=NUM_NODES,
     cores_per_qpu=CORES_PER_QPU,
-    id=id
+    id=id,
 )
 ```
 
@@ -264,17 +274,34 @@ bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
 result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
 
 # Parameterized ansatz → train (binding happens in Rust, GIL-free)
-qaoa = (polypus.Circuit(4)
-        .h(0).h(1).h(2).h(3)
-        .rzz(0, 1, polypus.Param(0)).rzz(1, 2, polypus.Param(0))
-        .rzz(2, 3, polypus.Param(0)).rzz(3, 0, polypus.Param(0))
-        .rx(0, polypus.Param(1)).rx(1, polypus.Param(1))
-        .rx(2, polypus.Param(1)).rx(3, polypus.Param(1))
-        .measure_all())
-result = polypus.train(qaoa, polypus.DE(generations=100, population_size=50),
-                       shots=1024, n_qpus=1, dimensions=2,
-                       expectation_function=my_cost, infrastructure="local",
-                       nodes=1, cores_per_qpu=1, id="qaoa")
+qaoa = (
+    polypus.Circuit(4)
+    .h(0)
+    .h(1)
+    .h(2)
+    .h(3)
+    .rzz(0, 1, polypus.Param(0))
+    .rzz(1, 2, polypus.Param(0))
+    .rzz(2, 3, polypus.Param(0))
+    .rzz(3, 0, polypus.Param(0))
+    .rx(0, polypus.Param(1))
+    .rx(1, polypus.Param(1))
+    .rx(2, polypus.Param(1))
+    .rx(3, polypus.Param(1))
+    .measure_all()
+)
+result = polypus.train(
+    qaoa,
+    polypus.DE(generations=100, population_size=50),
+    shots=1024,
+    n_qpus=1,
+    dimensions=2,
+    expectation_function=my_cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="qaoa",
+)
 ```
 
 ### From Rust
@@ -301,8 +328,8 @@ From Python, both outputs are also available:
 
 ```python
 qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-qir_text = qc.to_qir()            # str (.ll)
-qir_bitcode = qc.to_qir_bitcode() # bytes (.bc)
+qir_text = qc.to_qir()  # str (.ll)
+qir_bitcode = qc.to_qir_bitcode()  # bytes (.bc)
 ```
 
 ### QASM 2.0 Import
@@ -314,8 +341,8 @@ import polypus
 from qiskit import qasm2
 
 qc = polypus.Circuit.from_qasm2(qasm2.dumps(qiskit_circuit))  # interop
-qc = polypus.Circuit.from_qasm2(open("ansatz.qasm").read())   # persistence
-qc.rz(1, 0.5).measure_all()        # imported circuits are regular builders
+qc = polypus.Circuit.from_qasm2(open("ansatz.qasm").read())  # persistence
+qc.rz(1, 0.5).measure_all()  # imported circuits are regular builders
 ```
 
 Round-trip guarantee (verified by tests): for any circuit produced by this library, export → import → export is byte-identical. The same API exists in Rust as `ParameterizedCircuit::from_qasm2`.

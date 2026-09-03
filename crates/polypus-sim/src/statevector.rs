@@ -68,6 +68,16 @@ impl Statevector {
         &self.data
     }
 
+    /// Consume the state and return ownership of its amplitude buffer.
+    ///
+    /// The counterpart of [`amplitudes`](Self::amplitudes) for callers that hand
+    /// the buffer on and drop the state anyway: it moves the `2^n` amplitudes
+    /// out instead of forcing a `to_vec()` copy of a vector that may be several
+    /// GiB (see [`MAX_QUBITS`]).
+    pub fn into_amplitudes(self) -> Vec<C64> {
+        self.data
+    }
+
     /// L2 norm of the state. A correctly evolved state stays at `1` up to
     /// floating-point error.
     pub fn norm(&self) -> f64 {
@@ -153,6 +163,9 @@ impl Statevector {
             GateInstruction::Cz(c, t) => {
                 kernels::apply_diagonal_2q(&mut self.data, *c, *t, gates::cz_diag(), par);
             }
+            GateInstruction::Swap(q0, q1) => {
+                kernels::apply_2q(&mut self.data, n, *q0, *q1, &gates::swap(), par);
+            }
             GateInstruction::Rzz { q0, q1, theta } => {
                 let diag = gates::rzz_diag(angle(theta)?);
                 kernels::apply_diagonal_2q(&mut self.data, *q0, *q1, diag, par);
@@ -179,5 +192,26 @@ impl Statevector {
             | GateInstruction::MeasureAll => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `into_amplitudes` must hand out exactly the buffer `amplitudes` borrows —
+    /// it is the copy-free alternative to `amplitudes().to_vec()`, not a
+    /// different read-out.
+    #[test]
+    fn into_amplitudes_matches_the_borrowed_view() {
+        let mut sv = Statevector::new(2).expect("2 qubits is well below MAX_QUBITS");
+        sv.apply(&GateInstruction::H(0))
+            .expect("H is unconditional");
+        sv.apply(&GateInstruction::Cx(0, 1))
+            .expect("Cx is unconditional");
+
+        let borrowed = sv.amplitudes().to_vec();
+        let owned = sv.into_amplitudes();
+        assert_eq!(owned, borrowed);
     }
 }

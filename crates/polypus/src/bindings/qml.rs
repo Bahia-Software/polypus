@@ -16,6 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyModule};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use polypus_qml::{
     ConvBlock, ConvLayer, Decision, Entanglement, Entangler, HardwareEfficientAnsatz, IqpEncoder,
@@ -24,9 +25,9 @@ use polypus_qml::{
 };
 
 use super::{
-    build_backend_config, dispatch_optimizer, is_native_backend, method_seed,
-    resolve_optimizer_seed, unique_id, validate_cunqa_allocation, validate_shots_and_qpus,
-    RecomputeFn, TrainResult,
+    build_backend_config, dispatch_optimizer, extract_cost_observable, is_native_backend,
+    method_seed, resolve_optimizer_seed, unique_id, validate_cunqa_allocation, validate_id,
+    validate_shots_and_qpus, RecomputeFn, TrainResult,
 };
 use crate::evaluation::{
     EvaluationOracle, ExactNativeQmlOracle, MinibatchConfig, NativeQmlOracle, OracleErrorSlot,
@@ -298,7 +299,7 @@ pub fn pauli_z(position: usize) -> PauliTerm {
 ///
 /// An `X` readout is measured by inserting the basis change at `compile` time,
 /// and is supported only when the whole readout resolves to one basis group
-/// (contract C-8) — a constraint of the readout, not of this spelling, and
+/// (contract C-10) — a constraint of the readout, not of this spelling, and
 /// reported by `compile` exactly as it is for the bare form.
 #[pyfunction(name = "X")]
 pub fn pauli_x(position: usize) -> PauliTerm {
@@ -419,7 +420,7 @@ impl PyDecision {
 /// The losses `polypus.qml.train(loss=…)` / `Model.train(loss=…)` accept.
 ///
 /// `CATEGORICAL_CROSS_ENTROPY` is the multiclass one, and pairs only with
-/// `Decision.ARGMAX` (contract C-8); the other three are scalar.
+/// `Decision.ARGMAX` (contract C-10); the other three are scalar.
 #[pyclass(module = "polypus.qml", name = "Loss", frozen)]
 pub struct PyLoss;
 
@@ -960,7 +961,7 @@ impl Model {
     }
 
     /// The number of trainable parameters `θ` this model compiles to — the
-    /// `dimensions` an optimizer sees (contract C-8(d)) and the length of the
+    /// `dimensions` an optimizer sees (contract C-10(d)) and the length of the
     /// `best_params` [`train`](Self::train) returns.
     ///
     /// Computed by compiling a **clone** of the builder, so the `Model` itself
@@ -1264,7 +1265,7 @@ impl TrainedModel {
         validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
 
         // Bind each new sample to the trained θ, producing one native circuit per
-        // sample (C-8 (a)). A sample of the wrong feature count fails here with a
+        // sample (C-10 (a)). A sample of the wrong feature count fails here with a
         // `QmlError::FeatureCountMismatch`, mapped to `ValueError` — `bind`
         // already validates, so there is no separate check to add.
         let bound: Vec<BoundCircuit> = x
@@ -1565,6 +1566,7 @@ pub fn qml_train<'py>(
 ) -> PyResult<PyObject> {
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_id(&id)?;
     // `method` is required on both paths; it only has a default because the
     // signature needs one once `x_train` (an earlier positional) is optional.
     let method = method.ok_or_else(|| {
@@ -1643,6 +1645,7 @@ fn qml_train_native(
     exact: bool,
     batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
+    let start = Instant::now();
     let py = model.py();
     // Reject kwargs that belong to the Qiskit path: on the native path the
     // samples (and their labels) travel inside the Dataset, and the fitness is
@@ -1784,7 +1787,7 @@ fn qml_train_native(
             errors: errors.clone(),
             minibatch,
         });
-        let recompute = recompute_full_fitness(batch_size, &oracle, &errors);
+        let recompute = recompute_full_fitness(batch_size, &oracle, &errors, &config.id);
         (Box::new(Arc::clone(&oracle)), Box::new(oracle), recompute)
     } else {
         let backend = Infrastructure::create_backend(&config)?;
@@ -1795,7 +1798,7 @@ fn qml_train_native(
             errors: errors.clone(),
             minibatch,
         });
-        let recompute = recompute_full_fitness(batch_size, &oracle, &errors);
+        let recompute = recompute_full_fitness(batch_size, &oracle, &errors, &config.id);
         (Box::new(Arc::clone(&oracle)), Box::new(oracle), recompute)
     };
 
@@ -1808,6 +1811,7 @@ fn qml_train_native(
         &errors,
         effective_seed,
         effective_id,
+        start,
     )?;
 
     // `dispatch_optimizer` is shared verbatim with the Qiskit path and the generic
@@ -1872,6 +1876,7 @@ fn recompute_full_fitness<O>(
     batch_size: Option<usize>,
     oracle: &Arc<O>,
     errors: &OracleErrorSlot,
+    run_id: &str,
 ) -> Option<Box<RecomputeFn>>
 where
     O: FullDatasetEvaluator + Send + Sync + 'static,
@@ -1879,13 +1884,14 @@ where
     batch_size.map(|_| {
         let oracle = Arc::clone(oracle);
         let errors = errors.clone();
+        let run_id = run_id.to_string();
         let closure: Box<RecomputeFn> = Box::new(move |theta: &[f64]| {
             match oracle.evaluate_full(theta) {
                 Ok(fitness) => fitness,
                 // Record and return a finite sentinel; `finish_optimization` sees
                 // the recorded error and raises it instead of using this value.
                 Err(e) => {
-                    errors.record(e);
+                    errors.record(e, &run_id);
                     0.0
                 }
             }
@@ -1937,6 +1943,7 @@ fn qml_train_qiskit(
     exact: bool,
     batch_size: Option<usize>,
 ) -> PyResult<PyObject> {
+    let start = Instant::now();
     // Exact mode is native-only (design doc §17): the Qiskit path has no
     // statevector of its own to read exactly, so reject rather than ignore it.
     if exact {
@@ -1966,6 +1973,16 @@ fn qml_train_qiskit(
     let expectation_function = expectation_function.ok_or_else(|| {
         PyValueError::new_err("expectation_function is required with a Qiskit feature_map / ansatz")
     })?;
+    // The optimizer searches a `dimensions`-wide vector and binds it to the
+    // ansatz's free parameters; a mismatch would otherwise surface later as a
+    // cryptic Qiskit binding error inside the oracle. `len()` calls `__len__`,
+    // working on Qiskit's ParameterView the same as on a list.
+    let num_ansatz_params = ansatz.getattr("parameters")?.len()?;
+    if num_ansatz_params != dimensions as usize {
+        return Err(PyValueError::new_err(format!(
+            "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
+        )));
+    }
 
     let effective_seed = resolve_optimizer_seed(seed, method_seed(method));
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
@@ -1999,8 +2016,21 @@ fn qml_train_qiskit(
     //    parameters unbound for the optimizer to fill in later.
     let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
     let mut qcs: Vec<Py<PyAny>> = Vec::new();
-    for row_result in x_train.try_iter()? {
+    // Each row must supply exactly one value per feature-map parameter. Zipping
+    // the two iterators would stop at the shorter one — a longer row silently
+    // drops features, a shorter row leaves feature-map parameters unbound and
+    // fails later as a cryptic Qiskit error inside the oracle. Materialize both
+    // lengths and reject a mismatch upfront with the row index and both lengths.
+    let fm_len = fm_params_list.len()?;
+    for (row_idx, row_result) in x_train.try_iter()?.enumerate() {
         let row = row_result?;
+        let row_len = row.len()?;
+        if row_len != fm_len {
+            return Err(PyValueError::new_err(format!(
+                "x_train row {row_idx} has {row_len} features, but feature_map expects {fm_len} \
+                 (len(feature_map.parameters))"
+            )));
+        }
         let param_dict = PyDict::new(py);
         for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
             param_dict.set_item(param?, val?)?;
@@ -2041,11 +2071,12 @@ fn qml_train_qiskit(
     // fitness and, for the gradient optimizers (QNG, Adam), its parameter-shift
     // gradient (exact by linearity of the mean expectation — this path has no
     // nonlinear loss).
+    let observable = extract_cost_observable(&expectation_function)?;
     let oracle = Arc::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
-        expectation_fn: expectation_function.unbind(),
+        observable,
         errors: errors.clone(),
     });
     let eval_oracle: Box<dyn EvaluationOracle> = Box::new(Arc::clone(&oracle));
@@ -2062,5 +2093,6 @@ fn qml_train_qiskit(
         &errors,
         effective_seed,
         effective_id,
+        start,
     )
 }

@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Oracle for native (pure-Rust) QML training (contract C-8).
+/// Oracle for native (pure-Rust) QML training (contract C-10).
 ///
 /// It holds a [`QmlProblem`] — a compiled model, a training set and a loss
 /// produced entirely by `polypus-qml` — and lets it bind parameters and score
@@ -41,7 +41,7 @@ use std::sync::Arc;
 ///
 /// [`NativeStatevectorBackend`]: crate::infrastructure::NativeStatevectorBackend
 pub struct NativeQmlOracle {
-    /// The trainable problem: bind parameters in, get fitness out (C-8).
+    /// The trainable problem: bind parameters in, get fitness out (C-10).
     ///
     /// Held behind an [`Arc`] so the common (no-minibatch) evaluation path shares
     /// it by reference-count bump instead of deep-cloning its per-sample circuit
@@ -70,7 +70,7 @@ impl EvaluationOracle for NativeQmlOracle {
         match self.try_evaluate(candidates) {
             Ok(values) => values,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; candidates.len()]
             }
         }
@@ -87,7 +87,7 @@ impl GradientOracle for NativeQmlOracle {
         match self.try_gradient(theta, &[param_index]) {
             Ok(grad) => grad[0],
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 0.0
             }
         }
@@ -101,7 +101,7 @@ impl GradientOracle for NativeQmlOracle {
         match self.try_gradient(theta, &indices) {
             Ok(grad) => grad,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; dims]
             }
         }
@@ -335,7 +335,7 @@ fn run_native_qml_counts(
     backend: &dyn QuantumBackend,
     theta: &[f64],
 ) -> Result<Vec<HashMap<String, u64>>, EvaluationError> {
-    // Bind the candidate into one native circuit per training sample (C-8 (a)).
+    // Bind the candidate into one native circuit per training sample (C-10 (a)).
     let bound: Vec<BoundCircuit> = problem
         .bind_batch(theta)?
         .into_iter()
@@ -553,7 +553,7 @@ mod tests {
     }
 
     /// A well-formed batch returns exactly `candidates.len()` finite fitnesses and
-    /// records no error (contract C-5 length + C-8 (b) finiteness, via the oracle).
+    /// records no error (contract C-5 length + C-10 (b) finiteness, via the oracle).
     #[test]
     fn evaluate_batch_returns_one_finite_fitness_per_candidate() {
         // `evaluate_batch` acquires the GIL only for the per-candidate signal

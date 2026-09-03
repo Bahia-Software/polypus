@@ -131,6 +131,11 @@ fn native_training_reaches_perfect_train_accuracy() {
             generations: 150,
             dimensions,
             tolerance: 1e-6,
+            // At least as large as `generations`, so the fitness-stagnation
+            // window never fills inside the budget — this test drives the run
+            // to convergence by selection pressure alone, unaffected by early
+            // stopping.
+            patience: 150,
             seed: Some(7),
         })
         .expect("DE optimizes successfully");

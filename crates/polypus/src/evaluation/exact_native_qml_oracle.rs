@@ -65,7 +65,7 @@ impl EvaluationOracle for ExactNativeQmlOracle {
         match self.try_evaluate(candidates) {
             Ok(values) => values,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; candidates.len()]
             }
         }
@@ -80,7 +80,7 @@ impl GradientOracle for ExactNativeQmlOracle {
         match self.try_gradient(theta, &[param_index]) {
             Ok(grad) => grad[0],
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 0.0
             }
         }
@@ -94,7 +94,7 @@ impl GradientOracle for ExactNativeQmlOracle {
         match self.try_gradient(theta, &indices) {
             Ok(grad) => grad,
             Err(e) => {
-                self.errors.record(e);
+                self.errors.record(e, &self.config.id);
                 vec![0.0; dims]
             }
         }
@@ -284,7 +284,7 @@ fn run_exact_native_qml_probs(
     backend: &NativeStatevectorBackend,
     theta: &[f64],
 ) -> Result<Vec<HashMap<String, f64>>, EvaluationError> {
-    // Bind the candidate into one native circuit per training sample (C-8 (a)).
+    // Bind the candidate into one native circuit per training sample (C-10 (a)).
     let bound: Vec<BoundCircuit> = problem
         .bind_batch(theta)?
         .into_iter()

@@ -57,14 +57,17 @@ class TestPolypusInstantiation:
         assert de.generations == 100
         assert de.population_size == 50
         assert de.tolerance == pytest.approx(0.01)
+        # Fitness-stagnation look-back window (contract C-5); default 20.
+        assert de.patience == 20
 
     def test_DE_custom_instantiation(self):
         import polypus
 
-        de = polypus.DE(generations=10, population_size=5, tolerance=0.05)
+        de = polypus.DE(generations=10, population_size=5, tolerance=0.05, patience=7)
         assert de.generations == 10
         assert de.population_size == 5
         assert de.tolerance == pytest.approx(0.05)
+        assert de.patience == 7
 
     def test_PSO_default_instantiation(self):
         import polypus
@@ -144,6 +147,43 @@ class TestPolypusInstantiation:
         assert adam.patience == 1
         adam.patience = 5
         assert adam.patience == 5
+
+
+class TestPolypusModuleMetadata:
+    """
+    The extension's classes and its `qml` submodule must report `polypus` as
+    their module, so `repr()`, tracebacks, `help()` and pickling name them as
+    `polypus.X` rather than `builtins.X`.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        ["DE", "PSO", "QNG", "Circuit", "Param", "RunResult", "TrainResult"],
+    )
+    def test_class_module_is_polypus(self, name):
+        import polypus
+
+        assert getattr(polypus, name).__module__ == "polypus"
+
+    def test_repr_is_qualified_by_module(self):
+        import polypus
+
+        assert "polypus.DE" in repr(polypus.DE())
+
+    def test_qml_submodule_name_is_qualified(self):
+        import polypus
+
+        assert polypus.qml.__name__ == "polypus.qml"
+
+    def test_qml_train_reachable_as_attribute(self):
+        import polypus
+
+        assert callable(polypus.qml.train)
+
+    def test_qml_submodule_is_importable(self):
+        import polypus.qml
+
+        assert callable(polypus.qml.train)
 
 
 # ---------------------------------------------------------------------------

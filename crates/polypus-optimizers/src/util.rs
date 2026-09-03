@@ -109,6 +109,58 @@ pub(crate) fn patience_converged(
     }
 }
 
+/// Fitness-stagnation early-stopping test used by Differential Evolution.
+///
+/// The optimizers *maximise* (higher fitness is better) and DE's best fitness
+/// is monotonically non-decreasing, so `history` — the best fitness recorded at
+/// the end of each generation — never falls. This returns `true` once the best
+/// fitness has improved by **less than `tolerance`** over the last `patience`
+/// generations, i.e. the search has stalled in *quality* rather than in
+/// population spread.
+///
+/// Concretely, with `history` holding one entry per executed generation
+/// (`history[g]` is the best fitness at the end of generation `g`, 0-indexed),
+/// the test fires at the current generation `g` iff
+///
+/// ```text
+/// g >= patience  &&  history[g] - history[g - patience] < tolerance
+/// ```
+///
+/// The `g >= patience` guard (`history.len() > patience`) means the first
+/// `patience` generations can never trigger a stop — a full `patience`-wide
+/// window of history must exist behind the current generation first. This is
+/// the criterion the C-5 contract prose describes, and it replaces the former
+/// population-standard-deviation collapse test for DE: on landscapes like QAOA
+/// the population would collapse (std → 0) within a handful of generations and
+/// stop the run long before the fitness had actually plateaued.
+///
+/// `tolerance` is therefore a *minimum cumulative fitness improvement* in the
+/// oracle's own fitness units, not a spread in parameter units.
+pub(crate) fn fitness_stagnated(
+    history: &[f64],
+    tolerance: f64,
+    patience: usize,
+    generation: usize,
+) -> bool {
+    // Need a full `patience`-wide window behind the current generation: with one
+    // entry per generation, `history.len() > patience` is exactly `generation >=
+    // patience` (`generation == history.len() - 1`).
+    if history.len() <= patience {
+        return false;
+    }
+    let current = history[history.len() - 1];
+    let past = history[history.len() - 1 - patience];
+    let improvement = current - past;
+    log::debug!(
+        "Generation {generation}: best-fitness improvement over last {patience} generations = {improvement:.6}"
+    );
+    let stagnated = improvement < tolerance;
+    if stagnated {
+        log::debug!("Stopping early at generation {generation} due to fitness stagnation");
+    }
+    stagnated
+}
+
 /// Validate that an oracle returned exactly one fitness value per candidate.
 ///
 /// Every optimizer — and every helper built on the oracle traits, such as
@@ -310,6 +362,40 @@ mod tests {
         let mut streak = 0usize;
         assert!(!patience_converged(&grad, 0.5, 1, &mut streak));
         assert_eq!(streak, 0);
+    }
+
+    #[test]
+    fn fitness_stagnated_false_before_patience_window_filled() {
+        // Fewer than `patience + 1` generations of history → no full window to
+        // look back over, so it can never fire regardless of the values.
+        let history = [0.0, 1.0, 2.0, 3.0];
+        assert!(!fitness_stagnated(&history, 0.5, 4, 3));
+        // Exactly `patience` entries is still one short of a full window.
+        assert!(!fitness_stagnated(&history, 100.0, 4, 3));
+    }
+
+    #[test]
+    fn fitness_stagnated_true_when_improvement_below_tolerance() {
+        // len == patience + 1: window spans history[0]..history[4]. Improvement
+        // 3.02 - 3.0 = 0.02 < tolerance 0.5 ⇒ stagnated.
+        let history = [3.0, 3.005, 3.01, 3.015, 3.02];
+        assert!(fitness_stagnated(&history, 0.5, 4, 4));
+    }
+
+    #[test]
+    fn fitness_stagnated_false_when_still_improving() {
+        // Improvement 4.0 - 0.0 = 4.0 over the window is well above tolerance.
+        let history = [0.0, 1.0, 2.0, 3.0, 4.0];
+        assert!(!fitness_stagnated(&history, 0.5, 4, 4));
+    }
+
+    #[test]
+    fn fitness_stagnated_compares_only_the_last_patience_generations() {
+        // A big early gain then a flat tail: with patience 2 the window is the
+        // last two steps (5.001 - 5.0 = 0.001 < tolerance), so it stagnates even
+        // though the run improved a lot earlier.
+        let history = [0.0, 5.0, 5.0005, 5.001];
+        assert!(fitness_stagnated(&history, 0.01, 2, 3));
     }
 
     #[test]

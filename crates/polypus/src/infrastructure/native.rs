@@ -12,7 +12,8 @@ use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::{Simulator, StatevectorSimulator};
+use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -98,35 +99,31 @@ impl NativeStatevectorBackend {
         }
     }
 
-    /// Resolve a [`BoundCircuit`] to a transpiled [`ConcreteCircuit`] and the
-    /// bitstring width its read-out uses, without touching Python.
-    ///
-    /// This is the shared front half of both execution paths — sampled
-    /// ([`simulate_one`](Self::simulate_one)) and exact
-    /// ([`simulate_one_exact`](Self::simulate_one_exact)) — factored out so the
-    /// two paths cannot drift on circuit resolution, transpilation or width:
+    /// Derive the executable [`ConcreteCircuit`] from a [`BoundCircuit`] and
+    /// apply the injected transpiler — all GIL-free. Shared by every execution
+    /// path — sampled ([`simulate_one`](Self::simulate_one)), the single-
+    /// evolution fast path ([`run_shots_distributed`](Self::run_shots_distributed))
+    /// and exact ([`simulate_one_exact`](Self::simulate_one_exact)) — factored
+    /// out so none of them can drift on circuit resolution or transpilation:
     ///
     /// 1. turn the variant into a [`ConcreteCircuit`] (a `Qiskit` circuit is
     ///    rejected — reading its gates would require the interpreter);
     /// 2. run the injected [`Transpiler`] with the per-run [`TranspileOptions`],
     ///    **unless** it is a guaranteed no-op ([`Transpiler::is_identity`]) — in
     ///    which case the circuit is borrowed straight through, avoiding the
-    ///    identity clone entirely (the default [`IdentityTranspiler`] path);
-    /// 3. compute the read-out width — the classical-register width, falling
-    ///    back to the qubit count when the circuit has no measurements
-    ///    (full-register read-out convention, matching C-3).
+    ///    identity clone entirely (the default [`IdentityTranspiler`] path).
     ///
-    /// The result is a [`Cow`]: `Borrowed` for a native circuit under an identity
-    /// transpiler (zero copies), `Owned` when the circuit had to be parsed from
-    /// OpenQASM or genuinely rewritten by a non-identity strategy.
-    ///
-    /// The width is computed **after** transpiling, so a strategy that changes
-    /// the register width is reflected.
-    fn resolve_and_transpile<'a>(
+    /// Returns a borrow of `circuit` whenever possible instead of an owned
+    /// clone: the `Native` variant borrows directly, and when the transpiler
+    /// is a guaranteed no-op that borrow is returned as-is, skipping the
+    /// trait-dispatch clone entirely (the default hot path). Only the `Qasm2`
+    /// variant (which must be parsed into a local) and a non-identity
+    /// transpiler (which must produce a new circuit) force an owned result.
+    fn concrete_circuit<'a>(
         &self,
         circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
-    ) -> Result<(Cow<'a, ConcreteCircuit>, usize), BackendError> {
+    ) -> Result<Cow<'a, ConcreteCircuit>, BackendError> {
         // Obtain a ConcreteCircuit without touching Python. A native circuit is
         // borrowed; an OpenQASM string must be parsed into an owned circuit.
         let source: Cow<'a, ConcreteCircuit> = match circuit {
@@ -150,23 +147,14 @@ impl NativeStatevectorBackend {
             }
         };
 
-        // Transpile the native circuit (GIL-free) before simulating — but only
-        // when the strategy actually rewrites. Under the default
-        // IdentityTranspiler this would be an identity clone, so borrow straight
-        // through instead of cloning.
-        let concrete: Cow<'a, ConcreteCircuit> = if self.transpiler.is_identity() {
-            source
+        // Transpile the native circuit (GIL-free) before simulating. When the
+        // transpiler is a guaranteed no-op, keep the borrow and skip the
+        // trait-dispatch clone entirely.
+        if self.transpiler.is_identity() {
+            Ok(source)
         } else {
-            Cow::Owned(self.transpiler.transpile(source.as_ref(), opts))
-        };
-
-        // Bitstring length = classical register width (qubit count when the
-        // circuit has no measurements, mirroring a full-register read-out).
-        let width = match concrete.num_clbits() {
-            0 => concrete.num_qubits,
-            c => c,
-        };
-        Ok((concrete, width))
+            Ok(Cow::Owned(self.transpiler.transpile(source.as_ref(), opts)))
+        }
     }
 
     /// Run one bound circuit and return Aer-compatible bitstring counts.
@@ -180,21 +168,24 @@ impl NativeStatevectorBackend {
         shots: u32,
         seed: u64,
         opts: &TranspileOptions,
+        parallel_threshold: usize,
     ) -> Result<HashMap<String, u64>, BackendError> {
-        let (concrete, width) = self.resolve_and_transpile(circuit, opts)?;
-
-        let raw = self
-            .simulator
+        let concrete = self.concrete_circuit(circuit, opts)?;
+        // Simulate with the gate-parallel threshold the caller picked: `run_circuits` raises it to
+        // `usize::MAX` (gate kernels off) for a population batch whose across-circuit `par_iter`
+        // already owns the cores, and keeps the default for a lone circuit. Gate-parallel is
+        // numerically identical to sequential, so this trades only speed, never results.
+        let simulator = StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold,
+        };
+        let raw = simulator
             .run_and_sample(concrete.as_ref(), shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
-
-        Ok(raw
-            .into_iter()
-            .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
-            .collect())
+        Ok(format_counts(concrete.as_ref(), raw))
     }
 
     /// Run one bound circuit and return the **exact** probability of every
@@ -221,7 +212,7 @@ impl NativeStatevectorBackend {
         circuit: &BoundCircuit,
         opts: &TranspileOptions,
     ) -> Result<HashMap<String, f64>, BackendError> {
-        let (concrete, width) = self.resolve_and_transpile(circuit, opts)?;
+        let concrete = self.concrete_circuit(circuit, opts)?;
         // Precondition: the exact mode only supports a full-register read-out
         // (0 classical bits = read the whole state, or `num_clbits ==
         // num_qubits` = MeasureAll — the only case polypus-qml generates). A
@@ -236,6 +227,12 @@ impl NativeStatevectorBackend {
                 concrete.num_qubits
             )));
         }
+        // Bitstring length = classical register width (qubit count when the
+        // circuit has no measurements, mirroring a full-register read-out).
+        let width = match num_clbits {
+            0 => concrete.num_qubits,
+            c => c,
+        };
         let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
@@ -275,6 +272,20 @@ impl NativeStatevectorBackend {
     }
 }
 
+/// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
+/// qubit indexing with the highest classical bit on the left. The width is the
+/// classical-register size, or the qubit count for a measurement-free circuit
+/// (a full-register read-out).
+fn format_counts(concrete: &ConcreteCircuit, raw: HashMap<usize, u64>) -> HashMap<String, u64> {
+    let width = match concrete.num_clbits() {
+        0 => concrete.num_qubits,
+        c => c,
+    };
+    raw.into_iter()
+        .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
+        .collect()
+}
+
 impl QuantumBackend for NativeStatevectorBackend {
     fn run_circuits(
         &self,
@@ -285,11 +296,28 @@ impl QuantumBackend for NativeStatevectorBackend {
         let opts = TranspileOptions {
             level: config.opt_level,
         };
-        // Derive each circuit's seed from its own content plus its batch
-        // position — no shared mutable state — so distinct circuits sample
-        // independently and deterministically while concurrent calls on this
-        // shared instance can never race for seed assignment.
-        qcs.iter()
+        // Evaluate the batch in parallel ACROSS circuits. A DE generation submits its whole
+        // population here (one circuit per candidate), so this is the population axis —
+        // embarrassingly parallel and the axis that actually scales. `simulate_one` is pure Rust
+        // (no GIL) and `&self`-only; each circuit's seed is derived purely from its own content
+        // plus its batch index — no shared mutable state — so distinct circuits sample
+        // independently and deterministically regardless of execution order, and concurrent calls
+        // on this shared instance can never race for seed assignment (the bug a previous shared
+        // atomic counter had). `par_iter`'s indexed `collect` preserves submission order and
+        // short-circuits on the first `Err`.
+        //
+        // Gate-level parallelism competes with this across-circuit par_iter on the same rayon pool.
+        // Once the batch has at least as many circuits as pool threads (a population saturating the
+        // node) the gate kernels only add nested-rayon contention, so evolve each circuit's gates
+        // SEQUENTIALLY (`parallel_threshold = MAX`). A smaller batch leaves cores idle, so keep the
+        // normal threshold and let rayon's nesting fill them; a lone circuit (n == 1) keeps full
+        // gate-level parallelism.
+        let parallel_threshold = if qcs.len() >= rayon::current_num_threads() {
+            usize::MAX
+        } else {
+            self.simulator.parallel_threshold
+        };
+        qcs.par_iter()
             .enumerate()
             .map(|(i, qc)| {
                 let content = seed_content_key(qc);
@@ -297,7 +325,55 @@ impl QuantumBackend for NativeStatevectorBackend {
                     .base_seed
                     .wrapping_add(fnv1a(content.as_bytes()))
                     .wrapping_add(i as u64);
-                self.simulate_one(qc, config.shots, seed, &opts)
+                self.simulate_one(qc, config.shots, seed, &opts, parallel_threshold)
+            })
+            .collect()
+    }
+
+    /// Single-evolution fast path: `polypus-sim` separates evolution from
+    /// sampling, so the shared circuit is evolved **once** and every shot batch
+    /// samples from that same statevector — instead of re-running the identical
+    /// evolution once per replica as the default (via `run_circuits`) would.
+    ///
+    /// Reproducibility is preserved exactly (contract C-7): the per-batch seeds
+    /// come from the *same* content-hash scheme `run_circuits` uses — the shared
+    /// circuit's own content plus the batch index, with no shared mutable state
+    /// — so a given base seed reproduces identical counts regardless of which
+    /// path ran the batches (`wrapping_add` is commutative, so batch `i` here
+    /// gets the exact seed `run_circuits` would give a single-circuit call at
+    /// index `i`). [`sample_projected`] with a given seed yields byte-identical
+    /// counts to a full `run_and_sample`. Shot conservation is preserved too
+    /// (contract C-3): a zero-shot batch samples nothing and returns an empty
+    /// map.
+    fn run_shots_distributed(
+        &self,
+        qc: &BoundCircuit,
+        shot_batches: &[u32],
+        config: &ExecutionConfig,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        // Evolve the shared circuit exactly once; the statevector is reused for
+        // every batch's sampling.
+        let concrete = self.concrete_circuit(qc, &opts)?;
+        let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
+            log::error!("native statevector simulation failed: {e}");
+            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+        })?;
+        // The shared circuit's content hash, fixed once for every batch below —
+        // no shared mutable state, matching `run_circuits`'s per-circuit scheme.
+        let content_hash = fnv1a(seed_content_key(qc).as_bytes());
+        shot_batches
+            .iter()
+            .enumerate()
+            .map(|(i, &shots)| {
+                let seed = self
+                    .base_seed
+                    .wrapping_add(content_hash)
+                    .wrapping_add(i as u64);
+                let raw = sample_projected(concrete.as_ref(), &sv, shots as usize, seed);
+                Ok(format_counts(concrete.as_ref(), raw))
             })
             .collect()
     }
@@ -388,6 +464,7 @@ mod tests {
                 2000,
                 7,
                 &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
             )
             .unwrap();
         let total: u64 = counts.values().sum();
@@ -409,10 +486,22 @@ mod tests {
         let circuit = BoundCircuit::Native(bell());
         assert_eq!(
             default_backend
-                .simulate_one(&circuit, 1000, 42, &opts)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    default_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
             explicit_backend
-                .simulate_one(&circuit, 1000, 42, &opts)
+                .simulate_one(
+                    &circuit,
+                    1000,
+                    42,
+                    &opts,
+                    explicit_backend.simulator.parallel_threshold
+                )
                 .unwrap(),
         );
     }
@@ -432,6 +521,7 @@ mod tests {
                 128,
                 1,
                 &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
             )
             .unwrap();
         // X|0> = |1>: every shot reads "1".
@@ -445,12 +535,59 @@ mod tests {
         let backend = NativeStatevectorBackend::new(0);
         let opts = TranspileOptions::default();
         let native = backend
-            .simulate_one(&BoundCircuit::Native(bell()), 1000, 5, &opts)
+            .simulate_one(
+                &BoundCircuit::Native(bell()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         let qasm = backend
-            .simulate_one(&BoundCircuit::Qasm2(bell().to_qasm2()), 1000, 5, &opts)
+            .simulate_one(
+                &BoundCircuit::Qasm2(bell().to_qasm2()),
+                1000,
+                5,
+                &opts,
+                backend.simulator.parallel_threshold,
+            )
             .unwrap();
         assert_eq!(native, qasm);
+    }
+
+    /// Regression (issue #83): under the identity transpiler, the `Qasm2` path
+    /// of `transpiled` returns the *exact input bytes* without parsing and
+    /// re-serializing. The input carries a comment (dropped on parse) and
+    /// non-canonical spacing, so a parse + re-emit round trip provably changes
+    /// the bytes — asserting byte-identity therefore proves the parse was
+    /// skipped, not merely that the QASM happens to be stable.
+    #[test]
+    fn qasm2_identity_path_returns_input_bytes_without_reserializing() {
+        let original = "OPENQASM 2.0;\n\
+             include \"qelib1.inc\";\n\
+             // this comment is dropped when the QASM is parsed\n\
+             qreg q[2];\n\
+             h q[0];\n\
+             cx q[0], q[1];\n"
+            .to_string();
+
+        // Premise check: a naive parse + re-emit really would change the bytes,
+        // so the byte-identity assertion below is meaningful.
+        let reserialized = ParameterizedCircuit::from_qasm2(&original)
+            .and_then(|pc| pc.assign_parameters(&[]))
+            .unwrap()
+            .to_qasm2();
+        assert_ne!(
+            reserialized, original,
+            "test premise: this QASM must not round-trip byte-identically"
+        );
+
+        let out = BoundCircuit::Qasm2(original.clone())
+            .transpiled(&IdentityTranspiler, &TranspileOptions::default());
+        match out {
+            BoundCircuit::Qasm2(text) => assert_eq!(text, original),
+            _ => panic!("expected the original Qasm2 variant to be preserved"),
+        }
     }
 
     /// An unparseable / unsupported QASM string is passed through untouched by
@@ -540,6 +677,77 @@ mod tests {
     /// eight-outcome counts dict (not a single statistic) keeps this
     /// non-flaky. This is the exact inversion of the removed
     /// `seeding_is_reproducible_per_id`, which encoded the bug.
+    /// Fast path (defect #3): `run_shots_distributed` conserves the total shots
+    /// across batches (C-3) and is deterministic for a fixed base seed (C-7).
+    #[test]
+    fn run_shots_distributed_conserves_shots_and_is_deterministic() {
+        let cfg = config_with(OptLevel::default());
+        let batches = [3u32, 3, 2]; // 8 shots over 3 "QPUs", uneven split.
+        let out = NativeStatevectorBackend::new(2024)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .unwrap();
+        assert_eq!(out.len(), batches.len());
+        let total: u64 = out.iter().flat_map(|m| m.values()).sum();
+        assert_eq!(total, u64::from(batches.iter().sum::<u32>()));
+        // Same base seed reproduces byte-identical batches.
+        let again = NativeStatevectorBackend::new(2024)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .unwrap();
+        assert_eq!(out, again);
+        for m in &out {
+            for k in m.keys() {
+                assert!(k == "00" || k == "11", "unexpected outcome {k}");
+            }
+        }
+    }
+
+    /// Fast path equivalence (C-7): the single-evolution path yields
+    /// byte-identical counts to sampling each batch through `run_circuits` with
+    /// the same contiguous seed block (`seed = base_seed + i`). The optimisation
+    /// changes performance, never results.
+    #[test]
+    fn run_shots_distributed_matches_run_circuits_per_batch() {
+        let batches = [5u32, 5, 4];
+        let fast = NativeStatevectorBackend::new(99)
+            .run_shots_distributed(
+                &BoundCircuit::Native(bell()),
+                &batches,
+                &config_with(OptLevel::default()),
+            )
+            .unwrap();
+
+        // Reference: one fresh backend per batch, seeded `99 + i` so it replays
+        // the exact seed the fast path reserves for replica `i`.
+        let reference: Vec<_> = batches
+            .iter()
+            .enumerate()
+            .map(|(i, &shots)| {
+                let mut cfg = config_with(OptLevel::default());
+                cfg.shots = shots;
+                NativeStatevectorBackend::new(99u64.wrapping_add(i as u64))
+                    .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+                    .unwrap()
+                    .remove(0)
+            })
+            .collect();
+
+        assert_eq!(fast, reference);
+    }
+
+    /// A zero-shot batch samples nothing (empty map), so shots stay conserved
+    /// even when `shots < n_qpus` (some replicas get `base = 0`).
+    #[test]
+    fn run_shots_distributed_zero_batch_is_empty() {
+        let cfg = config_with(OptLevel::default());
+        let out = NativeStatevectorBackend::new(1)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &[1u32, 0, 0], &cfg)
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(out[1].is_empty() && out[2].is_empty());
+        let total: u64 = out.iter().flat_map(|m| m.values()).sum();
+        assert_eq!(total, 1);
+    }
+
     #[test]
     fn omitted_seed_differs_across_calls_for_same_id() {
         use crate::infrastructure::Infrastructure;
@@ -671,6 +879,120 @@ mod tests {
         assert_eq!(
             backend.run_circuits_exact(&batch, &cfg).unwrap(),
             backend.run_circuits_exact(&batch, &cfg).unwrap()
+        );
+    }
+
+    /// Micro-benchmark (perf evidence for issue #83, not a correctness check —
+    /// hence `#[ignore]`d and assertion-free). It isolates the exact cost the
+    /// identity-transpiler fix eliminates, side by side within one binary, so
+    /// there is no build-to-build noise and no reliance on the pre-fix code
+    /// still existing on disk.
+    ///
+    /// The full-training benchmarks (`bench_native_vs_qiskit.py`,
+    /// `bench_batching.py`) can't detect this fix: at 4–8 qubits through a DE
+    /// loop, GIL crossings, Aer/Qiskit overhead and optimizer bookkeeping dwarf
+    /// one or two `ConcreteCircuit` clones. This benchmark never calls the
+    /// simulator (qubit count stays at 8); gate *count* — which drives clone and
+    /// QASM cost — is what we scale.
+    ///
+    /// Run with:
+    /// ```text
+    /// LD_LIBRARY_PATH=~/miniconda3/lib cargo test -p polypus --lib \
+    ///   infrastructure::native::tests::bench_identity_path_avoids_clone_and_qasm_roundtrip \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "perf micro-benchmark: prints timings, run explicitly with --ignored --nocapture"]
+    fn bench_identity_path_avoids_clone_and_qasm_roundtrip() {
+        use std::borrow::Cow;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        /// Gate *count* (not qubit count) drives clone/QASM cost, so we keep
+        /// qubits small and pile on gates.
+        fn big_circuit(n_gates: usize) -> ConcreteCircuit {
+            let mut pc = ParameterizedCircuit::new(8);
+            for i in 0..n_gates {
+                pc = pc.h(i % 8).cx(i % 8, (i + 1) % 8).rz(i % 8, 0.123);
+            }
+            pc.assign_parameters(&[]).unwrap()
+        }
+
+        const N: usize = 500;
+        const N_GATES: usize = 20_000;
+        let opts = TranspileOptions::default();
+        let circuit = big_circuit(N_GATES);
+        let qasm = circuit.to_qasm2();
+
+        // --- Native path: two clones (old) vs. borrow (new) ---
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // Exactly what `simulate_one` used to do: clone up front, then the
+            // IdentityTranspiler clones again inside `transpile`.
+            let a = circuit.clone();
+            let b = IdentityTranspiler.transpile(&a, &opts);
+            black_box(&b);
+        }
+        let native_old_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // The `is_identity()` branch: borrow, zero clones.
+            let c: Cow<'_, ConcreteCircuit> = if IdentityTranspiler.is_identity() {
+                Cow::Borrowed(&circuit)
+            } else {
+                Cow::Owned(IdentityTranspiler.transpile(&circuit, &opts))
+            };
+            black_box(c.as_ref());
+        }
+        let native_new_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        // --- Qasm2 path: parse+transpile+re-emit (old) vs. String clone (new) ---
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // Exactly what `BoundCircuit::transpiled` used to do for Qasm2.
+            let parsed = ParameterizedCircuit::from_qasm2(&qasm)
+                .and_then(|pc| pc.assign_parameters(&[]))
+                .unwrap();
+            let out = IdentityTranspiler.transpile(&parsed, &opts).to_qasm2();
+            black_box(&out);
+        }
+        let qasm_old_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..N {
+            // The `is_identity()` short-circuit: a cheap String clone.
+            let out = qasm.clone();
+            black_box(&out);
+        }
+        let qasm_new_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;
+
+        // Extrapolation to the training scale used by bench_native_vs_qiskit.py
+        // (pop=20, gens=10 => 200 candidate submissions per run).
+        const SUBMISSIONS_PER_RUN: f64 = 200.0;
+        let native_saved_ms = (native_old_us - native_new_us) * SUBMISSIONS_PER_RUN / 1e3;
+        let qasm_saved_ms = (qasm_old_us - qasm_new_us) * SUBMISSIONS_PER_RUN / 1e3;
+
+        println!(
+            "\nissue #83 identity-path micro-benchmark \
+             ({N_GATES} gates, 8 qubits, mean over {N} calls):"
+        );
+        println!(
+            "  native clone+transpile (old): {native_old_us:8.2} us/call\n\
+             native borrow          (new): {native_new_us:8.2} us/call\n\
+             speedup                     : {:8.1}x",
+            native_old_us / native_new_us
+        );
+        println!(
+            "  qasm parse+transpile+emit (old): {qasm_old_us:8.2} us/call\n\
+             qasm String clone         (new): {qasm_new_us:8.2} us/call\n\
+             speedup                        : {:8.1}x",
+            qasm_old_us / qasm_new_us
+        );
+        println!(
+            "  extrapolated saved per training run ({} submissions): \
+             native {native_saved_ms:.2} ms, qasm {qasm_saved_ms:.2} ms",
+            SUBMISSIONS_PER_RUN as u64
         );
     }
 }

@@ -135,7 +135,7 @@ impl Observable {
     /// is public and mutable, and the `serde` `Deserialize` derive builds one
     /// straight from the wire. [`compile`](crate::QuantumModel::compile) calls
     /// this on every observable it resolves so those two routes cannot produce
-    /// a `CompiledModel` that violates C-8(b) — a `NaN` coefficient would
+    /// a `CompiledModel` that violates C-10(b) — a `NaN` coefficient would
     /// otherwise make `fitness_from_counts` return `Ok(NaN)` instead of the
     /// finite `f64` or typed error the contract promises.
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

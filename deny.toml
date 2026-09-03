@@ -19,6 +19,12 @@ ignore = [
     # (also reachable via `skip`/`step_by`). No such calls exist on pyo3
     # iterators in this workspace. Remove when the pyo3 >=0.26 upgrade lands.
     { id = "RUSTSEC-2026-0176", reason = "nth/nth_back (and skip/step_by) are never called on PyList/PyTuple iterators here" },
+    # ttf-parser is unmaintained (author states no further fixes will land;
+    # no safe upgrade exists). Pulled in transitively via
+    # ab_glyph <- plotters, and used only to parse two fixed, trusted,
+    # embedded DejaVu font files — never untrusted/external font input.
+    # Revisit if ab_glyph migrates to a maintained parser (e.g. skrifa).
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained but only parses trusted, embedded DejaVu fonts, never untrusted input; no safe upgrade available" },
 ]
 
 [licenses]
