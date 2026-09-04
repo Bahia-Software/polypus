@@ -34,9 +34,11 @@ Two independent things are measured:
 
 Results land in a timestamped folder (matching `run_benchmarks.py`):
   benchmarks/bench_YYYYMMDD_HHMMSS/
-    results.csv
+    results.csv                    timing per engine × n_qubits
+    correctness.csv                max amplitude error vs Aer per n_qubits
     qft_time_vs_qubits.png
     qft_speedup_vs_qubits.png
+    qft_correctness_vs_qubits.png
 
 Usage:
   python benchmarks/bench_qft_sweep.py                 # verify + full sweep
@@ -67,6 +69,11 @@ ENGINES = {
 }
 # Short tags for the inline speedup line.
 SHORT = {"polypus": "native", "qiskit_aer": "Aer", "qiskit_terra": "Terra"}
+
+# Correctness tolerance: the max amplitude error (polypus vs Aer) we require and
+# draw as the reference line on the correctness plot. Shared by `verify()`, the
+# per-n correctness curve, and the plot so the three never drift apart.
+TOL = 1e-9
 
 
 def load_average() -> tuple[str, str, str]:
@@ -101,6 +108,18 @@ def _aer_statevector(qc) -> np.ndarray:
     return np.asarray(aer.run(qc).result().get_statevector().data)
 
 
+def max_error_vs_aer(n: int, inverse: bool, swaps: bool) -> float:
+    """Max amplitude error between the polypus template and Aer for one config.
+
+    A single statevector on each side — O(1) circuits, cheap enough to sample at
+    every point of the timing sweep (unlike `verify`'s O(2^n) identity check)."""
+    import polypus
+
+    p_sv = np.asarray(polypus.statevector(polypus_qft(n, inverse, swaps)))
+    a_sv = _aer_statevector(qiskit_qft(n, inverse, swaps))
+    return float(np.max(np.abs(p_sv - a_sv)))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Correctness
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +138,7 @@ def _qasm_header(qasm: str) -> list[str]:
     return [ln for ln in qasm.splitlines() if ln.startswith(keep)]
 
 
-def verify(n: int, tol: float = 1e-9) -> bool:
+def verify(n: int, tol: float = TOL) -> bool:
     """Cross-validate the template against Qiskit and against analytic identities.
 
     Returns True iff every check passes. Raises AssertionError on a real
@@ -132,9 +151,7 @@ def verify(n: int, tol: float = 1e-9) -> bool:
     ok = True
     for inverse in (False, True):
         for swaps in (False, True):
-            p_sv = np.asarray(polypus.statevector(polypus_qft(n, inverse, swaps)))
-            a_sv = _aer_statevector(qiskit_qft(n, inverse, swaps))
-            err = float(np.max(np.abs(p_sv - a_sv)))
+            err = max_error_vs_aer(n, inverse, swaps)
             tag = f"inverse={str(inverse):5} swaps={str(swaps):5}"
             print(f"  polypus vs Aer  {tag}: max amplitude error {err:.2e}")
             assert err < tol, (
@@ -237,7 +254,22 @@ def save_csv(rows: list[dict], path: Path) -> None:
     print(f"  Saved: {path.name}")
 
 
-def save_plots(rows: list[dict], engines: list[str], out_dir: Path) -> None:
+def save_correctness_csv(correctness: dict[int, float], path: Path) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["n_qubits", "max_amp_error"])
+        for n in sorted(correctness):
+            w.writerow([n, f"{correctness[n]:.3e}"])
+    print(f"  Saved: {path.name}")
+
+
+def save_plots(
+    rows: list[dict],
+    engines: list[str],
+    out_dir: Path,
+    correctness: dict[int, float] | None = None,
+    durable: int | None = None,
+) -> None:
     try:
         import matplotlib
 
@@ -277,6 +309,9 @@ def save_plots(rows: list[dict], engines: list[str], out_dir: Path) -> None:
     print(f"  Saved: {dest.name}")
 
     # ── Panel 2: speedup of polypus vs each Qiskit engine ─────────────────────
+    # Log-y: the run spans ~470× down to ~0.25×, and the crossover region
+    # (0.2×–0.6×) is the whole point — on a linear axis it collapses onto the
+    # x-axis and becomes unreadable.
     fig, ax = plt.subplots(figsize=(8, 5))
     for e in engines:
         if e == "polypus":
@@ -285,16 +320,51 @@ def save_plots(rows: list[dict], engines: list[str], out_dir: Path) -> None:
         ys = [med[e][q] / med["polypus"][q] for q in xs]
         ax.plot(xs, ys, marker="o", label=f"vs {ENGINES[e]}", color=colors.get(e))
     ax.axhline(1.0, linestyle="--", color="grey", linewidth=1.0, label="parity (1×)")
+    if durable is not None:
+        ax.axvline(durable, linestyle="--", color="#d62728", linewidth=1.2)
+        ax.annotate(
+            f"durable crossover\nn={durable}",
+            xy=(durable, 1.0),
+            xytext=(6, 8),
+            textcoords="offset points",
+            color="#d62728",
+            fontsize=9,
+            ha="left",
+            va="bottom",
+        )
+    ax.set_yscale("log")
     ax.set_xlabel("n_qubits")
-    ax.set_ylabel("polypus speedup (× faster; <1 = slower)")
+    ax.set_ylabel("polypus speedup (× faster; <1 = slower, log scale)")
     ax.set_title("QFT statevector — polypus speedup vs Qiskit")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, which="both", alpha=0.3)
     ax.legend()
     fig.tight_layout()
     dest = out_dir / "qft_speedup_vs_qubits.png"
     fig.savefig(dest, dpi=150)
     plt.close(fig)
     print(f"  Saved: {dest.name}")
+
+    # ── Panel 3: correctness — max amplitude error vs Aer, per n_qubits ────────
+    if correctness:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        xs = sorted(correctness)
+        ys = [correctness[q] for q in xs]
+        ax.plot(xs, ys, marker="o", color="#1f77b4", label="max amplitude error")
+        ax.axhline(
+            TOL, linestyle="--", color="#d62728", linewidth=1.2,
+            label=f"tolerance ({TOL:.0e})",
+        )
+        ax.set_yscale("log")
+        ax.set_xlabel("n_qubits")
+        ax.set_ylabel("max |amplitude| error vs Aer (log scale)")
+        ax.set_title("QFT statevector — polypus vs Aer agreement")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        dest = out_dir / "qft_correctness_vs_qubits.png"
+        fig.savefig(dest, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {dest.name}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -323,7 +393,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--verify-only", action="store_true",
                    help="Run only the correctness checks, no timing sweep.")
     p.add_argument("--no-verify", action="store_true",
-                   help="Skip the correctness pass and only time the sweep.")
+                   help="Skip the one-off O(2^n) verify() pass. The cheap per-n "
+                   "correctness curve (error vs Aer) is still collected — it is "
+                   "independent of this flag.")
     p.add_argument("--inverse", action="store_true",
                    help="Time the inverse transform QFT† (default: forward).")
     p.add_argument("--no-swaps", action="store_true",
@@ -372,10 +444,19 @@ def main() -> None:
 
     rows: list[dict] = []
     med_by_engine: dict[str, dict[int, float]] = {e: {} for e in engines}
+    # Per-n correctness (max amplitude error vs Aer) sampled once per n — a
+    # single statevector per side, independent of the timing engines. Collected
+    # for the timed configuration (args.inverse × swaps) so the correctness plot
+    # tracks exactly what was benchmarked. This is deliberately kept separate
+    # from `--no-verify` (see below): it is cheap and its whole purpose is to
+    # make the polypus/Aer agreement visible across the sweep.
+    correctness: dict[int, float] = {}
     for n in qubits:
         gates = qiskit_qft(n, args.inverse, swaps).size()
         la1, la5, la15 = load_average()
         print(f"  n={n:>2} ({gates:>4} gates) load={la1}/{la5}/{la15}")
+        correctness[n] = max_error_vs_aer(n, args.inverse, swaps)
+        print(f"    max amplitude error vs Aer: {correctness[n]:.2e}")
         for e in engines:
             if e == "qiskit_terra" and n > args.terra_max:
                 print(f"    {ENGINES[e]:26}: skipped (n>{args.terra_max})")
@@ -441,7 +522,8 @@ def main() -> None:
     out_dir: Path = args.outdir or Path("benchmarks") / f"bench_{ts}"
     out_dir.mkdir(parents=True, exist_ok=True)
     save_csv(rows, out_dir / "results.csv")
-    save_plots(rows, engines, out_dir)
+    save_correctness_csv(correctness, out_dir / "correctness.csv")
+    save_plots(rows, engines, out_dir, correctness=correctness, durable=durable)
     print(f"\n  Output folder: {out_dir}/")
 
 
