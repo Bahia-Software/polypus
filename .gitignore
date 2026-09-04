@@ -21,6 +21,7 @@ examples/qaoa_results.csv
 examples/plots_maxcut/
 qft_results.csv
 qft*.png
+results/
 
 # SLURM / qraise job artifacts
 slurm-*.out
