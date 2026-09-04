@@ -3,7 +3,11 @@ import sys
 
 from qiskit import QuantumCircuit
 
-sys.path.append(os.getenv("HOME"))
+# Location of the `cunqa` package. Defaults to $POLYPUS_CUNQA_PATH, falling
+# back to $STORE and then $HOME so it works across install layouts.
+_cunqa_path = os.getenv("POLYPUS_CUNQA_PATH") or os.getenv("STORE") or os.getenv("HOME")
+if _cunqa_path:
+    sys.path.append(_cunqa_path)
 
 from cunqa.qjob import gather
 from cunqa.qpu import get_QPUs, qdrop, qraise, run
