@@ -58,6 +58,10 @@
 /// 64-bit complex amplitude type used throughout the simulator.
 pub type C64 = num_complex::Complex<f64>;
 
+// Machine-aware calibration of the gate-parallel threshold. Only meaningful —
+// and only compiled — when the `parallel` feature provides a path to calibrate.
+#[cfg(feature = "parallel")]
+mod calibration;
 mod error;
 mod gates;
 mod kernels;
@@ -66,6 +70,10 @@ mod rng;
 mod simulator;
 mod statevector;
 
+#[cfg(feature = "parallel")]
+pub use calibration::{
+    calibrate_and_cache, calibrate_parallel_threshold, CalibrationOutcome, CalibrationResult,
+};
 pub use error::SimError;
 pub use rng::SplitMix64;
 pub use simulator::{sample_projected, Simulator, StatevectorSimulator};
@@ -79,7 +87,14 @@ pub use statevector::Statevector;
 /// is also well below `usize::BITS`, so `1 << n` can never overflow.
 pub const MAX_QUBITS: usize = 30;
 
-/// Circuits with at least this many qubits use the parallel kernels (only when
-/// the `parallel` feature is enabled). Smaller circuits run sequentially to
-/// avoid thread-pool overhead that would dwarf the tiny workload.
+/// Static fallback for the qubit count at which circuits switch to the parallel
+/// kernels (only when the `parallel` feature is enabled). Smaller circuits run
+/// sequentially to avoid thread-pool overhead that would dwarf the tiny
+/// workload.
+///
+/// This constant is hardware-oblivious, so it is only the *fallback*: with the
+/// `parallel` feature a per-machine value measured by the `calibration` module
+/// and cached on disk supersedes it (see [`StatevectorSimulator::new`]). It is
+/// still what a process uses when no calibration has been run or the cached one
+/// was made for different hardware.
 pub(crate) const DEFAULT_PARALLEL_THRESHOLD: usize = 12;

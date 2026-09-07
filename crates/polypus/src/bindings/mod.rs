@@ -4,6 +4,7 @@ use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
 
+pub mod calibration;
 pub mod circuit;
 pub mod de;
 pub mod logging;
@@ -11,6 +12,7 @@ pub mod observable;
 pub mod pso;
 pub mod qng;
 
+use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
@@ -1211,6 +1213,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_parallel_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()

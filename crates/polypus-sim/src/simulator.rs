@@ -210,17 +210,44 @@ pub struct StatevectorSimulator {
     pub parallel_threshold: usize,
 }
 
+/// The parallel threshold a default simulator is built with. With the
+/// `parallel` feature this is the per-machine value resolved (once per process)
+/// from the on-disk calibration cache, falling back to the static
+/// [`DEFAULT_PARALLEL_THRESHOLD`](crate::DEFAULT_PARALLEL_THRESHOLD); without it
+/// there is no parallel path, so the constant is used directly.
+///
+/// Resolving here — rather than in each consumer — is deliberate: every caller
+/// that builds a default [`StatevectorSimulator`] (the `polypus.statevector`
+/// binding and the native backend both use [`StatevectorSimulator::new`]) picks
+/// up the calibrated threshold for free, and the machine-aware logic stays in
+/// this crate instead of being patched into the binding layer.
+#[cfg(feature = "parallel")]
+fn default_parallel_threshold() -> usize {
+    crate::calibration::resolve_threshold()
+}
+
+#[cfg(not(feature = "parallel"))]
+fn default_parallel_threshold() -> usize {
+    crate::DEFAULT_PARALLEL_THRESHOLD
+}
+
 impl Default for StatevectorSimulator {
     fn default() -> Self {
         StatevectorSimulator {
             max_qubits: crate::MAX_QUBITS,
-            parallel_threshold: crate::DEFAULT_PARALLEL_THRESHOLD,
+            parallel_threshold: default_parallel_threshold(),
         }
     }
 }
 
 impl StatevectorSimulator {
     /// A simulator with default limits.
+    ///
+    /// With the `parallel` feature, `parallel_threshold` is the machine-aware
+    /// value from the calibration cache when one is present and valid for this
+    /// hardware, otherwise the static
+    /// [`DEFAULT_PARALLEL_THRESHOLD`](crate::DEFAULT_PARALLEL_THRESHOLD). The
+    /// cache is consulted at most once per process (memoised), never per gate.
     pub fn new() -> Self {
         Self::default()
     }
