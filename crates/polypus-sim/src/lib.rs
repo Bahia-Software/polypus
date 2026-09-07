@@ -72,7 +72,8 @@ mod statevector;
 
 #[cfg(feature = "parallel")]
 pub use calibration::{
-    calibrate_and_cache, calibrate_parallel_threshold, CalibrationOutcome, CalibrationResult,
+    calibrate_and_cache, calibrate_parallel_threshold, resolved_fallback_reason,
+    CalibrationOutcome, CalibrationResult, FallbackReason,
 };
 pub use error::SimError;
 pub use rng::SplitMix64;

@@ -625,6 +625,15 @@ pub fn run_quantum_circuit<'py>(
         nodes,
         cores_per_qpu,
     )?;
+    // Only the native statevector backend consults the gate-parallel threshold,
+    // so surface the one-time default-visible warning only when this run
+    // actually resolves to it — never for Aer/CUNQA/QMIO. Gated on the resolved
+    // `BackendConfig`, not the raw `backend` string, so it tracks the real
+    // dispatch (e.g. `backend="polypus"` under `infrastructure="cunqa"`, which
+    // Aer-simulates, correctly does not warn).
+    if matches!(backend_config, BackendConfig::LocalNative) {
+        calibration::warn_if_using_default_threshold(qc.py())?;
+    }
     let config = ExecutionConfig {
         id: id.clone(),
         shots,

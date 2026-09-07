@@ -158,6 +158,10 @@ pub fn statevector<'py>(
     params: Option<Vec<f64>>,
 ) -> PyResult<Bound<'py, PyArray1<polypus_sim::C64>>> {
     let params = params.unwrap_or_default();
+    // This entry point is always the native statevector path, so surface the
+    // one-time, default-visible warning if the gate-parallel threshold fell back
+    // to the static default (uncalibrated machine, or stale calibration).
+    super::calibration::warn_if_using_default_threshold(qc.py())?;
     // Binding stays on this side of the release: it is O(gates), allocates
     // nothing of size `2^n`, and reads the circuit through the `PyRef`.
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;

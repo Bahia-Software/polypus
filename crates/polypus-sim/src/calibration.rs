@@ -272,11 +272,23 @@ fn read_cache() -> Option<CachedCalibration> {
     read_cache_from(&cache_file()?)
 }
 
-/// Why the runtime resolver fell back to the static default.
+/// Why the runtime resolver fell back to the static
+/// [`DEFAULT_PARALLEL_THRESHOLD`] instead of a calibrated value.
+///
+/// Public because a caller outside this crate (the `polypus` bindings layer)
+/// surfaces it to the user — see [`resolved_fallback_reason`], which returns
+/// `Some(reason)` on a fallback and `None` when the threshold came from a cache
+/// valid for this hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fallback {
+pub enum FallbackReason {
+    /// No usable calibration cache was found for this machine.
     NotCalibrated,
-    HardwareChanged { cached_threads: usize },
+    /// A cache existed but was made for a different thread count (the machine, or
+    /// `RAYON_NUM_THREADS`, changed since calibration).
+    HardwareChanged {
+        /// Thread count the stale cache was calibrated for.
+        cached_threads: usize,
+    },
 }
 
 /// The runtime resolution, pure over `(cache, current thread count)` so it is
@@ -284,7 +296,7 @@ enum Fallback {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
     Cached(usize),
-    Fallback(Fallback),
+    Fallback(FallbackReason),
 }
 
 /// Decide the threshold from a (possibly absent) cache and the current thread
@@ -292,37 +304,51 @@ enum Decision {
 fn decide(cache: Option<CachedCalibration>, current_threads: usize) -> Decision {
     match cache {
         Some(c) if c.num_threads == current_threads => Decision::Cached(c.threshold),
-        Some(c) => Decision::Fallback(Fallback::HardwareChanged {
+        Some(c) => Decision::Fallback(FallbackReason::HardwareChanged {
             cached_threads: c.num_threads,
         }),
-        None => Decision::Fallback(Fallback::NotCalibrated),
+        None => Decision::Fallback(FallbackReason::NotCalibrated),
     }
 }
 
-/// Process-wide memo of the resolved threshold: filled once, reused for the life
-/// of the process.
-static RESOLVED_THRESHOLD: OnceLock<usize> = OnceLock::new();
-
-/// Threshold the default [`StatevectorSimulator`](crate::StatevectorSimulator)
-/// uses, resolved **once per process** and memoised.
+/// The once-per-process resolution: the threshold in force, plus *why* it was
+/// chosen (`None` = it came from a cache valid for this hardware; `Some` = a
+/// fallback to the static default, with the reason).
 ///
-/// On the first call it reads the on-disk cache and compares its hardware
-/// fingerprint (`rayon::current_num_threads()`) with this machine's:
-/// * match → the calibrated threshold;
-/// * mismatch → [`DEFAULT_PARALLEL_THRESHOLD`] plus a `warn!` that the hardware
-///   changed since calibration (recalibrate via
-///   `polypus.calibrate_parallel_threshold(force=True)`);
-/// * no cache → [`DEFAULT_PARALLEL_THRESHOLD`] plus an `info!` pointing at
-///   calibration.
+/// Both fields are computed together in one place so a caller reading the reason
+/// ([`resolved_fallback_reason`]) can never observe a threshold that disagrees
+/// with it — the two answers come from the same cache read and the same decision.
+#[derive(Debug, Clone, Copy)]
+struct Resolution {
+    threshold: usize,
+    fallback: Option<FallbackReason>,
+}
+
+/// Process-wide memo of the resolution: filled once, reused for the life of the
+/// process.
+static RESOLUTION: OnceLock<Resolution> = OnceLock::new();
+
+/// Resolve (once per process) and memoise the threshold together with its
+/// fallback reason.
+///
+/// It reads the on-disk cache and compares its hardware fingerprint
+/// (`rayon::current_num_threads()`) with this machine's:
+/// * match → the calibrated threshold, no fallback;
+/// * mismatch → [`DEFAULT_PARALLEL_THRESHOLD`] plus a `warn!` and
+///   [`FallbackReason::HardwareChanged`];
+/// * no cache → [`DEFAULT_PARALLEL_THRESHOLD`] plus an `info!` and
+///   [`FallbackReason::NotCalibrated`].
 ///
 /// It never calibrates here: measurement is an explicit act
 /// ([`calibrate_and_cache`], run by `install.sh` or
 /// `polypus.calibrate_parallel_threshold()`), so simulation never pays a
 /// surprise stall and a cache miss degrades safely to today's behaviour. The
 /// once-per-process guard mirrors the `LOGGER_INSTALLED` guard in the bindings —
-/// resolve once, never per circuit or per gate.
-pub(crate) fn resolve_threshold() -> usize {
-    *RESOLVED_THRESHOLD.get_or_init(|| {
+/// resolve once, never per circuit or per gate. The `log` records here are only
+/// visible with `polypus.init_logger()`; the bindings additionally surface a
+/// fallback through Python's `warnings`, which is visible by default.
+fn resolution() -> Resolution {
+    *RESOLUTION.get_or_init(|| {
         let current = rayon::current_num_threads();
         match decide(read_cache(), current) {
             Decision::Cached(threshold) => {
@@ -330,28 +356,50 @@ pub(crate) fn resolve_threshold() -> usize {
                     "using cached gate-parallel threshold {threshold} qubit(s) for \
                      {current} thread(s)"
                 );
-                threshold
+                Resolution {
+                    threshold,
+                    fallback: None,
+                }
             }
-            Decision::Fallback(Fallback::HardwareChanged { cached_threads }) => {
-                log::warn!(
-                    "gate-parallel calibration was made for {cached_threads} thread(s) but this \
-                     machine has {current}; using the default threshold \
-                     {DEFAULT_PARALLEL_THRESHOLD}. Recalibrate with \
-                     polypus.calibrate_parallel_threshold(force=True)."
-                );
-                DEFAULT_PARALLEL_THRESHOLD
-            }
-            Decision::Fallback(Fallback::NotCalibrated) => {
-                log::info!(
-                    "no gate-parallel calibration cached; using the default threshold \
-                     {DEFAULT_PARALLEL_THRESHOLD}. Run install.sh or \
-                     polypus.calibrate_parallel_threshold() to tune it for this machine \
-                     (requires polypus.init_logger() to be visible)."
-                );
-                DEFAULT_PARALLEL_THRESHOLD
+            Decision::Fallback(reason) => {
+                match reason {
+                    FallbackReason::HardwareChanged { cached_threads } => log::warn!(
+                        "gate-parallel calibration was made for {cached_threads} thread(s) but \
+                         this machine has {current}; using the default threshold \
+                         {DEFAULT_PARALLEL_THRESHOLD}. Recalibrate with \
+                         polypus.calibrate_parallel_threshold(force=True)."
+                    ),
+                    FallbackReason::NotCalibrated => log::info!(
+                        "no gate-parallel calibration cached; using the default threshold \
+                         {DEFAULT_PARALLEL_THRESHOLD}. Run install.sh or \
+                         polypus.calibrate_parallel_threshold() to tune it for this machine \
+                         (requires polypus.init_logger() to be visible)."
+                    ),
+                }
+                Resolution {
+                    threshold: DEFAULT_PARALLEL_THRESHOLD,
+                    fallback: Some(reason),
+                }
             }
         }
     })
+}
+
+/// Threshold the default [`StatevectorSimulator`](crate::StatevectorSimulator)
+/// uses, resolved **once per process** and memoised (see [`resolution`]).
+pub(crate) fn resolve_threshold() -> usize {
+    resolution().threshold
+}
+
+/// Why the process-wide threshold fell back to the static default, or `None`
+/// when it came from a cache valid for this hardware.
+///
+/// Shares the same once-per-process resolution as [`resolve_threshold`] (reading
+/// it here triggers that resolution if it has not happened yet), so the reason
+/// always matches the threshold actually in force. Intended for the `polypus`
+/// bindings, which turn a `Some(..)` into a default-visible Python warning.
+pub fn resolved_fallback_reason() -> Option<FallbackReason> {
+    resolution().fallback
 }
 
 /// The threshold to reuse without measuring, or `None` if a fresh measurement is
@@ -515,9 +563,12 @@ mod tests {
         assert_eq!(decide(Some(cached(14, 8)), 8), Decision::Cached(14));
         assert_eq!(
             decide(Some(cached(14, 8)), 32),
-            Decision::Fallback(Fallback::HardwareChanged { cached_threads: 8 })
+            Decision::Fallback(FallbackReason::HardwareChanged { cached_threads: 8 })
         );
-        assert_eq!(decide(None, 8), Decision::Fallback(Fallback::NotCalibrated));
+        assert_eq!(
+            decide(None, 8),
+            Decision::Fallback(FallbackReason::NotCalibrated)
+        );
     }
 
     #[test]
