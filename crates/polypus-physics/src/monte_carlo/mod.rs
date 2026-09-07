@@ -800,8 +800,10 @@ mod tests {
             let title = format!(
                 "PDD - H2O, {energy_kev:.0} keV, campo {field_cm:.0}x{field_cm:.0} cm, maniquí {depth_cm:.0} cm"
             );
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
             let filename = format!(
-                "/home/uxia/polypus/crates/polypus-physics/graphics/pdd_rust_{energy_kev:.0}kev_{field_cm:.0}x{field_cm:.0}cm_{depth_cm:.0}cm_{voxel_cm:.2}cmvoxel.png"
+                "{graphics_dir}/pdd_rust_{energy_kev:.0}kev_{field_cm:.0}x{field_cm:.0}cm_{depth_cm:.0}cm_{voxel_cm:.2}cmvoxel.png"
             );
 
             crate::monte_carlo::voxel_plots::plot_relative_pdd(
@@ -1084,15 +1086,18 @@ mod tests {
         assert_eq!(pdd.len(), 150);
 
         #[cfg(feature = "plotters")]
-        crate::monte_carlo::voxel_plots::plot_relative_pdd(
-            &pdd,
-            voxel_size_m,
-            "PDD - H2O, 100 keV, haz paralelo 16x16 cm (equivalente Geant4 B1)",
-            std::path::Path::new(
-                "/home/uxia/polypus/crates/polypus-physics/graphics/pdd_geant4_equivalente.png",
-            ),
-        )
-        .unwrap();
+        {
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_geant4_equivalente.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                "PDD - H2O, 100 keV, haz paralelo 16x16 cm (equivalente Geant4 B1)",
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -1151,14 +1156,15 @@ mod tests {
         #[cfg(feature = "plotters")]
         {
             let title = "PDD - H2O, 100 kVp (Kramers, corte 15 keV), campo 10x10 cm, maniquí 20 cm";
-            let filename =
-                "/home/uxia/polypus/crates/polypus-physics/graphics/pdd_rust_100kvp_kramers.png";
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_rust_100kvp_kramers.png");
 
             crate::monte_carlo::voxel_plots::plot_relative_pdd(
                 &pdd,
                 voxel_size_m,
                 title,
-                std::path::Path::new(filename),
+                std::path::Path::new(&filename),
             )
             .unwrap();
 
@@ -1219,14 +1225,15 @@ mod tests {
         #[cfg(feature = "plotters")]
         {
             let title = "PDD - Pb, 100 kVp (Kramers, corte 15 keV), campo 2x2 cm, maniquí 5 mm";
-            let filename =
-                "/home/uxia/polypus/crates/polypus-physics/graphics/pdd_rust_100kvp_pb.png";
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_rust_100kvp_pb.png");
 
             crate::monte_carlo::voxel_plots::plot_relative_pdd(
                 &pdd,
                 voxel_size_m,
                 title,
-                std::path::Path::new(filename),
+                std::path::Path::new(&filename),
             )
             .unwrap();
 
