@@ -299,11 +299,11 @@ fn measure_session_threshold() -> usize {
 
 /// Measure the gate-parallelism crossover on this machine.
 ///
-/// Runs [`CALIBRATION_SESSIONS`] independent sessions — each probing
-/// [`CALIBRATION_SIZES`] with the representative kernel sequence
-/// ([`apply_probe_sequence`], median of [`CALIBRATION_SAMPLES`] samples per
+/// Runs `CALIBRATION_SESSIONS` independent sessions — each probing
+/// `CALIBRATION_SIZES` with the representative kernel sequence
+/// (`apply_probe_sequence`, median of `CALIBRATION_SAMPLES` samples per
 /// point) and choosing the smallest size where parallel is at least
-/// [`MIN_SPEEDUP`]× faster — and returns the **median** of the thresholds they
+/// `MIN_SPEEDUP`× faster — and returns the **median** of the thresholds they
 /// chose, so one noisy session cannot swing the result (a parallelism-disabling
 /// threshold is returned when the sessions agree nothing wins). **Pure
 /// measurement**: it does not read or write the cache (see [`calibrate_and_cache`])
@@ -402,7 +402,7 @@ fn merged_cache(
 }
 
 /// Why the runtime resolver fell back to the static
-/// [`DEFAULT_PARALLEL_THRESHOLD`] instead of a calibrated value.
+/// `DEFAULT_PARALLEL_THRESHOLD` instead of a calibrated value.
 ///
 /// Public because a caller outside this crate (the `polypus` bindings layer)
 /// surfaces it to the user — see [`resolved_fallback_reason`], which returns
@@ -416,7 +416,7 @@ pub enum FallbackReason {
     /// never been calibrated. Contrast a cache that simply lacks an entry for the
     /// current thread count while holding others — a routine event on a shared
     /// node whose jobs get different CPU allotments — which is only logged at
-    /// `info!` and is **not** reported as a fallback (see [`resolution`]).
+    /// `info!` and is **not** reported as a fallback (see `resolution`).
     NotCalibrated,
     /// A cache existed but was made for a different thread count.
     ///
@@ -425,7 +425,7 @@ pub enum FallbackReason {
     /// absent entry (handled as the informational size-uncalibrated case), not a
     /// fallback. The variant is retained because it is part of the crate's public
     /// surface and because a future, richer hardware fingerprint (see the
-    /// single-node limitation on [`CachedCalibration`]) would revive a genuine
+    /// single-node limitation on `CachedCalibration`) would revive a genuine
     /// "same thread count, different machine" mismatch that belongs here.
     HardwareChanged {
         /// Thread count the stale cache was calibrated for.
@@ -571,7 +571,7 @@ pub(crate) fn resolve_threshold() -> usize {
 /// entry valid for this thread count, or the routine case where the machine is
 /// calibrated for other thread counts but not this one (informational only).
 ///
-/// Shares the same once-per-process resolution as [`resolve_threshold`] (reading
+/// Shares the same once-per-process resolution as `resolve_threshold` (reading
 /// it here triggers that resolution if it has not happened yet), so the reason
 /// always matches the threshold actually in force. Intended for the `polypus`
 /// bindings, which turn a `Some(..)` into a default-visible Python warning.
@@ -602,14 +602,14 @@ fn threshold_to_reuse(
 /// is reused as-is: nothing is measured and `duration` is zero. Otherwise the
 /// crossover is measured and merged into the cache — the freshly measured thread
 /// count's entry is inserted or updated while every other thread count's entry is
-/// preserved (see [`merged_cache`]), so calibrating one job size never drops
+/// preserved (see `merged_cache`), so calibrating one job size never drops
 /// another's. A cache that cannot be written (read-only filesystem, container,
 /// CI) is **not** an error: the measured threshold is still returned, with
 /// `cache_written = false`, so this process runs calibrated even though the next
 /// one will not benefit.
 ///
 /// Intended to run **before any simulation** — e.g. the first line of a SLURM
-/// script — because the per-process resolver ([`resolve_threshold`]) reads the
+/// script — because the per-process resolver (`resolve_threshold`) reads the
 /// cache once and memoises it, so a calibration performed after the first
 /// simulator is built will only be picked up by later processes.
 pub fn calibrate_and_cache(force: bool) -> CalibrationOutcome {

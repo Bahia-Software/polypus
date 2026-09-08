@@ -245,9 +245,8 @@ impl StatevectorSimulator {
     ///
     /// With the `parallel` feature, `parallel_threshold` is the machine-aware
     /// value from the calibration cache when one is present and valid for this
-    /// hardware, otherwise the static
-    /// [`DEFAULT_PARALLEL_THRESHOLD`](crate::DEFAULT_PARALLEL_THRESHOLD). The
-    /// cache is consulted at most once per process (memoised), never per gate.
+    /// hardware, otherwise the static `DEFAULT_PARALLEL_THRESHOLD`. The cache is
+    /// consulted at most once per process (memoised), never per gate.
     pub fn new() -> Self {
         Self::default()
     }
