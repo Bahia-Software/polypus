@@ -220,6 +220,32 @@ print('  polypus_python: OK')
 " || error "Installation verification failed."
 success "All symbols present."
 
+# ── 8b. Calibrate gate-parallelism threshold (release builds only) ────────────
+# The native statevector simulator switches its gate kernels to the rayon
+# parallel path at a machine-specific qubit count. Measure it once now (well
+# under a second) and cache it on disk, so every later run reads the cached
+# value instead of the hardware-oblivious default. Only release builds are
+# perf-representative, so debug builds are left to the runtime default. Fails
+# safe: a read-only cache dir (container/CI) is reported, never fatal — the
+# Rust side returns cache_written=False rather than raising, and the `if`
+# guard keeps `set -e` from aborting the install on any unexpected error.
+if [[ "$BUILD_MODE" == "release" ]]; then
+    info "Calibrating gate-parallelism threshold for this machine..."
+    if python -c "
+import polypus
+r = polypus.calibrate_parallel_threshold(force=True)
+where = r['cache_path'] if r['cache_written'] else 'not persisted (cache dir not writable)'
+print(f\"  threshold={r['threshold']} qubits, threads={r['num_threads']}, \"
+      f\"measured in {r['duration_secs']:.2f}s, cache: {where}\")
+"; then
+        success "Gate-parallelism threshold calibrated."
+    else
+        warn "Calibration step failed; the simulator will fall back to its default threshold."
+    fi
+else
+    info "Skipping gate-parallelism calibration (dev build is not perf-representative)."
+fi
+
 # ── 9. Tests ─────────────────────────────────────────────────────────────────
 if [[ "$RUN_TESTS" != "none" ]]; then
     # Ensure pytest is available

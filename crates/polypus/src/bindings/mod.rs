@@ -4,6 +4,7 @@ use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
 
+pub mod calibration;
 pub mod circuit;
 pub mod de;
 pub mod logging;
@@ -11,6 +12,7 @@ pub mod observable;
 pub mod pso;
 pub mod qng;
 
+use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
@@ -623,6 +625,15 @@ pub fn run_quantum_circuit<'py>(
         nodes,
         cores_per_qpu,
     )?;
+    // Only the native statevector backend consults the gate-parallel threshold,
+    // so surface the one-time default-visible warning only when this run
+    // actually resolves to it — never for Aer/CUNQA/QMIO. Gated on the resolved
+    // `BackendConfig`, not the raw `backend` string, so it tracks the real
+    // dispatch (e.g. `backend="polypus"` under `infrastructure="cunqa"`, which
+    // Aer-simulates, correctly does not warn).
+    if matches!(backend_config, BackendConfig::LocalNative) {
+        calibration::warn_if_using_default_threshold(qc.py())?;
+    }
     let config = ExecutionConfig {
         id: id.clone(),
         shots,
@@ -1211,6 +1222,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_parallel_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()
