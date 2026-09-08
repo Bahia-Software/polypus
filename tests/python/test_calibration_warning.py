@@ -37,14 +37,14 @@ CAL_MARKER = "calibrate_parallel_threshold"
 
 # A 2-qubit Bell circuit as OpenQASM 2.0, usable by both the native and the Aer
 # backends of run_quantum_circuit (passed as a string → BoundCircuit::Qasm2).
-_BELL_QASM = '''OPENQASM 2.0;
+_BELL_QASM = """OPENQASM 2.0;
 include "qelib1.inc";
 qreg q[2];
 creg c[2];
 h q[0];
 cx q[0],q[1];
 measure q -> c;
-'''
+"""
 
 
 def _run_child(code: str, cache_home) -> subprocess.CompletedProcess:

@@ -126,11 +126,7 @@ def max_error_vs_aer(n: int, inverse: bool, swaps: bool) -> float:
 def _qasm_body(qasm: str) -> list[str]:
     """Gate lines of an OpenQASM 2.0 program, dropping header/declarations."""
     skip = ("OPENQASM", "include", "qreg", "creg")
-    return [
-        ln
-        for ln in qasm.splitlines()
-        if ln.strip() and not ln.startswith(skip)
-    ]
+    return [ln for ln in qasm.splitlines() if ln.strip() and not ln.startswith(skip)]
 
 
 def _qasm_header(qasm: str) -> list[str]:
@@ -228,8 +224,14 @@ def _run_isolated_engine(engine: str, n: int, inverse: bool, swaps: bool, repeat
 def bench_isolated(engine, n, inverse, swaps, repeat) -> list[float]:
     """Run one engine's timing loop in a brand-new subprocess (see docstring)."""
     cmd = [
-        sys.executable, __file__, "--engine", engine, "--qubits", str(n),
-        "--repeat", str(repeat),
+        sys.executable,
+        __file__,
+        "--engine",
+        engine,
+        "--qubits",
+        str(n),
+        "--repeat",
+        str(repeat),
     ]
     if inverse:
         cmd.append("--inverse")
@@ -244,8 +246,16 @@ def bench_isolated(engine, n, inverse, swaps, repeat) -> list[float]:
 # ══════════════════════════════════════════════════════════════════════════════
 def save_csv(rows: list[dict], path: Path) -> None:
     fieldnames = [
-        "n_qubits", "gates", "engine", "min_s", "median_s", "max_s",
-        "repeat", "loadavg_1", "loadavg_5", "loadavg_15",
+        "n_qubits",
+        "gates",
+        "engine",
+        "min_s",
+        "median_s",
+        "max_s",
+        "repeat",
+        "loadavg_1",
+        "loadavg_5",
+        "loadavg_15",
     ]
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -351,7 +361,10 @@ def save_plots(
         ys = [correctness[q] for q in xs]
         ax.plot(xs, ys, marker="o", color="#1f77b4", label="max amplitude error")
         ax.axhline(
-            TOL, linestyle="--", color="#d62728", linewidth=1.2,
+            TOL,
+            linestyle="--",
+            color="#d62728",
+            linewidth=1.2,
             label=f"tolerance ({TOL:.0e})",
         )
         ax.set_yscale("log")
@@ -376,35 +389,78 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "--qubits", nargs="+", type=int, default=None, metavar="N",
+        "--qubits",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="N",
         help="Explicit qubit counts. Default sweeps 4..26 with extra "
         "resolution near the reported ~26q native/Aer crossover.",
     )
-    p.add_argument("--repeat", type=int, default=5, metavar="N",
-                   help="Timed rounds per engine per point (default: 5).")
-    p.add_argument("--quick", action="store_true",
-                   help="Fast sweep: qubits=[4,8,12,16,20], repeat=3.")
-    p.add_argument("--no-terra", action="store_true",
-                   help="Skip Terra's pure Statevector reference engine.")
-    p.add_argument("--terra-max", type=int, default=22, metavar="N",
-                   help="Cap Terra to n<=N (it is ~4x slower per qubit; default: 22).")
-    p.add_argument("--verify-qubits", type=int, default=8, metavar="N",
-                   help="Qubit count for the correctness pass (default: 8).")
-    p.add_argument("--verify-only", action="store_true",
-                   help="Run only the correctness checks, no timing sweep.")
-    p.add_argument("--no-verify", action="store_true",
-                   help="Skip the one-off O(2^n) verify() pass. The cheap per-n "
-                   "correctness curve (error vs Aer) is still collected — it is "
-                   "independent of this flag.")
-    p.add_argument("--inverse", action="store_true",
-                   help="Time the inverse transform QFT† (default: forward).")
-    p.add_argument("--no-swaps", action="store_true",
-                   help="Time without the qubit-reversal swap network.")
-    p.add_argument("--outdir", type=Path, default=None, metavar="DIR",
-                   help="Output folder (default: benchmarks/bench_TIMESTAMP/).")
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Timed rounds per engine per point (default: 5).",
+    )
+    p.add_argument(
+        "--quick",
+        action="store_true",
+        help="Fast sweep: qubits=[4,8,12,16,20], repeat=3.",
+    )
+    p.add_argument(
+        "--no-terra",
+        action="store_true",
+        help="Skip Terra's pure Statevector reference engine.",
+    )
+    p.add_argument(
+        "--terra-max",
+        type=int,
+        default=22,
+        metavar="N",
+        help="Cap Terra to n<=N (it is ~4x slower per qubit; default: 22).",
+    )
+    p.add_argument(
+        "--verify-qubits",
+        type=int,
+        default=8,
+        metavar="N",
+        help="Qubit count for the correctness pass (default: 8).",
+    )
+    p.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Run only the correctness checks, no timing sweep.",
+    )
+    p.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip the one-off O(2^n) verify() pass. The cheap per-n "
+        "correctness curve (error vs Aer) is still collected — it is "
+        "independent of this flag.",
+    )
+    p.add_argument(
+        "--inverse",
+        action="store_true",
+        help="Time the inverse transform QFT† (default: forward).",
+    )
+    p.add_argument(
+        "--no-swaps",
+        action="store_true",
+        help="Time without the qubit-reversal swap network.",
+    )
+    p.add_argument(
+        "--outdir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Output folder (default: benchmarks/bench_TIMESTAMP/).",
+    )
     # Internal: run a single engine in isolation (see bench_isolated).
-    p.add_argument("--engine", choices=list(ENGINES), default=None,
-                   help=argparse.SUPPRESS)
+    p.add_argument(
+        "--engine", choices=list(ENGINES), default=None, help=argparse.SUPPRESS
+    )
     return p.parse_args()
 
 
@@ -464,12 +520,20 @@ def main() -> None:
             xs = bench_isolated(e, n, args.inverse, swaps, args.repeat)
             lo, md, hi = min(xs), statistics.median(xs), max(xs)
             med_by_engine[e][n] = md
-            rows.append({
-                "n_qubits": n, "gates": gates, "engine": e,
-                "min_s": round(lo, 6), "median_s": round(md, 6),
-                "max_s": round(hi, 6), "repeat": args.repeat,
-                "loadavg_1": la1, "loadavg_5": la5, "loadavg_15": la15,
-            })
+            rows.append(
+                {
+                    "n_qubits": n,
+                    "gates": gates,
+                    "engine": e,
+                    "min_s": round(lo, 6),
+                    "median_s": round(md, 6),
+                    "max_s": round(hi, 6),
+                    "repeat": args.repeat,
+                    "loadavg_1": la1,
+                    "loadavg_5": la5,
+                    "loadavg_15": la15,
+                }
+            )
             print(
                 f"    {ENGINES[e]:26}: {lo * 1e3:9.3f} / {md * 1e3:9.3f} / "
                 f"{hi * 1e3:9.3f} ms (min/median/max)"
@@ -479,7 +543,8 @@ def main() -> None:
             base = med_by_engine["polypus"][n]
             parts = [
                 f"vs {SHORT[e]} {med_by_engine[e][n] / base:5.2f}x"
-                for e in engines if e != "polypus" and n in med_by_engine[e]
+                for e in engines
+                if e != "polypus" and n in med_by_engine[e]
             ]
             print(f"    polypus speedup: {' · '.join(parts)}")
 
@@ -489,17 +554,21 @@ def main() -> None:
     # thread-pool spin-up near the native auto-parallel threshold).
     print("\n── polypus vs Aer statevector ──")
     shared = [
-        n for n in qubits
+        n
+        for n in qubits
         if n in med_by_engine["polypus"] and n in med_by_engine["qiskit_aer"]
     ]
-    speedup = {n: med_by_engine["qiskit_aer"][n] / med_by_engine["polypus"][n]
-               for n in shared}
+    speedup = {
+        n: med_by_engine["qiskit_aer"][n] / med_by_engine["polypus"][n] for n in shared
+    }
     durable = None
     for i, n in enumerate(shared):
         if all(speedup[m] < 1.0 for m in shared[i:]):
             durable = n
             break
-    transient = [n for n in shared if speedup[n] < 1.0 and (durable is None or n < durable)]
+    transient = [
+        n for n in shared if speedup[n] < 1.0 and (durable is None or n < durable)
+    ]
     for n in shared:
         flag = ""
         if n == durable:
@@ -508,14 +577,18 @@ def main() -> None:
             flag = "  (transient dip)"
         print(f"  n={n:>2}: {speedup[n]:6.2f}x{flag}")
     if durable is not None:
-        print(f"\n  Native statevector falls durably below Aer at n={durable} "
-              f"(and stays below through n={shared[-1]}).")
+        print(
+            f"\n  Native statevector falls durably below Aer at n={durable} "
+            f"(and stays below through n={shared[-1]})."
+        )
     else:
         print("\n  Native statevector stayed faster than Aer across the whole sweep.")
     if transient:
-        print(f"  Transient sub-1x dip(s) at n={transient} — likely one-off "
-              f"thread-pool spin-up at the native auto-parallel threshold, not "
-              f"the memory-bound crossover.")
+        print(
+            f"  Transient sub-1x dip(s) at n={transient} — likely one-off "
+            f"thread-pool spin-up at the native auto-parallel threshold, not "
+            f"the memory-bound crossover."
+        )
 
     # ── Persist ───────────────────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
