@@ -6,9 +6,10 @@
 //! *machine* — core count, memory bandwidth, cache — not just on `n`. Pinning it
 //! at a constant makes the native simulator go parallel too late on a big node
 //! (measurably slower than Qiskit Aer around n = 12–18) or too eagerly on a
-//! small one. This module measures that crossover once, caches it on disk keyed
-//! by a hardware fingerprint, and reuses it across processes — the same "wisdom"
-//! mechanism FFTW uses.
+//! small one. This module measures that crossover, caches it on disk keyed by
+//! rayon thread count — one entry per thread count the machine is calibrated at,
+//! since a single SLURM node hands its jobs different CPU allotments — and reuses
+//! it across processes, the same "wisdom" mechanism FFTW uses.
 //!
 //! Everything here is gated behind the `parallel` feature: without the rayon
 //! kernels there is no parallel path to calibrate, so the whole notion is moot
@@ -20,8 +21,8 @@
 //! Measurement is an **explicit** act — [`calibrate_and_cache`], driven by
 //! `install.sh` or `polypus.calibrate_parallel_threshold()`. The per-process
 //! runtime path ([`resolve_threshold`]) never measures: it reads the cache once
-//! and, on a miss or a hardware mismatch, degrades to the static default rather
-//! than stalling a user's first circuit for a second while it times kernels.
+//! and, when it holds no entry for this thread count, degrades to the static
+//! default rather than stalling a user's first circuit for a second timing kernels.
 //! That keeps the fallback exactly as fast as today's behaviour and makes a
 //! calibration the caller's deliberate choice (e.g. the first line of a SLURM
 //! script, before any circuit runs).
@@ -55,6 +56,7 @@
 //! `polypus-logger`) and stay silent until the application installs a sink —
 //! from Python, `polypus.init_logger()` once per process.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -99,8 +101,12 @@ const MIN_SPEEDUP: f64 = 1.15;
 const CALIBRATION_SESSIONS: usize = 3;
 
 /// Schema version of the on-disk cache. A file written by a different layout is
-/// ignored (treated as absent) rather than mis-parsed.
-const CACHE_SCHEMA: u32 = 1;
+/// ignored (treated as absent) rather than mis-parsed. Bumped to `2` when the
+/// payload changed from a single flat `(threshold, num_threads)` to a
+/// thread-count → threshold map: a `schema = 1` file is therefore treated as
+/// absent, costing at worst one ~1s recalibration of the current size — no
+/// migration path is warranted for a cache that is cheap to rebuild.
+const CACHE_SCHEMA: u32 = 2;
 
 /// Threshold meaning "never take the gate-parallel path": one past the qubit
 /// ceiling, so no runnable circuit (`n <= MAX_QUBITS`) reaches it. Chosen when
@@ -146,11 +152,28 @@ pub struct CalibrationOutcome {
 }
 
 /// On-disk cache payload. Small and forward-guarded by `schema`.
+///
+/// [`entries`](Self::entries) maps a rayon thread count to the gate-parallel
+/// threshold calibrated for it, e.g. `{"8": 16, "32": 18}` on disk. One entry
+/// per distinct thread count the machine has been calibrated at — a single
+/// SLURM node hands its jobs different CPU allotments (`--cpus-per-task`), and
+/// `rayon::current_num_threads()` honours the cgroup limit, so the *same* node
+/// legitimately calibrates several thread counts. A flat single-entry payload
+/// (the `schema = 1` layout) would let each new job size overwrite the last, so
+/// every size change would look like a hardware change and fall back to the
+/// static default; a map keeps every size's result side by side instead.
+///
+/// **Known limitation (single-node assumption):** the only key is the thread
+/// count. If this cluster ever grew heterogeneous nodes, two different nodes that
+/// happened to run with the same thread count would share — and clobber — one
+/// entry, since nothing here distinguishes them. There is exactly one node today
+/// (`sinfo` confirms), so this is not resolved; a richer fingerprint (CPU model,
+/// cache sizes) would be the fix if that changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CachedCalibration {
     schema: u32,
-    threshold: usize,
-    num_threads: usize,
+    /// Rayon thread count → calibrated gate-parallel threshold.
+    entries: HashMap<usize, usize>,
 }
 
 /// One size's median timings, nanoseconds per gate application.
@@ -359,6 +382,25 @@ fn read_cache() -> Option<CachedCalibration> {
     read_cache_from(&cache_file()?)
 }
 
+/// Fold a freshly measured `num_threads → threshold` result into whatever the
+/// cache already holds, inserting or updating **only** that thread count's entry
+/// and preserving every other. `existing = None` — no cache, or one whose schema
+/// this build does not understand (e.g. the flat `schema = 1` layout) — starts a
+/// fresh map. Pure over its inputs, so the "calibrating size B must not drop size
+/// A" invariant is unit-tested without touching the clock or disk.
+fn merged_cache(
+    existing: Option<CachedCalibration>,
+    num_threads: usize,
+    threshold: usize,
+) -> CachedCalibration {
+    let mut entries = existing.map(|c| c.entries).unwrap_or_default();
+    entries.insert(num_threads, threshold);
+    CachedCalibration {
+        schema: CACHE_SCHEMA,
+        entries,
+    }
+}
+
 /// Why the runtime resolver fell back to the static
 /// [`DEFAULT_PARALLEL_THRESHOLD`] instead of a calibrated value.
 ///
@@ -368,10 +410,23 @@ fn read_cache() -> Option<CachedCalibration> {
 /// valid for this hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FallbackReason {
-    /// No usable calibration cache was found for this machine.
+    /// No usable calibration cache was found for this machine at all — the file
+    /// is absent, unreadable, of an unknown schema, or holds no entries. This is
+    /// the *serious* case (`warn!` + a Python `UserWarning`): the machine has
+    /// never been calibrated. Contrast a cache that simply lacks an entry for the
+    /// current thread count while holding others — a routine event on a shared
+    /// node whose jobs get different CPU allotments — which is only logged at
+    /// `info!` and is **not** reported as a fallback (see [`resolution`]).
     NotCalibrated,
-    /// A cache existed but was made for a different thread count (the machine, or
-    /// `RAYON_NUM_THREADS`, changed since calibration).
+    /// A cache existed but was made for a different thread count.
+    ///
+    /// **Currently unreachable** under the on-disk map layout: since the cache
+    /// keys thresholds by thread count, a mismatched thread count is simply an
+    /// absent entry (handled as the informational size-uncalibrated case), not a
+    /// fallback. The variant is retained because it is part of the crate's public
+    /// surface and because a future, richer hardware fingerprint (see the
+    /// single-node limitation on [`CachedCalibration`]) would revive a genuine
+    /// "same thread count, different machine" mismatch that belongs here.
     HardwareChanged {
         /// Thread count the stale cache was calibrated for.
         cached_threads: usize,
@@ -383,24 +438,37 @@ pub enum FallbackReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
     Cached(usize),
+    /// The cache holds thresholds for other thread counts but none for the
+    /// current one — routine on a shared node whose jobs get different CPU
+    /// allotments. The static default is used, but this is informational
+    /// (`info!`), not a warnable fallback: see [`resolution`].
+    SizeUncalibrated,
     Fallback(FallbackReason),
 }
 
 /// Decide the threshold from a (possibly absent) cache and the current thread
-/// count: use the cache only when its fingerprint matches this machine.
+/// count: use the entry calibrated for this thread count when the map has one.
+///
+/// A cache with entries but none for `current_threads` is
+/// [`SizeUncalibrated`](Decision::SizeUncalibrated) (a new job size, routine),
+/// distinct from a cache that is absent or holds no entries at all
+/// ([`NotCalibrated`](FallbackReason::NotCalibrated), the serious case).
 fn decide(cache: Option<CachedCalibration>, current_threads: usize) -> Decision {
     match cache {
-        Some(c) if c.num_threads == current_threads => Decision::Cached(c.threshold),
-        Some(c) => Decision::Fallback(FallbackReason::HardwareChanged {
-            cached_threads: c.num_threads,
-        }),
+        Some(c) => match c.entries.get(&current_threads) {
+            Some(&threshold) => Decision::Cached(threshold),
+            None if c.entries.is_empty() => Decision::Fallback(FallbackReason::NotCalibrated),
+            None => Decision::SizeUncalibrated,
+        },
         None => Decision::Fallback(FallbackReason::NotCalibrated),
     }
 }
 
 /// The once-per-process resolution: the threshold in force, plus *why* it was
-/// chosen (`None` = it came from a cache valid for this hardware; `Some` = a
-/// fallback to the static default, with the reason).
+/// chosen (`None` = no warnable fallback — either a cache entry valid for this
+/// thread count, or the routine informational case where other thread counts are
+/// calibrated but this one is not; `Some` = the serious fallback to the static
+/// default, with the reason).
 ///
 /// Both fields are computed together in one place so a caller reading the reason
 /// ([`resolved_fallback_reason`]) can never observe a threshold that disagrees
@@ -418,13 +486,18 @@ static RESOLUTION: OnceLock<Resolution> = OnceLock::new();
 /// Resolve (once per process) and memoise the threshold together with its
 /// fallback reason.
 ///
-/// It reads the on-disk cache and compares its hardware fingerprint
-/// (`rayon::current_num_threads()`) with this machine's:
-/// * match → the calibrated threshold, no fallback;
-/// * mismatch → [`DEFAULT_PARALLEL_THRESHOLD`] plus a `warn!` and
-///   [`FallbackReason::HardwareChanged`];
-/// * no cache → [`DEFAULT_PARALLEL_THRESHOLD`] plus an `info!` and
-///   [`FallbackReason::NotCalibrated`].
+/// It reads the on-disk cache and looks up the current thread count
+/// (`rayon::current_num_threads()`) in it:
+/// * entry present → the calibrated threshold, no fallback;
+/// * entries exist but not for this thread count → [`DEFAULT_PARALLEL_THRESHOLD`]
+///   plus an `info!` and **no** fallback reason. A shared SLURM node serves jobs
+///   sized by `--cpus-per-task`, so a not-yet-seen thread count is routine, not a
+///   problem worth a default-visible warning — the caller runs
+///   `polypus.calibrate_parallel_threshold()` per job to fill it in;
+/// * no cache at all (absent, unreadable, unknown schema, or empty) →
+///   [`DEFAULT_PARALLEL_THRESHOLD`] plus a `warn!` and
+///   [`FallbackReason::NotCalibrated`] — the serious case, reserved for a machine
+///   that has never been calibrated.
 ///
 /// It never calibrates here: measurement is an explicit act
 /// ([`calibrate_and_cache`], run by `install.sh` or
@@ -448,6 +521,21 @@ fn resolution() -> Resolution {
                     fallback: None,
                 }
             }
+            Decision::SizeUncalibrated => {
+                // Routine on a shared node: other thread counts are calibrated,
+                // this one is simply new. Informational only — no warnable
+                // fallback, so the bindings raise no Python warning for it.
+                log::info!(
+                    "no gate-parallel calibration cached for {current} thread(s) (other thread \
+                     counts are calibrated); using the default threshold \
+                     {DEFAULT_PARALLEL_THRESHOLD}. Run polypus.calibrate_parallel_threshold() to \
+                     tune this thread count too (requires polypus.init_logger() to be visible)."
+                );
+                Resolution {
+                    threshold: DEFAULT_PARALLEL_THRESHOLD,
+                    fallback: None,
+                }
+            }
             Decision::Fallback(reason) => {
                 match reason {
                     FallbackReason::HardwareChanged { cached_threads } => log::warn!(
@@ -456,7 +544,7 @@ fn resolution() -> Resolution {
                          {DEFAULT_PARALLEL_THRESHOLD}. Recalibrate with \
                          polypus.calibrate_parallel_threshold(force=True)."
                     ),
-                    FallbackReason::NotCalibrated => log::info!(
+                    FallbackReason::NotCalibrated => log::warn!(
                         "no gate-parallel calibration cached; using the default threshold \
                          {DEFAULT_PARALLEL_THRESHOLD}. Run install.sh or \
                          polypus.calibrate_parallel_threshold() to tune it for this machine \
@@ -478,8 +566,10 @@ pub(crate) fn resolve_threshold() -> usize {
     resolution().threshold
 }
 
-/// Why the process-wide threshold fell back to the static default, or `None`
-/// when it came from a cache valid for this hardware.
+/// Why the process-wide threshold fell back to the static default in a way worth
+/// surfacing, or `None` when there is nothing to warn about — either a cache
+/// entry valid for this thread count, or the routine case where the machine is
+/// calibrated for other thread counts but not this one (informational only).
 ///
 /// Shares the same once-per-process resolution as [`resolve_threshold`] (reading
 /// it here triggers that resolution if it has not happened yet), so the reason
@@ -490,7 +580,10 @@ pub fn resolved_fallback_reason() -> Option<FallbackReason> {
 }
 
 /// The threshold to reuse without measuring, or `None` if a fresh measurement is
-/// required. Pure, so the `force`/reuse logic is unit-tested directly.
+/// required. Reuse is per thread count: only the entry calibrated for
+/// `current_threads` counts as a hit, so a new job size on an already-calibrated
+/// node recalibrates just that size. Pure, so the `force`/reuse logic is
+/// unit-tested directly.
 fn threshold_to_reuse(
     force: bool,
     cache: Option<CachedCalibration>,
@@ -499,21 +592,21 @@ fn threshold_to_reuse(
     if force {
         return None;
     }
-    match cache {
-        Some(c) if c.num_threads == current_threads => Some(c.threshold),
-        _ => None,
-    }
+    cache?.entries.get(&current_threads).copied()
 }
 
 /// Calibrate if needed and persist the result — the entry point behind
 /// `polypus.calibrate_parallel_threshold(force=...)` and `install.sh`.
 ///
-/// With `force = false` a cache already valid for the current hardware (same
-/// rayon thread count) is reused as-is: nothing is measured and `duration` is
-/// zero. Otherwise the crossover is measured and written to the cache. A cache
-/// that cannot be written (read-only filesystem, container, CI) is **not** an
-/// error: the measured threshold is still returned, with `cache_written = false`,
-/// so this process runs calibrated even though the next one will not benefit.
+/// With `force = false` a cache entry already valid for the current thread count
+/// is reused as-is: nothing is measured and `duration` is zero. Otherwise the
+/// crossover is measured and merged into the cache — the freshly measured thread
+/// count's entry is inserted or updated while every other thread count's entry is
+/// preserved (see [`merged_cache`]), so calibrating one job size never drops
+/// another's. A cache that cannot be written (read-only filesystem, container,
+/// CI) is **not** an error: the measured threshold is still returned, with
+/// `cache_written = false`, so this process runs calibrated even though the next
+/// one will not benefit.
 ///
 /// Intended to run **before any simulation** — e.g. the first line of a SLURM
 /// script — because the per-process resolver ([`resolve_threshold`]) reads the
@@ -535,11 +628,9 @@ pub fn calibrate_and_cache(force: bool) -> CalibrationOutcome {
     }
 
     let result = calibrate_parallel_threshold();
-    let cached = CachedCalibration {
-        schema: CACHE_SCHEMA,
-        threshold: result.threshold,
-        num_threads: result.num_threads,
-    };
+    // Re-read and merge so this thread count's entry is updated in place without
+    // clobbering the thresholds calibrated for other thread counts on this node.
+    let cached = merged_cache(read_cache(), result.num_threads, result.threshold);
     let cache_written = match cache_file() {
         Some(path) => match write_cache_to(&path, &cached) {
             Ok(()) => true,
@@ -574,11 +665,12 @@ pub fn calibrate_and_cache(force: bool) -> CalibrationOutcome {
 mod tests {
     use super::*;
 
-    fn cached(threshold: usize, num_threads: usize) -> CachedCalibration {
+    /// Build a cache from `(num_threads, threshold)` entries — the on-disk map,
+    /// spelled out for a test.
+    fn cached(entries: &[(usize, usize)]) -> CachedCalibration {
         CachedCalibration {
             schema: CACHE_SCHEMA,
-            threshold,
-            num_threads,
+            entries: entries.iter().copied().collect(),
         }
     }
 
@@ -672,11 +764,19 @@ mod tests {
     }
 
     #[test]
-    fn decide_uses_cache_only_on_matching_fingerprint() {
-        assert_eq!(decide(Some(cached(14, 8)), 8), Decision::Cached(14));
+    fn decide_uses_the_entry_for_the_current_thread_count() {
+        let cache = cached(&[(8, 16), (32, 18)]);
+        // A thread count with an entry uses it.
+        assert_eq!(decide(Some(cache.clone()), 8), Decision::Cached(16));
+        assert_eq!(decide(Some(cache.clone()), 32), Decision::Cached(18));
+        // A thread count absent from a populated cache is the routine
+        // size-uncalibrated case, NOT a warnable fallback.
+        assert_eq!(decide(Some(cache), 16), Decision::SizeUncalibrated);
+        // A cache with no entries at all, and no cache at all, are both the
+        // serious "never calibrated" fallback.
         assert_eq!(
-            decide(Some(cached(14, 8)), 32),
-            Decision::Fallback(FallbackReason::HardwareChanged { cached_threads: 8 })
+            decide(Some(cached(&[])), 8),
+            Decision::Fallback(FallbackReason::NotCalibrated)
         );
         assert_eq!(
             decide(None, 8),
@@ -685,22 +785,48 @@ mod tests {
     }
 
     #[test]
-    fn reuse_requires_no_force_and_matching_fingerprint() {
-        // force=True always recalibrates, even with a perfectly valid cache.
-        assert_eq!(threshold_to_reuse(true, Some(cached(14, 8)), 8), None);
-        // Matching fingerprint reuses without measuring.
-        assert_eq!(threshold_to_reuse(false, Some(cached(14, 8)), 8), Some(14));
-        // A different thread count recalibrates.
-        assert_eq!(threshold_to_reuse(false, Some(cached(14, 8)), 32), None);
+    fn reuse_requires_no_force_and_an_entry_for_the_current_thread_count() {
+        let cache = cached(&[(8, 14)]);
+        // force=True always recalibrates, even with a perfectly valid entry.
+        assert_eq!(threshold_to_reuse(true, Some(cache.clone()), 8), None);
+        // An entry for the current thread count reuses without measuring.
+        assert_eq!(threshold_to_reuse(false, Some(cache.clone()), 8), Some(14));
+        // A thread count without an entry recalibrates (only that size).
+        assert_eq!(threshold_to_reuse(false, Some(cache), 32), None);
         // No cache recalibrates.
         assert_eq!(threshold_to_reuse(false, None, 8), None);
+    }
+
+    #[test]
+    fn merged_cache_updates_one_entry_and_preserves_the_rest() {
+        // The direct regression test for the reported bug: calibrating thread
+        // count B must not drop the entry calibrated for A. Calibrate A (8→16),
+        // then B (32→18), and confirm A is still recoverable.
+        let after_a = merged_cache(None, 8, 16);
+        let after_b = merged_cache(Some(after_a), 32, 18);
+        assert_eq!(decide(Some(after_b.clone()), 8), Decision::Cached(16));
+        assert_eq!(decide(Some(after_b.clone()), 32), Decision::Cached(18));
+
+        // Recalibrating A (force, same thread count) updates only A's entry and
+        // leaves B untouched.
+        let after_a_again = merged_cache(Some(after_b), 8, 20);
+        assert_eq!(decide(Some(after_a_again.clone()), 8), Decision::Cached(20));
+        assert_eq!(decide(Some(after_a_again), 32), Decision::Cached(18));
+    }
+
+    #[test]
+    fn merged_cache_starts_fresh_from_an_unreadable_or_absent_cache() {
+        // A `None` (absent, or an incompatible older schema `read_cache` rejected)
+        // yields a single-entry map, never an error and never a lost write.
+        let fresh = merged_cache(None, 8, 16);
+        assert_eq!(decide(Some(fresh), 8), Decision::Cached(16));
     }
 
     #[test]
     fn cache_round_trips_through_disk() {
         let dir = temp_dir("roundtrip");
         let path = dir.join("parallel_threshold.json");
-        let original = cached(16, 12);
+        let original = cached(&[(12, 16), (8, 14)]);
         write_cache_to(&path, &original).expect("temp dir is writable");
         let read = read_cache_from(&path).expect("just-written cache parses");
         assert_eq!(read, original);
@@ -712,7 +838,21 @@ mod tests {
         let dir = temp_dir("schema");
         let path = dir.join("parallel_threshold.json");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&path, br#"{"schema":999,"threshold":14,"num_threads":8}"#).unwrap();
+        std::fs::write(&path, br#"{"schema":999,"entries":{"8":14}}"#).unwrap();
+        assert_eq!(read_cache_from(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_cache_treats_the_old_flat_schema_as_absent() {
+        // A `schema = 1` file (the pre-map flat layout) must be treated as absent,
+        // not migrated and not an error: the worst case is one ~1s recalibration
+        // of the current size. Both the schema guard and the shape mismatch reject
+        // it; either way the result is `None`.
+        let dir = temp_dir("flat-schema");
+        let path = dir.join("parallel_threshold.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, br#"{"schema":1,"threshold":18,"num_threads":32}"#).unwrap();
         assert_eq!(read_cache_from(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -739,7 +879,7 @@ mod tests {
         let file = temp_dir("file");
         std::fs::write(&file, b"x").unwrap();
         let path = file.join("sub").join("parallel_threshold.json");
-        assert!(write_cache_to(&path, &cached(14, 8)).is_err());
+        assert!(write_cache_to(&path, &cached(&[(8, 14)])).is_err());
         let _ = std::fs::remove_file(&file);
     }
 }
