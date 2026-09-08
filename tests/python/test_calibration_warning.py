@@ -12,10 +12,10 @@ user can fix it.
 Why subprocesses: ``resolve_threshold()`` memoises its answer in a process-life
 ``OnceLock``, and the bindings guard the warning with a process-global
 ``AtomicBool``. Both are one-shot *per process*, so each scenario (uncalibrated
-/ hardware-changed / calibrated / aer-vs-native) needs its **own** process to
-observe a fresh resolution — sharing one pytest process would let whichever test
-ran first fix the answer for all the others. This mirrors the subprocess
-isolation in ``test_interrupt.py``. The "at most once per process" case is the
+/ old-schema cache / size-uncalibrated / calibrated / aer-vs-native) needs its
+**own** process to observe a fresh resolution — sharing one pytest process would
+let whichever test ran first fix the answer for all the others. This mirrors the
+subprocess isolation in ``test_interrupt.py``. The "at most once per process" case is the
 one exception that fits in a single process, but it too runs in a child so its
 count is not disturbed by other tests that already ran the native path.
 
@@ -65,14 +65,38 @@ def _run_child(code: str, cache_home) -> subprocess.CompletedProcess:
     )
 
 
-def _seed_stale_cache(cache_home) -> None:
-    """Write a cache whose thread-count fingerprint cannot match any real machine,
-    forcing the HardwareChanged fallback."""
+def _seed_old_schema_cache(cache_home) -> None:
+    """Write a cache in the pre-map ``schema:1`` layout (a flat
+    ``{threshold, num_threads}``).
+
+    Since commit ea6562a (``feat(sim): key the gate-parallel calibration cache by
+    thread count``) the on-disk cache is a ``schema:2`` thread-count → threshold
+    map, and ``read_cache_from`` treats any other schema as **absent** — no
+    migration, worst case one recalibration. So this file does not model a
+    "different hardware" cache (``FallbackReason::HardwareChanged`` is unreachable
+    under thread-count keying); it models a cache the current build cannot read,
+    which resolves to the serious ``NotCalibrated`` fallback, exactly as an empty
+    cache dir does."""
     d = cache_home / "polypus"
     d.mkdir(parents=True, exist_ok=True)
     (d / "parallel_threshold.json").write_text(
         '{"schema":1,"threshold":14,"num_threads":999999}'
     )
+
+
+def _seed_foreign_thread_count_cache(cache_home) -> None:
+    """Write a current-schema (``schema:2``) cache holding a calibrated entry for a
+    thread count that cannot match this machine (``999999``), so the map is
+    populated but has no entry for the current thread count.
+
+    This is the routine "size-uncalibrated" case a shared SLURM node hits when a
+    job runs at a ``--cpus-per-task`` allotment not yet calibrated: the machine is
+    calibrated (for other thread counts), just not for this one. It resolves to
+    ``Decision::SizeUncalibrated`` — the default threshold with an ``info!`` and,
+    deliberately, **no** Python ``UserWarning``."""
+    d = cache_home / "polypus"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "parallel_threshold.json").write_text('{"schema":2,"entries":{"999999":14}}')
 
 
 def test_statevector_warns_when_uncalibrated(tmp_path):
@@ -89,8 +113,14 @@ print("DONE")
     assert "has not been calibrated" in r.stderr, r.stderr
 
 
-def test_statevector_warns_on_hardware_change(tmp_path):
-    _seed_stale_cache(tmp_path)
+def test_statevector_warns_when_cache_is_old_schema(tmp_path):
+    # A cache written in the old flat ``schema:1`` layout is treated as *absent*
+    # by a ``schema:2`` build (commit ea6562a — no migration), so this is the
+    # serious NotCalibrated fallback, exactly like an empty cache dir. It is NOT
+    # the HardwareChanged case: thread-count keying makes that reason unreachable,
+    # so the warning must be the "never calibrated" one and must NOT mention
+    # force=True (which belongs only to the unreachable hardware-changed message).
+    _seed_old_schema_cache(tmp_path)
     code = """
 import polypus
 polypus.statevector(polypus.Circuit(2).h(0).cx(0, 1))
@@ -98,9 +128,29 @@ print("DONE")
 """
     r = _run_child(code, tmp_path)
     assert r.returncode == 0, r.stderr
+    assert "DONE" in r.stdout
     assert CAL_MARKER in r.stderr, r.stderr
-    # The hardware-changed message specifically points at force=True.
-    assert "force=True" in r.stderr, r.stderr
+    assert "has not been calibrated" in r.stderr, r.stderr
+    assert "force=True" not in r.stderr, r.stderr
+
+
+def test_statevector_does_not_warn_when_only_other_thread_counts_calibrated(tmp_path):
+    # A current-schema cache calibrated for other thread counts but not this one is
+    # the routine size-uncalibrated case on a shared node whose jobs get different
+    # CPU allotments: it uses the default threshold silently (info! only), and the
+    # bindings must raise NO default-visible UserWarning. There was no Python-level
+    # test for this designed-for-SLURM behaviour before; only the Rust unit test
+    # ``decide_uses_the_entry_for_the_current_thread_count`` covered it.
+    _seed_foreign_thread_count_cache(tmp_path)
+    code = """
+import polypus
+polypus.statevector(polypus.Circuit(2).h(0).cx(0, 1))
+print("DONE")
+"""
+    r = _run_child(code, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "DONE" in r.stdout
+    assert CAL_MARKER not in r.stderr, r.stderr
 
 
 def test_no_warning_when_calibrated(tmp_path):
