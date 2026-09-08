@@ -26,6 +26,16 @@
 //! calibration the caller's deliberate choice (e.g. the first line of a SLURM
 //! script, before any circuit runs).
 //!
+//! ## How the crossover is measured
+//!
+//! Calibration sweeps [`CALIBRATION_SIZES`], timing a small fixed sequence that
+//! exercises **every** kernel family once — dense and diagonal 1-qubit,
+//! diagonal and dense 2-qubit, controlled 1-qubit (see [`apply_probe_sequence`])
+//! — rather than one gate repeated. A real circuit dispatches to all five
+//! kernels (a QFT, for instance, is dominated by the diagonal 2-qubit `cp`, not
+//! by the 1-qubit `H` the probe used to time), so measuring a single gate gave a
+//! crossover for the wrong kernel.
+//!
 //! ## Visibility
 //!
 //! Diagnostics go through the `log` facade (this crate never depends on
@@ -138,34 +148,64 @@ fn select_threshold(timings: &[SizeTiming]) -> usize {
     PARALLELISM_DISABLED
 }
 
-/// Median (per-application) nanoseconds to apply a dense 1-qubit gate to a `2^n`
-/// buffer on the given path. One buffer is reused across samples; applying `H`
-/// repeatedly keeps amplitudes bounded (`H·H = I`), so there is no drift to
-/// renormalise between samples.
+/// Apply one instance of the representative probe sequence — exactly one gate
+/// per kernel family — so calibration times the *mix* of kernels a real circuit
+/// dispatches to, not a single gate repeated. The dispatch table in
+/// [`statevector`](crate::statevector) routes every `GateInstruction` to one of
+/// five kernel functions; this sequence hits each once:
+///
+/// * `apply_1q`            — dense 1-qubit    → `H` on q0
+/// * `apply_diagonal_1q`   — diagonal 1-qubit → `Z` on q0
+/// * `apply_diagonal_2q`   — diagonal 2-qubit → `Cz` on (q0, q1)
+/// * `apply_controlled_1q` — controlled 1-qubit → `Cx` (control q1, target q0)
+/// * `apply_2q`            — dense 2-qubit    → `Swap` on (q0, q1)
+///
+/// The gates are chosen only as representatives of their kernel, not tied to any
+/// named algorithm: the point is to characterise the machine for *anything* that
+/// runs, not just QFT/Hadamards. Every gate is unitary, so applying the sequence
+/// repeatedly across samples keeps the buffer normalised (`|amp| <= 1`) with no
+/// drift to renormalise — the same property the old `H`-only probe leaned on
+/// (`H·H = I`). Needs `n >= 2` for the two-qubit kernels, which every
+/// [`CALIBRATION_SIZES`] entry satisfies. Kernels are called directly with the
+/// explicit `parallel` flag so the two paths are measured in isolation, without
+/// routing through `Statevector` and the very threshold being calibrated (which
+/// would add instruction-decode overhead and contaminate the pure kernel timing).
+fn apply_probe_sequence(data: &mut [C64], n: usize, parallel: bool) {
+    kernels::apply_1q(data, n, 0, &gates::h(), parallel);
+    let (z0, z1) = gates::z();
+    kernels::apply_diagonal_1q(data, 0, z0, z1, parallel);
+    kernels::apply_diagonal_2q(data, 0, 1, gates::cz_diag(), parallel);
+    kernels::apply_controlled_1q(data, n, 1, 0, &gates::x(), parallel);
+    kernels::apply_2q(data, n, 0, 1, &gates::swap(), parallel);
+}
+
+/// Median (per-sequence) nanoseconds to apply the representative probe sequence
+/// ([`apply_probe_sequence`]) to a `2^n` buffer on the given path. One buffer is
+/// reused across samples; the sequence is unitary, so amplitudes stay bounded
+/// with no drift to renormalise between samples.
 fn measure_median_ns(n: usize, parallel: bool) -> f64 {
     let dim = 1usize << n;
     let mut data = vec![C64::new(0.0, 0.0); dim];
     data[0] = C64::new(1.0, 0.0);
-    let gate = gates::h();
     let mut samples = Vec::with_capacity(CALIBRATION_SAMPLES);
     for _ in 0..CALIBRATION_SAMPLES {
-        samples.push(sample_apply_ns(&mut data, n, &gate, parallel));
+        samples.push(sample_sequence_ns(&mut data, n, parallel));
     }
     median(&mut samples)
 }
 
-/// One timing sample: apply the kernel enough times to fill [`SAMPLE_WINDOW`],
-/// then return nanoseconds per application. The repeat count is discovered by
-/// doubling, so a single window constant fits every size and machine.
-fn sample_apply_ns(data: &mut [C64], n: usize, gate: &[[C64; 2]; 2], parallel: bool) -> f64 {
+/// One timing sample: apply the probe sequence enough times to fill
+/// [`SAMPLE_WINDOW`], then return nanoseconds per sequence. The repeat count is
+/// discovered by doubling, so a single window constant fits every size and
+/// machine. Both paths use the same unit (ns per sequence), so the crossover
+/// decision in [`select_threshold`] — a ratio — is unaffected by the change from
+/// per-gate to per-sequence timing.
+fn sample_sequence_ns(data: &mut [C64], n: usize, parallel: bool) -> f64 {
     let mut reps: u32 = 1;
     loop {
         let start = Instant::now();
         for _ in 0..reps {
-            // Call the kernel directly with the explicit `parallel` flag: this
-            // measures the two kernel paths in isolation, without routing through
-            // `Statevector` and the very threshold we are calibrating.
-            kernels::apply_1q(data, n, 0, gate, parallel);
+            apply_probe_sequence(data, n, parallel);
         }
         let elapsed = start.elapsed();
         // Keep the optimiser from hoisting the timed loop: the buffer is observed
@@ -187,8 +227,9 @@ fn median(samples: &mut [f64]) -> f64 {
 
 /// Measure the gate-parallelism crossover on this machine.
 ///
-/// Probes [`CALIBRATION_SIZES`], timing the dense 1-qubit kernel on both paths
-/// (median of [`CALIBRATION_SAMPLES`] samples each), and returns the smallest
+/// Probes [`CALIBRATION_SIZES`], timing the representative kernel sequence
+/// ([`apply_probe_sequence`]) on both paths (median of [`CALIBRATION_SAMPLES`]
+/// samples each), and returns the smallest
 /// size where parallel is at least [`MIN_SPEEDUP`]× faster — or a
 /// parallelism-disabling threshold if none is. **Pure measurement**: it does not
 /// read or write the cache (see [`calibrate_and_cache`]) and, with the default
