@@ -28,13 +28,26 @@
 //!
 //! ## How the crossover is measured
 //!
-//! Calibration sweeps [`CALIBRATION_SIZES`], timing a small fixed sequence that
-//! exercises **every** kernel family once — dense and diagonal 1-qubit,
+//! Each *session* sweeps [`CALIBRATION_SIZES`], timing a small fixed sequence
+//! that exercises **every** kernel family once — dense and diagonal 1-qubit,
 //! diagonal and dense 2-qubit, controlled 1-qubit (see [`apply_probe_sequence`])
 //! — rather than one gate repeated. A real circuit dispatches to all five
 //! kernels (a QFT, for instance, is dominated by the diagonal 2-qubit `cp`, not
 //! by the 1-qubit `H` the probe used to time), so measuring a single gate gave a
 //! crossover for the wrong kernel.
+//!
+//! Robustness comes in two layers, both a median. *Within* a session, every
+//! `(size, path)` timing is the median of [`CALIBRATION_SAMPLES`] samples.
+//! *Across* sessions, [`calibrate_parallel_threshold`] runs
+//! [`CALIBRATION_SESSIONS`] independent sessions and takes the median of the
+//! thresholds they chose — the same statistical principle one level up, so a
+//! single noisy session cannot swing the result. That extra layer is what let
+//! the per-session margin ([`MIN_SPEEDUP`]) shrink from a wide 25% — needed when
+//! one session was the whole decision — to a tighter 15%, without a slightly
+//! unlucky run latching parallelism on. Time budget: `CALIBRATION_SESSIONS`
+//! sessions × well under a second each stays comfortably below the ~10s that
+//! passes unnoticed inside `install.sh` (measured, not assumed — see the crate
+//! benchmarks).
 //!
 //! ## Visibility
 //!
@@ -68,11 +81,22 @@ const CALIBRATION_SAMPLES: usize = 9;
 /// granularity and one-off scheduler jitter are amortised instead of dominating.
 const SAMPLE_WINDOW: Duration = Duration::from_millis(3);
 
-/// Parallel is chosen only when it is at least this many times faster than
-/// sequential — a comfortable margin, not a photo finish. The crossover must pay
-/// for the pool overhead *and* leave headroom, or a slightly noisy tie would
-/// latch parallelism on and cost time on every later gate. `1.25` ⇒ 25% faster.
-const MIN_SPEEDUP: f64 = 1.25;
+/// Parallel is chosen (within one session) only when it is at least this many
+/// times faster than sequential — a margin, not a photo finish: the crossover
+/// must pay for the pool overhead *and* leave headroom, or a slightly noisy tie
+/// would latch parallelism on and cost time on every later gate. `1.15` ⇒ 15%
+/// faster. This is tighter than the earlier 25% because a single session is no
+/// longer the whole decision — [`CALIBRATION_SESSIONS`] sessions are combined by
+/// median (see [`calibrate_parallel_threshold`]), so one unlucky near-tie can no
+/// longer swing the result and the margin need not absorb that risk alone.
+const MIN_SPEEDUP: f64 = 1.15;
+
+/// Independent calibration sessions whose chosen thresholds are combined by
+/// **median** (see [`median_threshold`]). Odd for the same reason
+/// [`CALIBRATION_SAMPLES`] is: the median is then one real session's decision,
+/// not an interpolation. `3` is enough for one noisy session to be outvoted
+/// while keeping the total time budget well under `install.sh`'s ~10s window.
+const CALIBRATION_SESSIONS: usize = 3;
 
 /// Schema version of the on-disk cache. A file written by a different layout is
 /// ignored (treated as absent) rather than mis-parsed.
@@ -146,6 +170,15 @@ fn select_threshold(timings: &[SizeTiming]) -> usize {
         }
     }
     PARALLELISM_DISABLED
+}
+
+/// Median of the thresholds chosen by several independent sessions (sorted in
+/// place). Pure over its input, so the cross-session combination is unit-tested
+/// without the clock — the outer analogue of [`median`] over samples. Never
+/// called with an empty slice ([`CALIBRATION_SESSIONS`] `>= 1`).
+fn median_threshold(thresholds: &mut [usize]) -> usize {
+    thresholds.sort_unstable();
+    thresholds[thresholds.len() / 2]
 }
 
 /// Apply one instance of the representative probe sequence — exactly one gate
@@ -225,20 +258,11 @@ fn median(samples: &mut [f64]) -> f64 {
     samples[samples.len() / 2]
 }
 
-/// Measure the gate-parallelism crossover on this machine.
-///
-/// Probes [`CALIBRATION_SIZES`], timing the representative kernel sequence
-/// ([`apply_probe_sequence`]) on both paths (median of [`CALIBRATION_SAMPLES`]
-/// samples each), and returns the smallest
-/// size where parallel is at least [`MIN_SPEEDUP`]× faster — or a
-/// parallelism-disabling threshold if none is. **Pure measurement**: it does not
-/// read or write the cache (see [`calibrate_and_cache`]) and, with the default
-/// parameters, takes well under a second.
-///
-/// Diagnostics go through the `log` facade and need `polypus.init_logger()` to
-/// be visible.
-pub fn calibrate_parallel_threshold() -> CalibrationResult {
-    let start = Instant::now();
+/// One calibration session: probe [`CALIBRATION_SIZES`] on both paths (median of
+/// [`CALIBRATION_SAMPLES`] samples each, over the representative
+/// [`apply_probe_sequence`]) and pick the crossover. This is the unit the outer
+/// cross-session median in [`calibrate_parallel_threshold`] is taken over.
+fn measure_session_threshold() -> usize {
     let timings: Vec<SizeTiming> = CALIBRATION_SIZES
         .iter()
         .map(|&n| SizeTiming {
@@ -247,12 +271,34 @@ pub fn calibrate_parallel_threshold() -> CalibrationResult {
             par_ns: measure_median_ns(n, true),
         })
         .collect();
-    let threshold = select_threshold(&timings);
+    select_threshold(&timings)
+}
+
+/// Measure the gate-parallelism crossover on this machine.
+///
+/// Runs [`CALIBRATION_SESSIONS`] independent sessions — each probing
+/// [`CALIBRATION_SIZES`] with the representative kernel sequence
+/// ([`apply_probe_sequence`], median of [`CALIBRATION_SAMPLES`] samples per
+/// point) and choosing the smallest size where parallel is at least
+/// [`MIN_SPEEDUP`]× faster — and returns the **median** of the thresholds they
+/// chose, so one noisy session cannot swing the result (a parallelism-disabling
+/// threshold is returned when the sessions agree nothing wins). **Pure
+/// measurement**: it does not read or write the cache (see [`calibrate_and_cache`])
+/// and, with the default parameters, takes well under `install.sh`'s ~10s window.
+///
+/// Diagnostics go through the `log` facade and need `polypus.init_logger()` to
+/// be visible.
+pub fn calibrate_parallel_threshold() -> CalibrationResult {
+    let start = Instant::now();
+    let mut thresholds: Vec<usize> = (0..CALIBRATION_SESSIONS)
+        .map(|_| measure_session_threshold())
+        .collect();
+    let threshold = median_threshold(&mut thresholds);
     let num_threads = rayon::current_num_threads();
     let duration = start.elapsed();
     log::info!(
         "calibrated gate-parallel threshold = {threshold} qubit(s) for {num_threads} thread(s) \
-         in {duration:?}"
+         over {CALIBRATION_SESSIONS} session(s) in {duration:?}"
     );
     CalibrationResult {
         threshold,
@@ -577,13 +623,39 @@ mod tests {
 
     #[test]
     fn select_threshold_requires_a_comfortable_margin_not_a_tie() {
-        // A near-tie (only ~4% faster) must NOT latch parallelism on.
+        // A win below the 15% margin (here ~10% faster) must NOT latch
+        // parallelism on: it would not pay for the pool overhead with headroom.
         let timings = vec![SizeTiming {
             n: 10,
             seq_ns: 100.0,
-            par_ns: 96.0,
+            par_ns: 91.0,
         }];
         assert_eq!(select_threshold(&timings), PARALLELISM_DISABLED);
+    }
+
+    #[test]
+    fn select_threshold_latches_just_past_the_margin() {
+        // A win just *past* the 15% margin (here ~16.6% faster) does latch: this
+        // pins the tighter margin down from the winning side, complementing the
+        // near-tie test above.
+        let timings = vec![SizeTiming {
+            n: 12,
+            seq_ns: 100.0,
+            par_ns: 85.0,
+        }];
+        assert_eq!(select_threshold(&timings), 12);
+    }
+
+    #[test]
+    fn median_threshold_returns_the_middle_session_decision() {
+        // Odd count: the median is one real session's choice, order-independent.
+        assert_eq!(median_threshold(&mut [12, 18, 14]), 14);
+        assert_eq!(median_threshold(&mut [14, 12, 18]), 14);
+        // Unanimous sessions return that value.
+        assert_eq!(median_threshold(&mut [16, 16, 16]), 16);
+        // A single dissenting session (e.g. one that disabled parallelism) is
+        // outvoted by the two that agreed.
+        assert_eq!(median_threshold(&mut [12, 12, PARALLELISM_DISABLED]), 12);
     }
 
     #[test]
