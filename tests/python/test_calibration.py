@@ -14,8 +14,6 @@ Each test redirects the cache to a temporary ``XDG_CACHE_HOME`` so it never
 reads or writes the real user cache.
 """
 
-import os
-
 import pytest
 
 polypus = pytest.importorskip("polypus")
