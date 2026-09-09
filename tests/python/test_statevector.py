@@ -227,6 +227,64 @@ def test_random_circuits_match_qiskit():
         _compare(polypus.statevector(p), qc)
 
 
+def test_long_diagonal_run_matches_qiskit():
+    """A diagonal-heavy circuit whose single run of consecutive diagonal gates is
+    far longer than the backend's fusion cap (``MAX_FUSED_DIAGONAL_RUN`` = 64):
+    the native path fuses such a run into one buffer pass (chunked at the cap),
+    and its ``statevector`` output must stay bit-for-bit what applying the gates
+    one at a time gives — which Qiskit's reference computes gate by gate.
+
+    The run mixes every diagonal instruction (``z, s, t, sdg, tdg, rz`` and
+    ``cz, rzz, cp``) on varied qubits, over a non-trivial (superposed) input so
+    the phases actually matter."""
+    import polypus
+
+    n = 4
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        p = p.h(q)
+        qc.h(q)
+
+    # 150 > 64: one unbroken diagonal run spanning several fused passes.
+    for k in range(150):
+        q = k % n
+        r = (k + 1) % n
+        kind = k % 9
+        if kind == 0:
+            p = p.z(q)
+            qc.z(q)
+        elif kind == 1:
+            p = p.s(q)
+            qc.s(q)
+        elif kind == 2:
+            p = p.t(q)
+            qc.t(q)
+        elif kind == 3:
+            p = p.sdg(q)
+            qc.sdg(q)
+        elif kind == 4:
+            p = p.tdg(q)
+            qc.tdg(q)
+        elif kind == 5:
+            th = 0.1 * k
+            p = p.rz(q, th)
+            qc.rz(th, q)
+        elif kind == 6:
+            p = p.cz(q, r)
+            qc.cz(q, r)
+        elif kind == 7:
+            th = -0.07 * k
+            p = p.rzz(q, r, th)
+            qc.rzz(th, q, r)
+        else:
+            th = 0.05 * k
+            p = p.cp(q, r, th)
+            qc.cp(th, q, r)
+
+    _compare(polypus.statevector(p), qc)
+
+
 # ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
 # simulator, not to the seam), so it is mirrored here — keep both in sync.
 _MAX_QUBITS = 30

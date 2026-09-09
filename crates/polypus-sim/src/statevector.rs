@@ -29,6 +29,109 @@ fn angle(p: &GateParam) -> Result<f64, SimError> {
     }
 }
 
+/// The diagonal descriptor for `gate`, or `None` if `gate` is not one of the
+/// nine diagonal instructions a fused run is built from (`Z, S, T, Sdg, Tdg, Rz`
+/// and `Cz, Rzz, Cp`).
+///
+/// These nine arms mirror exactly the diagonal arms of [`Statevector::apply`],
+/// so run detection and single-gate application always agree on what "diagonal"
+/// means — this function is the single source of truth for that, and
+/// [`is_diagonal`] is defined in terms of it precisely so the two cannot drift.
+///
+/// `Some(Err(..))` is a *diagonal* gate whose angle is invalid: it still belongs
+/// to a run, but resolving its angle failed exactly as [`Statevector::apply`]
+/// would fail on it. Building the descriptor is where a run's angle validation
+/// happens, before any amplitude is touched — see
+/// [`Statevector::apply_diagonal_ops`] and its caller.
+pub(crate) fn diagonal_op(gate: &GateInstruction) -> Option<Result<kernels::DiagonalOp, SimError>> {
+    use kernels::DiagonalOp;
+    // A resolved angle that fails validation short-circuits the whole builder to
+    // `Some(Err(..))`, exactly as `apply` would fail on the same gate.
+    macro_rules! angle {
+        ($theta:expr) => {
+            match angle($theta) {
+                Ok(t) => t,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+    }
+    let op = match gate {
+        GateInstruction::Z(q) => {
+            let (d0, d1) = gates::z();
+            DiagonalOp::One {
+                bit: 1 << *q,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::S(q) => {
+            let (d0, d1) = gates::s();
+            DiagonalOp::One {
+                bit: 1 << *q,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::T(q) => {
+            let (d0, d1) = gates::t();
+            DiagonalOp::One {
+                bit: 1 << *q,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::Sdg(q) => {
+            let (d0, d1) = gates::sdg();
+            DiagonalOp::One {
+                bit: 1 << *q,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::Tdg(q) => {
+            let (d0, d1) = gates::tdg();
+            DiagonalOp::One {
+                bit: 1 << *q,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::Rz { qubit, theta } => {
+            let (d0, d1) = gates::rz(angle!(theta));
+            DiagonalOp::One {
+                bit: 1 << *qubit,
+                d0,
+                d1,
+            }
+        }
+        GateInstruction::Cz(c, t) => DiagonalOp::Two {
+            b0: 1 << *c,
+            b1: 1 << *t,
+            diag: gates::cz_diag(),
+        },
+        GateInstruction::Rzz { q0, q1, theta } => DiagonalOp::Two {
+            b0: 1 << *q0,
+            b1: 1 << *q1,
+            diag: gates::rzz_diag(angle!(theta)),
+        },
+        GateInstruction::Cp { q0, q1, theta } => DiagonalOp::Two {
+            b0: 1 << *q0,
+            b1: 1 << *q1,
+            diag: gates::cp_diag(angle!(theta)),
+        },
+        // Every non-diagonal instruction: not part of a fused run.
+        _ => return None,
+    };
+    Some(Ok(op))
+}
+
+/// Whether `gate` dispatches through a diagonal kernel — i.e. whether it can join
+/// a fused diagonal run. Defined via [`diagonal_op`] so the predicate and the
+/// builder are one source of truth (see [`diagonal_op`]).
+pub(crate) fn is_diagonal(gate: &GateInstruction) -> bool {
+    diagonal_op(gate).is_some()
+}
+
 impl Statevector {
     /// Allocate the `|0…0⟩` state over `num_qubits` qubits.
     ///
@@ -193,6 +296,28 @@ impl Statevector {
         }
         Ok(())
     }
+
+    /// Apply a run of consecutive diagonal operators in a **single** pass over
+    /// the amplitude buffer, instead of one pass per operator.
+    ///
+    /// Diagonal operators commute regardless of which qubits they touch, so a run
+    /// of them is one combined diagonal whose per-index phase is the product of
+    /// the individual phases (see [`kernels::apply_diagonal_run`]). The result is
+    /// numerically identical to calling [`apply`](Self::apply) on each member of
+    /// the run in turn; the win is touching the (memory-bandwidth-bound) buffer
+    /// once rather than once per gate on a deep diagonal stretch.
+    ///
+    /// `ops` are the descriptors built from the run by [`diagonal_op`], where the
+    /// run's angle validation has already happened — so this method itself is
+    /// infallible and never partially applies. Its caller,
+    /// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator),
+    /// builds them (propagating any [`SimError`] before calling this) and takes a
+    /// length-1 fast path through [`apply`](Self::apply), so an isolated diagonal
+    /// gate never pays for a `Vec` or the per-index run loop.
+    pub(crate) fn apply_diagonal_ops(&mut self, ops: &[kernels::DiagonalOp]) {
+        let par = self.use_parallel();
+        kernels::apply_diagonal_run(&mut self.data, ops, par);
+    }
 }
 
 #[cfg(test)]
@@ -213,5 +338,155 @@ mod tests {
         let borrowed = sv.amplitudes().to_vec();
         let owned = sv.into_amplitudes();
         assert_eq!(owned, borrowed);
+    }
+
+    /// The classifier must accept exactly the nine instructions `apply`
+    /// dispatches through a diagonal kernel, and reject everything else.
+    #[test]
+    fn is_diagonal_matches_the_diagonal_kernel_arms() {
+        let diagonal = [
+            GateInstruction::Z(0),
+            GateInstruction::S(0),
+            GateInstruction::T(0),
+            GateInstruction::Sdg(0),
+            GateInstruction::Tdg(0),
+            GateInstruction::Rz {
+                qubit: 0,
+                theta: GateParam::Fixed(0.4),
+            },
+            GateInstruction::Cz(0, 1),
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Fixed(0.4),
+            },
+            GateInstruction::Cp {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Fixed(0.4),
+            },
+        ];
+        for gate in &diagonal {
+            assert!(is_diagonal(gate), "{gate:?} should be diagonal");
+        }
+
+        let non_diagonal = [
+            GateInstruction::H(0),
+            GateInstruction::X(0),
+            GateInstruction::Y(0),
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: GateParam::Fixed(0.4),
+            },
+            GateInstruction::Ry {
+                qubit: 0,
+                theta: GateParam::Fixed(0.4),
+            },
+            GateInstruction::Cx(0, 1),
+            GateInstruction::Swap(0, 1),
+            GateInstruction::Rxx {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Fixed(0.4),
+            },
+            GateInstruction::U {
+                qubit: 0,
+                theta: GateParam::Fixed(0.4),
+                phi: GateParam::Fixed(0.4),
+                lam: GateParam::Fixed(0.4),
+            },
+            GateInstruction::Barrier(vec![]),
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::MeasureAll,
+        ];
+        for gate in &non_diagonal {
+            assert!(!is_diagonal(gate), "{gate:?} should not be diagonal");
+        }
+    }
+
+    /// A diagonal gate with an unresolved angle is still diagonal (belongs to a
+    /// run), but building its descriptor surfaces the same error `apply` would —
+    /// this is where a run's angle validation lives, before any buffer write.
+    #[test]
+    fn diagonal_op_propagates_angle_errors() {
+        let unbound = GateInstruction::Rz {
+            qubit: 0,
+            theta: GateParam::Param(2),
+        };
+        assert!(is_diagonal(&unbound));
+        assert_eq!(
+            diagonal_op(&unbound),
+            Some(Err(SimError::UnboundParameter { index: 2 }))
+        );
+
+        let nan = GateInstruction::Cp {
+            q0: 0,
+            q1: 1,
+            theta: GateParam::Fixed(f64::NAN),
+        };
+        assert!(is_diagonal(&nan));
+        assert_eq!(diagonal_op(&nan), Some(Err(SimError::NonFiniteAmplitude)));
+
+        // A non-diagonal gate is not classified as part of a run at all.
+        assert!(diagonal_op(&GateInstruction::H(0)).is_none());
+    }
+
+    /// Fusing a run through `apply_diagonal_ops` must land on exactly the state
+    /// that applying each member singly through `apply` does.
+    #[test]
+    fn apply_diagonal_ops_matches_gate_by_gate_apply() {
+        let run = [
+            GateInstruction::Rz {
+                qubit: 1,
+                theta: GateParam::Fixed(0.3),
+            },
+            GateInstruction::Cz(1, 3),
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 2,
+                theta: GateParam::Fixed(0.9),
+            },
+            GateInstruction::T(3),
+            GateInstruction::Cp {
+                q0: 2,
+                q1: 3,
+                theta: GateParam::Fixed(1.3),
+            },
+        ];
+
+        // A non-trivial starting state, so diagonal phases actually matter.
+        let mut base = Statevector::new(4).expect("4 qubits is well below MAX_QUBITS");
+        for q in 0..4 {
+            base.apply(&GateInstruction::H(q))
+                .expect("H is unconditional");
+        }
+
+        let mut sequential = base.clone();
+        for gate in &run {
+            sequential.apply(gate).expect("run members are all valid");
+        }
+
+        let ops: Vec<_> = run
+            .iter()
+            .map(|g| {
+                diagonal_op(g)
+                    .expect("run member is diagonal")
+                    .expect("run member has a valid angle")
+            })
+            .collect();
+        let mut fused = base;
+        fused.apply_diagonal_ops(&ops);
+
+        for (i, (a, b)) in sequential
+            .amplitudes()
+            .iter()
+            .zip(fused.amplitudes().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - b).norm() < 1e-12,
+                "amplitude {i} differs: sequential {a} vs fused {b}"
+            );
+        }
     }
 }

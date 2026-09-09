@@ -104,6 +104,30 @@ const CANCELLATION_OVERHEAD_DIVISOR: u32 = 20;
 /// circuit the read is amortized over 4096 gates.
 const CLOCK_READ_WORK_UNITS: usize = 1 << 16;
 
+/// Most consecutive diagonal instructions that
+/// [`run_cancellable`](StatevectorSimulator::run_cancellable) folds into one
+/// fused pass over the amplitude buffer.
+///
+/// A run of diagonal gates commutes into a single combined diagonal, so an
+/// unbounded run could be applied in one atomic pass — but that would make two
+/// things scale with circuit depth that must not: cancellation latency (one
+/// uninterruptible pass) and, once a run is long enough that its per-index
+/// factor product no longer fits the memory-bandwidth-bound regime, the pass
+/// itself turns compute-bound and the fusion stops paying off. Capping the run
+/// bounds both: cancellation is polled at least once per capped pass, and each
+/// pass stays bandwidth-bound (its cost is dominated by the `2^n` buffer
+/// traversal, not the ≤`MAX_FUSED_DIAGONAL_RUN` factors per amplitude).
+///
+/// 64 sits comfortably above the longest diagonal run any real circuit produces
+/// — a QFT phase column is ≤ `n − 1` gates, ≤ 29 at [`MAX_QUBITS`](crate::MAX_QUBITS)
+/// = 30 — so QFT never hits the cap, while a genuinely deep run (a QAOA cost
+/// layer, a Trotterized `ZZ`/`RZ` evolution) is chunked into bandwidth-bound
+/// passes rather than one growing pass. Unlike the parallel threshold, this is a
+/// fixed architectural safety bound, not a hardware-tuned value: it needs no
+/// calibration, only to be larger than any real run and small enough to stay
+/// bandwidth-bound.
+pub(crate) const MAX_FUSED_DIAGONAL_RUN: usize = 64;
+
 /// Throttled front-end for a `run_cancellable` cancellation hook.
 ///
 /// The state a throttle needs only exists when there *is* a hook, so it lives
@@ -352,16 +376,318 @@ impl Simulator for StatevectorSimulator {
         // hook covers is the gate sequence — whose cost (gates x `2^n`) is
         // unbounded, where the allocation's is capped by `max_qubits`.
         let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits);
-        for (applied, gate) in circuit.gates.iter().enumerate() {
+        let gates = &circuit.gates;
+        let total = gates.len();
+        // Cancellation is polled once per *scanned* instruction, the same cadence
+        // as the old one-gate-per-iteration loop; this closure is that single
+        // poll, plus the diagnostic the old loop logged on a stop.
+        let mut poll_cancel = |at: usize| -> Result<(), SimError> {
             if cancellation.cancelled() {
-                log::debug!(
-                    "simulation cancelled by the caller after {applied} of {} gate(s)",
-                    circuit.gates.len()
-                );
-                return Err(SimError::Cancelled);
+                log::debug!("simulation cancelled by the caller after {at} of {total} gate(s)");
+                Err(SimError::Cancelled)
+            } else {
+                Ok(())
             }
-            sv.apply(gate)?;
+        };
+        // Fuse maximal runs of consecutive diagonal instructions into one pass
+        // (see `Statevector::apply_diagonal_ops`). `apply` has no lookahead, so
+        // the run detection has to live here — the one call site with the whole
+        // instruction list in hand.
+        let mut i = 0;
+        while i < total {
+            // Non-diagonal gate, or a diagonal gate not followed by another (a
+            // run of length 1): today's single-gate path. The fast path avoids a
+            // `Vec` allocation and the per-index run branch for the common case of
+            // an isolated diagonal gate in an otherwise non-diagonal circuit.
+            let starts_a_run = MAX_FUSED_DIAGONAL_RUN >= 2
+                && crate::statevector::is_diagonal(&gates[i])
+                && i + 1 < total
+                && crate::statevector::is_diagonal(&gates[i + 1]);
+            if !starts_a_run {
+                poll_cancel(i)?;
+                sv.apply(&gates[i])?;
+                i += 1;
+                continue;
+            }
+
+            // A run of two or more diagonal gates. Scan forward up to the cap,
+            // polling cancellation once per scanned instruction (cheap — reading
+            // instruction tags, not touching the amplitude buffer) and building
+            // each descriptor, which validates the run's `Rz`/`Rzz`/`Cp` angles
+            // *before* any amplitude is modified. If cancellation fires mid-scan
+            // or an angle is invalid, nothing from this run is applied.
+            let mut ops = Vec::with_capacity(MAX_FUSED_DIAGONAL_RUN);
+            let mut j = i;
+            while j < total && j - i < MAX_FUSED_DIAGONAL_RUN {
+                // `is_diagonal` is `diagonal_op(..).is_some()`, so a `None` here
+                // can only mean a non-diagonal terminator: the run ends.
+                let Some(descriptor) = crate::statevector::diagonal_op(&gates[j]) else {
+                    break;
+                };
+                poll_cancel(j)?;
+                ops.push(descriptor?);
+                j += 1;
+            }
+            sv.apply_diagonal_ops(&ops);
+            i = j;
         }
         Ok(sv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{C64, MAX_QUBITS};
+    use polypus_circuit::{GateInstruction as G, GateParam::Fixed};
+    use std::f64::consts::FRAC_PI_4;
+
+    /// A simulator pinned to the sequential kernels, so these tests take the same
+    /// path — and behave the same — with or without the `parallel` feature and
+    /// regardless of the runner's core count. Mirrors `tests/cancellation.rs`.
+    fn sequential_sim() -> StatevectorSimulator {
+        StatevectorSimulator {
+            max_qubits: MAX_QUBITS,
+            parallel_threshold: MAX_QUBITS + 1,
+        }
+    }
+
+    /// The per-index phase one diagonal gate contributes to basis state `b`,
+    /// computed straight from the gate's definition — an independent reference
+    /// for the fused kernel, sharing none of its code.
+    fn diagonal_phase(gate: &G, b: usize) -> C64 {
+        let set = |q: usize| (b >> q) & 1 == 1;
+        let one = C64::new(1.0, 0.0);
+        match gate {
+            G::Z(q) => {
+                if set(*q) {
+                    C64::new(-1.0, 0.0)
+                } else {
+                    one
+                }
+            }
+            G::S(q) => {
+                if set(*q) {
+                    C64::new(0.0, 1.0)
+                } else {
+                    one
+                }
+            }
+            G::T(q) => {
+                if set(*q) {
+                    C64::from_polar(1.0, FRAC_PI_4)
+                } else {
+                    one
+                }
+            }
+            G::Rz { qubit, theta } => {
+                let t = fixed(theta);
+                C64::from_polar(1.0, if set(*qubit) { t / 2.0 } else { -t / 2.0 })
+            }
+            G::Cp { q0, q1, theta } => {
+                if set(*q0) && set(*q1) {
+                    C64::from_polar(1.0, fixed(theta))
+                } else {
+                    one
+                }
+            }
+            G::Rzz { q0, q1, theta } => {
+                let t = fixed(theta);
+                C64::from_polar(
+                    1.0,
+                    if set(*q0) == set(*q1) {
+                        -t / 2.0
+                    } else {
+                        t / 2.0
+                    },
+                )
+            }
+            other => panic!("{other:?} is not a diagonal gate the reference handles"),
+        }
+    }
+
+    fn fixed(p: &polypus_circuit::GateParam) -> f64 {
+        match p {
+            Fixed(v) => *v,
+            other => panic!("expected a fixed angle, got {other:?}"),
+        }
+    }
+
+    /// A circuit whose diagonal run is long enough to span several fused passes
+    /// (200 > `MAX_FUSED_DIAGONAL_RUN`) must land on the analytically known
+    /// amplitudes, not merely "not panic". Starting from a uniform superposition,
+    /// each amplitude is `1/sqrt(D)` times the product of the run's per-index
+    /// phases.
+    #[test]
+    fn a_long_diagonal_run_matches_analytic_amplitudes() {
+        let n = 3;
+        let dim = 1usize << n;
+
+        let mut run: Vec<G> = Vec::new();
+        for k in 0..200 {
+            let q = k % n;
+            run.push(match k % 5 {
+                0 => G::Rz {
+                    qubit: q,
+                    theta: Fixed(0.1 * k as f64),
+                },
+                1 => G::Cp {
+                    q0: q,
+                    q1: (q + 1) % n,
+                    theta: Fixed(0.05 * k as f64),
+                },
+                2 => G::Rzz {
+                    q0: q,
+                    q1: (q + 2) % n,
+                    theta: Fixed(-0.07 * k as f64),
+                },
+                3 => G::T(q),
+                _ => G::Z(q),
+            });
+        }
+        assert!(run.len() > MAX_FUSED_DIAGONAL_RUN);
+
+        let mut gates: Vec<G> = (0..n).map(G::H).collect();
+        gates.extend(run.iter().cloned());
+        let circuit = ConcreteCircuit {
+            num_qubits: n,
+            gates,
+        };
+
+        let sv = sequential_sim()
+            .run(&circuit)
+            .expect("all angles are finite");
+
+        let inv_sqrt_d = 1.0 / (dim as f64).sqrt();
+        for b in 0..dim {
+            let mut expected = C64::new(inv_sqrt_d, 0.0);
+            for gate in &run {
+                expected *= diagonal_phase(gate, b);
+            }
+            let got = sv.amplitudes()[b];
+            assert!(
+                (got - expected).norm() < 1e-12,
+                "amplitude {b}: got {got}, expected {expected}"
+            );
+        }
+    }
+
+    /// Fusion must be transparent: a diagonal-heavy circuit (diagonal runs longer
+    /// than the cap, broken up by non-diagonal gates) evolved through the fusing
+    /// loop must be bit-for-bit close to applying every gate singly through the
+    /// per-gate kernels.
+    #[test]
+    fn fused_run_matches_gate_by_gate_application() {
+        let n = 4;
+        let mut gates: Vec<G> = (0..n).map(G::H).collect();
+        for block in 0..3 {
+            for k in 0..80 {
+                let q = k % n;
+                gates.push(match k % 4 {
+                    0 => G::Rz {
+                        qubit: q,
+                        theta: Fixed(0.13 * (k + block) as f64),
+                    },
+                    1 => G::Cp {
+                        q0: q,
+                        q1: (q + 1) % n,
+                        theta: Fixed(0.09 * (k + 1) as f64),
+                    },
+                    2 => G::Cz(q, (q + 2) % n),
+                    _ => G::S(q),
+                });
+            }
+            // A non-diagonal gate terminates the run and starts the next.
+            gates.push(G::Cx(block % n, (block + 1) % n));
+            gates.push(G::Ry {
+                qubit: block % n,
+                theta: Fixed(0.5),
+            });
+        }
+        let circuit = ConcreteCircuit {
+            num_qubits: n,
+            gates: gates.clone(),
+        };
+
+        let fused = sequential_sim().run(&circuit).expect("all angles finite");
+
+        // Reference: apply each gate one at a time through `Statevector::apply`,
+        // which never fuses.
+        let mut reference = Statevector::new(n).expect("n below MAX_QUBITS");
+        reference.set_parallel_threshold(MAX_QUBITS + 1);
+        for gate in &gates {
+            reference.apply(gate).expect("all gates valid");
+        }
+
+        for (b, (a, c)) in fused
+            .amplitudes()
+            .iter()
+            .zip(reference.amplitudes().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - c).norm() < 1e-12,
+                "amplitude {b}: fused {a} vs gate-by-gate {c}"
+            );
+        }
+    }
+
+    /// Qubit width for the cancellation regression: wide enough that a single
+    /// fused pass is expensive (a checkpoint's worth of wall clock accrues in a
+    /// few dozen passes), so the run reaches several checkpoints well before its
+    /// end even on a fast machine.
+    const CANCEL_N: usize = 16;
+
+    /// A single diagonal run far longer than `MAX_FUSED_DIAGONAL_RUN`, so the
+    /// fusing loop chunks it into many capped passes; long enough (many hundred
+    /// passes) that several cancellation checkpoints come due while it runs.
+    const CANCEL_RUN: usize = 60_000;
+
+    /// Regression test for the cancellation-cadence constraint: the fusing loop
+    /// must poll cancellation *per scanned instruction*, not once per fused run.
+    ///
+    /// The run is one unbroken diagonal stretch far past the cap, terminated by a
+    /// `NaN` `Rz`. Timing-independent by the same trick as `tests/cancellation.rs`:
+    /// the error *variant* alone says whether the loop reached the end —
+    /// `Cancelled` proves it stopped part-way, and only a per-instruction poll can
+    /// make it stop part-way through a run. A naive "fuse the whole run, check
+    /// once" loop would build the whole run's descriptors first, hit the `NaN`, and
+    /// return `NonFiniteAmplitude` instead — so this test fails against it and
+    /// passes only against the interleaved scan.
+    #[test]
+    fn cancellation_fires_inside_a_run_longer_than_the_cap() {
+        let mut gates: Vec<G> = (0..CANCEL_RUN)
+            .map(|k| G::Rz {
+                qubit: k % CANCEL_N,
+                theta: Fixed(0.1),
+            })
+            .collect();
+        // Poisoned terminator: reached only if the loop is never cancelled.
+        gates.push(G::Rz {
+            qubit: 0,
+            theta: Fixed(f64::NAN),
+        });
+        assert!(gates.len() > MAX_FUSED_DIAGONAL_RUN);
+        let circuit = ConcreteCircuit {
+            num_qubits: CANCEL_N,
+            gates,
+        };
+
+        let mut calls = 0usize;
+        let err = {
+            let mut cancel = || {
+                calls += 1;
+                calls >= 3
+            };
+            sequential_sim()
+                .run_cancellable(&circuit, Some(&mut cancel))
+                .unwrap_err()
+        };
+        // `Cancelled`, not `NonFiniteAmplitude`: the loop was interrupted inside
+        // the run, before reaching the poisoned final gate.
+        assert_eq!(err, SimError::Cancelled);
+        // And it stopped at the first "yes" — proof the hook is polled while a run
+        // is being scanned, not merely once for the whole run.
+        assert_eq!(calls, 3);
     }
 }
