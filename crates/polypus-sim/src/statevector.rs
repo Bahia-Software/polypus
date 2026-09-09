@@ -297,15 +297,17 @@ impl Statevector {
         Ok(())
     }
 
-    /// Apply a run of consecutive diagonal operators in a **single** pass over
-    /// the amplitude buffer, instead of one pass per operator.
+    /// Apply a run of consecutive diagonal operators in roughly one main-memory
+    /// traversal of the amplitude buffer, instead of one per operator.
     ///
     /// Diagonal operators commute regardless of which qubits they touch, so a run
     /// of them is one combined diagonal whose per-index phase is the product of
-    /// the individual phases (see [`kernels::apply_diagonal_run`]). The result is
-    /// numerically identical to calling [`apply`](Self::apply) on each member of
-    /// the run in turn; the win is touching the (memory-bandwidth-bound) buffer
-    /// once rather than once per gate on a deep diagonal stretch.
+    /// the individual phases; [`kernels::apply_diagonal_run`] applies that product
+    /// tile by tile, carrying each cache tile through every op so the buffer is
+    /// read and written through main memory about once for the whole run. The
+    /// result is numerically what calling [`apply`](Self::apply) on each member of
+    /// the run in turn gives, to rounding (the same per-amplitude multiplies,
+    /// regrouped); the win is the saved memory traffic on a deep diagonal stretch.
     ///
     /// `ops` are the descriptors built from the run by [`diagonal_op`], where the
     /// run's angle validation has already happened — so this method itself is

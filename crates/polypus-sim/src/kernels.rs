@@ -22,12 +22,15 @@
 //! - **diagonal** ([`apply_diagonal_1q`], [`apply_diagonal_2q`]): a per-index
 //!   phase, needing no pairing — the cheapest path;
 //! - **fused diagonal** ([`apply_diagonal_run`]): a whole run of consecutive
-//!   diagonal operators collapsed into one pass, multiplying each amplitude by
-//!   the product of every op's per-index phase. Diagonal operators commute
-//!   regardless of which qubits they touch, so this product is order-independent
-//!   — the point is to pay one traversal of the (memory-bandwidth-bound) buffer
-//!   instead of one per gate on a deep diagonal stretch (a QAOA cost layer, a
-//!   Trotterized `ZZ`/`RZ` evolution, a QFT phase column);
+//!   diagonal operators applied by carrying each cache tile through every op,
+//!   multiplying each amplitude by the product of every op's per-index phase.
+//!   Diagonal operators commute regardless of which qubits they touch, so both
+//!   the product and the reordering it allows are sound — the point is to pay one
+//!   main-memory traversal of the (memory-bandwidth-bound) buffer instead of one
+//!   per gate on a deep diagonal stretch (a QAOA cost layer, a Trotterized
+//!   `ZZ`/`RZ` evolution, a QFT phase column). Tiling — rather than a single
+//!   loop with the op loop inside it — is what makes that pay off; see
+//!   [`DIAGONAL_TILE`];
 //! - **controlled 1-qubit** ([`apply_controlled_1q`]): the 2×2 is applied to a
 //!   pair only when the control bit (identical across the pair) is set;
 //! - **dense 2-qubit** ([`apply_2q`]): a full 4×4 matrix over groups of four.
@@ -162,49 +165,92 @@ pub(crate) enum DiagonalOp {
     },
 }
 
-/// The combined factor [`apply_diagonal_run`] multiplies amplitude `i` by: the
-/// product of every op's individual per-index phase. Order-independent, because
-/// diagonal operators commute.
+/// Amplitudes carried through the whole run together before moving on — the
+/// cache-blocking tile that makes fusion pay off.
+///
+/// A naive fused pass (one loop over the buffer, an op loop *inside* it) loses to
+/// the per-gate kernels: its inner op loop branches on a runtime-length,
+/// heterogeneous op list, which the compiler cannot vectorize, so it runs at
+/// scalar speed and — being compute-bound — never cashes in the memory-traffic it
+/// saves. Tiling fixes both. Each tile is multiplied by every op while it stays
+/// hot in cache, so the run costs ~one main-memory traversal rather than one per
+/// op (the point of fusing), and each op is applied to the tile by a *monomorphic*
+/// inner loop ([`block_diagonal_1q`] / [`block_diagonal_2q`], the same body as the
+/// single-gate kernels) that vectorizes exactly as they do.
+///
+/// 4096 amplitudes = 64 KiB sits in L2 on every target. The pass is insensitive
+/// to the exact value across 512–32768 (measured), so this is a locality knob,
+/// not a hardware-tuned constant.
+const DIAGONAL_TILE: usize = 4096;
+
+/// Multiply one cache tile by a 1-qubit diagonal op. `start` is the tile's global
+/// index, so `start + local` reconstructs each amplitude's basis index for the
+/// bit test — the same per-index phase as [`apply_diagonal_1q`], hence the same
+/// (vectorizable) shape.
 #[inline]
-fn diagonal_run_factor(ops: &[DiagonalOp], i: usize) -> C64 {
-    let mut factor = C64::new(1.0, 0.0);
-    for op in ops {
-        match op {
-            DiagonalOp::One { bit, d0, d1 } => {
-                factor *= if i & bit == 0 { *d0 } else { *d1 };
-            }
-            DiagonalOp::Two { b0, b1, diag } => {
-                let k = ((usize::from(i & b1 != 0)) << 1) | usize::from(i & b0 != 0);
-                factor *= diag[k];
-            }
-        }
+fn block_diagonal_1q(tile: &mut [C64], start: usize, bit: usize, d0: C64, d1: C64) {
+    for (local, amp) in tile.iter_mut().enumerate() {
+        *amp *= if (start + local) & bit == 0 { d0 } else { d1 };
     }
-    factor
 }
 
-/// Fused diagonal run: apply every op in `ops` in a **single** pass over `data`,
-/// multiplying each amplitude by the product of the ops' per-index factors (see
-/// [`diagonal_run_factor`]).
+/// Multiply one cache tile by a 2-qubit diagonal op — the [`apply_diagonal_2q`]
+/// body over a tile.
+#[inline]
+fn block_diagonal_2q(tile: &mut [C64], start: usize, b0: usize, b1: usize, diag: [C64; 4]) {
+    for (local, amp) in tile.iter_mut().enumerate() {
+        let i = start + local;
+        let k = ((usize::from(i & b1 != 0)) << 1) | usize::from(i & b0 != 0);
+        *amp *= diag[k];
+    }
+}
+
+/// Fused diagonal run: apply every op in `ops` to the buffer, multiplying each
+/// amplitude by the product of the ops' per-index factors, tiled so the buffer is
+/// traversed through main memory roughly once for the whole run instead of once
+/// per op — the win over applying each op through
+/// [`apply_diagonal_1q`] / [`apply_diagonal_2q`] in turn.
 ///
-/// Numerically identical to applying the same ops one at a time through
-/// [`apply_diagonal_1q`] / [`apply_diagonal_2q`], but touches the buffer once
-/// instead of once per op — which is the whole optimization on a deep diagonal
-/// stretch, where the per-gate passes are the redundant work.
+/// Ops are first partitioned into monomorphic 1-qubit and 2-qubit slices (`ops`
+/// is capped at `MAX_FUSED_DIAGONAL_RUN`, so this is a tiny, one-off split), then
+/// each tile is carried through all 1-qubit ops and all 2-qubit ops. Reordering is
+/// sound: diagonal operators commute. The result is numerically what applying the
+/// ops one at a time gives, to rounding — the same sequence of per-amplitude
+/// multiplies, only regrouped.
 pub(crate) fn apply_diagonal_run(data: &mut [C64], ops: &[DiagonalOp], parallel: bool) {
+    let mut ones: Vec<(usize, C64, C64)> = Vec::with_capacity(ops.len());
+    let mut twos: Vec<(usize, usize, [C64; 4])> = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            DiagonalOp::One { bit, d0, d1 } => ones.push((*bit, *d0, *d1)),
+            DiagonalOp::Two { b0, b1, diag } => twos.push((*b0, *b1, *diag)),
+        }
+    }
+
+    // One tile carried through every op: monomorphic inner loops, cache-resident.
+    let apply_tile = |start: usize, tile: &mut [C64]| {
+        for &(bit, d0, d1) in &ones {
+            block_diagonal_1q(tile, start, bit, d0, d1);
+        }
+        for &(b0, b1, diag) in &twos {
+            block_diagonal_2q(tile, start, b0, b1, diag);
+        }
+    };
+
     #[cfg(feature = "parallel")]
     if parallel {
         use rayon::prelude::*;
-        data.par_iter_mut().enumerate().for_each(|(i, amp)| {
-            *amp *= diagonal_run_factor(ops, i);
-        });
+        data.par_chunks_mut(DIAGONAL_TILE)
+            .enumerate()
+            .for_each(|(t, tile)| apply_tile(t * DIAGONAL_TILE, tile));
         return;
     }
 
     #[cfg(not(feature = "parallel"))]
     let _ = parallel;
 
-    for (i, amp) in data.iter_mut().enumerate() {
-        *amp *= diagonal_run_factor(ops, i);
+    for (t, tile) in data.chunks_mut(DIAGONAL_TILE).enumerate() {
+        apply_tile(t * DIAGONAL_TILE, tile);
     }
 }
 
