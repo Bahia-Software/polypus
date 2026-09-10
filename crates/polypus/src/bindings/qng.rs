@@ -99,12 +99,21 @@ impl PyVarianceOracle {
         theta: &[f64],
         param_index: usize,
     ) -> Result<f64, EvaluationError> {
-        self.variance_function
+        let value: f64 = self
+            .variance_function
             .bind(py)
             .call1((theta.to_vec(), param_index as u32))
             .map_err(EvaluationError::Python)?
             .extract()
-            .map_err(EvaluationError::Python)
+            .map_err(EvaluationError::Python)?;
+        // A QFIM diagonal element must be finite and non-negative — zero is fine
+        // (Tikhonov regularisation keeps the QNG division well-posed). Reject a
+        // NaN/infinite/negative value here so it cannot silently corrupt the
+        // natural-gradient update (θ ← θ − η·∇/qfim).
+        if !value.is_finite() || value < 0.0 {
+            return Err(EvaluationError::InvalidVariance { param_index, value });
+        }
+        Ok(value)
     }
 }
 
