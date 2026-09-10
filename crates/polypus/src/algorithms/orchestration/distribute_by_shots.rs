@@ -68,6 +68,11 @@ impl AlgorithmTrait for DistributeByShotsRun {
                 *total.entry(k).or_insert(0) += v;
             }
         }
+        // Central result validation (contract C-3): the merged counts are one
+        // logical result that must conserve the total shots apportioned above and
+        // be non-empty. Per-replica maps can legitimately be empty (a zero-shot
+        // replica), so the check is on the merged result, not each batch.
+        crate::infrastructure::validate_run_results(std::slice::from_ref(&total), 1, shots)?;
         let merged_pyobj = Python::with_gil(|py| -> PyResult<pyo3::PyObject> {
             // The runs above execute with the GIL released (see
             // `run_quantum_circuit`); this reacquire is the first Python

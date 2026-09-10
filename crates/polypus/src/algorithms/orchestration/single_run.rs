@@ -14,6 +14,10 @@ impl AlgorithmTrait for AlgorithmSingleRun {
         // backend's `Drop` still releases resources if we return early.
         let backend = Infrastructure::create_backend(&args.config)?;
         let counts = backend.run_circuits(&args.qcs, &args.config)?;
+        // Central result validation (contract C-3 + empty-map guard) before the
+        // counts cross to Python. On an early return here the backend's `Drop`
+        // still releases its resources.
+        crate::infrastructure::validate_run_results(&counts, args.qcs.len(), args.config.shots)?;
         backend.close();
         // Convert native counts to a Python `list[dict]` at the FFI boundary.
         Python::with_gil(|py| {

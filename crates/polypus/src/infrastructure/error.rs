@@ -60,6 +60,13 @@ pub enum BackendError {
     /// A backend was asked to run a circuit representation it cannot execute
     /// (e.g. a Qiskit `QuantumCircuit` on a GIL-free backend).
     UnsupportedCircuit(String),
+    /// A backend returned measurement results that violate the execution
+    /// contract: the wrong number of count maps, an empty map (no measurements
+    /// for a circuit that ran), a shot total that does not match the request
+    /// (contract C-3 shot conservation), or a malformed non-bitstring key.
+    /// Surfaced here rather than silently reduced downstream — an empty map, in
+    /// particular, would otherwise become a `0.0` fitness with no error at all.
+    InvalidResults(String),
     /// A native (pure-Rust) circuit failed to parse or to simulate.
     NativeCircuit(String),
     /// A CUNQA-specific failure originating in the Rust layer (family-handle
@@ -92,6 +99,7 @@ impl fmt::Display for BackendError {
                 write!(f, "expected exactly {expected} circuit(s), got {got}")
             }
             BackendError::UnsupportedCircuit(m) => write!(f, "{m}"),
+            BackendError::InvalidResults(m) => write!(f, "backend returned invalid results: {m}"),
             BackendError::NativeCircuit(m) => write!(f, "{m}"),
             BackendError::Cunqa(m) => write!(f, "CUNQA backend error: {m}"),
             BackendError::Conversion(m) => {
@@ -119,6 +127,11 @@ impl From<BackendError> for PyErr {
                 PyValueError::new_err(format!("expected exactly {expected} circuit(s), got {got}"))
             }
             BackendError::UnsupportedCircuit(m) => PyNativeCircuitError::new_err(m),
+            // A backend/contract violation on our own results: the typed backend
+            // base class, not a native-circuit or seam error.
+            BackendError::InvalidResults(m) => {
+                PyBackendError::new_err(format!("backend returned invalid results: {m}"))
+            }
             BackendError::NativeCircuit(m) => PyNativeCircuitError::new_err(m),
             BackendError::Cunqa(m) => PyCunqaError::new_err(m),
             BackendError::Conversion(m) => PyBackendError::new_err(m),

@@ -159,7 +159,7 @@ mod tests {
         fn run_circuits(
             &self,
             qcs: &[BoundCircuit],
-            _config: &ExecutionConfig,
+            config: &ExecutionConfig,
         ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
             let mut calls = self.locked_calls();
             // Index of the first circuit of this chunk within the whole batch;
@@ -172,8 +172,19 @@ mod tests {
             if self.fail {
                 return Err(BackendError::Conversion("mock failure".to_string()));
             }
+            // Encode each candidate's batch position in the "1" count (read back by
+            // `KeyOneObservable`) and park the rest of the shots under "0", so the
+            // synthetic result still conserves `config.shots` (contract C-3, now
+            // validated centrally in `run_and_evaluate`). `offset + i` stays well
+            // under the 16 shots for these 5 candidates.
             Ok((0..qcs.len())
-                .map(|i| HashMap::from([("1".to_string(), (offset + i) as u64)]))
+                .map(|i| {
+                    let ones = (offset + i) as u64;
+                    HashMap::from([
+                        ("1".to_string(), ones),
+                        ("0".to_string(), u64::from(config.shots) - ones),
+                    ])
+                })
                 .collect())
         }
 
