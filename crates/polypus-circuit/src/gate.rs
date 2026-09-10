@@ -284,6 +284,46 @@ pub fn terminal_measurement_violation(gates: &[GateInstruction]) -> Option<usize
     None
 }
 
+/// The first qubit index in `gates` that is out of range for a register of
+/// `num_qubits` qubits (i.e. `>= num_qubits`), if any.
+///
+/// Every qubit *reference* is checked — unitary operands, [`Measure`] targets
+/// and [`Barrier`] operands. ([`MeasureAll`] spans `0..num_qubits` by definition
+/// and is always in range; classical-bit indices are a separate concern.) The
+/// fluent builder already rejects an out-of-range qubit at push time
+/// ([`CircuitError::QubitOutOfRange`](crate::CircuitError::QubitOutOfRange)), but
+/// a [`ConcreteCircuit`](crate::ConcreteCircuit) can be assembled or mutated
+/// through its public `gates` field, bypassing that. This is the shared
+/// reference — the sibling of [`terminal_measurement_violation`] — that the
+/// builder-free consumers (notably the native simulator) use to reject such a
+/// circuit *before it reaches a kernel*, where an out-of-range index maps to an
+/// out-of-bounds amplitude (`1 << qubit`) and is undefined behaviour in release.
+///
+/// [`Measure`]: GateInstruction::Measure
+/// [`Barrier`]: GateInstruction::Barrier
+/// [`MeasureAll`]: GateInstruction::MeasureAll
+pub fn qubit_index_violation(gates: &[GateInstruction], num_qubits: usize) -> Option<usize> {
+    for gate in gates {
+        let offending = match gate.acts_on() {
+            ActsOn::One(q) => (q >= num_qubits).then_some(q),
+            ActsOn::Two(a, b) => (a >= num_qubits)
+                .then_some(a)
+                .or_else(|| (b >= num_qubits).then_some(b)),
+            ActsOn::None => match gate {
+                GateInstruction::Measure { qubit, .. } => (*qubit >= num_qubits).then_some(*qubit),
+                GateInstruction::Barrier(qubits) => {
+                    qubits.iter().copied().find(|&q| q >= num_qubits)
+                }
+                _ => None,
+            },
+        };
+        if offending.is_some() {
+            return offending;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +534,38 @@ mod tests {
         measured.sync(&gates);
 
         assert!(measured.contains(0));
+    }
+
+    #[test]
+    fn qubit_index_violation_flags_every_kind_of_reference() {
+        // Unitary operands (one- and two-qubit), a measurement target and a
+        // barrier operand are all checked; the offending index is returned.
+        assert_eq!(qubit_index_violation(&[GateInstruction::H(5)], 2), Some(5));
+        assert_eq!(
+            qubit_index_violation(&[GateInstruction::Cx(0, 9)], 2),
+            Some(9)
+        );
+        assert_eq!(
+            qubit_index_violation(&[GateInstruction::Measure { qubit: 4, cbit: 0 }], 2),
+            Some(4)
+        );
+        assert_eq!(
+            qubit_index_violation(&[GateInstruction::Barrier(vec![0, 7])], 2),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn qubit_index_violation_accepts_in_range_circuits() {
+        // In-range references (including `MeasureAll`, which spans 0..num_qubits
+        // by definition) are clean; the boundary index `num_qubits` is not.
+        let gates = vec![
+            GateInstruction::H(0),
+            GateInstruction::Cx(0, 1),
+            GateInstruction::MeasureAll,
+        ];
+        assert_eq!(qubit_index_violation(&gates, 2), None);
+        assert_eq!(qubit_index_violation(&[GateInstruction::X(2)], 2), Some(2));
+        assert_eq!(qubit_index_violation(&[], 0), None);
     }
 }
