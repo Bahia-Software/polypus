@@ -439,7 +439,15 @@ impl Simulator for StatevectorSimulator {
             // each descriptor, which validates the run's `Rz`/`Rzz`/`Cp` angles
             // *before* any amplitude is modified. If cancellation fires mid-scan
             // or an angle is invalid, nothing from this run is applied.
-            let mut ops = Vec::with_capacity(MAX_FUSED_DIAGONAL_RUN);
+            //
+            // Grows organically (`Vec::new`) rather than pre-allocating
+            // `MAX_FUSED_DIAGONAL_RUN` up front: most runs are far shorter than
+            // the cap (a real diagonal run is typically only a handful of gates),
+            // so reserving the full 64-entry worst case every time wasted memory
+            // on every run for no benefit — the doubling growth this falls back
+            // to costs at most a few KB of copying even for a run that does reach
+            // the cap, utterly negligible next to the `2^n` pass that follows.
+            let mut ops = Vec::new();
             let mut j = i;
             while j < total && j - i < MAX_FUSED_DIAGONAL_RUN {
                 // `is_diagonal` is `diagonal_op(..).is_some()`, so a `None` here
