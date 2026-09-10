@@ -58,6 +58,22 @@ jobs:
         with:
           command: check
 
+  # The committed Cargo.lock pins exact dependency versions so a new upstream
+  # release cannot silently drift the build (unpinned deps have turned CI red
+  # before). This job fails if the lockfile is out of sync with the manifests —
+  # a Cargo.toml change that landed without a matching lockfile update.
+  # `cargo metadata --locked` resolves the graph against the committed lock and
+  # errors if it would need to change; no build, no Python needed.
+  lockfile:
+    name: Cargo.lock up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Cargo.lock is in sync with the manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -77,15 +93,16 @@ jobs:
       # crate's `extension-module` feature tells PyO3 not to link libpython,
       # which breaks building the test/bench targets that --all-targets compiles.
       - name: Clippy (workspace, default features)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Lint the optional QMIO backend (pure Rust: zeromq + serde-pickle).
       - name: Clippy (qmio backend)
-        run: cargo clippy -p polypus --features qmio --all-targets -- -D warnings
+        run: cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
 
-  # Guard the declared MSRV (rust-version in Cargo.toml). Without a committed
-  # Cargo.lock this resolves fresh dependencies each run, so a new release of
-  # a dependency can raise the effective MSRV and turn this job red without
-  # any change in the repo — if that happens, bump rust-version deliberately.
+  # Guard the declared MSRV (rust-version in Cargo.toml). With the committed
+  # Cargo.lock and `--locked`, the exact pinned dependency versions are used, so
+  # a new dependency release can no longer raise the effective MSRV or turn this
+  # job red without a deliberate lockfile change; bump rust-version deliberately
+  # if a required dependency update ever does.
   msrv:
     name: MSRV (1.85)
     runs-on: ubuntu-latest
@@ -98,9 +115,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Check (workspace, default features)
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
       - name: Check (qmio backend)
-        run: cargo check -p polypus --features qmio --all-targets
+        run: cargo check --locked -p polypus --features qmio --all-targets
 
   test:
     name: test (Rust)
@@ -119,23 +136,24 @@ jobs:
       # whose results must be bit-identical to the sequential path).
       - name: Test pure-Rust crates (all features)
         run: >
-          cargo test
+          cargo test --locked
           -p polypus-circuit
           -p polypus-sim
           -p polypus-physics
           -p polypus-optimizers
+          -p polypus-observable
           --all-features
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
       # feature), not independent toggles — `--all-features` sets several at
       # once and the `log` crate refuses to compile. Test it with no features.
       - name: Test polypus-logger
-        run: cargo test -p polypus-logger
+        run: cargo test --locked -p polypus-logger
       # `polypus` with default features — NOT extension-module (see clippy note).
       - name: Test polypus (default features)
-        run: cargo test -p polypus
+        run: cargo test --locked -p polypus
       - name: Test polypus (qmio backend)
-        run: cargo test -p polypus --features qmio
+        run: cargo test --locked -p polypus --features qmio
 
   # Sanity-check that the rustdoc still builds cleanly across the whole
   # workspace (broken intra-doc links fail via -D warnings). Catches
@@ -154,7 +172,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build docs (no deploy)
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
 

@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has six crates:
+with PyO3 Python bindings. The Cargo workspace has seven crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -24,6 +24,7 @@ with PyO3 Python bindings. The Cargo workspace has six crates:
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
+| `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; orchestration and infrastructures (`local`, `cunqa`, `qmio`, `native`) | **Yes** |
 

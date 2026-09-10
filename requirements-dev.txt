@@ -8,6 +8,10 @@ build>=1.0
 # ships setuptools in fresh environments, so declare it explicitly.
 setuptools>=70
 qiskit>=2.0
+# Aer is the default `local` simulator backend and is exercised by the test
+# suite directly; declare it here too, not only transitively via the
+# polypus_python package (packages/polypus_python/pyproject.toml).
+qiskit-aer>=0.17
 
 # Testing
 pytest>=8.0

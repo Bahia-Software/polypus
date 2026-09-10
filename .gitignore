@@ -1,6 +1,5 @@
 # Rust build output
 target/
-Cargo.lock
 
 # Python build artifacts
 dist/
