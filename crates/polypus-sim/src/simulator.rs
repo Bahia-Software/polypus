@@ -378,23 +378,46 @@ impl Simulator for StatevectorSimulator {
         let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits);
         let gates = &circuit.gates;
         let total = gates.len();
-        // Cancellation is polled once per *scanned* instruction, the same cadence
-        // as the old one-gate-per-iteration loop; this closure is that single
-        // poll, plus the diagnostic the old loop logged on a stop.
-        let mut poll_cancel = |at: usize| -> Result<(), SimError> {
-            if cancellation.cancelled() {
-                log::debug!("simulation cancelled by the caller after {at} of {total} gate(s)");
-                Err(SimError::Cancelled)
-            } else {
-                Ok(())
-            }
-        };
-        // Fuse maximal runs of consecutive diagonal instructions into one pass
-        // (see `Statevector::apply_diagonal_ops`). `apply` has no lookahead, so
-        // the run detection has to live here — the one call site with the whole
-        // instruction list in hand.
+        // Two fusion mechanisms share this one scan, because both need the whole
+        // instruction list in hand (`apply` has no lookahead):
+        //
+        //  * diagonal runs (#131) — maximal runs of consecutive diagonal gates
+        //    folded into one buffer pass (see `Statevector::apply_diagonal_ops`);
+        //  * dense connected-qubit components (#132) — the nine dense gates
+        //    (`H, X, Y, Rx, Ry, U`, `Cx, Swap, Rxx`) grouped, while they touch at
+        //    most two qubits between them, into one composed matrix per component.
+        //
+        // The two never overlap: a gate is dense-fusable, diagonal, or a boundary
+        // (`Barrier`/`Measure`/`MeasureAll`). A diagonal gate or a boundary is a
+        // hard boundary for the open dense components — their gates all occurred
+        // earlier, so they must reach the state first — so it flushes them before
+        // taking its own path.
+        let mut open: Vec<DenseComponent> = Vec::new();
         let mut i = 0;
         while i < total {
+            // A dense-fusable gate joins the connected-component machinery.
+            if let Some(qubits) = crate::statevector::dense_fusable_qubits(&gates[i]) {
+                // Point 1 of the cancellation cadence: once per scanned gate,
+                // before deciding merge-vs-flush (bookkeeping only, no buffer
+                // touch). See `flush_dense` for point 2.
+                poll_cancel(&mut cancellation, i, total)?;
+                absorb_dense_gate(
+                    &mut sv,
+                    gates,
+                    &mut open,
+                    i,
+                    qubits,
+                    &mut cancellation,
+                    total,
+                )?;
+                i += 1;
+                continue;
+            }
+
+            // Any non-dense gate is a boundary: flush every open dense component
+            // (polling once per component — point 2) before it is applied.
+            flush_dense(&mut sv, gates, &mut open, &mut cancellation, total)?;
+
             // Non-diagonal gate, or a diagonal gate not followed by another (a
             // run of length 1): today's single-gate path. The fast path avoids a
             // `Vec` allocation and the per-index run branch for the common case of
@@ -404,7 +427,7 @@ impl Simulator for StatevectorSimulator {
                 && i + 1 < total
                 && crate::statevector::is_diagonal(&gates[i + 1]);
             if !starts_a_run {
-                poll_cancel(i)?;
+                poll_cancel(&mut cancellation, i, total)?;
                 sv.apply(&gates[i])?;
                 i += 1;
                 continue;
@@ -424,15 +447,180 @@ impl Simulator for StatevectorSimulator {
                 let Some(descriptor) = crate::statevector::diagonal_op(&gates[j]) else {
                     break;
                 };
-                poll_cancel(j)?;
+                poll_cancel(&mut cancellation, j, total)?;
                 ops.push(descriptor?);
                 j += 1;
             }
             sv.apply_diagonal_ops(&ops);
             i = j;
         }
+        // End of the circuit: flush whatever dense components are still open.
+        flush_dense(&mut sv, gates, &mut open, &mut cancellation, total)?;
         Ok(sv)
     }
+}
+
+/// One poll of the cancellation hook, plus the diagnostic the old
+/// one-gate-per-iteration loop logged on a stop. Called once per *scanned*
+/// instruction, the same cadence as before the fusion loops existed.
+fn poll_cancel(
+    cancellation: &mut CancellationCheck,
+    at: usize,
+    total: usize,
+) -> Result<(), SimError> {
+    if cancellation.cancelled() {
+        log::debug!("simulation cancelled by the caller after {at} of {total} gate(s)");
+        Err(SimError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// An open dense component during the scan: a set of at most two qubits, and the
+/// circuit indices of the dense gates fused onto it, in ascending (circuit)
+/// order.
+///
+/// Invariant, maintained by [`absorb_dense_gate`]: open components are pairwise
+/// qubit-disjoint (any gate that would bridge two of them merges them, or — if
+/// that would exceed two qubits — forces a flush), so open components commute and
+/// may be flushed in any order.
+struct DenseComponent {
+    /// The component's qubits, sorted ascending; length 1 or 2.
+    qubits: Vec<usize>,
+    /// Circuit indices of the fused gates. Kept in insertion order (cheap to
+    /// merge — a concatenation, never a re-sort), then sorted once at flush time
+    /// by [`apply_to`](Self::apply_to). Sorting on every merge instead would be
+    /// `O(gates²)` on a long same-qubit run.
+    indices: Vec<usize>,
+    /// The earliest gate index in the component, for a deterministic flush order.
+    /// Maintained incrementally so the flush needs no scan of `indices`.
+    min_index: usize,
+}
+
+impl DenseComponent {
+    /// A fresh single-gate component for the gate at index `i`.
+    fn singleton(qubits: Vec<usize>, i: usize) -> Self {
+        DenseComponent {
+            qubits,
+            indices: vec![i],
+            min_index: i,
+        }
+    }
+
+    /// Apply this component to `sv`. A lone gate takes the unmodified
+    /// [`Statevector::apply`] fast path (a component that never merged pays no
+    /// composition cost); two or more gates are composed into one matrix, in
+    /// circuit order.
+    fn apply_to(&self, sv: &mut Statevector, gates: &[GateInstruction]) -> Result<(), SimError> {
+        if self.indices.len() == 1 {
+            return sv.apply(&gates[self.indices[0]]);
+        }
+        // Restore circuit order once, here — merging kept them unsorted.
+        let mut order = self.indices.clone();
+        order.sort_unstable();
+        let members: Vec<&GateInstruction> = order.iter().map(|&k| &gates[k]).collect();
+        match self.qubits.as_slice() {
+            [q] => sv.apply_composed_1q(*q, &members),
+            [qa, qb] => sv.apply_composed_2q(*qa, *qb, &members),
+            // The merge cap keeps `qubits` at length 1 or 2; nothing else is built.
+            _ => unreachable!("a dense component spans one or two qubits"),
+        }
+    }
+}
+
+/// Fold the dense-fusable gate at index `i` (touching `qubits`) into the open
+/// components: merge it with every open component it shares a qubit with when the
+/// union still fits two qubits, otherwise flush all open components and start a
+/// fresh one holding just this gate.
+fn absorb_dense_gate(
+    sv: &mut Statevector,
+    gates: &[GateInstruction],
+    open: &mut Vec<DenseComponent>,
+    i: usize,
+    qubits: crate::statevector::DenseQubits,
+    cancellation: &mut CancellationCheck,
+    total: usize,
+) -> Result<(), SimError> {
+    use crate::statevector::DenseQubits;
+    let gate_qubits: Vec<usize> = match qubits {
+        DenseQubits::One(q) => vec![q],
+        DenseQubits::Two(a, b) => {
+            let (lo, hi) = (a.min(b), a.max(b));
+            vec![lo, hi]
+        }
+    };
+
+    // The merged qubit set = this gate's qubits ∪ every touched component's.
+    let mut merged: Vec<usize> = gate_qubits.clone();
+    for comp in open.iter() {
+        if comp.qubits.iter().any(|q| gate_qubits.contains(q)) {
+            for &q in &comp.qubits {
+                if !merged.contains(&q) {
+                    merged.push(q);
+                }
+            }
+        }
+    }
+
+    if merged.len() > 2 {
+        // Bridging would exceed the two-qubit cap. Every open component's gates
+        // occurred before this one, so flush them all (in circuit order), then
+        // open a new component for this gate alone.
+        flush_dense(sv, gates, open, cancellation, total)?;
+        open.push(DenseComponent::singleton(gate_qubits, i));
+        return Ok(());
+    }
+
+    // Merge every touched component (and this gate) into one. Untouched
+    // components stay open and qubit-disjoint from the result. Indices are only
+    // concatenated (not re-sorted) — `apply_to` sorts once at flush.
+    merged.sort_unstable();
+    let mut merged_indices: Vec<usize> = Vec::new();
+    let mut min_index = i;
+    let mut kept: Vec<DenseComponent> = Vec::with_capacity(open.len());
+    for comp in open.drain(..) {
+        if comp.qubits.iter().any(|q| gate_qubits.contains(q)) {
+            min_index = min_index.min(comp.min_index);
+            merged_indices.extend(comp.indices);
+        } else {
+            kept.push(comp);
+        }
+    }
+    merged_indices.push(i);
+    *open = kept;
+    open.push(DenseComponent {
+        qubits: merged,
+        indices: merged_indices,
+        min_index,
+    });
+    Ok(())
+}
+
+/// Flush every open dense component to `sv`, in circuit order, polling
+/// cancellation **once per component before its apply** — point 2 of the
+/// cadence, the part a naive port of #131 (which only ever flushed one run) would
+/// miss: a single flush here can hold several independent components.
+///
+/// A no-op when nothing is open — and, crucially, it polls nothing then, so a
+/// purely diagonal circuit keeps #131's exact poll cadence.
+fn flush_dense(
+    sv: &mut Statevector,
+    gates: &[GateInstruction],
+    open: &mut Vec<DenseComponent>,
+    cancellation: &mut CancellationCheck,
+    total: usize,
+) -> Result<(), SimError> {
+    if open.is_empty() {
+        return Ok(());
+    }
+    // Disjoint components commute, so any order is numerically identical; earliest
+    // gate first is the natural, deterministic choice.
+    open.sort_by_key(|comp| comp.min_index);
+    for comp in std::mem::take(open) {
+        poll_cancel(cancellation, comp.min_index, total)?;
+        comp.apply_to(sv, gates)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -689,5 +877,242 @@ mod tests {
         // And it stopped at the first "yes" — proof the hook is polled while a run
         // is being scanned, not merely once for the whole run.
         assert_eq!(calls, 3);
+    }
+
+    /// Evolve `gates` gate-by-gate through `Statevector::apply` (never fusing),
+    /// pinned to the sequential kernels — the reference the fused run must match.
+    fn reference_state(n: usize, gates: &[G]) -> Statevector {
+        let mut sv = Statevector::new(n).expect("n below MAX_QUBITS");
+        sv.set_parallel_threshold(MAX_QUBITS + 1);
+        for gate in gates {
+            sv.apply(gate).expect("all gates valid");
+        }
+        sv
+    }
+
+    /// The fused run (dense connected-component fusion) must land bit-for-bit
+    /// close to applying every gate one at a time through `Statevector::apply`.
+    fn assert_fused_matches_reference(n: usize, gates: &[G]) {
+        let circuit = ConcreteCircuit {
+            num_qubits: n,
+            gates: gates.to_vec(),
+        };
+        let fused = sequential_sim().run(&circuit).expect("all angles finite");
+        let reference = reference_state(n, gates);
+        for (b, (a, c)) in fused
+            .amplitudes()
+            .iter()
+            .zip(reference.amplitudes().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - c).norm() < 1e-12,
+                "amplitude {b}: fused {a} vs gate-by-gate {c}"
+            );
+        }
+    }
+
+    /// A chain of dense one-qubit gates on the *same* qubit fuses into one
+    /// composed 2×2. Composition is non-commutative, so this also pins the order:
+    /// `Rx·Ry·Rx` with distinct angles is not any reordering of itself.
+    #[test]
+    fn composed_same_qubit_chain_matches_gate_by_gate() {
+        let gates = [
+            G::Rx {
+                qubit: 0,
+                theta: Fixed(0.3),
+            },
+            G::Ry {
+                qubit: 0,
+                theta: Fixed(-1.1),
+            },
+            G::Rx {
+                qubit: 0,
+                theta: Fixed(0.7),
+            },
+        ];
+        assert_fused_matches_reference(1, &gates);
+    }
+
+    /// A chain of dense two-qubit gates on the *same* pair fuses into one composed
+    /// 4×4 — including the asymmetric `Cx` (whose 4×4 is built directly) and the
+    /// symmetric `Swap`/`Rxx`.
+    #[test]
+    fn composed_same_pair_chain_matches_gate_by_gate() {
+        let gates = [
+            G::Cx(0, 1),
+            G::Rxx {
+                q0: 0,
+                q1: 1,
+                theta: Fixed(0.7),
+            },
+            G::Swap(0, 1),
+            G::Cx(1, 0),
+        ];
+        assert_fused_matches_reference(2, &gates);
+    }
+
+    /// The shape the fusion actually pays off on: a `Cx` sharing a qubit with the
+    /// rotations before and after it, so a whole rotation–entangle–rotation block
+    /// collapses to one 4×4 pass. Mixes one-qubit gates (lifted into the joint
+    /// space) with the two-qubit `Cx` inside a single component.
+    #[test]
+    fn rotation_cx_rotation_chain_matches_gate_by_gate() {
+        let gates = [
+            G::Rx {
+                qubit: 0,
+                theta: Fixed(0.5),
+            },
+            G::Ry {
+                qubit: 1,
+                theta: Fixed(-0.3),
+            },
+            G::Cx(0, 1),
+            G::Rx {
+                qubit: 1,
+                theta: Fixed(0.8),
+            },
+            G::Ry {
+                qubit: 0,
+                theta: Fixed(0.2),
+            },
+        ];
+        assert_fused_matches_reference(2, &gates);
+    }
+
+    /// Independent dense one-qubit gates on *different* qubits never share a
+    /// qubit, so each stays its own length-1 component and flushes through the
+    /// unmodified `Statevector::apply` fast path (`DenseComponent::apply_to`'s
+    /// `indices.len() == 1` arm) — never the composed path, which a component that
+    /// never merged must not pay for. The result is therefore exactly
+    /// `apply`-gate-by-gate; equivalence here confirms the singleton path stays
+    /// correct and is exercised.
+    #[test]
+    fn independent_single_qubit_gates_take_the_singleton_path() {
+        let gates = [
+            G::H(0),
+            G::X(1),
+            G::Y(2),
+            G::Ry {
+                qubit: 3,
+                theta: Fixed(0.4),
+            },
+            G::U {
+                qubit: 4,
+                theta: Fixed(0.5),
+                phi: Fixed(1.2),
+                lam: Fixed(-0.4),
+            },
+        ];
+        assert_fused_matches_reference(5, &gates);
+    }
+
+    /// Dense components, diagonal runs and a hard boundary (`Barrier`) interleaved:
+    /// each diagonal gate and the barrier flush the open dense components before
+    /// taking their own path, so this exercises the dense/diagonal boundary logic
+    /// end to end. Must still match plain gate-by-gate application.
+    #[test]
+    fn mixed_dense_diagonal_and_boundary_matches_gate_by_gate() {
+        let gates = [
+            G::H(0),
+            G::Rx {
+                qubit: 1,
+                theta: Fixed(0.3),
+            },
+            G::Cx(0, 1),
+            // Diagonal run: flushes the {0,1} dense component first.
+            G::Rz {
+                qubit: 0,
+                theta: Fixed(0.9),
+            },
+            G::Cz(0, 2),
+            G::Rzz {
+                q0: 1,
+                q1: 2,
+                theta: Fixed(-0.4),
+            },
+            // Back to dense on a fresh set of qubits.
+            G::Ry {
+                qubit: 2,
+                theta: Fixed(0.6),
+            },
+            G::Rxx {
+                q0: 2,
+                q1: 3,
+                theta: Fixed(1.1),
+            },
+            // A hard boundary mid-stream: flushes the {2,3} dense component.
+            G::Barrier(vec![]),
+            G::Ry {
+                qubit: 3,
+                theta: Fixed(-0.2),
+            },
+            G::Cx(3, 0),
+        ];
+        assert_fused_matches_reference(4, &gates);
+    }
+
+    /// Qubit width for the dense-flush cancellation regression: wide enough that a
+    /// single component's one buffer pass (tens of ms sequentially, measured well
+    /// above 25 ms here) comfortably exceeds the checkpoint interval, so the hook
+    /// is polled once per component as a multi-component flush drains.
+    const DENSE_CANCEL_N: usize = 21;
+
+    /// Regression for cadence point 2: a flush holding several independent dense
+    /// components must poll cancellation *before each component*, not once for the
+    /// whole flush.
+    ///
+    /// The circuit is a layer of single-qubit gates on distinct qubits with no
+    /// entangling gate between them — none merge, none force an early flush, so
+    /// they all stay open until one flush at the end — with a poisoned `NaN` `Rx`
+    /// on its own qubit as the last component. Timing-independent in its
+    /// *assertion*, by the same trick as `cancellation_fires_inside_a_run...`
+    /// above: the error variant alone says where the run stopped. A hook that
+    /// answers "stop" on its 2nd call must cancel *inside* the flush, having
+    /// applied some but not all components, so the run never reaches the poison:
+    ///
+    ///  * `Cancelled` (not `NonFiniteAmplitude`) proves the flush stopped
+    ///    part-way — which only a per-component poll can do. A "poll once before
+    ///    the flush" port would apply every component (its lone poll answers
+    ///    "continue" on call 1) and hit the poison; a "poll once after" port
+    ///    likewise never stops mid-flush.
+    ///  * `calls == 2` proves it stopped at the first "stop" answer — after
+    ///    applying exactly the components before it: neither 0 (checked only
+    ///    before the flush) nor all (checked only after).
+    #[test]
+    fn cancellation_fires_between_components_of_one_flush() {
+        let real = 5;
+        let mut gates: Vec<G> = (0..real)
+            .map(|q| G::Ry {
+                qubit: q,
+                theta: Fixed(0.3),
+            })
+            .collect();
+        // Poisoned terminator on its own qubit: applied only if the flush never
+        // stops. It opens its own (last) component and is evaluated only when
+        // flushed.
+        gates.push(G::Rx {
+            qubit: real,
+            theta: Fixed(f64::NAN),
+        });
+        let circuit = ConcreteCircuit {
+            num_qubits: DENSE_CANCEL_N,
+            gates,
+        };
+
+        let mut calls = 0usize;
+        let err = {
+            let mut cancel = || {
+                calls += 1;
+                calls >= 2
+            };
+            sequential_sim()
+                .run_cancellable(&circuit, Some(&mut cancel))
+                .unwrap_err()
+        };
+        // Stopped inside the flush, before the poisoned final component.
+        assert_eq!(err, SimError::Cancelled);
+        // Exactly at the first "stop": two components in, not zero and not all.
+        assert_eq!(calls, 2);
     }
 }

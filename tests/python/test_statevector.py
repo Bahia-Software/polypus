@@ -285,6 +285,46 @@ def test_long_diagonal_run_matches_qiskit():
     _compare(polypus.statevector(p), qc)
 
 
+def test_dense_fusion_mixed_matches_qiskit():
+    """A hardware-efficient-ansatz shape (the circuit the dense connected-qubit
+    fusion of issue #132 targets) with diagonal gates interleaved, so the fused
+    dense path, the diagonal-run path (#131) and the flush-on-boundary logic
+    between them are all exercised in one circuit.
+
+    Each layer applies ``rx``/``ry`` on every qubit and a brickwork of ``cx``
+    entanglers (so rotations fuse with the ``cx`` they share a qubit with into one
+    composed 2-qubit matrix), then a run of diagonal gates (``rz``/``cz``/``rzz``)
+    that forces the open dense components to flush before it. The fused native
+    output must stay bit-for-bit what applying every gate one at a time gives —
+    which Qiskit computes gate by gate — to 1e-10."""
+    import polypus
+
+    n = 5
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for layer in range(4):
+        for q in range(n):
+            a = 0.3 + 0.1 * layer + 0.05 * q
+            b = -0.2 - 0.07 * q
+            p = p.rx(q, a).ry(q, b)
+            qc.rx(a, q)
+            qc.ry(b, q)
+        # Brickwork entanglers: pairing alternates each layer so a cx bridges
+        # components built in the previous layer, forcing >2-qubit flushes.
+        for s in range(layer % 2, n - 1, 2):
+            p = p.cx(s, s + 1)
+            qc.cx(s, s + 1)
+        # A diagonal run: a hard boundary that flushes the open dense components.
+        for q in range(n):
+            r = (q + 1) % n
+            p = p.rz(q, 0.11 * (q + 1)).cz(q, r).rzz(q, r, -0.09 * (layer + 1))
+            qc.rz(0.11 * (q + 1), q)
+            qc.cz(q, r)
+            qc.rzz(-0.09 * (layer + 1), q, r)
+
+    _compare(polypus.statevector(p), qc)
+
+
 # ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
 # simulator, not to the seam), so it is mirrored here — keep both in sync.
 _MAX_QUBITS = 30

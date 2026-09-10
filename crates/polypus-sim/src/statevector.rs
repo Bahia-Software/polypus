@@ -132,6 +132,175 @@ pub(crate) fn is_diagonal(gate: &GateInstruction) -> bool {
     diagonal_op(gate).is_some()
 }
 
+/// The qubit set of a *dense-fusable* gate: the nine dense (non-diagonal,
+/// non-boundary) instructions the connected-component fusion of issue #132 is
+/// built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenseQubits {
+    /// A dense one-qubit gate (`H, X, Y, Rx, Ry, U`).
+    One(usize),
+    /// A dense two-qubit gate (`Cx, Swap, Rxx`); the two qubits are distinct.
+    Two(usize, usize),
+}
+
+/// The qubits `gate` touches if it is one of the nine dense-fusable instructions
+/// (`H, X, Y, Rx, Ry, U` and `Cx, Swap, Rxx`), or `None` otherwise.
+///
+/// These nine are exactly the gates [`Statevector::apply`] dispatches through
+/// [`kernels::apply_1q`] / [`kernels::apply_2q`] (its dense, non-diagonal arms):
+/// disjoint from the nine [`diagonal_op`] classifies and from the
+/// `Barrier`/`Measure`/`MeasureAll` no-ops, so a gate is dense-fusable, diagonal,
+/// or a boundary, never two of those. A run of these fuses into one composed
+/// matrix per connected qubit component; see
+/// [`Statevector::apply_composed_1q`] / [`Statevector::apply_composed_2q`] and
+/// their caller
+/// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator).
+pub(crate) fn dense_fusable_qubits(gate: &GateInstruction) -> Option<DenseQubits> {
+    use GateInstruction as G;
+    match gate {
+        G::H(q) | G::X(q) | G::Y(q) => Some(DenseQubits::One(*q)),
+        G::Rx { qubit, .. } | G::Ry { qubit, .. } | G::U { qubit, .. } => {
+            Some(DenseQubits::One(*qubit))
+        }
+        G::Cx(a, b) | G::Swap(a, b) => Some(DenseQubits::Two(*a, *b)),
+        G::Rxx { q0, q1, .. } => Some(DenseQubits::Two(*q0, *q1)),
+        _ => None,
+    }
+}
+
+/// The 2×2 matrix of a dense one-qubit gate, with its angles resolved (the same
+/// resolution [`Statevector::apply`] performs, propagating the same [`SimError`]
+/// on a `NaN`/unbound angle before any amplitude is touched).
+///
+/// Only ever called on a gate [`dense_fusable_qubits`] classified as
+/// [`DenseQubits::One`]; any other variant is a caller bug, not a runtime error.
+fn dense_matrix_1q(gate: &GateInstruction) -> Result<[[C64; 2]; 2], SimError> {
+    use GateInstruction as G;
+    let m = match gate {
+        G::H(_) => gates::h(),
+        G::X(_) => gates::x(),
+        G::Y(_) => gates::y(),
+        G::Rx { theta, .. } => gates::rx(angle(theta)?),
+        G::Ry { theta, .. } => gates::ry(angle(theta)?),
+        G::U {
+            theta, phi, lam, ..
+        } => gates::u(angle(theta)?, angle(phi)?, angle(lam)?),
+        other => unreachable!("{other:?} is not a dense one-qubit gate"),
+    };
+    Ok(m)
+}
+
+/// The 4×4 matrix of a dense two-qubit gate over the component's qubits
+/// `(qa, qb)` (`qa < qb`), in the `(bit_qb << 1) | bit_qa` basis that
+/// [`kernels::apply_2q`] / [`kernels::two_qubit_indices`] use.
+///
+/// `Swap` and `Rxx` are symmetric in their operands, so their gate matrices are
+/// already correct regardless of which operand is `qa`; only `Cx` needs its
+/// control/target woven into this basis, which [`cx_4x4`] does. Only ever called
+/// on a [`DenseQubits::Two`] gate acting on exactly `{qa, qb}`, where `qa` is the
+/// low qubit (bit 0).
+fn dense_matrix_2q(gate: &GateInstruction, qa: usize) -> Result<[[C64; 4]; 4], SimError> {
+    use GateInstruction as G;
+    let m = match gate {
+        G::Cx(control, target) => cx_4x4(*control, *target, qa),
+        G::Swap(..) => gates::swap(),
+        G::Rxx { theta, .. } => gates::rxx(angle(theta)?),
+        other => unreachable!("{other:?} is not a dense two-qubit gate"),
+    };
+    Ok(m)
+}
+
+/// Lift a dense one-qubit gate acting on one of a component's two qubits into the
+/// joint 4×4 space over `(qa, qb)`, ready to compose with [`matmul4`].
+///
+/// A one-qubit gate embeds as `m` on its own qubit and identity on the other;
+/// `dense_matrix_2q` handles the genuinely two-qubit members. `qa` is the
+/// component's low qubit (bit 0); the other qubit is bit 1.
+fn lifted_matrix_2q(gate: &GateInstruction, qa: usize) -> Result<[[C64; 4]; 4], SimError> {
+    match dense_fusable_qubits(gate) {
+        Some(DenseQubits::One(q)) => {
+            let m = dense_matrix_1q(gate)?;
+            // qa is the low bit (position 0), the other qubit the high bit (1).
+            let target_pos = if q == qa { 0 } else { 1 };
+            Ok(lift_1q_to_2q(&m, target_pos))
+        }
+        Some(DenseQubits::Two(..)) => dense_matrix_2q(gate, qa),
+        None => unreachable!("a component gate is always dense-fusable"),
+    }
+}
+
+/// Embed a 2×2 gate matrix `m` acting on bit `target_pos` (0 or 1) of the
+/// two-qubit index into the 4×4 that acts as identity on the other bit, in the
+/// `(bit1 << 1) | bit0` basis [`kernels::apply_2q`] expects.
+fn lift_1q_to_2q(m: &[[C64; 2]; 2], target_pos: usize) -> [[C64; 4]; 4] {
+    let other_pos = 1 - target_pos;
+    let mut out = [[C64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (c, cell) in row.iter_mut().enumerate() {
+            // Identity on the untouched bit: zero unless it matches across in/out.
+            if (r >> other_pos) & 1 == (c >> other_pos) & 1 {
+                *cell = m[(r >> target_pos) & 1][(c >> target_pos) & 1];
+            }
+        }
+    }
+    out
+}
+
+/// The 4×4 permutation of `Cx(control, target)` over a component's qubits
+/// `(qa, qb)`, in the `(bit_qb << 1) | bit_qa` basis. Built directly rather than
+/// through [`kernels::apply_controlled_1q`]'s control/target dispatch, because a
+/// composed component needs a plain 4×4 for [`kernels::apply_2q`].
+///
+/// `qa` is the component's low qubit (bit 0 of the two-qubit index); the high
+/// qubit is bit 1, so a qubit that is not `qa` is at position 1.
+fn cx_4x4(control: usize, target: usize, qa: usize) -> [[C64; 4]; 4] {
+    let control_pos = if control == qa { 0 } else { 1 };
+    let target_pos = if target == qa { 0 } else { 1 };
+    let mut out = [[C64::new(0.0, 0.0); 4]; 4];
+    // `Cx` is its own inverse (it flips the target when the control is set, and
+    // the control bit is untouched), so the single non-zero column of output
+    // `row` is that same map applied to `row`.
+    for (row, out_row) in out.iter_mut().enumerate() {
+        let col = if (row >> control_pos) & 1 == 1 {
+            row ^ (1 << target_pos)
+        } else {
+            row
+        };
+        out_row[col] = C64::new(1.0, 0.0);
+    }
+    out
+}
+
+/// `a · b` for 2×2 complex matrices (`a` applied after `b`).
+fn matmul2(a: &[[C64; 2]; 2], b: &[[C64; 2]; 2]) -> [[C64; 2]; 2] {
+    let mut out = [[C64::new(0.0, 0.0); 2]; 2];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            let mut acc = C64::new(0.0, 0.0);
+            for k in 0..2 {
+                acc += a[i][k] * b[k][j];
+            }
+            *cell = acc;
+        }
+    }
+    out
+}
+
+/// `a · b` for 4×4 complex matrices (`a` applied after `b`).
+fn matmul4(a: &[[C64; 4]; 4], b: &[[C64; 4]; 4]) -> [[C64; 4]; 4] {
+    let mut out = [[C64::new(0.0, 0.0); 4]; 4];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            let mut acc = C64::new(0.0, 0.0);
+            for k in 0..4 {
+                acc += a[i][k] * b[k][j];
+            }
+            *cell = acc;
+        }
+    }
+    out
+}
+
 impl Statevector {
     /// Allocate the `|0…0⟩` state over `num_qubits` qubits.
     ///
@@ -319,6 +488,64 @@ impl Statevector {
     pub(crate) fn apply_diagonal_ops(&mut self, ops: &[kernels::DiagonalOp]) {
         let par = self.use_parallel();
         kernels::apply_diagonal_run(&mut self.data, ops, par);
+    }
+
+    /// Apply a component of two or more dense one-qubit gates, all on `qubit`, as
+    /// a single composed 2×2 matrix in one buffer pass instead of one pass each.
+    ///
+    /// The gates are composed **in circuit order** — unlike a diagonal run they do
+    /// not commute in general, so the order is load-bearing — and every angle is
+    /// resolved (surfacing the same [`SimError`] [`apply`](Self::apply) would)
+    /// *before* any amplitude is written, so an invalid angle fails the whole
+    /// component untouched, matching [`diagonal_op`]'s pre-write validation.
+    ///
+    /// The single-gate case never reaches here: its caller,
+    /// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator),
+    /// dispatches a lone gate straight through [`apply`](Self::apply) so a
+    /// component that never merged pays no composition overhead. `gates_in_order`
+    /// therefore always holds at least two gates.
+    pub(crate) fn apply_composed_1q(
+        &mut self,
+        qubit: usize,
+        gates_in_order: &[&GateInstruction],
+    ) -> Result<(), SimError> {
+        let (first, rest) = gates_in_order
+            .split_first()
+            .expect("a composed component holds at least two gates");
+        let mut combined = dense_matrix_1q(first)?;
+        for gate in rest {
+            combined = matmul2(&dense_matrix_1q(gate)?, &combined);
+        }
+        let par = self.use_parallel();
+        kernels::apply_1q(&mut self.data, self.n, qubit, &combined, par);
+        Ok(())
+    }
+
+    /// Apply a component of two or more dense gates on exactly the two qubits
+    /// `(qa, qb)` (`qa < qb`) as a single composed 4×4 matrix in one buffer pass.
+    ///
+    /// Each member is lifted into the joint two-qubit space (a one-qubit gate
+    /// embeds as identity on the other qubit; `Cx`/`Swap`/`Rxx` are already
+    /// two-qubit) and the lifts are composed in circuit order. Angle resolution
+    /// and the "validate before any write" contract are exactly as for
+    /// [`apply_composed_1q`](Self::apply_composed_1q); `gates_in_order` likewise
+    /// always holds at least two gates.
+    pub(crate) fn apply_composed_2q(
+        &mut self,
+        qa: usize,
+        qb: usize,
+        gates_in_order: &[&GateInstruction],
+    ) -> Result<(), SimError> {
+        let (first, rest) = gates_in_order
+            .split_first()
+            .expect("a composed component holds at least two gates");
+        let mut combined = lifted_matrix_2q(first, qa)?;
+        for gate in rest {
+            combined = matmul4(&lifted_matrix_2q(gate, qa)?, &combined);
+        }
+        let par = self.use_parallel();
+        kernels::apply_2q(&mut self.data, self.n, qa, qb, &combined, par);
+        Ok(())
     }
 }
 
