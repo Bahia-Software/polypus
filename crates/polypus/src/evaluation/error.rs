@@ -54,6 +54,17 @@ pub enum EvaluationError {
     /// The Python-backed oracle returned a non-finite expectation value
     /// (contract C-5 requires every output to be a finite f64).
     NonFinite { index: usize, value: f64 },
+    /// The Python `variance_function` (QNG) returned an invalid QFIM diagonal
+    /// element: a `NaN`/infinite value or a negative one. A variance must be a
+    /// finite, non-negative number — zero is allowed (Tikhonov regularisation
+    /// keeps the QNG division well-posed). Rejected at the callback boundary so a
+    /// bad value cannot silently corrupt the natural-gradient update.
+    InvalidVariance {
+        /// The parameter index the callback was evaluated at.
+        param_index: usize,
+        /// The offending value returned by `variance_function`.
+        value: f64,
+    },
 }
 
 impl fmt::Display for EvaluationError {
@@ -74,6 +85,10 @@ impl fmt::Display for EvaluationError {
             EvaluationError::NonFinite { index, value } => write!(
                 f,
                 "oracle returned a non-finite expectation value {value} at index {index}; contract C-5 requires every output to be a finite f64"
+            ),
+            EvaluationError::InvalidVariance { param_index, value } => write!(
+                f,
+                "variance_function returned an invalid value {value} for parameter index {param_index}; a QFIM diagonal element must be a finite, non-negative number"
             ),
         }
     }
@@ -124,6 +139,9 @@ impl From<EvaluationError> for PyErr {
             }
             non_finite @ EvaluationError::NonFinite { .. } => {
                 PyEvaluationError::new_err(non_finite.to_string())
+            }
+            invalid_variance @ EvaluationError::InvalidVariance { .. } => {
+                PyEvaluationError::new_err(invalid_variance.to_string())
             }
         }
     }
@@ -314,6 +332,17 @@ mod tests {
                 value: f64::NAN,
             },
             "contract C-5",
+        );
+    }
+
+    #[test]
+    fn invalid_variance_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvaluationError::InvalidVariance {
+                param_index: 1,
+                value: -1.0,
+            },
+            "finite, non-negative",
         );
     }
 

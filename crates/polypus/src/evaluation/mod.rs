@@ -194,6 +194,11 @@ pub(crate) fn run_and_evaluate(
     observable: &dyn CostObservable,
 ) -> Result<Vec<f64>, EvaluationError> {
     let counts = backend.run_circuits(qcs, config)?;
+    // Central result validation (contract C-3 + empty-map guard): one map per
+    // circuit, each non-empty and conserving the requested shots. An empty map
+    // would otherwise reduce to a silent 0.0 fitness with no error at all.
+    crate::infrastructure::validate_run_results(&counts, qcs.len(), config.shots)
+        .map_err(EvaluationError::Backend)?;
     // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
     // per-batch boundary. The optimizer entry points release the GIL around
     // `optimize()`, which lets other Python threads run but does NOT by itself

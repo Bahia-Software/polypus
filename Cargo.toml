@@ -50,3 +50,17 @@ log                = "0.4"
 uuid               = { version = "1", features = ["v4"] }
 # RNG shared by `polypus` and `polypus-optimizers`; keep default features.
 rand               = "0.8"
+
+# Release profile posture — set explicitly rather than left to Cargo's defaults.
+#
+# Memory safety must not depend on a debug build. Qubit-index and operand
+# validation is enforced by real `Result`-returning checks
+# (`polypus_sim::Statevector::apply` + `polypus_circuit::qubit_index_violation`),
+# never by the statevector kernels' `debug_assert!`s — so `debug-assertions`
+# stays off in release, keeping those hot kernels at full speed. `overflow-checks`
+# is turned ON: shot-count and index arithmetic must trap on overflow rather than
+# silently wrap, in release as well as debug (the kernels' index math is bitwise,
+# so this does not touch their inner loops).
+[profile.release]
+overflow-checks = true
+debug-assertions = false

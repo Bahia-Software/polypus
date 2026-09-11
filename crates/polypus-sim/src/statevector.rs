@@ -119,6 +119,20 @@ impl Statevector {
     /// [`SimError::UnboundParameter`] if an angle is still a free parameter, or
     /// [`SimError::NonFiniteAmplitude`] if an angle is `NaN`/infinity.
     pub fn apply(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
+        // Reject an out-of-range qubit operand before it reaches a kernel. The
+        // kernels guard their indices only with a `debug_assert!`, which is gone
+        // in a release build — where the parallel path would then perform an
+        // out-of-bounds raw-pointer write (undefined behaviour). `apply` is a
+        // public entry point, so this check lives here rather than only in the
+        // simulator's whole-circuit pre-pass.
+        if let Some(qubit) =
+            polypus_circuit::qubit_index_violation(std::slice::from_ref(gate), self.n)
+        {
+            return Err(SimError::QubitIndexOutOfRange {
+                qubit,
+                num_qubits: self.n,
+            });
+        }
         let par = self.use_parallel();
         let n = self.n;
         match gate {

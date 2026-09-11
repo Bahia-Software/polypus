@@ -322,6 +322,19 @@ impl Simulator for StatevectorSimulator {
                 max: self.max_qubits,
             });
         }
+        // Reject any out-of-range qubit reference before allocating the `2^n`
+        // statevector (a hand-assembled / field-mutated circuit can carry one;
+        // the builder cannot). `apply` re-checks per gate, but doing it here
+        // fails fast — and, near the qubit ceiling, avoids a multi-GiB
+        // allocation for a circuit that can never run.
+        if let Some(qubit) =
+            polypus_circuit::qubit_index_violation(&circuit.gates, circuit.num_qubits)
+        {
+            return Err(SimError::QubitIndexOutOfRange {
+                qubit,
+                num_qubits: circuit.num_qubits,
+            });
+        }
         // Contract C-4: reject a gate acting on an already-measured qubit
         // (defense in depth for hand-assembled circuits). `apply` treats
         // measurements as no-ops, so without this the violation would be

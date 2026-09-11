@@ -181,6 +181,82 @@ class TestTrainQNG:
         )
         assert len(result.best_params) == _DIMENSIONS
 
+    def test_qng_rejects_zero_max_iters(
+        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
+    ):
+        # 0 iterations never evaluates the objective; the run must be rejected as
+        # a bad configuration (ValueError) rather than reporting best_fitness=-inf.
+        import polypus
+
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=simple_variance_fn,
+                    max_iters=0,
+                    bounds=(0.0, math.pi),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_zero_iters",
+            )
+
+    def test_qng_rejects_infinite_bounds(
+        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
+    ):
+        # (0, +inf) satisfies lb < ub but is not a bounded sampling interval.
+        import polypus
+
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=simple_variance_fn,
+                    max_iters=3,
+                    bounds=(0.0, math.inf),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_inf_bounds",
+            )
+
+    @pytest.mark.parametrize("bad_value", [-1.0, math.nan, math.inf])
+    def test_qng_rejects_invalid_variance(
+        self, parametrized_circuit, simple_expectation_fn, bad_value
+    ):
+        # A variance_function returning a negative, NaN or infinite value must
+        # surface as a typed polypus.EvaluationError, not silently corrupt the
+        # natural-gradient update (which divides by the QFIM diagonal).
+        import polypus
+
+        with pytest.raises(polypus.EvaluationError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=lambda theta, a: bad_value,
+                    max_iters=3,
+                    bounds=(0.0, math.pi),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_bad_variance",
+            )
+
 
 class TestTrainInvalidMethod:
     def test_invalid_method_raises_type_error(

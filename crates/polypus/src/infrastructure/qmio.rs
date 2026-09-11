@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
@@ -122,6 +122,17 @@ pub enum QmioError {
         attempts: usize,
         millis: u128,
     },
+    /// The request was successfully sent but no reply was received (a receive
+    /// timeout or error). Unlike a connect/send failure — where the request never
+    /// left our socket and can be retried safely — the QPU may already have
+    /// *executed* this request, so it is deliberately **not** resent: a blind
+    /// retry would risk a double execution. Surfaced as a distinct terminal
+    /// error so the caller can decide whether re-submitting is safe.
+    ResultUnknown {
+        endpoint: String,
+        /// What went wrong on receive (a timeout, or the underlying error).
+        detail: String,
+    },
     /// The reply exceeded [`QmioBackend::max_reply_bytes`].
     ResponseTooLarge { bytes: usize, limit: usize },
     /// The dedicated Tokio runtime could not be built at construction time.
@@ -154,6 +165,12 @@ impl fmt::Display for QmioError {
             QmioError::Timeout { endpoint, attempts, millis } => write!(
                 f,
                 "no reply from QMIO endpoint {endpoint} within {millis} ms after {attempts} attempt(s)"
+            ),
+            QmioError::ResultUnknown { endpoint, detail } => write!(
+                f,
+                "the request to QMIO endpoint {endpoint} was delivered but no reply was received \
+                 ({detail}); the QPU may have executed it, so it was not resent (to avoid a double \
+                 execution)"
             ),
             QmioError::ResponseTooLarge { bytes, limit } => write!(
                 f,
@@ -194,6 +211,10 @@ pub struct QmioBackend {
     retry_backoff: Duration,
     /// Reconnect+retry attempts before giving up on a request.
     max_retries: usize,
+    /// Hard deadline for the whole request across all reconnect/retry attempts —
+    /// a global wall-clock cap on top of the per-operation `recv_timeout`, so no
+    /// request (including a pathologically slow reconnect) can run unboundedly.
+    global_timeout: Duration,
     /// Hard cap on an accepted reply, guarding against a hostile/buggy peer.
     max_reply_bytes: usize,
     /// Idempotency guard for [`close`](Self::close)/[`Drop`].
@@ -228,6 +249,21 @@ impl QmioBackend {
             .map_err(|e| QmioError::Runtime(e.to_string()))?;
         let recv_timeout = Duration::from_millis(env_u64("QMIO_RECV_TIMEOUT_MS", 300_000));
         let max_retries = env_u64("QMIO_MAX_RETRIES", 3) as usize;
+        let retry_backoff = Duration::from_millis(env_u64("QMIO_RETRY_BACKOFF_MS", 100));
+        // Global deadline default: a generous worst-case bound so it never cuts a
+        // legitimate reconnect/retry sequence short, only a pathological hang.
+        // Each attempt bounds connect + send + recv at `recv_timeout` each (3x),
+        // over `max_retries + 1` attempts, plus the linear-backoff sum. Overridable
+        // via QMIO_GLOBAL_TIMEOUT_MS to impose a tighter cap.
+        let attempts = max_retries as u64 + 1;
+        let backoff_sum =
+            retry_backoff.as_millis() as u64 * (max_retries as u64 * (max_retries as u64 + 1) / 2);
+        let default_global = attempts
+            .saturating_mul(3)
+            .saturating_mul(recv_timeout.as_millis() as u64)
+            .saturating_add(backoff_sum);
+        let global_timeout =
+            Duration::from_millis(env_u64("QMIO_GLOBAL_TIMEOUT_MS", default_global));
         Ok(QmioBackend {
             endpoint,
             program_format,
@@ -237,12 +273,24 @@ impl QmioBackend {
             runtime,
             socket: Mutex::new(None),
             recv_timeout,
-            retry_backoff: Duration::from_millis(env_u64("QMIO_RETRY_BACKOFF_MS", 100)),
+            retry_backoff,
             max_retries,
+            global_timeout,
             // 64 MiB: far above any realistic counts payload, far below "OOM".
             max_reply_bytes: 64 * 1024 * 1024,
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// Override the timeouts and retry budget on a constructed backend. Test-only:
+    /// lets the simulated-server tests drive fast, deterministic timeout/retry
+    /// behaviour without depending on process-wide environment variables.
+    #[cfg(test)]
+    fn with_test_timeouts(mut self, recv_ms: u64, max_retries: usize, global_ms: u64) -> Self {
+        self.recv_timeout = Duration::from_millis(recv_ms);
+        self.max_retries = max_retries;
+        self.global_timeout = Duration::from_millis(global_ms);
+        self
     }
 
     /// Serialise one bound circuit into the program payload for the configured
@@ -311,8 +359,19 @@ impl QmioBackend {
         let mut guard = self.socket.lock().unwrap_or_else(|p| p.into_inner());
 
         self.runtime.block_on(async {
+            let deadline = Instant::now() + self.global_timeout;
             let mut last_err: Option<QmioError> = None;
             for attempt in 0..=self.max_retries {
+                // Global deadline: never start another attempt once the whole-call
+                // budget is spent. Each individual op below is separately bounded,
+                // so this caps total wall time even across reconnect/retry.
+                if Instant::now() >= deadline {
+                    return Err(last_err.unwrap_or_else(|| QmioError::Timeout {
+                        endpoint: self.endpoint.clone(),
+                        attempts: attempt,
+                        millis: self.global_timeout.as_millis(),
+                    }));
+                }
                 // Linear backoff before a retry; the first attempt is immediate.
                 if attempt > 0 {
                     // A retry means the previous attempt hit a transient fault
@@ -330,12 +389,23 @@ impl QmioBackend {
                     }
                     tokio::time::sleep(self.retry_backoff * attempt as u32).await;
                 }
-                // (Re)connect if we have no live socket.
+                // (Re)connect if we have no live socket, bounded by the timeout so
+                // an unreachable or hung endpoint cannot block the whole call.
                 if guard.is_none() {
-                    match connect(&self.endpoint).await {
-                        Ok(s) => *guard = Some(s),
-                        Err(e) => {
+                    match tokio::time::timeout(self.recv_timeout, connect(&self.endpoint)).await {
+                        Ok(Ok(s)) => *guard = Some(s),
+                        Ok(Err(e)) => {
                             last_err = Some(e);
+                            continue;
+                        }
+                        Err(_elapsed) => {
+                            last_err = Some(QmioError::Connect {
+                                endpoint: self.endpoint.clone(),
+                                source: format!(
+                                    "connect timed out after {} ms",
+                                    self.recv_timeout.as_millis()
+                                ),
+                            });
                             continue;
                         }
                     }
@@ -377,8 +447,11 @@ impl QmioBackend {
                     }
                 }
 
-                // Receive, bounded by the configured timeout. On timeout or
-                // error the REQ socket is stuck, so we discard and retry.
+                // The request has now been delivered. Receive, bounded by the
+                // timeout — but from here a failure means the QPU may already have
+                // executed the request, so the result is UNKNOWN: we discard the
+                // stuck socket but must NOT resend (a blind retry risks a double
+                // execution). This is the send-failed vs result-unknown boundary.
                 let socket = match guard.as_mut() {
                     Some(socket) => socket,
                     None => {
@@ -404,14 +477,16 @@ impl QmioBackend {
                     }
                     Ok(Err(e)) => {
                         drop_socket(&mut guard).await;
-                        last_err = Some(QmioError::Recv(e.to_string()));
+                        return Err(QmioError::ResultUnknown {
+                            endpoint: self.endpoint.clone(),
+                            detail: format!("receive failed: {e}"),
+                        });
                     }
                     Err(_elapsed) => {
                         drop_socket(&mut guard).await;
-                        last_err = Some(QmioError::Timeout {
+                        return Err(QmioError::ResultUnknown {
                             endpoint: self.endpoint.clone(),
-                            attempts: attempt + 1,
-                            millis: self.recv_timeout.as_millis(),
+                            detail: format!("no reply within {} ms", self.recv_timeout.as_millis()),
                         });
                     }
                 }
@@ -419,7 +494,7 @@ impl QmioBackend {
             Err(last_err.unwrap_or_else(|| QmioError::Timeout {
                 endpoint: self.endpoint.clone(),
                 attempts: self.max_retries + 1,
-                millis: self.recv_timeout.as_millis(),
+                millis: self.global_timeout.as_millis(),
             }))
         })
     }
@@ -1115,6 +1190,88 @@ mod tests {
         assert_eq!(counts[0].get("11"), Some(&524));
         assert_eq!(counts[0].values().sum::<u64>(), 1024);
 
+        server.join().unwrap();
+    }
+
+    /// A receive failure *after the request was delivered* must surface as
+    /// [`QmioError::ResultUnknown`] — never a blind resend/retry, which would risk
+    /// a double execution on the QPU. The simulated server receives the request
+    /// but never replies, so the client's receive times out. `ResultUnknown` is
+    /// only reachable on the no-resend path (a retry would instead exhaust
+    /// `max_retries` and return `Timeout`), so the error type alone proves the
+    /// request was not resent.
+    #[test]
+    fn recv_timeout_after_delivery_is_result_unknown_not_resent() {
+        use crate::infrastructure::{BackendConfig, BackendError};
+        use std::sync::mpsc;
+        use zeromq::RepSocket;
+
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (delivered_tx, delivered_rx) = mpsc::channel::<()>();
+        let server_endpoint = endpoint.clone();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut rep = RepSocket::new();
+                rep.bind(&server_endpoint).await.unwrap();
+                ready_tx.send(()).unwrap();
+                // Receive the request but deliberately never reply, forcing the
+                // client's receive to time out. Signal receipt so the test knows
+                // the request reached the post-send (delivered) path.
+                let _ = rep.recv().await.unwrap();
+                delivered_tx.send(()).unwrap();
+                // Hold the socket open long enough that a (buggy) resend would have
+                // had time to arrive before teardown.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            });
+        });
+        ready_rx.recv().unwrap();
+
+        let backend = QmioBackend::new(
+            endpoint.clone(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        // Short receive timeout, retries still allowed: without the fix the client
+        // would resend and eventually return Timeout instead of ResultUnknown.
+        .with_test_timeouts(150, 3, 10_000);
+        let config = ExecutionConfig {
+            id: "qmio-unknown".to_string(),
+            shots: 1024,
+            n_qpus: 1,
+            infrastructure: "qmio".to_string(),
+            backend_config: BackendConfig::Qmio {
+                endpoint,
+                program_format: QmioProgramFormat::OpenQasm,
+                optimization: 0,
+                repetition_period: None,
+                res_format: "binary_count".to_string(),
+            },
+            opt_level: crate::infrastructure::OptLevel::default(),
+            seed: None,
+        };
+
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Qmio(QmioError::ResultUnknown { .. })),
+            "a delivered-but-unreplied request must be ResultUnknown (not resent); got: {err:?}"
+        );
+        // The request was delivered to the server exactly once.
+        delivered_rx.recv().unwrap();
         server.join().unwrap();
     }
 
