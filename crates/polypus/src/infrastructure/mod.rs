@@ -102,9 +102,12 @@ impl Infrastructure {
             // native backend runs; the entropy fallback here only guards a
             // directly-built config that left `seed` unset (e.g. tests), so
             // an omitted seed still yields independent noise, never a panic.
-            BackendConfig::LocalNative => Ok(Arc::new(NativeStatevectorBackend::new(
-                config.seed.unwrap_or_else(execution_config::random_seed),
-            ))),
+            BackendConfig::LocalNative { fusion } => Ok(Arc::new(
+                NativeStatevectorBackend::new(
+                    config.seed.unwrap_or_else(execution_config::random_seed),
+                )
+                .with_fusion(*fusion),
+            )),
             #[cfg(feature = "qmio")]
             BackendConfig::Qmio {
                 endpoint,

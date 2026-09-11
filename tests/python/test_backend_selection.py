@@ -93,6 +93,28 @@ class TestRunQuantumCircuitBackends:
                 noise_model=object(),
             )
 
+    def test_native_backend_fusion_false_matches_fusion_true(self):
+        """`fusion=False` opts the native backend out of gate fusion (issues
+        #131/#132) for a strictly gate-by-gate simulation. Fusion only
+        changes performance, never the result: with the same seed, a circuit
+        shaped to trigger fusion (entangled, so not all outcomes are
+        possible) must produce byte-identical counts either way."""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        fused = polypus.run_quantum_circuit(
+            qc, shots=2000, infrastructure="local", backend="polypus", seed=99
+        )
+        unfused = polypus.run_quantum_circuit(
+            qc,
+            shots=2000,
+            infrastructure="local",
+            backend="polypus",
+            seed=99,
+            fusion=False,
+        )
+        assert fused.counts == unfused.counts
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # A Qiskit circuit is rejected by the QMIO infrastructure

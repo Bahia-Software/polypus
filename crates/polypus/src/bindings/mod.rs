@@ -270,6 +270,13 @@ fn finish_optimization(
 /// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
 /// statevector simulator. The choice is ignored for CUNQA, which manages its
 /// own simulated QPUs.
+///
+/// `fusion` is only meaningful for the native `"polypus"` backend (see
+/// [`BackendConfig::LocalNative`]); every other backend ignores it, the same
+/// way `local`/`qmio` ignore `nodes`/`cores_per_qpu` below — ignored rather
+/// than rejected, since a caller sweeping the same kwargs across backends
+/// (this one included) should not have to special-case a default-valued,
+/// backend-specific knob per call.
 fn build_backend_config(
     infrastructure: &str,
     backend: &str,
@@ -277,6 +284,7 @@ fn build_backend_config(
     noise_model: Option<Py<PyAny>>,
     nodes: u32,
     cores_per_qpu: u32,
+    fusion: bool,
 ) -> PyResult<BackendConfig> {
     match Infrastructure::from_str(infrastructure)? {
         Infrastructure::Local => match backend {
@@ -292,7 +300,7 @@ fn build_backend_config(
                          and does not accept a noise_model; use backend=\"aer\"",
                     ));
                 }
-                Ok(BackendConfig::LocalNative)
+                Ok(BackendConfig::LocalNative { fusion })
             }
             other => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown local backend '{other}'; expected \"aer\" or \"polypus\""
@@ -550,7 +558,11 @@ fn extract_cost_observable(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn CostObser
 ///
 /// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
 /// effective `seed`, `backend`, `infrastructure`) for logging and replay.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+///
+/// `fusion` (default `true`) is only meaningful for `backend="polypus"`: it
+/// lets gate fusion be disabled for a strictly gate-by-gate simulation of
+/// exactly the circuit as written. Every other backend ignores it.
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=true))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -562,6 +574,7 @@ pub fn run_quantum_circuit<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    fusion: bool,
 ) -> PyResult<pyo3::PyObject> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -622,6 +635,7 @@ pub fn run_quantum_circuit<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        fusion,
     )?;
     let config = ExecutionConfig {
         id: id.clone(),
@@ -719,7 +733,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=true))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -735,6 +749,7 @@ pub fn train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    fusion: bool,
 ) -> PyResult<PyObject> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -784,6 +799,7 @@ pub fn train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        fusion,
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
@@ -1060,7 +1076,9 @@ pub fn qml_train<'py>(
 
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path (native backend already rejected above): `backend` can only be
-    // an Aer variant here.
+    // an Aer variant here, so `fusion` (native-only) can never actually reach
+    // anything — passed as `true` (the crate-wide default) purely to satisfy
+    // the signature, not because it is reachable.
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1068,6 +1086,7 @@ pub fn qml_train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        true,
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -1278,6 +1297,7 @@ mod tests {
             None,
             "polypus",
             seed,
+            true,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -1345,6 +1365,7 @@ mod tests {
                 None,
                 "polypus",
                 Some(7),
+                true,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -1393,6 +1414,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
+                    true,
                 )
                 .expect("native run succeeds");
                 result
@@ -1469,6 +1491,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                true,
             );
             assert!(
                 result.is_err(),
@@ -1566,7 +1589,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2)
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, true)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -1578,15 +1601,38 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native = build_backend_config("local", name, "automatic", None, 1, 2)
+            let native = build_backend_config("local", name, "automatic", None, 1, 2, true)
                 .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
-            assert!(matches!(native, BackendConfig::LocalNative));
+            assert!(matches!(
+                native,
+                BackendConfig::LocalNative { fusion: true }
+            ));
         }
+    }
+
+    /// The `fusion` kwarg reaches `BackendConfig::LocalNative` unchanged, in
+    /// both directions — it is not silently forced to `true`.
+    #[test]
+    fn build_backend_config_forwards_fusion_for_the_native_backend() {
+        let with_fusion = build_backend_config("local", "polypus", "automatic", None, 1, 2, true)
+            .expect("polypus is a valid local backend");
+        assert!(matches!(
+            with_fusion,
+            BackendConfig::LocalNative { fusion: true }
+        ));
+
+        let without_fusion =
+            build_backend_config("local", "polypus", "automatic", None, 1, 2, false)
+                .expect("polypus is a valid local backend");
+        assert!(matches!(
+            without_fusion,
+            BackendConfig::LocalNative { fusion: false }
+        ));
     }
 
     #[test]
     fn build_backend_config_rejects_an_unknown_local_backend() {
-        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2)
+        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2, true)
             .expect_err("an unknown local backend must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -1602,8 +1648,16 @@ mod tests {
         // do — the check is `Option::is_some`, not a Qiskit type check.
         pyo3::prepare_freethreaded_python();
         let noise_model = Python::with_gil(|py| py.None());
-        let err = build_backend_config("local", "polypus", "automatic", Some(noise_model), 1, 2)
-            .expect_err("a noise model on the native backend must be rejected");
+        let err = build_backend_config(
+            "local",
+            "polypus",
+            "automatic",
+            Some(noise_model),
+            1,
+            2,
+            true,
+        )
+        .expect_err("a noise model on the native backend must be rejected");
         Python::with_gil(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(
@@ -1617,9 +1671,16 @@ mod tests {
     fn build_backend_config_keeps_a_noise_model_for_aer() {
         pyo3::prepare_freethreaded_python();
         let noise_model = Python::with_gil(|py| py.None());
-        let config =
-            build_backend_config("local", "aer", "density_matrix", Some(noise_model), 1, 2)
-                .expect("aer accepts a noise model");
+        let config = build_backend_config(
+            "local",
+            "aer",
+            "density_matrix",
+            Some(noise_model),
+            1,
+            2,
+            true,
+        )
+        .expect("aer accepts a noise model");
         assert!(matches!(
             config,
             BackendConfig::Local {
@@ -1632,7 +1693,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
-        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4)
+        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, true)
             .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
@@ -1647,7 +1708,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2)
+        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, true)
             .expect_err("an unknown infrastructure must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

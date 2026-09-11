@@ -224,7 +224,8 @@ impl Throttle<'_> {
 /// Dense statevector backend.
 ///
 /// Cheap to construct and clone; holds only configuration. Defaults to
-/// [`MAX_QUBITS`](crate::MAX_QUBITS) and the crate's parallel threshold.
+/// [`MAX_QUBITS`](crate::MAX_QUBITS), the crate's parallel threshold, and
+/// gate fusion enabled.
 #[derive(Debug, Clone)]
 pub struct StatevectorSimulator {
     /// Reject circuits needing more than this many qubits.
@@ -232,6 +233,19 @@ pub struct StatevectorSimulator {
     /// Qubit count at or above which gates use the parallel kernels (only with
     /// the `parallel` feature).
     pub parallel_threshold: usize,
+    /// Whether [`run_cancellable`](Simulator::run_cancellable) may fuse gates
+    /// (diagonal-run fusion and dense connected-qubit-component fusion, see
+    /// its doc comment) before applying them.
+    ///
+    /// Fusion only changes how many buffer passes a given gate sequence takes
+    /// — never the result, up to floating-point rounding (composing several
+    /// gates into one matrix accumulates rounding error in a different order
+    /// than applying them one at a time, though both converge to the same
+    /// value). Defaults to `true`. Set to `false` for a strictly gate-by-gate
+    /// simulation that applies the circuit exactly as written — e.g. to
+    /// reason about or benchmark a circuit's own per-gate cost, unaffected by
+    /// the fusion heuristics.
+    pub fusion: bool,
 }
 
 impl Default for StatevectorSimulator {
@@ -239,6 +253,7 @@ impl Default for StatevectorSimulator {
         StatevectorSimulator {
             max_qubits: crate::MAX_QUBITS,
             parallel_threshold: crate::DEFAULT_PARALLEL_THRESHOLD,
+            fusion: true,
         }
     }
 }
@@ -378,6 +393,24 @@ impl Simulator for StatevectorSimulator {
         let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits);
         let gates = &circuit.gates;
         let total = gates.len();
+
+        if !self.fusion {
+            // Pure, unfused simulation: apply every gate exactly as it appears
+            // in the circuit, one buffer pass each, through the same
+            // `Statevector::apply` the fused path itself falls back to for a
+            // gate that never merges. Semantically identical to the fused
+            // path below (fusion only changes how many passes the same gate
+            // sequence takes, never — up to rounding — the result), but a
+            // caller that wants to reason about or benchmark the circuit
+            // exactly as written needs a way to opt out of the rewrite
+            // entirely, not just trust that it's transparent.
+            for (i, gate) in gates.iter().enumerate() {
+                poll_cancel(&mut cancellation, i, total)?;
+                sv.apply(gate)?;
+            }
+            return Ok(sv);
+        }
+
         // Two fusion mechanisms share this one scan, because both need the whole
         // instruction list in hand (`apply` has no lookahead):
         //
@@ -699,6 +732,19 @@ mod tests {
         StatevectorSimulator {
             max_qubits: MAX_QUBITS,
             parallel_threshold: MAX_QUBITS + 1,
+            fusion: true,
+        }
+    }
+
+    /// Same as [`sequential_sim`], with fusion disabled — the reference every
+    /// "fused matches gate-by-gate" test below now runs through the real
+    /// `fusion: false` code path instead of a hand-rolled per-gate loop, so
+    /// those tests double as regression coverage for the flag itself.
+    fn sequential_sim_unfused() -> StatevectorSimulator {
+        StatevectorSimulator {
+            max_qubits: MAX_QUBITS,
+            parallel_threshold: MAX_QUBITS + 1,
+            fusion: false,
         }
     }
 
@@ -861,13 +907,11 @@ mod tests {
 
         let fused = sequential_sim().run(&circuit).expect("all angles finite");
 
-        // Reference: apply each gate one at a time through `Statevector::apply`,
-        // which never fuses.
-        let mut reference = Statevector::new(n).expect("n below MAX_QUBITS");
-        reference.set_parallel_threshold(MAX_QUBITS + 1);
-        for gate in &gates {
-            reference.apply(gate).expect("all gates valid");
-        }
+        // Reference: the same circuit run with fusion disabled, which applies
+        // every gate one at a time through `Statevector::apply`.
+        let reference = sequential_sim_unfused()
+            .run(&circuit)
+            .expect("all angles finite");
 
         for (b, (a, c)) in fused
             .amplitudes()
@@ -941,15 +985,17 @@ mod tests {
         assert_eq!(calls, 3);
     }
 
-    /// Evolve `gates` gate-by-gate through `Statevector::apply` (never fusing),
-    /// pinned to the sequential kernels — the reference the fused run must match.
+    /// Evolve `gates` with fusion disabled (gate-by-gate through
+    /// `Statevector::apply`, never fusing), pinned to the sequential kernels —
+    /// the reference the fused run must match.
     fn reference_state(n: usize, gates: &[G]) -> Statevector {
-        let mut sv = Statevector::new(n).expect("n below MAX_QUBITS");
-        sv.set_parallel_threshold(MAX_QUBITS + 1);
-        for gate in gates {
-            sv.apply(gate).expect("all gates valid");
-        }
-        sv
+        let circuit = ConcreteCircuit {
+            num_qubits: n,
+            gates: gates.to_vec(),
+        };
+        sequential_sim_unfused()
+            .run(&circuit)
+            .expect("all angles finite")
     }
 
     /// The fused run (dense connected-component fusion) must land bit-for-bit
@@ -1176,5 +1222,101 @@ mod tests {
         assert_eq!(err, SimError::Cancelled);
         // Exactly at the first "stop": two components in, not zero and not all.
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn fusion_defaults_to_enabled() {
+        assert!(StatevectorSimulator::default().fusion);
+        assert!(StatevectorSimulator::new().fusion);
+    }
+
+    /// The opt-out itself, asserted directly (not just implied by the reference
+    /// helpers above being rebased onto it): a circuit exercising both fusion
+    /// mechanisms (a diagonal run, a dense connected component, and a boundary)
+    /// gives the same result whether `fusion` is `true` or `false`.
+    #[test]
+    fn fusion_false_matches_fusion_true_on_a_mixed_circuit() {
+        let gates = [
+            G::H(0),
+            G::Rx {
+                qubit: 1,
+                theta: Fixed(0.3),
+            },
+            G::Cx(0, 1), // dense component on {0, 1}
+            G::Rz {
+                qubit: 0,
+                theta: Fixed(0.9),
+            },
+            G::Cp {
+                q0: 0,
+                q1: 2,
+                theta: Fixed(-0.4),
+            }, // diagonal run, flushes the dense component first
+            G::Barrier(vec![]),
+            G::Ry {
+                qubit: 2,
+                theta: Fixed(0.6),
+            },
+        ];
+        let circuit = ConcreteCircuit {
+            num_qubits: 3,
+            gates: gates.to_vec(),
+        };
+        let fused = sequential_sim().run(&circuit).expect("all angles finite");
+        let unfused = sequential_sim_unfused()
+            .run(&circuit)
+            .expect("all angles finite");
+        for (b, (a, c)) in fused
+            .amplitudes()
+            .iter()
+            .zip(unfused.amplitudes().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - c).norm() < 1e-12,
+                "amplitude {b}: fusion=true {a} vs fusion=false {c}"
+            );
+        }
+    }
+
+    /// With fusion off, cancellation must still be polled once per gate — the
+    /// same cadence the fused path polls once per *scanned* instruction. A
+    /// long run of otherwise-fusable diagonal gates, poisoned by a trailing
+    /// `NaN`, proves the loop stops mid-run rather than needing to reach (and
+    /// fail on) the poisoned gate: only a per-gate poll can do that.
+    #[test]
+    fn fusion_false_polls_cancellation_every_gate() {
+        // Same duration-tuned sizing as `cancellation_fires_inside_a_run_longer_
+        // than_the_cap` above: with fusion off, each of these is its own full
+        // buffer pass (there is no run/component to amortize it across), so the
+        // same gate count that takes several checkpoints to scan when fused
+        // comfortably outlives them here too.
+        let mut gates: Vec<G> = (0..CANCEL_RUN)
+            .map(|k| G::Rz {
+                qubit: k % CANCEL_N,
+                theta: Fixed(0.1),
+            })
+            .collect();
+        gates.push(G::Rz {
+            qubit: 0,
+            theta: Fixed(f64::NAN),
+        });
+        let circuit = ConcreteCircuit {
+            num_qubits: CANCEL_N,
+            gates,
+        };
+
+        let mut calls = 0usize;
+        let err = {
+            let mut cancel = || {
+                calls += 1;
+                calls >= 3
+            };
+            sequential_sim_unfused()
+                .run_cancellable(&circuit, Some(&mut cancel))
+                .unwrap_err()
+        };
+        assert_eq!(err, SimError::Cancelled);
+        assert_eq!(calls, 3);
     }
 }

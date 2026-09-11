@@ -92,9 +92,17 @@ pub enum BackendConfig {
     ///
     /// Selected with `backend="polypus"`. Runs entirely in Rust (no GIL, no
     /// Qiskit) on a [`crate::infrastructure::NativeStatevectorBackend`]. It is
-    /// noiseless by construction, so it carries no provider-specific fields; the
-    /// shot count and run id travel in [`ExecutionConfig`].
-    LocalNative,
+    /// noiseless by construction, so its only provider-specific field is
+    /// `fusion`; the shot count and run id travel in [`ExecutionConfig`].
+    LocalNative {
+        /// Whether the backend may fuse gates (diagonal-run and dense
+        /// connected-component fusion — see
+        /// [`polypus_sim::StatevectorSimulator::fusion`]) before applying
+        /// them. Defaults to `true`; `false` runs the circuit strictly
+        /// gate-by-gate, exactly as written, for a caller that wants a pure
+        /// simulation unaffected by the fusion heuristics.
+        fusion: bool,
+    },
     /// CUNQA distributed QPU platform (SLURM-managed HPC).
     Cunqa {
         /// Backend/device class name forwarded to CUNQA.
@@ -147,7 +155,7 @@ impl Clone for BackendConfig {
                     .as_ref()
                     .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
             },
-            BackendConfig::LocalNative => BackendConfig::LocalNative,
+            BackendConfig::LocalNative { fusion } => BackendConfig::LocalNative { fusion: *fusion },
             BackendConfig::Cunqa {
                 backend,
                 sim_method,

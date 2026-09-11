@@ -62,6 +62,16 @@ impl NativeStatevectorBackend {
         }
     }
 
+    /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
+    /// default, matching [`StatevectorSimulator::default`]). Backs
+    /// [`BackendConfig::LocalNative`](crate::infrastructure::BackendConfig::LocalNative)'s
+    /// `fusion` field, which lets a Python caller opt out of gate fusion for a
+    /// strictly gate-by-gate simulation of exactly the circuit as written.
+    pub fn with_fusion(mut self, fusion: bool) -> Self {
+        self.simulator.fusion = fusion;
+        self
+    }
+
     /// Derive the executable [`ConcreteCircuit`] from a [`BoundCircuit`] and
     /// apply the injected transpiler — all GIL-free. Shared by
     /// [`simulate_one`](Self::simulate_one) and
@@ -134,6 +144,7 @@ impl NativeStatevectorBackend {
         let simulator = StatevectorSimulator {
             max_qubits: self.simulator.max_qubits,
             parallel_threshold,
+            fusion: self.simulator.fusion,
         };
         let raw = simulator
             .run_and_sample(concrete.as_ref(), shots as usize, seed)
@@ -268,7 +279,7 @@ mod tests {
             shots: 500,
             n_qpus: 1,
             infrastructure: "local".to_string(),
-            backend_config: crate::infrastructure::BackendConfig::LocalNative,
+            backend_config: crate::infrastructure::BackendConfig::LocalNative { fusion: true },
             opt_level,
             // No explicit seed: exercises the OS-entropy fallback path in
             // `Infrastructure::create_backend`. Tests that build the backend
@@ -319,6 +330,54 @@ mod tests {
             out.gates.push(GateInstruction::Barrier(Vec::new()));
             out
         }
+    }
+
+    #[test]
+    fn with_fusion_toggles_the_simulator_flag() {
+        assert!(NativeStatevectorBackend::new(0).simulator.fusion);
+        assert!(
+            !NativeStatevectorBackend::new(0)
+                .with_fusion(false)
+                .simulator
+                .fusion
+        );
+        assert!(
+            NativeStatevectorBackend::new(0)
+                .with_fusion(true)
+                .simulator
+                .fusion
+        );
+    }
+
+    /// End-to-end: `create_backend` threads `BackendConfig::LocalNative`'s
+    /// `fusion` field all the way to the simulator it constructs, for both
+    /// values — not just the default. A same-seed, same-circuit comparison
+    /// against the fusion-enabled backend must still agree (fusion changes
+    /// performance, never the result), proving `fusion: false` reached a
+    /// working (not just a differently-configured) simulator.
+    #[test]
+    fn create_backend_threads_fusion_through_local_native() {
+        use crate::infrastructure::Infrastructure;
+
+        let mut cfg = config_with(OptLevel::default());
+        // Pinned so the only variable between the two branches is `fusion` --
+        // `config_with`'s default `seed: None` would draw independent
+        // OS-entropy seeds per `create_backend` call, which would make the
+        // two branches' counts differ for a reason unrelated to fusion.
+        cfg.seed = Some(2024);
+        cfg.backend_config = crate::infrastructure::BackendConfig::LocalNative { fusion: true };
+        let fused = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
+
+        cfg.backend_config = crate::infrastructure::BackendConfig::LocalNative { fusion: false };
+        let unfused = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
+
+        assert_eq!(fused, unfused);
     }
 
     #[test]
