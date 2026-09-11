@@ -7,6 +7,7 @@ pub mod cunqa;
 pub mod error;
 pub mod execution_config;
 pub mod local;
+pub mod mem_budget;
 pub mod native;
 pub mod planner;
 #[cfg(feature = "qmio")]
@@ -17,6 +18,7 @@ pub use cunqa::CunqaBackend;
 pub use error::{BackendError, InfrastructureError};
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
+pub use mem_budget::max_statevector_concurrency;
 pub use native::NativeStatevectorBackend;
 pub use planner::{
     BackendCapabilities, CancelToken, CircuitTask, Counts, Planner, PlannerRequirements,
