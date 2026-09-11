@@ -517,6 +517,14 @@ impl QuantumBackend for QmioBackend {
         1
     }
 
+    fn capabilities(&self) -> super::BackendCapabilities {
+        // One circuit per call over a single REQ endpoint.
+        super::BackendCapabilities {
+            max_concurrency: 1,
+            supports_shot_distribution: true,
+        }
+    }
+
     fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
