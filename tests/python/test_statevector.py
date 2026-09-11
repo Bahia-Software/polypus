@@ -325,6 +325,39 @@ def test_dense_fusion_mixed_matches_qiskit():
     _compare(polypus.statevector(p), qc)
 
 
+def test_fusion_false_matches_fusion_true_and_qiskit():
+    """``fusion=False`` opts out of both fusion mechanisms (#131, #132) for a
+    strictly gate-by-gate simulation of exactly the circuit as written.
+    Fusion only changes performance, never the result, so on a circuit shaped
+    to trigger both mechanisms (dense connected components *and* a diagonal
+    run — the same shape as ``test_dense_fusion_mixed_matches_qiskit``) the
+    unfused output must still match Qiskit, and therefore the fused output
+    too."""
+    import polypus
+
+    n = 4
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        p = p.rx(q, 0.3 + 0.1 * q).ry(q, -0.2 - 0.05 * q)
+        qc.rx(0.3 + 0.1 * q, q)
+        qc.ry(-0.2 - 0.05 * q, q)
+    for s in range(0, n - 1, 2):
+        p = p.cx(s, s + 1)
+        qc.cx(s, s + 1)
+    for q in range(n):
+        r = (q + 1) % n
+        p = p.rz(q, 0.11 * (q + 1)).cz(q, r).rzz(q, r, -0.09)
+        qc.rz(0.11 * (q + 1), q)
+        qc.cz(q, r)
+        qc.rzz(-0.09, q, r)
+
+    fused = polypus.statevector(p)
+    unfused = polypus.statevector(p, fusion=False)
+    _compare(unfused, qc)
+    assert np.allclose(fused, unfused, atol=1e-10)
+
+
 # ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
 # simulator, not to the seam), so it is mirrored here — keep both in sync.
 _MAX_QUBITS = 30

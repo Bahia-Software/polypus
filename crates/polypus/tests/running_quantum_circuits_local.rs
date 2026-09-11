@@ -105,7 +105,7 @@ fn native_config(shots: u32, n_qpus: u32, id: &str) -> ExecutionConfig {
         shots,
         n_qpus,
         infrastructure: "local".to_string(),
-        backend_config: BackendConfig::LocalNative,
+        backend_config: BackendConfig::LocalNative { fusion: true },
         opt_level: OptLevel::default(),
         // Fixed seed: these tests assert only shot conservation, and a fixed seed
         // keeps the native backend's sampling deterministic across runs.

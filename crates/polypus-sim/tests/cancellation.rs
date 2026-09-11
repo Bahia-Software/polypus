@@ -39,6 +39,7 @@ fn sequential_sim() -> StatevectorSimulator {
     StatevectorSimulator {
         max_qubits: MAX_QUBITS,
         parallel_threshold: MAX_QUBITS + 1,
+        fusion: true,
     }
 }
 

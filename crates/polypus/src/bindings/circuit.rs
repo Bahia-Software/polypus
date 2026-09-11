@@ -147,15 +147,22 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// and nothing bounds the gate count, which is why the run has to stay
 /// interruptible (see above) rather than relying on being short.
 ///
+/// **`fusion`** (default `true`) controls [`polypus_sim::StatevectorSimulator::fusion`]:
+/// whether consecutive gates may be fused into fewer buffer passes before
+/// applying them. Fusion only changes performance, never the result (up to
+/// floating-point rounding order); pass `fusion=False` for a strictly
+/// gate-by-gate simulation of exactly the circuit as written.
+///
 /// ```python
 /// import polypus
 /// qc = polypus.Circuit(2).h(0).cx(0, 1)
 /// amps = polypus.statevector(qc)          # array([0.707…+0j, 0j, 0j, 0.707…+0j])
 /// ```
-#[pyfunction(signature = (qc, params = None))]
+#[pyfunction(signature = (qc, params = None, fusion = true))]
 pub fn statevector<'py>(
     qc: PyRef<'py, Circuit>,
     params: Option<Vec<f64>>,
+    fusion: bool,
 ) -> PyResult<Bound<'py, PyArray1<polypus_sim::C64>>> {
     let params = params.unwrap_or_default();
     // Binding stays on this side of the release: it is O(gates), allocates
@@ -194,7 +201,11 @@ pub fn statevector<'py>(
                 }
             })
         };
-        StatevectorSimulator::new().run_cancellable(&concrete, Some(&mut cancelled))
+        StatevectorSimulator {
+            fusion,
+            ..StatevectorSimulator::new()
+        }
+        .run_cancellable(&concrete, Some(&mut cancelled))
     });
     let sv = match outcome {
         Ok(sv) => sv,
