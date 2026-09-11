@@ -123,6 +123,12 @@ _INTERRUPT_DEADLINE_S = 5.0  # hard ceiling; real value <1s, full run far longer
 # wind-down (the optimizer's own per-generation bookkeeping, with evaluation
 # short-circuited) stays in the millisecond range. Ctrl+C is captured within
 # one generation; what follows is negligible.
+#
+# This landscape is degenerate too (a fixed circuit with no training data;
+# only 4 of the 16 qubits carry a trainable rotation), so the fitness plateaus
+# and DE's default `patience=20` early-stops it in well under a second — same
+# hazard as `_QML_CHILD` below. `patience` is set far above `generations` so
+# only the interrupt (never convergence) can end the run.
 _NATIVE_CHILD = r"""
 import sys, time
 import polypus
@@ -151,7 +157,9 @@ start = time.time()
 try:
     polypus.train(
         qc,
-        polypus.DE(generations=1500, population_size=8, tolerance=1e-12),
+        polypus.DE(
+            generations=1500, population_size=8, tolerance=1e-12, patience=3000
+        ),
         shots=1024,
         n_qpus=1,
         dimensions=4,
