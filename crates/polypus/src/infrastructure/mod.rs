@@ -7,16 +7,23 @@ pub mod cunqa;
 pub mod error;
 pub mod execution_config;
 pub mod local;
+pub mod mem_budget;
 pub mod native;
+pub mod planner;
 #[cfg(feature = "qmio")]
 pub mod qmio;
 pub mod transpiler;
 
 pub use cunqa::CunqaBackend;
-pub use error::BackendError;
+pub use error::{BackendError, InfrastructureError};
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
+pub use mem_budget::max_statevector_concurrency;
 pub use native::NativeStatevectorBackend;
+pub use planner::{
+    BackendCapabilities, CancelToken, CircuitTask, Counts, Planner, PlannerRequirements,
+    SequentialPlanner, ShotDistributingPlanner,
+};
 #[cfg(feature = "qmio")]
 pub use qmio::QmioBackend;
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
@@ -319,6 +326,26 @@ pub trait QuantumBackend: Send + Sync {
 
     /// Release any held resources (SLURM jobs, cloud sessions, QPU reservations, …).
     fn close(&self) {}
+
+    /// What this backend can do, so a [`Planner`] can size its execution waves.
+    ///
+    /// The default is unbounded concurrency (the whole batch in one wave, matching
+    /// the previous default `max_batch_size`) with shot distribution supported. A
+    /// backend overrides this to cap concurrency: native/local by a memory budget,
+    /// CUNQA at `n_qpus`, QMIO at 1.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            max_concurrency: usize::MAX,
+            supports_shot_distribution: true,
+        }
+    }
+
+    /// The sensible default planner for this backend: the atomic-wave
+    /// [`SequentialPlanner`], used by every backend. The `polypus` edge opts into
+    /// the [`ShotDistributingPlanner`] for `run_quantum_circuit` shot distribution.
+    fn default_planner(&self) -> Arc<dyn Planner> {
+        Arc::new(SequentialPlanner)
+    }
 }
 
 /// Centrally validate the measurement-count maps a backend returned for a batch,

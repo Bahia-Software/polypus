@@ -13,7 +13,7 @@ use polypus_observable::ObservableError;
 use pyo3::PyErr;
 
 use crate::exceptions::EvaluationError as PyEvaluationError;
-use crate::infrastructure::BackendError;
+use crate::infrastructure::{BackendError, InfrastructureError};
 
 /// A failure encountered while evaluating a candidate parameter vector.
 ///
@@ -105,6 +105,27 @@ impl From<BackendError> for EvaluationError {
 impl From<ObservableError> for EvaluationError {
     fn from(err: ObservableError) -> Self {
         EvaluationError::Observable(err)
+    }
+}
+
+impl From<InfrastructureError> for EvaluationError {
+    fn from(err: InfrastructureError) -> Self {
+        match err {
+            // These three reproduce exactly what the former `run_and_evaluate`
+            // returned (a backend error, an observable error, a verbatim Python
+            // exception from the between-wave `check_signals`).
+            InfrastructureError::Backend(e) => EvaluationError::Backend(e),
+            InfrastructureError::Observable(e) => EvaluationError::Observable(e),
+            InfrastructureError::Python(e) => EvaluationError::Python(e),
+            // A cooperative cancel surfaces as a KeyboardInterrupt, the same class
+            // a SIGINT would (unreachable while nothing sets the token).
+            InfrastructureError::Cancelled => EvaluationError::Python(
+                pyo3::exceptions::PyKeyboardInterrupt::new_err("the run was cancelled"),
+            ),
+            // A planner/backend mismatch is a construction-time check, not reached
+            // through the oracle; surface it as the typed evaluation error.
+            InfrastructureError::IncompatiblePlanner(m) => EvaluationError::Runtime(m),
+        }
     }
 }
 

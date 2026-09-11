@@ -52,6 +52,12 @@ impl PyCallbackObservable {
 }
 
 impl CostObservable for PyCallbackObservable {
+    fn locality(&self) -> polypus_observable::ReducerLocality {
+        // Holds a Python callback and must run in this process under the GIL, so it
+        // can never be pushed to a remote reduce-at-source worker.
+        polypus_observable::ReducerLocality::Local
+    }
+
     fn expectation_batch(
         &self,
         counts: &[HashMap<String, u64>],
@@ -128,5 +134,21 @@ impl CostObservable for PyCallbackObservable {
             })
             .collect();
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polypus_observable::ReducerLocality;
+
+    #[test]
+    fn reducer_is_local_because_it_holds_a_gil_bound_callback() {
+        // A Python-callback reducer can never be pushed to a remote reduce-at-source
+        // worker (plan §7.1): it must run in this process under the GIL. Pin that
+        // classification so a future Planner never treats it as `Portable`.
+        pyo3::prepare_freethreaded_python();
+        let obs = Python::with_gil(|py| PyCallbackObservable::new(py.None(), false));
+        assert_eq!(obs.locality(), ReducerLocality::Local);
     }
 }

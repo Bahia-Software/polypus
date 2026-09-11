@@ -20,6 +20,7 @@
 
 use std::fmt;
 
+use polypus_observable::ObservableError;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyErr;
 
@@ -140,6 +141,69 @@ impl From<BackendError> for PyErr {
                 crate::exceptions::QmioError::new_err(qmio_err.to_string())
             }
         }
+    }
+}
+
+/// A failure while a [`Planner`](super::Planner) executes circuits on a backend:
+/// the backend itself failed, a cost-observable failed while reducing counts to
+/// expectations, or a Python exception was raised — a `KeyboardInterrupt` from
+/// the `check_signals` the planner runs between waves (ENGINEERING §3).
+///
+/// This is the planner's own error type. Per the crate's granularity decision it
+/// deliberately does **not** implement `From<_> for PyErr`: the evaluation oracle
+/// wraps it into an [`EvaluationError`](crate::evaluation::EvaluationError) and
+/// `run_quantum_circuit` converts it at the FFI edge, keeping the exception
+/// hierarchy in one place.
+///
+/// `Clone`/`Eq` are omitted: [`Python`](Self::Python) carries a [`PyErr`].
+#[derive(Debug)]
+pub enum InfrastructureError {
+    /// The execution backend failed.
+    Backend(BackendError),
+    /// A native cost-observable failed while reducing counts to expectations.
+    Observable(ObservableError),
+    /// A Python exception raised inside the planner (a `check_signals` SIGINT
+    /// between waves). Carried verbatim so its original type re-raises.
+    Python(PyErr),
+    /// The run was cooperatively cancelled between waves via the planner's
+    /// [`CancelToken`](super::CancelToken): a wave is atomic, so cancellation
+    /// takes effect at the next wave boundary, never mid-wave. Surfaces as a
+    /// `KeyboardInterrupt`, the same class a SIGINT would.
+    Cancelled,
+    /// A [`Planner`](super::Planner)'s requirements are not met by the backend it
+    /// was paired with (e.g. shot distribution requested from a backend that does
+    /// not support it). A configuration error, checked up front. Surfaces as a
+    /// `ValueError`.
+    IncompatiblePlanner(String),
+}
+
+impl fmt::Display for InfrastructureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InfrastructureError::Backend(err) => write!(f, "{err}"),
+            InfrastructureError::Observable(err) => {
+                write!(f, "expectation evaluation failed: {err}")
+            }
+            InfrastructureError::Python(err) => write!(f, "{err}"),
+            InfrastructureError::Cancelled => write!(f, "the run was cancelled"),
+            InfrastructureError::IncompatiblePlanner(m) => {
+                write!(f, "planner is incompatible with the backend: {m}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InfrastructureError {}
+
+impl From<BackendError> for InfrastructureError {
+    fn from(err: BackendError) -> Self {
+        InfrastructureError::Backend(err)
+    }
+}
+
+impl From<ObservableError> for InfrastructureError {
+    fn from(err: ObservableError) -> Self {
+        InfrastructureError::Observable(err)
     }
 }
 

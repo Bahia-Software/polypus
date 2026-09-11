@@ -1,8 +1,9 @@
 use crate::evaluation::{
-    run_and_evaluate, CircuitSource, CostObservable, EvaluationError, EvaluationOracle,
-    OracleErrorSlot,
+    CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot,
 };
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::infrastructure::{
+    BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
+};
 use std::sync::Arc;
 
 /// Oracle for standard VQC training.
@@ -16,15 +17,19 @@ use std::sync::Arc;
 /// Rust (no GIL); with [`CircuitSource::Qiskit`] it calls Python's
 /// `assign_parameters` as before.
 ///
-/// Circuits are submitted to the backend in chunks of `max_batch_size` so that
-/// each chunk maps to one backend call (one QPU batch for CUNQA, one Aer call
-/// for local).
+/// The oracle owns only the *what* (bind candidates, build tasks, validate C-5);
+/// the [`Planner`] owns the *how* (waves, concurrency cap, between-wave
+/// `check_signals`, cancellation).
 pub struct VqcOracle {
     /// Parameterised circuit template (ansatz parameters unbound).
     pub circuit: CircuitSource,
     pub config: Arc<ExecutionConfig>,
     pub backend: Arc<dyn QuantumBackend>,
+    /// Owns how the bound circuits are executed and reduced (waves, concurrency).
+    pub planner: Arc<dyn Planner>,
     pub observable: Arc<dyn CostObservable>,
+    /// Cooperative cancellation, shared with the run's `Scheduler`/entry point.
+    pub cancel: CancelToken,
     /// Shared with the `train` entry point: the first evaluation failure is
     /// recorded here and surfaced as a `PyErr` after `optimize` returns, since
     /// [`EvaluationOracle::evaluate_batch`] cannot return a `Result`.
@@ -53,43 +58,50 @@ impl VqcOracle {
     /// the trait method (which must return `Vec<f64>`) can record any error and
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        // Bind each candidate to the circuit template. For native circuits
-        // this loop never touches Python.
+        // Bind each candidate eagerly to the template (native binding is GIL-free;
+        // Qiskit re-acquires the GIL internally). The concurrency/memory cap is the
+        // Planner's job (`max_concurrency`), not this loop.
         let bound: Vec<BoundCircuit> = candidates
             .iter()
             .map(|params| self.circuit.bind(params))
             .collect::<Result<_, _>>()?;
 
-        // Submit circuits in backend-sized batches and collect expectations.
-        // Local runs the whole batch in one Aer call (parallel experiments);
-        // CUNQA caps each call at n_qpus (one circuit per QPU).
-        let batch_size = self.backend.max_batch_size(bound.len()).max(1);
-        let mut results = Vec::with_capacity(candidates.len());
-        for chunk in bound.chunks(batch_size) {
-            let ev = run_and_evaluate(
-                self.backend.as_ref(),
-                chunk,
-                &self.config,
-                self.observable.as_ref(),
-            )?;
-            results.extend(ev);
-        }
+        // One 2D task per candidate — uniform shots in training. `shots` comes
+        // from the task, the single source of truth the Planner reads.
+        let tasks: Vec<CircuitTask> = bound
+            .iter()
+            .map(|circuit| CircuitTask {
+                circuit,
+                shots: self.config.shots,
+            })
+            .collect();
 
-        // Defense-in-depth (contract C-5): `run_and_evaluate` already guarantees
-        // exactly `chunk.len()` values per chunk, and the chunks partition
-        // `bound` (== `candidates`) exactly, so this can only ever hold. It is
-        // kept as an explicit, self-documenting invariant at the point where the
-        // per-candidate results are finally assembled — do not "simplify" it away
-        // on the assumption the centralized check is enough. As with that path,
-        // report it as a `Result` rather than panicking (rule 4: FFI errors are
-        // `PyErr`/`Result`, and this runs under `OracleErrorSlot`).
-        if results.len() != candidates.len() {
+        // Delegate execution + reduction to the Planner: it owns the waves, the
+        // concurrency cap, the between-wave `check_signals` and the shot merge.
+        // This dissolves the former per-chunk `run_and_evaluate` loop.
+        let values = self.planner.evaluate(
+            self.backend.as_ref(),
+            &tasks,
+            self.observable.as_ref(),
+            &self.config,
+            &self.cancel,
+        )?;
+
+        // Contract C-5 stays in the oracle (its contract with the optimizer):
+        // exactly one finite value per candidate. A short/long batch would index
+        // out of bounds inside the pure-Rust optimizer; a NaN/inf would silently
+        // poison it. Reported as a `Result`, never a panic (this runs under
+        // `OracleErrorSlot`).
+        if values.len() != candidates.len() {
             return Err(EvaluationError::WrongLength {
                 expected: candidates.len(),
-                got: results.len(),
+                got: values.len(),
             });
         }
-        Ok(results)
+        if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(EvaluationError::NonFinite { index, value });
+        }
+        Ok(values)
     }
 }
 
@@ -191,6 +203,15 @@ mod tests {
         fn max_batch_size(&self, _total: usize) -> usize {
             self.batch_size
         }
+
+        fn capabilities(&self) -> crate::infrastructure::BackendCapabilities {
+            // The Planner waves at this size, reproducing the old chunking that
+            // these tests assert on.
+            crate::infrastructure::BackendCapabilities {
+                max_concurrency: self.batch_size,
+                supports_shot_distribution: true,
+            }
+        }
     }
 
     /// The tests only ever bind native templates, so every circuit the mock sees
@@ -239,7 +260,9 @@ mod tests {
             circuit: template(),
             config: config(),
             backend,
+            planner: Arc::new(crate::infrastructure::SequentialPlanner),
             observable: Arc::new(KeyOneObservable),
+            cancel: crate::infrastructure::CancelToken::default(),
             errors: OracleErrorSlot::new(),
         }
     }

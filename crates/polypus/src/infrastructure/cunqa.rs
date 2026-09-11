@@ -100,6 +100,14 @@ impl QuantumBackend for CunqaBackend {
         self.n_qpus as usize
     }
 
+    fn capabilities(&self) -> super::BackendCapabilities {
+        // One circuit per QPU per call, so a wave is at most `n_qpus` circuits.
+        super::BackendCapabilities {
+            max_concurrency: self.n_qpus as usize,
+            supports_shot_distribution: true,
+        }
+    }
+
     fn close(&self) {
         // Idempotent: only the first call actually releases the allocation.
         if self.closed.swap(true, Ordering::SeqCst) {

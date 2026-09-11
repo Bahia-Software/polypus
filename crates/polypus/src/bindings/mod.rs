@@ -29,11 +29,8 @@ use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::infrastructure::{
     BackendConfig, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
 };
-use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
-    OptimizerError,
-};
+use crate::scheduler::{dispatch_optimizer, DeConfig, Method, OracleError, PsoConfig, QngConfig};
+use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -234,25 +231,28 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
 /// reported duration covers the whole call.
 ///
-/// An `OptimizerError` with no oracle failure recorded is a rejected
-/// optimizer configuration (`population_size` too small for DE, empty PSO/QNG
-/// `bounds`, …), caught before any oracle call — unlike an oracle failure, it
-/// has nowhere else to be logged, so it is logged here too.
+/// [`OracleError::Config`] is a rejected optimizer configuration
+/// (`population_size` too small for DE, empty PSO/QNG `bounds`, …), caught before
+/// any oracle call — unlike an oracle failure it has nowhere else to be logged,
+/// so it is logged here too; [`OracleError::Evaluation`] re-raises the oracle's
+/// recorded failure with its original class preserved.
 fn finish_optimization(
     py: Python<'_>,
-    result: Result<OptimizationOutcome, OptimizerError>,
-    errors: &OracleErrorSlot,
+    result: Result<OptimizationOutcome, OracleError>,
     seed: u64,
     id: String,
     start: Instant,
 ) -> PyResult<PyObject> {
-    if let Some(eval_err) = errors.take() {
-        return Err(eval_err.into());
-    }
-    let outcome = result.map_err(|e| {
-        log::error!("run {id}: optimizer rejected the configuration: {e}");
-        pyo3::exceptions::PyValueError::new_err(e.to_string())
-    })?;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(OracleError::Evaluation(eval_err)) => return Err(eval_err.into()),
+        Err(OracleError::Config(config_err)) => {
+            log::error!("run {id}: optimizer rejected the configuration: {config_err}");
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                config_err.to_string(),
+            ));
+        }
+    };
     log::info!(
         "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
         outcome.iterations_run,
@@ -260,6 +260,58 @@ fn finish_optimization(
         start.elapsed()
     );
     outcome_to_train_result(py, outcome, seed, id)
+}
+
+/// Parse a `polypus.DE` / `PSO` / `QNG` object into a pyo3-free [`Method`].
+///
+/// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
+/// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
+/// non-method object is a `TypeError`, exactly as the previous inline dispatch
+/// (shared now by both `train` and `qml_train`).
+fn method_from_pyclass(
+    method: &Bound<'_, PyAny>,
+    errors: &OracleErrorSlot,
+    run_id: &str,
+) -> PyResult<Method> {
+    if let Ok(de) = method.extract::<PyRef<DE>>() {
+        return Ok(Method::De(DeConfig {
+            generations: de.generations,
+            population_size: de.population_size,
+            tolerance: de.tolerance,
+            patience: de.patience,
+        }));
+    }
+    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
+        return Ok(Method::Pso(PsoConfig {
+            generations: pso.generations,
+            population_size: pso.population_size,
+            bounds: pso.bounds,
+            inertia_weight: pso.inertia_weight,
+            cognitive_weight: pso.cognitive_weight,
+            social_weight: pso.social_weight,
+            tolerance: pso.tolerance,
+        }));
+    }
+    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
+        let variance_oracle: Box<dyn VarianceOracle> = Box::new(PyVarianceOracle {
+            variance_function: qng.variance_function.clone_ref(method.py()),
+            errors: errors.clone(),
+            run_id: run_id.to_string(),
+        });
+        return Ok(Method::Qng(
+            QngConfig {
+                max_iters: qng.max_iters,
+                learning_rate: qng.learning_rate,
+                finite_difference_step: qng.finite_difference_step,
+                bounds: qng.bounds,
+                tikhonov_reg: qng.tikhonov_reg,
+            },
+            variance_oracle,
+        ));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
+    ))
 }
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
@@ -820,93 +872,27 @@ pub fn train<'py>(
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
+    // Every backend's default planner is the atomic-wave SequentialPlanner.
+    let planner = backend.default_planner();
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
+        planner,
         observable,
+        cancel: crate::infrastructure::CancelToken::default(),
         errors: errors.clone(),
     });
 
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            patience: de.patience,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            // Release the GIL for the whole optimization: parameter binding and
-            // native simulation are GIL-free, so holding it would stall every
-            // other Python thread and (with the per-batch check_signals in
-            // run_and_evaluate) keep Ctrl+C from taking effect until the run
-            // ends. See docs/ENGINEERING.md §3.
-            method
-                .py()
-                .allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            method.py().allow_threads(|| AlgorithmPSO.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
-            bounds: qng.bounds,
-            dimensions,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(method.py()),
-                errors: errors.clone(),
-                run_id: effective_id.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            method.py().allow_threads(|| AlgorithmQNG.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
-    ))
+    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    // Release the GIL for the whole optimization: parameter binding and native
+    // simulation are GIL-free, so holding it would stall every other Python
+    // thread and (with the per-batch check_signals in the oracle) keep Ctrl+C
+    // from taking effect until the run ends. See docs/ENGINEERING.md §3.
+    let result = method.py().allow_threads(|| {
+        dispatch_optimizer(method_enum, oracle, dimensions, &errors, effective_seed)
+    });
+    finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
 
 /// QML entry point: train a data-encoding VQC where `feature_map` encodes each
@@ -1108,81 +1094,14 @@ pub fn qml_train<'py>(
         errors: errors.clone(),
     });
 
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            patience: de.patience,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            // Release the GIL for the optimization (see `train` and
-            // docs/ENGINEERING.md §3): the QML workers re-acquire it per batch,
-            // and the main-thread signal check in the oracle keeps Ctrl+C prompt.
-            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmPSO.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
-            bounds: qng.bounds,
-            dimensions,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(py),
-                errors: errors.clone(),
-                run_id: effective_id.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmQNG.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
-    ))
+    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
+    // §3): the QML workers re-acquire it per batch, and the main-thread signal
+    // check in the oracle keeps Ctrl+C prompt.
+    let result = py.allow_threads(|| {
+        dispatch_optimizer(method_enum, oracle, dimensions, &errors, effective_seed)
+    });
+    finish_optimization(py, result, effective_seed, effective_id, start)
 }
 
 /// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
