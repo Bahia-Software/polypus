@@ -85,6 +85,7 @@ pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
 pub mod infrastructure;
+mod scheduler;
 pub mod utils;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
