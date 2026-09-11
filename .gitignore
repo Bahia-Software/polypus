@@ -19,6 +19,7 @@ benchmarks/bench_*.csv
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+/crates/polypus-physics/graphics/
 
 # Logger output
 *.log
@@ -26,4 +27,4 @@ logs/
 
 CLAUDE.md
 AI_GUIDELINES.md
-.claude/crates/polypus-physics/graphics/
+.claude
