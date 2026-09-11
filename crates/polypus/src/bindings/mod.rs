@@ -872,11 +872,15 @@ pub fn train<'py>(
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
+    // Every backend's default planner is the atomic-wave SequentialPlanner.
+    let planner = backend.default_planner();
     let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
         circuit: circuit_source,
         config: Arc::clone(&config),
         backend,
+        planner,
         observable,
+        cancel: crate::infrastructure::CancelToken::default(),
         errors: errors.clone(),
     });
 
