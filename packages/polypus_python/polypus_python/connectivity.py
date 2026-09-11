@@ -1,14 +1,18 @@
 from .local import Local
 
-# from .cunqa import Cunqa
-
 
 def connect_to_infrastructure(infrastructure: str, **kwargs):
     if infrastructure == "local":
         return "local"
-    # elif infrastructure == "cunqa":
-    #     # Reserve qpus in slurm
-    #     return Cunqa().get_qpus(**kwargs)
+    elif infrastructure == "cunqa":
+        # Lazy import: `cunqa` is an OPTIONAL dependency (see polypus_python
+        # pyproject `[cunqa]` extra). Importing it only inside this branch keeps
+        # `import polypus_python` working when cunqa is not installed; the CUNQA
+        # path then fails only if actually requested.
+        from .cunqa import Cunqa
+
+        # Reserve qpus in slurm
+        return Cunqa().get_qpus(**kwargs)
     else:
         raise ValueError(f"Unknown infrastructure: {infrastructure}")
 

@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` reads `slurm_job_id`, not `family` (C1) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -28,6 +28,7 @@ Rules of the road:
 | C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 | C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
+| C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -55,6 +56,8 @@ Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
 
+`family_name` is `ExecutionConfig::id`, whose charset is constrained by C-9.
+
 ### `run_qcs(infrastructure: str, **kwargs)`
 
 | backend | kwargs (exact names) |
@@ -62,7 +65,8 @@ violation.
 | local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional), `seed: int` (optional, C-7) |
 | cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
-`qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
+`id` / `family_id` are `ExecutionConfig::id`, whose charset is constrained by
+C-9. `qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
 strings; the Python side parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
@@ -70,9 +74,11 @@ order** (see C-3 for the dict format).
 ### `disconnect_from_infrastructure(infrastructure: str, **kwargs)`
 
 For `"cunqa"`: single kwarg **`family`** (the handle returned by
-`connect_to_infrastructure`). *Known break (audit C1): the current
-implementation reads `slurm_job_id`. `family` is the canonical name; fix the
-Python side, not the Rust side.*
+`connect_to_infrastructure`), forwarded to CUNQA's `qdrop`. *(Historical break,
+audit C1, now fixed: the Python side used to read `slurm_job_id` — a key the
+Rust side never sends — so a `KeyError` fired before `qdrop` ran and the QPU
+allocation leaked. The Python side was corrected to read `family`; the Rust
+side was already canonical.)*
 
 ### `expectation_values(counts: list[dict], fn) -> list[float]`
 
@@ -119,7 +125,7 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
+h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
 barrier  measure  measure_all
 ```
 
@@ -190,8 +196,24 @@ only to define behaviour for hand-assembled circuits)*.
 
 Backends and exporters **must reject** circuits that violate this with an
 explicit error — never silently reorder, deduplicate or no-op the measurement.
-The single shared check is `polypus_circuit::terminal_measurement_violation`,
-enforced in the builder, the importer, the simulator and the QIR exporter.
+The rule is enforced at four points, which must all reject identically (same
+offending qubit, same error) even though they see the circuit differently:
+
+- **Builder** (`ParameterizedCircuit::try_push`/`push`): incremental,
+  push-time. Each push is checked against the per-circuit record of qubits
+  already measured, which the push itself then updates — the prefix is known to
+  be valid, so only the new instruction can offend. Rescanning here would make
+  building a circuit quadratic in its gate count (issue #109).
+- **QASM importer**: incremental, parse-time, against the parser's own
+  `measured` set (which also carries the offending line number).
+- **Simulator** (`polypus-sim`) and **QIR exporter**: a single full-sequence
+  scan via `polypus_circuit::terminal_measurement_violation`, since both are
+  handed a complete instruction list — possibly hand-assembled, i.e. never
+  validated by the builder or the importer.
+
+`terminal_measurement_violation` is the reference definition of the rule: a
+unitary on a measured qubit is a violation, `Barrier` is always allowed, and
+re-measuring an already-measured qubit is allowed.
 Rationale and alternatives considered: see `docs/adr/0001-terminal-measurements.md`.
 
 **Enforcing test:** rejection tests in
@@ -209,16 +231,46 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
+  stagnation*, not on population-spread collapse. With `fitness_history[g]` the
+  best fitness at the end of generation `g` (0-indexed; DE maximises, so this
+  series is monotonically non-decreasing), the run stops at the first generation
+  `g` such that
+
+  ```text
+  g >= patience   and   fitness_history[g] - fitness_history[g - patience] < tolerance
+  ```
+
+  i.e. the best fitness improved by less than `tolerance` over the last
+  `patience` generations. Consequences:
+  - `tolerance` is a **minimum cumulative fitness improvement in the oracle's
+    own fitness units** — *not* a population standard deviation in parameter
+    units. (This replaces the former "max per-dimension population std <
+    tolerance" collapse test, which on QAOA-like landscapes fired within ~5
+    generations, long before the fitness had plateaued.)
+  - `patience` (generations; DE binding default **20**) is the look-back window.
+    No early stop can fire before generation `patience`, so a larger value makes
+    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
+  - The search dynamics are unchanged (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles
+    initialised in `[0, 2π)`); only the stopping rule differs. PSO still uses the
+    per-dimension std-collapse test; QNG has no early stop.
+- **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
+  the best fitness at the end of each executed generation/iteration, so
+  `fitness_history.len() == iterations_run` and `fitness_history.last()`
+  equals `best_fitness`. It is surfaced on the Python `TrainResult`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
+plus the DE fitness-stagnation tests there
+(`de_early_stops_on_fitness_stagnation`, `de_large_patience_never_stops_early`)
+and the `fitness_stagnated` unit tests in `crates/polypus-optimizers/src/util.rs`,
 **plus** `tests/python/test_oracle_contract.py` for the Python-backed length and
-finiteness guarantee: the Rust invariant test never exercises the
-`polypus_python.expectation_values` return path, so it covers only one half of
-the contract. The Python test forces a short return list and a non-finite value
-through `polypus.train` and asserts each surfaces as a typed
-`polypus.EvaluationError` (naming both lengths, or the offending index/value),
-never a `pyo3_runtime.PanicException` and never a silently-poisoned result.
+finiteness guarantee: the Rust invariant test never exercises the Python-callback
+return path, so it covers only one half of the contract. The Python test forces a
+short return list and a non-finite value through `polypus.train` and asserts each
+surfaces as a typed `polypus.EvaluationError` (naming both lengths, or the
+offending index/value), never a `pyo3_runtime.PanicException` and never a
+silently-poisoned result.
 
 ---
 
@@ -355,3 +407,44 @@ legitimate type error and propagates as-is; it is not masked into the messages
 above.
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py`.
+
+---
+
+## C-9 · `id` charset validation (`train` / `qml.train` Python entry points)
+
+The `id` kwarg of `polypus.train` and `polypus.qml.train` is a caller-supplied
+*prefix*: the entry point appends a UUID v4 to it and the result becomes
+`ExecutionConfig::id`, which names the run's temp files and log streams and —
+on `infrastructure="cunqa"` — travels to SLURM as the C-1 kwargs `family_name`
+(`connect_to_infrastructure`) and `family_id` (`run_qcs`), and from there
+verbatim into `qraise`. The crate cannot see how `qraise`/SLURM interpolate that
+name, so the string is constrained at the boundary instead of trusted:
+
+- **Charset.** Every character must be an ASCII letter, an ASCII digit, `.`,
+  `_` or `-` (i.e. `^[A-Za-z0-9._-]+$`). Whitespace, path separators (`/`,
+  `../`) and shell metacharacters (`;`, `|`, `` ` ``, `$`, `&`, newline) are
+  rejected. The `ValueError` names the **offending character** so the caller
+  can see which one failed.
+- **Non-empty.** An empty `id` is rejected: it would degrade the effective id to
+  a bare `_<uuid>` and carries no debugging value.
+- **Length.** At most **64 characters**, measured on the caller-supplied prefix
+  **before** the UUID suffix, keeping the effective id inside the limits SLURM
+  job names and filesystem path components impose.
+
+This is defense-in-depth, not a fix for a known exploit — the July 2026
+technical audit (#89) found the value unvalidated anywhere in the crate, which
+`docs/ENGINEERING.md` §8 ("validate and sanitize all inputs; never trust
+external data") does not allow for a string that leaves the process.
+
+**When it is checked.** Upfront, alongside the other kwarg guards
+(`validate_shots_and_qpus`, `validate_cunqa_allocation`) as the entry point's
+first statements — before any seam call, any backend creation and, crucially,
+before `unique_id` appends the UUID, so a rejected `id` never yields a
+partially-valid effective id. Validation is unconditional: unlike
+`nodes`/`cores_per_qpu` it is not gated on `infrastructure == "cunqa"`, because
+the temp-file and log-stream naming applies to every infrastructure.
+
+`run_quantum_circuit` is not covered: it generates its own `id` internally and
+takes no such kwarg.
+
+**Enforcing test:** `tests/python/test_id_validation.py`.

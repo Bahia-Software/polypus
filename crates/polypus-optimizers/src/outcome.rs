@@ -24,6 +24,15 @@ pub struct OptimizationOutcome {
     /// Optimizers without an early-stopping test (e.g. QNG) always report
     /// `false` — they simply exhaust their iteration budget.
     pub converged: bool,
+    /// Best fitness recorded at the end of each generation/iteration, in order.
+    ///
+    /// One entry per executed generation, so `fitness_history.len() ==
+    /// iterations_run` and `fitness_history.last()` (when non-empty) equals
+    /// [`best_fitness`](OptimizationOutcome::best_fitness). This exposes the
+    /// optimizer's quality trajectory, which is what DE's fitness-stagnation
+    /// early stop is computed from (contract C-5). Empty only for a zero-budget
+    /// run (`generations`/`max_iters == 0`).
+    pub fitness_history: Vec<f64>,
 }
 
 /// Shared entry point for the variational optimizers in this crate.

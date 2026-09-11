@@ -42,6 +42,7 @@ mod gate;
 mod qasm;
 mod qasm_import;
 mod qir;
+pub mod templates;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
 pub use error::CircuitError;

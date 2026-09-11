@@ -20,6 +20,12 @@ qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
 /crates/polypus-physics/graphics/
+qft_results.csv
+qft*.png
+
+# SLURM / qraise job artifacts
+slurm-*.out
+qraise_*
 
 # Logger output
 *.log

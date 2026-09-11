@@ -2,7 +2,7 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
-use crate::gate::{is_qubit_measured, ActsOn, GateInstruction, GateParam};
+use crate::gate::{ActsOn, GateInstruction, GateParam, MeasuredQubits};
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
@@ -32,7 +32,7 @@ use crate::qir;
 /// programming errors, mirroring how Qiskit raises `CircuitError` at
 /// construction time. Parameter *values* are validated fallibly at binding
 /// time instead, returning [`CircuitError`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ParameterizedCircuit {
     /// Number of qubits in the (single) quantum register.
     pub num_qubits: usize,
@@ -41,6 +41,22 @@ pub struct ParameterizedCircuit {
     pub num_params: usize,
     /// The instruction sequence, in execution order.
     pub gates: Vec<GateInstruction>,
+    /// Push-time cache backing the C-4 check in [`try_push`](Self::try_push).
+    /// Derived from `gates`, never part of the circuit's identity; assigning
+    /// `gates` directly leaves it in its "not derived yet" state, from which the
+    /// next push rebuilds it.
+    pub(crate) measured: MeasuredQubits,
+}
+
+/// Structural equality over the circuit itself: the `measured` cache is derived
+/// from `gates`, so two circuits that differ only in whether that cache has been
+/// materialised yet are the same circuit.
+impl PartialEq for ParameterizedCircuit {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_qubits == other.num_qubits
+            && self.num_params == other.num_params
+            && self.gates == other.gates
+    }
 }
 
 impl ParameterizedCircuit {
@@ -50,6 +66,7 @@ impl ParameterizedCircuit {
             num_qubits,
             num_params: 0,
             gates: Vec::new(),
+            measured: MeasuredQubits::default(),
         }
     }
 
@@ -130,17 +147,20 @@ impl ParameterizedCircuit {
     pub fn try_push(&mut self, gate: GateInstruction) -> Result<(), CircuitError> {
         // Terminal-measurement model (contract C-4): a unitary gate may not act
         // on a qubit that an earlier instruction already measured. The existing
-        // prefix is already valid, so only the new gate can offend. Checked
-        // before any mutation below.
+        // prefix is already valid, so only the new gate can offend. Answered from
+        // the incremental `measured` cache — rescanning `gates` here made building
+        // a circuit quadratic in its gate count. Checked before any mutation
+        // below; the cache itself is only advanced on the success path.
+        self.measured.sync(&self.gates);
         match gate.acts_on() {
-            ActsOn::One(q) if is_qubit_measured(&self.gates, q) => {
+            ActsOn::One(q) if self.measured.contains(q) => {
                 return Err(CircuitError::QubitAlreadyMeasured { qubit: q });
             }
             ActsOn::Two(a, b) => {
-                if is_qubit_measured(&self.gates, a) {
+                if self.measured.contains(a) {
                     return Err(CircuitError::QubitAlreadyMeasured { qubit: a });
                 }
-                if is_qubit_measured(&self.gates, b) {
+                if self.measured.contains(b) {
                     return Err(CircuitError::QubitAlreadyMeasured { qubit: b });
                 }
             }
@@ -163,9 +183,9 @@ impl ParameterizedCircuit {
                 let theta = *theta;
                 self.track_param(&theta);
             }
-            GateInstruction::Cx(q0, q1) | GateInstruction::Cz(q0, q1) => {
-                self.check_pair(*q0, *q1)?
-            }
+            GateInstruction::Cx(q0, q1)
+            | GateInstruction::Cz(q0, q1)
+            | GateInstruction::Swap(q0, q1) => self.check_pair(*q0, *q1)?,
             GateInstruction::Rzz { q0, q1, theta } | GateInstruction::Rxx { q0, q1, theta } => {
                 self.check_pair(*q0, *q1)?;
                 Self::check_finite(theta)?;
@@ -201,6 +221,7 @@ impl ParameterizedCircuit {
             GateInstruction::Measure { qubit, .. } => self.check_qubit(*qubit)?,
             GateInstruction::MeasureAll => {}
         }
+        self.measured.record(&gate);
         self.gates.push(gate);
         Ok(())
     }
@@ -323,6 +344,11 @@ impl ParameterizedCircuit {
     /// Controlled-Z with `control` and `target`.
     pub fn cz(self, control: usize, target: usize) -> Self {
         self.push(GateInstruction::Cz(control, target))
+    }
+
+    /// SWAP: exchange the states of qubits `q0` and `q1`.
+    pub fn swap(self, q0: usize, q1: usize) -> Self {
+        self.push(GateInstruction::Swap(q0, q1))
     }
 
     /// ZZ-interaction rotation on `(q0, q1)`.

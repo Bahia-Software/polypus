@@ -8,11 +8,20 @@ circuit independently with Qiskit gate calls and assert the amplitudes match to
 1e-10. The randomized test exercises the whole gate set over many circuits.
 
 Both backends use the little-endian convention (qubit 0 is the least-significant
-bit), so the amplitude arrays are compared directly.
+bit), so the amplitude arrays are compared directly — and both are NumPy arrays
+of ``complex128`` (``test_returns_a_complex128_numpy_array`` pins the Polypus
+side, which the ``np.asarray`` in ``_compare`` would otherwise not notice).
+
+The two tests at the end cover the *qubit ceiling* at the seam (issue #86): the
+dense statevector backend caps circuits at ``polypus_sim::MAX_QUBITS``
+(30 ≈ 16 GiB) and must reject anything larger with a ``ValueError`` before
+allocating — the Python-visible half of the guard already tested in Rust
+(``crates/polypus-sim/tests/scalability.rs``).
 """
 
 import math
 import random
+import time
 
 import numpy as np
 import pytest
@@ -31,6 +40,28 @@ def _compare(polypus_amps, qc, atol=1e-10):
     assert got.shape == ref.shape, f"shape {got.shape} != {ref.shape}"
     assert np.allclose(got, ref, atol=atol), (
         f"\npolypus = {np.round(got, 4)}\nqiskit  = {np.round(ref, 4)}"
+    )
+
+
+def test_returns_a_complex128_numpy_array():
+    """The `2^n` amplitudes cross the seam as a `numpy.ndarray` of `complex128`,
+    not as a `list` of boxed Python `complex` objects: it is the dtype every
+    consumer wants (NumPy, and Qiskit's own `Statevector.data`) and it is far
+    cheaper to hand over, because the Rust buffer is moved into the array instead
+    of being converted element by element (measured at 26-30 qubits: a gateless
+    30-qubit call went from 29.7s to 5.0s — see `docs/ENGINEERING.md` §4).
+
+    Asserted on its own because the correctness tests above all funnel through
+    `np.asarray`, which accepts a list just as happily and would therefore not
+    catch a regression to the old return type."""
+    import polypus
+
+    amps = polypus.statevector(polypus.Circuit(3).h(0).cx(0, 1))
+
+    assert isinstance(amps, np.ndarray), f"expected np.ndarray, got {type(amps)!r}"
+    assert amps.dtype == np.complex128, f"expected complex128, got {amps.dtype}"
+    assert amps.shape == (8,), (
+        f"expected one amplitude per basis state; got {amps.shape}"
     )
 
 
@@ -194,3 +225,49 @@ def test_random_circuits_match_qiskit():
         for _ in range(depth):
             p = _apply_random_gate(p, qc, n, rng)
         _compare(polypus.statevector(p), qc)
+
+
+# ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
+# simulator, not to the seam), so it is mirrored here — keep both in sync.
+_MAX_QUBITS = 30
+
+
+def test_qubit_ceiling_is_documented_at_the_seam():
+    """The ceiling has to be discoverable from Python, not only from the Rust
+    source: `help(polypus.statevector)` must state it."""
+    import polypus
+
+    doc = polypus.statevector.__doc__ or ""
+    assert "MAX_QUBITS" in doc and str(_MAX_QUBITS) in doc, (
+        f"statevector.__doc__ must document the qubit ceiling; got:\n{doc}"
+    )
+
+
+# Comfortably above the ceiling: 31 is the first rejected value, 40 would need
+# 16 TiB and 64 exceeds addressable memory entirely — an unguarded run would not
+# merely be slow, it would take the interpreter down with it.
+@pytest.mark.parametrize("num_qubits", [_MAX_QUBITS + 1, 40, 64])
+def test_rejects_circuits_above_the_qubit_ceiling(num_qubits):
+    """`statevector` must refuse a circuit larger than the backend's ceiling
+    with a `ValueError` (contract C-1's failure mode), raised *before* the
+    `2^n` allocation is attempted."""
+    import polypus
+
+    qc = polypus.Circuit(num_qubits).h(0)
+
+    start = time.perf_counter()
+    with pytest.raises(ValueError) as excinfo:
+        polypus.statevector(qc)
+    elapsed = time.perf_counter() - start
+
+    message = str(excinfo.value)
+    assert str(num_qubits) in message and str(_MAX_QUBITS) in message, (
+        f"the error must name the requested count and the limit; got: {message!r}"
+    )
+    assert "qubit" in message.lower(), f"unexpected error message: {message!r}"
+    # The guard is a single comparison, so the call returns essentially
+    # instantly. A slow failure would mean allocation was attempted first.
+    assert elapsed < 1.0, (
+        f"rejection took {elapsed:.3f}s — the guard must fire before any "
+        f"2^{num_qubits} allocation"
+    )

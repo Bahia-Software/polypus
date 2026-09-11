@@ -2,9 +2,10 @@
 //! (see `docs/CONTRACTS.md`):
 //!
 //! - **C-2 · Gate vocabulary symmetry (QIR half).** Each non-trivial QIR
-//!   decomposition (`rzz`, `rxx`, `cp`, `u3`) must realise the *same unitary*
-//!   as the native gate up to a global phase, with the native simulator as the
-//!   reference. The decompositions here mirror `polypus_circuit`'s `qir.rs`.
+//!   decomposition (`swap`, `rzz`, `rxx`, `cp`, `u3`) must realise the *same
+//!   unitary* as the native gate up to a global phase, with the native
+//!   simulator as the reference. The decompositions here mirror
+//!   `polypus_circuit`'s `qir.rs`.
 //! - **C-4 · Terminal measurement placement (simulator half).** The simulator
 //!   rejects a circuit that operates on an already-measured qubit rather than
 //!   silently treating the measurement as a no-op.
@@ -60,6 +61,14 @@ fn assert_equiv_up_to_global_phase(n: usize, native: &[G], decomposed: &[G]) {
 }
 
 const ANGLES: [f64; 5] = [0.3, 0.7, 1.25, -2.0, FRAC_PI_3];
+
+#[test]
+fn c2_qir_swap_decomposition_matches_native() {
+    // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
+    let native = [G::Swap(0, 1)];
+    let decomp = [G::Cx(0, 1), G::Cx(1, 0), G::Cx(0, 1)];
+    assert_equiv_up_to_global_phase(2, &native, &decomp);
+}
 
 #[test]
 fn c2_qir_rzz_decomposition_matches_native() {

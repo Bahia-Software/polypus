@@ -195,14 +195,12 @@ fn wrong_number_of_params_is_rejected() {
 #[test]
 fn param_index_out_of_bounds_is_rejected() {
     // Assemble manually so num_params and gate indices disagree.
-    let qc = ParameterizedCircuit {
-        num_qubits: 1,
-        num_params: 1,
-        gates: vec![GateInstruction::Rx {
-            qubit: 0,
-            theta: GateParam::Param(5),
-        }],
-    };
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.num_params = 1;
+    qc.gates = vec![GateInstruction::Rx {
+        qubit: 0,
+        theta: GateParam::Param(5),
+    }];
     assert_eq!(
         qc.assign_parameters(&[0.1]),
         Err(CircuitError::ParamIndexOutOfBounds {

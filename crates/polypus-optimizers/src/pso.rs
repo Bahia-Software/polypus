@@ -108,6 +108,9 @@ impl AlgorithmPSO {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
+        // Global best fitness at the end of each generation (see
+        // `OptimizationOutcome::fitness_history`).
+        let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
             iterations_run = generation + 1;
@@ -154,6 +157,8 @@ impl AlgorithmPSO {
             positions = new_positions;
             velocities = new_velocities;
 
+            fitness_history.push(personal_best_fitness[global_best_idx]);
+
             if population_converged(&positions, tolerance, generation) {
                 converged = true;
                 break;
@@ -165,6 +170,7 @@ impl AlgorithmPSO {
             best_params: global_best_pos,
             iterations_run,
             converged,
+            fitness_history,
         })
     }
 }

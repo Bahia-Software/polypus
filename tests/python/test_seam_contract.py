@@ -13,11 +13,13 @@ types (``ValueError`` for an unknown infrastructure, ``TypeError`` for a bad
 kwarg) are preserved because the Rust side re-raises the original exception
 verbatim.
 
-Note: this deliberately exercises the ``local`` path (real
-``connect_to_infrastructure("local")`` + mocked ``run_qcs``). It does **not**
-touch the CUNQA ``disconnect`` path, which still carries the separately-tracked
-"known break" (reads ``slurm_job_id`` instead of ``family``, CONTRACTS.md C-1);
-that defect is out of scope here and is not exercised or masked.
+The panic-safety tests deliberately exercise the ``local`` path (real
+``connect_to_infrastructure("local")`` + mocked ``run_qcs``). The CUNQA
+``disconnect`` path is covered separately below: it forwards the ``family``
+handle to ``qdrop`` (CONTRACTS.md C-1). This used to be a "known break" — the
+Python side read ``slurm_job_id`` (a key the Rust side never sends), so a
+``KeyError`` fired before ``qdrop`` ran and the QPU allocation leaked; the test
+below locks in the fix without needing a real ``cunqa`` install or SLURM.
 """
 
 import pytest
@@ -89,3 +91,41 @@ def test_seam_failure_is_never_a_panic_exception(monkeypatch):
         assert isinstance(exc, RuntimeError)
     else:
         pytest.fail("expected the mocked seam failure to raise")
+
+
+def _install_fake_cunqa(monkeypatch, dropped):
+    """Register a minimal fake ``cunqa`` package in ``sys.modules`` so the CUNQA
+    seam imports without a real install or SLURM. ``qdrop`` records the family
+    names it is handed; the rest are inert stubs to satisfy the module-level
+    ``from cunqa.qpu import ...`` in ``polypus_python.cunqa``."""
+    import sys
+    import types
+
+    qjob_mod = types.ModuleType("cunqa.qjob")
+    qjob_mod.gather = lambda *a, **k: []
+    qpu_mod = types.ModuleType("cunqa.qpu")
+    qpu_mod.get_QPUs = lambda *a, **k: []
+    qpu_mod.qraise = lambda *a, **k: "fam-1"
+    qpu_mod.run = lambda *a, **k: None
+    qpu_mod.qdrop = lambda *families, **k: dropped.extend(families)
+
+    monkeypatch.setitem(sys.modules, "cunqa", types.ModuleType("cunqa"))
+    monkeypatch.setitem(sys.modules, "cunqa.qjob", qjob_mod)
+    monkeypatch.setitem(sys.modules, "cunqa.qpu", qpu_mod)
+    # Force a fresh import so the fake ``qdrop`` is the one bound in the module.
+    monkeypatch.delitem(sys.modules, "polypus_python.cunqa", raising=False)
+
+
+def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
+    # C-1: the Rust side calls disconnect_from_infrastructure("cunqa",
+    # family=<handle>). The Python side must forward that handle to CUNQA's
+    # `qdrop` — regression guard for the historical break where it read
+    # `slurm_job_id` (never sent) and `qdrop` was never reached.
+    import polypus_python
+
+    dropped = []
+    _install_fake_cunqa(monkeypatch, dropped)
+
+    polypus_python.disconnect_from_infrastructure("cunqa", family="fam-1")
+
+    assert dropped == ["fam-1"], "the family handle must reach qdrop unchanged"

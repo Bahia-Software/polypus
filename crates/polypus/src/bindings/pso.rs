@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 /// Particle Swarm Optimization configuration.
-#[pyclass]
+#[pyclass(module = "polypus")]
 #[allow(clippy::upper_case_acronyms)]
 pub struct PSO {
     #[pyo3(get, set)]
@@ -30,9 +30,6 @@ pub struct PSO {
 impl PSO {
     #[new]
     #[pyo3(signature = (generations = 100, population_size = 50, bounds = (-std::f64::consts::PI, std::f64::consts::PI), inertia_weight = 0.5, cognitive_weight = 1.0, social_weight = 1.0, tolerance = 0.01, seed = None))]
-    // Constructor mirrors PSO's full hyper-parameter set as Python kwargs; the
-    // added `seed` pushes it one past the lint threshold.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         generations: u32,
         population_size: u32,

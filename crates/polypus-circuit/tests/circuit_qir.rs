@@ -60,6 +60,25 @@ fn bell_pair_full_module() {
 }
 
 #[test]
+fn swap_is_decomposed_to_three_cnots() {
+    let ir = ParameterizedCircuit::new(2)
+        .swap(0, 1)
+        .to_qir_with_params(&[])
+        .unwrap();
+
+    let q0 = "%Qubit* null";
+    let q1 = "%Qubit* inttoptr (i64 1 to %Qubit*)";
+    assert_eq!(
+        call_lines(&ir),
+        vec![
+            format!("call void @__quantum__qis__cnot__body({q0}, {q1})"),
+            format!("call void @__quantum__qis__cnot__body({q1}, {q0})"),
+            format!("call void @__quantum__qis__cnot__body({q0}, {q1})"),
+        ]
+    );
+}
+
+#[test]
 fn rzz_is_decomposed_to_cnot_rz_cnot() {
     let ir = ParameterizedCircuit::new(2)
         .rzz(0, 1, 0.5)

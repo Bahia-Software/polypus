@@ -60,7 +60,13 @@ impl QuantumBackend for LocalBackend {
                     log::error!("local infrastructure connection failed: {e}");
                     BackendError::Seam(e)
                 })?;
-            let connection_str = connection.extract::<String>().map_err(BackendError::Seam)?;
+            // The call above succeeded; a wrong-shaped return value is our
+            // Rust-side conversion failure, not a seam exception (contract C-1).
+            let connection_str = connection.extract::<String>().map_err(|e| {
+                BackendError::Conversion(format!(
+                    "expected connect_to_infrastructure(\"local\") to return str: {e}"
+                ))
+            })?;
 
             let kwargs = PyDict::new(py);
             let conv = |e: PyErr| BackendError::Conversion(e.to_string());
@@ -89,9 +95,13 @@ impl QuantumBackend for LocalBackend {
                     log::error!("local circuit execution failed: {e}");
                     BackendError::Seam(e)
                 })?;
-            result
-                .extract::<Vec<HashMap<String, u64>>>()
-                .map_err(BackendError::Seam)
+            // As above: `run_qcs` returned successfully, so a wrong-shaped
+            // value is a Rust-side conversion failure, not a seam exception.
+            result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
+                BackendError::Conversion(format!(
+                    "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
+                ))
+            })
         })
     }
 }

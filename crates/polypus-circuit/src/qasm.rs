@@ -84,6 +84,9 @@ pub(crate) fn write_qasm2(
             GateInstruction::Cz(c, t) => {
                 let _ = writeln!(out, "cz q[{c}],q[{t}];");
             }
+            GateInstruction::Swap(q0, q1) => {
+                let _ = writeln!(out, "swap q[{q0}],q[{q1}];");
+            }
             GateInstruction::Rzz { q0, q1, theta } => {
                 let _ = writeln!(out, "rzz({}) q[{q0}],q[{q1}];", angle(theta)?);
             }

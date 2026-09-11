@@ -135,3 +135,10 @@ pub(crate) fn cp_diag(theta: f64) -> [C64; 4] {
     let diag = C64::from_polar(1.0, theta);
     [re(1.0), re(1.0), re(1.0), diag]
 }
+
+/// SWAP, in the basis `00, 01, 10, 11`: exchanges `|01>` and `|10>`, leaves the
+/// symmetric states fixed. Symmetric, so the qubit order does not matter.
+pub(crate) fn swap() -> [[C64; 4]; 4] {
+    let (o, z) = (re(1.0), re(0.0));
+    [[o, z, z, z], [z, z, o, z], [z, o, z, z], [z, z, z, o]]
+}

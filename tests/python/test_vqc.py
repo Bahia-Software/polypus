@@ -52,6 +52,12 @@ class TestTrainDE:
         assert isinstance(result.iterations_run, int)
         assert isinstance(result.converged, bool)
         assert isinstance(result.seed, int)
+        # The quality trajectory is exposed too (contract C-5): one best-fitness
+        # entry per executed generation, ending on the reported best_fitness.
+        assert isinstance(result.fitness_history, list)
+        assert len(result.fitness_history) == result.iterations_run
+        assert all(isinstance(f, float) for f in result.fitness_history)
+        assert result.fitness_history[-1] == result.best_fitness
 
     def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
         import polypus

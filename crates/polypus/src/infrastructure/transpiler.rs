@@ -82,6 +82,15 @@ pub trait Transpiler: Send + Sync {
     /// Rewrite `circuit` into an equivalent one valid for the backend's target,
     /// honoring `opts` (e.g. optimization [`OptLevel`]).
     fn transpile(&self, circuit: &ConcreteCircuit, opts: &TranspileOptions) -> ConcreteCircuit;
+
+    /// Whether [`transpile`](Self::transpile) is guaranteed to be a no-op
+    /// (returns a circuit equal to its input) regardless of `opts`. Callers on
+    /// hot paths use this to skip calling `transpile` — and any clone/parse
+    /// leading up to it — entirely. Default `false` (conservative: only opt in
+    /// when it's actually true for every [`TranspileOptions`]).
+    fn is_identity(&self) -> bool {
+        false
+    }
 }
 
 /// No-op transpiler: returns the circuit unchanged, ignoring `opts`.
@@ -95,6 +104,11 @@ impl Transpiler for IdentityTranspiler {
     #[inline]
     fn transpile(&self, circuit: &ConcreteCircuit, _opts: &TranspileOptions) -> ConcreteCircuit {
         circuit.clone()
+    }
+
+    #[inline]
+    fn is_identity(&self) -> bool {
+        true
     }
 }
 
@@ -199,5 +213,29 @@ mod tests {
             out.gates.last(),
             Some(GateInstruction::Barrier(_))
         ));
+    }
+
+    /// `IdentityTranspiler` advertises itself as a guaranteed no-op, while a
+    /// custom `Transpiler` that does not override the default (even one that
+    /// happens to return the circuit unchanged) reports `false` — the hint is
+    /// opt-in, so callers only skip `transpile` when it is provably safe.
+    #[test]
+    fn is_identity_true_only_for_identity_transpiler() {
+        // A custom strategy that never overrides `is_identity`, keeping the
+        // conservative default. It even returns the circuit unchanged, proving
+        // the hint is about the opt-in, not the observed behavior.
+        struct DefaultingPassthrough;
+        impl Transpiler for DefaultingPassthrough {
+            fn transpile(
+                &self,
+                circuit: &ConcreteCircuit,
+                _opts: &TranspileOptions,
+            ) -> ConcreteCircuit {
+                circuit.clone()
+            }
+        }
+
+        assert!(IdentityTranspiler.is_identity());
+        assert!(!DefaultingPassthrough.is_identity());
     }
 }

@@ -34,6 +34,12 @@ pub enum SimError {
         /// The qubit that was operated on after being measured.
         qubit: usize,
     },
+    /// The caller asked for the simulation to stop before it finished, through
+    /// the cancellation hook passed to
+    /// [`Simulator::run_cancellable`](crate::Simulator::run_cancellable). The
+    /// partially evolved statevector is discarded: a run that stopped part-way
+    /// through the gate sequence is not a state any circuit describes.
+    Cancelled,
 }
 
 impl fmt::Display for SimError {
@@ -54,6 +60,9 @@ impl fmt::Display for SimError {
                 f,
                 "gate acts on qubit {qubit} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
             ),
+            SimError::Cancelled => {
+                write!(f, "the simulation was cancelled before it completed")
+            }
         }
     }
 }

@@ -14,6 +14,15 @@ use crate::infrastructure::transpiler::OptLevel;
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// Unique identifier for this run (logging, temp files, SLURM job names).
+    ///
+    /// Already validated when it comes from a Python entry point: `train` /
+    /// `qml.train` restrict the caller-supplied *prefix* to `[A-Za-z0-9._-]`,
+    /// non-empty and at most 64 characters (contract C-9, `validate_id` in
+    /// `crate::bindings`) before appending the UUID v4 suffix, precisely because
+    /// this string reaches CUNQA's SLURM `family_name`/`family_id` and the temp
+    /// file / log stream names above. Constructing an `ExecutionConfig` directly
+    /// from Rust bypasses that check — keep the same charset if the value can
+    /// reach an external tool.
     pub id: String,
     /// Number of shots per circuit.
     pub shots: u32,
