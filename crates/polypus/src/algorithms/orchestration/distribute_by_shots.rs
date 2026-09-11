@@ -1,9 +1,10 @@
 use crate::algorithms::{AlgorithmArgs, AlgorithmTrait};
-use crate::infrastructure::{BackendError, Infrastructure};
+use crate::infrastructure::{
+    BackendError, CancelToken, CircuitTask, Infrastructure, Planner, ShotDistributingPlanner,
+};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::collections::HashMap;
 
 /// Distributes shots across multiple QPUs and merges the result counts.
 pub struct DistributeByShotsRun;
@@ -13,13 +14,9 @@ impl AlgorithmTrait for DistributeByShotsRun {
     type AlgorithmReturnType = PyResult<pyo3::PyObject>;
 
     fn run(&self, args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
-        // This algorithm operates on exactly one circuit: it replicates that
-        // single circuit across `n_qpus` and splits the shots between the
-        // replicas. Reject any other count with a typed error instead of
-        // panicking on `args.qcs[0]` (empty `qcs`) or silently dropping the
-        // extras (`qcs[1..]`). `n_qpus >= 1` and `shots >= 1` are guaranteed by
-        // the Python-facing boundary; the circuit count is not, so this is the
-        // sole place that contract is enforced — before any backend is built.
+        // This algorithm operates on exactly one circuit. Reject any other count
+        // up front, before a backend is even built (the planner guards it again as
+        // defense in depth). `n_qpus >= 1` and `shots >= 1` come from the boundary.
         if args.qcs.len() != 1 {
             return Err(BackendError::InvalidCircuitCount {
                 expected: 1,
@@ -29,65 +26,30 @@ impl AlgorithmTrait for DistributeByShotsRun {
         }
 
         let backend = Infrastructure::create_backend(&args.config)?;
+        // The ShotDistributingPlanner owns the whole distribution: it apportions
+        // this circuit's shots across `n_qpus` (base + one extra on the first
+        // `remainder`, conserving the total per C-3), runs `run_shots_distributed`,
+        // merges the replicas, validates and honours Ctrl+C.
+        let planner = ShotDistributingPlanner;
+        let cancel = CancelToken::default();
+        let tasks = [CircuitTask {
+            circuit: &args.qcs[0],
+            shots: args.config.shots,
+        }];
+        let mut merged = planner
+            .execute(backend.as_ref(), &tasks, &args.config, &cancel)
+            .map_err(super::infrastructure_error_to_pyerr)?;
+        backend.close();
 
-        // Distribute shots across QPUs, conserving the total (contract C-3): the
-        // remainder `shots % n_qpus` is spread one extra shot per QPU over the
-        // first `remainder` QPUs, never dropped. `n_qpus >= 1` and `shots >= 1`
-        // are guaranteed by the Python-facing boundary validation, so no guard is
-        // duplicated here.
-        //
-        // `shot_batches[i]` is replica `i`'s shot count (`base + 1` for the first
-        // `remainder` replicas, `base` for the rest). The backend runs the single
-        // circuit once per batch via `run_shots_distributed`; the native backend
-        // overrides that to evolve the statevector once and sample each batch,
-        // while other backends fall back to replicating + `run_circuits`.
-        let shots = args.config.shots;
-        let n_qpus = args.config.n_qpus;
-        let base = shots / n_qpus;
-        let remainder = shots % n_qpus;
-        log::debug!(
-            "distributing {} shots across {} QPUs: {} QPU(s) at {} shots, {} QPU(s) at {} shots",
-            shots,
-            n_qpus,
-            remainder,
-            base + 1,
-            n_qpus - remainder,
-            base
-        );
-
-        let shot_batches: Vec<u32> = (0..n_qpus)
-            .map(|i| if i < remainder { base + 1 } else { base })
-            .collect();
-        let counts_vec =
-            backend.run_shots_distributed(&args.qcs[0], &shot_batches, &args.config)?;
-
-        // Merge counts from all QPUs into a single dict
-        let mut total: HashMap<String, u64> = HashMap::new();
-        for counts in counts_vec {
-            for (k, v) in counts {
-                *total.entry(k).or_insert(0) += v;
-            }
-        }
-        // Central result validation (contract C-3): the merged counts are one
-        // logical result that must conserve the total shots apportioned above and
-        // be non-empty. Per-replica maps can legitimately be empty (a zero-shot
-        // replica), so the check is on the merged result, not each batch.
-        crate::infrastructure::validate_run_results(std::slice::from_ref(&total), 1, shots)?;
-        let merged_pyobj = Python::with_gil(|py| -> PyResult<pyo3::PyObject> {
-            // The runs above execute with the GIL released (see
-            // `run_quantum_circuit`); this reacquire is the first Python
-            // touchpoint, so honor a pending Ctrl+C here before building the
-            // merged dict and propagate it verbatim. See docs/ENGINEERING.md §3.
-            py.check_signals()?;
+        // `execute` returns exactly one merged `Counts` for the single circuit.
+        let total = merged.pop().unwrap_or_default();
+        Python::with_gil(|py| -> PyResult<pyo3::PyObject> {
             let py_dict = PyDict::new(py);
             for (k, v) in total {
                 py_dict.set_item(k, v)?;
             }
             Ok(py_dict.into())
-        })?;
-
-        backend.close();
-        Ok(merged_pyobj)
+        })
     }
 
     fn name(&self) -> String {
