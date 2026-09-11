@@ -1,6 +1,8 @@
 use crate::infrastructure::error::BackendError;
 use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::infrastructure::{
+    max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -77,6 +79,19 @@ impl QuantumBackend for LocalBackend {
             kwargs
                 .set_item("sim_method", &self.sim_method)
                 .map_err(conv)?;
+            // Bound Aer's concurrent experiments to the statevector memory budget
+            // (plan §4.5, P1-memory): Aer's `max_parallel_experiments=0` default
+            // ("auto") spawns one process per experiment and OOMs at high qubit
+            // counts. This is a pure resource knob — Aer seeds each experiment
+            // deterministically, so the counts are unchanged for any bound.
+            let cores = std::thread::available_parallelism()
+                .map(|c| c.get())
+                .unwrap_or(1);
+            let max_parallel_experiments =
+                max_statevector_concurrency(widest_qubits(qcs, py), cores);
+            kwargs
+                .set_item("max_parallel_experiments", max_parallel_experiments)
+                .map_err(conv)?;
             if let Some(nm) = &self.noise_model {
                 kwargs
                     .set_item("noise_model", nm.clone_ref(py))
@@ -103,5 +118,57 @@ impl QuantumBackend for LocalBackend {
                 ))
             })
         })
+    }
+}
+
+/// The widest circuit in the batch, used to size Aer's `max_parallel_experiments`
+/// against the statevector memory budget (plan §4.5). Each variant's width is
+/// read where it is cheapest: `Native` exposes it directly, `Qasm2` is parsed for
+/// it, and a `Qiskit` circuit is read through the GIL (`num_qubits`), which the
+/// caller already holds. An empty or unreadable batch yields 0 — a one-amplitude
+/// budget that leaves Aer's parallelism at the core count.
+fn widest_qubits(qcs: &[BoundCircuit], py: Python<'_>) -> usize {
+    qcs.iter()
+        .filter_map(|qc| match qc {
+            BoundCircuit::Native(cc) => Some(cc.num_qubits),
+            BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+                .ok()
+                .map(|pc| pc.num_qubits),
+            BoundCircuit::Qiskit(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polypus_circuit::ParameterizedCircuit;
+
+    /// `widest_qubits` budgets for the largest statevector in a mixed batch: a
+    /// too-small `n` would under-bound Aer and reintroduce the OOM. The `Native`
+    /// and `Qasm2` arms are GIL-free; the GIL is only held to satisfy the
+    /// signature (the `Qiskit` arm is exercised end-to-end by the Python suite).
+    #[test]
+    fn widest_qubits_picks_the_largest_circuit() {
+        pyo3::prepare_freethreaded_python();
+        let small = ParameterizedCircuit::new(2)
+            .h(0)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap();
+        let big = ParameterizedCircuit::new(7)
+            .h(0)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap();
+        let batch = vec![
+            BoundCircuit::Native(small),
+            BoundCircuit::Qasm2(big.to_qasm2()),
+        ];
+        Python::with_gil(|py| {
+            assert_eq!(widest_qubits(&batch, py), 7);
+            assert_eq!(widest_qubits(&[], py), 0);
+        });
     }
 }

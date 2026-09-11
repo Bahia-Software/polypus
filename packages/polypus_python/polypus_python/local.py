@@ -39,6 +39,14 @@ class Local(Infraestructure):
         sim_method = args.get("sim_method", "automatic")
         noise_model = args.get("noise_model", None)
         seed = args.get("seed", None)
+        # How many experiments Aer may run in parallel. Aer's default of 0
+        # ("auto") spawns one process per experiment and OOMs at high qubit
+        # counts, so the caller (the Rust local backend) supplies a value sized to
+        # a statevector memory budget; 0 is kept only as the fallback for a direct
+        # caller that does not, preserving that path's historical behaviour. Aer
+        # seeds each experiment deterministically, so this bound never changes the
+        # counts — only peak memory and speed.
+        max_parallel_experiments = args.get("max_parallel_experiments", 0)
 
         # Submit every circuit in one Aer call so the C++ engine can run the
         # experiments in parallel across cores (GIL released) instead of looping
@@ -46,7 +54,7 @@ class Local(Infraestructure):
         sim = AerSimulator(
             method=sim_method,
             noise_model=noise_model,
-            max_parallel_experiments=0,
+            max_parallel_experiments=max_parallel_experiments,
         )
         if seed is not None:
             # Rust resolves `seed` from the full u64 range, but Aer's
