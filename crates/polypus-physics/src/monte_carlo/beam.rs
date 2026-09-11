@@ -7,14 +7,16 @@ use rand::Rng;
 
 use crate::particle::{FourMomentum, ParticleState, Position};
 
+use super::spectrum::EnergySpectrum;
+
 #[derive(Debug)]
 pub struct DivergentBeam {
     /// Distance from the source to the surface (m).
     pub source_to_surface_distance_m: f64,
     /// Side length of the square field at the surface (m).
     pub field_side_m: f64,
-    /// Photon energy (MeV).
-    pub energy_mev: f64,
+    /// Photon energy.
+    pub energy_source: Box<dyn EnergySpectrum>,
 }
 
 use rand::RngCore;
@@ -48,7 +50,7 @@ impl DivergentBeam {
         ParticleState {
             position: Position([x0, y0, z0]),
             momentum: FourMomentum {
-                energy_mev: self.energy_mev,
+                energy_mev: self.energy_source.sample_energy_mev(rng),
                 direction: [dx / norm, dy / norm, dz / norm],
             },
             alive: true,
@@ -62,9 +64,44 @@ impl BeamSource for DivergentBeam {
     }
 }
 
+/// A broad, parallel beam: primaries start at a fixed depth `z0`, with
+/// position uniformly distributed over a rectangle in the transverse
+/// plane, and a fixed direction (0, 0, 1) — no divergence.
+///
+/// Mirrors Geant4 example B1's default `PrimaryGeneratorAction`.
+#[derive(Debug)]
+pub struct ParallelBeam {
+    pub half_width_x_m: f64,
+    pub half_width_y_m: f64,
+    pub z0_m: f64,
+    pub energy_source: Box<dyn EnergySpectrum>,
+}
+
+impl ParallelBeam {
+    pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
+        let x0 = rng.gen_range(-self.half_width_x_m..=self.half_width_x_m);
+        let y0 = rng.gen_range(-self.half_width_y_m..=self.half_width_y_m);
+        ParticleState {
+            position: Position([x0, y0, self.z0_m]),
+            momentum: FourMomentum {
+                energy_mev: self.energy_source.sample_energy_mev(rng),
+                direction: [0.0, 0.0, 1.0],
+            },
+            alive: true,
+        }
+    }
+}
+
+impl BeamSource for ParallelBeam {
+    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState {
+        self.sample(rng)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monte_carlo::spectrum::Monoenergetic;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
@@ -72,7 +109,7 @@ mod tests {
         DivergentBeam {
             source_to_surface_distance_m: 0.10,
             field_side_m: 0.10,
-            energy_mev: 0.1,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
         }
     }
 
