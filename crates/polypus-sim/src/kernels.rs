@@ -218,8 +218,21 @@ fn block_diagonal_2q(tile: &mut [C64], start: usize, b0: usize, b1: usize, diag:
 /// ops one at a time gives, to rounding — the same sequence of per-amplitude
 /// multiplies, only regrouped.
 pub(crate) fn apply_diagonal_run(data: &mut [C64], ops: &[DiagonalOp], parallel: bool) {
-    let mut ones: Vec<(usize, C64, C64)> = Vec::with_capacity(ops.len());
-    let mut twos: Vec<(usize, usize, [C64; 4])> = Vec::with_capacity(ops.len());
+    // Sized to how many of each variant `ops` actually holds, not to
+    // `ops.len()` for both: a run of all-`Two` gates (every QFT phase column,
+    // for instance — it never contains a `One`) used to reserve a same-sized
+    // `ones` that stayed empty, and an equally oversized `twos` on top of
+    // that. One pass over `ops` (cheap — reading tags, no buffer touch) to
+    // count each variant means neither `Vec` reserves a single byte it
+    // doesn't use.
+    let (ones_count, twos_count) = ops
+        .iter()
+        .fold((0usize, 0usize), |(ones, twos), op| match op {
+            DiagonalOp::One { .. } => (ones + 1, twos),
+            DiagonalOp::Two { .. } => (ones, twos + 1),
+        });
+    let mut ones: Vec<(usize, C64, C64)> = Vec::with_capacity(ones_count);
+    let mut twos: Vec<(usize, usize, [C64; 4])> = Vec::with_capacity(twos_count);
     for op in ops {
         match op {
             DiagonalOp::One { bit, d0, d1 } => ones.push((*bit, *d0, *d1)),
