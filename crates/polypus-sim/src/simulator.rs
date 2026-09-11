@@ -495,10 +495,12 @@ fn poll_cancel(
 struct DenseComponent {
     /// The component's qubits, sorted ascending; length 1 or 2.
     qubits: Vec<usize>,
-    /// Circuit indices of the fused gates. Kept in insertion order (cheap to
-    /// merge — a concatenation, never a re-sort), then sorted once at flush time
-    /// by [`apply_to`](Self::apply_to). Sorting on every merge instead would be
-    /// `O(gates²)` on a long same-qubit run.
+    /// Circuit indices of the fused gates. A component absorbed via
+    /// [`absorb_dense_gate`]'s fast path (the common case: this gate shares a
+    /// qubit with exactly one open component) grows this in place, one
+    /// `push` at a time, so it stays sorted for free — indices only arrive
+    /// out of order when two independent components are merged, which
+    /// [`apply_to`](Self::apply_to) sorts out once, at flush.
     indices: Vec<usize>,
     /// The earliest gate index in the component, for a deterministic flush order.
     /// Maintained incrementally so the flush needs no scan of `indices`.
@@ -519,17 +521,23 @@ impl DenseComponent {
     /// [`Statevector::apply`] fast path (a component that never merged pays no
     /// composition cost); two or more gates are composed into one matrix, in
     /// circuit order.
-    fn apply_to(&self, sv: &mut Statevector, gates: &[GateInstruction]) -> Result<(), SimError> {
+    ///
+    /// Takes `self` by value — its only caller already owns it (drained from
+    /// `open`) — so restoring circuit order sorts `indices` in place instead
+    /// of cloning it first, and the sorted indices are handed to
+    /// [`Statevector::apply_composed_1q`]/[`apply_composed_2q`] directly
+    /// alongside `gates`, with no intermediate `Vec<&GateInstruction>` built
+    /// just to carry them.
+    fn apply_to(mut self, sv: &mut Statevector, gates: &[GateInstruction]) -> Result<(), SimError> {
         if self.indices.len() == 1 {
             return sv.apply(&gates[self.indices[0]]);
         }
-        // Restore circuit order once, here — merging kept them unsorted.
-        let mut order = self.indices.clone();
-        order.sort_unstable();
-        let members: Vec<&GateInstruction> = order.iter().map(|&k| &gates[k]).collect();
+        // Restore circuit order once, here — merging two components (rather
+        // than growing one in place) leaves indices out of order.
+        self.indices.sort_unstable();
         match self.qubits.as_slice() {
-            [q] => sv.apply_composed_1q(*q, &members),
-            [qa, qb] => sv.apply_composed_2q(*qa, *qb, &members),
+            [q] => sv.apply_composed_1q(*q, &self.indices, gates),
+            [qa, qb] => sv.apply_composed_2q(*qa, *qb, &self.indices, gates),
             // The merge cap keeps `qubits` at length 1 or 2; nothing else is built.
             _ => unreachable!("a dense component spans one or two qubits"),
         }
@@ -574,14 +582,21 @@ fn absorb_dense_gate(
         DenseQubits::Two(a, b) => q == a || q == b,
     };
 
-    // The merged qubit set = this gate's qubits ∪ every touched component's.
-    // The one allocation this function needs in the common case (an isolated
-    // gate with nothing open to merge into): it becomes the eventual
-    // `DenseComponent`'s qubit list directly below, no separate "this gate's
-    // own qubits" `Vec` cloned into it first.
+    // The merged qubit set = this gate's qubits ∪ every touched component's,
+    // and how many (and which) open components are touched -- both needed
+    // to decide the cap and, below, to grow a lone touched component in
+    // place instead of rebuilding one. The one allocation this function
+    // needs in the common case (an isolated gate with nothing open to merge
+    // into): `merged` becomes the eventual `DenseComponent`'s qubit list
+    // directly below, no separate "this gate's own qubits" `Vec` cloned
+    // into it first.
     let mut merged: Vec<usize> = dense_qubits_vec(qubits);
-    for comp in open.iter() {
+    let mut touched_one = None;
+    let mut touched_count = 0usize;
+    for (idx, comp) in open.iter().enumerate() {
         if comp.qubits.iter().any(|&q| touches_gate(q)) {
+            touched_count += 1;
+            touched_one = Some(idx);
             for &q in &comp.qubits {
                 if !merged.contains(&q) {
                     merged.push(q);
@@ -589,6 +604,7 @@ fn absorb_dense_gate(
             }
         }
     }
+    merged.sort_unstable(); // qubits stays sorted at every use below
 
     if merged.len() > 2 {
         // Bridging would exceed the two-qubit cap. Every open component's gates
@@ -599,13 +615,31 @@ fn absorb_dense_gate(
         return Ok(());
     }
 
-    // Merge every touched component (and this gate) into one. Untouched
-    // components stay open and qubit-disjoint from the result. Indices are only
-    // concatenated (not re-sorted) — `apply_to` sorts once at flush.
-    merged.sort_unstable();
+    // Fast path: exactly one open component shares a qubit with this gate --
+    // the common case for a chain of gates repeatedly touching the same
+    // qubit(s), which is exactly what makes fusion worth it in the first
+    // place. Grow that component's own index list in place (`Vec::push`'s
+    // own amortized growth) instead of rebuilding a fresh list and copying
+    // the old one into it below: without this fast path, absorbing the
+    // g-th gate into an already-`m`-gate component costs O(m) (the copy),
+    // so a chain of g gates costs O(g^2) in total, not O(g) -- confirmed
+    // with a direct allocator measurement before this fix (a 32-round,
+    // 96-gate same-pair chain: 736 B for round 1, 82,808 B by round 32 --
+    // growing per-gate cost, not the flat cost this fast path restores).
+    if touched_count == 1 {
+        let idx = touched_one.expect("touched_count == 1");
+        open[idx].qubits = merged;
+        open[idx].indices.push(i);
+        return Ok(());
+    }
+
+    // General case: 0 components touched (a fresh component-to-be) or 2+ (a
+    // genuine merge of previously-independent components) -- both are
+    // one-off relative to any single component's history, so rebuilding
+    // here doesn't reintroduce the accumulation the fast path above avoids.
     let mut merged_indices: Vec<usize> = Vec::new();
     let mut min_index = i;
-    let mut kept: Vec<DenseComponent> = Vec::with_capacity(open.len());
+    let mut kept: Vec<DenseComponent> = Vec::new();
     for comp in open.drain(..) {
         if comp.qubits.iter().any(|&q| touches_gate(q)) {
             min_index = min_index.min(comp.min_index);

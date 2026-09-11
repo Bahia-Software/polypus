@@ -502,19 +502,25 @@ impl Statevector {
     /// The single-gate case never reaches here: its caller,
     /// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator),
     /// dispatches a lone gate straight through [`apply`](Self::apply) so a
-    /// component that never merged pays no composition overhead. `gates_in_order`
-    /// therefore always holds at least two gates.
+    /// component that never merged pays no composition overhead. `indices`
+    /// (already in circuit order — sorting is the caller's job) therefore
+    /// always holds at least two entries into `gates`.
+    ///
+    /// Takes `indices` + `gates` rather than a pre-built `&[&GateInstruction]`
+    /// so the caller never has to materialize one just to hand the members
+    /// over.
     pub(crate) fn apply_composed_1q(
         &mut self,
         qubit: usize,
-        gates_in_order: &[&GateInstruction],
+        indices: &[usize],
+        gates: &[GateInstruction],
     ) -> Result<(), SimError> {
-        let (first, rest) = gates_in_order
+        let (&first, rest) = indices
             .split_first()
             .expect("a composed component holds at least two gates");
-        let mut combined = dense_matrix_1q(first)?;
-        for gate in rest {
-            combined = matmul2(&dense_matrix_1q(gate)?, &combined);
+        let mut combined = dense_matrix_1q(&gates[first])?;
+        for &idx in rest {
+            combined = matmul2(&dense_matrix_1q(&gates[idx])?, &combined);
         }
         let par = self.use_parallel();
         kernels::apply_1q(&mut self.data, self.n, qubit, &combined, par);
@@ -527,21 +533,22 @@ impl Statevector {
     /// Each member is lifted into the joint two-qubit space (a one-qubit gate
     /// embeds as identity on the other qubit; `Cx`/`Swap`/`Rxx` are already
     /// two-qubit) and the lifts are composed in circuit order. Angle resolution
-    /// and the "validate before any write" contract are exactly as for
-    /// [`apply_composed_1q`](Self::apply_composed_1q); `gates_in_order` likewise
-    /// always holds at least two gates.
+    /// and the "validate before any write" contract, and taking `indices` +
+    /// `gates` rather than a pre-built `&[&GateInstruction]`, are exactly as
+    /// for [`apply_composed_1q`](Self::apply_composed_1q).
     pub(crate) fn apply_composed_2q(
         &mut self,
         qa: usize,
         qb: usize,
-        gates_in_order: &[&GateInstruction],
+        indices: &[usize],
+        gates: &[GateInstruction],
     ) -> Result<(), SimError> {
-        let (first, rest) = gates_in_order
+        let (&first, rest) = indices
             .split_first()
             .expect("a composed component holds at least two gates");
-        let mut combined = lifted_matrix_2q(first, qa)?;
-        for gate in rest {
-            combined = matmul4(&lifted_matrix_2q(gate, qa)?, &combined);
+        let mut combined = lifted_matrix_2q(&gates[first], qa)?;
+        for &idx in rest {
+            combined = matmul4(&lifted_matrix_2q(&gates[idx], qa)?, &combined);
         }
         let par = self.use_parallel();
         kernels::apply_2q(&mut self.data, self.n, qa, qb, &combined, par);
