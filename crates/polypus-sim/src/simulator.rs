@@ -540,6 +540,22 @@ impl DenseComponent {
 /// components: merge it with every open component it shares a qubit with when the
 /// union still fits two qubits, otherwise flush all open components and start a
 /// fresh one holding just this gate.
+/// This gate's own qubits as an owned, sorted list — the one allocation a
+/// [`DenseComponent`] genuinely needs (as its `qubits` field, or as a fresh
+/// singleton's). Kept out of the membership checks in
+/// [`absorb_dense_gate`], which use `qubits` directly instead of testing
+/// against a `Vec` built just to ask "is q one of this gate's qubits?".
+fn dense_qubits_vec(qubits: crate::statevector::DenseQubits) -> Vec<usize> {
+    use crate::statevector::DenseQubits;
+    match qubits {
+        DenseQubits::One(q) => vec![q],
+        DenseQubits::Two(a, b) => {
+            let (lo, hi) = (a.min(b), a.max(b));
+            vec![lo, hi]
+        }
+    }
+}
+
 fn absorb_dense_gate(
     sv: &mut Statevector,
     gates: &[GateInstruction],
@@ -550,18 +566,22 @@ fn absorb_dense_gate(
     total: usize,
 ) -> Result<(), SimError> {
     use crate::statevector::DenseQubits;
-    let gate_qubits: Vec<usize> = match qubits {
-        DenseQubits::One(q) => vec![q],
-        DenseQubits::Two(a, b) => {
-            let (lo, hi) = (a.min(b), a.max(b));
-            vec![lo, hi]
-        }
+
+    // Whether `q` is one of this gate's own qubits — a plain comparison
+    // against `qubits` (`Copy`), not a `Vec` allocated solely to ask this.
+    let touches_gate = |q: usize| match qubits {
+        DenseQubits::One(a) => q == a,
+        DenseQubits::Two(a, b) => q == a || q == b,
     };
 
     // The merged qubit set = this gate's qubits ∪ every touched component's.
-    let mut merged: Vec<usize> = gate_qubits.clone();
+    // The one allocation this function needs in the common case (an isolated
+    // gate with nothing open to merge into): it becomes the eventual
+    // `DenseComponent`'s qubit list directly below, no separate "this gate's
+    // own qubits" `Vec` cloned into it first.
+    let mut merged: Vec<usize> = dense_qubits_vec(qubits);
     for comp in open.iter() {
-        if comp.qubits.iter().any(|q| gate_qubits.contains(q)) {
+        if comp.qubits.iter().any(|&q| touches_gate(q)) {
             for &q in &comp.qubits {
                 if !merged.contains(&q) {
                     merged.push(q);
@@ -575,7 +595,7 @@ fn absorb_dense_gate(
         // occurred before this one, so flush them all (in circuit order), then
         // open a new component for this gate alone.
         flush_dense(sv, gates, open, cancellation, total)?;
-        open.push(DenseComponent::singleton(gate_qubits, i));
+        open.push(DenseComponent::singleton(dense_qubits_vec(qubits), i));
         return Ok(());
     }
 
@@ -587,7 +607,7 @@ fn absorb_dense_gate(
     let mut min_index = i;
     let mut kept: Vec<DenseComponent> = Vec::with_capacity(open.len());
     for comp in open.drain(..) {
-        if comp.qubits.iter().any(|q| gate_qubits.contains(q)) {
+        if comp.qubits.iter().any(|&q| touches_gate(q)) {
             min_index = min_index.min(comp.min_index);
             merged_indices.extend(comp.indices);
         } else {
