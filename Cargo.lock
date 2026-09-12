@@ -787,6 +787,7 @@ dependencies = [
  "log",
  "numpy",
  "polypus-circuit",
+ "polypus-infrastructure",
  "polypus-logger",
  "polypus-observable",
  "polypus-optimizers",
@@ -794,16 +795,30 @@ dependencies = [
  "pyo3",
  "rand 0.8.6",
  "rayon",
- "serde-pickle",
- "serde_json",
  "tokio",
  "uuid",
- "zeromq",
 ]
 
 [[package]]
 name = "polypus-circuit"
 version = "0.6.0"
+
+[[package]]
+name = "polypus-infrastructure"
+version = "0.6.0"
+dependencies = [
+ "log",
+ "polypus-circuit",
+ "polypus-observable",
+ "polypus-sim",
+ "pyo3",
+ "rand 0.8.6",
+ "rayon",
+ "serde-pickle",
+ "serde_json",
+ "tokio",
+ "zeromq",
+]
 
 [[package]]
 name = "polypus-logger"

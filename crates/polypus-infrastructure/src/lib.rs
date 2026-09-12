@@ -258,8 +258,8 @@ pub trait QuantumBackend: Send + Sync {
     /// A failure is returned as a [`BackendError`] (never a panic): a Python
     /// exception from the `polypus_python` seam is carried verbatim in
     /// [`BackendError::Seam`] so it re-raises with its original type, and
-    /// Rust-originated failures map to the typed
-    /// [`exceptions`](crate::exceptions) hierarchy at the FFI boundary.
+    /// Rust-originated failures map to the typed `polypus.*` exception hierarchy
+    /// at the FFI boundary (in `polypus::exceptions`, the crate's edge).
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
@@ -269,10 +269,9 @@ pub trait QuantumBackend: Send + Sync {
     /// Run a single circuit `qc` under a per-replica shot distribution,
     /// returning one counts map per entry of `shot_batches` (replica `i` runs
     /// `shot_batches[i]` shots). The caller has already apportioned the shots —
-    /// e.g. [`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)
-    /// splitting a total across `n_qpus`, one extra shot on the first
-    /// `shots % n_qpus` replicas — so the summed counts conserve the total
-    /// exactly (contract C-3).
+    /// e.g. the `polypus` edge's shot-distribution algorithm splitting a total
+    /// across `n_qpus`, one extra shot on the first `shots % n_qpus` replicas — so
+    /// the summed counts conserve the total exactly (contract C-3).
     ///
     /// The method exists so a backend that can *reuse* one circuit evolution
     /// across many shot batches can override it and avoid re-simulating the

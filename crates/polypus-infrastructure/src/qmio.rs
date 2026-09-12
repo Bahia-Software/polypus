@@ -56,10 +56,8 @@
 //!    (header and body), which matches the 2.0-style body the QMIO examples use.
 //!    Verify acceptance against the live QPU (point 6).
 
-use crate::infrastructure::error::BackendError;
-use crate::infrastructure::{
-    record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend,
-};
+use crate::error::BackendError;
+use crate::{record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use serde_json::json;
 use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
@@ -71,7 +69,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
-pub use crate::infrastructure::execution_config::QmioProgramFormat;
+pub use crate::execution_config::QmioProgramFormat;
 
 /// Default endpoint, used only when `ZMQ_SERVER` is unset. Documented fallback,
 /// never silently hard-coded over an explicit configuration.
@@ -92,7 +90,7 @@ enum ProgramPayload {
 /// [`BackendError::Qmio`], which the FFI boundary maps to the typed
 /// `polypus.QmioError` Python exception — never a panic. The enum keeps its own
 /// rich variants (verified against the wire protocol) instead of being
-/// flattened into [`BackendError`]; see [`crate::infrastructure::error`] for the
+/// flattened into [`BackendError`]; see [`crate::error`] for the
 /// crate-wide granularity decision.
 #[derive(Debug)]
 pub enum QmioError {
@@ -1105,7 +1103,7 @@ mod tests {
     /// [`QmioBackend`] path without the actual QPU.
     #[test]
     fn simulated_rep_server_end_to_end() {
-        use crate::infrastructure::BackendConfig;
+        use crate::BackendConfig;
         use std::sync::mpsc;
         use zeromq::RepSocket;
 
@@ -1185,7 +1183,7 @@ mod tests {
                 repetition_period: None,
                 res_format: "binary_count".to_string(),
             },
-            opt_level: crate::infrastructure::OptLevel::default(),
+            opt_level: crate::OptLevel::default(),
             // QMIO does not consume the sampling seed (real QPU / server-side).
             seed: None,
         };
@@ -1210,7 +1208,7 @@ mod tests {
     /// request was not resent.
     #[test]
     fn recv_timeout_after_delivery_is_result_unknown_not_resent() {
-        use crate::infrastructure::{BackendConfig, BackendError};
+        use crate::{BackendConfig, BackendError};
         use std::sync::mpsc;
         use zeromq::RepSocket;
 
@@ -1267,7 +1265,7 @@ mod tests {
                 repetition_period: None,
                 res_format: "binary_count".to_string(),
             },
-            opt_level: crate::infrastructure::OptLevel::default(),
+            opt_level: crate::OptLevel::default(),
             seed: None,
         };
 
@@ -1289,7 +1287,7 @@ mod tests {
     #[test]
     #[ignore = "requires ZMQ_SERVER and live access to the CESGA QMIO QPU"]
     fn real_qpu_smoke() {
-        use crate::infrastructure::BackendConfig;
+        use crate::BackendConfig;
 
         let endpoint = std::env::var("ZMQ_SERVER")
             .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://10.255.3.70:5556");
@@ -1313,7 +1311,7 @@ mod tests {
                 repetition_period: None,
                 res_format: "binary_count".to_string(),
             },
-            opt_level: crate::infrastructure::OptLevel::default(),
+            opt_level: crate::OptLevel::default(),
             // QMIO does not consume the sampling seed (real QPU / server-side).
             seed: None,
         };
@@ -1409,16 +1407,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn schema_errors_map_to_the_qmio_python_exception() {
-        // The whole point of returning `Schema` instead of empty counts: it
-        // reaches Python as a catchable `polypus.QmioError`, never a panic.
-        pyo3::prepare_freethreaded_python();
-        let err = counts_from_json(&json!({})).expect_err("an empty reply is a schema error");
-        let py_err: pyo3::PyErr = BackendError::Qmio(err).into();
-        pyo3::Python::with_gil(|py| {
-            assert!(py_err.is_instance_of::<crate::exceptions::QmioError>(py));
-            assert!(py_err.is_instance_of::<crate::exceptions::BackendError>(py));
-        });
-    }
+    // The mapping of `BackendError::Qmio` to the typed `polypus.QmioError`
+    // Python class is tested at the `polypus` FFI edge
+    // (`exceptions::backend_error_to_pyerr`), which owns that `#[pyclass]`; this
+    // crate tests only that a bad reply becomes a `QmioError::Schema` (above).
 }

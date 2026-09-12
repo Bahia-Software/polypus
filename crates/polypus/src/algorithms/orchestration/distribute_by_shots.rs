@@ -18,14 +18,16 @@ impl AlgorithmTrait for DistributeByShotsRun {
         // up front, before a backend is even built (the planner guards it again as
         // defense in depth). `n_qpus >= 1` and `shots >= 1` come from the boundary.
         if args.qcs.len() != 1 {
-            return Err(BackendError::InvalidCircuitCount {
-                expected: 1,
-                got: args.qcs.len(),
-            }
-            .into());
+            return Err(crate::exceptions::backend_error_to_pyerr(
+                BackendError::InvalidCircuitCount {
+                    expected: 1,
+                    got: args.qcs.len(),
+                },
+            ));
         }
 
-        let backend = Infrastructure::create_backend(&args.config)?;
+        let backend = Infrastructure::create_backend(&args.config)
+            .map_err(crate::exceptions::backend_error_to_pyerr)?;
         // The ShotDistributingPlanner owns the whole distribution: it apportions
         // this circuit's shots across `n_qpus` (base + one extra on the first
         // `remainder`, conserving the total per C-3), runs `run_shots_distributed`,

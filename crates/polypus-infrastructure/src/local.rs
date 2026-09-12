@@ -1,8 +1,6 @@
-use crate::infrastructure::error::BackendError;
-use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::infrastructure::{
-    max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend,
-};
+use crate::error::BackendError;
+use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;

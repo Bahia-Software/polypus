@@ -12,7 +12,8 @@ impl AlgorithmTrait for AlgorithmSingleRun {
     fn run(&self, args: AlgorithmArgs) -> PyResult<pyo3::PyObject> {
         // Backend creation and execution surface any failure as a `PyErr`; the
         // backend's `Drop` still releases resources if we return early.
-        let backend = Infrastructure::create_backend(&args.config)?;
+        let backend = Infrastructure::create_backend(&args.config)
+            .map_err(crate::exceptions::backend_error_to_pyerr)?;
         // The default planner (SequentialPlanner) owns the waves, the concurrency
         // cap, the C-3 result validation and the between-wave `check_signals`
         // (ENGINEERING §3) that used to live inline here.

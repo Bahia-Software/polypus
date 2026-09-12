@@ -84,9 +84,18 @@ mod bindings;
 pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
-pub mod infrastructure;
 mod scheduler;
 pub mod utils;
+
+/// Quantum-execution backends, the `Planner`, circuit/config types and the
+/// backend-layer error (re-export of the `polypus-infrastructure` crate).
+///
+/// Extracted into its own crate so the GIL-touching backend layer no longer sits
+/// inside the FFI edge; the alias keeps every existing `polypus::infrastructure::…`
+/// / `crate::infrastructure::…` path resolving. The one thing that stays at the
+/// edge is turning a [`infrastructure::BackendError`] into a typed `polypus.*`
+/// exception — see `exceptions::backend_error_to_pyerr`.
+pub use polypus_infrastructure as infrastructure;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
 ///
