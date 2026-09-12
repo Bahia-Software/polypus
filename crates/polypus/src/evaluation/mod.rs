@@ -16,60 +16,14 @@ use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::ParameterizedCircuit;
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
-use std::sync::{Arc, Mutex};
 
-/// Thread-safe holder for the first error an oracle hits during `optimize`.
-///
-/// The optimizer traits ([`EvaluationOracle`] and
-/// [`VarianceOracle`](polypus_optimizers::VarianceOracle)) return plain
-/// `f64`/`Vec<f64>` — a pure-crate contract this crate cannot change — so a
-/// Python-side failure mid-optimization cannot be returned through the trait.
-/// Instead the oracle records it here and yields a finite sentinel; the entry
-/// point inspects the slot after `optimize` returns and surfaces the error as a
-/// `PyErr` (contract C-5 keeps oracle outputs finite regardless).
-#[derive(Clone, Default)]
-pub struct OracleErrorSlot(Arc<Mutex<Option<EvaluationError>>>);
-
-impl OracleErrorSlot {
-    /// A fresh, empty slot.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Record `err` as the failure, keeping the *first* one recorded.
-    ///
-    /// `run_id` is the effective [`ExecutionConfig::id`] of the run whose oracle
-    /// failed, threaded in from the call site because this slot holds no run
-    /// metadata of its own. The failure is logged at `error!` here, as it is
-    /// recorded: from this point on the oracle only yields sentinel values, so
-    /// without this record the log would simply go quiet until `optimize()`
-    /// returns and the entry point raises.
-    pub fn record(&self, err: EvaluationError, run_id: &str) {
-        let mut guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // Log only when this call actually stores the error, so the message never
-        // claims to have "recorded" a failure it silently dropped.
-        if guard.is_none() {
-            // Formatting the `Python(PyErr)` variant reacquires the GIL through
-            // `PyErr`'s own `Display`, and this can run with the GIL released
-            // (the optimizers run inside `allow_threads`). Safe either way:
-            // `Python::with_gil` is re-entrant — the same guarantee `cunqa.rs`
-            // relies on to acquire the GIL from within a `Drop`.
-            log::error!("run {run_id}: oracle evaluation failed: {err}");
-            *guard = Some(err);
-        }
-    }
-
-    /// Whether a failure has been recorded (lets callers short-circuit further
-    /// work once evaluation is doomed).
-    pub fn failed(&self) -> bool {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).is_some()
-    }
-
-    /// Take the recorded failure, if any.
-    pub fn take(&self) -> Option<EvaluationError> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
-    }
-}
+/// Re-export the type-erased error slot from the pure `polypus-scheduler` crate,
+/// where it now lives — it is shared with `dispatch_optimizer`, and the scheduler
+/// crate cannot depend on this pyo3-touching one. The oracles below box their
+/// [`EvaluationError`] into it (`slot.record(Box::new(err), id)`); the FFI edge
+/// downcasts it back to re-raise the original exception. Re-exported here so the
+/// existing `crate::evaluation::OracleErrorSlot` path keeps resolving.
+pub use polypus_scheduler::OracleErrorSlot;
 
 /// A parameterised circuit template, in one of the representations Polypus
 /// supports as optimisation targets.
@@ -231,123 +185,4 @@ pub(crate) fn run_and_evaluate(
         return Err(EvaluationError::NonFinite { index, value });
     }
     Ok(values)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // `OracleErrorSlot` is plain `Arc<Mutex<Option<EvaluationError>>>` wrapping:
-    // none of it touches `Py<...>`/`PyErr`, so these tests need no interpreter
-    // (ENGINEERING.md §3). `WrongLength`/`NonFinite` are the two variants that
-    // can be constructed without Python, and their `Display` is distinguishable,
-    // which is what lets the first-error-wins assertions below tell them apart.
-
-    fn wrong_length() -> EvaluationError {
-        EvaluationError::WrongLength {
-            expected: 4,
-            got: 2,
-        }
-    }
-
-    fn non_finite() -> EvaluationError {
-        EvaluationError::NonFinite {
-            index: 7,
-            value: f64::NAN,
-        }
-    }
-
-    /// Run id threaded into `record`. It only names the run in the `error!` line
-    /// the slot emits as it stores the failure (#88); the slot itself keeps no
-    /// run metadata, so it never affects what is stored or returned.
-    const RUN_ID: &str = "oracle-error-slot-test";
-
-    #[test]
-    fn new_slot_is_empty() {
-        let slot = OracleErrorSlot::new();
-        assert!(!slot.failed(), "a fresh slot must not report a failure");
-        assert!(slot.take().is_none(), "a fresh slot must hold no error");
-    }
-
-    #[test]
-    fn default_slot_is_empty() {
-        let slot = OracleErrorSlot::default();
-        assert!(!slot.failed());
-        assert!(slot.take().is_none());
-    }
-
-    #[test]
-    fn record_marks_the_slot_as_failed() {
-        let slot = OracleErrorSlot::new();
-        slot.record(wrong_length(), RUN_ID);
-        assert!(slot.failed(), "record() must make failed() true");
-    }
-
-    #[test]
-    fn record_keeps_the_first_error() {
-        let slot = OracleErrorSlot::new();
-        slot.record(wrong_length(), RUN_ID);
-        slot.record(non_finite(), RUN_ID);
-        let kept = slot.take().expect("an error was recorded");
-        assert!(
-            matches!(kept, EvaluationError::WrongLength { .. }),
-            "the first recorded error must win, got: {kept}"
-        );
-    }
-
-    #[test]
-    fn take_returns_the_error_and_clears_the_slot() {
-        let slot = OracleErrorSlot::new();
-        slot.record(non_finite(), RUN_ID);
-        let taken = slot.take().expect("an error was recorded");
-        assert!(matches!(taken, EvaluationError::NonFinite { .. }));
-        assert!(!slot.failed(), "take() must clear the slot");
-        assert!(slot.take().is_none(), "a second take() must yield None");
-    }
-
-    #[test]
-    fn clone_shares_the_same_slot() {
-        // The QML oracle hands a clone to each worker thread; they must all see
-        // (and write to) the same underlying slot.
-        let slot = OracleErrorSlot::new();
-        let handed_out = slot.clone();
-        handed_out.record(wrong_length(), RUN_ID);
-        assert!(slot.failed(), "a clone must share the original's storage");
-    }
-
-    #[test]
-    fn concurrent_records_keep_exactly_one_error() {
-        // This type exists to be shared across the QML oracle's worker threads
-        // (see `qml_oracle.rs`), so the first-error-wins property must hold
-        // under contention, not just sequentially.
-        let slot = OracleErrorSlot::new();
-        let start = Arc::new(std::sync::Barrier::new(8));
-        let handles: Vec<_> = (0..8)
-            .map(|i| {
-                let slot = slot.clone();
-                let start = Arc::clone(&start);
-                std::thread::spawn(move || {
-                    start.wait();
-                    slot.record(
-                        EvaluationError::NonFinite {
-                            index: i,
-                            value: f64::INFINITY,
-                        },
-                        RUN_ID,
-                    );
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().expect("no worker may panic");
-        }
-
-        assert!(slot.failed(), "at least one writer must have recorded");
-        let first = slot.take().expect("exactly one error survives");
-        assert!(matches!(first, EvaluationError::NonFinite { .. }));
-        assert!(
-            slot.take().is_none(),
-            "only one error is ever stored, however many writers raced"
-        );
-    }
 }

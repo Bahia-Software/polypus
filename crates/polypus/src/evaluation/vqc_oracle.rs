@@ -46,7 +46,9 @@ impl EvaluationOracle for VqcOracle {
         match self.try_evaluate(candidates) {
             Ok(values) => values,
             Err(e) => {
-                self.errors.record(e, &self.config.id);
+                // Type-erase the failure into the (pyo3-free) slot; the FFI edge
+                // downcasts it back to re-raise the original exception.
+                self.errors.record(Box::new(e), &self.config.id);
                 vec![0.0; candidates.len()]
             }
         }

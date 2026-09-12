@@ -791,6 +791,7 @@ dependencies = [
  "polypus-logger",
  "polypus-observable",
  "polypus-optimizers",
+ "polypus-scheduler",
  "polypus-sim",
  "pyo3",
  "rand 0.8.6",
@@ -858,6 +859,16 @@ dependencies = [
  "plotters",
  "rand 0.8.6",
  "serde",
+]
+
+[[package]]
+name = "polypus-scheduler"
+version = "0.6.0"
+dependencies = [
+ "log",
+ "polypus-infrastructure",
+ "polypus-observable",
+ "polypus-optimizers",
 ]
 
 [[package]]

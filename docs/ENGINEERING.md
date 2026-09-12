@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has eight crates:
+with PyO3 Python bindings. The Cargo workspace has nine crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -26,6 +26,7 @@ with PyO3 Python bindings. The Cargo workspace has eight crates:
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
+| `polypus-scheduler` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, `Flow`/`RunCircuitFlow`, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; orchestration, evaluation oracles, and the FFI edge (`#[pyclass]` hierarchy, error→`PyErr` conversion) | **Yes** |
 
@@ -47,6 +48,13 @@ boundary stays out-of-process and explicit; see
   **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
   into a typed `polypus.*` exception is the edge's job
   (`polypus::exceptions::backend_error_to_pyerr`).
+- `polypus-scheduler` is **`pyo3`-free at the source level**: it must not name
+  `pyo3`, `Python`, `PyErr` or the GIL (its `Cargo.toml` has no `pyo3`). It still
+  links libpython *transitively* through `polypus-infrastructure`, so its tests
+  run in the same job as `polypus`, not the pure-Rust group. A real oracle
+  failure reaches it **type-erased** as a `Box<dyn Error + Send>` in the
+  `OracleErrorSlot`; the `polypus` edge downcasts it back to the concrete
+  `EvaluationError` to re-raise (plan §10.1).
 - Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
   `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
 - The optimizers are decoupled from circuits and Python via the

@@ -85,7 +85,8 @@ impl PyVarianceOracle {
         match self.try_call(py, theta, param_index) {
             Ok(value) => value,
             Err(e) => {
-                self.errors.record(e, &self.run_id);
+                // Type-erase into the (pyo3-free) slot; the edge downcasts it back.
+                self.errors.record(Box::new(e), &self.run_id);
                 0.0
             }
         }
