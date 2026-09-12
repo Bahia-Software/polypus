@@ -166,6 +166,10 @@ jobs:
       # polypus-infrastructure), so it is tested here, not in the pure-Rust group.
       - name: Test polypus-scheduler
         run: cargo test --locked -p polypus-scheduler
+      # `polypus-evaluation` touches pyo3 (Qiskit binding, Python callbacks), so
+      # like `polypus` it links libpython and is tested here.
+      - name: Test polypus-evaluation
+        run: cargo test --locked -p polypus-evaluation
       # `polypus` with default features — NOT extension-module (see clippy note).
       - name: Test polypus (default features)
         run: cargo test --locked -p polypus
