@@ -84,7 +84,6 @@ mod bindings;
 pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
-mod scheduler;
 pub mod utils;
 
 /// Quantum-execution backends, the `Planner`, circuit/config types and the
@@ -96,6 +95,13 @@ pub mod utils;
 /// edge is turning a [`infrastructure::BackendError`] into a typed `polypus.*`
 /// exception — see `exceptions::backend_error_to_pyerr`.
 pub use polypus_infrastructure as infrastructure;
+
+/// Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the
+/// `Flow` trait + `RunCircuitFlow`, and `dispatch_optimizer` + the type-erased
+/// `OracleErrorSlot` (re-export of the pyo3-free `polypus-scheduler` crate). A
+/// real oracle failure reaches it as a `Box<dyn Error + Send>`; this edge
+/// downcasts it back to the concrete `EvaluationError` to re-raise.
+pub use polypus_scheduler as scheduler;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
 ///

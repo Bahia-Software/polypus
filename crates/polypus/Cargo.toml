@@ -33,6 +33,7 @@ polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
 polypus-infrastructure = { workspace = true }
+polypus-scheduler = { workspace = true }
 polypus-logger = { workspace = true }
 # Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
 # are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).

@@ -1,0 +1,17 @@
+[package]
+name = "polypus-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# The scheduler orchestrates a flow over infra's backends/planners and the
+# pure-Rust optimizers. It is deliberately **pyo3-free**: a real Python failure
+# reaches it type-erased as `Box<dyn Error + Send>` (the `polypus` edge downcasts
+# and re-raises it verbatim), so this crate never names `pyo3` or `PyErr`.
+polypus-infrastructure = { workspace = true }
+polypus-optimizers = { workspace = true }
+polypus-observable = { workspace = true }
+log = { workspace = true }

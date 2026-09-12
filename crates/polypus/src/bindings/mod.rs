@@ -245,7 +245,19 @@ fn finish_optimization(
 ) -> PyResult<PyObject> {
     let outcome = match result {
         Ok(outcome) => outcome,
-        Err(OracleError::Evaluation(eval_err)) => return Err(eval_err.into()),
+        Err(OracleError::Evaluation(boxed)) => {
+            // The oracle boxed an `EvaluationError` into the type-erased slot
+            // (the scheduler crate is pyo3-free); recover it to re-raise with its
+            // original Python class preserved. The slot only ever holds an
+            // `EvaluationError`, so the downcast fails only in an impossible case,
+            // where we still surface a typed evaluation error rather than panic.
+            return Err(
+                match boxed.downcast::<crate::evaluation::EvaluationError>() {
+                    Ok(eval_err) => (*eval_err).into(),
+                    Err(other) => crate::exceptions::EvaluationError::new_err(other.to_string()),
+                },
+            );
+        }
         Err(OracleError::Config(config_err)) => {
             log::error!("run {id}: optimizer rejected the configuration: {config_err}");
             return Err(pyo3::exceptions::PyValueError::new_err(
