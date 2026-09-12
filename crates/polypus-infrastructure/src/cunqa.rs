@@ -1,8 +1,6 @@
-use crate::infrastructure::error::BackendError;
-use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::infrastructure::{
-    record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend,
-};
+use crate::error::BackendError;
+use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::{record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -247,7 +245,7 @@ fn drop_qpus(family: &Py<PyAny>) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::cleanup_failure_count;
+    use crate::cleanup_failure_count;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 

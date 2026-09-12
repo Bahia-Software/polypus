@@ -15,7 +15,7 @@ use pyo3::PyErr;
 /// `check_signals`) re-raises verbatim.
 pub(crate) fn infrastructure_error_to_pyerr(err: InfrastructureError) -> PyErr {
     match err {
-        InfrastructureError::Backend(e) => e.into(),
+        InfrastructureError::Backend(e) => crate::exceptions::backend_error_to_pyerr(e),
         InfrastructureError::Observable(e) => {
             crate::exceptions::EvaluationError::new_err(e.to_string())
         }

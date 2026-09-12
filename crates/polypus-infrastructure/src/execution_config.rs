@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::infrastructure::transpiler::OptLevel;
+use crate::transpiler::OptLevel;
 
 /// Provider-agnostic execution parameters, fully decoupled from circuit data.
 ///
@@ -8,7 +8,7 @@ use crate::infrastructure::transpiler::OptLevel;
 /// (Aer simulation method, CUNQA node count, future IBM token, …) belongs in
 /// [`BackendConfig`], so adding a new provider never widens this struct.
 ///
-/// Passed to [`crate::infrastructure::QuantumBackend::run_circuits`] alongside
+/// Passed to [`crate::QuantumBackend::run_circuits`] alongside
 /// the circuits, so the backend knows *how* and *where* to run them without
 /// coupling to algorithm logic.
 #[derive(Debug, Clone)]
@@ -37,18 +37,18 @@ pub struct ExecutionConfig {
     pub backend_config: BackendConfig,
     /// Optimization effort for the backend's transpiler.
     ///
-    /// Travels to [`crate::infrastructure::Transpiler::transpile`] as a
-    /// [`TranspileOptions`](crate::infrastructure::TranspileOptions) *argument*
+    /// Travels to [`crate::Transpiler::transpile`] as a
+    /// [`TranspileOptions`](crate::TranspileOptions) *argument*
     /// (the *tuning*), while the transpilation *strategy* is injected into the
     /// backend by composition. Defaults to [`OptLevel::Light`]; with the default
-    /// [`IdentityTranspiler`](crate::infrastructure::IdentityTranspiler) it has
+    /// [`IdentityTranspiler`](crate::IdentityTranspiler) it has
     /// no effect on results.
     pub opt_level: OptLevel,
     /// Explicit RNG seed for shot sampling.
     ///
     /// Consumed by every backend that samples shots itself: the native
     /// statevector backend
-    /// ([`NativeStatevectorBackend`](crate::infrastructure::NativeStatevectorBackend))
+    /// ([`NativeStatevectorBackend`](crate::NativeStatevectorBackend))
     /// seeds its per-circuit sampling stream directly, while [`Local`](BackendConfig::Local)
     /// and [`Cunqa`](BackendConfig::Cunqa) forward it to the underlying Aer
     /// (`seed_simulator`) and CUNQA `run(..., seed=...)` calls respectively.
@@ -66,7 +66,7 @@ pub struct ExecutionConfig {
 /// Used as the default when no explicit seed is supplied, so an omitted seed
 /// produces genuine (independent) shot noise across runs rather than repeating a
 /// value derived from the run [`id`](ExecutionConfig::id).
-pub(crate) fn random_seed() -> u64 {
+pub fn random_seed() -> u64 {
     use rand::RngCore;
     rand::rngs::OsRng.next_u64()
 }
@@ -75,7 +75,7 @@ pub(crate) fn random_seed() -> u64 {
 ///
 /// Each variant declares exactly the fields its backend needs. Supporting a new
 /// provider (IBM, IQM, an HPC scheduler, …) means adding one variant here and
-/// one [`crate::infrastructure::QuantumBackend`] implementation — existing
+/// one [`crate::QuantumBackend`] implementation — existing
 /// variants, backends, and every algorithm stay untouched.
 #[derive(Debug)]
 pub enum BackendConfig {
@@ -91,7 +91,7 @@ pub enum BackendConfig {
     /// Local pure-Rust statevector simulator (`polypus-sim`).
     ///
     /// Selected with `backend="polypus"`. Runs entirely in Rust (no GIL, no
-    /// Qiskit) on a [`crate::infrastructure::NativeStatevectorBackend`]. It is
+    /// Qiskit) on a [`crate::NativeStatevectorBackend`]. It is
     /// noiseless by construction, so it carries no provider-specific fields; the
     /// shot count and run id travel in [`ExecutionConfig`].
     LocalNative,
@@ -130,7 +130,7 @@ pub enum BackendConfig {
 /// Manual [`Clone`]: the only non-`Clone` field is `BackendConfig::Local`'s
 /// optional Qiskit `NoiseModel`, whose reference count must be bumped under the
 /// GIL via `clone_ref` (the same pattern
-/// [`Infrastructure::create_backend`](crate::infrastructure::Infrastructure::create_backend)
+/// [`Infrastructure::create_backend`](crate::Infrastructure::create_backend)
 /// uses). Cloning a config is what lets an orchestration algorithm derive a
 /// per-batch config that differs only in `shots` without mutating the caller's.
 impl Clone for BackendConfig {

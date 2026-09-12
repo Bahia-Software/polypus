@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has seven crates:
+with PyO3 Python bindings. The Cargo workspace has eight crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -25,8 +25,9 @@ with PyO3 Python bindings. The Cargo workspace has seven crates:
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
-| `polypus` | The library + Python extension module; orchestration and infrastructures (`local`, `cunqa`, `qmio`, `native`) | **Yes** |
+| `polypus` | The library + Python extension module; orchestration, evaluation oracles, and the FFI edge (`#[pyclass]` hierarchy, error→`PyErr` conversion) | **Yes** |
 
 Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in
 `packages/polypus_python/pyproject.toml`), **CUNQA** (distributed QPUs over
@@ -41,8 +42,13 @@ boundary stays out-of-process and explicit; see
   and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or
   Python**. Do not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python
   types into them.
-- Only the `polypus` crate may depend on `pyo3` and contain `#[pyclass]` /
-  `#[pymethods]` / `#[pyfunction]`.
+- `polypus-infrastructure` may depend on `pyo3` for the GIL and for carrying a
+  `PyErr` verbatim (its Aer/CUNQA/QMIO seams call into Python), but it defines
+  **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
+  into a typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::backend_error_to_pyerr`).
+- Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
+  `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
 - The optimizers are decoupled from circuits and Python via the
   `EvaluationOracle` / `VarianceOracle` traits (contract C-5). A new optimizer
   is implemented against those oracles; it must **not** call Python or know

@@ -330,7 +330,9 @@ fn build_backend_config(
     nodes: u32,
     cores_per_qpu: u32,
 ) -> PyResult<BackendConfig> {
-    match Infrastructure::from_str(infrastructure)? {
+    match Infrastructure::from_str(infrastructure)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?
+    {
         Infrastructure::Local => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
                 backend: "AerSimulator".to_string(),
@@ -864,7 +866,8 @@ pub fn train<'py>(
         shots,
         effective_seed,
     );
-    let backend = Infrastructure::create_backend(&config)?;
+    let backend = Infrastructure::create_backend(&config)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
     // Shared error slot: the oracles record the first evaluation failure here
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
@@ -1081,7 +1084,8 @@ pub fn qml_train<'py>(
         shots,
         effective_seed,
     );
-    let backend = Infrastructure::create_backend(&config)?;
+    let backend = Infrastructure::create_backend(&config)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
     // Shared error slot (see `train`): oracles record the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();

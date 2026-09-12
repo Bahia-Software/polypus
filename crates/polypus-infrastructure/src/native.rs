@@ -1,18 +1,16 @@
 //! Native statevector backend: runs circuits in pure Rust via `polypus-sim`,
 //! without ever touching the Python interpreter or Qiskit.
 //!
-//! This is the local counterpart to [`LocalBackend`](crate::infrastructure::LocalBackend)
+//! This is the local counterpart to [`LocalBackend`](crate::LocalBackend)
 //! (Qiskit Aer). It is selected with `backend="polypus"` and consumes a
 //! [`BoundCircuit::Native`] directly — no OpenQASM round-trip, no GIL — which is
 //! what makes the native circuit path pay off end-to-end. An OpenQASM 2.0
 //! string is also accepted (parsed in Rust); a Qiskit `QuantumCircuit` is not,
 //! since reading its gates would require the interpreter.
 
-use crate::infrastructure::error::BackendError;
-use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::infrastructure::{
-    max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend,
-};
+use crate::error::BackendError;
+use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use rayon::prelude::*;
@@ -342,7 +340,7 @@ impl QuantumBackend for NativeStatevectorBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::OptLevel;
+    use crate::OptLevel;
     use polypus_circuit::{GateInstruction, ParameterizedCircuit};
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
@@ -362,7 +360,7 @@ mod tests {
             shots: 500,
             n_qpus: 1,
             infrastructure: "local".to_string(),
-            backend_config: crate::infrastructure::BackendConfig::LocalNative,
+            backend_config: crate::BackendConfig::LocalNative,
             opt_level,
             // No explicit seed: exercises the OS-entropy fallback path in
             // `Infrastructure::create_backend`. Tests that build the backend
@@ -744,7 +742,7 @@ mod tests {
 
     #[test]
     fn omitted_seed_differs_across_calls_for_same_id() {
-        use crate::infrastructure::Infrastructure;
+        use crate::Infrastructure;
         let cfg = config_with(OptLevel::default()); // id "abc", seed: None
         let batch = vec![BoundCircuit::Native(uniform3())];
         let a = Infrastructure::create_backend(&cfg)

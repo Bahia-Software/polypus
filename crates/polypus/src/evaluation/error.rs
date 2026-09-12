@@ -132,7 +132,9 @@ impl From<InfrastructureError> for EvaluationError {
 impl From<EvaluationError> for PyErr {
     fn from(err: EvaluationError) -> PyErr {
         match err {
-            EvaluationError::Backend(backend_err) => backend_err.into(),
+            EvaluationError::Backend(backend_err) => {
+                crate::exceptions::backend_error_to_pyerr(backend_err)
+            }
             EvaluationError::Binding(circuit_err) => {
                 PyEvaluationError::new_err(circuit_err.to_string())
             }
