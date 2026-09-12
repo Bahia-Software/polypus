@@ -1,0 +1,25 @@
+[package]
+name = "polypus-evaluation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# How a candidate is evaluated: the oracles bind circuits (Qiskit, under the GIL),
+# run them through a planner, and reduce counts to a fitness. This crate touches
+# pyo3 (Py<PyAny> callbacks, GIL sections) but — like the rest of the workspace —
+# defines no `#[pyclass]` and no `From<_> for PyErr`: turning an `EvaluationError`
+# into a typed `polypus.*` exception is the `polypus` edge's job.
+polypus-infrastructure = { workspace = true }
+polypus-scheduler = { workspace = true }
+polypus-optimizers = { workspace = true }
+polypus-observable = { workspace = true }
+polypus-circuit = { workspace = true }
+pyo3 = { version = "0.25" }
+log = { workspace = true }
+# Count-weighted aggregation in the Python-callback observable fallback.
+rayon = "1"
+# Bounded-concurrency runtime for the QML oracle's per-candidate evaluation.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }

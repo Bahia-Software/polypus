@@ -787,6 +787,7 @@ dependencies = [
  "log",
  "numpy",
  "polypus-circuit",
+ "polypus-evaluation",
  "polypus-infrastructure",
  "polypus-logger",
  "polypus-observable",
@@ -794,15 +795,27 @@ dependencies = [
  "polypus-scheduler",
  "polypus-sim",
  "pyo3",
- "rand 0.8.6",
- "rayon",
- "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "polypus-circuit"
 version = "0.6.0"
+
+[[package]]
+name = "polypus-evaluation"
+version = "0.6.0"
+dependencies = [
+ "log",
+ "polypus-circuit",
+ "polypus-infrastructure",
+ "polypus-observable",
+ "polypus-optimizers",
+ "polypus-scheduler",
+ "pyo3",
+ "rayon",
+ "tokio",
+]
 
 [[package]]
 name = "polypus-infrastructure"

@@ -104,6 +104,49 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
     }
 }
 
+/// Map an evaluation-layer [`EvaluationError`](crate::evaluation::EvaluationError)
+/// to the typed `polypus.*` Python exception it should surface as.
+///
+/// The FFI edge's counterpart to [`backend_error_to_pyerr`]:
+/// `polypus-evaluation` implements no `From<_> for PyErr`, so this is where an
+/// oracle failure becomes an exception. `Python`/callback-boxed variants re-raise
+/// their original Python exception verbatim; a wrapped `Backend` failure keeps its
+/// own class (delegates to [`backend_error_to_pyerr`]); everything else surfaces
+/// as `polypus.EvaluationError`.
+pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError) -> PyErr {
+    use crate::evaluation::EvaluationError as EvalErr;
+    match err {
+        EvalErr::Backend(backend_err) => backend_error_to_pyerr(backend_err),
+        EvalErr::Binding(circuit_err) => EvaluationError::new_err(circuit_err.to_string()),
+        EvalErr::Observable(obs_err) => match obs_err {
+            // A callback observable boxes its `PyErr` here; recover it so the
+            // original Python exception type re-raises verbatim across the FFI.
+            polypus_observable::ObservableError::External(boxed) => {
+                match boxed.downcast::<PyErr>() {
+                    Ok(py_err) => *py_err,
+                    Err(other) => EvaluationError::new_err(other.to_string()),
+                }
+            }
+            // Native evaluation failures (bad bitstring, invalid construction) map
+            // to the typed evaluation exception.
+            other => EvaluationError::new_err(other.to_string()),
+        },
+        // Preserve the original Python exception type raised by the callback.
+        EvalErr::Python(py_err) => py_err,
+        // Rust-side failures: surface as the typed polypus.EvaluationError, not
+        // PyO3's generic RuntimeError / the TypeError extract() would emit.
+        EvalErr::Runtime(m) => EvaluationError::new_err(m),
+        EvalErr::Conversion(m) => EvaluationError::new_err(m),
+        wrong_length @ EvalErr::WrongLength { .. } => {
+            EvaluationError::new_err(wrong_length.to_string())
+        }
+        non_finite @ EvalErr::NonFinite { .. } => EvaluationError::new_err(non_finite.to_string()),
+        invalid_variance @ EvalErr::InvalidVariance { .. } => {
+            EvaluationError::new_err(invalid_variance.to_string())
+        }
+    }
+}
+
 /// Register the exception hierarchy on the extension module so Python can both
 /// see (`polypus.BackendError`) and catch these classes.
 pub fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
@@ -196,6 +239,151 @@ mod tests {
         Python::with_gil(|py| {
             assert!(cunqa.is_instance_of::<BackendError>(py));
             assert!(native.is_instance_of::<BackendError>(py));
+        });
+    }
+}
+
+#[cfg(test)]
+mod evaluation_mapping_tests {
+    // Relocated from polypus-evaluation's error.rs when EvaluationError moved to
+    // its own crate: the FFI mapping now lives here (`evaluation_error_to_pyerr`).
+    // `prepare_freethreaded_python()` + `is_instance_of` need a bare CPython
+    // interpreter and no installed package (ENGINEERING §3).
+    use super::*;
+    use crate::evaluation::EvaluationError as EvalErr;
+    use polypus_circuit::CircuitError;
+    use polypus_infrastructure::BackendError;
+    use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError};
+    use pyo3::prelude::*;
+    use pyo3::types::PyAnyMethods;
+
+    #[test]
+    fn runtime_variant_maps_to_typed_evaluation_error() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let err = evaluation_error_to_pyerr(EvalErr::Runtime("worker panicked".to_string()));
+            assert!(
+                err.value(py).is_instance_of::<EvaluationError>(),
+                "Runtime must surface as polypus.EvaluationError"
+            );
+            assert!(
+                !err.value(py).is_instance_of::<PyRuntimeError>(),
+                "Runtime must not surface as the generic RuntimeError"
+            );
+            assert!(err.to_string().contains("worker panicked"));
+        });
+    }
+
+    #[test]
+    fn conversion_variant_maps_to_typed_evaluation_error() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let err = evaluation_error_to_pyerr(EvalErr::Conversion("not list[float]".to_string()));
+            assert!(err.value(py).is_instance_of::<EvaluationError>());
+            assert!(
+                !err.value(py).is_instance_of::<PyTypeError>(),
+                "Conversion must not surface as the generic TypeError"
+            );
+            assert!(err.to_string().contains("not list[float]"));
+        });
+    }
+
+    #[test]
+    fn counts_conversion_failure_maps_to_typed_evaluation_error() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let msg = "failed to convert the backend results into a Python list[dict]: OOM";
+            let err = evaluation_error_to_pyerr(EvalErr::Conversion(msg.to_string()));
+            assert!(err.value(py).is_instance_of::<EvaluationError>());
+            assert!(
+                !err.value(py).is_instance_of::<PyMemoryError>(),
+                "a counts conversion failure must not surface as a raised MemoryError"
+            );
+            assert!(err
+                .to_string()
+                .contains("backend results into a Python list[dict]"));
+        });
+    }
+
+    /// Assert `err` crosses the FFI as `polypus.EvaluationError`, stays catchable
+    /// as `PolypusError`, and keeps its message.
+    fn assert_maps_to_evaluation_error(err: EvalErr, expected_message: &str) {
+        pyo3::prepare_freethreaded_python();
+        let py_err = evaluation_error_to_pyerr(err);
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<EvaluationError>(py),
+                "wrong exception class for: {py_err}"
+            );
+            assert!(
+                py_err.is_instance_of::<PolypusError>(py),
+                "EvaluationError must stay catchable as PolypusError: {py_err}"
+            );
+            assert!(
+                py_err.to_string().contains(expected_message),
+                "message lost in translation: {py_err}"
+            );
+        });
+    }
+
+    #[test]
+    fn binding_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::Binding(CircuitError::WrongNumberOfParams {
+                expected: 3,
+                got: 1,
+            }),
+            "circuit declares 3 free parameter(s) but 1 value(s) were provided",
+        );
+    }
+
+    #[test]
+    fn wrong_length_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::WrongLength {
+                expected: 4,
+                got: 2,
+            },
+            "contract C-5",
+        );
+    }
+
+    #[test]
+    fn non_finite_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::NonFinite {
+                index: 3,
+                value: f64::NAN,
+            },
+            "contract C-5",
+        );
+    }
+
+    #[test]
+    fn invalid_variance_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::InvalidVariance {
+                param_index: 1,
+                value: -1.0,
+            },
+            "finite, non-negative",
+        );
+    }
+
+    #[test]
+    fn backend_variant_delegates_to_the_backend_mapping() {
+        // `EvaluationError::Backend` must not retype the wrapped failure: a CUNQA
+        // error surfacing through an oracle is still a `polypus.CunqaError`.
+        pyo3::prepare_freethreaded_python();
+        let py_err = evaluation_error_to_pyerr(EvalErr::Backend(BackendError::Cunqa(
+            "qraise failed".to_string(),
+        )));
+        Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<CunqaError>(py));
+            assert!(
+                !py_err.is_instance_of::<EvaluationError>(py),
+                "a wrapped backend failure must keep its own class"
+            );
         });
     }
 }
