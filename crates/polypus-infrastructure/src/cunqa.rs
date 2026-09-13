@@ -92,12 +92,6 @@ impl QuantumBackend for CunqaBackend {
         })
     }
 
-    fn max_batch_size(&self, _total: usize) -> usize {
-        // CUNQA dispatches one circuit per QPU, so a single call can carry at
-        // most `n_qpus` circuits.
-        self.n_qpus as usize
-    }
-
     fn capabilities(&self) -> super::BackendCapabilities {
         // One circuit per QPU per call, so a wave is at most `n_qpus` circuits.
         super::BackendCapabilities {

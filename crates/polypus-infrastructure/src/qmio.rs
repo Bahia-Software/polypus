@@ -51,7 +51,7 @@
 //!    `bytes` (needed for the bitcode path); switch to `.proto_v2()` only for a
 //!    Python-2 server.
 //! 5. **`n_qpus > 1` mapping**: there is a single endpoint, so QMIO is treated as
-//!    one QPU ([`max_batch_size`](QmioBackend::max_batch_size) returns `1`).
+//!    one QPU (`capabilities().max_concurrency` is `1`).
 //! 6. **OpenQASM header**: Polypus exports and submits an `OPENQASM 2.0` program
 //!    (header and body), which matches the 2.0-style body the QMIO examples use.
 //!    Verify acceptance against the live QPU (point 6).
@@ -508,11 +508,6 @@ impl QuantumBackend for QmioBackend {
             log::error!("QMIO backend error talking to {}: {e}", self.endpoint);
             BackendError::Qmio(e)
         })
-    }
-
-    fn max_batch_size(&self, _total: usize) -> usize {
-        // A single QPU behind one REQ endpoint: at most one circuit per call.
-        1
     }
 
     fn capabilities(&self) -> super::BackendCapabilities {

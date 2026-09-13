@@ -200,10 +200,6 @@ mod tests {
                 .collect())
         }
 
-        fn max_batch_size(&self, _total: usize) -> usize {
-            self.batch_size
-        }
-
         fn capabilities(&self) -> polypus_infrastructure::BackendCapabilities {
             // The Planner waves at this size, reproducing the old chunking that
             // these tests assert on.

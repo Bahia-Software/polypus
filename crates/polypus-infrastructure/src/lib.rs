@@ -311,18 +311,6 @@ pub trait QuantumBackend: Send + Sync {
         Ok(out)
     }
 
-    /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
-    /// call, given the `total` circuits to evaluate.
-    ///
-    /// Local simulation can take the whole batch at once: Aer's C++ engine runs
-    /// the experiments in parallel across cores and releases the GIL, which is
-    /// the only real parallelism available locally. Distributed backends such as
-    /// CUNQA are bounded by the number of physical QPUs and therefore cap the
-    /// batch at `n_qpus` (one circuit per QPU per call).
-    fn max_batch_size(&self, total: usize) -> usize {
-        total
-    }
-
     /// Release any held resources (SLURM jobs, cloud sessions, QPU reservations, …).
     fn close(&self) {}
 

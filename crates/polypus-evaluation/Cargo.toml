@@ -21,5 +21,3 @@ pyo3 = { version = "0.25" }
 log = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = "1"
-# Bounded-concurrency runtime for the QML oracle's per-candidate evaluation.
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }

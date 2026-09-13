@@ -1102,11 +1102,14 @@ pub fn qml_train<'py>(
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
     let observable = extract_cost_observable(&expectation_function)?;
+    let planner = backend.default_planner();
     let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
         training_circuits: qcs,
         config: Arc::clone(&config),
         backend,
+        planner,
         observable,
+        cancel: crate::infrastructure::CancelToken::default(),
         errors: errors.clone(),
     });
 
