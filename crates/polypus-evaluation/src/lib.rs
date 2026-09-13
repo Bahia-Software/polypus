@@ -14,7 +14,6 @@
 pub mod error;
 pub mod py_callback_observable;
 pub mod qml_oracle;
-mod runtime;
 pub mod variance_oracle;
 pub mod vqc_oracle;
 
@@ -29,7 +28,7 @@ pub use vqc_oracle::VqcOracle;
 pub use polypus_observable::CostObservable;
 
 use polypus_circuit::ParameterizedCircuit;
-use polypus_infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use polypus_infrastructure::BoundCircuit;
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 
@@ -137,68 +136,3 @@ pub(crate) fn assign_parameters_qiskit(
 /// To add a new evaluation strategy (e.g. noisy readout mitigation, hardware
 /// native gates, …) implement this trait without touching any algorithm.
 pub use polypus_optimizers::EvaluationOracle;
-
-/// Execute a batch of bound circuits through `backend` and reduce the resulting
-/// counts to expectation values via `observable`.
-///
-/// This is the **single place** in the codebase that turns measurement counts
-/// into fitness values, shared by [`VqcOracle`] and [`QmlOracle`]. The
-/// expectation is computed natively (rayon, no GIL) for the declarative
-/// observables, or via a single deduplicated GIL section for the Python-callback
-/// fallback — replacing the former per-bitstring `polypus_python.expectation_values`
-/// round-trip (which also required serialising the counts into a `list[dict]`).
-///
-/// Returns an [`EvaluationError`] on any failure: a backend error is wrapped; a
-/// native-evaluation error (bad bitstring width/char, invalid construction) maps
-/// to a typed exception via [`EvaluationError::Observable`]; and a Python
-/// callback error is carried verbatim (the callback observable boxes its `PyErr`
-/// in [`ObservableError::External`], recovered on the way out). The resulting
-/// batch is finally checked against contract C-5 — exactly one finite `f64` per
-/// submitted circuit — surfacing [`EvaluationError::WrongLength`] or
-/// [`EvaluationError::NonFinite`] instead of letting a short or non-finite
-/// result poison the pure-Rust optimizer. Never a panic.
-pub(crate) fn run_and_evaluate(
-    backend: &dyn QuantumBackend,
-    qcs: &[BoundCircuit],
-    config: &ExecutionConfig,
-    observable: &dyn CostObservable,
-) -> Result<Vec<f64>, EvaluationError> {
-    let counts = backend.run_circuits(qcs, config)?;
-    // Central result validation (contract C-3 + empty-map guard): one map per
-    // circuit, each non-empty and conserving the requested shots. An empty map
-    // would otherwise reduce to a silent 0.0 fitness with no error at all.
-    polypus_infrastructure::validate_run_results(&counts, qcs.len(), config.shots)
-        .map_err(EvaluationError::Backend)?;
-    // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
-    // per-batch boundary. The optimizer entry points release the GIL around
-    // `optimize()`, which lets other Python threads run but does NOT by itself
-    // process signals: CPython only acts on a pending signal while the main
-    // thread runs Python bytecode or when `PyErr_CheckSignals` is called
-    // explicitly. This is that explicit call, so a long native-backend run stays
-    // interruptible (see docs/ENGINEERING.md §3). It is the *only* GIL touch on
-    // the native path; the aggregation below runs GIL-free (the callback
-    // observable re-acquires the GIL internally for one deduplicated section).
-    Python::with_gil(|py| py.check_signals()).map_err(EvaluationError::Python)?;
-    let values = observable
-        .expectation_batch(&counts)
-        .map_err(EvaluationError::from)?;
-
-    // Contract C-5: the oracle must return exactly one finite f64 per submitted
-    // circuit. This is the single choke point that reduces counts to fitness, so
-    // validating here protects every oracle: a short batch would otherwise index
-    // out of bounds inside the pure-Rust optimizer (an uncatchable
-    // `PanicException` across the FFI), and a NaN/inf would silently poison the
-    // optimizer and yield a bogus result with no error at all. The native
-    // observables guarantee this structurally; the Python-callback fallback does
-    // not (a user cost function may return a non-finite value).
-    if values.len() != qcs.len() {
-        return Err(EvaluationError::WrongLength {
-            expected: qcs.len(),
-            got: values.len(),
-        });
-    }
-    if let Some((index, &value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-        return Err(EvaluationError::NonFinite { index, value });
-    }
-    Ok(values)
-}

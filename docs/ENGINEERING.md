@@ -86,9 +86,9 @@ boundary stays out-of-process and explicit; see
   deaf to Ctrl+C until it returns. So a GIL-free loop that must stay
   interruptible has to call `py.check_signals()` at a safe boundary: the
   optimizer entry points (`train` / `qml.train`) release the GIL around the
-  whole `optimize()` call **and** call `py.check_signals()` at each per-batch
-  Python touchpoint (`run_and_evaluate`, plus once on the main thread after the
-  QML workers join, since `PyErr_CheckSignals` is a no-op off the main thread).
+  whole `optimize()` call, and the `Planner` calls `py.check_signals()` between
+  execution waves (inside `execute`) — the one place that boundary now lives, so
+  both the VQC and QML oracles stay interruptible without their own signal loop.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the

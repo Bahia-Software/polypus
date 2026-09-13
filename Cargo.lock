@@ -814,7 +814,6 @@ dependencies = [
  "polypus-scheduler",
  "pyo3",
  "rayon",
- "tokio",
 ]
 
 [[package]]
