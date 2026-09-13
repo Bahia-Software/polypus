@@ -1,19 +1,35 @@
+//! # polypus-evaluation
+//!
+//! **How a candidate is evaluated** — the oracles that turn a parameter vector
+//! into a scalar fitness. Holds [`VqcOracle`], [`QmlOracle`],
+//! [`PyVarianceOracle`], the Python-callback observable [`PyCallbackObservable`],
+//! the [`CircuitSource`] binding boundary and the evaluation error type.
+//!
+//! This crate touches `pyo3` (Qiskit binding under the GIL, Python callbacks) but
+//! — like the rest of the workspace below the edge — defines no `#[pyclass]` and
+//! no `From<_> for PyErr`: turning an [`EvaluationError`] into a typed `polypus.*`
+//! exception is the `polypus` edge's job
+//! (`polypus::exceptions::evaluation_error_to_pyerr`).
+
 pub mod error;
 pub mod py_callback_observable;
 pub mod qml_oracle;
+mod runtime;
+pub mod variance_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::QmlOracle;
+pub use variance_oracle::PyVarianceOracle;
 pub use vqc_oracle::VqcOracle;
 
-/// Re-export the native cost-observable seam so `crate::evaluation::CostObservable`
+/// Re-export the native cost-observable seam so `crate::CostObservable`
 /// resolves alongside the oracles that consume it.
 pub use polypus_observable::CostObservable;
 
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::ParameterizedCircuit;
+use polypus_infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 
@@ -22,7 +38,7 @@ use pyo3::types::IntoPyDict;
 /// crate cannot depend on this pyo3-touching one. The oracles below box their
 /// [`EvaluationError`] into it (`slot.record(Box::new(err), id)`); the FFI edge
 /// downcasts it back to re-raise the original exception. Re-exported here so the
-/// existing `crate::evaluation::OracleErrorSlot` path keeps resolving.
+/// existing `crate::OracleErrorSlot` path keeps resolving.
 pub use polypus_scheduler::OracleErrorSlot;
 
 /// A parameterised circuit template, in one of the representations Polypus
@@ -108,7 +124,7 @@ pub(crate) fn assign_parameters_qiskit(
 ///
 /// Re-exported from the pure-Rust [`polypus_optimizers`] crate, where the trait
 /// now lives (it is the optimizers' input contract). Re-exporting here keeps the
-/// `crate::evaluation::EvaluationOracle` path — used by [`VqcOracle`] and
+/// `crate::EvaluationOracle` path — used by [`VqcOracle`] and
 /// [`QmlOracle`] — resolving unchanged.
 ///
 /// An oracle encapsulates everything needed to translate a parameter vector
@@ -151,7 +167,7 @@ pub(crate) fn run_and_evaluate(
     // Central result validation (contract C-3 + empty-map guard): one map per
     // circuit, each non-empty and conserving the requested shots. An empty map
     // would otherwise reduce to a silent 0.0 fitness with no error at all.
-    crate::infrastructure::validate_run_results(&counts, qcs.len(), config.shots)
+    polypus_infrastructure::validate_run_results(&counts, qcs.len(), config.shots)
         .map_err(EvaluationError::Backend)?;
     // Turn a pending SIGINT (Ctrl+C) into a `KeyboardInterrupt` at this safe
     // per-batch boundary. The optimizer entry points release the GIL around

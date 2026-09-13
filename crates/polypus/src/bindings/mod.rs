@@ -16,12 +16,12 @@ use de::DE;
 use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo};
 use pso::PSO;
-use qng::{PyVarianceOracle, QNG};
+use qng::QNG;
 
 use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
 use crate::evaluation::{
     CircuitSource, CostObservable, EvaluationOracle, OracleErrorSlot, PyCallbackObservable,
-    QmlOracle, VqcOracle,
+    PyVarianceOracle, QmlOracle, VqcOracle,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
@@ -253,7 +253,7 @@ fn finish_optimization(
             // where we still surface a typed evaluation error rather than panic.
             return Err(
                 match boxed.downcast::<crate::evaluation::EvaluationError>() {
-                    Ok(eval_err) => (*eval_err).into(),
+                    Ok(eval_err) => crate::exceptions::evaluation_error_to_pyerr(*eval_err),
                     Err(other) => crate::exceptions::EvaluationError::new_err(other.to_string()),
                 },
             );

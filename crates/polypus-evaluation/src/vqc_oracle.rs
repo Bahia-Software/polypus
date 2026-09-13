@@ -1,7 +1,5 @@
-use crate::evaluation::{
-    CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot,
-};
-use crate::infrastructure::{
+use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot};
+use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
 };
 use std::sync::Arc;
@@ -110,8 +108,8 @@ impl VqcOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::{BackendConfig, BackendError, OptLevel};
     use polypus_circuit::{GateParam, ParameterizedCircuit};
+    use polypus_infrastructure::{BackendConfig, BackendError, OptLevel};
     use polypus_observable::ObservableError;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -206,10 +204,10 @@ mod tests {
             self.batch_size
         }
 
-        fn capabilities(&self) -> crate::infrastructure::BackendCapabilities {
+        fn capabilities(&self) -> polypus_infrastructure::BackendCapabilities {
             // The Planner waves at this size, reproducing the old chunking that
             // these tests assert on.
-            crate::infrastructure::BackendCapabilities {
+            polypus_infrastructure::BackendCapabilities {
                 max_concurrency: self.batch_size,
                 supports_shot_distribution: true,
             }
@@ -262,9 +260,9 @@ mod tests {
             circuit: template(),
             config: config(),
             backend,
-            planner: Arc::new(crate::infrastructure::SequentialPlanner),
+            planner: Arc::new(polypus_infrastructure::SequentialPlanner),
             observable: Arc::new(KeyOneObservable),
-            cancel: crate::infrastructure::CancelToken::default(),
+            cancel: polypus_infrastructure::CancelToken::default(),
             errors: OracleErrorSlot::new(),
         }
     }

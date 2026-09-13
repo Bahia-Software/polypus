@@ -1,8 +1,8 @@
-use crate::evaluation::{
+use crate::{
     assign_parameters_qiskit, run_and_evaluate, CostObservable, EvaluationError, EvaluationOracle,
     OracleErrorSlot,
 };
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use polypus_infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
 use pyo3::prelude::*;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -165,7 +165,7 @@ impl QmlOracle {
     /// the trait method (which must return `Vec<f64>`) can record any error and
     /// yield finite sentinels while the entry point re-raises it.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        let rt = crate::utils::tokio_runtime().map_err(|e| {
+        let rt = crate::runtime::tokio_runtime().map_err(|e| {
             EvaluationError::Runtime(format!(
                 "failed to start the Tokio runtime for QML evaluation: {e}"
             ))

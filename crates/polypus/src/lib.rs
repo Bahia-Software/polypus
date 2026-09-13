@@ -81,10 +81,15 @@
 
 pub mod algorithms;
 mod bindings;
-pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
-pub mod utils;
+
+/// Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`,
+/// `PyCallbackObservable`, `CircuitSource` and `EvaluationError` (re-export of the
+/// `polypus-evaluation` crate). The alias keeps every existing
+/// `crate::evaluation::…` path resolving; turning an `EvaluationError` into a typed
+/// `polypus.*` exception stays at the edge — see `exceptions::evaluation_error_to_pyerr`.
+pub use polypus_evaluation as evaluation;
 
 /// Quantum-execution backends, the `Planner`, circuit/config types and the
 /// backend-layer error (re-export of the `polypus-infrastructure` crate).

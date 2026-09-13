@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has nine crates:
+with PyO3 Python bindings. The Cargo workspace has ten crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -27,8 +27,9 @@ with PyO3 Python bindings. The Cargo workspace has nine crates:
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
 | `polypus-scheduler` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, `Flow`/`RunCircuitFlow`, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
+| `polypus-evaluation` | Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
-| `polypus` | The library + Python extension module; orchestration, evaluation oracles, and the FFI edge (`#[pyclass]` hierarchy, error→`PyErr` conversion) | **Yes** |
+| `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
 Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in
 `packages/polypus_python/pyproject.toml`), **CUNQA** (distributed QPUs over
@@ -55,6 +56,11 @@ boundary stays out-of-process and explicit; see
   failure reaches it **type-erased** as a `Box<dyn Error + Send>` in the
   `OracleErrorSlot`; the `polypus` edge downcasts it back to the concrete
   `EvaluationError` to re-raise (plan §10.1).
+- `polypus-evaluation` may depend on `pyo3` (Qiskit binding under the GIL, Python
+  callbacks) like `polypus-infrastructure`, but likewise defines **no**
+  `#[pyclass]` and **no** `From<_> for PyErr`: turning an `EvaluationError` into a
+  typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::evaluation_error_to_pyerr`).
 - Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
   `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
 - The optimizers are decoupled from circuits and Python via the
