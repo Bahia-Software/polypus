@@ -891,6 +891,8 @@ dependencies = [
  "num-complex",
  "polypus-circuit",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
