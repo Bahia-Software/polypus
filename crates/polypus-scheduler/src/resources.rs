@@ -18,8 +18,10 @@ pub struct Resources {
     /// The planner paired with `backend` (its `default_planner()` unless the edge
     /// chose another, e.g. the shot-distributing planner).
     pub planner: Arc<dyn Planner>,
-    /// The run configuration (id, shots, seed, backend config, …).
-    pub config: ExecutionConfig,
+    /// The run configuration (id, shots, seed, backend config, …). An `Arc` so a
+    /// training [`Flow`] can share it with the oracle it builds without cloning it
+    /// under the GIL (the config holds a `Py<PyAny>` noise model).
+    pub config: Arc<ExecutionConfig>,
 }
 
 impl Resources {
@@ -31,7 +33,7 @@ impl Resources {
     pub fn new(
         backend: Arc<dyn QuantumBackend>,
         planner: Option<Arc<dyn Planner>>,
-        config: ExecutionConfig,
+        config: Arc<ExecutionConfig>,
     ) -> Result<Self, InfrastructureError> {
         let planner = planner.unwrap_or_else(|| backend.default_planner());
         planner.requirements().check(&backend.capabilities())?;
@@ -117,7 +119,7 @@ mod tests {
     fn new_defaults_the_planner_and_accepts_a_compatible_pairing() {
         // A native backend + its default SequentialPlanner is always compatible.
         let backend = Arc::new(NoDistributionBackend);
-        let resources = Resources::new(backend, None, config())
+        let resources = Resources::new(backend, None, Arc::new(config()))
             .expect("SequentialPlanner (default) needs no shot distribution");
         // The default planner was filled in and validated.
         assert!(resources.planner.requirements().min_concurrency <= 4);
@@ -130,7 +132,11 @@ mod tests {
         let backend = Arc::new(NoDistributionBackend);
         // `Resources` holds trait objects and is not `Debug`, so assert on the
         // `Result` directly rather than via `expect_err`.
-        let result = Resources::new(backend, Some(Arc::new(ShotDistributingPlanner)), config());
+        let result = Resources::new(
+            backend,
+            Some(Arc::new(ShotDistributingPlanner)),
+            Arc::new(config()),
+        );
         assert!(
             matches!(result, Err(InfrastructureError::IncompatiblePlanner(_))),
             "shot distribution on a non-supporting backend must be rejected at construction",
@@ -140,6 +146,11 @@ mod tests {
     #[test]
     fn explicit_sequential_planner_is_accepted() {
         let backend = Arc::new(NoDistributionBackend);
-        assert!(Resources::new(backend, Some(Arc::new(SequentialPlanner)), config()).is_ok());
+        assert!(Resources::new(
+            backend,
+            Some(Arc::new(SequentialPlanner)),
+            Arc::new(config())
+        )
+        .is_ok());
     }
 }

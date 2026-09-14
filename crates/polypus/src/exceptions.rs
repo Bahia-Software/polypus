@@ -29,7 +29,7 @@
 
 use crate::infrastructure::BackendError as InfraBackendError;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyValueError};
+use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyValueError};
 use pyo3::PyErr;
 
 create_exception!(
@@ -144,6 +144,27 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
         invalid_variance @ EvalErr::InvalidVariance { .. } => {
             EvaluationError::new_err(invalid_variance.to_string())
         }
+    }
+}
+
+/// Convert a planner's `InfrastructureError` into a `PyErr` at the FFI edge.
+///
+/// `InfrastructureError` deliberately implements no `From<_> for PyErr`; this is
+/// the one place `run_quantum_circuit` / the training flows perform that
+/// conversion, mapping each variant to the class it always surfaced as: a backend
+/// error keeps its own class (via [`backend_error_to_pyerr`]), a Python exception
+/// (a SIGINT from the planner's `check_signals`) re-raises verbatim, and a
+/// cooperative cancel is a `KeyboardInterrupt`.
+pub(crate) fn infrastructure_error_to_pyerr(
+    err: crate::infrastructure::InfrastructureError,
+) -> PyErr {
+    use crate::infrastructure::InfrastructureError as InfraErr;
+    match err {
+        InfraErr::Backend(e) => backend_error_to_pyerr(e),
+        InfraErr::Observable(e) => EvaluationError::new_err(e.to_string()),
+        InfraErr::Python(e) => e,
+        InfraErr::Cancelled => PyKeyboardInterrupt::new_err("the run was cancelled"),
+        InfraErr::IncompatiblePlanner(m) => PyValueError::new_err(m),
     }
 }
 

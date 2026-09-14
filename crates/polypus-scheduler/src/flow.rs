@@ -132,8 +132,12 @@ mod tests {
     /// will use in Phase 6.
     #[test]
     fn scheduler_runs_a_run_circuit_flow_in_order() {
-        let resources =
-            Resources::new(Arc::new(StubBackend), Some(Arc::new(EchoPlanner)), config()).unwrap();
+        let resources = Resources::new(
+            Arc::new(StubBackend),
+            Some(Arc::new(EchoPlanner)),
+            Arc::new(config()),
+        )
+        .unwrap();
         let scheduler = Scheduler::ephemeral(resources);
 
         let circuits = vec![

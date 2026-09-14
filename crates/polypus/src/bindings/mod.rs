@@ -18,18 +18,20 @@ use observable::{CachedCost, Ising, Qubo};
 use pso::PSO;
 use qng::QNG;
 
-use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
 use crate::evaluation::{
-    CircuitSource, CostObservable, EvaluationOracle, OracleErrorSlot, PyCallbackObservable,
-    PyVarianceOracle, QmlOracle, VqcOracle,
+    CircuitSource, CostObservable, OracleErrorSlot, PyCallbackObservable, PyVarianceOracle,
+    TrainQmlFlow, TrainVqcFlow,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::infrastructure::{
-    BackendConfig, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
+    BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
+    OptLevel, Planner, ShotDistributingPlanner,
 };
-use crate::scheduler::{dispatch_optimizer, DeConfig, Method, OracleError, PsoConfig, QngConfig};
+use crate::scheduler::{
+    DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
+};
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,10 +41,9 @@ use uuid::Uuid;
 /// manifest that lets a run be logged and replayed (contract C-7).
 ///
 /// `counts` is the exact payload the runner produced before this wrapper
-/// existed — a `list[dict[str, int]]` for a single-QPU run
-/// ([`AlgorithmSingleRun`](crate::algorithms::AlgorithmSingleRun)), or a single
-/// merged `dict[str, int]` for a distributed (`n_qpus > 1`) run
-/// ([`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)); the
+/// existed — a `list[dict[str, int]]` for a single-QPU run (the backend's default
+/// atomic-wave planner), or a single merged `dict[str, int]` for a distributed
+/// (`n_qpus > 1`) run (the shot-distributing planner); the
 /// per-dict format is contract C-3. The manifest fields make a simulated run
 /// reproducible: feeding the reported [`seed`](Self::seed) back into
 /// `run_quantum_circuit(..., seed=...)` reproduces the counts byte-for-byte on
@@ -698,11 +699,6 @@ pub fn run_quantum_circuit<'py>(
         opt_level: OptLevel::default(),
         seed: effective_seed,
     };
-    let args = AlgorithmArgs {
-        qcs: vec![bound_qc],
-        config,
-    };
-
     // Lifecycle record at the default level, carrying the C-7 manifest data only
     // (the circuit itself stays in the `debug!` above): enough to see what ran
     // where, and with which seed to replay it.
@@ -711,26 +707,53 @@ pub fn run_quantum_circuit<'py>(
          n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
     );
 
-    let algorithm: Box<
-        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>> + Send,
-    > = if n_qpus == 1 {
-        Box::new(AlgorithmSingleRun)
-    } else {
-        Box::new(DistributeByShotsRun)
-    };
-
-    // Release the GIL for the whole run, mirroring `train` below: circuit
-    // execution is GIL-free on the native backend (and internally reacquires
-    // the GIL where Aer/CUNQA need it), so holding it here would stall every
-    // other Python thread and (with the per-circuit check_signals each
-    // algorithm variant performs before result conversion) keep Ctrl+C from
-    // taking effect until the run finishes. See docs/ENGINEERING.md §3.
-    // Keep the original counts payload intact and wrap it with the run manifest.
-    let counts = qc.py().allow_threads(move || algorithm.run(args))?;
+    // Release the GIL for the whole run, mirroring `train`: circuit execution is
+    // GIL-free on the native backend (and internally reacquires the GIL where
+    // Aer/CUNQA need it), so holding it here would stall every other Python thread
+    // and (with the Planner's between-wave check_signals) keep Ctrl+C from taking
+    // effect until the run finishes. See docs/ENGINEERING.md §3. `n_qpus > 1`
+    // selects the shot-distributing planner (which apportions this one circuit's
+    // shots across replicas and merges, conserving the total per C-3); otherwise
+    // the backend's default atomic-wave planner runs the circuit as-is.
+    let counts_result =
+        qc.py()
+            .allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
+                let backend = Infrastructure::create_backend(&config)
+                    .map_err(InfrastructureError::Backend)?;
+                let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
+                    None
+                } else {
+                    Some(Arc::new(ShotDistributingPlanner))
+                };
+                let resources = Resources::new(backend, planner, Arc::new(config))?;
+                let scheduler = Scheduler::ephemeral(resources);
+                let out = scheduler.run(RunCircuitFlow {
+                    circuits: vec![bound_qc],
+                    shots,
+                });
+                scheduler.close();
+                out
+            });
+    let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     // Completion counterpart of the start record above. There is no
     // iterations/convergence notion on this path (those are `TrainResult`
     // fields), so this reports only the run and how long it took.
     log::info!("run {id} completed: duration={:?}", start.elapsed());
+    // Convert at the FFI boundary, preserving the historical output shapes:
+    // `n_qpus == 1` yields one `list[dict]` (one map per circuit); `n_qpus > 1`
+    // yields the single merged `dict`.
+    let counts: PyObject = Python::with_gil(|py| -> PyResult<PyObject> {
+        if n_qpus == 1 {
+            Ok(counts_vec.into_pyobject(py)?.into_any().unbind())
+        } else {
+            let total = counts_vec.into_iter().next().unwrap_or_default();
+            let py_dict = PyDict::new(py);
+            for (k, v) in total {
+                py_dict.set_item(k, v)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+    })?;
     Python::with_gil(|py| {
         Py::new(
             py,
@@ -880,33 +903,33 @@ pub fn train<'py>(
     );
     let backend = Infrastructure::create_backend(&config)
         .map_err(crate::exceptions::backend_error_to_pyerr)?;
-    // Shared error slot: the oracles record the first evaluation failure here
+    // Shared error slot: the oracle records the first evaluation failure here
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
     let errors = OracleErrorSlot::new();
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
-    // Every backend's default planner is the atomic-wave SequentialPlanner.
-    let planner = backend.default_planner();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
-        circuit: circuit_source,
-        config: Arc::clone(&config),
-        backend,
-        planner,
-        observable,
-        cancel: crate::infrastructure::CancelToken::default(),
-        errors: errors.clone(),
-    });
-
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
+    // and validate the pairing up front.
+    let resources = Resources::new(backend, None, Arc::clone(&config))
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    let scheduler = Scheduler::ephemeral(resources);
+    let flow = TrainVqcFlow {
+        circuit: circuit_source,
+        observable,
+        method: method_enum,
+        dimensions,
+        seed: effective_seed,
+        errors: errors.clone(),
+    };
     // Release the GIL for the whole optimization: parameter binding and native
     // simulation are GIL-free, so holding it would stall every other Python
-    // thread and (with the per-batch check_signals in the oracle) keep Ctrl+C
-    // from taking effect until the run ends. See docs/ENGINEERING.md §3.
-    let result = method.py().allow_threads(|| {
-        dispatch_optimizer(method_enum, oracle, dimensions, &errors, effective_seed)
-    });
+    // thread and (with the Planner's between-wave check_signals) keep Ctrl+C from
+    // taking effect until the run ends. See docs/ENGINEERING.md §3.
+    let result = method.py().allow_threads(|| scheduler.run(flow));
+    scheduler.close();
     finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
 
@@ -1098,28 +1121,27 @@ pub fn qml_train<'py>(
     );
     let backend = Infrastructure::create_backend(&config)
         .map_err(crate::exceptions::backend_error_to_pyerr)?;
-    // Shared error slot (see `train`): oracles record the first evaluation
+    // Shared error slot (see `train`): the oracle records the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
     let observable = extract_cost_observable(&expectation_function)?;
-    let planner = backend.default_planner();
-    let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
-        training_circuits: qcs,
-        config: Arc::clone(&config),
-        backend,
-        planner,
-        observable,
-        cancel: crate::infrastructure::CancelToken::default(),
-        errors: errors.clone(),
-    });
-
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let resources = Resources::new(backend, None, Arc::clone(&config))
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    let scheduler = Scheduler::ephemeral(resources);
+    let flow = TrainQmlFlow {
+        training_circuits: qcs,
+        observable,
+        method: method_enum,
+        dimensions,
+        seed: effective_seed,
+        errors: errors.clone(),
+    };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
-    // §3): the QML workers re-acquire it per batch, and the main-thread signal
-    // check in the oracle keeps Ctrl+C prompt.
-    let result = py.allow_threads(|| {
-        dispatch_optimizer(method_enum, oracle, dimensions, &errors, effective_seed)
-    });
+    // §3): the Qiskit binding + Aer calls re-acquire it, and the Planner's
+    // between-wave check_signals keeps Ctrl+C prompt.
+    let result = py.allow_threads(|| scheduler.run(flow));
+    scheduler.close();
     finish_optimization(py, result, effective_seed, effective_id, start)
 }
 
