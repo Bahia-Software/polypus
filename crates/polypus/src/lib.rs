@@ -81,11 +81,32 @@
 
 pub mod algorithms;
 mod bindings;
-pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
-pub mod infrastructure;
-pub mod utils;
+
+/// Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`,
+/// `PyCallbackObservable`, `CircuitSource` and `EvaluationError` (re-export of the
+/// `polypus-evaluation` crate). The alias keeps every existing
+/// `crate::evaluation::…` path resolving; turning an `EvaluationError` into a typed
+/// `polypus.*` exception stays at the edge — see `exceptions::evaluation_error_to_pyerr`.
+pub use polypus_evaluation as evaluation;
+
+/// Quantum-execution backends, the `Planner`, circuit/config types and the
+/// backend-layer error (re-export of the `polypus-infrastructure` crate).
+///
+/// Extracted into its own crate so the GIL-touching backend layer no longer sits
+/// inside the FFI edge; the alias keeps every existing `polypus::infrastructure::…`
+/// / `crate::infrastructure::…` path resolving. The one thing that stays at the
+/// edge is turning a [`infrastructure::BackendError`] into a typed `polypus.*`
+/// exception — see `exceptions::backend_error_to_pyerr`.
+pub use polypus_infrastructure as infrastructure;
+
+/// Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the
+/// `Flow` trait + `RunCircuitFlow`, and `dispatch_optimizer` + the type-erased
+/// `OracleErrorSlot` (re-export of the pyo3-free `polypus-scheduler` crate). A
+/// real oracle failure reaches it as a `Box<dyn Error + Send>`; this edge
+/// downcasts it back to the concrete `EvaluationError` to re-raise.
+pub use polypus_scheduler as scheduler;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
 ///

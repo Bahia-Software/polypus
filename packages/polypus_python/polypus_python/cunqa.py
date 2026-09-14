@@ -3,30 +3,51 @@ import sys
 
 from qiskit import QuantumCircuit
 
-sys.path.append(os.getenv("HOME"))
+# CUNQA is an optional, site-installed dependency (see the `cunqa` extra in
+# polypus_python's pyproject). Prefer a normal import -- installed via that extra
+# or already on PYTHONPATH. As an explicit escape hatch for a non-packaged site
+# install, honour POLYPUS_CUNQA_PATH (a documented, deployment-specific location)
+# instead of the previous unconditional `sys.path.append(os.getenv("HOME"))`,
+# which was non-portable and appended `None` to sys.path when HOME was unset.
+_cunqa_path = os.getenv("POLYPUS_CUNQA_PATH")
+if _cunqa_path and _cunqa_path not in sys.path:
+    sys.path.append(_cunqa_path)
 
-from cunqa.qjob import gather
-from cunqa.qpu import get_QPUs, qdrop, qraise, run
+from cunqa.qjob import gather  # noqa: E402  (must follow the path setup above)
+from cunqa.qpu import get_QPUs, qdrop, qraise, run  # noqa: E402
 
-from .infrastructure import Infraestructure
+from .infrastructure import Infraestructure  # noqa: E402
 
 
 class Cunqa(Infraestructure):
     def get_qpus(self, **kwargs) -> object:
-
         n = kwargs["n"]
         t = kwargs["t"]
         n_nodes = kwargs["n_nodes"]
         family_name = kwargs["family_name"]
-        family = qraise(
-            n,
-            t,
-            quantum_comm=False,
-            co_located=True,
-            n_nodes=n_nodes,
-            family=family_name,
-            backend="/mnt/netapp2/Store_uni/home/empresa/bah/dfp/quantum/simple_backend.json",
-        )
+        # Cores per QPU is forwarded by the Rust CunqaBackend (`raise_qpus` sets
+        # kwargs["cores_per_qpu"]); it used to be dropped here, so the requested
+        # allocation was silently ignored. Pass it through to qraise. `cores`
+        # follows CUNQA's qraise API (part of the unverified integration; see the
+        # note in run_qcs).
+        cores_per_qpu = kwargs.get("cores_per_qpu")
+
+        qraise_kwargs = {
+            "quantum_comm": False,
+            "co_located": True,
+            "n_nodes": n_nodes,
+            "family": family_name,
+        }
+        if cores_per_qpu is not None:
+            qraise_kwargs["cores"] = cores_per_qpu
+        # The vQPU backend spec is deployment-specific: read it from
+        # POLYPUS_CUNQA_BACKEND (a path to a CUNQA backend JSON) rather than a
+        # hardcoded absolute path. Unset -> let CUNQA choose its own default.
+        backend = os.getenv("POLYPUS_CUNQA_BACKEND")
+        if backend:
+            qraise_kwargs["backend"] = backend
+
+        family = qraise(n, t, **qraise_kwargs)
         return family
 
     def drop_qpus(self, **kwargs) -> object:
@@ -62,7 +83,6 @@ class Cunqa(Infraestructure):
         # Absent/empty keeps CUNQA's own default rather than guessing one.
         sim_method = args.get("sim_method") or None
 
-        sys.path.append(os.getenv("HOME"))
         try:
             qpus = get_QPUs(co_located=True, family=family_id)
         except Exception as e:

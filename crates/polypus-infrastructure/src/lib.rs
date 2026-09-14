@@ -7,16 +7,23 @@ pub mod cunqa;
 pub mod error;
 pub mod execution_config;
 pub mod local;
+pub mod mem_budget;
 pub mod native;
+pub mod planner;
 #[cfg(feature = "qmio")]
 pub mod qmio;
 pub mod transpiler;
 
 pub use cunqa::CunqaBackend;
-pub use error::BackendError;
+pub use error::{BackendError, InfrastructureError};
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
+pub use mem_budget::max_statevector_concurrency;
 pub use native::NativeStatevectorBackend;
+pub use planner::{
+    BackendCapabilities, CancelToken, CircuitTask, Counts, Planner, PlannerRequirements,
+    SequentialPlanner, ShotDistributingPlanner,
+};
 #[cfg(feature = "qmio")]
 pub use qmio::QmioBackend;
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
@@ -102,9 +109,12 @@ impl Infrastructure {
             // native backend runs; the entropy fallback here only guards a
             // directly-built config that left `seed` unset (e.g. tests), so
             // an omitted seed still yields independent noise, never a panic.
-            BackendConfig::LocalNative => Ok(Arc::new(NativeStatevectorBackend::new(
-                config.seed.unwrap_or_else(execution_config::random_seed),
-            ))),
+            BackendConfig::LocalNative { fusion } => Ok(Arc::new(
+                NativeStatevectorBackend::new(
+                    config.seed.unwrap_or_else(execution_config::random_seed),
+                )
+                .with_fusion(*fusion),
+            )),
             #[cfg(feature = "qmio")]
             BackendConfig::Qmio {
                 endpoint,
@@ -251,8 +261,8 @@ pub trait QuantumBackend: Send + Sync {
     /// A failure is returned as a [`BackendError`] (never a panic): a Python
     /// exception from the `polypus_python` seam is carried verbatim in
     /// [`BackendError::Seam`] so it re-raises with its original type, and
-    /// Rust-originated failures map to the typed
-    /// [`exceptions`](crate::exceptions) hierarchy at the FFI boundary.
+    /// Rust-originated failures map to the typed `polypus.*` exception hierarchy
+    /// at the FFI boundary (in `polypus::exceptions`, the crate's edge).
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
@@ -262,10 +272,9 @@ pub trait QuantumBackend: Send + Sync {
     /// Run a single circuit `qc` under a per-replica shot distribution,
     /// returning one counts map per entry of `shot_batches` (replica `i` runs
     /// `shot_batches[i]` shots). The caller has already apportioned the shots —
-    /// e.g. [`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)
-    /// splitting a total across `n_qpus`, one extra shot on the first
-    /// `shots % n_qpus` replicas — so the summed counts conserve the total
-    /// exactly (contract C-3).
+    /// e.g. the `polypus` edge's shot-distribution algorithm splitting a total
+    /// across `n_qpus`, one extra shot on the first `shots % n_qpus` replicas — so
+    /// the summed counts conserve the total exactly (contract C-3).
     ///
     /// The method exists so a backend that can *reuse* one circuit evolution
     /// across many shot batches can override it and avoid re-simulating the
@@ -305,18 +314,125 @@ pub trait QuantumBackend: Send + Sync {
         Ok(out)
     }
 
-    /// Maximum number of circuits to submit per [`run_circuits`](Self::run_circuits)
-    /// call, given the `total` circuits to evaluate.
-    ///
-    /// Local simulation can take the whole batch at once: Aer's C++ engine runs
-    /// the experiments in parallel across cores and releases the GIL, which is
-    /// the only real parallelism available locally. Distributed backends such as
-    /// CUNQA are bounded by the number of physical QPUs and therefore cap the
-    /// batch at `n_qpus` (one circuit per QPU per call).
-    fn max_batch_size(&self, total: usize) -> usize {
-        total
-    }
-
     /// Release any held resources (SLURM jobs, cloud sessions, QPU reservations, …).
     fn close(&self) {}
+
+    /// What this backend can do, so a [`Planner`] can size its execution waves.
+    ///
+    /// The default is unbounded concurrency (the whole batch in one wave, matching
+    /// the previous default `max_batch_size`) with shot distribution supported. A
+    /// backend overrides this to cap concurrency: native/local by a memory budget,
+    /// CUNQA at `n_qpus`, QMIO at 1.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            max_concurrency: usize::MAX,
+            supports_shot_distribution: true,
+        }
+    }
+
+    /// The sensible default planner for this backend: the atomic-wave
+    /// [`SequentialPlanner`], used by every backend. The `polypus` edge opts into
+    /// the [`ShotDistributingPlanner`] for `run_quantum_circuit` shot distribution.
+    fn default_planner(&self) -> Arc<dyn Planner> {
+        Arc::new(SequentialPlanner)
+    }
+}
+
+/// Centrally validate the measurement-count maps a backend returned for a batch,
+/// before anything downstream consumes them.
+///
+/// Checks, in order: exactly one map per submitted circuit; every map non-empty;
+/// every map's counts summing to `expected_shots` (contract C-3 shot
+/// conservation); every key a non-empty bitstring (`0`/`1` only). Any violation
+/// is a backend/contract bug, returned as [`BackendError::InvalidResults`] so it
+/// surfaces as a typed diagnostic — rather than an empty or short result being
+/// silently reduced to a `0.0` fitness or indexing out of bounds in the
+/// optimizer.
+///
+/// `expected_shots` is the per-map shot count: `config.shots` for a normal batch
+/// ([`run_circuits`](QuantumBackend::run_circuits)), or the total for a merged
+/// shot-distributed result. This is the fase-1 result-frontier half of C-3; the
+/// per-wave merge check moves into the `Planner` in a later phase.
+pub fn validate_run_results(
+    counts: &[HashMap<String, u64>],
+    expected_circuits: usize,
+    expected_shots: u32,
+) -> Result<(), BackendError> {
+    if counts.len() != expected_circuits {
+        return Err(BackendError::InvalidResults(format!(
+            "expected one counts map per circuit ({expected_circuits}), got {}",
+            counts.len()
+        )));
+    }
+    let expected_shots = u64::from(expected_shots);
+    for (i, map) in counts.iter().enumerate() {
+        if map.is_empty() {
+            return Err(BackendError::InvalidResults(format!(
+                "empty counts map for circuit {i} ({expected_shots} shot(s) requested); an empty \
+                 result has no measurement outcomes and cannot be reduced to a fitness"
+            )));
+        }
+        let total: u64 = map.values().copied().sum();
+        if total != expected_shots {
+            return Err(BackendError::InvalidResults(format!(
+                "counts for circuit {i} sum to {total} shot(s) but {expected_shots} were requested \
+                 (contract C-3 shot conservation)"
+            )));
+        }
+        if let Some(bad) = map
+            .keys()
+            .find(|k| k.is_empty() || !k.bytes().all(|b| b == b'0' || b == b'1'))
+        {
+            return Err(BackendError::InvalidResults(format!(
+                "counts for circuit {i} contain a non-bitstring key {bad:?} (expected a string of \
+                 0/1 outcomes)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod result_validation_tests {
+    use super::*;
+
+    fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn accepts_a_well_formed_batch() {
+        let batch = vec![counts(&[("00", 5), ("11", 5)]), counts(&[("01", 10)])];
+        assert!(validate_run_results(&batch, 2, 10).is_ok());
+    }
+
+    #[test]
+    fn rejects_wrong_result_count() {
+        let batch = vec![counts(&[("0", 4)])];
+        let err = validate_run_results(&batch, 2, 4).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidResults(_)));
+        assert!(err.to_string().contains("one counts map per circuit"));
+    }
+
+    #[test]
+    fn rejects_empty_map() {
+        let err = validate_run_results(&[HashMap::new()], 1, 8).unwrap_err();
+        assert!(err.to_string().contains("empty counts map"));
+    }
+
+    #[test]
+    fn rejects_shot_non_conservation() {
+        // 3 + 4 = 7 shots, but 8 were requested.
+        let batch = vec![counts(&[("0", 3), ("1", 4)])];
+        let err = validate_run_results(&batch, 1, 8).unwrap_err();
+        assert!(err.to_string().contains("C-3"));
+    }
+
+    #[test]
+    fn rejects_non_bitstring_key() {
+        // Valid count and shot total, but "0x2" is not a bitstring.
+        let batch = vec![counts(&[("0x2", 8)])];
+        let err = validate_run_results(&batch, 1, 8).unwrap_err();
+        assert!(err.to_string().contains("non-bitstring"));
+    }
 }

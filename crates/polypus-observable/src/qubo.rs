@@ -225,6 +225,15 @@ mod tests {
     }
 
     #[test]
+    fn native_reducer_defaults_to_portable() {
+        // The native QUBO evaluator is pure Rust with no host-process dependency, so
+        // it keeps the trait default `Portable` — the other half of the locality
+        // contract pinned by the callback observable's `Local` test.
+        let obs = QuboObservable::new(1, vec![(0, 1.0)], vec![], 0.0, 1.0).unwrap();
+        assert_eq!(obs.locality(), crate::ReducerLocality::Portable);
+    }
+
+    #[test]
     fn rejects_bad_construction() {
         assert!(QuboObservable::new(0, vec![], vec![], 0.0, 1.0).is_err());
         assert!(QuboObservable::new(2, vec![(2, 1.0)], vec![], 0.0, 1.0).is_err()); // index oob

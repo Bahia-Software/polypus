@@ -8,8 +8,12 @@ from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
 from qiskit.qpy import dump, load
 from qiskit.qpy.exceptions import QpyError
 
-sys.path.append(os.getenv("HOME"))
-# from cunqa import get_QPUs, gather
+# Optional escape hatch for a non-packaged CUNQA site install (mirrors cunqa.py):
+# a portable, explicit location, unlike the previous unconditional
+# `sys.path.append(os.getenv("HOME"))`, which appended None when HOME was unset.
+_cunqa_path = os.getenv("POLYPUS_CUNQA_PATH")
+if _cunqa_path and _cunqa_path not in sys.path:
+    sys.path.append(_cunqa_path)
 
 
 def get_logger(id):
@@ -201,7 +205,6 @@ def run_qc_in_qpu(id, qc, shots):
 
     # Get the QPUs
     tic_total = time.time()
-    sys.path.append(os.getenv("HOME"))
     try:
         qpus = get_QPUs(local=False, family=id)
         log_message(id, f"Time to get the QPU: {time.time() - tic_total}s", "debug")

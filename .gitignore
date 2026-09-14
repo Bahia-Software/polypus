@@ -1,6 +1,5 @@
 # Rust build output
 target/
-Cargo.lock
 
 # Python build artifacts
 dist/
@@ -15,11 +14,15 @@ __pycache__/
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
 benchmarks/bench_*/
+benchmarks/fusion_*.csv
+benchmarks/fusion_*.json
+benchmarks/fusion_*.out
 
 # Experiment outputs
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+/crates/polypus-physics/graphics/
 qft_results.csv
 qft*.png
 
@@ -33,4 +36,4 @@ logs/
 
 CLAUDE.md
 AI_GUIDELINES.md
-.claude/
+.claude

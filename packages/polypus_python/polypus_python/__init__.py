@@ -1,8 +1,3 @@
-import os
-import sys
-
-sys.path.append(os.getenv("HOME"))
-
 from .connectivity import (
     connect_to_infrastructure,
     disconnect_from_infrastructure,

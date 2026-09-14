@@ -3,7 +3,7 @@
 //! A [`Transpiler`] rewrites a native [`ConcreteCircuit`] so that it is valid
 //! for a backend's *target* (native gate-set decomposition, qubit-connectivity
 //! mapping, optimization passes, …). It is the transpilation counterpart of
-//! [`crate::infrastructure::QuantumBackend`]: an execution backend *composes*
+//! [`crate::QuantumBackend`]: an execution backend *composes*
 //! the `Transpiler` appropriate for its target and invokes it inside its own
 //! `run_circuits`, so algorithm code never has to know about hardware-specific
 //! rewriting.
@@ -58,7 +58,7 @@ pub struct TranspileOptions {
 /// decomposition, qubit-connectivity mapping, optimization passes, etc.
 ///
 /// Operates entirely on [`ConcreteCircuit`] so it never touches the Python GIL,
-/// keeping it usable at HPC scale. Each [`crate::infrastructure::QuantumBackend`]
+/// keeping it usable at HPC scale. Each [`crate::QuantumBackend`]
 /// *composes* the `Transpiler` appropriate for its target (the *strategy*), and
 /// passes per-run [`TranspileOptions`] (the *tuning*); algorithm code stays
 /// completely unaware of any hardware-specific rewriting.
@@ -67,9 +67,9 @@ pub struct TranspileOptions {
 ///
 /// - **New strategy** (a different rewriting algorithm): create a type that
 ///   implements `Transpiler` and inject it by composition (e.g.
-///   [`NativeStatevectorBackend::with_transpiler`](crate::infrastructure::NativeStatevectorBackend::with_transpiler)).
-///   No change to [`QuantumBackend`](crate::infrastructure::QuantumBackend),
-///   the algorithms, or [`BoundCircuit`](crate::infrastructure::BoundCircuit).
+///   [`NativeStatevectorBackend::with_transpiler`](crate::NativeStatevectorBackend::with_transpiler)).
+///   No change to [`QuantumBackend`](crate::QuantumBackend),
+///   the algorithms, or [`BoundCircuit`](crate::BoundCircuit).
 /// - **New tuning knob** (seed, layout, approximation degree, …): add a field
 ///   to [`TranspileOptions`]. The `transpile` signature stays stable.
 ///

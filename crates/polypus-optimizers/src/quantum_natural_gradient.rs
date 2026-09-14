@@ -102,12 +102,18 @@ fn compute_qfim_diagonal(
     theta: &[f64],
     dims: usize,
     tikhonov_reg: f64,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, OptimizerError> {
     let mut diag = variance_oracle.variance_diagonal(theta, dims);
+    // The QNG update indexes `qfim_diag[0..dims]` positionally, so a diagonal of
+    // the wrong length would panic out of bounds deep in the loop. Reject it as a
+    // length-contract violation instead. Only a custom Rust `VarianceOracle` can
+    // trip this — the Python `PyVarianceOracle` maps over `0..dims` by
+    // construction — but the check keeps the trait contract honest.
+    check_oracle_len(dims, diag.len())?;
     for v in diag.iter_mut() {
         *v += tikhonov_reg;
     }
-    diag
+    Ok(diag)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,12 +152,43 @@ impl AlgorithmQNG {
         } = args;
 
         let dims = dimensions as usize;
+
+        // Validate the scalar configuration before any RNG draw or oracle call,
+        // so a bad config surfaces a typed error at the seam instead of a silent
+        // `-inf` outcome, a `NaN`/`inf` update, or a panic in the sampler.
+        if max_iters == 0 {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "max_iters",
+                reason: "must be at least 1 (0 iterations never evaluates the objective)"
+                    .to_string(),
+            });
+        }
+        if !finite_difference_step.is_finite() || finite_difference_step <= 0.0 {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "finite_difference_step",
+                reason: format!("must be finite and > 0, got {finite_difference_step}"),
+            });
+        }
+        if !tikhonov_reg.is_finite() || tikhonov_reg < 0.0 {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "tikhonov_reg",
+                reason: format!("must be finite and >= 0, got {tikhonov_reg}"),
+            });
+        }
+        if !learning_rate.is_finite() {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "learning_rate",
+                reason: format!("must be finite, got {learning_rate}"),
+            });
+        }
+
         let (lb, ub) = bounds;
-        // θ is drawn from the half-open interval [lb, ub), which is empty when
-        // `lb >= ub` and panics inside the sampler. Reject before any RNG draw
-        // or oracle call, as PSO does; requiring `partial_cmp` to be
-        // `Some(Less)` also rejects a non-finite (`NaN`) bound.
-        if !matches!(lb.partial_cmp(&ub), Some(std::cmp::Ordering::Less)) {
+        // θ is drawn from the half-open interval [lb, ub); reject an empty or
+        // unbounded interval before the sampler sees it. `lb >= ub` covers the
+        // empty case; the finiteness checks reject `NaN` (which fails every
+        // comparison) and an infinite bound (which would make `gen_range` draw
+        // from an unbounded interval — a panic in the `Uniform` sampler).
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
 
@@ -173,7 +210,7 @@ impl AlgorithmQNG {
 
             // ── 2. Diagonal QFIM with Tikhonov regularisation ────────────────
             let qfim_diag =
-                compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg);
+                compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg)?;
 
             // ── 3. QNG update: θ ← θ − η · G⁻¹ · ∇(−E) ─────────────────────
             //    Equivalent to θ ← θ + η · G⁻¹ · ∇E  (maximise expectation)

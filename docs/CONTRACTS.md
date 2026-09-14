@@ -25,7 +25,7 @@ Rules of the road:
 | C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 | C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
@@ -285,7 +285,10 @@ diverge.
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
-**Enforcing check:** version-coherence step in `.github/workflows/hygiene.yml`.
+**Enforcing check:** *not yet present.* There is no `hygiene.yml` (nor a
+version-coherence step in any current workflow); coherence is maintained by
+convention until the release-workflow gate lands with 0.7.0 (see the historical
+note above).
 
 ---
 

@@ -43,6 +43,21 @@ pub use error::ObservableError;
 pub use ising::IsingObservable;
 pub use qubo::QuboObservable;
 
+/// Where a reducer can run: `Portable` reducers are pure Rust and can run
+/// anywhere (including, in a future phase, at the data source before counts are
+/// shipped back), while `Local` reducers must run in the caller's process because
+/// they hold non-serializable state — e.g. a Python callback that needs the GIL.
+///
+/// This is a forward-looking hook for reduce-at-source (plan §7.1): a `Planner`
+/// may only push reduction to a remote worker when the reducer is `Portable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducerLocality {
+    /// Runs anywhere: pure Rust, serializable, no host-process dependency.
+    Portable,
+    /// Must run in the caller's process (holds the GIL / non-serializable state).
+    Local,
+}
+
 /// Maps a batch of measurement counts (one map per candidate) to one expectation
 /// value per candidate, in the same order.
 ///
@@ -59,4 +74,11 @@ pub trait CostObservable: Send + Sync {
         &self,
         counts: &[HashMap<String, u64>],
     ) -> Result<Vec<f64>, ObservableError>;
+
+    /// Where this reducer may run. Defaults to [`ReducerLocality::Portable`]
+    /// (the native `Qubo`/`Ising` evaluators are pure Rust); the Python-callback
+    /// observable overrides it to [`ReducerLocality::Local`].
+    fn locality(&self) -> ReducerLocality {
+        ReducerLocality::Portable
+    }
 }

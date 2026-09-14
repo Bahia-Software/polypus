@@ -1,16 +1,16 @@
 //! Native statevector backend: runs circuits in pure Rust via `polypus-sim`,
 //! without ever touching the Python interpreter or Qiskit.
 //!
-//! This is the local counterpart to [`LocalBackend`](crate::infrastructure::LocalBackend)
+//! This is the local counterpart to [`LocalBackend`](crate::LocalBackend)
 //! (Qiskit Aer). It is selected with `backend="polypus"` and consumes a
 //! [`BoundCircuit::Native`] directly — no OpenQASM round-trip, no GIL — which is
 //! what makes the native circuit path pay off end-to-end. An OpenQASM 2.0
 //! string is also accepted (parsed in Rust); a Qiskit `QuantumCircuit` is not,
 //! since reading its gates would require the interpreter.
 
-use crate::infrastructure::error::BackendError;
-use crate::infrastructure::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::infrastructure::{BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::error::BackendError;
+use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
+use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use rayon::prelude::*;
@@ -60,6 +60,16 @@ impl NativeStatevectorBackend {
             base_seed: seed,
             counter: AtomicU64::new(0),
         }
+    }
+
+    /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
+    /// default, matching [`StatevectorSimulator::default`]). Backs
+    /// [`BackendConfig::LocalNative`](crate::BackendConfig::LocalNative)'s
+    /// `fusion` field, which lets a Python caller opt out of gate fusion for a
+    /// strictly gate-by-gate simulation of exactly the circuit as written.
+    pub fn with_fusion(mut self, fusion: bool) -> Self {
+        self.simulator.fusion = fusion;
+        self
     }
 
     /// Derive the executable [`ConcreteCircuit`] from a [`BoundCircuit`] and
@@ -134,6 +144,7 @@ impl NativeStatevectorBackend {
         let simulator = StatevectorSimulator {
             max_qubits: self.simulator.max_qubits,
             parallel_threshold,
+            fusion: self.simulator.fusion,
         };
         let raw = simulator
             .run_and_sample(concrete.as_ref(), shots as usize, seed)
@@ -143,6 +154,123 @@ impl NativeStatevectorBackend {
             })?;
         Ok(format_counts(concrete.as_ref(), raw))
     }
+
+    /// Run `qcs` while holding at most `cap` statevectors in memory at once.
+    ///
+    /// This is a pure resource bound: the per-circuit seed is reserved as one
+    /// contiguous block up front (`base_seed + block_start + global_index`), so a
+    /// circuit's seed — and therefore its counts — is independent of how the batch
+    /// is chunked, and gate-vs-circuit parallelism is numerically identical. The
+    /// result is byte-for-byte the historical single unbounded `par_iter` for
+    /// every `cap`; only peak memory and speed change.
+    fn run_batch_with_cap(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &ExecutionConfig,
+        cap: usize,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        // Tuning travels as an argument; the strategy is the injected field.
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        // Reserve a contiguous block of seeds for the whole batch, so each circuit
+        // is sampled independently and deterministically regardless of order OR of
+        // which window runs it.
+        let start = self.counter.fetch_add(qcs.len() as u64, Ordering::Relaxed);
+        let threads = rayon::current_num_threads();
+        let cap = cap.max(1);
+
+        // Fast path: when the budget permits the full pool-wide concurrency
+        // (`cap >= threads`, i.e. `threads` statevectors fit) or the batch is a
+        // single window, evaluate the whole batch in one `par_iter` — byte-for-byte
+        // the previous behaviour (rayon already bounds in-flight tasks to the pool).
+        if cap >= threads || cap >= qcs.len() {
+            let pt = self.gate_parallel_threshold(qcs.len(), threads);
+            return self.simulate_window(qcs, config.shots, &opts, start, pt);
+        }
+
+        // Budget-throttled path: process the batch in windows of `cap` so at most
+        // `cap` statevectors are alive at once. Windows run in input order and each
+        // window's seed offset keeps the global seed block contiguous; an `Err`
+        // short-circuits at the first failing window (the lowest-index failure, as
+        // one `par_iter` over the whole batch would also surface first).
+        let mut out = Vec::with_capacity(qcs.len());
+        let mut offset = 0usize;
+        while offset < qcs.len() {
+            let end = (offset + cap).min(qcs.len());
+            let pt = self.gate_parallel_threshold(end - offset, threads);
+            let block = self.simulate_window(
+                &qcs[offset..end],
+                config.shots,
+                &opts,
+                start + offset as u64,
+                pt,
+            )?;
+            out.extend(block);
+            offset = end;
+        }
+        Ok(out)
+    }
+
+    /// Simulate one window in parallel ACROSS circuits, seeding circuit `i` of the
+    /// window with `base_seed + global_start + i`. A DE generation submits its
+    /// whole population this way — the embarrassingly-parallel population axis.
+    /// `simulate_one` is pure Rust (no GIL) and `&self`-only; rayon's indexed
+    /// `collect` preserves order and short-circuits on the first `Err`.
+    fn simulate_window(
+        &self,
+        window: &[BoundCircuit],
+        shots: u32,
+        opts: &TranspileOptions,
+        global_start: u64,
+        parallel_threshold: usize,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        window
+            .par_iter()
+            .enumerate()
+            .map(|(i, qc)| {
+                let seed = self
+                    .base_seed
+                    .wrapping_add(global_start)
+                    .wrapping_add(i as u64);
+                self.simulate_one(qc, shots, seed, opts, parallel_threshold)
+            })
+            .collect()
+    }
+
+    /// Gate-vs-circuit auto-parallel threshold (native.rs' historical rule): gate
+    /// kernels compete with the across-circuit `par_iter` on the same rayon pool,
+    /// so once a window has at least as many circuits as pool threads, evolve each
+    /// circuit's gates SEQUENTIALLY (`usize::MAX`) to avoid nested-rayon
+    /// contention; a smaller window keeps the default threshold and lets rayon's
+    /// nesting fill idle cores. Numerically identical either way — speed only.
+    fn gate_parallel_threshold(&self, window_len: usize, threads: usize) -> usize {
+        if window_len >= threads {
+            usize::MAX
+        } else {
+            self.simulator.parallel_threshold
+        }
+    }
+}
+
+/// The widest circuit in the batch, used to size the memory budget (plan §4.5):
+/// the native backend budgets for its largest statevector. `Native` circuits
+/// expose their width directly (GIL-free), a `Qasm2` program is parsed for it,
+/// and a `Qiskit` circuit (which this backend rejects at execution) contributes
+/// nothing. An empty or all-unsupported batch yields 0 — a one-amplitude budget
+/// that keeps full thread concurrency and lets `simulate_one` surface the real
+/// per-circuit error.
+fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
+    qcs.iter()
+        .filter_map(|qc| match qc {
+            BoundCircuit::Native(cc) => Some(cc.num_qubits),
+            BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
+                .ok()
+                .map(|pc| pc.num_qubits),
+            BoundCircuit::Qiskit(_) => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
@@ -165,39 +293,14 @@ impl QuantumBackend for NativeStatevectorBackend {
         qcs: &[BoundCircuit],
         config: &ExecutionConfig,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
-        // Tuning travels as an argument; the strategy is the injected field.
-        let opts = TranspileOptions {
-            level: config.opt_level,
-        };
-        // Reserve a contiguous block of seeds for this batch so each circuit is
-        // sampled independently and deterministically, regardless of order.
-        let start = self.counter.fetch_add(qcs.len() as u64, Ordering::Relaxed);
-        // Evaluate the batch in parallel ACROSS circuits. A DE generation submits its whole
-        // population here (one circuit per candidate), so this is the population axis —
-        // embarrassingly parallel and the axis that actually scales. `simulate_one` is pure Rust
-        // (no GIL) and `&self`-only; the per-circuit seed is `start + i`, fixed up front and
-        // independent of execution order, so `par_iter` yields byte-identical counts to the
-        // sequential path, and rayon's indexed `collect` preserves order and short-circuits on the
-        // first `Err`.
-        //
-        // Gate-level parallelism competes with this across-circuit par_iter on the same rayon pool.
-        // Once the batch has at least as many circuits as pool threads (a population saturating the
-        // node) the gate kernels only add nested-rayon contention, so evolve each circuit's gates
-        // SEQUENTIALLY (`parallel_threshold = MAX`). A smaller batch leaves cores idle, so keep the
-        // normal threshold and let rayon's nesting fill them; a lone circuit (n == 1) keeps full
-        // gate-level parallelism.
-        let parallel_threshold = if qcs.len() >= rayon::current_num_threads() {
-            usize::MAX
-        } else {
-            self.simulator.parallel_threshold
-        };
-        qcs.par_iter()
-            .enumerate()
-            .map(|(i, qc)| {
-                let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                self.simulate_one(qc, config.shots, seed, &opts, parallel_threshold)
-            })
-            .collect()
+        // Bound the peak memory to a statevector budget (plan §4.5, P1-memory):
+        // the real cost of a population batch is the concurrent statevectors
+        // (`2^n * 16` bytes each), not the cheap `BoundCircuit` list, so cap how
+        // many run at once by the batch's widest circuit. This is a pure resource
+        // bound — counts are unchanged (see `run_batch_with_cap`).
+        let cap =
+            max_statevector_concurrency(representative_qubits(qcs), rayon::current_num_threads());
+        self.run_batch_with_cap(qcs, config, cap)
     }
 
     /// Single-evolution fast path: `polypus-sim` separates evolution from
@@ -248,7 +351,7 @@ impl QuantumBackend for NativeStatevectorBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::OptLevel;
+    use crate::OptLevel;
     use polypus_circuit::{GateInstruction, ParameterizedCircuit};
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
@@ -268,7 +371,7 @@ mod tests {
             shots: 500,
             n_qpus: 1,
             infrastructure: "local".to_string(),
-            backend_config: crate::infrastructure::BackendConfig::LocalNative,
+            backend_config: crate::BackendConfig::LocalNative { fusion: true },
             opt_level,
             // No explicit seed: exercises the OS-entropy fallback path in
             // `Infrastructure::create_backend`. Tests that build the backend
@@ -319,6 +422,54 @@ mod tests {
             out.gates.push(GateInstruction::Barrier(Vec::new()));
             out
         }
+    }
+
+    #[test]
+    fn with_fusion_toggles_the_simulator_flag() {
+        assert!(NativeStatevectorBackend::new(0).simulator.fusion);
+        assert!(
+            !NativeStatevectorBackend::new(0)
+                .with_fusion(false)
+                .simulator
+                .fusion
+        );
+        assert!(
+            NativeStatevectorBackend::new(0)
+                .with_fusion(true)
+                .simulator
+                .fusion
+        );
+    }
+
+    /// End-to-end: `create_backend` threads `BackendConfig::LocalNative`'s
+    /// `fusion` field all the way to the simulator it constructs, for both
+    /// values — not just the default. A same-seed, same-circuit comparison
+    /// against the fusion-enabled backend must still agree (fusion changes
+    /// performance, never the result), proving `fusion: false` reached a
+    /// working (not just a differently-configured) simulator.
+    #[test]
+    fn create_backend_threads_fusion_through_local_native() {
+        use crate::Infrastructure;
+
+        let mut cfg = config_with(OptLevel::default());
+        // Pinned so the only variable between the two branches is `fusion` --
+        // `config_with`'s default `seed: None` would draw independent
+        // OS-entropy seeds per `create_backend` call, which would make the
+        // two branches' counts differ for a reason unrelated to fusion.
+        cfg.seed = Some(2024);
+        cfg.backend_config = crate::BackendConfig::LocalNative { fusion: true };
+        let fused = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
+
+        cfg.backend_config = crate::BackendConfig::LocalNative { fusion: false };
+        let unfused = Infrastructure::create_backend(&cfg)
+            .unwrap()
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .unwrap();
+
+        assert_eq!(fused, unfused);
     }
 
     #[test]
@@ -506,6 +657,40 @@ mod tests {
         }
     }
 
+    /// P1-memory (plan §4.5): capping concurrent statevectors must be a pure
+    /// resource bound — the counts are byte-identical to the single unbounded
+    /// `par_iter` for *every* cap, because the per-circuit seed is fixed up front
+    /// (`base_seed + block_start + i`) and gate-vs-circuit parallelism is
+    /// numerically identical. The batch is sized past the thread pool so the full
+    /// path takes the `usize::MAX` gate-threshold branch while the small-cap
+    /// windows take the default branch, pinning that this threshold flip changes
+    /// nothing. Each backend gets a fresh seed block, so all runs start at 0.
+    #[test]
+    fn capped_batches_match_the_full_batch_byte_for_byte() {
+        let cfg = config_with(OptLevel::default());
+        let n = rayon::current_num_threads() + 3;
+        // Identical circuits, but each index draws seed base+i, so the output
+        // vector is order- and seed-sensitive: a mis-seeded or reordered window
+        // would change it.
+        let batch: Vec<BoundCircuit> = (0..n).map(|_| BoundCircuit::Native(uniform3())).collect();
+
+        // Reference: whole batch in one window (cap >= len => fast path).
+        let full = NativeStatevectorBackend::new(2024)
+            .run_batch_with_cap(&batch, &cfg, usize::MAX)
+            .unwrap();
+        assert_eq!(full.len(), n);
+
+        for cap in [1usize, 2, 3, n - 1, n, n + 100] {
+            let capped = NativeStatevectorBackend::new(2024)
+                .run_batch_with_cap(&batch, &cfg, cap)
+                .unwrap();
+            assert_eq!(
+                capped, full,
+                "cap={cap} must yield byte-identical counts to the full batch"
+            );
+        }
+    }
+
     /// Acceptance criterion (defect #1), positive half: the *same explicit
     /// seed* reproduces byte-identical counts across two independent backends,
     /// regardless of the run `id` (which no longer feeds the RNG).
@@ -616,7 +801,7 @@ mod tests {
 
     #[test]
     fn omitted_seed_differs_across_calls_for_same_id() {
-        use crate::infrastructure::Infrastructure;
+        use crate::Infrastructure;
         let cfg = config_with(OptLevel::default()); // id "abc", seed: None
         let batch = vec![BoundCircuit::Native(uniform3())];
         let a = Infrastructure::create_backend(&cfg)

@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has six crates:
+with PyO3 Python bindings. The Cargo workspace has ten crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -24,8 +24,12 @@ with PyO3 Python bindings. The Cargo workspace has six crates:
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
+| `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
+| `polypus-scheduler` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, `Flow`/`RunCircuitFlow`, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
+| `polypus-evaluation` | Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
-| `polypus` | The library + Python extension module; orchestration and infrastructures (`local`, `cunqa`, `qmio`, `native`) | **Yes** |
+| `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
 Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in
 `packages/polypus_python/pyproject.toml`), **CUNQA** (distributed QPUs over
@@ -40,8 +44,25 @@ boundary stays out-of-process and explicit; see
   and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or
   Python**. Do not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python
   types into them.
-- Only the `polypus` crate may depend on `pyo3` and contain `#[pyclass]` /
-  `#[pymethods]` / `#[pyfunction]`.
+- `polypus-infrastructure` may depend on `pyo3` for the GIL and for carrying a
+  `PyErr` verbatim (its Aer/CUNQA/QMIO seams call into Python), but it defines
+  **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
+  into a typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::backend_error_to_pyerr`).
+- `polypus-scheduler` is **`pyo3`-free at the source level**: it must not name
+  `pyo3`, `Python`, `PyErr` or the GIL (its `Cargo.toml` has no `pyo3`). It still
+  links libpython *transitively* through `polypus-infrastructure`, so its tests
+  run in the same job as `polypus`, not the pure-Rust group. A real oracle
+  failure reaches it **type-erased** as a `Box<dyn Error + Send>` in the
+  `OracleErrorSlot`; the `polypus` edge downcasts it back to the concrete
+  `EvaluationError` to re-raise (plan §10.1).
+- `polypus-evaluation` may depend on `pyo3` (Qiskit binding under the GIL, Python
+  callbacks) like `polypus-infrastructure`, but likewise defines **no**
+  `#[pyclass]` and **no** `From<_> for PyErr`: turning an `EvaluationError` into a
+  typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::evaluation_error_to_pyerr`).
+- Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
+  `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
 - The optimizers are decoupled from circuits and Python via the
   `EvaluationOracle` / `VarianceOracle` traits (contract C-5). A new optimizer
   is implemented against those oracles; it must **not** call Python or know
@@ -65,24 +86,21 @@ boundary stays out-of-process and explicit; see
   deaf to Ctrl+C until it returns. So a GIL-free loop that must stay
   interruptible has to call `py.check_signals()` at a safe boundary: the
   optimizer entry points (`train` / `qml.train`) release the GIL around the
-  whole `optimize()` call **and** call `py.check_signals()` at each per-batch
-  Python touchpoint (`run_and_evaluate`, plus once on the main thread after the
-  QML workers join, since `PyErr_CheckSignals` is a no-op off the main thread).
+  whole `optimize()` call, and the `Planner` calls `py.check_signals()` between
+  execution waves (inside `execute`) — the one place that boundary now lives, so
+  both the VQC and QML oracles stay interruptible without their own signal loop.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception (`EvaluationError::Python` carries it verbatim), never
   swallowed into a panic by an `.expect()` (that would surface as an opaque
-  `PanicException`; see §9 and `OracleErrorSlot` in
-  `crates/polypus/src/evaluation/mod.rs`).
+  `PanicException`; see §9 and `OracleErrorSlot` in `polypus-scheduler`).
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
-  around the whole `algorithm.run(args)` call and each orchestration variant
-  calls `py.check_signals()` at its per-circuit / pre-result-conversion
-  boundary — the single `Python::with_gil` block where `AlgorithmSingleRun`
-  and `DistributeByShotsRun` reacquire the GIL to build the return value, as
-  the first statement before constructing any Python object. A pending Ctrl+C
-  surfaces there as a `KeyboardInterrupt` propagated verbatim through the
-  function's `Result`, never swallowed or retyped.
+  around the whole `scheduler.run(flow)` call; the `Planner` calls
+  `py.check_signals()` between execution waves (in `execute`), and the counts are
+  converted to a Python object back at the edge — GIL re-acquired — only after the
+  run returns. A pending Ctrl+C surfaces there as a `KeyboardInterrupt`
+  propagated verbatim through the function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
   around the `StatevectorSimulator::run_cancellable` call (parameter binding
   stays on the GIL side — it is O(gates) and allocates nothing of size `2^n`),

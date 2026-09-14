@@ -1,0 +1,153 @@
+{
+  "meta": {
+    "backend": "polypus (native) for train/run_quantum_circuit; mocked run_qcs for qml_train",
+    "note": "Pre-refactor determinism baseline. Regenerate only on a deliberate, reviewed behaviour change (see module docstring)."
+  },
+  "qml_train": {
+    "de_mockbackend_seed123": {
+      "best_fitness_hex": "0x1.0000000000000p+0",
+      "best_fitness_repr": "1.0",
+      "best_params_hex": [
+        "0x1.406d5b9c78921p+2",
+        "0x1.ea498aa091d94p+1",
+        "0x1.22a97899859efp+1",
+        "0x1.c59c8cb7e8361p-4"
+      ],
+      "best_params_repr": [
+        "5.006674673846903",
+        "3.830369308856186",
+        "2.270796847307103",
+        "0.11074500053520132"
+      ],
+      "converged": false,
+      "iterations_run": 3,
+      "seed": 123
+    }
+  },
+  "run_quantum_circuit": {
+    "native_bell_seed7": {
+      "counts": [
+        {
+          "00": 525,
+          "11": 475
+        }
+      ],
+      "seed": 7
+    },
+    "native_ghz4_seed123": {
+      "counts": [
+        {
+          "0000": 2046,
+          "1111": 2050
+        }
+      ],
+      "seed": 123
+    },
+    "native_uniform3_seed42": {
+      "counts": [
+        {
+          "000": 242,
+          "001": 256,
+          "010": 243,
+          "011": 245,
+          "100": 239,
+          "101": 269,
+          "110": 257,
+          "111": 249
+        }
+      ],
+      "seed": 42
+    }
+  },
+  "train": {
+    "de_native_1q_seed2024": {
+      "best_fitness_hex": "0x1.0000000000000p+0",
+      "best_fitness_repr": "1.0",
+      "best_params_hex": [
+        "0x1.8e5e58af63f32p+1"
+      ],
+      "best_params_repr": [
+        "3.112254224433763"
+      ],
+      "converged": false,
+      "fitness_history_hex": [
+        "0x1.fe00000000000p-1",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0"
+      ],
+      "iterations_run": 8,
+      "seed": 2024
+    },
+    "de_native_2q_seed7": {
+      "best_fitness_hex": "0x1.f400000000000p-1",
+      "best_fitness_repr": "0.9765625",
+      "best_params_hex": [
+        "0x1.b82bc7dd763bbp+1",
+        "0x1.7e78fbb15488fp+2"
+      ],
+      "best_params_repr": [
+        "3.438836081634205",
+        "5.976134226964986"
+      ],
+      "converged": false,
+      "fitness_history_hex": [
+        "0x1.a600000000000p-1",
+        "0x1.da00000000000p-1",
+        "0x1.f400000000000p-1",
+        "0x1.f400000000000p-1",
+        "0x1.f400000000000p-1",
+        "0x1.f400000000000p-1"
+      ],
+      "iterations_run": 6,
+      "seed": 7
+    },
+    "pso_native_1q_seed2024": {
+      "best_fitness_hex": "0x1.0000000000000p+0",
+      "best_fitness_repr": "1.0",
+      "best_params_hex": [
+        "0x1.6e681049c0904p+1"
+      ],
+      "best_params_repr": [
+        "2.8625507698171777"
+      ],
+      "converged": false,
+      "fitness_history_hex": [
+        "0x1.e200000000000p-1",
+        "0x1.e200000000000p-1",
+        "0x1.fc00000000000p-1",
+        "0x1.fc00000000000p-1",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0",
+        "0x1.0000000000000p+0"
+      ],
+      "iterations_run": 8,
+      "seed": 2024
+    },
+    "qng_native_1q_seed2024": {
+      "best_fitness_hex": "0x1.fa00000000000p-1",
+      "best_fitness_repr": "0.98828125",
+      "best_params_hex": [
+        "0x1.60324ab2a982ep+1"
+      ],
+      "best_params_repr": [
+        "2.751534783589725"
+      ],
+      "converged": false,
+      "fitness_history_hex": [
+        "0x1.e600000000000p-1",
+        "0x1.e600000000000p-1",
+        "0x1.e600000000000p-1",
+        "0x1.fa00000000000p-1",
+        "0x1.fa00000000000p-1"
+      ],
+      "iterations_run": 5,
+      "seed": 2024
+    }
+  }
+}

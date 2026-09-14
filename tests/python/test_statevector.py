@@ -227,6 +227,137 @@ def test_random_circuits_match_qiskit():
         _compare(polypus.statevector(p), qc)
 
 
+def test_long_diagonal_run_matches_qiskit():
+    """A diagonal-heavy circuit whose single run of consecutive diagonal gates is
+    far longer than the backend's fusion cap (``MAX_FUSED_DIAGONAL_RUN`` = 64):
+    the native path fuses such a run into one buffer pass (chunked at the cap),
+    and its ``statevector`` output must stay bit-for-bit what applying the gates
+    one at a time gives — which Qiskit's reference computes gate by gate.
+
+    The run mixes every diagonal instruction (``z, s, t, sdg, tdg, rz`` and
+    ``cz, rzz, cp``) on varied qubits, over a non-trivial (superposed) input so
+    the phases actually matter."""
+    import polypus
+
+    n = 4
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        p = p.h(q)
+        qc.h(q)
+
+    # 150 > 64: one unbroken diagonal run spanning several fused passes.
+    for k in range(150):
+        q = k % n
+        r = (k + 1) % n
+        kind = k % 9
+        if kind == 0:
+            p = p.z(q)
+            qc.z(q)
+        elif kind == 1:
+            p = p.s(q)
+            qc.s(q)
+        elif kind == 2:
+            p = p.t(q)
+            qc.t(q)
+        elif kind == 3:
+            p = p.sdg(q)
+            qc.sdg(q)
+        elif kind == 4:
+            p = p.tdg(q)
+            qc.tdg(q)
+        elif kind == 5:
+            th = 0.1 * k
+            p = p.rz(q, th)
+            qc.rz(th, q)
+        elif kind == 6:
+            p = p.cz(q, r)
+            qc.cz(q, r)
+        elif kind == 7:
+            th = -0.07 * k
+            p = p.rzz(q, r, th)
+            qc.rzz(th, q, r)
+        else:
+            th = 0.05 * k
+            p = p.cp(q, r, th)
+            qc.cp(th, q, r)
+
+    _compare(polypus.statevector(p), qc)
+
+
+def test_dense_fusion_mixed_matches_qiskit():
+    """A hardware-efficient-ansatz shape (the circuit the dense connected-qubit
+    fusion of issue #132 targets) with diagonal gates interleaved, so the fused
+    dense path, the diagonal-run path (#131) and the flush-on-boundary logic
+    between them are all exercised in one circuit.
+
+    Each layer applies ``rx``/``ry`` on every qubit and a brickwork of ``cx``
+    entanglers (so rotations fuse with the ``cx`` they share a qubit with into one
+    composed 2-qubit matrix), then a run of diagonal gates (``rz``/``cz``/``rzz``)
+    that forces the open dense components to flush before it. The fused native
+    output must stay bit-for-bit what applying every gate one at a time gives —
+    which Qiskit computes gate by gate — to 1e-10."""
+    import polypus
+
+    n = 5
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for layer in range(4):
+        for q in range(n):
+            a = 0.3 + 0.1 * layer + 0.05 * q
+            b = -0.2 - 0.07 * q
+            p = p.rx(q, a).ry(q, b)
+            qc.rx(a, q)
+            qc.ry(b, q)
+        # Brickwork entanglers: pairing alternates each layer so a cx bridges
+        # components built in the previous layer, forcing >2-qubit flushes.
+        for s in range(layer % 2, n - 1, 2):
+            p = p.cx(s, s + 1)
+            qc.cx(s, s + 1)
+        # A diagonal run: a hard boundary that flushes the open dense components.
+        for q in range(n):
+            r = (q + 1) % n
+            p = p.rz(q, 0.11 * (q + 1)).cz(q, r).rzz(q, r, -0.09 * (layer + 1))
+            qc.rz(0.11 * (q + 1), q)
+            qc.cz(q, r)
+            qc.rzz(-0.09 * (layer + 1), q, r)
+
+    _compare(polypus.statevector(p), qc)
+
+
+def test_fusion_false_matches_fusion_true_and_qiskit():
+    """``fusion=False`` opts out of both fusion mechanisms (#131, #132) for a
+    strictly gate-by-gate simulation of exactly the circuit as written.
+    Fusion only changes performance, never the result, so on a circuit shaped
+    to trigger both mechanisms (dense connected components *and* a diagonal
+    run — the same shape as ``test_dense_fusion_mixed_matches_qiskit``) the
+    unfused output must still match Qiskit, and therefore the fused output
+    too."""
+    import polypus
+
+    n = 4
+    p = polypus.Circuit(n)
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        p = p.rx(q, 0.3 + 0.1 * q).ry(q, -0.2 - 0.05 * q)
+        qc.rx(0.3 + 0.1 * q, q)
+        qc.ry(-0.2 - 0.05 * q, q)
+    for s in range(0, n - 1, 2):
+        p = p.cx(s, s + 1)
+        qc.cx(s, s + 1)
+    for q in range(n):
+        r = (q + 1) % n
+        p = p.rz(q, 0.11 * (q + 1)).cz(q, r).rzz(q, r, -0.09)
+        qc.rz(0.11 * (q + 1), q)
+        qc.cz(q, r)
+        qc.rzz(-0.09, q, r)
+
+    fused = polypus.statevector(p)
+    unfused = polypus.statevector(p, fusion=False)
+    _compare(unfused, qc)
+    assert np.allclose(fused, unfused, atol=1e-10)
+
+
 # ``polypus_sim::MAX_QUBITS``. Not exposed to Python (the constant belongs to the
 # simulator, not to the seam), so it is mirrored here — keep both in sync.
 _MAX_QUBITS = 30

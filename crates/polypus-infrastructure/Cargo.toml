@@ -1,0 +1,32 @@
+[package]
+name = "polypus-infrastructure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ
+# stack; forwarded from `polypus`'s own `qmio` feature. Mirrors the backend's
+# dependency set in `polypus/Cargo.toml`.
+qmio = ["dep:zeromq", "dep:serde-pickle", "dep:serde_json", "dep:tokio"]
+
+[dependencies]
+polypus-circuit = { workspace = true }
+polypus-sim = { workspace = true, features = ["parallel"] }
+polypus-observable = { workspace = true }
+# PyO3 for the GIL-touching backends (Aer/CUNQA/QMIO seams) and for carrying a
+# `PyErr` verbatim in `BackendError::Seam`. This crate never defines the
+# extension module, so it does not enable `pyo3/extension-module`; the top-level
+# `polypus` cdylib turns that on, and feature unification applies it here too.
+pyo3 = { version = "0.25" }
+rand = { workspace = true }
+# Across-circuit population parallelism in the native statevector backend.
+rayon = "1"
+log = { workspace = true }
+# --- optional, only compiled with `--features qmio` ---
+zeromq = { version = "0.6", optional = true }
+serde-pickle = { version = "1.2", optional = true }
+serde_json = { version = "1.0", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net"], optional = true }

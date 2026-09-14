@@ -47,12 +47,28 @@ pub enum OptimizerError {
     /// returned a number of fitness values different from the number of
     /// candidates it was given. The optimizers index the result positionally,
     /// so a short (or long) return would otherwise panic with an out-of-bounds
-    /// index deep inside the optimization loop.
+    /// index deep inside the optimization loop. Also raised when a
+    /// [`VarianceOracle::variance_diagonal`](crate::VarianceOracle::variance_diagonal)
+    /// returns a diagonal whose length is not the number of dimensions (QNG).
     OracleLengthMismatch {
         /// Number of candidates submitted (the required length).
         expected: usize,
         /// Number of fitness values the oracle actually returned.
         got: usize,
+    },
+    /// A scalar configuration value is outside its valid domain: QNG's
+    /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
+    /// report `-inf`), `finite_difference_step` (must be finite and `> 0`),
+    /// `tikhonov_reg` (must be finite and `>= 0`) or `learning_rate` (must be
+    /// finite). Detected before any RNG draw or oracle call, so a bad config
+    /// maps to a `PyValueError` at the seam rather than producing a `NaN`/`inf`
+    /// result. (Empty or non-finite `bounds` keep their own
+    /// [`InvalidBounds`](OptimizerError::InvalidBounds) variant.)
+    InvalidConfig {
+        /// The offending parameter's name.
+        parameter: &'static str,
+        /// Why it was rejected (valid domain + the offending value).
+        reason: String,
     },
 }
 
@@ -71,6 +87,9 @@ impl fmt::Display for OptimizerError {
                 f,
                 "evaluation oracle returned {got} fitness value(s) for {expected} candidate(s); it must return exactly one value per candidate, in order"
             ),
+            OptimizerError::InvalidConfig { parameter, reason } => {
+                write!(f, "invalid {parameter}: {reason}")
+            }
         }
     }
 }

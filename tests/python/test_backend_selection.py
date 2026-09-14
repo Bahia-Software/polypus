@@ -93,6 +93,57 @@ class TestRunQuantumCircuitBackends:
                 noise_model=object(),
             )
 
+    def test_native_backend_fusion_false_matches_fusion_true(self):
+        """`fusion=False` opts the native backend out of gate fusion (issues
+        #131/#132) for a strictly gate-by-gate simulation. Fusion only
+        changes performance, never the result: with the same seed, a circuit
+        shaped to trigger fusion (entangled, so not all outcomes are
+        possible) must produce byte-identical counts either way."""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        fused = polypus.run_quantum_circuit(
+            qc, shots=2000, infrastructure="local", backend="polypus", seed=99
+        )
+        unfused = polypus.run_quantum_circuit(
+            qc,
+            shots=2000,
+            infrastructure="local",
+            backend="polypus",
+            seed=99,
+            fusion=False,
+        )
+        assert fused.counts == unfused.counts
+
+    def test_fusion_true_rejected_on_non_native_backend(self):
+        """`fusion=True` asks for gate fusion, which only the native `polypus`
+        backend performs. Requesting it on Aer — a backend that cannot fuse —
+        is rejected with a ValueError rather than silently ignored, so it never
+        looks like it took effect. (Omitting `fusion` leaves Aer untouched;
+        that is the default and is covered throughout the rest of the suite.)"""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        with pytest.raises(ValueError, match="fusion=True applies only to"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="local", backend="aer", fusion=True
+            )
+
+    def test_fusion_false_accepted_on_non_native_backend(self):
+        """`fusion=False` ("do not fuse") is honourable on every backend — a
+        non-fusing backend already runs gate-by-gate — so passing it to Aer is
+        accepted, not rejected: it is a no-op there, not an unmeetable request
+        like `fusion=True`."""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        result = polypus.run_quantum_circuit(
+            qc, shots=100, infrastructure="local", backend="aer", fusion=False
+        )
+        # counts is one dict per circuit (C-3); the call was accepted, and shots
+        # are conserved.
+        assert sum(result.counts[0].values()) == 100
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # A Qiskit circuit is rejected by the QMIO infrastructure

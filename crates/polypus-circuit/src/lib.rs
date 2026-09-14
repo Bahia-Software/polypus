@@ -46,6 +46,6 @@ pub mod templates;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
 pub use error::CircuitError;
-pub use gate::{terminal_measurement_violation, GateInstruction, GateParam};
+pub use gate::{qubit_index_violation, terminal_measurement_violation, GateInstruction, GateParam};
 // Variant re-exports so call sites can write `Param(0)` / `Fixed(0.5)` directly.
 pub use gate::GateParam::{Fixed, Param};

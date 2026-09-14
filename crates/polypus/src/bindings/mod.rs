@@ -18,24 +18,23 @@ use de::DE;
 use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo};
 use pso::PSO;
-use qng::{PyVarianceOracle, QNG};
+use qng::QNG;
 
-use crate::algorithms::{AlgorithmArgs, AlgorithmSingleRun, AlgorithmTrait, DistributeByShotsRun};
 use crate::evaluation::{
-    CircuitSource, CostObservable, EvaluationOracle, OracleErrorSlot, PyCallbackObservable,
-    QmlOracle, VqcOracle,
+    CircuitSource, CostObservable, OracleErrorSlot, PyCallbackObservable, PyVarianceOracle,
+    TrainQmlFlow, TrainVqcFlow,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
 use crate::infrastructure::execution_config::QmioProgramFormat;
 use crate::infrastructure::{
-    BackendConfig, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
+    BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
+    OptLevel, Planner, ShotDistributingPlanner,
 };
-use polypus_optimizers::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, OptimizationOutcome, Optimizer,
-    OptimizerError,
+use crate::scheduler::{
+    DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
 };
+use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -44,10 +43,9 @@ use uuid::Uuid;
 /// manifest that lets a run be logged and replayed (contract C-7).
 ///
 /// `counts` is the exact payload the runner produced before this wrapper
-/// existed — a `list[dict[str, int]]` for a single-QPU run
-/// ([`AlgorithmSingleRun`](crate::algorithms::AlgorithmSingleRun)), or a single
-/// merged `dict[str, int]` for a distributed (`n_qpus > 1`) run
-/// ([`DistributeByShotsRun`](crate::algorithms::DistributeByShotsRun)); the
+/// existed — a `list[dict[str, int]]` for a single-QPU run (the backend's default
+/// atomic-wave planner), or a single merged `dict[str, int]` for a distributed
+/// (`n_qpus > 1`) run (the shot-distributing planner); the
 /// per-dict format is contract C-3. The manifest fields make a simulated run
 /// reproducible: feeding the reported [`seed`](Self::seed) back into
 /// `run_quantum_circuit(..., seed=...)` reproduces the counts byte-for-byte on
@@ -236,25 +234,40 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
 /// reported duration covers the whole call.
 ///
-/// An `OptimizerError` with no oracle failure recorded is a rejected
-/// optimizer configuration (`population_size` too small for DE, empty PSO/QNG
-/// `bounds`, …), caught before any oracle call — unlike an oracle failure, it
-/// has nowhere else to be logged, so it is logged here too.
+/// [`OracleError::Config`] is a rejected optimizer configuration
+/// (`population_size` too small for DE, empty PSO/QNG `bounds`, …), caught before
+/// any oracle call — unlike an oracle failure it has nowhere else to be logged,
+/// so it is logged here too; [`OracleError::Evaluation`] re-raises the oracle's
+/// recorded failure with its original class preserved.
 fn finish_optimization(
     py: Python<'_>,
-    result: Result<OptimizationOutcome, OptimizerError>,
-    errors: &OracleErrorSlot,
+    result: Result<OptimizationOutcome, OracleError>,
     seed: u64,
     id: String,
     start: Instant,
 ) -> PyResult<PyObject> {
-    if let Some(eval_err) = errors.take() {
-        return Err(eval_err.into());
-    }
-    let outcome = result.map_err(|e| {
-        log::error!("run {id}: optimizer rejected the configuration: {e}");
-        pyo3::exceptions::PyValueError::new_err(e.to_string())
-    })?;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(OracleError::Evaluation(boxed)) => {
+            // The oracle boxed an `EvaluationError` into the type-erased slot
+            // (the scheduler crate is pyo3-free); recover it to re-raise with its
+            // original Python class preserved. The slot only ever holds an
+            // `EvaluationError`, so the downcast fails only in an impossible case,
+            // where we still surface a typed evaluation error rather than panic.
+            return Err(
+                match boxed.downcast::<crate::evaluation::EvaluationError>() {
+                    Ok(eval_err) => crate::exceptions::evaluation_error_to_pyerr(*eval_err),
+                    Err(other) => crate::exceptions::EvaluationError::new_err(other.to_string()),
+                },
+            );
+        }
+        Err(OracleError::Config(config_err)) => {
+            log::error!("run {id}: optimizer rejected the configuration: {config_err}");
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                config_err.to_string(),
+            ));
+        }
+    };
     log::info!(
         "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
         outcome.iterations_run,
@@ -262,6 +275,58 @@ fn finish_optimization(
         start.elapsed()
     );
     outcome_to_train_result(py, outcome, seed, id)
+}
+
+/// Parse a `polypus.DE` / `PSO` / `QNG` object into a pyo3-free [`Method`].
+///
+/// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
+/// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
+/// non-method object is a `TypeError`, exactly as the previous inline dispatch
+/// (shared now by both `train` and `qml_train`).
+fn method_from_pyclass(
+    method: &Bound<'_, PyAny>,
+    errors: &OracleErrorSlot,
+    run_id: &str,
+) -> PyResult<Method> {
+    if let Ok(de) = method.extract::<PyRef<DE>>() {
+        return Ok(Method::De(DeConfig {
+            generations: de.generations,
+            population_size: de.population_size,
+            tolerance: de.tolerance,
+            patience: de.patience,
+        }));
+    }
+    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
+        return Ok(Method::Pso(PsoConfig {
+            generations: pso.generations,
+            population_size: pso.population_size,
+            bounds: pso.bounds,
+            inertia_weight: pso.inertia_weight,
+            cognitive_weight: pso.cognitive_weight,
+            social_weight: pso.social_weight,
+            tolerance: pso.tolerance,
+        }));
+    }
+    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
+        let variance_oracle: Box<dyn VarianceOracle> = Box::new(PyVarianceOracle {
+            variance_function: qng.variance_function.clone_ref(method.py()),
+            errors: errors.clone(),
+            run_id: run_id.to_string(),
+        });
+        return Ok(Method::Qng(
+            QngConfig {
+                max_iters: qng.max_iters,
+                learning_rate: qng.learning_rate,
+                finite_difference_step: qng.finite_difference_step,
+                bounds: qng.bounds,
+                tikhonov_reg: qng.tikhonov_reg,
+            },
+            variance_oracle,
+        ));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
+    ))
 }
 
 /// Map the public `infrastructure` + `backend` strings and provider parameters
@@ -272,6 +337,22 @@ fn finish_optimization(
 /// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
 /// statevector simulator. The choice is ignored for CUNQA, which manages its
 /// own simulated QPUs.
+///
+/// `fusion` only applies to the native `"polypus"` backend (see
+/// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
+/// `Option` so the three cases stay distinct:
+///
+/// * omitted (`None`): no opinion — the native backend uses its default
+///   (`true`); every other backend ignores it, so sweeping the same kwargs
+///   across backends needs no per-call special-casing (as with
+///   `nodes`/`cores_per_qpu`, which `local`/`qmio` also ignore).
+/// * `Some(false)`: "do not fuse". Every backend can honour this — the
+///   non-native ones never fuse anyway — so it is always accepted; on the
+///   native backend it forces a strictly gate-by-gate run.
+/// * `Some(true)`: "fuse". Only the native backend can. Asking for it on a
+///   backend that cannot fuse is a request that cannot be met, so it is
+///   rejected here rather than silently ignored (which would mislead the
+///   caller into believing fusion was in effect).
 fn build_backend_config(
     infrastructure: &str,
     backend: &str,
@@ -279,8 +360,24 @@ fn build_backend_config(
     noise_model: Option<Py<PyAny>>,
     nodes: u32,
     cores_per_qpu: u32,
+    fusion: Option<bool>,
 ) -> PyResult<BackendConfig> {
-    match Infrastructure::from_str(infrastructure)? {
+    let infrastructure_kind = Infrastructure::from_str(infrastructure)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
+    // Only the native statevector backend fuses gates. An explicit `Some(true)`
+    // anywhere else is an unmeetable request (see the doc above) — reject it
+    // before building anything, so it never looks like it took effect. `None`
+    // and `Some(false)` pass through: both are honourable everywhere.
+    let is_native = matches!(infrastructure_kind, Infrastructure::Local)
+        && matches!(backend, "polypus" | "statevector" | "polypus_statevector");
+    if fusion == Some(true) && !is_native {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "fusion=True applies only to the native backend=\"polypus\"; backend \"{backend}\" \
+             on infrastructure \"{infrastructure}\" cannot fuse gates. Omit fusion, or pass \
+             fusion=False for a gate-by-gate run."
+        )));
+    }
+    match infrastructure_kind {
         Infrastructure::Local => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
                 backend: "AerSimulator".to_string(),
@@ -294,7 +391,9 @@ fn build_backend_config(
                          and does not accept a noise_model; use backend=\"aer\"",
                     ));
                 }
-                Ok(BackendConfig::LocalNative)
+                Ok(BackendConfig::LocalNative {
+                    fusion: fusion.unwrap_or(true),
+                })
             }
             other => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown local backend '{other}'; expected \"aer\" or \"polypus\""
@@ -552,7 +651,15 @@ fn extract_cost_observable(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn CostObser
 ///
 /// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
 /// effective `seed`, `backend`, `infrastructure`) for logging and replay.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+///
+/// `fusion` applies only to `backend="polypus"`, the one backend that fuses
+/// gates. Omit it (the default) and each backend does its own thing — the
+/// native one fuses, the rest never did. `fusion=False` forces a strictly
+/// gate-by-gate run and is accepted everywhere (a non-fusing backend already
+/// meets it). `fusion=True` on any backend that cannot fuse is rejected with a
+/// `ValueError` rather than silently ignored, so it never looks like it took
+/// effect.
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -564,6 +671,7 @@ pub fn run_quantum_circuit<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    fusion: Option<bool>,
 ) -> PyResult<pyo3::PyObject> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -624,6 +732,7 @@ pub fn run_quantum_circuit<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        fusion,
     )?;
     // Only the native statevector backend consults the gate-parallel threshold,
     // so surface the one-time default-visible warning only when this run
@@ -643,11 +752,6 @@ pub fn run_quantum_circuit<'py>(
         opt_level: OptLevel::default(),
         seed: effective_seed,
     };
-    let args = AlgorithmArgs {
-        qcs: vec![bound_qc],
-        config,
-    };
-
     // Lifecycle record at the default level, carrying the C-7 manifest data only
     // (the circuit itself stays in the `debug!` above): enough to see what ran
     // where, and with which seed to replay it.
@@ -656,26 +760,53 @@ pub fn run_quantum_circuit<'py>(
          n_qpus={n_qpus}, shots={shots}, seed={effective_seed:?}"
     );
 
-    let algorithm: Box<
-        dyn AlgorithmTrait<Args = AlgorithmArgs, AlgorithmReturnType = PyResult<PyObject>> + Send,
-    > = if n_qpus == 1 {
-        Box::new(AlgorithmSingleRun)
-    } else {
-        Box::new(DistributeByShotsRun)
-    };
-
-    // Release the GIL for the whole run, mirroring `train` below: circuit
-    // execution is GIL-free on the native backend (and internally reacquires
-    // the GIL where Aer/CUNQA need it), so holding it here would stall every
-    // other Python thread and (with the per-circuit check_signals each
-    // algorithm variant performs before result conversion) keep Ctrl+C from
-    // taking effect until the run finishes. See docs/ENGINEERING.md §3.
-    // Keep the original counts payload intact and wrap it with the run manifest.
-    let counts = qc.py().allow_threads(move || algorithm.run(args))?;
+    // Release the GIL for the whole run, mirroring `train`: circuit execution is
+    // GIL-free on the native backend (and internally reacquires the GIL where
+    // Aer/CUNQA need it), so holding it here would stall every other Python thread
+    // and (with the Planner's between-wave check_signals) keep Ctrl+C from taking
+    // effect until the run finishes. See docs/ENGINEERING.md §3. `n_qpus > 1`
+    // selects the shot-distributing planner (which apportions this one circuit's
+    // shots across replicas and merges, conserving the total per C-3); otherwise
+    // the backend's default atomic-wave planner runs the circuit as-is.
+    let counts_result =
+        qc.py()
+            .allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
+                let backend = Infrastructure::create_backend(&config)
+                    .map_err(InfrastructureError::Backend)?;
+                let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
+                    None
+                } else {
+                    Some(Arc::new(ShotDistributingPlanner))
+                };
+                let resources = Resources::new(backend, planner, Arc::new(config))?;
+                let scheduler = Scheduler::ephemeral(resources);
+                let out = scheduler.run(RunCircuitFlow {
+                    circuits: vec![bound_qc],
+                    shots,
+                });
+                scheduler.close();
+                out
+            });
+    let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     // Completion counterpart of the start record above. There is no
     // iterations/convergence notion on this path (those are `TrainResult`
     // fields), so this reports only the run and how long it took.
     log::info!("run {id} completed: duration={:?}", start.elapsed());
+    // Convert at the FFI boundary, preserving the historical output shapes:
+    // `n_qpus == 1` yields one `list[dict]` (one map per circuit); `n_qpus > 1`
+    // yields the single merged `dict`.
+    let counts: PyObject = Python::with_gil(|py| -> PyResult<PyObject> {
+        if n_qpus == 1 {
+            Ok(counts_vec.into_pyobject(py)?.into_any().unbind())
+        } else {
+            let total = counts_vec.into_iter().next().unwrap_or_default();
+            let py_dict = PyDict::new(py);
+            for (k, v) in total {
+                py_dict.set_item(k, v)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+    })?;
     Python::with_gil(|py| {
         Py::new(
             py,
@@ -730,7 +861,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -746,6 +877,7 @@ pub fn train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    fusion: Option<bool>,
 ) -> PyResult<PyObject> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -795,6 +927,7 @@ pub fn train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        fusion,
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
@@ -823,101 +956,36 @@ pub fn train<'py>(
         shots,
         effective_seed,
     );
-    let backend = Infrastructure::create_backend(&config)?;
-    // Shared error slot: the oracles record the first evaluation failure here
+    let backend = Infrastructure::create_backend(&config)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
+    // Shared error slot: the oracle records the first evaluation failure here
     // (the optimizer traits cannot return a `Result`) and it is surfaced by
     // `finish_optimization` after `optimize` returns.
     let errors = OracleErrorSlot::new();
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
-    let oracle: Box<dyn EvaluationOracle> = Box::new(VqcOracle {
+    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
+    // and validate the pairing up front.
+    let resources = Resources::new(backend, None, Arc::clone(&config))
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    let scheduler = Scheduler::ephemeral(resources);
+    let flow = TrainVqcFlow {
         circuit: circuit_source,
-        config: Arc::clone(&config),
-        backend,
         observable,
+        method: method_enum,
+        dimensions,
+        seed: effective_seed,
         errors: errors.clone(),
-    });
-
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            patience: de.patience,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            // Release the GIL for the whole optimization: parameter binding and
-            // native simulation are GIL-free, so holding it would stall every
-            // other Python thread and (with the per-batch check_signals in
-            // run_and_evaluate) keep Ctrl+C from taking effect until the run
-            // ends. See docs/ENGINEERING.md §3.
-            method
-                .py()
-                .allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            method.py().allow_threads(|| AlgorithmPSO.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
-            bounds: qng.bounds,
-            dimensions,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(method.py()),
-                errors: errors.clone(),
-                run_id: effective_id.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            method.py(),
-            method.py().allow_threads(|| AlgorithmQNG.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
-    ))
+    };
+    // Release the GIL for the whole optimization: parameter binding and native
+    // simulation are GIL-free, so holding it would stall every other Python
+    // thread and (with the Planner's between-wave check_signals) keep Ctrl+C from
+    // taking effect until the run ends. See docs/ENGINEERING.md §3.
+    let result = method.py().allow_threads(|| scheduler.run(flow));
+    scheduler.close();
+    finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
 
 /// QML entry point: train a data-encoding VQC where `feature_map` encodes each
@@ -1071,7 +1139,10 @@ pub fn qml_train<'py>(
 
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path (native backend already rejected above): `backend` can only be
-    // an Aer variant here.
+    // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
+    // rather than `Some(true)` — the latter would trip build_backend_config's
+    // "fusion=True on a non-fusing backend" rejection for a value the caller
+    // never chose.
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1079,6 +1150,7 @@ pub fn qml_train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        None,
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -1106,94 +1178,30 @@ pub fn qml_train<'py>(
         shots,
         effective_seed,
     );
-    let backend = Infrastructure::create_backend(&config)?;
-    // Shared error slot (see `train`): oracles record the first evaluation
+    let backend = Infrastructure::create_backend(&config)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
+    // Shared error slot (see `train`): the oracle records the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
     let observable = extract_cost_observable(&expectation_function)?;
-    let oracle: Box<dyn EvaluationOracle> = Box::new(QmlOracle {
+    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let resources = Resources::new(backend, None, Arc::clone(&config))
+        .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    let scheduler = Scheduler::ephemeral(resources);
+    let flow = TrainQmlFlow {
         training_circuits: qcs,
-        config: Arc::clone(&config),
-        backend,
         observable,
+        method: method_enum,
+        dimensions,
+        seed: effective_seed,
         errors: errors.clone(),
-    });
-
-    if let Ok(de) = method.extract::<PyRef<DE>>() {
-        let args = AlgorithmDifferentialEvolutionArgs {
-            oracle,
-            population_size: de.population_size,
-            generations: de.generations,
-            dimensions,
-            tolerance: de.tolerance,
-            patience: de.patience,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            // Release the GIL for the optimization (see `train` and
-            // docs/ENGINEERING.md §3): the QML workers re-acquire it per batch,
-            // and the main-thread signal check in the oracle keeps Ctrl+C prompt.
-            py.allow_threads(|| AlgorithmDifferentialEvolution.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let args = AlgorithmPSOArgs {
-            oracle,
-            population_size: pso.population_size,
-            generations: pso.generations,
-            dimensions,
-            bounds: pso.bounds,
-            inertia_weight: pso.inertia_weight,
-            cognitive_weight: pso.cognitive_weight,
-            social_weight: pso.social_weight,
-            tolerance: pso.tolerance,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmPSO.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    if let Ok(qng) = method.extract::<PyRef<QNG>>() {
-        let args = AlgorithmQNGArgs {
-            oracle,
-            max_iters: qng.max_iters,
-            learning_rate: qng.learning_rate,
-            finite_difference_step: qng.finite_difference_step,
-            bounds: qng.bounds,
-            dimensions,
-            variance_oracle: Box::new(PyVarianceOracle {
-                variance_function: qng.variance_function.clone_ref(py),
-                errors: errors.clone(),
-                run_id: effective_id.clone(),
-            }),
-            tikhonov_reg: qng.tikhonov_reg,
-            seed: Some(effective_seed),
-        };
-        return finish_optimization(
-            py,
-            py.allow_threads(|| AlgorithmQNG.optimize(args)),
-            &errors,
-            effective_seed,
-            effective_id.clone(),
-            start,
-        );
-    }
-
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, or polypus.QNG",
-    ))
+    };
+    // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
+    // §3): the Qiskit binding + Aer calls re-acquire it, and the Planner's
+    // between-wave check_signals keeps Ctrl+C prompt.
+    let result = py.allow_threads(|| scheduler.run(flow));
+    scheduler.close();
+    finish_optimization(py, result, effective_seed, effective_id, start)
 }
 
 /// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
@@ -1290,6 +1298,7 @@ mod tests {
             None,
             "polypus",
             seed,
+            None,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -1357,6 +1366,7 @@ mod tests {
                 None,
                 "polypus",
                 Some(7),
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -1405,6 +1415,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
+                    None,
                 )
                 .expect("native run succeeds");
                 result
@@ -1481,6 +1492,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                None,
             );
             assert!(
                 result.is_err(),
@@ -1578,7 +1590,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2)
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -1590,15 +1602,77 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native = build_backend_config("local", name, "automatic", None, 1, 2)
+            let native = build_backend_config("local", name, "automatic", None, 1, 2, Some(true))
                 .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
-            assert!(matches!(native, BackendConfig::LocalNative));
+            assert!(matches!(
+                native,
+                BackendConfig::LocalNative { fusion: true }
+            ));
+        }
+    }
+
+    /// The `fusion` kwarg reaches `BackendConfig::LocalNative` unchanged, in
+    /// both directions — it is not silently forced to `true`.
+    #[test]
+    fn build_backend_config_forwards_fusion_for_the_native_backend() {
+        let with_fusion =
+            build_backend_config("local", "polypus", "automatic", None, 1, 2, Some(true))
+                .expect("polypus is a valid local backend");
+        assert!(matches!(
+            with_fusion,
+            BackendConfig::LocalNative { fusion: true }
+        ));
+
+        let without_fusion =
+            build_backend_config("local", "polypus", "automatic", None, 1, 2, Some(false))
+                .expect("polypus is a valid local backend");
+        assert!(matches!(
+            without_fusion,
+            BackendConfig::LocalNative { fusion: false }
+        ));
+    }
+
+    /// Omitting `fusion` (`None`) leaves the native backend on its default
+    /// (`true`) — the crate-wide `StatevectorSimulator::default().fusion`.
+    #[test]
+    fn build_backend_config_defaults_fusion_to_enabled_when_omitted() {
+        let native = build_backend_config("local", "polypus", "automatic", None, 1, 2, None)
+            .expect("polypus is a valid local backend");
+        assert!(matches!(
+            native,
+            BackendConfig::LocalNative { fusion: true }
+        ));
+    }
+
+    /// `fusion=True` on a backend that cannot fuse is rejected: a request that
+    /// cannot be met must not look like it took effect. `fusion=False` and an
+    /// omitted `fusion` — both honourable everywhere, since a non-fusing backend
+    /// already runs gate-by-gate — are accepted unchanged.
+    #[test]
+    fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
+        pyo3::prepare_freethreaded_python();
+        for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
+            let err = build_backend_config(infra, backend, "automatic", None, 1, 2, Some(true))
+                .expect_err("fusion=True on a non-fusing backend must be rejected");
+            Python::with_gil(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("fusion=True applies only to"),
+                    "unexpected error: {err}"
+                );
+            });
+
+            // fusion=False and an omitted fusion must build a config, not error.
+            build_backend_config(infra, backend, "automatic", None, 1, 2, Some(false))
+                .expect("fusion=False is accepted everywhere");
+            build_backend_config(infra, backend, "automatic", None, 1, 2, None)
+                .expect("omitted fusion is accepted everywhere");
         }
     }
 
     #[test]
     fn build_backend_config_rejects_an_unknown_local_backend() {
-        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2)
+        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2, None)
             .expect_err("an unknown local backend must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -1614,8 +1688,16 @@ mod tests {
         // do — the check is `Option::is_some`, not a Qiskit type check.
         pyo3::prepare_freethreaded_python();
         let noise_model = Python::with_gil(|py| py.None());
-        let err = build_backend_config("local", "polypus", "automatic", Some(noise_model), 1, 2)
-            .expect_err("a noise model on the native backend must be rejected");
+        let err = build_backend_config(
+            "local",
+            "polypus",
+            "automatic",
+            Some(noise_model),
+            1,
+            2,
+            None,
+        )
+        .expect_err("a noise model on the native backend must be rejected");
         Python::with_gil(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(
@@ -1629,9 +1711,16 @@ mod tests {
     fn build_backend_config_keeps_a_noise_model_for_aer() {
         pyo3::prepare_freethreaded_python();
         let noise_model = Python::with_gil(|py| py.None());
-        let config =
-            build_backend_config("local", "aer", "density_matrix", Some(noise_model), 1, 2)
-                .expect("aer accepts a noise model");
+        let config = build_backend_config(
+            "local",
+            "aer",
+            "density_matrix",
+            Some(noise_model),
+            1,
+            2,
+            None,
+        )
+        .expect("aer accepts a noise model");
         assert!(matches!(
             config,
             BackendConfig::Local {
@@ -1644,7 +1733,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
-        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4)
+        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None)
             .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
@@ -1659,7 +1748,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2)
+        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, None)
             .expect_err("an unknown infrastructure must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
