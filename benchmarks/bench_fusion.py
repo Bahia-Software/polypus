@@ -174,8 +174,12 @@ def main() -> int:
         default=None,
         help="layers for trotter/hea (default: per-family, 16/8; ignored by qft)",
     )
-    ap.add_argument("--out", type=Path, default=None, help="write CSV + JSON here (prefix)")
-    ap.add_argument("--smoke", action="store_true", help="tiny run to check the script works")
+    ap.add_argument(
+        "--out", type=Path, default=None, help="write CSV + JSON here (prefix)"
+    )
+    ap.add_argument(
+        "--smoke", action="store_true", help="tiny run to check the script works"
+    )
     args = ap.parse_args()
 
     if args.smoke:
@@ -209,7 +213,9 @@ def main() -> int:
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
-                print(f"! {family} n={n} FAILED:\n{proc.stderr.strip()}", file=sys.stderr)
+                print(
+                    f"! {family} n={n} FAILED:\n{proc.stderr.strip()}", file=sys.stderr
+                )
                 continue
             row = json.loads(proc.stdout.strip().splitlines()[-1])
             rows.append(row)
@@ -224,7 +230,9 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         json_path = out.with_suffix(".json")
         csv_path = out.with_suffix(".csv")
-        json_path.write_text(json.dumps({"rayon_num_threads": threads, "rows": rows}, indent=2))
+        json_path.write_text(
+            json.dumps({"rayon_num_threads": threads, "rows": rows}, indent=2)
+        )
         with csv_path.open("w") as f:
             f.write("family,n,depth,reps,t_unfused_s,t_fused_s,speedup\n")
             for r in rows:
