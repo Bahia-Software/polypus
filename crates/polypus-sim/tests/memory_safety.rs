@@ -113,7 +113,9 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
         ],
     };
     assert_eq!(
-        StatevectorSimulator::new().run(&dense_component).unwrap_err(),
+        StatevectorSimulator::new()
+            .run(&dense_component)
+            .unwrap_err(),
         SimError::QubitIndexOutOfRange {
             qubit: 8,
             num_qubits: 3
