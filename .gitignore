@@ -21,6 +21,7 @@ benchmarks/fusion_*.out
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+/crates/polypus-physics/graphics/
 qft_results.csv
 qft*.png
 
@@ -34,4 +35,4 @@ logs/
 
 CLAUDE.md
 AI_GUIDELINES.md
-.claude/
+.claude
