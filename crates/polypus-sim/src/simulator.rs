@@ -245,6 +245,10 @@ pub struct StatevectorSimulator {
     /// simulation that applies the circuit exactly as written — e.g. to
     /// reason about or benchmark a circuit's own per-gate cost, unaffected by
     /// the fusion heuristics.
+    ///
+    /// The speedup fusion buys — and why the extra machinery earns its keep — is
+    /// measured by `benchmarks/bench_fusion.py`, which times this flag both ways
+    /// on the same build across diagonal-heavy and dense circuits.
     pub fusion: bool,
 }
 

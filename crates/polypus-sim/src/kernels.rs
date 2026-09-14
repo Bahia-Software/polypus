@@ -181,6 +181,10 @@ pub(crate) enum DiagonalOp {
 /// 4096 amplitudes = 64 KiB sits in L2 on every target. The pass is insensitive
 /// to the exact value across 512–32768 (measured), so this is a locality knob,
 /// not a hardware-tuned constant.
+///
+/// The end-to-end speedup fusion buys over the gate-by-gate path is measured by
+/// `benchmarks/bench_fusion.py` (the `qft`/`trotter` families exercise these
+/// diagonal runs) — `fusion=False` vs `fusion=True` on the same build.
 const DIAGONAL_TILE: usize = 4096;
 
 /// Multiply one cache tile by a 1-qubit diagonal op. `start` is the tile's global
