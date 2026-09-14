@@ -26,8 +26,8 @@ with PyO3 Python bindings. The Cargo workspace has ten crates:
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
-| `polypus-scheduler` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, `Flow`/`RunCircuitFlow`, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
-| `polypus-evaluation` | Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
+| `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
+| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
@@ -49,13 +49,16 @@ boundary stays out-of-process and explicit; see
   **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
   into a typed `polypus.*` exception is the edge's job
   (`polypus::exceptions::backend_error_to_pyerr`).
-- `polypus-scheduler` is **`pyo3`-free at the source level**: it must not name
+- `polypus-orchestration` is **`pyo3`-free at the source level**: it must not name
   `pyo3`, `Python`, `PyErr` or the GIL (its `Cargo.toml` has no `pyo3`). It still
   links libpython *transitively* through `polypus-infrastructure`, so its tests
   run in the same job as `polypus`, not the pure-Rust group. A real oracle
   failure reaches it **type-erased** as a `Box<dyn Error + Send>` in the
   `OracleErrorSlot`; the `polypus` edge downcasts it back to the concrete
-  `EvaluationError` to re-raise (plan §10.1).
+  `EvaluationError` to re-raise (plan §10.1). It owns **every** `Flow`, including
+  the training flow (`TrainFlow`): a training flow's `pyo3`-touching oracle is
+  built through an `OracleFactory` implemented in `polypus-evaluation`, so the
+  *order* lives here with the scheduler while only its assembly stays behind the GIL.
 - `polypus-evaluation` may depend on `pyo3` (Qiskit binding under the GIL, Python
   callbacks) like `polypus-infrastructure`, but likewise defines **no**
   `#[pyclass]` and **no** `From<_> for PyErr`: turning an `EvaluationError` into a
@@ -94,7 +97,7 @@ boundary stays out-of-process and explicit; see
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception (`EvaluationError::Python` carries it verbatim), never
   swallowed into a panic by an `.expect()` (that would surface as an opaque
-  `PanicException`; see §9 and `OracleErrorSlot` in `polypus-scheduler`).
+  `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
   around the whole `scheduler.run(flow)` call; the `Planner` calls
   `py.check_signals()` between execution waves (in `execute`), and the counts are

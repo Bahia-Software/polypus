@@ -5,6 +5,13 @@
 //! [`PyVarianceOracle`], the Python-callback observable [`PyCallbackObservable`],
 //! the [`CircuitSource`] binding boundary and the evaluation error type.
 //!
+//! It also holds the [`OracleFactory`](polypus_orchestration::OracleFactory)
+//! implementations — [`VqcOracleFactory`] and [`QmlOracleFactory`] — that assemble
+//! those oracles for a training flow. The training *order* itself
+//! ([`TrainFlow`](polypus_orchestration::TrainFlow)) lives in `polypus-orchestration`
+//! with the scheduler that runs it; only the `pyo3`-touching *assembly* (binding
+//! circuit templates, wiring observables) lives here.
+//!
 //! This crate touches `pyo3` (Qiskit binding under the GIL, Python callbacks) but
 //! — like the rest of the workspace below the edge — defines no `#[pyclass]` and
 //! no `From<_> for PyErr`: turning an [`EvaluationError`] into a typed `polypus.*`
@@ -14,16 +21,14 @@
 pub mod error;
 pub mod py_callback_observable;
 pub mod qml_oracle;
-pub mod train_flow;
 pub mod variance_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
-pub use qml_oracle::QmlOracle;
-pub use train_flow::{TrainQmlFlow, TrainVqcFlow};
+pub use qml_oracle::{QmlOracle, QmlOracleFactory};
 pub use variance_oracle::PyVarianceOracle;
-pub use vqc_oracle::VqcOracle;
+pub use vqc_oracle::{VqcOracle, VqcOracleFactory};
 
 /// Re-export the native cost-observable seam so `crate::CostObservable`
 /// resolves alongside the oracles that consume it.
@@ -34,13 +39,13 @@ use polypus_infrastructure::BoundCircuit;
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 
-/// Re-export the type-erased error slot from the pure `polypus-scheduler` crate,
-/// where it now lives — it is shared with `dispatch_optimizer`, and the scheduler
-/// crate cannot depend on this pyo3-touching one. The oracles below box their
-/// [`EvaluationError`] into it (`slot.record(Box::new(err), id)`); the FFI edge
-/// downcasts it back to re-raise the original exception. Re-exported here so the
-/// existing `crate::OracleErrorSlot` path keeps resolving.
-pub use polypus_scheduler::OracleErrorSlot;
+/// Re-export the type-erased error slot from the pure `polypus-orchestration`
+/// crate, where it now lives — it is shared with `dispatch_optimizer`, and the
+/// orchestration crate cannot depend on this pyo3-touching one. The oracles below
+/// box their [`EvaluationError`] into it (`slot.record(Box::new(err), id)`); the
+/// FFI edge downcasts it back to re-raise the original exception. Re-exported here
+/// so the existing `crate::OracleErrorSlot` path keeps resolving.
+pub use polypus_orchestration::OracleErrorSlot;
 
 /// A parameterised circuit template, in one of the representations Polypus
 /// supports as optimisation targets.
