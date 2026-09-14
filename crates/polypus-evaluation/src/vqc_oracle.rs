@@ -2,6 +2,7 @@ use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, Or
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
 };
+use polypus_orchestration::{OracleFactory, Resources};
 use std::sync::Arc;
 
 /// Oracle for standard VQC training.
@@ -102,6 +103,40 @@ impl VqcOracle {
             return Err(EvaluationError::NonFinite { index, value });
         }
         Ok(values)
+    }
+}
+
+/// Assembles a [`VqcOracle`] for a training flow from the run's [`Resources`].
+///
+/// The `pyo3`-touching half of the training seam: it carries the domain inputs the
+/// edge parsed (the parameterised template and the reducer) and, when
+/// [`polypus_orchestration::TrainFlow`] runs, wires them to the run's backend,
+/// planner, config, cancellation and error slot to produce the oracle the optimizer
+/// queries. The *order* (`TrainFlow`) lives in `polypus-orchestration`; only this
+/// assembly lives here.
+pub struct VqcOracleFactory {
+    /// Parameterised circuit template (ansatz parameters unbound).
+    pub circuit: CircuitSource,
+    /// Reduces measurement counts to the fitness scalar.
+    pub observable: Arc<dyn CostObservable>,
+}
+
+impl OracleFactory for VqcOracleFactory {
+    fn build(
+        self,
+        resources: &Resources,
+        cancel: &CancelToken,
+        errors: &OracleErrorSlot,
+    ) -> Box<dyn EvaluationOracle> {
+        Box::new(VqcOracle {
+            circuit: self.circuit,
+            config: Arc::clone(&resources.config),
+            backend: Arc::clone(&resources.backend),
+            planner: Arc::clone(&resources.planner),
+            observable: self.observable,
+            cancel: cancel.clone(),
+            errors: errors.clone(),
+        })
     }
 }
 

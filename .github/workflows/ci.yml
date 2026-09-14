@@ -162,10 +162,10 @@ jobs:
         run: cargo test --locked -p polypus-infrastructure
       - name: Test polypus-infrastructure (qmio backend)
         run: cargo test --locked -p polypus-infrastructure --features qmio
-      # `polypus-scheduler` is pyo3-free but links libpython transitively (via
+      # `polypus-orchestration` is pyo3-free but links libpython transitively (via
       # polypus-infrastructure), so it is tested here, not in the pure-Rust group.
-      - name: Test polypus-scheduler
-        run: cargo test --locked -p polypus-scheduler
+      - name: Test polypus-orchestration
+        run: cargo test --locked -p polypus-orchestration
       # `polypus-evaluation` touches pyo3 (Qiskit binding, Python callbacks), so
       # like `polypus` it links libpython and is tested here.
       - name: Test polypus-evaluation

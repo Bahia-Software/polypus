@@ -5,7 +5,7 @@ use polypus::infrastructure::{
     InfrastructureError, NativeStatevectorBackend, OptLevel, QuantumBackend,
     ShotDistributingPlanner,
 };
-use polypus::scheduler::{Resources, RunCircuitFlow, Scheduler};
+use polypus::orchestration::{Resources, RunCircuitFlow, Scheduler};
 use std::collections::HashMap;
 use std::sync::Arc;
 

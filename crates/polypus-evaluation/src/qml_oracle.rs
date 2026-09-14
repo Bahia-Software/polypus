@@ -4,6 +4,7 @@ use crate::{
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
 };
+use polypus_orchestration::{OracleFactory, Resources};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -129,5 +130,37 @@ impl QmlOracle {
             return Err(EvaluationError::NonFinite { index, value });
         }
         Ok(means)
+    }
+}
+
+/// Assembles a [`QmlOracle`] for a training flow from the run's [`Resources`].
+///
+/// The QML counterpart of [`VqcOracleFactory`](crate::VqcOracleFactory): it carries
+/// the pre-bound training circuits and the reducer, and wires them to the run
+/// context when [`polypus_orchestration::TrainFlow`] runs. See
+/// [`VqcOracleFactory`](crate::VqcOracleFactory) for the order-vs-assembly split.
+pub struct QmlOracleFactory {
+    /// Pre-bound training circuits (feature-map parameters already fixed).
+    pub training_circuits: Vec<Py<PyAny>>,
+    /// Reduces each candidate's measurement counts to the fitness scalar.
+    pub observable: Arc<dyn CostObservable>,
+}
+
+impl OracleFactory for QmlOracleFactory {
+    fn build(
+        self,
+        resources: &Resources,
+        cancel: &CancelToken,
+        errors: &OracleErrorSlot,
+    ) -> Box<dyn EvaluationOracle> {
+        Box::new(QmlOracle {
+            training_circuits: self.training_circuits,
+            config: Arc::clone(&resources.config),
+            backend: Arc::clone(&resources.backend),
+            planner: Arc::clone(&resources.planner),
+            observable: self.observable,
+            cancel: cancel.clone(),
+            errors: errors.clone(),
+        })
     }
 }
