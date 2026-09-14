@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "polypus"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "numpy",
@@ -800,11 +800,11 @@ dependencies = [
 
 [[package]]
 name = "polypus-circuit"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "polypus-evaluation"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "polypus-circuit",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-infrastructure"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "polypus-circuit",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-logger"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "log",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-observable"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "rand 0.8.6",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-optimizers"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "ndarray",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-orchestration"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "polypus-infrastructure",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-physics"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "csv",
  "include_dir",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "polypus-sim"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "log",
  "num-complex",
