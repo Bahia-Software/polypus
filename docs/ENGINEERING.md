@@ -94,16 +94,13 @@ boundary stays out-of-process and explicit; see
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception (`EvaluationError::Python` carries it verbatim), never
   swallowed into a panic by an `.expect()` (that would surface as an opaque
-  `PanicException`; see §9 and `OracleErrorSlot` in
-  `crates/polypus/src/evaluation/mod.rs`).
+  `PanicException`; see §9 and `OracleErrorSlot` in `polypus-scheduler`).
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
-  around the whole `algorithm.run(args)` call and each orchestration variant
-  calls `py.check_signals()` at its per-circuit / pre-result-conversion
-  boundary — the single `Python::with_gil` block where `AlgorithmSingleRun`
-  and `DistributeByShotsRun` reacquire the GIL to build the return value, as
-  the first statement before constructing any Python object. A pending Ctrl+C
-  surfaces there as a `KeyboardInterrupt` propagated verbatim through the
-  function's `Result`, never swallowed or retyped.
+  around the whole `scheduler.run(flow)` call; the `Planner` calls
+  `py.check_signals()` between execution waves (in `execute`), and the counts are
+  converted to a Python object back at the edge — GIL re-acquired — only after the
+  run returns. A pending Ctrl+C surfaces there as a `KeyboardInterrupt`
+  propagated verbatim through the function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
   around the `StatevectorSimulator::run_cancellable` call (parameter binding
   stays on the GIL side — it is O(gates) and allocates nothing of size `2^n`),
