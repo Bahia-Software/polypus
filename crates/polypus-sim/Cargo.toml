@@ -18,9 +18,18 @@ rayon           = { version = "1", optional = true }
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.
 log             = { workspace = true }
+# On-disk persistence of the calibrated gate-parallel threshold (see
+# `calibration`). Deliberately pulled in *only* under the `parallel` feature —
+# there is nothing to calibrate without the rayon kernels — so the default build
+# gains no serde dependency. `serde_json` matches the "1.0" already used by
+# `polypus-logger`/`polypus`; `dirs`/`directories` is intentionally *not* added
+# (the cache directory is resolved by hand from XDG_CACHE_HOME/HOME).
+serde           = { version = "1.0", features = ["derive"], optional = true }
+serde_json      = { version = "1.0", optional = true }
 
 [features]
 default  = []
 # Opt-in data-parallel gate kernels (rayon). Results are identical to the
 # sequential path; only large circuits (see DEFAULT_PARALLEL_THRESHOLD) use it.
-parallel = ["dep:rayon"]
+# The serde deps are for the calibration cache, which only exists with `parallel`.
+parallel = ["dep:rayon", "dep:serde", "dep:serde_json"]
