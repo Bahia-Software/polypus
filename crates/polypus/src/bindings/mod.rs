@@ -336,12 +336,21 @@ fn method_from_pyclass(
 /// statevector simulator. The choice is ignored for CUNQA, which manages its
 /// own simulated QPUs.
 ///
-/// `fusion` is only meaningful for the native `"polypus"` backend (see
-/// [`BackendConfig::LocalNative`]); every other backend ignores it, the same
-/// way `local`/`qmio` ignore `nodes`/`cores_per_qpu` below — ignored rather
-/// than rejected, since a caller sweeping the same kwargs across backends
-/// (this one included) should not have to special-case a default-valued,
-/// backend-specific knob per call.
+/// `fusion` only applies to the native `"polypus"` backend (see
+/// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
+/// `Option` so the three cases stay distinct:
+///
+/// * omitted (`None`): no opinion — the native backend uses its default
+///   (`true`); every other backend ignores it, so sweeping the same kwargs
+///   across backends needs no per-call special-casing (as with
+///   `nodes`/`cores_per_qpu`, which `local`/`qmio` also ignore).
+/// * `Some(false)`: "do not fuse". Every backend can honour this — the
+///   non-native ones never fuse anyway — so it is always accepted; on the
+///   native backend it forces a strictly gate-by-gate run.
+/// * `Some(true)`: "fuse". Only the native backend can. Asking for it on a
+///   backend that cannot fuse is a request that cannot be met, so it is
+///   rejected here rather than silently ignored (which would mislead the
+///   caller into believing fusion was in effect).
 fn build_backend_config(
     infrastructure: &str,
     backend: &str,
@@ -349,11 +358,24 @@ fn build_backend_config(
     noise_model: Option<Py<PyAny>>,
     nodes: u32,
     cores_per_qpu: u32,
-    fusion: bool,
+    fusion: Option<bool>,
 ) -> PyResult<BackendConfig> {
-    match Infrastructure::from_str(infrastructure)
-        .map_err(crate::exceptions::backend_error_to_pyerr)?
-    {
+    let infrastructure_kind = Infrastructure::from_str(infrastructure)
+        .map_err(crate::exceptions::backend_error_to_pyerr)?;
+    // Only the native statevector backend fuses gates. An explicit `Some(true)`
+    // anywhere else is an unmeetable request (see the doc above) — reject it
+    // before building anything, so it never looks like it took effect. `None`
+    // and `Some(false)` pass through: both are honourable everywhere.
+    let is_native = matches!(infrastructure_kind, Infrastructure::Local)
+        && matches!(backend, "polypus" | "statevector" | "polypus_statevector");
+    if fusion == Some(true) && !is_native {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "fusion=True applies only to the native backend=\"polypus\"; backend \"{backend}\" \
+             on infrastructure \"{infrastructure}\" cannot fuse gates. Omit fusion, or pass \
+             fusion=False for a gate-by-gate run."
+        )));
+    }
+    match infrastructure_kind {
         Infrastructure::Local => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
                 backend: "AerSimulator".to_string(),
@@ -367,7 +389,9 @@ fn build_backend_config(
                          and does not accept a noise_model; use backend=\"aer\"",
                     ));
                 }
-                Ok(BackendConfig::LocalNative { fusion })
+                Ok(BackendConfig::LocalNative {
+                    fusion: fusion.unwrap_or(true),
+                })
             }
             other => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown local backend '{other}'; expected \"aer\" or \"polypus\""
@@ -626,10 +650,14 @@ fn extract_cost_observable(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn CostObser
 /// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
 /// effective `seed`, `backend`, `infrastructure`) for logging and replay.
 ///
-/// `fusion` (default `true`) is only meaningful for `backend="polypus"`: it
-/// lets gate fusion be disabled for a strictly gate-by-gate simulation of
-/// exactly the circuit as written. Every other backend ignores it.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=true))]
+/// `fusion` applies only to `backend="polypus"`, the one backend that fuses
+/// gates. Omit it (the default) and each backend does its own thing — the
+/// native one fuses, the rest never did. `fusion=False` forces a strictly
+/// gate-by-gate run and is accepted everywhere (a non-fusing backend already
+/// meets it). `fusion=True` on any backend that cannot fuse is rejected with a
+/// `ValueError` rather than silently ignored, so it never looks like it took
+/// effect.
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -641,7 +669,7 @@ pub fn run_quantum_circuit<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
-    fusion: bool,
+    fusion: Option<bool>,
 ) -> PyResult<pyo3::PyObject> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -822,7 +850,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=true))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -838,7 +866,7 @@ pub fn train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
-    fusion: bool,
+    fusion: Option<bool>,
 ) -> PyResult<PyObject> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1100,9 +1128,10 @@ pub fn qml_train<'py>(
 
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path (native backend already rejected above): `backend` can only be
-    // an Aer variant here, so `fusion` (native-only) can never actually reach
-    // anything — passed as `true` (the crate-wide default) purely to satisfy
-    // the signature, not because it is reachable.
+    // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
+    // rather than `Some(true)` — the latter would trip build_backend_config's
+    // "fusion=True on a non-fusing backend" rejection for a value the caller
+    // never chose.
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1110,7 +1139,7 @@ pub fn qml_train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
-        true,
+        None,
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -1257,7 +1286,7 @@ mod tests {
             None,
             "polypus",
             seed,
-            true,
+            None,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -1325,7 +1354,7 @@ mod tests {
                 None,
                 "polypus",
                 Some(7),
-                true,
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -1374,7 +1403,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
-                    true,
+                    None,
                 )
                 .expect("native run succeeds");
                 result
@@ -1451,7 +1480,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
-                true,
+                None,
             );
             assert!(
                 result.is_err(),
@@ -1549,7 +1578,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, true)
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -1561,7 +1590,7 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native = build_backend_config("local", name, "automatic", None, 1, 2, true)
+            let native = build_backend_config("local", name, "automatic", None, 1, 2, Some(true))
                 .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
             assert!(matches!(
                 native,
@@ -1574,15 +1603,16 @@ mod tests {
     /// both directions — it is not silently forced to `true`.
     #[test]
     fn build_backend_config_forwards_fusion_for_the_native_backend() {
-        let with_fusion = build_backend_config("local", "polypus", "automatic", None, 1, 2, true)
-            .expect("polypus is a valid local backend");
+        let with_fusion =
+            build_backend_config("local", "polypus", "automatic", None, 1, 2, Some(true))
+                .expect("polypus is a valid local backend");
         assert!(matches!(
             with_fusion,
             BackendConfig::LocalNative { fusion: true }
         ));
 
         let without_fusion =
-            build_backend_config("local", "polypus", "automatic", None, 1, 2, false)
+            build_backend_config("local", "polypus", "automatic", None, 1, 2, Some(false))
                 .expect("polypus is a valid local backend");
         assert!(matches!(
             without_fusion,
@@ -1590,9 +1620,47 @@ mod tests {
         ));
     }
 
+    /// Omitting `fusion` (`None`) leaves the native backend on its default
+    /// (`true`) — the crate-wide `StatevectorSimulator::default().fusion`.
+    #[test]
+    fn build_backend_config_defaults_fusion_to_enabled_when_omitted() {
+        let native = build_backend_config("local", "polypus", "automatic", None, 1, 2, None)
+            .expect("polypus is a valid local backend");
+        assert!(matches!(
+            native,
+            BackendConfig::LocalNative { fusion: true }
+        ));
+    }
+
+    /// `fusion=True` on a backend that cannot fuse is rejected: a request that
+    /// cannot be met must not look like it took effect. `fusion=False` and an
+    /// omitted `fusion` — both honourable everywhere, since a non-fusing backend
+    /// already runs gate-by-gate — are accepted unchanged.
+    #[test]
+    fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
+        pyo3::prepare_freethreaded_python();
+        for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
+            let err = build_backend_config(infra, backend, "automatic", None, 1, 2, Some(true))
+                .expect_err("fusion=True on a non-fusing backend must be rejected");
+            Python::with_gil(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("fusion=True applies only to"),
+                    "unexpected error: {err}"
+                );
+            });
+
+            // fusion=False and an omitted fusion must build a config, not error.
+            build_backend_config(infra, backend, "automatic", None, 1, 2, Some(false))
+                .expect("fusion=False is accepted everywhere");
+            build_backend_config(infra, backend, "automatic", None, 1, 2, None)
+                .expect("omitted fusion is accepted everywhere");
+        }
+    }
+
     #[test]
     fn build_backend_config_rejects_an_unknown_local_backend() {
-        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2, true)
+        let err = build_backend_config("local", "does-not-exist", "automatic", None, 1, 2, None)
             .expect_err("an unknown local backend must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -1615,7 +1683,7 @@ mod tests {
             Some(noise_model),
             1,
             2,
-            true,
+            None,
         )
         .expect_err("a noise model on the native backend must be rejected");
         Python::with_gil(|py| {
@@ -1638,7 +1706,7 @@ mod tests {
             Some(noise_model),
             1,
             2,
-            true,
+            None,
         )
         .expect("aer accepts a noise model");
         assert!(matches!(
@@ -1653,7 +1721,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
-        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, true)
+        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None)
             .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
@@ -1668,7 +1736,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, true)
+        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, None)
             .expect_err("an unknown infrastructure must be rejected");
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
