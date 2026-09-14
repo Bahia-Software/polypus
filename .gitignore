@@ -13,11 +13,15 @@ __pycache__/
 
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
+benchmarks/fusion_*.csv
+benchmarks/fusion_*.json
+benchmarks/fusion_*.out
 
 # Experiment outputs
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+/crates/polypus-physics/graphics/
 qft_results.csv
 qft*.png
 
@@ -31,4 +35,4 @@ logs/
 
 CLAUDE.md
 AI_GUIDELINES.md
-.claude/
+.claude

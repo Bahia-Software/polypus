@@ -153,7 +153,7 @@ mod tests {
             shots: 500,
             n_qpus: 1,
             infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative,
+            backend_config: BackendConfig::LocalNative { fusion: true },
             opt_level: OptLevel::default(),
             seed: Some(2024),
         }

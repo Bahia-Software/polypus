@@ -654,7 +654,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
         let mut rng = StdRng::seed_from_u64(11);
         let (result, grid) = eng
             .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
@@ -733,6 +734,7 @@ mod tests {
         use crate::medium::compound::CompoundMedium;
         use crate::monte_carlo::beam::DivergentBeam;
         use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::Monoenergetic;
         use crate::monte_carlo::voxel::VoxelGrid;
         use crate::monte_carlo::{MonteCarloEngine, RunConfig};
         use crate::particle::photon::Photon;
@@ -744,15 +746,16 @@ mod tests {
         let beam = DivergentBeam {
             source_to_surface_distance_m: 0.10,
             field_side_m: 0.10, // 10x10 cm, como tu configuración real
-            energy_mev: 0.1,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
         };
 
         let geometry = Geometry::Box {
             min: [-0.20, -0.20, 0.0],
-            max: [0.20, 0.20, 0.10], // 40x40 cm de sección, 10 cm de profundidad
+            max: [0.20, 0.20, 0.20], // 20 cm de profundidad en vez de 10
         };
 
-        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
 
         let engine = MonteCarloEngine::new(
             Photon,
@@ -760,13 +763,13 @@ mod tests {
             PhotonInteractionModel,
             RunConfig {
                 n_histories: 400000,
-                seed: 123,
+                seed: 456,
                 ..Default::default()
             },
         )
         .with_geometry(geometry);
 
-        let mut rng = StdRng::seed_from_u64(123);
+        let mut rng = StdRng::seed_from_u64(456);
         let (result, grid) = engine
             .run_with_source_and_voxels(&beam, grid, &mut rng)
             .unwrap();
@@ -782,20 +785,459 @@ mod tests {
         println!("PDD relativo (%): {:?}", grid.relative_pdd());
 
         let pdd = grid.relative_pdd();
+        assert_eq!(pdd.len(), 40);
 
         #[cfg(feature = "plotters")]
-        crate::monte_carlo::voxel_plots::plot_relative_pdd(
-            &pdd,
-            0.005, // <- antes 0.01
-            "PDD - H2O, 100 keV, campo 10x10 cm (0.5 cm/capa)",
-            std::path::Path::new("/tmp/pdd_rust_fino.png"),
-        )
-        .unwrap();
+        {
+            let energy_kev = beam.energy_source.min_energy_mev() * 1000.0;
+            let field_cm = beam.field_side_m * 100.0;
+            let Geometry::Box { min, max } = geometry else {
+                panic!("expected a bounded geometry");
+            };
+            let depth_cm = (max[2] - min[2]) * 100.0;
+            let voxel_cm = voxel_size_m * 100.0;
 
-        assert_eq!(pdd.len(), 20);
-        assert!(
-            pdd.iter().any(|&v| v > 0.0),
-            "no se depositó nada en ningún sitio"
+            let title = format!(
+                "PDD - H2O, {energy_kev:.0} keV, campo {field_cm:.0}x{field_cm:.0} cm, maniquí {depth_cm:.0} cm"
+            );
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!(
+                "{graphics_dir}/pdd_rust_{energy_kev:.0}kev_{field_cm:.0}x{field_cm:.0}cm_{depth_cm:.0}cm_{voxel_cm:.2}cmvoxel.png"
+            );
+
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                &title,
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename}");
+        }
+    }
+
+    #[test]
+    fn small_water_phantom_primary_vs_scatter_diagnostic() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::interactions::{InteractionEvent, InteractionModel};
+        use crate::medium::compound::CompoundMedium;
+        use crate::medium::Medium;
+        use crate::monte_carlo::beam::{BeamSource, DivergentBeam};
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::sampler;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::particle::photon::Photon;
+        use crate::particle::Particle;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let medium: &dyn Medium = &water;
+        let model = PhotonInteractionModel;
+        let particle = Photon;
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(Monoenergetic::new(20.0).unwrap()),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.10],
+        };
+
+        let mut primary_grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let mut scatter_grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(123);
+        let n = 400_000;
+
+        for _ in 0..n {
+            let mut state = beam.sample_state(&mut rng);
+            particle.validate_state(&state).unwrap();
+
+            let mut interaction_count = 0;
+            let mut steps = 0;
+            while state.alive && steps < 10_000 {
+                steps += 1;
+
+                let sigma_tot = model
+                    .total_cross_section_per_m(&particle, &state, medium)
+                    .unwrap();
+                if sigma_tot <= 0.0 {
+                    break;
+                }
+                let mean_free_path = 1.0 / sigma_tot;
+                let step = sampler::sample_step_length(mean_free_path, &mut rng);
+                sampler::advance(&mut state, step);
+
+                if !geometry.contains(state.position) {
+                    break;
+                }
+
+                let event = model
+                    .sample_interaction(&particle, &state, medium, &mut rng)
+                    .unwrap();
+                interaction_count += 1;
+                let grid = if interaction_count == 1 {
+                    &mut primary_grid
+                } else {
+                    &mut scatter_grid
+                };
+
+                match event {
+                    InteractionEvent::Absorbed {
+                        energy_deposit_mev, ..
+                    } => {
+                        grid.score(state.position, energy_deposit_mev);
+                        state.alive = false;
+                    }
+                    InteractionEvent::Scattered {
+                        new_state,
+                        energy_deposit_mev,
+                        ..
+                    } => {
+                        grid.score(state.position, energy_deposit_mev);
+                        state = new_state;
+                    }
+                }
+            }
+        }
+
+        println!("PDD primaria: {:?}", primary_grid.relative_pdd());
+        println!("PDD dispersión: {:?}", scatter_grid.relative_pdd());
+    }
+    #[test]
+    fn small_water_phantom_channel_diagnostic() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::interactions::{InteractionEvent, InteractionModel};
+        use crate::medium::compound::CompoundMedium;
+        use crate::medium::Medium;
+        use crate::monte_carlo::beam::{BeamSource, DivergentBeam};
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::sampler;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::particle::photon::Photon;
+        use crate::particle::Particle;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let medium: &dyn Medium = &water;
+        let model = PhotonInteractionModel;
+        let particle = Photon;
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.10],
+        };
+
+        let new_grid = || VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let mut primary_photoelectric = new_grid();
+        let mut primary_compton = new_grid();
+        let mut scatter_photoelectric = new_grid();
+        let mut scatter_compton = new_grid();
+
+        let mut rng = StdRng::seed_from_u64(123);
+        let n = 400_000;
+
+        for _ in 0..n {
+            let mut state = beam.sample_state(&mut rng);
+            particle.validate_state(&state).unwrap();
+
+            let mut interaction_count = 0;
+            let mut steps = 0;
+            while state.alive && steps < 10_000 {
+                steps += 1;
+
+                let sigma_tot = model
+                    .total_cross_section_per_m(&particle, &state, medium)
+                    .unwrap();
+                if sigma_tot <= 0.0 {
+                    break;
+                }
+                let mean_free_path = 1.0 / sigma_tot;
+                let step = sampler::sample_step_length(mean_free_path, &mut rng);
+                sampler::advance(&mut state, step);
+
+                if !geometry.contains(state.position) {
+                    break;
+                }
+
+                let event = model
+                    .sample_interaction(&particle, &state, medium, &mut rng)
+                    .unwrap();
+                interaction_count += 1;
+                let is_primary = interaction_count == 1;
+
+                match event {
+                    InteractionEvent::Absorbed {
+                        energy_deposit_mev, ..
+                    } => {
+                        let grid = if is_primary {
+                            &mut primary_photoelectric
+                        } else {
+                            &mut scatter_photoelectric
+                        };
+                        grid.score(state.position, energy_deposit_mev);
+                        state.alive = false;
+                    }
+                    InteractionEvent::Scattered {
+                        new_state,
+                        energy_deposit_mev,
+                        ..
+                    } => {
+                        if energy_deposit_mev > 0.0 {
+                            let grid = if is_primary {
+                                &mut primary_compton
+                            } else {
+                                &mut scatter_compton
+                            };
+                            grid.score(state.position, energy_deposit_mev);
+                        }
+                        // Rayleigh (energy_deposit_mev == 0.0): nada que depositar, pero
+                        // el fotón sigue vivo con la nueva dirección.
+                        state = new_state;
+                    }
+                }
+            }
+        }
+
+        println!(
+            "Fotoeléctrico, primaria:   {:?}",
+            primary_photoelectric.relative_pdd()
         );
+        println!(
+            "Compton, primaria:         {:?}",
+            primary_compton.relative_pdd()
+        );
+        println!(
+            "Fotoeléctrico, dispersión: {:?}",
+            scatter_photoelectric.relative_pdd()
+        );
+        println!(
+            "Compton, dispersión:       {:?}",
+            scatter_compton.relative_pdd()
+        );
+    }
+
+    #[test]
+    fn geant4_b1_equivalent_depth_dose() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::ParallelBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+
+        // Envelope 20x20x30 cm, entrada en z=0 (tu convención de siempre, no la
+        // de Geant4 centrada en el origen — la forma de la curva en profundidad
+        // no depende de dónde pongas el cero).
+        let beam = ParallelBeam {
+            half_width_x_m: 0.08, // 80% de 20 cm = 16 cm de ancho, medio-ancho 8 cm
+            half_width_y_m: 0.08,
+            z0_m: 0.0,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.10, -0.10, 0.0],
+            max: [0.10, 0.10, 0.30],
+        };
+
+        let voxel_size_m = 0.002; // 2 mm, igual que tus 150 capas de Geant4
+        let grid = VoxelGrid::new([-0.10, -0.10, 0.0], voxel_size_m, [100, 100, 150]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400_000,
+                seed: 42,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        let pdd = grid.relative_pdd();
+        assert_eq!(pdd.len(), 150);
+
+        #[cfg(feature = "plotters")]
+        {
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_geant4_equivalente.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                "PDD - H2O, 100 keV, haz paralelo 16x16 cm (equivalente Geant4 B1)",
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn polyenergetic_100kvp_pdd_experiment() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::KramersSpectrum;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+
+        // 100 kVp, corte de filtración inherente en 15 keV (~2.5 mm Al equivalente,
+        // aproximación razonable, no una cifra verificada para tu caso concreto).
+        let spectrum = KramersSpectrum::from_kvp(100.0, 15.0).unwrap();
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(spectrum),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.20],
+        };
+
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400_000,
+                seed: 42,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        let pdd = grid.relative_pdd();
+        assert_eq!(pdd.len(), 40);
+
+        #[cfg(feature = "plotters")]
+        {
+            let title = "PDD - H2O, 100 kVp (Kramers, corte 15 keV), campo 10x10 cm, maniquí 20 cm";
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_rust_100kvp_kramers.png");
+
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                title,
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename}");
+        }
+    }
+
+    #[test]
+    fn polyenergetic_100kvp_pdd_lead_experiment() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::KramersSpectrum;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let lead = CompoundMedium::new("Pb", 11340.0, 5000).unwrap();
+        let spectrum = KramersSpectrum::from_kvp(100.0, 15.0).unwrap();
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.02, // campo más pequeño, 2x2 cm, acorde a la escala mm
+            energy_source: Box::new(spectrum),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.01, -0.01, 0.0],
+            max: [0.01, 0.01, 0.005], // 2x2 cm de sección, 5 mm de profundidad
+        };
+
+        let voxel_size_m = 0.000_25; // 0.25 mm -> 20 capas en profundidad
+        let grid = VoxelGrid::new([-0.01, -0.01, 0.0], voxel_size_m, [80, 80, 20]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            lead,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400_000,
+                seed: 42,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        let pdd = grid.relative_pdd();
+        assert_eq!(pdd.len(), 20);
+
+        #[cfg(feature = "plotters")]
+        {
+            let title = "PDD - Pb, 100 kVp (Kramers, corte 15 keV), campo 2x2 cm, maniquí 5 mm";
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!("{graphics_dir}/pdd_rust_100kvp_pb.png");
+
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                title,
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename}");
+        }
     }
 }
