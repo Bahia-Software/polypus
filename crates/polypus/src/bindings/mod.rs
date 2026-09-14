@@ -740,7 +740,7 @@ pub fn run_quantum_circuit<'py>(
     // `BackendConfig`, not the raw `backend` string, so it tracks the real
     // dispatch (e.g. `backend="polypus"` under `infrastructure="cunqa"`, which
     // Aer-simulates, correctly does not warn).
-    if matches!(backend_config, BackendConfig::LocalNative) {
+    if matches!(backend_config, BackendConfig::LocalNative { .. }) {
         calibration::warn_if_using_default_threshold(qc.py())?;
     }
     let config = ExecutionConfig {

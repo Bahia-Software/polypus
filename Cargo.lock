@@ -795,6 +795,7 @@ dependencies = [
  "polypus-scheduler",
  "polypus-sim",
  "pyo3",
+ "rayon",
  "uuid",
 ]
 
