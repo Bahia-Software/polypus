@@ -72,6 +72,58 @@ fn statevector_apply_rejects_out_of_range_qubit() {
 }
 
 #[test]
+fn fusion_does_not_bypass_the_out_of_range_guard() {
+    // The whole-circuit guard must run *before* the gate-fusion machinery, so an
+    // out-of-range operand is rejected even when it sits inside a sequence the
+    // fuser would otherwise fold — a diagonal run collapsed into one buffer pass,
+    // or a dense connected component composed into one matrix. Fusion is on by
+    // default (`StatevectorSimulator::new`); were the guard ever moved after the
+    // fusion loop, the out-of-range `1 << q` would reach the kernels: a silently
+    // wrong result on the (safe) diagonal path, and an out-of-bounds raw-pointer
+    // write on the dense path's parallel kernel in release — the very UB this
+    // whole file guards against.
+
+    // A run of consecutive diagonal gates (the #131 fusion path) with an
+    // out-of-range member in the middle of the run.
+    let diagonal_run = ConcreteCircuit {
+        num_qubits: 3,
+        gates: vec![
+            GateInstruction::Z(0),
+            GateInstruction::Z(7),
+            GateInstruction::Z(1),
+        ],
+    };
+    assert_eq!(
+        StatevectorSimulator::new().run(&diagonal_run).unwrap_err(),
+        SimError::QubitIndexOutOfRange {
+            qubit: 7,
+            num_qubits: 3
+        }
+    );
+
+    // A chain of dense gates sharing a qubit (the #132 connected-component path:
+    // `H`·`X` on qubit 0 would compose into one 2×2) followed by an out-of-range
+    // dense gate that would open its own component and reach `apply_1q`.
+    let dense_component = ConcreteCircuit {
+        num_qubits: 3,
+        gates: vec![
+            GateInstruction::H(0),
+            GateInstruction::X(0),
+            GateInstruction::Y(8),
+        ],
+    };
+    assert_eq!(
+        StatevectorSimulator::new()
+            .run(&dense_component)
+            .unwrap_err(),
+        SimError::QubitIndexOutOfRange {
+            qubit: 8,
+            num_qubits: 3
+        }
+    );
+}
+
+#[test]
 fn valid_circuits_are_unaffected() {
     // The guard must not perturb a well-formed run.
     let circuit = ParameterizedCircuit::new(2)
