@@ -14,12 +14,14 @@
 pub mod error;
 pub mod py_callback_observable;
 pub mod qml_oracle;
+pub mod train_flow;
 pub mod variance_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
 pub use qml_oracle::QmlOracle;
+pub use train_flow::{TrainQmlFlow, TrainVqcFlow};
 pub use variance_oracle::PyVarianceOracle;
 pub use vqc_oracle::VqcOracle;
 
