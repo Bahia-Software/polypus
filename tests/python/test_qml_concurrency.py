@@ -1,27 +1,34 @@
 """
-``QmlOracle`` submits a whole candidate population as one backend batch.
+``QmlOracle`` bounds its in-flight circuit batch to a window of candidates.
 
 ``QmlOracle::try_evaluate`` used to hand Tokio's blocking pool **one
 ``spawn_blocking`` task per candidate**, so a DE/PSO ``population_size`` in the
 hundreds created hundreds of simultaneously-blocked OS threads — for no gain,
-since the GIL serialises the actual Qiskit/Aer work (issue #85). It was then
-bounded to a few tasks per core.
+since the GIL serialises the actual Qiskit/Aer work (issue #85). That was replaced
+by binding every ``candidate × training-circuit`` pair into one flat batch handed
+to the ``Planner`` in one go.
 
-That whole mechanism is now gone: the oracle binds every ``candidate ×
-training-circuit`` pair into **one flat batch** and hands it to the ``Planner``,
-which submits it to the backend in waves (for Aer, a single wave — Aer
-parallelises the experiments internally). So the population never becomes
-per-candidate threads *or* per-candidate backend calls: it reaches the backend as
-one batch per evaluation.
+That flat batch is now itself bounded (issue #146): binding the whole
+``candidates × training-circuit`` product up front holds
+``population × n_train`` ``BoundCircuit``s live at once (15 000 for a 300×50 run),
+and the ``Planner``'s wave cap does not help — ``LocalBackend`` reports
+``max_concurrency == usize::MAX``, so it would run the whole batch in one wave.
+So the oracle now binds the population in **windows of a few candidates per core**
+(``CONCURRENCY_MULTIPLIER × available_parallelism()``), submitting and dropping
+each window before building the next. The population therefore deliberately does
+**not** reach the backend as one giant call — but it is still *batched*, not the
+pre-#85 one-call-per-candidate dispatch.
 
 This is the Python half of the proof. The real ``polypus.qml.train`` runs with a
 population in the hundreds while the C-1 ``polypus_python.run_qcs`` seam is
 monkeypatched — the same technique ``test_seam_contract.py`` uses — into a probe
 that records how many circuits each backend call carries. The result-level proof
 (the migration is byte-identical) lives in the determinism gate's ``qml_train``
-vector; here we pin the *batching shape*.
+vector; here we pin the *batching shape*: bounded windows, not one giant batch and
+not per-candidate.
 """
 
+import os
 import threading
 
 import pytest
@@ -67,7 +74,24 @@ def _probing_seam(probe):
     return run_qcs
 
 
-def test_qml_train_submits_the_population_as_one_batch(monkeypatch):
+def _candidate_window():
+    """The oracle's in-flight window, in candidates.
+
+    Mirrors ``candidate_window_size`` in ``crates/polypus-evaluation/src/qml_oracle.rs``
+    (``CONCURRENCY_MULTIPLIER × available_parallelism()``). Uses the CPU-affinity
+    count on Linux — what Rust's ``std::thread::available_parallelism`` reports —
+    falling back to the CPU count elsewhere, so the expected window is derived from
+    the runner, never hardcoded.
+    """
+    try:
+        parallelism = len(os.sched_getaffinity(0))
+    except AttributeError:  # sched_getaffinity is Linux-only
+        parallelism = os.cpu_count() or 1
+    _concurrency_multiplier = 2
+    return parallelism * _concurrency_multiplier
+
+
+def test_qml_train_bounds_the_population_into_windows(monkeypatch):
     import numpy as np
     import polypus
     import polypus_python
@@ -102,11 +126,18 @@ def test_qml_train_submits_the_population_as_one_batch(monkeypatch):
     assert len(result.best_params) == len(ansatz.parameters)
     assert probe.calls >= 1, "the training run never reached the backend"
 
-    # The whole population is submitted in a single backend call — not one call
-    # per candidate (the old per-candidate dispatch), and not a partial chunk.
-    assert probe.max_circuits_in_a_call == _POPULATION, (
+    # One training row means one circuit per candidate, so a window of candidates
+    # reaches the backend as that many circuits. The largest call is one full window
+    # (or the whole population, on a machine whose window already covers it) — never
+    # the eager whole-population batch this fix replaced.
+    expected_max = min(_candidate_window(), _POPULATION)
+    assert probe.max_circuits_in_a_call == expected_max, (
         f"the largest backend call carried {probe.max_circuits_in_a_call} circuits; "
-        f"the whole population of {_POPULATION} must be batched into one call"
+        f"the oracle must bound each call to one window of {expected_max}"
+    )
+    # …and that is genuinely batched, not the pre-#85 one-circuit-per-call dispatch.
+    assert probe.max_circuits_in_a_call > 1, (
+        "each backend call carried a single circuit — that is per-candidate dispatch"
     )
     # Correctness: every candidate's circuit reaches the backend, and each
     # evaluation submits exactly one population — no drops, no duplication. (DE
