@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Shared, pure-Rust logging sink for the Polypus workspace: a configurable `log::Log` implementation (text/JSON, stdout/stderr/file) installed once per process. Library crates only emit through the `log` facade; this crate is depended on by whoever installs the logger."
 
 [dependencies]

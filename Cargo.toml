@@ -33,6 +33,8 @@ authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "
 # text, including the "or subsequent versions approved by the European
 # Commission" clause, lives in the LICENSE file at the repo root.
 license = "EUPL-1.2"
+# Source repository, inherited by each member crate via `repository.workspace = true`.
+repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
 polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.0" }

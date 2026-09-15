@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description       = "Pure-Rust particle-physics simulation layer for Polypus: classical Monte Carlo transport and quantum Hamiltonian definitions as Pauli sums. No Python, no external physics framework."
 
 [lib]

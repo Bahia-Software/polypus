@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Evaluation layer for Polypus: oracles that turn a parameter vector into scalar fitness (VQC/QML, variance, Python-callback observables), plus the OracleFactory assembly for training flows."
 
 [dependencies]
 # How a candidate is evaluated: the oracles bind circuits (Qiskit, under the GIL),

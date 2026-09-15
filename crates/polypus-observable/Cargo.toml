@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description       = "Pure-Rust diagonal cost observables (QUBO/Ising) mapping measurement counts to expectation values. rayon-parallel over candidates, GIL-free. No Python."
 
 [lib]
