@@ -321,13 +321,48 @@ pub trait QuantumBackend: Send + Sync {
     ///
     /// The default is unbounded concurrency (the whole batch in one wave, matching
     /// the previous default `max_batch_size`) with shot distribution supported. A
-    /// backend overrides this to cap concurrency: native/local by a memory budget,
-    /// CUNQA at `n_qpus`, QMIO at 1.
+    /// backend overrides this to cap concurrency: CUNQA at `n_qpus`, QMIO at 1.
+    ///
+    /// This **batch-agnostic** form is the one paired against a planner's
+    /// requirements up front (`Resources::new`) and the one mocks override, so its
+    /// signature and behaviour are frozen. A backend whose real cap depends on the
+    /// batch does **not** express it here — it overrides
+    /// [`capabilities_for`](Self::capabilities_for) instead (see there for why).
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             max_concurrency: usize::MAX,
             supports_shot_distribution: true,
         }
+    }
+
+    /// Batch-aware capabilities: what this backend can do *for this specific batch
+    /// of tasks*, so a [`Planner`] can size its execution waves against a cap that
+    /// may depend on the batch itself.
+    ///
+    /// **Why this exists alongside [`capabilities`](Self::capabilities).** The
+    /// batch-agnostic `capabilities()` is called *without* a batch — by
+    /// `Resources::new` to validate the planner/backend pairing before any run, and
+    /// by test mocks that override it — so its signature must not change. But
+    /// [`NativeStatevectorBackend`] and [`LocalBackend`] cap their real
+    /// concurrency by a *statevector memory budget scaled by the batch's widest
+    /// circuit* (see `mem_budget`): a cap that is unknowable without the batch.
+    /// Before this method existed they inherited the unbounded default, so
+    /// [`SequentialPlanner::execute`] treated their entire batch as one wave and
+    /// ran `py.check_signals()` only once, at the end — an ininterruptible
+    /// training generation (ENGINEERING §3). This additive method lets those
+    /// backends expose the batch-derived cap the wave loop needs, without
+    /// perturbing the frozen `capabilities()` seam.
+    ///
+    /// The default **ignores the batch and delegates to
+    /// [`capabilities`](Self::capabilities)**, which is exactly correct for every
+    /// backend whose cap is static — [`CunqaBackend`] (`n_qpus`), [`QmioBackend`]
+    /// (1) — and for every mock. Only [`NativeStatevectorBackend`] and
+    /// [`LocalBackend`] override it, reusing the very cap arithmetic their
+    /// `run_circuits` already applies internally, so the wave size the planner
+    /// picks matches the memory bound the backend would enforce anyway.
+    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+        let _ = tasks;
+        self.capabilities()
     }
 
     /// The sensible default planner for this backend: the atomic-wave

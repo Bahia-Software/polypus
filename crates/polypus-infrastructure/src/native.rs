@@ -10,7 +10,10 @@
 
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::{
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
+    QuantumBackend,
+};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use rayon::prelude::*;
@@ -261,16 +264,23 @@ impl NativeStatevectorBackend {
 /// that keeps full thread concurrency and lets `simulate_one` surface the real
 /// per-circuit error.
 fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
-    qcs.iter()
-        .filter_map(|qc| match qc {
-            BoundCircuit::Native(cc) => Some(cc.num_qubits),
-            BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-                .ok()
-                .map(|pc| pc.num_qubits),
-            BoundCircuit::Qiskit(_) => None,
-        })
-        .max()
-        .unwrap_or(0)
+    qcs.iter().filter_map(circuit_qubits).max().unwrap_or(0)
+}
+
+/// Qubit width of a single circuit as this backend sees it (GIL-free): `Native`
+/// exposes it directly, `Qasm2` is parsed for it, and a `Qiskit` circuit — which
+/// this backend rejects at execution — contributes nothing. Shared by
+/// [`representative_qubits`] (over the batch `run_circuits` receives) and
+/// [`NativeStatevectorBackend::capabilities_for`] (over the planner's task slice),
+/// so both size the memory budget by the identical per-circuit rule.
+fn circuit_qubits(qc: &BoundCircuit) -> Option<usize> {
+    match qc {
+        BoundCircuit::Native(cc) => Some(cc.num_qubits),
+        BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
+            .ok()
+            .map(|pc| pc.num_qubits),
+        BoundCircuit::Qiskit(_) => None,
+    }
 }
 
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
@@ -301,6 +311,25 @@ impl QuantumBackend for NativeStatevectorBackend {
         let cap =
             max_statevector_concurrency(representative_qubits(qcs), rayon::current_num_threads());
         self.run_batch_with_cap(qcs, config, cap)
+    }
+
+    /// Expose the statevector memory cap [`run_circuits`] already enforces, so the
+    /// planner sizes its waves to match (and runs `py.check_signals()` once per
+    /// wave). The arithmetic is identical to `run_circuits` — the batch's widest
+    /// circuit fed to [`max_statevector_concurrency`] against
+    /// `rayon::current_num_threads()` — only here it is read off the task slice
+    /// without cloning any circuit. GIL-free: `Native`/`Qasm2` widths need no
+    /// interpreter, and a `Qiskit` circuit (rejected at execution) is ignored.
+    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+        let widest = tasks
+            .iter()
+            .filter_map(|t| circuit_qubits(t.circuit))
+            .max()
+            .unwrap_or(0);
+        BackendCapabilities {
+            max_concurrency: max_statevector_concurrency(widest, rayon::current_num_threads()),
+            supports_shot_distribution: true,
+        }
     }
 
     /// Single-evolution fast path: `polypus-sim` separates evolution from
@@ -689,6 +718,72 @@ mod tests {
                 "cap={cap} must yield byte-identical counts to the full batch"
             );
         }
+    }
+
+    /// Issue #147: `capabilities_for` exposes the *same* statevector memory cap
+    /// `run_circuits` enforces internally, derived from the batch's widest
+    /// circuit — so the planner can split a high-qubit batch into memory-safe
+    /// waves. A 30-qubit statevector is 16 GiB, so under the default 16 GiB
+    /// budget exactly one fits at a time (cap 1), independent of the thread
+    /// count; the circuit is zero-gate and never simulated, so this costs
+    /// nothing. Crucially the batch-agnostic `capabilities()` is left at its
+    /// unbounded default, proving the change is purely additive.
+    #[test]
+    fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks: Vec<CircuitTask> = (0..4)
+            .map(|_| CircuitTask {
+                circuit: &wide,
+                shots: 8,
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+
+        let cap = backend.capabilities_for(&tasks).max_concurrency;
+        assert_eq!(
+            cap,
+            max_statevector_concurrency(30, rayon::current_num_threads()),
+            "capabilities_for must reuse run_circuits' exact cap arithmetic"
+        );
+        assert_eq!(
+            cap, 1,
+            "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
+        );
+        assert!(
+            cap < tasks.len(),
+            "the cap must force more than one wave for this batch"
+        );
+
+        // The frozen, batch-agnostic seam is untouched.
+        assert_eq!(backend.capabilities().max_concurrency, usize::MAX);
+        assert!(backend.capabilities().supports_shot_distribution);
+    }
+
+    /// A low-qubit batch keeps full thread concurrency (a single wave): the
+    /// memory cap only bites at high qubit counts, so common workloads are
+    /// unchanged. This mirrors `run_circuits`' behaviour exactly.
+    #[test]
+    fn capabilities_for_keeps_full_concurrency_at_low_qubits() {
+        let small =
+            BoundCircuit::Native(ParameterizedCircuit::new(4).assign_parameters(&[]).unwrap());
+        let tasks: Vec<CircuitTask> = (0..8)
+            .map(|_| CircuitTask {
+                circuit: &small,
+                shots: 8,
+            })
+            .collect();
+        let cap = NativeStatevectorBackend::new(0)
+            .capabilities_for(&tasks)
+            .max_concurrency;
+        assert_eq!(cap, rayon::current_num_threads());
+        assert_eq!(
+            cap,
+            max_statevector_concurrency(4, rayon::current_num_threads())
+        );
     }
 
     /// Acceptance criterion (defect #1), positive half: the *same explicit

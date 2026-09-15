@@ -98,6 +98,28 @@ boundary stays out-of-process and explicit; see
   **original** exception (`EvaluationError::Python` carries it verbatim), never
   swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
+- **How many waves that boundary produces is backend- *and* batch-dependent
+  (issue #147).** `SequentialPlanner::execute` sizes each wave from
+  `backend.capabilities_for(tasks).max_concurrency`, a **batch-aware** companion
+  to the frozen, argument-free `QuantumBackend::capabilities()`. The native and
+  local backends cap their real concurrency by a statevector memory budget scaled
+  by the batch's *widest* circuit (`mem_budget::max_statevector_concurrency`);
+  they override `capabilities_for` to expose that cap, so a high-qubit batch is
+  split into several waves and `py.check_signals()` runs **once per wave** —
+  a whole training generation is no longer one uninterruptible call. Backends
+  whose cap is static (CUNQA at `n_qpus`, QMIO at 1) do not override it and
+  inherit the default, which delegates to `capabilities()` ignoring the batch, so
+  their behaviour is unchanged.
+  - **Why a new method rather than changing `capabilities()`.** The
+    argument-free `capabilities()` is called *without* a batch by
+    `Resources::new` (to validate the planner/backend pairing up front) and is
+    overridden by test mocks; its signature and meaning are load-bearing outside
+    this crate, so the fix is strictly additive — `capabilities_for(&[CircuitTask])
+    -> BackendCapabilities`, taking the planner's borrowed task slice (each
+    `CircuitTask` already holds a `&BoundCircuit`) so sizing a wave clones no
+    circuit. The override reuses the *exact* cap arithmetic each backend's
+    `run_circuits` already applies internally, so the wave size the planner picks
+    always matches the memory bound the backend would enforce anyway.
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
   around the whole `scheduler.run(flow)` call; the `Planner` calls
   `py.check_signals()` between execution waves (in `execute`), and the counts are
