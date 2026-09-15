@@ -355,11 +355,12 @@ pub trait QuantumBackend: Send + Sync {
     ///
     /// The default **ignores the batch and delegates to
     /// [`capabilities`](Self::capabilities)**, which is exactly correct for every
-    /// backend whose cap is static — [`CunqaBackend`] (`n_qpus`), [`QmioBackend`]
-    /// (1) — and for every mock. Only [`NativeStatevectorBackend`] and
-    /// [`LocalBackend`] override it, reusing the very cap arithmetic their
-    /// `run_circuits` already applies internally, so the wave size the planner
-    /// picks matches the memory bound the backend would enforce anyway.
+    /// backend whose cap is static — [`CunqaBackend`] (`n_qpus`), `QmioBackend`
+    /// (1, behind the `qmio` feature) — and for every mock. Only
+    /// [`NativeStatevectorBackend`] and [`LocalBackend`] override it, reusing the
+    /// very cap arithmetic their `run_circuits` already applies internally, so the
+    /// wave size the planner picks matches the memory bound the backend would
+    /// enforce anyway.
     fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
         let _ = tasks;
         self.capabilities()

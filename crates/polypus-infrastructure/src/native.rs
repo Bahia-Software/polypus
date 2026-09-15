@@ -313,21 +313,33 @@ impl QuantumBackend for NativeStatevectorBackend {
         self.run_batch_with_cap(qcs, config, cap)
     }
 
-    /// Expose the statevector memory cap [`run_circuits`] already enforces, so the
-    /// planner sizes its waves to match (and runs `py.check_signals()` once per
-    /// wave). The arithmetic is identical to `run_circuits` — the batch's widest
-    /// circuit fed to [`max_statevector_concurrency`] against
-    /// `rayon::current_num_threads()` — only here it is read off the task slice
-    /// without cloning any circuit. GIL-free: `Native`/`Qasm2` widths need no
-    /// interpreter, and a `Qiskit` circuit (rejected at execution) is ignored.
+    /// Report the wave size the planner should use for this batch, derived from
+    /// the same statevector memory budget [`run_circuits`](Self::run_circuits)
+    /// enforces internally — the batch's widest circuit fed to
+    /// [`max_statevector_concurrency`] against `rayon::current_num_threads()`,
+    /// read off the task slice without cloning any circuit. GIL-free:
+    /// `Native`/`Qasm2` widths need no interpreter, and a `Qiskit` circuit
+    /// (rejected at execution) is ignored.
+    ///
+    /// The wave size is capped **only when the budget actually throttles
+    /// concurrency below the thread pool** (`cap < threads`, the high-qubit
+    /// regime): there `run_circuits` would otherwise process the batch as several
+    /// sequential memory windows inside *one* call, so exposing `cap` lets the
+    /// planner run those windows as waves with a `py.check_signals()` between them
+    /// (issue #147). When the budget does not bite (`cap == threads`, the common
+    /// low-qubit case) the cap is reported as unbounded so the whole batch stays a
+    /// single wave — matching `run_batch_with_cap`'s fast path; the backend still
+    /// parallelises internally up to the thread count.
     fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
         let widest = tasks
             .iter()
             .filter_map(|t| circuit_qubits(t.circuit))
             .max()
             .unwrap_or(0);
+        let threads = rayon::current_num_threads();
+        let cap = max_statevector_concurrency(widest, threads);
         BackendCapabilities {
-            max_concurrency: max_statevector_concurrency(widest, rayon::current_num_threads()),
+            max_concurrency: if cap >= threads { usize::MAX } else { cap },
             supports_shot_distribution: true,
         }
     }
@@ -720,16 +732,26 @@ mod tests {
         }
     }
 
-    /// Issue #147: `capabilities_for` exposes the *same* statevector memory cap
-    /// `run_circuits` enforces internally, derived from the batch's widest
-    /// circuit — so the planner can split a high-qubit batch into memory-safe
-    /// waves. A 30-qubit statevector is 16 GiB, so under the default 16 GiB
-    /// budget exactly one fits at a time (cap 1), independent of the thread
-    /// count; the circuit is zero-gate and never simulated, so this costs
+    /// Issue #147: for a high-qubit batch — where the memory budget throttles
+    /// concurrency below the thread pool — `capabilities_for` reports the
+    /// statevector memory cap `run_circuits` enforces internally, so the planner
+    /// can split the batch into memory-safe waves. A 30-qubit statevector is
+    /// 16 GiB, so under the default 16 GiB budget exactly one fits at a time
+    /// (cap 1); the circuit is zero-gate and never simulated, so this costs
     /// nothing. Crucially the batch-agnostic `capabilities()` is left at its
-    /// unbounded default, proving the change is purely additive.
+    /// unbounded default, proving the change is purely additive. (Assumes the
+    /// multi-core host of CI/dev: on a single core the raw cap already equals the
+    /// thread count and the whole batch stays one wave, which is the same
+    /// concurrency anyway.)
     #[test]
     fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
+        let threads = rayon::current_num_threads();
+        // This test's point only exists when the budget can throttle below the
+        // pool; skip the degenerate single-core case rather than assert a value
+        // that is correct only with real parallelism.
+        if threads <= 1 {
+            return;
+        }
         let wide = BoundCircuit::Native(
             ParameterizedCircuit::new(30)
                 .assign_parameters(&[])
@@ -744,11 +766,9 @@ mod tests {
         let backend = NativeStatevectorBackend::new(0);
 
         let cap = backend.capabilities_for(&tasks).max_concurrency;
-        assert_eq!(
-            cap,
-            max_statevector_concurrency(30, rayon::current_num_threads()),
-            "capabilities_for must reuse run_circuits' exact cap arithmetic"
-        );
+        // 30 qubits throttles below `threads`, so the wave cap is the raw memory
+        // cap (1), not the unbounded low-qubit report.
+        assert_eq!(cap, max_statevector_concurrency(30, threads));
         assert_eq!(
             cap, 1,
             "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
@@ -763,11 +783,13 @@ mod tests {
         assert!(backend.capabilities().supports_shot_distribution);
     }
 
-    /// A low-qubit batch keeps full thread concurrency (a single wave): the
-    /// memory cap only bites at high qubit counts, so common workloads are
-    /// unchanged. This mirrors `run_circuits`' behaviour exactly.
+    /// A low-qubit batch is reported as a **single unbounded wave**: the memory
+    /// budget does not throttle below the thread pool, so the planner hands the
+    /// whole batch to the backend in one call (which parallelises internally),
+    /// exactly as before this change — no per-wave chunking overhead for the
+    /// common low-qubit workloads.
     #[test]
-    fn capabilities_for_keeps_full_concurrency_at_low_qubits() {
+    fn capabilities_for_keeps_a_single_wave_at_low_qubits() {
         let small =
             BoundCircuit::Native(ParameterizedCircuit::new(4).assign_parameters(&[]).unwrap());
         let tasks: Vec<CircuitTask> = (0..8)
@@ -776,14 +798,16 @@ mod tests {
                 shots: 8,
             })
             .collect();
+        // Premise: at 4 qubits the budget leaves concurrency at the full thread
+        // count, i.e. it does not bite — so the wave stays unbounded.
+        assert_eq!(
+            max_statevector_concurrency(4, rayon::current_num_threads()),
+            rayon::current_num_threads()
+        );
         let cap = NativeStatevectorBackend::new(0)
             .capabilities_for(&tasks)
             .max_concurrency;
-        assert_eq!(cap, rayon::current_num_threads());
-        assert_eq!(
-            cap,
-            max_statevector_concurrency(4, rayon::current_num_threads())
-        );
+        assert_eq!(cap, usize::MAX);
     }
 
     /// Acceptance criterion (defect #1), positive half: the *same explicit

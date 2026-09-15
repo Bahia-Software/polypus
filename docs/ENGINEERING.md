@@ -104,12 +104,17 @@ boundary stays out-of-process and explicit; see
   to the frozen, argument-free `QuantumBackend::capabilities()`. The native and
   local backends cap their real concurrency by a statevector memory budget scaled
   by the batch's *widest* circuit (`mem_budget::max_statevector_concurrency`);
-  they override `capabilities_for` to expose that cap, so a high-qubit batch is
-  split into several waves and `py.check_signals()` runs **once per wave** —
-  a whole training generation is no longer one uninterruptible call. Backends
-  whose cap is static (CUNQA at `n_qpus`, QMIO at 1) do not override it and
-  inherit the default, which delegates to `capabilities()` ignoring the batch, so
-  their behaviour is unchanged.
+  they override `capabilities_for` to expose that cap **only when it throttles
+  concurrency below the core count** — the high-qubit regime — so a high-qubit
+  batch is split into several waves and `py.check_signals()` runs **once per
+  wave**: a whole training generation is no longer one uninterruptible call. When
+  the budget does not bite (the common low-qubit case) they report an unbounded
+  wave, so the whole population still reaches the backend as a **single** call
+  (Aer parallelises the experiments internally; splitting would only add per-call
+  overhead — pinned by `tests/python/test_qml_concurrency.py`). Backends whose cap
+  is static (CUNQA at `n_qpus`, QMIO at 1) do not override it and inherit the
+  default, which delegates to `capabilities()` ignoring the batch, so their
+  behaviour is unchanged.
   - **Why a new method rather than changing `capabilities()`.** The
     argument-free `capabilities()` is called *without* a batch by
     `Resources::new` (to validate the planner/backend pairing up front) and is
@@ -119,7 +124,8 @@ boundary stays out-of-process and explicit; see
     `CircuitTask` already holds a `&BoundCircuit`) so sizing a wave clones no
     circuit. The override reuses the *exact* cap arithmetic each backend's
     `run_circuits` already applies internally, so the wave size the planner picks
-    always matches the memory bound the backend would enforce anyway.
+    matches the memory bound the backend would enforce anyway — and collapses to a
+    single wave whenever that bound is not actually binding.
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
   around the whole `scheduler.run(flow)` call; the `Planner` calls
   `py.check_signals()` between execution waves (in `execute`), and the counts are
