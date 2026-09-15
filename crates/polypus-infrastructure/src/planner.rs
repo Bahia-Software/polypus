@@ -156,7 +156,14 @@ impl Planner for SequentialPlanner {
         config: &ExecutionConfig,
         cancel: &CancelToken,
     ) -> Result<Vec<Counts>, InfrastructureError> {
-        let wave = backend.capabilities().max_concurrency.max(1);
+        // Size the wave with the *batch-aware* cap: native/local derive it from a
+        // statevector memory budget scaled by this batch's widest circuit
+        // (`capabilities_for`), so a high-qubit batch is split into several waves
+        // instead of one. The between-wave `py.check_signals()` below (ENGINEERING
+        // §3) therefore runs once per wave, keeping a big generation interruptible.
+        // Backends with a static cap inherit the default, which delegates to the
+        // batch-agnostic `capabilities()` — unchanged behaviour for them.
+        let wave = backend.capabilities_for(tasks).max_concurrency.max(1);
         let mut out: Vec<Counts> = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(wave) {
             if cancel.is_cancelled() {
@@ -271,5 +278,222 @@ mod tests {
         assert!(ShotDistributingPlanner.requirements().check(&caps).is_ok());
         // The sequential planner needs no distribution and any concurrency ≥ 1.
         assert!(SequentialPlanner.requirements().check(&caps).is_ok());
+    }
+
+    // --- Issue #147: batch-aware wave sizing for native/local -----------------
+    //
+    // These tests prove `SequentialPlanner::execute` now sizes its waves with the
+    // *batch-aware* cap (`capabilities_for`), so a high-qubit batch on the native
+    // or local backend is split into several memory-capped waves — with the
+    // between-wave `py.check_signals()` running once per wave — instead of one
+    // uninterruptible wave.
+    //
+    // The cap decision is taken by the *real* native/local backend
+    // (`WaveSpy::capabilities_for` delegates to it), but the circuits are never
+    // simulated: a `WaveSpy` intercepts `run_circuits`, records each wave's size
+    // and returns dummy valid counts. That is what lets us use a 30-qubit circuit
+    // (16 GiB statevector => cap 1 under the default budget, independent of the
+    // thread count) without ever allocating 2^30 amplitudes or mutating the
+    // `POLYPUS_MEM_BUDGET` env var (a known flakiness source this project avoids).
+    use crate::{BackendCapabilities, NativeStatevectorBackend};
+    use polypus_circuit::ParameterizedCircuit;
+    use std::sync::Mutex;
+
+    /// Wraps a real backend to borrow its batch-aware cap while stubbing out
+    /// execution: `run_circuits` records the wave size and returns one valid
+    /// (non-empty, shot-conserving) counts map per circuit, so nothing is ever
+    /// simulated. Optionally cancels a shared token from inside the first wave.
+    struct WaveSpy<'b> {
+        inner: &'b dyn QuantumBackend,
+        calls: Mutex<Vec<usize>>,
+        cancel_after_first: Option<CancelToken>,
+    }
+
+    impl QuantumBackend for WaveSpy<'_> {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            config: &ExecutionConfig,
+        ) -> Result<Vec<Counts>, BackendError> {
+            self.calls.lock().unwrap().push(qcs.len());
+            if let Some(token) = &self.cancel_after_first {
+                token.cancel();
+            }
+            Ok(qcs
+                .iter()
+                .map(|_| Counts::from([("0".to_string(), u64::from(config.shots))]))
+                .collect())
+        }
+
+        // The whole point: waves are sized by the real backend's batch-aware cap.
+        fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+            self.inner.capabilities_for(tasks)
+        }
+    }
+
+    fn config() -> ExecutionConfig {
+        ExecutionConfig {
+            id: "wave-test".to_string(),
+            shots: 8,
+            n_qpus: 1,
+            infrastructure: "local".to_string(),
+            backend_config: crate::BackendConfig::LocalNative { fusion: true },
+            opt_level: crate::OptLevel::default(),
+            seed: Some(7),
+        }
+    }
+
+    /// Four 30-qubit tasks, referencing one zero-gate circuit (never simulated).
+    fn wide_batch(circuit: &BoundCircuit) -> Vec<CircuitTask<'_>> {
+        (0..4).map(|_| CircuitTask { circuit, shots: 8 }).collect()
+    }
+
+    /// Acceptance criterion 1 (native): a high-qubit batch is split into several
+    /// waves respecting the memory-derived cap, not run as one wave. Cap 1 (30
+    /// qubits under the 16 GiB default) ⇒ one circuit per wave ⇒ four waves.
+    #[test]
+    fn execute_splits_high_qubit_native_batch_into_memory_capped_waves() {
+        pyo3::prepare_freethreaded_python();
+        if rayon::current_num_threads() <= 1 {
+            return; // Needs real parallelism for the budget to throttle below it.
+        }
+        let native = NativeStatevectorBackend::new(0);
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks = wide_batch(&wide);
+        let spy = WaveSpy {
+            inner: &native,
+            calls: Mutex::new(Vec::new()),
+            cancel_after_first: None,
+        };
+
+        let out = SequentialPlanner
+            .execute(&spy, &tasks, &config(), &CancelToken::default())
+            .unwrap();
+
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![1, 1, 1, 1],
+            "cap 1 must split the batch into four single-circuit waves, not one wave of four"
+        );
+    }
+
+    /// Acceptance criterion 1 (local): same split, cap taken from the real
+    /// `LocalBackend` (whose `capabilities_for` reads widths through the GIL).
+    #[test]
+    fn execute_splits_high_qubit_local_batch_into_memory_capped_waves() {
+        pyo3::prepare_freethreaded_python();
+        if std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1)
+            <= 1
+        {
+            return; // Needs real parallelism for the budget to throttle below it.
+        }
+        let local =
+            crate::LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks = wide_batch(&wide);
+        let spy = WaveSpy {
+            inner: &local,
+            calls: Mutex::new(Vec::new()),
+            cancel_after_first: None,
+        };
+
+        let out = SequentialPlanner
+            .execute(&spy, &tasks, &config(), &CancelToken::default())
+            .unwrap();
+
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![1, 1, 1, 1],
+            "cap 1 must split the batch into four single-circuit waves, not one wave of four"
+        );
+    }
+
+    /// Acceptance criterion 2 (native): the wave boundary — where
+    /// `py.check_signals()` runs — is honoured *between* waves, not only once at
+    /// the end. Cancelling from inside the first wave stops the second from ever
+    /// launching: only one `run_circuits` call is recorded and `execute` returns
+    /// `Cancelled`. Were the whole batch one wave, cancellation set mid-run would
+    /// have no effect and all four circuits would run.
+    #[test]
+    fn execute_signal_checks_between_native_waves_not_only_at_the_end() {
+        pyo3::prepare_freethreaded_python();
+        if rayon::current_num_threads() <= 1 {
+            return; // Needs real parallelism for the budget to throttle below it.
+        }
+        let native = NativeStatevectorBackend::new(0);
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks = wide_batch(&wide);
+        let token = CancelToken::default();
+        let spy = WaveSpy {
+            inner: &native,
+            calls: Mutex::new(Vec::new()),
+            cancel_after_first: Some(token.clone()),
+        };
+
+        let err = SequentialPlanner
+            .execute(&spy, &tasks, &config(), &token)
+            .unwrap_err();
+
+        assert!(matches!(err, InfrastructureError::Cancelled));
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![1],
+            "the second wave must not launch after cancellation at the first wave boundary"
+        );
+    }
+
+    /// Acceptance criterion 2 (local): same between-wave boundary, with the cap
+    /// taken from the real `LocalBackend`.
+    #[test]
+    fn execute_signal_checks_between_local_waves_not_only_at_the_end() {
+        pyo3::prepare_freethreaded_python();
+        if std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1)
+            <= 1
+        {
+            return; // Needs real parallelism for the budget to throttle below it.
+        }
+        let local =
+            crate::LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks = wide_batch(&wide);
+        let token = CancelToken::default();
+        let spy = WaveSpy {
+            inner: &local,
+            calls: Mutex::new(Vec::new()),
+            cancel_after_first: Some(token.clone()),
+        };
+
+        let err = SequentialPlanner
+            .execute(&spy, &tasks, &config(), &token)
+            .unwrap_err();
+
+        assert!(matches!(err, InfrastructureError::Cancelled));
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![1],
+            "the second wave must not launch after cancellation at the first wave boundary"
+        );
     }
 }

@@ -1,6 +1,9 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::{
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
+    QuantumBackend,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -117,6 +120,40 @@ impl QuantumBackend for LocalBackend {
             })
         })
     }
+
+    /// Report the wave size the planner should use for this batch, derived from
+    /// the same statevector memory budget [`run_circuits`](Self::run_circuits)
+    /// hands Aer as `max_parallel_experiments` — the batch's widest circuit fed to
+    /// [`max_statevector_concurrency`] against `available_parallelism()`, read off
+    /// the task slice without cloning any circuit. The GIL is acquired solely to
+    /// read a `Qiskit` circuit's `num_qubits` (as `run_circuits` does);
+    /// `Native`/`Qasm2` widths need no interpreter.
+    ///
+    /// The wave size is capped **only when the budget actually throttles
+    /// concurrency below the core count** (`cap < cores`, the high-qubit regime):
+    /// there splitting into waves lets the planner run a `py.check_signals()`
+    /// between them (issue #147). When the budget does not bite (`cap == cores`,
+    /// the common low-qubit case) the cap is reported as unbounded so the whole
+    /// population reaches Aer as a **single** call — Aer parallelises the
+    /// experiments internally up to `max_parallel_experiments`, so splitting would
+    /// only add per-call overhead (see `tests/python/test_qml_concurrency.py`).
+    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+        let cores = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1);
+        let widest = Python::with_gil(|py| {
+            tasks
+                .iter()
+                .filter_map(|t| circuit_qubits(t.circuit, py))
+                .max()
+                .unwrap_or(0)
+        });
+        let cap = max_statevector_concurrency(widest, cores);
+        BackendCapabilities {
+            max_concurrency: if cap >= cores { usize::MAX } else { cap },
+            supports_shot_distribution: true,
+        }
+    }
 }
 
 /// The widest circuit in the batch, used to size Aer's `max_parallel_experiments`
@@ -127,15 +164,25 @@ impl QuantumBackend for LocalBackend {
 /// budget that leaves Aer's parallelism at the core count.
 fn widest_qubits(qcs: &[BoundCircuit], py: Python<'_>) -> usize {
     qcs.iter()
-        .filter_map(|qc| match qc {
-            BoundCircuit::Native(cc) => Some(cc.num_qubits),
-            BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
-                .ok()
-                .map(|pc| pc.num_qubits),
-            BoundCircuit::Qiskit(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
-        })
+        .filter_map(|qc| circuit_qubits(qc, py))
         .max()
         .unwrap_or(0)
+}
+
+/// Qubit width of a single circuit, read where it is cheapest: `Native` exposes it
+/// directly, `Qasm2` is parsed for it, and a `Qiskit` circuit is read through the
+/// GIL (`num_qubits`), which the caller already holds. Shared by [`widest_qubits`]
+/// (over the batch `run_circuits` receives) and
+/// [`LocalBackend::capabilities_for`] (over the planner's task slice), so both
+/// size Aer's memory budget by the identical per-circuit rule.
+fn circuit_qubits(qc: &BoundCircuit, py: Python<'_>) -> Option<usize> {
+    match qc {
+        BoundCircuit::Native(cc) => Some(cc.num_qubits),
+        BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+            .ok()
+            .map(|pc| pc.num_qubits),
+        BoundCircuit::Qiskit(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
+    }
 }
 
 #[cfg(test)]
@@ -168,5 +215,79 @@ mod tests {
             assert_eq!(widest_qubits(&batch, py), 7);
             assert_eq!(widest_qubits(&[], py), 0);
         });
+    }
+
+    /// Issue #147: `capabilities_for` exposes the *same* statevector memory cap
+    /// `run_circuits` hands Aer as `max_parallel_experiments`, derived from the
+    /// batch's widest circuit — so the planner can split a high-qubit batch into
+    /// memory-safe waves. A 30-qubit statevector is 16 GiB, so under the default
+    /// 16 GiB budget exactly one fits at a time (cap 1); the circuit is zero-gate
+    /// and never submitted to Aer, so this costs nothing. The batch-agnostic
+    /// `capabilities()` is left at its unbounded default (purely additive).
+    #[test]
+    fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
+        pyo3::prepare_freethreaded_python();
+        let cores = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1);
+        // This test's point only exists when the budget can throttle below the
+        // core count; skip the degenerate single-core case (there the whole batch
+        // stays one wave — the same concurrency anyway).
+        if cores <= 1 {
+            return;
+        }
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks: Vec<CircuitTask> = (0..4)
+            .map(|_| CircuitTask {
+                circuit: &wide,
+                shots: 8,
+            })
+            .collect();
+        let backend =
+            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+
+        let cap = backend.capabilities_for(&tasks).max_concurrency;
+        // 30 qubits throttles below `cores`, so the wave cap is the raw memory
+        // cap (1), not the unbounded low-qubit report.
+        assert_eq!(cap, max_statevector_concurrency(30, cores));
+        assert_eq!(
+            cap, 1,
+            "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
+        );
+        assert!(
+            cap < tasks.len(),
+            "the cap must force more than one wave for this batch"
+        );
+
+        // The frozen, batch-agnostic seam is untouched.
+        assert_eq!(backend.capabilities().max_concurrency, usize::MAX);
+        assert!(backend.capabilities().supports_shot_distribution);
+    }
+
+    /// A low-qubit batch is reported as a **single unbounded wave**, so the whole
+    /// population reaches Aer in one call (issue #147 must not regress the
+    /// single-batch contract of `tests/python/test_qml_concurrency.py`).
+    #[test]
+    fn capabilities_for_keeps_a_single_wave_at_low_qubits() {
+        pyo3::prepare_freethreaded_python();
+        let small =
+            BoundCircuit::Native(ParameterizedCircuit::new(2).assign_parameters(&[]).unwrap());
+        let tasks: Vec<CircuitTask> = (0..64)
+            .map(|_| CircuitTask {
+                circuit: &small,
+                shots: 8,
+            })
+            .collect();
+        let backend =
+            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        assert_eq!(
+            backend.capabilities_for(&tasks).max_concurrency,
+            usize::MAX,
+            "a low-qubit population must stay a single wave"
+        );
     }
 }
