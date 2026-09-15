@@ -60,6 +60,18 @@ pub enum PhysicsError {
     UntabulatedMedium {
         message: String,
     },
+    /// Could not download an ENDF-6 evaluation from the IAEA data service.
+    EndfDownloadFailed {
+        /// Atomic number that failed to download.
+        z: u32,
+        /// Human-readable description of what went wrong.
+        message: String,
+    },
+    /// Could not read or write the local ENDF-6 cache on disk.
+    EndfCacheError {
+        /// Human-readable description of what went wrong.
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -97,6 +109,12 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::UntabulatedMedium { message } => {
                 write!(f, "untabulated medium: {message}")
+            }
+            PhysicsError::EndfDownloadFailed { z, message } => {
+                write!(f, "could not download ENDF-6 data for Z={z}: {message}")
+            }
+            PhysicsError::EndfCacheError { message } => {
+                write!(f, "ENDF-6 cache error: {message}")
             }
         }
     }

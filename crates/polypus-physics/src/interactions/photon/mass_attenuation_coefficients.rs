@@ -1,28 +1,67 @@
 //! ENDF-6 (EPDL) photon cross-section data reading and interpolation.
 
+use crate::constants::{AVOGADRO, BARN_TO_CM2};
+use crate::error::PhysicsError;
 use std::collections::HashMap;
 #[cfg(feature = "csv-export")]
 use std::path::Path;
 use std::sync::OnceLock;
 
-use include_dir::{include_dir, Dir};
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
-use crate::constants::{AVOGADRO, BARN_TO_CM2};
-use crate::error::PhysicsError;
+/// Local on-disk cache directory for downloaded ENDF-6 evaluations.
+fn cache_dir() -> Result<PathBuf, PhysicsError> {
+    let base = dirs::cache_dir().ok_or_else(|| PhysicsError::EndfCacheError {
+        message: "could not determine a cache directory for this platform".to_string(),
+    })?;
+    let dir = base.join("polypus-physics").join("endf");
+    std::fs::create_dir_all(&dir).map_err(|e| PhysicsError::EndfCacheError {
+        message: format!("could not create cache directory {}: {e}", dir.display()),
+    })?;
+    Ok(dir)
+}
 
-/// The 100 ENDF-6 files, embedded in the binary.
-static ENDF_FILES: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/interactions/photon/endf_data");
+/// URL of the raw ENDF-6 (EPDL) evaluation for a given Z, at the IAEA data
+/// service.
+fn endf_url(z: u32) -> String {
+    format!("https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{z:03}000")
+}
 
-/// Extracts (Z, symbol) from a file's first line, e.g. "  26-Fe ...".
-fn read_element_header(first_line: &str) -> Option<(u32, String)> {
-    let (before, after) = first_line.trim_start().split_once('-')?;
-    let z: u32 = before.trim_end().parse().ok()?;
-    let symbol: String = after
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect();
-    (1..=2).contains(&symbol.len()).then_some((z, symbol))
+/// Returns the raw contents of the ENDF-6 evaluation for `z`, downloading
+/// it from the IAEA data service on first use and caching it locally on
+/// disk for every subsequent call.
+fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
+    let path = cache_dir()?.join(format!("ZA{z:03}000.txt"));
+
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        return Ok(contents);
+    }
+
+    let mut response =
+        ureq::get(&endf_url(z))
+            .call()
+            .map_err(|e| PhysicsError::EndfDownloadFailed {
+                z,
+                message: e.to_string(),
+            })?;
+
+    let mut contents = String::new();
+    response
+        .body_mut()
+        .as_reader()
+        .read_to_string(&mut contents)
+        .map_err(|e| PhysicsError::EndfDownloadFailed {
+            z,
+            message: format!("could not read response body: {e}"),
+        })?;
+
+    std::fs::write(&path, &contents).map_err(|e| PhysicsError::EndfCacheError {
+        message: format!("could not write cache file {}: {e}", path.display()),
+    })?;
+
+    Ok(contents)
 }
 
 /// The last `from_end - to_end` characters of a line, like Python's
@@ -144,35 +183,71 @@ fn atomic_mass(z: u32) -> Option<f64> {
     ATOMIC_MASSES.get((z - 1) as usize).copied()
 }
 
-/// The parsed identity and raw contents of one embedded ENDF-6 file.
+/// The parsed identity and raw contents of one ENDF-6 evaluation, fetched
+/// (and cached) on demand.
 struct EndfEntry {
     z: u32,
-    contents: &'static str,
+    contents: String,
 }
 
-/// Builds a symbol -> file lookup by reading the first line of every
-/// embedded ENDF-6 file. Built once, on first use, and cached from then on.
-fn endf_index() -> &'static HashMap<String, EndfEntry> {
-    static INDEX: OnceLock<HashMap<String, EndfEntry>> = OnceLock::new();
-
-    INDEX.get_or_init(|| {
-        let mut index = HashMap::new();
-        for file in ENDF_FILES.files() {
-            let contents = file
-                .contents_utf8()
-                .expect("embedded ENDF-6 files must be valid UTF-8");
-            let first_line = contents.lines().next().unwrap_or("");
-            if let Some((z, symbol)) = read_element_header(first_line) {
-                index.insert(symbol, EndfEntry { z, contents });
-            }
-        }
-        index
-    })
+/// The set of ENDF-6 evaluations fetched so far in this process, keyed by
+/// chemical symbol. Grows incrementally as elements are requested — unlike
+/// the old embedded-data design, there is no fixed set of 100 to index
+/// upfront.
+fn endf_index() -> &'static Mutex<HashMap<String, EndfEntry>> {
+    static INDEX: OnceLock<Mutex<HashMap<String, EndfEntry>>> = OnceLock::new();
+    INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Looks up an element's atomic number from its chemical symbol (e.g. "Fe" -> 26).
+/// Returns the (Z, raw contents) of a chemical element's ENDF-6 evaluation,
+/// downloading and caching it on first use.
+fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
+    let z = z_for_symbol(symbol).ok_or_else(|| PhysicsError::UnknownElement {
+        symbol: symbol.to_string(),
+    })?;
+
+    let mut index = endf_index()
+        .lock()
+        .map_err(|_| PhysicsError::EndfCacheError {
+            message: "ENDF-6 index lock was poisoned".to_string(),
+        })?;
+
+    if let Some(entry) = index.get(symbol) {
+        return Ok((entry.z, entry.contents.clone()));
+    }
+
+    let contents = fetch_endf_contents(z)?;
+    index.insert(
+        symbol.to_string(),
+        EndfEntry {
+            z,
+            contents: contents.clone(),
+        },
+    );
+    Ok((z, contents))
+}
+
+/// Chemical symbol for each Z from 1 to 100, in order. Used to translate a
+/// symbol to its atomic number before downloading the corresponding
+/// ENDF-6 evaluation — this table alone is embedded in the binary (a few
+/// KB), unlike the full ENDF-6 data, which is fetched on demand.
+const ELEMENT_SYMBOLS: [&str; 100] = [
+    "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl",
+    "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As",
+    "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb",
+    "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl",
+    "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
+    "Cf", "Es", "Fm",
+];
+
+/// Looks up an element's atomic number from its chemical symbol
+/// (e.g. `"Fe"` → `26`), without needing any ENDF-6 data downloaded yet.
 pub fn z_for_symbol(symbol: &str) -> Option<u32> {
-    endf_index().get(symbol).map(|entry| entry.z)
+    ELEMENT_SYMBOLS
+        .iter()
+        .position(|&s| s == symbol)
+        .map(|index| (index + 1) as u32)
 }
 
 /// A single (energy, cross-section) data point straight from an ENDF-6 file.
@@ -271,13 +346,9 @@ pub fn cross_section_for_element(
     symbol: &str,
     mt: u32,
 ) -> Result<(u32, Vec<CrossSectionPoint>), PhysicsError> {
-    let entry = endf_index()
-        .get(symbol)
-        .ok_or_else(|| PhysicsError::UnknownElement {
-            symbol: symbol.to_string(),
-        })?;
-    let points = read_section(entry.contents, 23, mt)?;
-    Ok((entry.z, points))
+    let (z, contents) = endf_entry_for_symbol(symbol)?;
+    let points = read_section(&contents, 23, mt)?;
+    Ok((z, points))
 }
 
 /// Computes the mass attenuation coefficient mu_m = sigma_t * N_A / A for a
@@ -656,29 +727,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn indexes_all_100_elements() {
-        let index = endf_index();
-        assert_eq!(index.len(), 100);
+    fn requesting_an_element_adds_it_to_the_index() {
+        let _ = endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let index = endf_index().lock().unwrap();
+        assert!(index.contains_key("H"));
     }
 
     #[test]
-    fn oxygen_symbol_resolves_to_z_8() {
+    fn element_symbols_table_has_100_entries() {
+        assert_eq!(ELEMENT_SYMBOLS.len(), 100);
+    }
+
+    #[test]
+    fn z_for_symbol_matches_known_elements() {
+        assert_eq!(z_for_symbol("H"), Some(1));
         assert_eq!(z_for_symbol("O"), Some(8));
-    }
-
-    #[test]
-    fn unknown_symbol_returns_none() {
+        assert_eq!(z_for_symbol("Fe"), Some(26));
+        assert_eq!(z_for_symbol("Pb"), Some(82));
+        assert_eq!(z_for_symbol("U"), Some(92));
+        assert_eq!(z_for_symbol("Fm"), Some(100));
         assert_eq!(z_for_symbol("Xx"), None);
     }
 
     #[test]
     fn is_cached_across_calls() {
-        let first = endf_index() as *const _;
-        let second = endf_index() as *const _;
-        assert_eq!(
-            first, second,
-            "endf_index() should return the same cached map"
-        );
+        let (z1, contents1) = endf_entry_for_symbol("H").unwrap();
+        let (z2, contents2) = endf_entry_for_symbol("H").unwrap();
+        assert_eq!(z1, z2);
+        assert_eq!(contents1, contents2);
     }
 
     #[test]
@@ -699,17 +775,17 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_has_2021_points() {
-        let entry = endf_index().get("H").expect("H should be indexed");
-        let points =
-            read_section(entry.contents, 23, 501).expect("MF=23 MT=501 should exist for H");
+        let (_z, contents) =
+            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         assert_eq!(points.len(), 2021);
     }
 
     #[test]
     fn hydrogen_total_cross_section_first_point() {
-        let entry = endf_index().get("H").expect("H should be indexed");
-        let points =
-            read_section(entry.contents, 23, 501).expect("MF=23 MT=501 should exist for H");
+        let (_z, contents) =
+            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let first = &points[0];
         assert_eq!(first.energy_ev, 1.0);
         assert!((first.sigma_barn - 4.62084e-6).abs() < 1e-12);
@@ -717,9 +793,9 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_last_point() {
-        let entry = endf_index().get("H").expect("H should be indexed");
-        let points =
-            read_section(entry.contents, 23, 501).expect("MF=23 MT=501 should exist for H");
+        let (_z, contents) =
+            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let last = points.last().unwrap();
         assert_eq!(last.energy_ev, 100_000_000_000.0);
         assert!((last.sigma_barn - 0.020718042).abs() < 1e-9);
@@ -727,8 +803,9 @@ mod tests {
 
     #[test]
     fn unknown_mt_channel_errors() {
-        let entry = endf_index().get("H").expect("H should be indexed");
-        let result = read_section(entry.contents, 23, 999);
+        let (_z, contents) =
+            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let result = read_section(&contents, 23, 999);
         assert!(matches!(
             result,
             Err(PhysicsError::MalformedEndfData { .. })
@@ -878,5 +955,27 @@ mod tests {
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("Compound,H2O"));
+    }
+    #[test]
+    fn endf_url_builds_correct_pattern() {
+        assert_eq!(
+            endf_url(1),
+            "https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA001000"
+        );
+        assert_eq!(
+            endf_url(100),
+            "https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA100000"
+        );
+    }
+    #[test]
+    fn fetching_an_element_writes_it_to_the_disk_cache() {
+        let (z, _contents) = endf_entry_for_symbol("He").unwrap();
+        assert_eq!(z, 2);
+        let path = cache_dir().unwrap().join("ZA002000.txt");
+        assert!(
+            path.exists(),
+            "expected {} to exist after fetching",
+            path.display()
+        );
     }
 }
