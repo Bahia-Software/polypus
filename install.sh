@@ -182,32 +182,30 @@ if [[ "$INSTALL_EXAMPLES" == "y" ]]; then
     success "Example dependencies installed."
 fi
 
-# ── 5. Build polypus_python wheel ────────────────────────────────────────────
-info "Building polypus_python wheel..."
-python -m build packages/polypus_python/ --wheel --no-isolation \
-    || error "Failed to build polypus_python wheel."
-
-WHEEL=$(ls -t packages/polypus_python/dist/polypus_python-*.whl | head -1)
-[[ -f "$WHEEL" ]] || error "Wheel not found after build."
-success "Built: $(basename "$WHEEL")"
-
-# ── 6. Install polypus_python ────────────────────────────────────────────────
-info "Installing polypus_python..."
-pip install --quiet --force-reinstall "$WHEEL" \
-    || error "Failed to install polypus_python."
-success "polypus_python installed."
-
-# ── 7. Build and install polypus Rust extension ──────────────────────────────
+# ── 5. Build & install polypus (Rust extension + bundled polypus_python) ──────
+# A single maturin wheel now contains BOTH the `polypus` extension and the
+# pure-Python `polypus_python` helpers (bundled via `[tool.maturin] include`), so
+# one build+install provides both import names. NOTE: `maturin develop` is not
+# used here — it installs only the compiled extension, not the `include`d
+# helpers; a built wheel does include them.
 MATURIN_FLAGS="--features extension-module"
 # Opt-in CESGA QMIO QPU backend (pure-Rust ZeroMQ; no system libzmq needed).
 [[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,qmio"
 [[ "$BUILD_MODE" == "release" ]] && MATURIN_FLAGS="--release $MATURIN_FLAGS"
-info "Building polypus Rust extension (maturin develop ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
-python -m maturin develop $MATURIN_FLAGS \
-    || error "maturin develop failed."
-success "polypus Rust extension installed."
+info "Building polypus wheel (maturin build ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
+python -m maturin build $MATURIN_FLAGS --out dist \
+    || error "maturin build failed."
 
-# ── 8. Verify the Python environment sees both packages ──────────────────────
+WHEEL=$(ls -t dist/polypus_quantum-*.whl | head -1)
+[[ -f "$WHEEL" ]] || error "Wheel not found after build."
+success "Built: $(basename "$WHEEL")"
+
+info "Installing $(basename "$WHEEL")..."
+pip install --quiet --force-reinstall "$WHEEL" \
+    || error "Failed to install polypus-quantum."
+success "polypus-quantum installed (polypus + polypus_python)."
+
+# ── 6. Verify the Python environment sees both packages ──────────────────────
 info "Verifying installed packages..."
 python -c "
 import polypus, polypus_python
@@ -220,7 +218,7 @@ print('  polypus_python: OK')
 " || error "Installation verification failed."
 success "All symbols present."
 
-# ── 9. Tests ─────────────────────────────────────────────────────────────────
+# ── 7. Tests ─────────────────────────────────────────────────────────────────
 if [[ "$RUN_TESTS" != "none" ]]; then
     # Ensure pytest is available
     if ! python -m pytest --version &>/dev/null; then
@@ -243,7 +241,7 @@ if [[ "$RUN_TESTS" != "none" ]]; then
     fi
 fi
 
-# ── 10. Benchmark ────────────────────────────────────────────────────────────
+# ── 8. Benchmark ────────────────────────────────────────────────────────────
 if [[ "$RUN_BENCHMARK" == "y" ]]; then
     echo ""
     info "Running system benchmark (--quick mode)..."
