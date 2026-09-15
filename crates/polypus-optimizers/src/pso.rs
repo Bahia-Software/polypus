@@ -71,11 +71,13 @@ impl AlgorithmPSO {
         let dims = dimensions as usize;
         let (lb, ub) = bounds;
         // Precondition (documented on the struct): positions are drawn from the
-        // half-open interval [lb, ub), which is empty when `lb >= ub` and panics
-        // inside the uniform sampler. Reject before any RNG draw or oracle call.
-        // Requiring `partial_cmp` to be `Some(Less)` also rejects a non-finite
-        // bound (`NaN`), which compares as `None` and can never be an interval.
-        if !matches!(lb.partial_cmp(&ub), Some(std::cmp::Ordering::Less)) {
+        // half-open interval [lb, ub); reject an empty or unbounded interval
+        // before any RNG draw or oracle call. `lb >= ub` covers the empty case;
+        // the finiteness checks reject `NaN` (which fails every comparison) and
+        // an infinite bound (which would make `gen_range` draw from an unbounded
+        // interval — a panic in the `Uniform` sampler, either for the position
+        // draw or for the derived infinite `vel_range` velocity draw).
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
         let max_vel = (ub - lb) * 0.2;
