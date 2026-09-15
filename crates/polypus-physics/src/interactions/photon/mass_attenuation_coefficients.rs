@@ -5,63 +5,43 @@ use crate::error::PhysicsError;
 use std::collections::HashMap;
 #[cfg(feature = "csv-export")]
 use std::path::Path;
-use std::sync::OnceLock;
-
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
-/// Local on-disk cache directory for downloaded ENDF-6 evaluations.
-fn cache_dir() -> Result<PathBuf, PhysicsError> {
-    let base = dirs::cache_dir().ok_or_else(|| PhysicsError::EndfCacheError {
-        message: "could not determine a cache directory for this platform".to_string(),
-    })?;
-    let dir = base.join("polypus-physics").join("endf");
-    std::fs::create_dir_all(&dir).map_err(|e| PhysicsError::EndfCacheError {
-        message: format!("could not create cache directory {}: {e}", dir.display()),
-    })?;
-    Ok(dir)
-}
-
-/// URL of the raw ENDF-6 (EPDL) evaluation for a given Z, at the IAEA data
-/// service.
-fn endf_url(z: u32) -> String {
-    format!("https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{z:03}000")
-}
-
-/// Returns the raw contents of the ENDF-6 evaluation for `z`, downloading
-/// it from the IAEA data service on first use and caching it locally on
-/// disk for every subsequent call.
-fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
-    let path = cache_dir()?.join(format!("ZA{z:03}000.txt"));
-
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        return Ok(contents);
+/// Directory containing the pre-downloaded ENDF-6 evaluations, resolved at
+/// runtime. This crate never downloads data over the network.
+///
+/// Checked in order:
+/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — an absolute path to the folder
+///    containing the `ZA{Z:03}000.txt` files.
+/// 2. `reference-data/endf-epdl-2023/`, relative to this workspace's root
+///    — the default location within this repository, so the env var only
+///    needs setting if that layout ever changes.
+fn external_endf_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("POLYPUS_ENDF_DATA_DIR") {
+        return PathBuf::from(dir);
     }
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference-data/endf-epdl-2023"
+    ))
+}
 
-    let mut response =
-        ureq::get(&endf_url(z))
-            .call()
-            .map_err(|e| PhysicsError::EndfDownloadFailed {
-                z,
-                message: e.to_string(),
-            })?;
-
-    let mut contents = String::new();
-    response
-        .body_mut()
-        .as_reader()
-        .read_to_string(&mut contents)
-        .map_err(|e| PhysicsError::EndfDownloadFailed {
-            z,
-            message: format!("could not read response body: {e}"),
-        })?;
-
-    std::fs::write(&path, &contents).map_err(|e| PhysicsError::EndfCacheError {
-        message: format!("could not write cache file {}: {e}", path.display()),
-    })?;
-
-    Ok(contents)
+/// Returns the raw contents of the ENDF-6 evaluation for `z`, reading it
+/// from a pre-downloaded local file. Never downloads anything — see
+/// [`external_endf_data_dir`].
+fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
+    let path = external_endf_data_dir().join(format!("ZA{z:03}000.txt"));
+    std::fs::read_to_string(&path).map_err(|e| PhysicsError::EndfDataNotFound {
+        z,
+        message: format!(
+            "could not read {}: {e}. Set POLYPUS_ENDF_DATA_DIR to the folder \
+             containing the ENDF-6 .txt files, or place them at \
+             reference-data/endf-epdl-2023 relative to the workspace root.",
+            path.display()
+        ),
+    })
 }
 
 /// The last `from_end - to_end` characters of a line, like Python's
@@ -208,7 +188,8 @@ fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
 
     let mut index = endf_index()
         .lock()
-        .map_err(|_| PhysicsError::EndfCacheError {
+        .map_err(|_| PhysicsError::EndfDataNotFound {
+            z,
             message: "ENDF-6 index lock was poisoned".to_string(),
         })?;
 
@@ -957,25 +938,47 @@ mod tests {
         assert!(contents.starts_with("Compound,H2O"));
     }
     #[test]
-    fn endf_url_builds_correct_pattern() {
-        assert_eq!(
-            endf_url(1),
-            "https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA001000"
-        );
-        assert_eq!(
-            endf_url(100),
-            "https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA100000"
-        );
-    }
-    #[test]
-    fn fetching_an_element_writes_it_to_the_disk_cache() {
+    fn reads_element_from_local_reference_data() {
         let (z, _contents) = endf_entry_for_symbol("He").unwrap();
         assert_eq!(z, 2);
-        let path = cache_dir().unwrap().join("ZA002000.txt");
+        let path = external_endf_data_dir().join("ZA002000.txt");
         assert!(
             path.exists(),
-            "expected {} to exist after fetching",
+            "expected {} to exist in the local reference data",
             path.display()
         );
+    }
+
+    #[test]
+    fn missing_element_gives_a_clear_error() {
+        // Z=999 has no corresponding local file.
+        let result = fetch_endf_contents(999);
+        match result {
+            Err(PhysicsError::EndfDataNotFound { z, message }) => {
+                assert_eq!(z, 999);
+                assert!(message.contains("POLYPUS_ENDF_DATA_DIR"));
+            }
+            other => panic!("expected EndfDataNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_var_overrides_default_data_dir() {
+        let temp_dir = std::env::temp_dir().join("polypus_endf_override_test");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("ZA001000.txt"), "custom test content").unwrap();
+
+        // SAFETY: no other test in this process reads/writes this exact
+        // variable concurrently — tests in this crate run in the same process
+        // but each uses distinct env vars/fixtures.
+        unsafe {
+            std::env::set_var("POLYPUS_ENDF_DATA_DIR", &temp_dir);
+        }
+        let contents = fetch_endf_contents(1).unwrap();
+        unsafe {
+            std::env::remove_var("POLYPUS_ENDF_DATA_DIR");
+        }
+
+        assert_eq!(contents, "custom test content");
     }
 }

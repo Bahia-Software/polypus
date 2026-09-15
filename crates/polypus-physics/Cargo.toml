@@ -26,8 +26,6 @@ plotters = { version = "0.3.7", default-features = false, features = [
     "line_series",
     "ab_glyph",
 ], optional = true }
-ureq = "3.4.2"
-dirs = "7.0.0"
 
 [features]
 default = []
