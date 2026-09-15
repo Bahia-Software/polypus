@@ -223,17 +223,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install maturin
         run: python -m pip install --upgrade maturin
-      # Smoke-test that the PyO3 extension wheel builds. If you package via
-      # packages/polypus_python or install.sh, point maturin there instead.
+      # Smoke-test that the full distribution wheel builds — the root
+      # pyproject.toml drives maturin (the `polypus` extension plus the bundled
+      # `polypus_python` helpers). Features come from pyproject `[tool.maturin]`.
       - name: Build wheel
-        run: maturin build --release --features extension-module -m crates/polypus/Cargo.toml
+        run: maturin build --release
 
   # ---------------------------------------------------------------------------
-  # Python test suite. Mirrors install.sh (steps 2, 5-7) and the manual README
-  # instructions: install dev deps, then build & install the pure-Python
-  # `polypus_python` package, then build & install the Rust extension, then run
-  # pytest. Order matters — see the note on the polypus_python step below.
-  # Runs at the floor and latest supported Python versions.
+  # Python test suite. Mirrors install.sh and the manual README instructions:
+  # install dev deps, then build & install the single `polypus-quantum` wheel
+  # (the `polypus` extension plus the bundled `polypus_python` helpers), then run
+  # pytest. Runs at the floor and latest supported Python versions.
   # ---------------------------------------------------------------------------
   python-tests:
     name: test (Python ${{ matrix.python-version }})
@@ -254,19 +254,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin pytest build
           pip install -r requirements-dev.txt
-      # The `polypus` extension imports `polypus_python` at runtime
-      # (crates/polypus/src/infrastructure/local.rs and evaluation/mod.rs call
-      # PyModule::import(py, "polypus_python")), so the pure-Python package MUST
-      # be built and installed BEFORE the extension. Installing its wheel also
-      # pulls the runtime deps declared in its pyproject.toml (qiskit, qiskit-aer).
-      - name: Build & install polypus_python (pure-Python package)
+      # One wheel now carries both the `polypus` extension and the bundled
+      # `polypus_python` helpers (the extension imports `polypus_python` at its
+      # execution seams via PyModule::import). Installing the wheel also pulls the
+      # runtime deps declared in pyproject.toml (qiskit, qiskit-aer).
+      - name: Build & install polypus-quantum (extension + bundled polypus_python)
         run: |
-          python -m build packages/polypus_python/ --wheel --no-isolation
-          pip install packages/polypus_python/dist/polypus_python-*.whl
-      - name: Build & install the extension
-        run: |
-          maturin build --release --features extension-module -m crates/polypus/Cargo.toml --out dist
-          pip install --no-index --find-links dist polypus
+          maturin build --release --out dist
+          pip install dist/polypus_quantum-*.whl
       # Examples and benchmarks are not executed (no __main__ guards; some
       # need optional deps like cunqa), but they must at least stay valid
       # Python — this catches syntax rot without running them.

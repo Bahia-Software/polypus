@@ -103,18 +103,17 @@ Install development dependencies:
 pip install -r requirements-dev.txt
 ```
 
-Build and install the `polypus_python` package:
+Build and install Polypus — a single wheel bundles the `polypus` extension and
+the `polypus_python` helper package:
 
 ```bash
-python -m build packages/polypus_python/
-pip install packages/polypus_python/
+maturin build --release --out dist
+pip install dist/polypus_quantum-*.whl
 ```
 
-Build the Rust extension:
-
-```bash
-maturin develop --release --features extension-module
-```
+> **Note:** `maturin develop` installs only the compiled `polypus` extension, not
+> the bundled `polypus_python` helpers. Build and install the wheel (above) to get
+> both import names.
 
 </details>
 
@@ -370,7 +369,7 @@ Polypus is a Cargo workspace of focused crates plus one Python package:
 | [`crates/polypus-optimizers`](crates/polypus-optimizers) | Pure Rust | DE, PSO and QNG optimizers, decoupled from circuits and Python via `EvaluationOracle`/`VarianceOracle` |
 | [`crates/polypus-physics`](crates/polypus-physics) | Pure Rust | Classical Monte Carlo transport and quantum Hamiltonians expressed as Pauli sums |
 | [`crates/polypus-logger`](crates/polypus-logger) | Pure Rust | Shared `log::Log` sink for the whole workspace |
-| [`packages/polypus_python`](packages/polypus_python) | Python | Python-side infrastructure glue (backend connectivity, worker processes) used by the extension module |
+| [`polypus_python`](polypus_python) | Python | Python-side infrastructure glue (backend connectivity, worker processes) used by the extension module; bundled into the `polypus-quantum` wheel |
 
 Only `crates/polypus` links against Python; every other Rust crate is dependency-free with respect to PyO3 and can be used standalone from any Rust project.
 

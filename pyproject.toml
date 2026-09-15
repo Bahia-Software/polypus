@@ -3,20 +3,69 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "polypus"
-# Floor set by the runtime deps of polypus_python (qiskit>=2.0 needs >=3.9).
-# CI tests the floor and the latest supported version.
+# PyPI distribution name. The import name stays `polypus` (see
+# `[tool.maturin] module-name` below) — the name `polypus` on PyPI is taken by
+# an unrelated project, so the distribution is published as `polypus-quantum`.
+name = "polypus-quantum"
+description = "Distributed quantum computing — Rust core, Python bindings, one API across simulators and real QPUs."
+readme = "README.md"
+# Floor set by the runtime deps of the bundled `polypus_python` helpers
+# (qiskit>=2.0 needs >=3.9). CI tests the floor and the latest supported version.
 requires-python = ">=3.9"
+license = "EUPL-1.2"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Diego Beltrán Fernández Prada", email = "diego.fernandez@bahiasoftware.es" },
+    { name = "Víctor Soñora Pombo" },
+    { name = "Sergio Figueiras Gómez" },
+    { name = "Miguel Boubeta Martínez" },
+    { name = "Galicia Supercomputing Center (CESGA)" },
+]
+keywords = ["quantum", "quantum-computing", "vqc", "qml", "qaoa", "qiskit", "simulator", "optimization"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+# Runtime deps of the bundled `polypus_python` helpers (Qiskit/Aer execution
+# seam). The Rust core needs none of these, but the wheel ships the helpers, so
+# they are declared here.
+dependencies = [
+    "qiskit>=2.0",
+    "qiskit-aer>=0.17",
+    'importlib-metadata; python_version<"3.10"',
 ]
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Bahia-Software/polypus"
+Repository = "https://github.com/Bahia-Software/polypus"
+Documentation = "https://bahia-software.github.io/polypus/"
+Issues = "https://github.com/Bahia-Software/polypus/issues"
+
 [tool.maturin]
 features = ["extension-module"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
+# Keep the import name `polypus` even though the distribution is `polypus-quantum`
+# (matches the crate's `[lib] name` and the `#[pymodule] fn polypus`). Without
+# this, maturin would expect the module to be `polypus_quantum` and `import
+# polypus` would break.
+module-name = "polypus"
+# Bundle the pure-Python helper package into the same wheel as a real top-level
+# `polypus_python` package. The extension imports it by that name at its
+# execution seams (`PyModule::import(py, "polypus_python")`), and users import
+# `polypus_python.qaoa_utils` etc. directly, so it must be a real top-level
+# package (not a `polypus` submodule or a sys.modules alias). No `format` key =>
+# included in BOTH the wheel and the sdist, so a build from the sdist (e.g. PyPI's
+# fallback when there is no matching wheel) still ships the helpers.
+include = ["polypus_python/**/*.py"]
 
 # Python lint + formatting for the whole repo (packages, tests, benchmarks,
 # examples). CI runs `ruff check` and `ruff format --check`.
@@ -36,6 +85,14 @@ select = ["E4", "E7", "E9", "F", "I"]
 "**/__init__.py" = ["F401"]
 # Tests import qiskit after a pytest.importorskip guard.
 "tests/**" = ["E402"]
+
+[tool.ruff.lint.isort]
+# `polypus_python/` now lives at the repo root, so ruff's isort would otherwise
+# auto-classify it as first-party and split it from `polypus` (the compiled
+# extension, classified third-party) in the files that import both. Pin it
+# third-party so the two stay in one import section, exactly as before the
+# packaging move (`polypus` needs no pin — it has no root source dir).
+known-third-party = ["polypus_python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
