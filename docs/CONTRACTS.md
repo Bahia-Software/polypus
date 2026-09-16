@@ -40,7 +40,7 @@ labelled `audit-2026-07`.
 
 ## C-1 · Rust → Python execution seam (`polypus_python`)
 
-The Rust orchestration layer (`crates/polypus/src/infrastructure/*.rs`) calls
+The Rust infrastructure layer (`crates/polypus-infrastructure/src/*.rs`) calls
 exactly three functions of the `polypus_python` package. Their names, argument
 names and return shapes are frozen by this contract; the two sides must never
 be changed independently.
@@ -80,11 +80,18 @@ Rust side never sends — so a `KeyError` fired before `qdrop` ran and the QPU
 allocation leaked. The Python side was corrected to read `family`; the Rust
 side was already canonical.)*
 
-### `expectation_values(counts: list[dict], fn) -> list[float]`
+### `expectation_values(counts, fn)` — *no longer part of this seam*
 
-Returns exactly `len(counts)` finite floats, in order.
+*Historical: this was once the fourth seam function — the Rust layer handed the
+counts back to Python to reduce them to expectation values. Expectation
+computation is now **native**: `polypus-observable` evaluates declarative
+QUBO/Ising costs, and `polypus-evaluation`'s `PyCallbackObservable` calls a user
+callback once per unique bitstring in a single GIL section and aggregates in
+Rust. The Rust layer no longer calls `expectation_values` across the seam, so it
+is not frozen by this contract. The function still lives in
+`polypus_python/qaoa_utils.py` for Python-side use.*
 
-### Failure modes (all four functions)
+### Failure modes (all three functions)
 
 - An unknown `infrastructure` value raises `ValueError` — never falls through
   to a default.
@@ -307,7 +314,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     statevector simulator, or `backend="aer"`, Qiskit Aer): an explicit `seed`
     is used directly — the native backend seeds its own RNG in-process, and
     Aer receives it as the `seed` kwarg forwarded across the C-1 seam
-    (`crates/polypus/src/infrastructure/local.rs`, which passes it to Aer's
+    (`crates/polypus-infrastructure/src/local.rs`, which passes it to Aer's
     `seed_simulator` option in `polypus_python`'s `local.py`) — and
     reproduces the counts byte-for-byte across calls, verified against a real
     Aer install. `seed=None` draws a fresh seed from OS entropy, so repeated
@@ -315,7 +322,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     repetition that motivated this contract). The run `id` is decoupled from
     the RNG — it is only a logging/temp-file/SLURM label.
   - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
-    the same seam (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
+    the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
     per-QPU offset so distributed shots aren't identical copies. **This path
     is unverified** — the `cunqa` package isn't installed anywhere this can be
@@ -365,10 +372,10 @@ end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
 rejection, and the returned manifest/outcome fields), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, and the seed-resolution
-precedence / optimizer determinism) and `crates/polypus/src/infrastructure/native.rs`
+precedence / optimizer determinism) and `crates/polypus-infrastructure/src/native.rs`
 (same-seed reproduces / omitted-seed differs at the backend level). CUNQA's
 `seed` forwarding follows the same shape as Aer's on the Rust side
-(`crates/polypus/src/infrastructure/cunqa.rs` mirrors `local.rs`) but has no
+(`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) but has no
 dedicated automated test and no verified-working status: per `ENGINEERING.md`
 §3 the Rust suite is deliberately Python-runtime-free, so this seam can only
 be tested from `tests/python/`, and the `cunqa` package isn't installed

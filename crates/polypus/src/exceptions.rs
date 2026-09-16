@@ -76,7 +76,7 @@ create_exception!(
 /// deliberately implements no `From<_> for PyErr`, so the whole
 /// backend→exception-class decision is made here, once. `run_quantum_circuit`
 /// and the oracle path reach it directly or via
-/// [`infrastructure_error_to_pyerr`](crate::algorithms::orchestration::infrastructure_error_to_pyerr).
+/// [`infrastructure_error_to_pyerr`](crate::exceptions::infrastructure_error_to_pyerr).
 /// Contract C-1's documented failure modes are preserved: a `Seam` error
 /// re-raises the original Python exception verbatim (keeping its
 /// `ValueError`/`TypeError` type), and an unknown infrastructure is a `ValueError`.
