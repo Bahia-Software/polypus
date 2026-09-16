@@ -559,6 +559,36 @@ fn pso_rejects_empty_bounds() {
 }
 
 #[test]
+fn pso_rejects_non_finite_bounds() {
+    // An ordered but unbounded interval (an infinite endpoint) or a `NaN`
+    // endpoint previously slipped past the ordering-only check and panicked
+    // inside the uniform sampler; all must now return a typed error before any
+    // RNG draw.
+    for bounds in [
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 1.0),
+        (f64::NAN, 1.0),
+    ] {
+        let result = AlgorithmPSO.optimize(AlgorithmPSOArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 10,
+            generations: 5,
+            dimensions: 2,
+            bounds,
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 1e-9,
+            seed: Some(1),
+        });
+        assert!(
+            matches!(result, Err(OptimizerError::InvalidBounds { .. })),
+            "bounds {bounds:?} should be rejected, got {result:?}"
+        );
+    }
+}
+
+#[test]
 fn qng_rejects_empty_bounds() {
     // QNG draws θ from [lb, ub) exactly like PSO, so an empty interval is the
     // same panic risk and must likewise return a typed error, not panic.
