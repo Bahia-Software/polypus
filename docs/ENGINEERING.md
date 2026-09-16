@@ -145,9 +145,9 @@ boundary stays out-of-process and explicit; see
     `Resources::new` (to validate the planner/backend pairing up front) and is
     overridden by test mocks; its signature and meaning are load-bearing outside
     this crate, so the fix is strictly additive — `capabilities_for(&[CircuitTask])
-    -> BackendCapabilities`, taking the planner's borrowed task slice (each
-    `CircuitTask` already holds a `&BoundCircuit`) so sizing a wave clones no
-    circuit. The override reuses the *exact* cap arithmetic each backend's
+    -> Result<BackendCapabilities, InfrastructureError>`, taking the planner's
+    borrowed task slice (each `CircuitTask` already holds a `&BoundCircuit`) so
+    sizing a wave clones no circuit. The override reuses the *exact* cap arithmetic each backend's
     `run_circuits` already applies internally, so the wave size the planner picks
     matches the memory bound the backend would enforce anyway — and collapses to a
     single wave whenever the batch fits in the budget.
