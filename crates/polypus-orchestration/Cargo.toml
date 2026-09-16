@@ -1,10 +1,12 @@
 [package]
-name = "polypus-scheduler"
+name = "polypus-orchestration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Orchestration layer for Polypus: the pure, Python-free policy middle (dispatch_optimizer, Resources/Scheduler/Flow) that binds a backend to its planner and runs circuit and training flows."
 
 [dependencies]
 # The scheduler orchestrates a flow over infra's backends/planners and the

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description       = "Pure-Rust statevector simulator for Polypus circuits: consumes polypus-circuit's ConcreteCircuit directly (no OpenQASM round-trip), GIL-free, with optional rayon parallelism. No Python."
 
 [lib]

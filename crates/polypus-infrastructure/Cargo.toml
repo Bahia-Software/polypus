@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Execution-backend layer for Polypus: quantum circuit backends (native statevector, local, CUNQA, CESGA QMIO QPU) and the Planner that decides how a circuit runs."
 
 [features]
 # Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ

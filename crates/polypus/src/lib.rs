@@ -102,11 +102,12 @@ pub use polypus_evaluation as evaluation;
 pub use polypus_infrastructure as infrastructure;
 
 /// Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the
-/// `Flow` trait + `RunCircuitFlow`, and `dispatch_optimizer` + the type-erased
-/// `OracleErrorSlot` (re-export of the pyo3-free `polypus-scheduler` crate). A
-/// real oracle failure reaches it as a `Box<dyn Error + Send>`; this edge
-/// downcasts it back to the concrete `EvaluationError` to re-raise.
-pub use polypus_scheduler as scheduler;
+/// `Flow` trait + all flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory`
+/// seam, and `dispatch_optimizer` + the type-erased `OracleErrorSlot` (re-export of
+/// the pyo3-free `polypus-orchestration` crate). A real oracle failure reaches it as
+/// a `Box<dyn Error + Send>`; this edge downcasts it back to the concrete
+/// `EvaluationError` to re-raise.
+pub use polypus_orchestration as orchestration;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
 ///

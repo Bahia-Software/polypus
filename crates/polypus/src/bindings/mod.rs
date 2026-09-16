@@ -22,7 +22,7 @@ use qng::QNG;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, OracleErrorSlot, PyCallbackObservable, PyVarianceOracle,
-    TrainQmlFlow, TrainVqcFlow,
+    QmlOracleFactory, VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
@@ -31,8 +31,9 @@ use crate::infrastructure::{
     BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
     OptLevel, Planner, ShotDistributingPlanner,
 };
-use crate::scheduler::{
+use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
+    TrainFlow,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::sync::Arc;
@@ -971,9 +972,11 @@ pub fn train<'py>(
     let resources = Resources::new(backend, None, Arc::clone(&config))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
-    let flow = TrainVqcFlow {
-        circuit: circuit_source,
-        observable,
+    let flow = TrainFlow {
+        factory: VqcOracleFactory {
+            circuit: circuit_source,
+            observable,
+        },
         method: method_enum,
         dimensions,
         seed: effective_seed,
@@ -1188,9 +1191,11 @@ pub fn qml_train<'py>(
     let resources = Resources::new(backend, None, Arc::clone(&config))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
-    let flow = TrainQmlFlow {
-        training_circuits: qcs,
-        observable,
+    let flow = TrainFlow {
+        factory: QmlOracleFactory {
+            training_circuits: qcs,
+            observable,
+        },
         method: method_enum,
         dimensions,
         seed: effective_seed,

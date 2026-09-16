@@ -1,0 +1,155 @@
+# Build the `polypus-quantum` distribution (the `polypus` PyO3 extension plus the
+# bundled `polypus_python` helpers) for every supported platform and publish it
+# to PyPI via Trusted Publishing (OIDC — no API tokens stored in the repo).
+#
+#   • Push a tag `vX.Y.Z`  → build everything and publish to PyPI.
+#   • Manual "Run workflow" → build everything and publish to TestPyPI (dry run).
+#
+# One-time setup on PyPI/TestPyPI (Trusted Publisher, "pending publisher" is fine
+# before the first release):
+#   Project: polypus-quantum   Owner: Bahia-Software   Repo: polypus
+#   Workflow: release.yml
+#   Environment: `pypi` for PyPI, `testpypi` for TestPyPI (must match below).
+#
+# No abi3 is used, so wheels are built per CPython version (3.9–3.13).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux: manylinux wheels for x86_64 and aarch64. The manylinux container ships
+  # CPython 3.9–3.13, so `--find-interpreter` builds all of them in one job.
+  linux:
+    name: wheels (linux ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # Features come from the root pyproject `[tool.maturin]`; the include
+          # rule bundles `polypus_python` into every wheel.
+          args: --release --out dist --find-interpreter
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  # macOS: Apple Silicon (macos-14) + Intel (macos-13). Per-version wheels via
+  # setup-python. setup-python has no reliable 3.9 on arm64 → excluded there.
+  macos:
+    name: wheels (${{ matrix.os }} py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          - os: macos-14
+            python-version: "3.9"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.os }}-${{ matrix.python-version }}
+          path: dist
+
+  # Windows: x64, per-version wheels.
+  windows:
+    name: wheels (windows py${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.python-version }}
+          path: dist
+
+  # Source distribution (also carries the bundled polypus_python + vendored crates).
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  # Publish to PyPI on a version tag.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [linux, macos, windows, sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/polypus-quantum
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Manual dry run: publish to TestPyPI (no tag required).
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [linux, macos, windows, sdist]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/polypus-quantum
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

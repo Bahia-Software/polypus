@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Evaluation layer for Polypus: oracles that turn a parameter vector into scalar fitness (VQC/QML, variance, Python-callback observables), plus the OracleFactory assembly for training flows."
 
 [dependencies]
 # How a candidate is evaluated: the oracles bind circuits (Qiskit, under the GIL),
@@ -13,7 +15,7 @@ license.workspace = true
 # defines no `#[pyclass]` and no `From<_> for PyErr`: turning an `EvaluationError`
 # into a typed `polypus.*` exception is the `polypus` edge's job.
 polypus-infrastructure = { workspace = true }
-polypus-scheduler = { workspace = true }
+polypus-orchestration = { workspace = true }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
 polypus-circuit = { workspace = true }
