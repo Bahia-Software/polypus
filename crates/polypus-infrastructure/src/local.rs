@@ -122,20 +122,34 @@ impl QuantumBackend for LocalBackend {
     }
 
     /// Report the wave size the planner should use for this batch, derived from
-    /// the same statevector memory budget [`run_circuits`](Self::run_circuits)
-    /// hands Aer as `max_parallel_experiments` — the batch's widest circuit fed to
-    /// [`max_statevector_concurrency`] against `available_parallelism()`, read off
-    /// the task slice without cloning any circuit. The GIL is acquired solely to
-    /// read a `Qiskit` circuit's `num_qubits` (as `run_circuits` does);
-    /// `Native`/`Qasm2` widths need no interpreter.
+    /// the statevector memory budget (the batch's widest circuit fed to
+    /// [`max_statevector_concurrency`] against `available_parallelism()`), read off
+    /// the task slice without cloning any circuit.
+    ///
+    /// **This is deliberately GIL-free**, so it reads widths only from the
+    /// native-domain variants (`Native`/`Qasm2`); a `Qiskit` circuit contributes
+    /// no width and the batch stays a single wave. Reading a `Qiskit` circuit's
+    /// `num_qubits` needs a `getattr` under the GIL, and doing that *here* — on the
+    /// optimizer thread, once per generation, at the top of every
+    /// [`Planner::execute`](crate::Planner::execute) — is a signal hazard: the
+    /// `getattr` runs Python bytecode, so a `KeyboardInterrupt` CPython raises for
+    /// a pending Ctrl+C would be **swallowed** by the `.ok()` that maps a missing
+    /// attribute to "unknown width", clearing the signal so the planner's
+    /// between-wave `py.check_signals()` never sees it. That made `qml.train`
+    /// unresponsive to Ctrl+C on constrained runners (issue #147 follow-up); it
+    /// also added a per-generation GIL round-trip to the QML hot path. The Qiskit
+    /// path's memory bound is unaffected: [`run_circuits`](Self::run_circuits)
+    /// still reads the true widths under the GIL (right before the GIL-releasing
+    /// Aer call) to set `max_parallel_experiments`.
     ///
     /// The wave size is capped **only when the whole batch cannot be held in the
     /// memory budget at once** (the high-qubit regime): there splitting into waves
     /// lets the planner run a `py.check_signals()` between them (issue #147). When
-    /// the batch fits, the cap is reported as unbounded so the whole population
-    /// reaches Aer as a **single** call — Aer parallelises the experiments
-    /// internally up to `max_parallel_experiments`, so splitting would only add
-    /// per-call overhead (see `tests/python/test_qml_concurrency.py`). See
+    /// the batch fits — including any batch whose widths are all Qiskit and thus
+    /// unread here — the cap is reported as unbounded so the whole population
+    /// reaches Aer as a **single** call (Aer parallelises the experiments
+    /// internally and releases the GIL during the run; see
+    /// `tests/python/test_qml_concurrency.py`). See
     /// `wave_concurrency` for why the fit test uses the
     /// pure memory limit rather than a core-count gate (which would degenerate on a
     /// single-core host, issue #147's 1-thread case).
@@ -143,17 +157,32 @@ impl QuantumBackend for LocalBackend {
         let cores = std::thread::available_parallelism()
             .map(|c| c.get())
             .unwrap_or(1);
-        let widest = Python::with_gil(|py| {
-            tasks
-                .iter()
-                .filter_map(|t| circuit_qubits(t.circuit, py))
-                .max()
-                .unwrap_or(0)
-        });
+        let widest = tasks
+            .iter()
+            .filter_map(|t| native_domain_qubits(t.circuit))
+            .max()
+            .unwrap_or(0);
         BackendCapabilities {
             max_concurrency: crate::wave_concurrency(widest, cores, tasks.len()),
             supports_shot_distribution: true,
         }
+    }
+}
+
+/// GIL-free qubit width of a circuit's *native domain*: `Native` exposes it
+/// directly and `Qasm2` is parsed for it, but a `Qiskit` circuit — whose width
+/// would need a `getattr` under the GIL — yields `None`. Used by
+/// [`LocalBackend::capabilities_for`] for wave sizing, which must not touch the
+/// interpreter (see there). Contrast [`circuit_qubits`], which *does* read the
+/// Qiskit width under a GIL the caller already holds, for `run_circuits`' Aer
+/// memory bound.
+fn native_domain_qubits(qc: &BoundCircuit) -> Option<usize> {
+    match qc {
+        BoundCircuit::Native(cc) => Some(cc.num_qubits),
+        BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+            .ok()
+            .map(|pc| pc.num_qubits),
+        BoundCircuit::Qiskit(_) => None,
     }
 }
 
@@ -281,5 +310,53 @@ mod tests {
             usize::MAX,
             "a low-qubit population must stay a single wave"
         );
+    }
+
+    /// Issue #147 follow-up: `capabilities_for` must NOT read a `Qiskit` circuit's
+    /// `num_qubits` (that needs a `getattr` under the GIL, whose `.ok()` on a
+    /// signal-interrupted call swallowed the pending Ctrl+C in the QML hot path and
+    /// left `qml.train` unresponsive). Here every task is a `Qiskit` variant whose
+    /// object *does* expose `num_qubits == 30`: had `capabilities_for` read it, the
+    /// 64-circuit batch would not fit the budget and would be split to a finite
+    /// cap. Because it is GIL-free and ignores Qiskit widths, the batch stays a
+    /// single wave (`usize::MAX`) — which is exactly what proves the width was not
+    /// read. Aer's real memory bound is still applied in `run_circuits`.
+    #[test]
+    fn capabilities_for_does_not_read_qiskit_widths() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // A lightweight stand-in for a wide Qiskit circuit: any object exposing
+            // `num_qubits`. Using `types.SimpleNamespace(num_qubits=30)` avoids a
+            // qiskit dependency in this unit test while still tripping the old
+            // getattr path if it were still there.
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("num_qubits", 30usize).unwrap();
+            let wide_obj: Py<PyAny> = py
+                .import("types")
+                .unwrap()
+                .getattr("SimpleNamespace")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap()
+                .unbind();
+
+            let circuits: Vec<BoundCircuit> = (0..64)
+                .map(|_| BoundCircuit::Qiskit(wide_obj.clone_ref(py)))
+                .collect();
+            let tasks: Vec<CircuitTask> = circuits
+                .iter()
+                .map(|c| CircuitTask {
+                    circuit: c,
+                    shots: 8,
+                })
+                .collect();
+            let backend =
+                LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+            assert_eq!(
+                backend.capabilities_for(&tasks).max_concurrency,
+                usize::MAX,
+                "Qiskit widths must be ignored (read GIL-free), so the batch stays one wave"
+            );
+        });
     }
 }

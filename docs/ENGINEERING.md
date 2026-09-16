@@ -121,6 +121,20 @@ boundary stays out-of-process and explicit; see
   single-thread case). Backends whose cap is static (CUNQA at `n_qpus`, QMIO at 1)
   do not override it and inherit the default, which delegates to `capabilities()`
   ignoring the batch, so their behaviour is unchanged.
+  - **`capabilities_for` must stay GIL-free.** It runs at the top of every
+    `execute` — for training, once per generation on the optimizer thread, with
+    the GIL released. `LocalBackend` therefore sizes waves from the *native-domain*
+    widths only (`Native`/`Qasm2`, read without the interpreter); a `Qiskit`
+    circuit contributes no width and its batch stays a single wave. Reading a
+    Qiskit `num_qubits` needs a `getattr`, which runs Python bytecode, so a
+    `KeyboardInterrupt` CPython raises there for a pending Ctrl+C would be
+    **swallowed** by the `.ok()` that treats a missing attribute as "unknown
+    width" — clearing the signal before the planner's between-wave
+    `py.check_signals()` can see it, which made `qml.train` unresponsive to Ctrl+C
+    on constrained runners (issue #147 follow-up). The Qiskit path's *memory* bound
+    is unaffected: `run_circuits` still reads the true widths under the GIL, right
+    before the GIL-releasing Aer call, to set `max_parallel_experiments`. The
+    native backend has no such hazard — its widths are always GIL-free.
   - **Why a new method rather than changing `capabilities()`.** The
     argument-free `capabilities()` is called *without* a batch by
     `Resources::new` (to validate the planner/backend pairing up front) and is
