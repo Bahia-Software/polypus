@@ -121,20 +121,25 @@ boundary stays out-of-process and explicit; see
   single-thread case). Backends whose cap is static (CUNQA at `n_qpus`, QMIO at 1)
   do not override it and inherit the default, which delegates to `capabilities()`
   ignoring the batch, so their behaviour is unchanged.
-  - **`capabilities_for` must stay GIL-free.** It runs at the top of every
-    `execute` — for training, once per generation on the optimizer thread, with
-    the GIL released. `LocalBackend` therefore sizes waves from the *native-domain*
-    widths only (`Native`/`Qasm2`, read without the interpreter); a `Qiskit`
-    circuit contributes no width and its batch stays a single wave. Reading a
-    Qiskit `num_qubits` needs a `getattr`, which runs Python bytecode, so a
-    `KeyboardInterrupt` CPython raises there for a pending Ctrl+C would be
-    **swallowed** by the `.ok()` that treats a missing attribute as "unknown
-    width" — clearing the signal before the planner's between-wave
-    `py.check_signals()` can see it, which made `qml.train` unresponsive to Ctrl+C
-    on constrained runners (issue #147 follow-up). The Qiskit path's *memory* bound
-    is unaffected: `run_circuits` still reads the true widths under the GIL, right
-    before the GIL-releasing Aer call, to set `max_parallel_experiments`. The
-    native backend has no such hazard — its widths are always GIL-free.
+  - **`capabilities_for` is fallible, so a Ctrl+C during width-reading is not
+    swallowed.** It runs at the top of every `execute` — for training, once per
+    generation on the optimizer thread, with the GIL released. `LocalBackend` sizes
+    waves from every circuit's width, including a `Qiskit` circuit's `num_qubits`,
+    which it reads via `getattr` under the GIL exactly as `run_circuits` does — so a
+    high-qubit Qiskit population (a Qiskit-templated ansatz on `backend="aer"`, the
+    common QML case) is still wave-split for interruptibility. That `getattr` runs
+    Python bytecode, which CPython can abort with a `KeyboardInterrupt` for a
+    pending Ctrl+C; mapping *that* to "width unknown" (an `.ok()` that discards it)
+    clears the signal before the planner's between-wave `py.check_signals()` can see
+    it, which made `qml.train` unresponsive to Ctrl+C on constrained runners
+    (issue #147 follow-up). So `capabilities_for` returns
+    `Result<BackendCapabilities, InfrastructureError>`: a `KeyboardInterrupt` from
+    the read is propagated verbatim (as `InfrastructureError::Python`, re-raised by
+    the planner), and only a genuine non-interrupt failure (a missing attribute,
+    which a real `QuantumCircuit` never has) falls back to "width unknown". The
+    default impl and the native backend read widths GIL-free and never error (they
+    return `Ok`); the call site in `execute` propagates with `?`, the same way it
+    already handles `run_circuits`' errors.
   - **Why a new method rather than changing `capabilities()`.** The
     argument-free `capabilities()` is called *without* a batch by
     `Resources::new` (to validate the planner/backend pairing up front) and is

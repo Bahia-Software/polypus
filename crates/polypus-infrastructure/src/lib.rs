@@ -402,9 +402,22 @@ pub trait QuantumBackend: Send + Sync {
     /// very cap arithmetic their `run_circuits` already applies internally, so the
     /// wave size the planner picks matches the memory bound the backend would
     /// enforce anyway.
-    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+    ///
+    /// **Fallible on purpose.** Sizing a wave can require reading a circuit's width
+    /// through the GIL ([`LocalBackend`] reads a Qiskit `num_qubits`), and that
+    /// `getattr` runs Python bytecode that CPython may abort with a
+    /// `KeyboardInterrupt` for a pending Ctrl+C. Returning a `Result` lets that
+    /// interrupt propagate verbatim (as [`InfrastructureError::Python`]) instead of
+    /// being swallowed into a silent "width unknown" — which would clear the
+    /// pending signal so the planner's own `check_signals` never fired, leaving a
+    /// run unresponsive to Ctrl+C. The default and the GIL-free backends never
+    /// error, so they simply return `Ok`.
+    fn capabilities_for(
+        &self,
+        tasks: &[CircuitTask<'_>],
+    ) -> Result<BackendCapabilities, InfrastructureError> {
         let _ = tasks;
-        self.capabilities()
+        Ok(self.capabilities())
     }
 
     /// The sensible default planner for this backend: the atomic-wave

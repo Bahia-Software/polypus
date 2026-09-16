@@ -12,7 +12,7 @@ use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
     max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
-    QuantumBackend,
+    InfrastructureError, QuantumBackend,
 };
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
@@ -332,20 +332,27 @@ impl QuantumBackend for NativeStatevectorBackend {
     /// for why the fit test uses the pure memory limit rather than a thread-count
     /// gate (which would degenerate on a single-core host, issue #147's 1-thread
     /// case).
-    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+    ///
+    /// Always `Ok`: this backend reads widths GIL-free (from the `Native` struct
+    /// or by parsing `Qasm2`), so unlike [`LocalBackend`](crate::LocalBackend) it can never be
+    /// interrupted mid-read. The `Result` exists only to satisfy the trait.
+    fn capabilities_for(
+        &self,
+        tasks: &[CircuitTask<'_>],
+    ) -> Result<BackendCapabilities, InfrastructureError> {
         let widest = tasks
             .iter()
             .filter_map(|t| circuit_qubits(t.circuit))
             .max()
             .unwrap_or(0);
-        BackendCapabilities {
+        Ok(BackendCapabilities {
             max_concurrency: crate::wave_concurrency(
                 widest,
                 rayon::current_num_threads(),
                 tasks.len(),
             ),
             supports_shot_distribution: true,
-        }
+        })
     }
 
     /// Single-evolution fast path: `polypus-sim` separates evolution from
@@ -761,7 +768,7 @@ mod tests {
             .collect();
         let backend = NativeStatevectorBackend::new(0);
 
-        let cap = backend.capabilities_for(&tasks).max_concurrency;
+        let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
         assert_eq!(
             cap, 1,
             "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
@@ -792,6 +799,7 @@ mod tests {
             .collect();
         let cap = NativeStatevectorBackend::new(0)
             .capabilities_for(&tasks)
+            .unwrap()
             .max_concurrency;
         assert_eq!(cap, usize::MAX);
     }

@@ -58,6 +58,7 @@ impl CancelToken {
 
 /// What a backend can do, so a planner can size its waves. Absorbs the former
 /// `max_batch_size`.
+#[derive(Debug)]
 pub struct BackendCapabilities {
     /// Most circuits to run concurrently in one wave (native/local: a memory
     /// budget; CUNQA: `n_qpus`; QMIO: 1).
@@ -162,8 +163,12 @@ impl Planner for SequentialPlanner {
         // instead of one. The between-wave `py.check_signals()` below (ENGINEERING
         // §3) therefore runs once per wave, keeping a big generation interruptible.
         // Backends with a static cap inherit the default, which delegates to the
-        // batch-agnostic `capabilities()` — unchanged behaviour for them.
-        let wave = backend.capabilities_for(tasks).max_concurrency.max(1);
+        // batch-agnostic `capabilities()` — unchanged behaviour for them. Sizing
+        // can read a circuit width through the GIL (local's Qiskit `num_qubits`),
+        // so it is fallible: a Ctrl+C raised during that read propagates here
+        // verbatim (a `KeyboardInterrupt`), never swallowed — same `?` propagation
+        // as the `run_circuits` call below.
+        let wave = backend.capabilities_for(tasks)?.max_concurrency.max(1);
         let mut out: Vec<Counts> = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(wave) {
             if cancel.is_cancelled() {
@@ -326,7 +331,10 @@ mod tests {
         }
 
         // The whole point: waves are sized by the real backend's batch-aware cap.
-        fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+        fn capabilities_for(
+            &self,
+            tasks: &[CircuitTask<'_>],
+        ) -> Result<BackendCapabilities, InfrastructureError> {
             self.inner.capabilities_for(tasks)
         }
     }
@@ -380,7 +388,10 @@ mod tests {
     }
 
     /// Acceptance criterion 1 (local): same split, cap taken from the real
-    /// `LocalBackend` (whose `capabilities_for` reads widths through the GIL).
+    /// `LocalBackend::capabilities_for`. These are `Native` circuits, so their
+    /// widths are read without a `getattr` (the Qiskit-width, signal-safe path is
+    /// covered by local.rs's own unit tests); this pins that the planner splits
+    /// local's batch into the memory-capped waves the backend reports.
     #[test]
     fn execute_splits_high_qubit_local_batch_into_memory_capped_waves() {
         pyo3::prepare_freethreaded_python();
@@ -475,5 +486,59 @@ mod tests {
             vec![1],
             "the second wave must not launch after cancellation at the first wave boundary"
         );
+    }
+
+    /// A backend whose `capabilities_for` fails (e.g. a `KeyboardInterrupt` raised
+    /// while reading a Qiskit width — see `local.rs`) must have that error
+    /// propagate out of `execute`, not be swallowed. `run_circuits` is never
+    /// reached, so no wave runs.
+    struct CapabilitiesForFails;
+    impl QuantumBackend for CapabilitiesForFails {
+        fn run_circuits(
+            &self,
+            _qcs: &[BoundCircuit],
+            _config: &ExecutionConfig,
+        ) -> Result<Vec<Counts>, BackendError> {
+            panic!("run_circuits must not be reached when capabilities_for fails");
+        }
+
+        fn capabilities_for(
+            &self,
+            _tasks: &[CircuitTask<'_>],
+        ) -> Result<BackendCapabilities, InfrastructureError> {
+            Err(InfrastructureError::Python(
+                pyo3::exceptions::PyKeyboardInterrupt::new_err("simulated Ctrl+C"),
+            ))
+        }
+    }
+
+    #[test]
+    fn execute_propagates_a_capabilities_for_error() {
+        pyo3::prepare_freethreaded_python();
+        let circuit =
+            BoundCircuit::Native(ParameterizedCircuit::new(2).assign_parameters(&[]).unwrap());
+        let tasks = vec![CircuitTask {
+            circuit: &circuit,
+            shots: 8,
+        }];
+
+        let err = SequentialPlanner
+            .execute(
+                &CapabilitiesForFails,
+                &tasks,
+                &config(),
+                &CancelToken::default(),
+            )
+            .unwrap_err();
+
+        match err {
+            InfrastructureError::Python(e) => Python::with_gil(|py| {
+                assert!(
+                    e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py),
+                    "the KeyboardInterrupt from capabilities_for must surface verbatim"
+                );
+            }),
+            other => panic!("expected InfrastructureError::Python, got {other:?}"),
+        }
     }
 }

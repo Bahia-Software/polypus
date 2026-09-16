@@ -2,7 +2,7 @@ use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
     max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
-    QuantumBackend,
+    InfrastructureError, QuantumBackend,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -122,67 +122,86 @@ impl QuantumBackend for LocalBackend {
     }
 
     /// Report the wave size the planner should use for this batch, derived from
-    /// the statevector memory budget (the batch's widest circuit fed to
-    /// [`max_statevector_concurrency`] against `available_parallelism()`), read off
-    /// the task slice without cloning any circuit.
+    /// the same statevector memory budget [`run_circuits`](Self::run_circuits)
+    /// hands Aer as `max_parallel_experiments` — the batch's widest circuit fed to
+    /// [`max_statevector_concurrency`] against `available_parallelism()`, read off
+    /// the task slice without cloning any circuit. `Native`/`Qasm2` widths are read
+    /// GIL-free; a `Qiskit` circuit's `num_qubits` is read via `getattr` under the
+    /// GIL, exactly as `run_circuits` does — so a high-qubit Qiskit population
+    /// (a Qiskit-templated ansatz on `backend="aer"`, the common QML case) is still
+    /// wave-split for interruptibility, not treated as one uninterruptible batch.
     ///
-    /// **This is deliberately GIL-free**, so it reads widths only from the
-    /// native-domain variants (`Native`/`Qasm2`); a `Qiskit` circuit contributes
-    /// no width and the batch stays a single wave. Reading a `Qiskit` circuit's
-    /// `num_qubits` needs a `getattr` under the GIL, and doing that *here* — on the
-    /// optimizer thread, once per generation, at the top of every
-    /// [`Planner::execute`](crate::Planner::execute) — is a signal hazard: the
-    /// `getattr` runs Python bytecode, so a `KeyboardInterrupt` CPython raises for
-    /// a pending Ctrl+C would be **swallowed** by the `.ok()` that maps a missing
-    /// attribute to "unknown width", clearing the signal so the planner's
-    /// between-wave `py.check_signals()` never sees it. That made `qml.train`
-    /// unresponsive to Ctrl+C on constrained runners (issue #147 follow-up); it
-    /// also added a per-generation GIL round-trip to the QML hot path. The Qiskit
-    /// path's memory bound is unaffected: [`run_circuits`](Self::run_circuits)
-    /// still reads the true widths under the GIL (right before the GIL-releasing
-    /// Aer call) to set `max_parallel_experiments`.
+    /// **Signal safety (issue #147 follow-up).** That `getattr` runs Python
+    /// bytecode, which CPython may abort with a `KeyboardInterrupt` for a pending
+    /// Ctrl+C. This runs at the top of every [`Planner::execute`](crate::Planner::execute)
+    /// — for training, once per generation on the optimizer thread — so a swallowed
+    /// interrupt (the earlier `.ok()` mapping *any* failure to "width unknown")
+    /// cleared the pending signal before the planner's between-wave
+    /// `py.check_signals()` could see it, leaving `qml.train` unresponsive to
+    /// Ctrl+C. Here the interrupt is instead **propagated verbatim** as
+    /// [`InfrastructureError::Python`]; only a genuine non-interrupt failure (e.g. a
+    /// missing attribute, which a real `QuantumCircuit` never has) falls back to
+    /// "width unknown". The Qiskit path's memory bound is separately enforced in
+    /// `run_circuits`.
     ///
     /// The wave size is capped **only when the whole batch cannot be held in the
     /// memory budget at once** (the high-qubit regime): there splitting into waves
     /// lets the planner run a `py.check_signals()` between them (issue #147). When
-    /// the batch fits — including any batch whose widths are all Qiskit and thus
-    /// unread here — the cap is reported as unbounded so the whole population
+    /// the batch fits, the cap is reported as unbounded so the whole population
     /// reaches Aer as a **single** call (Aer parallelises the experiments
-    /// internally and releases the GIL during the run; see
-    /// `tests/python/test_qml_concurrency.py`). See
+    /// internally; see `tests/python/test_qml_concurrency.py`). See
     /// `wave_concurrency` for why the fit test uses the
     /// pure memory limit rather than a core-count gate (which would degenerate on a
     /// single-core host, issue #147's 1-thread case).
-    fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
+    fn capabilities_for(
+        &self,
+        tasks: &[CircuitTask<'_>],
+    ) -> Result<BackendCapabilities, InfrastructureError> {
         let cores = std::thread::available_parallelism()
             .map(|c| c.get())
             .unwrap_or(1);
-        let widest = tasks
-            .iter()
-            .filter_map(|t| native_domain_qubits(t.circuit))
-            .max()
-            .unwrap_or(0);
-        BackendCapabilities {
+        let widest = Python::with_gil(|py| -> Result<usize, InfrastructureError> {
+            let mut widest = 0usize;
+            for task in tasks {
+                if let Some(n) = circuit_qubits_checked(task.circuit, py)? {
+                    widest = widest.max(n);
+                }
+            }
+            Ok(widest)
+        })?;
+        Ok(BackendCapabilities {
             max_concurrency: crate::wave_concurrency(widest, cores, tasks.len()),
             supports_shot_distribution: true,
-        }
+        })
     }
 }
 
-/// GIL-free qubit width of a circuit's *native domain*: `Native` exposes it
-/// directly and `Qasm2` is parsed for it, but a `Qiskit` circuit — whose width
-/// would need a `getattr` under the GIL — yields `None`. Used by
-/// [`LocalBackend::capabilities_for`] for wave sizing, which must not touch the
-/// interpreter (see there). Contrast [`circuit_qubits`], which *does* read the
-/// Qiskit width under a GIL the caller already holds, for `run_circuits`' Aer
-/// memory bound.
-fn native_domain_qubits(qc: &BoundCircuit) -> Option<usize> {
+/// Qubit width of a single circuit for wave sizing, propagating a
+/// `KeyboardInterrupt` instead of swallowing it (issue #147 follow-up). `Native`
+/// and `Qasm2` are read GIL-free; a `Qiskit` circuit's `num_qubits` is read via
+/// `getattr`, and if that `getattr` fails **because CPython raised a
+/// `KeyboardInterrupt`** for a pending Ctrl+C, the error is returned verbatim so
+/// the planner re-raises it — rather than being mistaken for a missing attribute
+/// and cleared. Any other failure (a genuine missing/incompatible attribute,
+/// which a real `QuantumCircuit` never has) means the width is simply unknown
+/// (`None`). Contrast [`circuit_qubits`], the swallowing variant `run_circuits`
+/// uses immediately before its GIL-releasing Aer call.
+fn circuit_qubits_checked(
+    qc: &BoundCircuit,
+    py: Python<'_>,
+) -> Result<Option<usize>, InfrastructureError> {
     match qc {
-        BoundCircuit::Native(cc) => Some(cc.num_qubits),
-        BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+        BoundCircuit::Native(cc) => Ok(Some(cc.num_qubits)),
+        BoundCircuit::Qasm2(qasm) => Ok(polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
             .ok()
-            .map(|pc| pc.num_qubits),
-        BoundCircuit::Qiskit(_) => None,
+            .map(|pc| pc.num_qubits)),
+        BoundCircuit::Qiskit(obj) => match obj.bind(py).getattr("num_qubits") {
+            Ok(attr) => Ok(attr.extract::<usize>().ok()),
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
+                Err(InfrastructureError::Python(e))
+            }
+            Err(_) => Ok(None),
+        },
     }
 }
 
@@ -274,7 +293,7 @@ mod tests {
         let backend =
             LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
 
-        let cap = backend.capabilities_for(&tasks).max_concurrency;
+        let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
         assert_eq!(
             cap, 1,
             "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
@@ -306,29 +325,27 @@ mod tests {
         let backend =
             LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
         assert_eq!(
-            backend.capabilities_for(&tasks).max_concurrency,
+            backend.capabilities_for(&tasks).unwrap().max_concurrency,
             usize::MAX,
             "a low-qubit population must stay a single wave"
         );
     }
 
-    /// Issue #147 follow-up: `capabilities_for` must NOT read a `Qiskit` circuit's
-    /// `num_qubits` (that needs a `getattr` under the GIL, whose `.ok()` on a
-    /// signal-interrupted call swallowed the pending Ctrl+C in the QML hot path and
-    /// left `qml.train` unresponsive). Here every task is a `Qiskit` variant whose
-    /// object *does* expose `num_qubits == 30`: had `capabilities_for` read it, the
-    /// 64-circuit batch would not fit the budget and would be split to a finite
-    /// cap. Because it is GIL-free and ignores Qiskit widths, the batch stays a
-    /// single wave (`usize::MAX`) — which is exactly what proves the width was not
-    /// read. Aer's real memory bound is still applied in `run_circuits`.
+    /// Issue #147 follow-up: a high-qubit **Qiskit** batch (a Qiskit-templated
+    /// ansatz on `backend="aer"`, the common QML case) must still be wave-split —
+    /// `capabilities_for` reads the Qiskit `num_qubits` through the GIL, just like
+    /// `run_circuits`. Every task is a `Qiskit` variant whose object exposes
+    /// `num_qubits == 30`, so the 64-circuit batch cannot fit the 16 GiB budget and
+    /// is capped to 1 (not left unbounded). This guards against the regression from
+    /// `588a138`, which stopped reading Qiskit widths and made this batch one
+    /// uninterruptible wave.
     #[test]
-    fn capabilities_for_does_not_read_qiskit_widths() {
+    fn capabilities_for_wave_splits_a_high_qubit_qiskit_batch() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             // A lightweight stand-in for a wide Qiskit circuit: any object exposing
-            // `num_qubits`. Using `types.SimpleNamespace(num_qubits=30)` avoids a
-            // qiskit dependency in this unit test while still tripping the old
-            // getattr path if it were still there.
+            // `num_qubits`. `types.SimpleNamespace(num_qubits=30)` avoids a qiskit
+            // dependency in this unit test while exercising the getattr path.
             let kwargs = pyo3::types::PyDict::new(py);
             kwargs.set_item("num_qubits", 30usize).unwrap();
             let wide_obj: Py<PyAny> = py
@@ -353,10 +370,54 @@ mod tests {
             let backend =
                 LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
             assert_eq!(
-                backend.capabilities_for(&tasks).max_concurrency,
-                usize::MAX,
-                "Qiskit widths must be ignored (read GIL-free), so the batch stays one wave"
+                backend.capabilities_for(&tasks).unwrap().max_concurrency,
+                1,
+                "a 30-qubit Qiskit population must be wave-split (its widths ARE read)"
             );
+        });
+    }
+
+    /// Issue #147 follow-up: a `KeyboardInterrupt` CPython raises while reading a
+    /// Qiskit `num_qubits` (a pending Ctrl+C landing during the `getattr`) must be
+    /// **propagated** as [`InfrastructureError::Python`], not swallowed as "width
+    /// unknown" — otherwise the pending signal is cleared and the planner's
+    /// between-wave `check_signals` never fires. Simulated with a Python object
+    /// whose `num_qubits` property raises `KeyboardInterrupt`.
+    #[test]
+    fn capabilities_for_propagates_keyboard_interrupt_from_qiskit_width_read() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // A stand-in whose `num_qubits` getattr raises KeyboardInterrupt, exactly
+            // as CPython would for a pending Ctrl+C mid-bytecode.
+            let module = PyModule::from_code(
+                py,
+                std::ffi::CString::new(
+                    "class Boom:\n    @property\n    def num_qubits(self):\n        raise KeyboardInterrupt()\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                std::ffi::CString::new("boom.py").unwrap().as_c_str(),
+                std::ffi::CString::new("boom").unwrap().as_c_str(),
+            )
+            .unwrap();
+            let boom: Py<PyAny> = module.getattr("Boom").unwrap().call0().unwrap().unbind();
+
+            let circuit = BoundCircuit::Qiskit(boom);
+            let tasks = vec![CircuitTask {
+                circuit: &circuit,
+                shots: 8,
+            }];
+            let backend =
+                LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+
+            let err = backend.capabilities_for(&tasks).unwrap_err();
+            match err {
+                InfrastructureError::Python(e) => assert!(
+                    e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py),
+                    "expected the KeyboardInterrupt to be carried verbatim"
+                ),
+                other => panic!("expected InfrastructureError::Python, got {other:?}"),
+            }
         });
     }
 }
