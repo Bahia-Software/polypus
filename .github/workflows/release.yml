@@ -47,19 +47,17 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: dist
 
-  # macOS: Apple Silicon (macos-14) + Intel (macos-13). Per-version wheels via
-  # setup-python. setup-python has no reliable 3.9 on arm64 → excluded there.
+  # macOS: Apple Silicon only (macos-14). GitHub is retiring the Intel `macos-13`
+  # runners, which left the Intel jobs queued indefinitely ("waiting for a runner"),
+  # so they are dropped — Intel-mac users can build from the sdist. setup-python has
+  # no reliable 3.9 on arm64, so macOS wheels are 3.10–3.13.
   macos:
-    name: wheels (${{ matrix.os }} py${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+    name: wheels (macos-arm64 py${{ matrix.python-version }})
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        exclude:
-          - os: macos-14
-            python-version: "3.9"
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -71,7 +69,7 @@ jobs:
           args: --release --out dist --interpreter python
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.os }}-${{ matrix.python-version }}
+          name: wheels-macos-arm64-${{ matrix.python-version }}
           path: dist
 
   # Windows: x64, per-version wheels.
