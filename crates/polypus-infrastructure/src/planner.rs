@@ -354,9 +354,6 @@ mod tests {
     #[test]
     fn execute_splits_high_qubit_native_batch_into_memory_capped_waves() {
         pyo3::prepare_freethreaded_python();
-        if rayon::current_num_threads() <= 1 {
-            return; // Needs real parallelism for the budget to throttle below it.
-        }
         let native = NativeStatevectorBackend::new(0);
         let wide = BoundCircuit::Native(
             ParameterizedCircuit::new(30)
@@ -387,13 +384,6 @@ mod tests {
     #[test]
     fn execute_splits_high_qubit_local_batch_into_memory_capped_waves() {
         pyo3::prepare_freethreaded_python();
-        if std::thread::available_parallelism()
-            .map(|c| c.get())
-            .unwrap_or(1)
-            <= 1
-        {
-            return; // Needs real parallelism for the budget to throttle below it.
-        }
         let local =
             crate::LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
         let wide = BoundCircuit::Native(
@@ -429,9 +419,6 @@ mod tests {
     #[test]
     fn execute_signal_checks_between_native_waves_not_only_at_the_end() {
         pyo3::prepare_freethreaded_python();
-        if rayon::current_num_threads() <= 1 {
-            return; // Needs real parallelism for the budget to throttle below it.
-        }
         let native = NativeStatevectorBackend::new(0);
         let wide = BoundCircuit::Native(
             ParameterizedCircuit::new(30)
@@ -463,13 +450,6 @@ mod tests {
     #[test]
     fn execute_signal_checks_between_local_waves_not_only_at_the_end() {
         pyo3::prepare_freethreaded_python();
-        if std::thread::available_parallelism()
-            .map(|c| c.get())
-            .unwrap_or(1)
-            <= 1
-        {
-            return; // Needs real parallelism for the budget to throttle below it.
-        }
         let local =
             crate::LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
         let wide = BoundCircuit::Native(

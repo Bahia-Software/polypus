@@ -242,6 +242,47 @@ impl BoundCircuit {
     }
 }
 
+/// Wave size a memory-budgeted backend (native/local) should report from
+/// [`capabilities_for`](QuantumBackend::capabilities_for) for a batch of
+/// `batch_len` circuits whose widest is `widest_qubits`, running on `cores`
+/// threads.
+///
+/// The rule: split the batch into planner-visible waves **only when the whole
+/// batch cannot be held in the statevector memory budget at once** — i.e. the
+/// backend would otherwise process it as several *sequential memory windows*
+/// inside one uninterruptible `run_circuits` call, which is exactly what issue
+/// #147 fixes by letting the `Planner` run a `py.check_signals()` between waves.
+/// When the batch fits, report [`usize::MAX`] so it stays a single wave (the
+/// backend still parallelises internally up to its own cap), preserving the
+/// single-call contract that keeps Aer efficient
+/// (`tests/python/test_qml_concurrency.py`).
+///
+/// The "does it fit" test uses the **pure memory limit**
+/// `max_statevector_concurrency(widest, usize::MAX)` — how many statevectors the
+/// budget holds, with the thread count removed — **not** the thread-capped cap.
+/// That is what makes the decision independent of `cores`: a thread-based gate
+/// (`cap >= cores`) degenerates when `cores == 1`, where the cap always equals
+/// `cores` regardless of qubit count and would wrongly report a single wave for a
+/// memory-heavy batch (issue #147, the single-core case). When a split *is*
+/// needed, the reported cap is the ordinary thread-and-budget bound
+/// `max_statevector_concurrency(widest, cores)`, the concurrency the backend will
+/// actually use.
+pub(crate) fn wave_concurrency(widest_qubits: usize, cores: usize, batch_len: usize) -> usize {
+    // Pure memory limit: how many `widest_qubits` statevectors the budget holds,
+    // independent of the core count (pass `usize::MAX` as the thread bound).
+    let budget_concurrency = max_statevector_concurrency(widest_qubits, usize::MAX);
+    if budget_concurrency >= batch_len {
+        // The whole batch fits under the budget at once — one wave; the backend
+        // parallelises it internally up to its own cap.
+        usize::MAX
+    } else {
+        // The batch cannot all be held at once, so it would be processed in
+        // several memory windows: expose the real cap so those windows become
+        // interruptible planner waves.
+        max_statevector_concurrency(widest_qubits, cores)
+    }
+}
+
 /// Contract for quantum circuit execution backends.
 ///
 /// A backend is completely agnostic to the algorithm calling it; it only knows
@@ -470,5 +511,58 @@ mod result_validation_tests {
         let batch = vec![counts(&[("0x2", 8)])];
         let err = validate_run_results(&batch, 1, 8).unwrap_err();
         assert!(err.to_string().contains("non-bitstring"));
+    }
+}
+
+#[cfg(test)]
+mod wave_concurrency_tests {
+    use super::*;
+
+    // These pin the wave-sizing rule shared by native/local `capabilities_for`,
+    // deterministically — the core count is an explicit parameter, so no case
+    // depends on the host having (or not having) more than one CPU. They assume
+    // the default 16 GiB budget (`POLYPUS_MEM_BUDGET` unset), like the rest of the
+    // suite: a 30-qubit statevector is exactly 16 GiB (budget holds one), a
+    // 2-qubit one is 64 bytes (budget holds hundreds of millions).
+
+    /// Regression for issue #147's single-core case. On a 1-core host the
+    /// thread-capped cap always equals the core count, so the old `cap >= cores`
+    /// gate reported `usize::MAX` (one uninterruptible wave) for *any* qubit count.
+    /// A 4-circuit batch of 30-qubit circuits cannot fit in the budget (holds 1),
+    /// so even with `cores == 1` the real cap (1) must be reported — not unbounded.
+    #[test]
+    fn single_core_high_qubit_batch_reports_a_finite_cap_not_unbounded() {
+        assert_eq!(wave_concurrency(30, 1, 4), 1);
+        // Same on a many-core host: still throttled to the memory cap.
+        assert_eq!(wave_concurrency(30, 32, 4), 1);
+    }
+
+    /// A batch that fits in the budget stays a single wave (`usize::MAX`) whatever
+    /// the core count — including one core, so a low-qubit population is never
+    /// exploded into per-circuit backend calls
+    /// (`tests/python/test_qml_concurrency.py`).
+    #[test]
+    fn a_batch_that_fits_the_budget_stays_a_single_wave_on_any_core_count() {
+        assert_eq!(wave_concurrency(2, 1, 200), usize::MAX);
+        assert_eq!(wave_concurrency(2, 32, 200), usize::MAX);
+        // A single high-qubit circuit fits (the budget holds exactly one), so it
+        // is one wave regardless — nothing to split.
+        assert_eq!(wave_concurrency(30, 1, 1), usize::MAX);
+        assert_eq!(wave_concurrency(30, 32, 1), usize::MAX);
+    }
+
+    /// When the batch does not fit, the reported cap is the ordinary
+    /// thread-and-budget bound (the concurrency the backend will actually use):
+    /// bounded by the budget at high qubits and by the cores when the budget is
+    /// slack but the batch is larger than what fits.
+    #[test]
+    fn split_reports_the_thread_and_budget_bound() {
+        // 30 qubits: budget holds 1, so the cap is 1 whatever the core count.
+        assert_eq!(wave_concurrency(30, 8, 4), 1);
+        // 28 qubits: budget holds 4; with 8 cores the cap is min(8, 4) = 4, and
+        // the 10-circuit batch (> 4) does not fit, so it splits at 4.
+        assert_eq!(wave_concurrency(28, 8, 10), 4);
+        // 28 qubits with only 2 cores: the cap is min(2, 4) = 2.
+        assert_eq!(wave_concurrency(28, 2, 10), 2);
     }
 }

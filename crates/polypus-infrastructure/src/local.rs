@@ -129,14 +129,16 @@ impl QuantumBackend for LocalBackend {
     /// read a `Qiskit` circuit's `num_qubits` (as `run_circuits` does);
     /// `Native`/`Qasm2` widths need no interpreter.
     ///
-    /// The wave size is capped **only when the budget actually throttles
-    /// concurrency below the core count** (`cap < cores`, the high-qubit regime):
-    /// there splitting into waves lets the planner run a `py.check_signals()`
-    /// between them (issue #147). When the budget does not bite (`cap == cores`,
-    /// the common low-qubit case) the cap is reported as unbounded so the whole
-    /// population reaches Aer as a **single** call — Aer parallelises the
-    /// experiments internally up to `max_parallel_experiments`, so splitting would
-    /// only add per-call overhead (see `tests/python/test_qml_concurrency.py`).
+    /// The wave size is capped **only when the whole batch cannot be held in the
+    /// memory budget at once** (the high-qubit regime): there splitting into waves
+    /// lets the planner run a `py.check_signals()` between them (issue #147). When
+    /// the batch fits, the cap is reported as unbounded so the whole population
+    /// reaches Aer as a **single** call — Aer parallelises the experiments
+    /// internally up to `max_parallel_experiments`, so splitting would only add
+    /// per-call overhead (see `tests/python/test_qml_concurrency.py`). See
+    /// `wave_concurrency` for why the fit test uses the
+    /// pure memory limit rather than a core-count gate (which would degenerate on a
+    /// single-core host, issue #147's 1-thread case).
     fn capabilities_for(&self, tasks: &[CircuitTask<'_>]) -> BackendCapabilities {
         let cores = std::thread::available_parallelism()
             .map(|c| c.get())
@@ -148,9 +150,8 @@ impl QuantumBackend for LocalBackend {
                 .max()
                 .unwrap_or(0)
         });
-        let cap = max_statevector_concurrency(widest, cores);
         BackendCapabilities {
-            max_concurrency: if cap >= cores { usize::MAX } else { cap },
+            max_concurrency: crate::wave_concurrency(widest, cores, tasks.len()),
             supports_shot_distribution: true,
         }
     }
@@ -217,25 +218,19 @@ mod tests {
         });
     }
 
-    /// Issue #147: `capabilities_for` exposes the *same* statevector memory cap
-    /// `run_circuits` hands Aer as `max_parallel_experiments`, derived from the
-    /// batch's widest circuit — so the planner can split a high-qubit batch into
-    /// memory-safe waves. A 30-qubit statevector is 16 GiB, so under the default
-    /// 16 GiB budget exactly one fits at a time (cap 1); the circuit is zero-gate
-    /// and never submitted to Aer, so this costs nothing. The batch-agnostic
-    /// `capabilities()` is left at its unbounded default (purely additive).
+    /// Issue #147: a high-qubit batch that cannot fit in the memory budget is
+    /// reported with the memory cap `run_circuits` hands Aer as
+    /// `max_parallel_experiments`, so the planner can split it into memory-safe
+    /// waves. A 30-qubit statevector is 16 GiB, so under the default 16 GiB budget
+    /// only one fits at a time, and a 4-circuit batch cannot be held at once ⇒
+    /// cap 1 — **regardless of the host core count** (the single-core regression
+    /// from issue #147, so the test deliberately does not guard on the core
+    /// count). The circuit is zero-gate and never submitted to Aer, so this costs
+    /// nothing. The batch-agnostic `capabilities()` is left at its unbounded
+    /// default (purely additive).
     #[test]
     fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
         pyo3::prepare_freethreaded_python();
-        let cores = std::thread::available_parallelism()
-            .map(|c| c.get())
-            .unwrap_or(1);
-        // This test's point only exists when the budget can throttle below the
-        // core count; skip the degenerate single-core case (there the whole batch
-        // stays one wave — the same concurrency anyway).
-        if cores <= 1 {
-            return;
-        }
         let wide = BoundCircuit::Native(
             ParameterizedCircuit::new(30)
                 .assign_parameters(&[])
@@ -251,9 +246,6 @@ mod tests {
             LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
 
         let cap = backend.capabilities_for(&tasks).max_concurrency;
-        // 30 qubits throttles below `cores`, so the wave cap is the raw memory
-        // cap (1), not the unbounded low-qubit report.
-        assert_eq!(cap, max_statevector_concurrency(30, cores));
         assert_eq!(
             cap, 1,
             "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
