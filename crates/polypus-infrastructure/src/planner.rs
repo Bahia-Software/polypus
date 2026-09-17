@@ -543,7 +543,6 @@ mod tests {
     // `POLYPUS_MEM_BUDGET` env var (a known flakiness source this project avoids).
     use crate::{BackendCapabilities, NativeStatevectorBackend};
     use polypus_circuit::ParameterizedCircuit;
-    use std::sync::Mutex;
 
     /// Wraps a real backend to borrow its batch-aware cap while stubbing out
     /// execution: `run_circuits` records the wave size and returns one valid
@@ -580,7 +579,7 @@ mod tests {
         }
     }
 
-    fn config() -> ExecutionConfig {
+    fn wave_config() -> ExecutionConfig {
         ExecutionConfig {
             id: "wave-test".to_string(),
             shots: 8,
@@ -617,7 +616,7 @@ mod tests {
         };
 
         let out = SequentialPlanner
-            .execute(&spy, &tasks, &config(), &CancelToken::default())
+            .execute(&spy, &tasks, &wave_config(), &CancelToken::default())
             .unwrap();
 
         assert_eq!(out.len(), 4);
@@ -651,7 +650,7 @@ mod tests {
         };
 
         let out = SequentialPlanner
-            .execute(&spy, &tasks, &config(), &CancelToken::default())
+            .execute(&spy, &tasks, &wave_config(), &CancelToken::default())
             .unwrap();
 
         assert_eq!(out.len(), 4);
@@ -686,7 +685,7 @@ mod tests {
         };
 
         let err = SequentialPlanner
-            .execute(&spy, &tasks, &config(), &token)
+            .execute(&spy, &tasks, &wave_config(), &token)
             .unwrap_err();
 
         assert!(matches!(err, InfrastructureError::Cancelled));
@@ -718,7 +717,7 @@ mod tests {
         };
 
         let err = SequentialPlanner
-            .execute(&spy, &tasks, &config(), &token)
+            .execute(&spy, &tasks, &wave_config(), &token)
             .unwrap_err();
 
         assert!(matches!(err, InfrastructureError::Cancelled));
@@ -767,7 +766,7 @@ mod tests {
             .execute(
                 &CapabilitiesForFails,
                 &tasks,
-                &config(),
+                &wave_config(),
                 &CancelToken::default(),
             )
             .unwrap_err();
