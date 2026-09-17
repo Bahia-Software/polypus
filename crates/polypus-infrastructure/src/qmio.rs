@@ -64,9 +64,9 @@ use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 pub use crate::execution_config::QmioProgramFormat;
@@ -186,11 +186,17 @@ impl std::error::Error for QmioError {}
 
 /// Backend that executes circuits on the CESGA QMIO QPU over ZeroMQ.
 ///
-/// The REQ socket is created lazily and held behind a [`Mutex`] so the backend
-/// is `Send + Sync` (required by [`QuantumBackend`]) even though a single REQ
-/// socket is inherently serial — which is exactly the semantics we want: one
-/// request at a time. On a network fault the socket is dropped and recreated
-/// (the "Lazy Pirate" pattern: a REQ socket is unusable after a failed `recv`).
+/// The REQ socket is created lazily and held behind a [`tokio::sync::Mutex`] so
+/// the backend is `Send + Sync` (required by [`QuantumBackend`]) even though a
+/// single REQ socket is inherently serial — which is exactly the semantics we
+/// want: one request at a time. An **async** mutex (not [`std::sync::Mutex`]) is
+/// deliberate: [`run_one`](Self::run_one) holds the guard across the request's
+/// `.await` points (connect/send/recv and the retry backoff), so a second
+/// concurrent caller must wait cooperatively — suspending its task rather than
+/// blocking an OS thread — as required by `ENGINEERING.md` §9 ("Don't hold a
+/// lock across an `.await`", which a `std::sync::Mutex` here would violate).
+/// On a network fault the socket is dropped and recreated (the "Lazy Pirate"
+/// pattern: a REQ socket is unusable after a failed `recv`).
 pub struct QmioBackend {
     endpoint: String,
     program_format: QmioProgramFormat,
@@ -351,12 +357,15 @@ impl QmioBackend {
         // default `info` log.
         log::debug!("QMIO request: {program:?}, config: {config_json}");
         let request = pickle_request(program, config_json)?;
-        // Recover the guard even if a previous holder panicked: a poisoned lock
-        // carries no broken invariant here (the socket is `Option`-guarded), and
-        // recovering it keeps this path panic-free.
-        let mut guard = self.socket.lock().unwrap_or_else(|p| p.into_inner());
 
         self.runtime.block_on(async {
+            // The async mutex is acquired *inside* the runtime and held across the
+            // request's `.await` points (ENGINEERING.md §9): a `tokio::sync::Mutex`
+            // suspends a competing caller cooperatively instead of blocking an OS
+            // thread, while still enforcing "one request at a time" over the single
+            // REQ socket. Unlike `std::sync::Mutex` it has no poisoning, so there is
+            // no poisoned-guard recovery to perform here.
+            let mut guard = self.socket.lock().await;
             let deadline = Instant::now() + self.global_timeout;
             let mut last_err: Option<QmioError> = None;
             for attempt in 0..=self.max_retries {
@@ -522,21 +531,25 @@ impl QuantumBackend for QmioBackend {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        // Recover a poisoned guard so `close` still attempts a graceful shutdown
-        // (and never panics) — this runs from `Drop`.
-        let mut guard = self.socket.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(socket) = guard.take() {
-            // Graceful close must run inside the runtime context. `close`
-            // returns any errors it hit instead of a `Result`; log (never
-            // discard) them and record the failed cleanup.
-            let errors = self.runtime.block_on(socket.close());
-            if !errors.is_empty() {
-                log::error!(
-                    "QMIO socket close reported {} error(s): {errors:?}",
-                    errors.len()
-                );
-                record_cleanup_failure();
+        // Graceful close must run inside the runtime context; the async mutex is
+        // therefore locked inside `block_on` (its `.lock()` is a future). There is
+        // no poisoning to recover from with `tokio::sync::Mutex`, and this stays
+        // panic-free — `Drop` requires it. `close` returns any errors it hit
+        // instead of a `Result`; log (never discard) them and record the failed
+        // cleanup.
+        let errors = self.runtime.block_on(async {
+            let mut guard = self.socket.lock().await;
+            match guard.take() {
+                Some(socket) => socket.close().await,
+                None => Vec::new(),
             }
+        });
+        if !errors.is_empty() {
+            log::error!(
+                "QMIO socket close reported {} error(s): {errors:?}",
+                errors.len()
+            );
+            record_cleanup_failure();
         }
     }
 }
@@ -1273,6 +1286,119 @@ mod tests {
         );
         // The request was delivered to the server exactly once.
         delivered_rx.recv().unwrap();
+        server.join().unwrap();
+    }
+
+    /// Two callers hitting the **same** [`QmioBackend`] concurrently must be
+    /// serialised over the single REQ socket and both complete correctly — the
+    /// property the async-mutex hardening protects. It exercises the guard being
+    /// held across the request's `.await` points from two OS threads at once: the
+    /// second caller waits (cooperatively) for the first to release rather than
+    /// racing it, so exactly one REQ socket ever talks to the endpoint.
+    ///
+    /// Determinism without sleeps: the simulated REP socket is itself lock-step
+    /// (one recv, one reply, repeat), so it hands out its two *distinct* replies
+    /// strictly in the order the requests arrive. Whichever thread wins the mutex
+    /// first gets the first reply; the other gets the second. The test therefore
+    /// asserts on the order-independent *set* of the two received counts — never on
+    /// which thread got which — so it is robust to the (legitimately arbitrary)
+    /// thread scheduling. Server readiness is signalled over an `mpsc` channel, as
+    /// in the other simulated-server tests.
+    #[test]
+    fn concurrent_callers_are_serialized_over_a_single_socket() {
+        use crate::BackendConfig;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use zeromq::RepSocket;
+
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let server_endpoint = endpoint.clone();
+        // The server replies to request #k with a `"00"` count of `1000 + k`, so
+        // the two replies are distinguishable. Because it is lock-step, the first
+        // request to arrive gets 1000 and the second gets 1001 — regardless of
+        // which client thread that is.
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut rep = RepSocket::new();
+                rep.bind(&server_endpoint).await.unwrap();
+                ready_tx.send(()).unwrap();
+
+                for k in 0..2u64 {
+                    let msg = rep.recv().await.unwrap();
+                    let bytes = msg.into_vec().into_iter().next().unwrap().to_vec();
+                    let request = serde_pickle::value_from_slice(&bytes, DeOptions::new()).unwrap();
+                    match request {
+                        PickleValue::Tuple(items) if items.len() == 2 => {}
+                        other => panic!("expected a 2-tuple request, got {other:?}"),
+                    }
+                    let reply_value = json!({"results": {"c": {"00": 1000 + k}}});
+                    let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
+                    rep.send(ZmqMessage::from(reply)).await.unwrap();
+                }
+            });
+        });
+        ready_rx.recv().unwrap();
+
+        let backend = Arc::new(
+            QmioBackend::new(
+                endpoint.clone(),
+                QmioProgramFormat::OpenQasm,
+                0,
+                None,
+                "binary_count".to_string(),
+            )
+            .unwrap(),
+        );
+
+        let make_config = |endpoint: String| ExecutionConfig {
+            id: "qmio-concurrent".to_string(),
+            shots: 1024,
+            n_qpus: 1,
+            infrastructure: "qmio".to_string(),
+            backend_config: BackendConfig::Qmio {
+                endpoint,
+                program_format: QmioProgramFormat::OpenQasm,
+                optimization: 0,
+                repetition_period: None,
+                res_format: "binary_count".to_string(),
+            },
+            opt_level: crate::OptLevel::default(),
+            seed: None,
+        };
+
+        let clients: Vec<_> = (0..2)
+            .map(|_| {
+                let backend = Arc::clone(&backend);
+                let config = make_config(endpoint.clone());
+                std::thread::spawn(move || {
+                    let counts = backend
+                        .run_circuits(&[BoundCircuit::Native(bell())], &config)
+                        .unwrap();
+                    assert_eq!(counts.len(), 1);
+                    *counts[0]
+                        .get("00")
+                        .expect("reply must carry a \"00\" count")
+                })
+            })
+            .collect();
+
+        let mut received: Vec<u64> = clients.into_iter().map(|h| h.join().unwrap()).collect();
+        received.sort_unstable();
+        // Both distinct replies were delivered, one to each caller: the two
+        // concurrent requests were serialised over the single socket without one
+        // being dropped, duplicated, or crossed with the other.
+        assert_eq!(received, vec![1000, 1001]);
+
         server.join().unwrap();
     }
 
