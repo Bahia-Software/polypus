@@ -398,6 +398,7 @@ If Polypus is useful in your research, please cite it:
 - Víctor Sóñora Pombo
 - Sergio Figueiras Gómez
 - Miguel Boubeta Martínez
+- Kevin Pérez González
 - Galicia Supercomputing Center (CESGA)
 
 ## Dependencies
