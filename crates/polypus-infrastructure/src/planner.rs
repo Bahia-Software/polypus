@@ -196,8 +196,11 @@ impl Planner for SequentialPlanner {
 }
 
 /// Runs *one* circuit by splitting its shots across `n_qpus` replicas and merging
-/// them (contract C-3) — reproducing `DistributeByShotsRun`. Opt-in; the
-/// `polypus` edge selects it for `run_quantum_circuit` with `n_qpus > 1`.
+/// them (contract C-3) — reproducing `DistributeByShotsRun`. The replicas run in
+/// waves of `≤ max_concurrency` (QMIO: 1, CUNQA: `n_qpus`), with a between-wave
+/// `check_signals` so a distributed-shots run stays interruptible on slow/real
+/// hardware, just like [`SequentialPlanner`]. Opt-in; the `polypus` edge selects
+/// it for `run_quantum_circuit` with `n_qpus > 1`.
 pub struct ShotDistributingPlanner;
 
 impl Planner for ShotDistributingPlanner {
@@ -226,9 +229,6 @@ impl Planner for ShotDistributingPlanner {
                 },
             ));
         }
-        if cancel.is_cancelled() {
-            return Err(InfrastructureError::Cancelled);
-        }
         let task = &tasks[0];
         let shots = task.shots;
         let n_qpus = config.n_qpus;
@@ -240,19 +240,38 @@ impl Planner for ShotDistributingPlanner {
         let shot_batches: Vec<u32> = (0..n_qpus)
             .map(|i| if i < remainder { base + 1 } else { base })
             .collect();
-        let counts_vec = backend
-            .run_shots_distributed(task.circuit, &shot_batches, config)
-            .map_err(InfrastructureError::Backend)?;
-        // Merge the replicas into one result (the merge, C-3, lives in the planner).
+        // Cap the in-flight replicas at the backend's concurrency (QMIO: 1,
+        // CUNQA: `n_qpus`; unbounded backends run the whole array in one chunk),
+        // running `check_signals` after every chunk so a slow/real-hardware run
+        // stays interruptible between waves — the same reason `SequentialPlanner`
+        // splits its batch (ENGINEERING §3). Chunking is numerically transparent:
+        // `run_shots_distributed` seeds each replica from a per-backend contiguous
+        // block, independent of how the batch is chunked (C-7), and the C-3 merge
+        // below accumulates across chunks.
+        let wave = backend.capabilities().max_concurrency.max(1);
         let mut merged: Counts = HashMap::new();
-        for counts in counts_vec {
-            for (k, v) in counts {
-                *merged.entry(k).or_insert(0) += v;
+        for chunk in shot_batches.chunks(wave) {
+            if cancel.is_cancelled() {
+                return Err(InfrastructureError::Cancelled);
             }
+            let counts_vec = backend
+                .run_shots_distributed(task.circuit, chunk, config)
+                .map_err(InfrastructureError::Backend)?;
+            // Merge this chunk's replicas into the running result (the merge, C-3,
+            // lives in the planner).
+            for counts in counts_vec {
+                for (k, v) in counts {
+                    *merged.entry(k).or_insert(0) += v;
+                }
+            }
+            // Honour a pending Ctrl+C after each chunk's run (mirroring
+            // `SequentialPlanner`'s between-wave `check_signals`).
+            Python::with_gil(|py| py.check_signals()).map_err(InfrastructureError::Python)?;
         }
+        // Validate once over the fully-merged map: shot conservation (C-3) is a
+        // property of the total, unaffected by how many backend calls produced it.
         validate_run_results(std::slice::from_ref(&merged), 1, shots)
             .map_err(InfrastructureError::Backend)?;
-        Python::with_gil(|py| py.check_signals()).map_err(InfrastructureError::Python)?;
         Ok(vec![merged])
     }
 }
@@ -260,6 +279,228 @@ impl Planner for ShotDistributingPlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BackendConfig, OptLevel};
+    use std::sync::Mutex;
+
+    /// A backend that records the length of every `shot_batches` slice
+    /// `ShotDistributingPlanner` hands it (via `run_shots_distributed`), so a test
+    /// can prove how many checkpoints a run was split into and that each respects
+    /// the concurrency cap. Its `max_concurrency` is configurable, and it can
+    /// optionally cancel a shared `CancelToken` on its first call to model a Ctrl+C
+    /// arriving mid-run. It returns one shot-conserving map per replica so the
+    /// planner's merged result satisfies contract C-3.
+    struct RecordingBackend {
+        max_concurrency: usize,
+        /// Length of each `run_shots_distributed` call's `shot_batches`, in order.
+        call_sizes: Mutex<Vec<usize>>,
+        /// If set, cancelled from inside the first call (models a between-wave Ctrl+C).
+        cancel_on_first_call: Option<CancelToken>,
+    }
+
+    impl RecordingBackend {
+        fn new(max_concurrency: usize) -> Self {
+            Self {
+                max_concurrency,
+                call_sizes: Mutex::new(Vec::new()),
+                cancel_on_first_call: None,
+            }
+        }
+
+        fn cancelling(max_concurrency: usize, token: CancelToken) -> Self {
+            Self {
+                max_concurrency,
+                call_sizes: Mutex::new(Vec::new()),
+                cancel_on_first_call: Some(token),
+            }
+        }
+
+        fn call_sizes(&self) -> Vec<usize> {
+            self.call_sizes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl QuantumBackend for RecordingBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            config: &ExecutionConfig,
+        ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+            // Never exercised by `ShotDistributingPlanner` (it goes through
+            // `run_shots_distributed`), but the trait requires it; return one
+            // shot-conserving map per circuit so it is well-formed if ever called.
+            Ok(qcs
+                .iter()
+                .map(|_| HashMap::from([("0".to_string(), u64::from(config.shots))]))
+                .collect())
+        }
+
+        fn run_shots_distributed(
+            &self,
+            _qc: &BoundCircuit,
+            shot_batches: &[u32],
+            _config: &ExecutionConfig,
+        ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+            let mut sizes = self.call_sizes.lock().unwrap_or_else(|p| p.into_inner());
+            let first_call = sizes.is_empty();
+            sizes.push(shot_batches.len());
+            drop(sizes);
+            if first_call {
+                if let Some(token) = &self.cancel_on_first_call {
+                    token.cancel();
+                }
+            }
+            // One shot-conserving map per replica; merged across all replicas this
+            // sums to the requested total (contract C-3).
+            Ok(shot_batches
+                .iter()
+                .map(|&s| HashMap::from([("0".to_string(), u64::from(s))]))
+                .collect())
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                max_concurrency: self.max_concurrency,
+                supports_shot_distribution: true,
+            }
+        }
+    }
+
+    fn config(n_qpus: u32, shots: u32) -> ExecutionConfig {
+        ExecutionConfig {
+            id: "shot-dist-test".to_string(),
+            shots,
+            n_qpus,
+            infrastructure: "local".to_string(),
+            backend_config: BackendConfig::LocalNative { fusion: true },
+            opt_level: OptLevel::default(),
+            seed: Some(7),
+        }
+    }
+
+    /// Acceptance bullet 1: a small concurrency cap splits a distributed-shots run
+    /// into multiple checkpoints (each `≤ max_concurrency`), with the total shots
+    /// still conserved (C-3). A `check_signals` sits after every recorded call in
+    /// `execute`, so "more than one call" is "more than one interrupt checkpoint".
+    #[test]
+    fn small_cap_splits_into_multiple_checkpoints() {
+        pyo3::prepare_freethreaded_python();
+        let backend = RecordingBackend::new(1); // QMIO-shaped cap.
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let shots = 100u32;
+        let n_qpus = 4u32;
+        let cfg = config(n_qpus, shots);
+        let tasks = vec![CircuitTask {
+            circuit: &circuit,
+            shots,
+        }];
+        let cancel = CancelToken::default();
+
+        let out = ShotDistributingPlanner
+            .execute(&backend, &tasks, &cfg, &cancel)
+            .expect("execute succeeds");
+
+        // One merged `Counts` for the single circuit, conserving the total (C-3);
+        // the `Ok` itself means `validate_run_results` accepted the merge.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].values().sum::<u64>(), u64::from(shots));
+
+        // The batch was split into more than one backend call, each within the cap,
+        // and every replica is still accounted for.
+        let sizes = backend.call_sizes();
+        assert!(
+            sizes.len() > 1,
+            "expected multiple checkpoints, got {sizes:?}"
+        );
+        assert!(
+            sizes.iter().all(|&s| s <= 1),
+            "each chunk must respect max_concurrency = 1: {sizes:?}"
+        );
+        assert_eq!(sizes.iter().sum::<usize>(), n_qpus as usize);
+    }
+
+    /// Acceptance bullet 1 (cancellation angle): the between-chunk checkpoint is a
+    /// real cooperative-cancellation boundary — a token cancelled during the first
+    /// chunk stops the second from launching and returns `Cancelled`.
+    #[test]
+    fn cancellation_between_checkpoints_stops_before_the_next_chunk() {
+        pyo3::prepare_freethreaded_python();
+        let cancel = CancelToken::default();
+        let backend = RecordingBackend::cancelling(1, cancel.clone());
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let shots = 100u32;
+        let n_qpus = 4u32;
+        let cfg = config(n_qpus, shots);
+        let tasks = vec![CircuitTask {
+            circuit: &circuit,
+            shots,
+        }];
+
+        let err = ShotDistributingPlanner
+            .execute(&backend, &tasks, &cfg, &cancel)
+            .expect_err("a cancellation between chunks must abort the run");
+        assert!(matches!(err, InfrastructureError::Cancelled));
+        // The first chunk ran (and set the token); the second never launched.
+        assert_eq!(backend.call_sizes().len(), 1);
+    }
+
+    /// Acceptance bullet 2: an unbounded cap (`usize::MAX`, the native/local
+    /// default) runs the whole batch in exactly one call — no unnecessary splitting.
+    #[test]
+    fn unbounded_cap_runs_in_a_single_call() {
+        pyo3::prepare_freethreaded_python();
+        let backend = RecordingBackend::new(usize::MAX);
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let shots = 100u32;
+        let n_qpus = 4u32;
+        let cfg = config(n_qpus, shots);
+        let tasks = vec![CircuitTask {
+            circuit: &circuit,
+            shots,
+        }];
+        let cancel = CancelToken::default();
+
+        let out = ShotDistributingPlanner
+            .execute(&backend, &tasks, &cfg, &cancel)
+            .expect("execute succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].values().sum::<u64>(), u64::from(shots));
+        assert_eq!(
+            backend.call_sizes(),
+            vec![n_qpus as usize],
+            "the whole batch should reach the backend in exactly one call"
+        );
+    }
+
+    /// Acceptance bullet 2 (CUNQA-shaped boundary): a cap *exactly equal* to
+    /// `n_qpus` (`==`, not `>`) still needs no splitting — one call, full batch.
+    #[test]
+    fn cap_equal_to_n_qpus_runs_in_a_single_call() {
+        pyo3::prepare_freethreaded_python();
+        let n_qpus = 4u32;
+        let backend = RecordingBackend::new(n_qpus as usize); // CUNQA: cap == n_qpus.
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let shots = 100u32;
+        let cfg = config(n_qpus, shots);
+        let tasks = vec![CircuitTask {
+            circuit: &circuit,
+            shots,
+        }];
+        let cancel = CancelToken::default();
+
+        let out = ShotDistributingPlanner
+            .execute(&backend, &tasks, &cfg, &cancel)
+            .expect("execute succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].values().sum::<u64>(), u64::from(shots));
+        assert_eq!(
+            backend.call_sizes(),
+            vec![n_qpus as usize],
+            "cap == n_qpus needs no splitting"
+        );
+    }
 
     #[test]
     fn requirements_reject_shot_distribution_when_unsupported() {
