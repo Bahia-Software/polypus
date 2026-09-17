@@ -13,6 +13,7 @@ __pycache__/
 
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
+benchmarks/bench_*/
 benchmarks/fusion_*.csv
 benchmarks/fusion_*.json
 benchmarks/fusion_*.out

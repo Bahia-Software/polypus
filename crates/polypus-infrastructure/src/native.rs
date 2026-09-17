@@ -10,7 +10,10 @@
 
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::{max_statevector_concurrency, BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::{
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
+    InfrastructureError, QuantumBackend,
+};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use rayon::prelude::*;
@@ -261,16 +264,23 @@ impl NativeStatevectorBackend {
 /// that keeps full thread concurrency and lets `simulate_one` surface the real
 /// per-circuit error.
 fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
-    qcs.iter()
-        .filter_map(|qc| match qc {
-            BoundCircuit::Native(cc) => Some(cc.num_qubits),
-            BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-                .ok()
-                .map(|pc| pc.num_qubits),
-            BoundCircuit::Qiskit(_) => None,
-        })
-        .max()
-        .unwrap_or(0)
+    qcs.iter().filter_map(circuit_qubits).max().unwrap_or(0)
+}
+
+/// Qubit width of a single circuit as this backend sees it (GIL-free): `Native`
+/// exposes it directly, `Qasm2` is parsed for it, and a `Qiskit` circuit — which
+/// this backend rejects at execution — contributes nothing. Shared by
+/// [`representative_qubits`] (over the batch `run_circuits` receives) and
+/// [`NativeStatevectorBackend::capabilities_for`] (over the planner's task slice),
+/// so both size the memory budget by the identical per-circuit rule.
+fn circuit_qubits(qc: &BoundCircuit) -> Option<usize> {
+    match qc {
+        BoundCircuit::Native(cc) => Some(cc.num_qubits),
+        BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
+            .ok()
+            .map(|pc| pc.num_qubits),
+        BoundCircuit::Qiskit(_) => None,
+    }
 }
 
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
@@ -301,6 +311,48 @@ impl QuantumBackend for NativeStatevectorBackend {
         let cap =
             max_statevector_concurrency(representative_qubits(qcs), rayon::current_num_threads());
         self.run_batch_with_cap(qcs, config, cap)
+    }
+
+    /// Report the wave size the planner should use for this batch, derived from
+    /// the same statevector memory budget [`run_circuits`](Self::run_circuits)
+    /// enforces internally — the batch's widest circuit fed to
+    /// [`max_statevector_concurrency`] against `rayon::current_num_threads()`,
+    /// read off the task slice without cloning any circuit. GIL-free:
+    /// `Native`/`Qasm2` widths need no interpreter, and a `Qiskit` circuit
+    /// (rejected at execution) is ignored.
+    ///
+    /// The wave size is capped **only when the whole batch cannot be held in the
+    /// memory budget at once** (the high-qubit regime): there `run_circuits` would
+    /// otherwise process the batch as several sequential memory windows inside
+    /// *one* call, so exposing the cap lets the planner run those windows as waves
+    /// with a `py.check_signals()` between them (issue #147). When the batch fits,
+    /// the cap is reported as unbounded so it stays a single wave — matching
+    /// `run_batch_with_cap`'s fast path; the backend still parallelises internally
+    /// up to the thread count. See `wave_concurrency`
+    /// for why the fit test uses the pure memory limit rather than a thread-count
+    /// gate (which would degenerate on a single-core host, issue #147's 1-thread
+    /// case).
+    ///
+    /// Always `Ok`: this backend reads widths GIL-free (from the `Native` struct
+    /// or by parsing `Qasm2`), so unlike [`LocalBackend`](crate::LocalBackend) it can never be
+    /// interrupted mid-read. The `Result` exists only to satisfy the trait.
+    fn capabilities_for(
+        &self,
+        tasks: &[CircuitTask<'_>],
+    ) -> Result<BackendCapabilities, InfrastructureError> {
+        let widest = tasks
+            .iter()
+            .filter_map(|t| circuit_qubits(t.circuit))
+            .max()
+            .unwrap_or(0);
+        Ok(BackendCapabilities {
+            max_concurrency: crate::wave_concurrency(
+                widest,
+                rayon::current_num_threads(),
+                tasks.len(),
+            ),
+            supports_shot_distribution: true,
+        })
     }
 
     /// Single-evolution fast path: `polypus-sim` separates evolution from
@@ -689,6 +741,67 @@ mod tests {
                 "cap={cap} must yield byte-identical counts to the full batch"
             );
         }
+    }
+
+    /// Issue #147: a high-qubit batch that cannot fit in the memory budget is
+    /// reported with the memory cap `run_circuits` enforces internally, so the
+    /// planner can split it into memory-safe waves. A 30-qubit statevector is
+    /// 16 GiB, so under the default 16 GiB budget only one fits at a time, and a
+    /// 4-circuit batch cannot be held at once ⇒ cap 1 — **regardless of the host
+    /// core count** (this is the single-core regression from issue #147, so the
+    /// test deliberately does not guard on the thread count). The circuit is
+    /// zero-gate and never simulated, so this costs nothing. Crucially the
+    /// batch-agnostic `capabilities()` is left at its unbounded default, proving
+    /// the change is purely additive.
+    #[test]
+    fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
+        let wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(30)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let tasks: Vec<CircuitTask> = (0..4)
+            .map(|_| CircuitTask {
+                circuit: &wide,
+                shots: 8,
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+
+        let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
+        assert_eq!(
+            cap, 1,
+            "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
+        );
+        assert!(
+            cap < tasks.len(),
+            "the cap must force more than one wave for this batch"
+        );
+
+        // The frozen, batch-agnostic seam is untouched.
+        assert_eq!(backend.capabilities().max_concurrency, usize::MAX);
+        assert!(backend.capabilities().supports_shot_distribution);
+    }
+
+    /// A low-qubit batch fits comfortably in the memory budget, so it is reported
+    /// as a **single unbounded wave** — the planner hands the whole batch to the
+    /// backend in one call (which parallelises internally), with no per-wave
+    /// chunking overhead — regardless of the host core count.
+    #[test]
+    fn capabilities_for_keeps_a_single_wave_at_low_qubits() {
+        let small =
+            BoundCircuit::Native(ParameterizedCircuit::new(4).assign_parameters(&[]).unwrap());
+        let tasks: Vec<CircuitTask> = (0..8)
+            .map(|_| CircuitTask {
+                circuit: &small,
+                shots: 8,
+            })
+            .collect();
+        let cap = NativeStatevectorBackend::new(0)
+            .capabilities_for(&tasks)
+            .unwrap()
+            .max_concurrency;
+        assert_eq!(cap, usize::MAX);
     }
 
     /// Acceptance criterion (defect #1), positive half: the *same explicit

@@ -51,3 +51,7 @@ pyo3 = { version = "0.25", features = ["num-complex"] }
 numpy = "0.25"
 log = { workspace = true }
 uuid = { workspace = true }
+# Only for `rayon::current_num_threads()` in the calibration warning message
+# (crates/polypus/src/bindings/calibration.rs); the actual parallel kernels
+# live in polypus-sim/polypus-infrastructure, which depend on it themselves.
+rayon = "1"

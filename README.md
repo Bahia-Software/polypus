@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Logo" width="350">
+  <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/logo.png" alt="Logo" width="350">
 </p>
 
 <h1 align="center">Polypus</h1>
@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/Bahia-Software/polypus/actions/workflows/ci.yml"><img src="https://github.com/Bahia-Software/polypus/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-EUPL--1.2-blue.svg" alt="License: EUPL-1.2"></a>
+  <a href="https://github.com/Bahia-Software/polypus/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-EUPL--1.2-blue.svg" alt="License: EUPL-1.2"></a>
   <img src="https://img.shields.io/badge/python-3.8%2B-blue.svg" alt="Python 3.8+">
   <a href="https://bahia-software.github.io/polypus/"><img src="https://img.shields.io/badge/docs-rustdoc-blue.svg" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/status-active%20development-yellow.svg" alt="Status: active development">
@@ -59,7 +59,7 @@ It is built for researchers and engineers who need to:
 - **Unified variational training** — Differential Evolution, Particle Swarm Optimization, and Quantum Natural Gradient behind a single `polypus.train()` API; switch optimizers by changing one argument, populations are distributed across QPUs automatically.
 - **Backend-agnostic** — local simulation via Qiskit Aer, CESGA's [CUNQA](https://github.com/CESGA-Quantum-Spain/cunqa) distributed QPU platform, and CESGA's QMIO real quantum processor, the last reached through a pure-Rust, GIL-free ZeroMQ client.
 - **Native circuit engine** (`polypus-circuit`) — optional pure-Rust circuit representation with OpenQASM 2.0 and QIR export; parameter binding is ~3x faster than Qiskit's `assign_parameters` and GIL-free, so concurrent evaluation threads bind candidates truly in parallel.
-- **A real Cargo workspace, not a monolith** — circuits, simulator, physics layer, optimizers, and logger are independent, individually testable crates; the pure-Rust ones have no Python dependency and are usable from any Rust project.
+- **A real Cargo workspace, not a monolith** — circuits, simulator, optimizers, cost observables, physics layer, execution backends, orchestration, evaluation, and logger are independent, individually testable crates; the pure-Rust ones have no Python dependency and are usable from any Rust project.
 
 ## Quickstart
 
@@ -354,7 +354,7 @@ Round-trip guarantee (verified by tests): for any circuit produced by this libra
 ### Performance Notes
 
 - **Parameter binding**: ~3x faster than Qiskit's `assign_parameters` and, crucially, **GIL-free** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`).
-- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call with `max_parallel_experiments=0`, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released. Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each call at `n_qpus` via `QuantumBackend::max_batch_size`.
+- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call with `max_parallel_experiments=0`, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released. Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each wave's concurrency at `n_qpus` via their `QuantumBackend::capabilities` (`BackendCapabilities::max_concurrency`), which the `Planner` enforces.
 - Native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA), where the Qiskit re-parse disappears entirely.
 
 ## Project Architecture
@@ -363,15 +363,19 @@ Polypus is a Cargo workspace of focused crates plus one Python package:
 
 | Path | Language | Role |
 |---|---|---|
-| [`crates/polypus`](crates/polypus) | Rust + PyO3 | Main library and Python extension module: backends, training loop, Python bindings |
+| [`crates/polypus`](crates/polypus) | Rust + PyO3 | The Python extension module and PyO3 edge: `#[pyclass]`/`#[pyfunction]` bindings, the typed `polypus.*` exception hierarchy, and re-exports of the workspace crates |
 | [`crates/polypus-circuit`](crates/polypus-circuit) | Pure Rust | Circuit representation, OpenQASM 2.0 / QIR export — no PyO3, usable from any Rust project |
 | [`crates/polypus-sim`](crates/polypus-sim) | Pure Rust | Statevector simulator consuming `polypus-circuit`'s `ConcreteCircuit` directly (no OpenQASM round-trip) |
 | [`crates/polypus-optimizers`](crates/polypus-optimizers) | Pure Rust | DE, PSO and QNG optimizers, decoupled from circuits and Python via `EvaluationOracle`/`VarianceOracle` |
+| [`crates/polypus-observable`](crates/polypus-observable) | Pure Rust | Native, GIL-free cost observables (QUBO / Ising and other diagonal costs) mapping measurement counts to per-candidate expectation values, parallelized with rayon |
 | [`crates/polypus-physics`](crates/polypus-physics) | Pure Rust | Classical Monte Carlo transport and quantum Hamiltonians expressed as Pauli sums |
+| [`crates/polypus-infrastructure`](crates/polypus-infrastructure) | Rust + PyO3 | Execution backends (local Aer, native, CUNQA, QMIO) and the `Planner` that sizes and runs circuit waves — *how* a circuit executes |
+| [`crates/polypus-orchestration`](crates/polypus-orchestration) | Pure Rust | `Flow`/`Scheduler`/`Resources` policy and optimizer dispatch — *how* a flow is orchestrated; deliberately pyo3-free |
+| [`crates/polypus-evaluation`](crates/polypus-evaluation) | Rust + PyO3 | The oracles (`VqcOracle`, `QmlOracle`, variance) and their `OracleFactory` assembly — *how* a candidate is evaluated |
 | [`crates/polypus-logger`](crates/polypus-logger) | Pure Rust | Shared `log::Log` sink for the whole workspace |
 | [`polypus_python`](polypus_python) | Python | Python-side infrastructure glue (backend connectivity, worker processes) used by the extension module; bundled into the `polypus-quantum` wheel |
 
-Only `crates/polypus` links against Python; every other Rust crate is dependency-free with respect to PyO3 and can be used standalone from any Rust project.
+Only `crates/polypus`, `crates/polypus-infrastructure` and `crates/polypus-evaluation` link against Python (via PyO3); every other Rust crate is dependency-free with respect to PyO3 and can be used standalone from any Rust project.
 
 ## Documentation
 
