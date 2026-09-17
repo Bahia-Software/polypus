@@ -98,6 +98,59 @@ boundary stays out-of-process and explicit; see
   **original** exception (`EvaluationError::Python` carries it verbatim), never
   swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
+- **How many waves that boundary produces is backend- *and* batch-dependent
+  (issue #147).** `SequentialPlanner::execute` sizes each wave from
+  `backend.capabilities_for(tasks).max_concurrency`, a **batch-aware** companion
+  to the frozen, argument-free `QuantumBackend::capabilities()`. The native and
+  local backends cap their real concurrency by a statevector memory budget scaled
+  by the batch's *widest* circuit (`mem_budget::max_statevector_concurrency`);
+  they override `capabilities_for` to expose that cap **only when the whole batch
+  cannot be held in the budget at once** — the high-qubit regime — so a high-qubit
+  batch is split into several waves and `py.check_signals()` runs **once per
+  wave**: a whole training generation is no longer one uninterruptible call. When
+  the batch fits (the common low-qubit case) they report an unbounded wave, so the
+  whole population still reaches the backend as a **single** call (Aer
+  parallelises the experiments internally; splitting would only add per-call
+  overhead — pinned by `tests/python/test_qml_concurrency.py`). The "does it fit"
+  test (`wave_concurrency`) is made against the **pure** memory limit — how many
+  statevectors the budget holds, with the thread count removed — *not* the
+  thread-capped cap: a thread-based gate (`cap >= cores`) degenerates on a
+  single-core allocation (a common SLURM/container case, or `RAYON_NUM_THREADS=1`),
+  where the cap always equals the core count regardless of qubit count and would
+  wrongly report one uninterruptible wave for a memory-heavy batch (issue #147's
+  single-thread case). Backends whose cap is static (CUNQA at `n_qpus`, QMIO at 1)
+  do not override it and inherit the default, which delegates to `capabilities()`
+  ignoring the batch, so their behaviour is unchanged.
+  - **`capabilities_for` is fallible, so a Ctrl+C during width-reading is not
+    swallowed.** It runs at the top of every `execute` — for training, once per
+    generation on the optimizer thread, with the GIL released. `LocalBackend` sizes
+    waves from every circuit's width, including a `Qiskit` circuit's `num_qubits`,
+    which it reads via `getattr` under the GIL exactly as `run_circuits` does — so a
+    high-qubit Qiskit population (a Qiskit-templated ansatz on `backend="aer"`, the
+    common QML case) is still wave-split for interruptibility. That `getattr` runs
+    Python bytecode, which CPython can abort with a `KeyboardInterrupt` for a
+    pending Ctrl+C; mapping *that* to "width unknown" (an `.ok()` that discards it)
+    clears the signal before the planner's between-wave `py.check_signals()` can see
+    it, which made `qml.train` unresponsive to Ctrl+C on constrained runners
+    (issue #147 follow-up). So `capabilities_for` returns
+    `Result<BackendCapabilities, InfrastructureError>`: a `KeyboardInterrupt` from
+    the read is propagated verbatim (as `InfrastructureError::Python`, re-raised by
+    the planner), and only a genuine non-interrupt failure (a missing attribute,
+    which a real `QuantumCircuit` never has) falls back to "width unknown". The
+    default impl and the native backend read widths GIL-free and never error (they
+    return `Ok`); the call site in `execute` propagates with `?`, the same way it
+    already handles `run_circuits`' errors.
+  - **Why a new method rather than changing `capabilities()`.** The
+    argument-free `capabilities()` is called *without* a batch by
+    `Resources::new` (to validate the planner/backend pairing up front) and is
+    overridden by test mocks; its signature and meaning are load-bearing outside
+    this crate, so the fix is strictly additive — `capabilities_for(&[CircuitTask])
+    -> Result<BackendCapabilities, InfrastructureError>`, taking the planner's
+    borrowed task slice (each `CircuitTask` already holds a `&BoundCircuit`) so
+    sizing a wave clones no circuit. The override reuses the *exact* cap arithmetic each backend's
+    `run_circuits` already applies internally, so the wave size the planner picks
+    matches the memory bound the backend would enforce anyway — and collapses to a
+    single wave whenever the batch fits in the budget.
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
   around the whole `scheduler.run(flow)` call; the `Planner` calls
   `py.check_signals()` between execution waves (in `execute`), and the counts are
