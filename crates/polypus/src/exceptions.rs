@@ -104,6 +104,34 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
     }
 }
 
+/// Map a native cost-observable
+/// [`ObservableError`](polypus_observable::ObservableError) to the `PyErr` it
+/// should surface as.
+///
+/// A callback observable boxes its own `PyErr` into the
+/// [`External`](polypus_observable::ObservableError::External) variant; recover
+/// it so the *original* Python exception type re-raises verbatim across the FFI
+/// instead of being flattened into a `polypus.EvaluationError`. Every other
+/// variant is a native evaluation failure (bad bitstring, invalid construction)
+/// and surfaces as the typed `polypus.EvaluationError`.
+///
+/// Both [`evaluation_error_to_pyerr`] and [`infrastructure_error_to_pyerr`]
+/// route their `Observable` arm through here so the downcast lives in one place.
+fn observable_error_to_pyerr(err: polypus_observable::ObservableError) -> PyErr {
+    use polypus_observable::ObservableError as ObsErr;
+    match err {
+        // A callback observable boxes its `PyErr` here; recover it so the
+        // original Python exception type re-raises verbatim across the FFI.
+        ObsErr::External(boxed) => match boxed.downcast::<PyErr>() {
+            Ok(py_err) => *py_err,
+            Err(other) => EvaluationError::new_err(other.to_string()),
+        },
+        // Native evaluation failures (bad bitstring, invalid construction) map
+        // to the typed evaluation exception.
+        other => EvaluationError::new_err(other.to_string()),
+    }
+}
+
 /// Map an evaluation-layer [`EvaluationError`](crate::evaluation::EvaluationError)
 /// to the typed `polypus.*` Python exception it should surface as.
 ///
@@ -118,19 +146,7 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
     match err {
         EvalErr::Backend(backend_err) => backend_error_to_pyerr(backend_err),
         EvalErr::Binding(circuit_err) => EvaluationError::new_err(circuit_err.to_string()),
-        EvalErr::Observable(obs_err) => match obs_err {
-            // A callback observable boxes its `PyErr` here; recover it so the
-            // original Python exception type re-raises verbatim across the FFI.
-            polypus_observable::ObservableError::External(boxed) => {
-                match boxed.downcast::<PyErr>() {
-                    Ok(py_err) => *py_err,
-                    Err(other) => EvaluationError::new_err(other.to_string()),
-                }
-            }
-            // Native evaluation failures (bad bitstring, invalid construction) map
-            // to the typed evaluation exception.
-            other => EvaluationError::new_err(other.to_string()),
-        },
+        EvalErr::Observable(obs_err) => observable_error_to_pyerr(obs_err),
         // Preserve the original Python exception type raised by the callback.
         EvalErr::Python(py_err) => py_err,
         // Rust-side failures: surface as the typed polypus.EvaluationError, not
@@ -152,16 +168,22 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
 /// `InfrastructureError` deliberately implements no `From<_> for PyErr`; this is
 /// the one place `run_quantum_circuit` / the training flows perform that
 /// conversion, mapping each variant to the class it always surfaced as: a backend
-/// error keeps its own class (via [`backend_error_to_pyerr`]), a Python exception
-/// (a SIGINT from the planner's `check_signals`) re-raises verbatim, and a
-/// cooperative cancel is a `KeyboardInterrupt`.
+/// error keeps its own class (via [`backend_error_to_pyerr`]), an observable
+/// failure goes through [`observable_error_to_pyerr`] so a Python exception
+/// raised inside a callback observable re-raises with its original class, a
+/// Python exception (a SIGINT from the planner's `check_signals`) re-raises
+/// verbatim, and a cooperative cancel is a `KeyboardInterrupt`.
 pub(crate) fn infrastructure_error_to_pyerr(
     err: crate::infrastructure::InfrastructureError,
 ) -> PyErr {
     use crate::infrastructure::InfrastructureError as InfraErr;
     match err {
         InfraErr::Backend(e) => backend_error_to_pyerr(e),
-        InfraErr::Observable(e) => EvaluationError::new_err(e.to_string()),
+        // Share the callback-downcast with `evaluation_error_to_pyerr`: an
+        // `External` variant carries a Python exception raised inside a callback
+        // observable, and its original class must re-raise verbatim rather than
+        // being discarded into a generic `polypus.EvaluationError`.
+        InfraErr::Observable(e) => observable_error_to_pyerr(e),
         InfraErr::Python(e) => e,
         InfraErr::Cancelled => PyKeyboardInterrupt::new_err("the run was cancelled"),
         InfraErr::IncompatiblePlanner(m) => PyValueError::new_err(m),
@@ -274,7 +296,8 @@ mod evaluation_mapping_tests {
     use crate::evaluation::EvaluationError as EvalErr;
     use polypus_circuit::CircuitError;
     use polypus_infrastructure::BackendError;
-    use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError};
+    use polypus_observable::ObservableError;
+    use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError, PyZeroDivisionError};
     use pyo3::prelude::*;
     use pyo3::types::PyAnyMethods;
 
@@ -405,6 +428,199 @@ mod evaluation_mapping_tests {
                 !py_err.is_instance_of::<EvaluationError>(py),
                 "a wrapped backend failure must keep its own class"
             );
+        });
+    }
+
+    #[test]
+    fn observable_non_external_maps_to_evaluation_error() {
+        // A native observable failure has no original Python class to preserve,
+        // so it surfaces as the typed `polypus.EvaluationError` with its message.
+        assert_maps_to_evaluation_error(
+            EvalErr::Observable(ObservableError::Invalid("coupling i == j".to_string())),
+            "coupling i == j",
+        );
+    }
+
+    #[test]
+    fn observable_external_preserves_the_original_python_class() {
+        // Twin of the `infrastructure_error_to_pyerr` fix: a Python exception
+        // boxed by a callback observable must re-raise with its original class,
+        // not be flattened into `polypus.EvaluationError`.
+        pyo3::prepare_freethreaded_python();
+        let py_err = evaluation_error_to_pyerr(EvalErr::Observable(ObservableError::External(
+            Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
+        )));
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyZeroDivisionError>(py),
+                "the callback's original class must survive the FFI: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<EvaluationError>(py),
+                "the original class must not be flattened into EvaluationError"
+            );
+            assert!(py_err.to_string().contains("callback divided by zero"));
+        });
+    }
+}
+
+#[cfg(test)]
+mod infrastructure_mapping_tests {
+    //! New coverage that closes the gap this issue fixed. Unlike the two modules
+    //! above, nothing was relocated here: `infrastructure_error_to_pyerr` simply
+    //! had no dedicated tests, and its `Observable` arm silently discarded the
+    //! original class of a Python exception raised inside a callback observable
+    //! (mapping it to a generic `polypus.EvaluationError`). These pin every
+    //! `InfrastructureError` variant's target class and message.
+    //!
+    //! Note the hierarchy split: `Backend` and non-`External` `Observable` land
+    //! inside the `polypus.PolypusError` hierarchy, but `Cancelled`
+    //! (`KeyboardInterrupt`), `IncompatiblePlanner` (`ValueError`), a verbatim
+    //! `Python` exception, and `Observable(External)` are *native* Python
+    //! exceptions by design — so the `PolypusError`-catchable assertion is made
+    //! only where it is actually true.
+    use super::*;
+    use crate::infrastructure::InfrastructureError as InfraErr;
+    use polypus_observable::ObservableError as ObsErr;
+    use pyo3::exceptions::{
+        PyKeyboardInterrupt, PyRuntimeError, PyValueError, PyZeroDivisionError,
+    };
+    use pyo3::prelude::*;
+    use pyo3::PyTypeInfo;
+
+    /// Assert `err` crosses the FFI as `E`, stays catchable as `PolypusError`,
+    /// and keeps its message. Valid only for variants whose target class is in
+    /// the `polypus.*` hierarchy (`Backend`, non-`External` `Observable`); the
+    /// native Python targets are asserted inline, because asserting
+    /// `PolypusError`-catchability on them would be a false check.
+    fn assert_maps_to<E: PyTypeInfo>(err: InfraErr, expected_message: &str) {
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(err);
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<E>(py),
+                "wrong exception class for: {py_err}"
+            );
+            assert!(
+                py_err.is_instance_of::<PolypusError>(py),
+                "every polypus.* class must stay catchable as PolypusError: {py_err}"
+            );
+            assert!(
+                py_err.to_string().contains(expected_message),
+                "message lost in translation: {py_err}"
+            );
+        });
+    }
+
+    #[test]
+    fn backend_variant_delegates_to_the_backend_mapping() {
+        // `InfrastructureError::Backend` must not retype the wrapped failure: a
+        // CUNQA error surfacing through the planner is still a `polypus.CunqaError`.
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(InfraErr::Backend(InfraBackendError::Cunqa(
+            "qraise failed".to_string(),
+        )));
+        Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<CunqaError>(py));
+            assert!(
+                !py_err.is_instance_of::<EvaluationError>(py),
+                "a wrapped backend failure must keep its own class"
+            );
+        });
+    }
+
+    #[test]
+    fn observable_non_external_maps_to_evaluation_error() {
+        // A native observable failure has no original Python class to preserve,
+        // so it surfaces as the typed `polypus.EvaluationError`.
+        assert_maps_to::<EvaluationError>(
+            InfraErr::Observable(ObsErr::Invalid("coupling i == j".to_string())),
+            "coupling i == j",
+        );
+    }
+
+    #[test]
+    fn observable_external_preserves_the_original_python_class() {
+        // The central regression test for this issue: a Python exception boxed by
+        // a callback observable must re-raise with its original class, not be
+        // discarded into a generic `polypus.EvaluationError`. `PyZeroDivisionError`
+        // is deliberately outside the `polypus.*` hierarchy so the check is
+        // unambiguous.
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(InfraErr::Observable(ObsErr::External(
+            Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
+        )));
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyZeroDivisionError>(py),
+                "a callback's ZeroDivisionError must re-raise with its original class: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<EvaluationError>(py),
+                "the original class must not be flattened into EvaluationError"
+            );
+            assert!(py_err.to_string().contains("callback divided by zero"));
+        });
+    }
+
+    #[test]
+    fn python_variant_reraises_verbatim() {
+        // A `check_signals` SIGINT (or any planner-raised Python exception) keeps
+        // its original class across the FFI.
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(InfraErr::Python(PyRuntimeError::new_err(
+            "planner boom",
+        )));
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyRuntimeError>(py),
+                "a planner Python exception must re-raise with its original class: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<PolypusError>(py),
+                "a verbatim Python exception is not a polypus.* class"
+            );
+            assert!(py_err.to_string().contains("planner boom"));
+        });
+    }
+
+    #[test]
+    fn cancelled_maps_to_keyboard_interrupt() {
+        // A cooperative cancel between waves surfaces as the same class a SIGINT
+        // would: a native `KeyboardInterrupt`, not a `polypus.*` class.
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(InfraErr::Cancelled);
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyKeyboardInterrupt>(py),
+                "a cooperative cancel must surface as KeyboardInterrupt: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<PolypusError>(py),
+                "KeyboardInterrupt is a native Python exception, not a polypus.* class"
+            );
+            assert!(py_err.to_string().contains("the run was cancelled"));
+        });
+    }
+
+    #[test]
+    fn incompatible_planner_maps_to_value_error() {
+        // A configuration mismatch checked up front surfaces as a native
+        // `ValueError`, message preserved.
+        pyo3::prepare_freethreaded_python();
+        let py_err = infrastructure_error_to_pyerr(InfraErr::IncompatiblePlanner(
+            "shot distribution unsupported".to_string(),
+        ));
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyValueError>(py),
+                "an incompatible planner must surface as ValueError: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<PolypusError>(py),
+                "ValueError is a native Python exception, not a polypus.* class"
+            );
+            assert!(py_err.to_string().contains("shot distribution unsupported"));
         });
     }
 }
