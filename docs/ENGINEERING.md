@@ -81,7 +81,7 @@ boundary stays out-of-process and explicit; see
 - **Never** hold the GIL while waiting (`block_on`, join) on workers that
   themselves need to acquire it: release it first with
   `Python::with_gil(|py| py.allow_threads(...))`. Ignoring this deadlocks
-  (documented in `crates/polypus/src/evaluation/qml_oracle.rs`).
+  (documented in `crates/polypus-evaluation/src/qml_oracle.rs`).
 - **Releasing the GIL does not by itself process signals.** `allow_threads`
   lets other Python threads run, but a pending SIGINT (Ctrl+C) is turned into a
   `KeyboardInterrupt` only when the **main thread** runs Python bytecode or when
@@ -192,7 +192,7 @@ boundary stays out-of-process and explicit; see
     `Cancelled` — never `PyValueError::new_err(e.to_string())`, which would
     downgrade a `KeyboardInterrupt` into a bogus `ValueError`. Same problem, and
     the same answer, as `OracleErrorSlot` in
-    `crates/polypus/src/evaluation/mod.rs`; no shared slot is needed here
+    `crates/polypus-orchestration/src/dispatch.rs`; no shared slot is needed here
     because `statevector` is single-shot and the hook runs on the calling
     thread. What is *not* interruptible is `Statevector::new`'s `2^n`
     allocation — one `vec![]` with nowhere to put a checkpoint — which is why

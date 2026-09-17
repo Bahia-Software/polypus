@@ -9,10 +9,19 @@
 #                              ConcreteCircuit directly (no OpenQASM round-trip; no PyO3)
 #   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
+#   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
+#                              diagonal costs) mapping measurement counts to expectation values
+#   - crates/polypus-infrastructure : execution backends (local Aer, native, CUNQA, QMIO) and
+#                              the Planner that sizes/runs circuit waves — how a circuit runs (PyO3)
+#   - crates/polypus-orchestration : Flow/Scheduler/Resources policy + optimizer dispatch —
+#                              how a flow is orchestrated (pure Rust, deliberately pyo3-free)
+#   - crates/polypus-evaluation : the oracles (VqcOracle, QmlOracle, variance) and their
+#                              OracleFactory assembly — how a candidate is evaluated (PyO3)
 #   - crates/polypus-logger  : pure-Rust logging sink (a `log::Log` implementation) shared by
 #                              the whole workspace; libraries emit via the `log` facade, only
 #                              the app layer installs it (no PyO3)
-#   - crates/polypus         : the Polypus library and Python extension module (PyO3)
+#   - crates/polypus         : the Polypus Python extension module and PyO3 edge (bindings,
+#                              typed exception hierarchy, workspace re-exports)
 [workspace]
 members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
