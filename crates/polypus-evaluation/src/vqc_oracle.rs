@@ -79,7 +79,7 @@ impl VqcOracle {
 
         // Delegate execution + reduction to the Planner: it owns the waves, the
         // concurrency cap, the between-wave `check_signals` and the shot merge.
-        // This dissolves the former per-chunk `run_and_evaluate` loop.
+        // This replaces the oracle's former per-chunk submission loop entirely.
         let values = self.planner.evaluate(
             self.backend.as_ref(),
             &tasks,
@@ -169,8 +169,9 @@ mod tests {
     /// chunked and ordered the work.
     ///
     /// With `fail = true` the call errors out before returning any counts, which
-    /// is also before `run_and_evaluate` reaches `Python::with_gil` — that is what
-    /// lets the chunking/short-circuit tests below run against a bare interpreter.
+    /// is also before the Planner's between-wave `check_signals` reaches
+    /// `Python::with_gil` — that is what lets the chunking/short-circuit tests
+    /// below run against a bare interpreter.
     struct MockBackend {
         batch_size: usize,
         fail: bool,
@@ -222,7 +223,8 @@ mod tests {
             // Encode each candidate's batch position in the "1" count (read back by
             // `KeyOneObservable`) and park the rest of the shots under "0", so the
             // synthetic result still conserves `config.shots` (contract C-3, now
-            // validated centrally in `run_and_evaluate`). `offset + i` stays well
+            // validated centrally by the Planner's `validate_run_results`).
+            // `offset + i` stays well
             // under the 16 shots for these 5 candidates.
             Ok((0..qcs.len())
                 .map(|i| {
@@ -285,7 +287,7 @@ mod tests {
     /// Build an oracle over `backend`, reducing counts with [`KeyOneObservable`]
     /// (the native stand-in for the former Python `expectation_values` seam, so
     /// the tests need no installed package and only a bare interpreter for
-    /// `run_and_evaluate`'s signal check).
+    /// the Planner's between-wave signal check).
     fn oracle(backend: Arc<MockBackend>) -> VqcOracle {
         VqcOracle {
             circuit: template(),
@@ -299,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn first_chunk_is_sized_by_max_batch_size_and_a_failure_short_circuits() {
+    fn first_wave_is_sized_by_max_concurrency_and_a_failure_short_circuits() {
         pyo3::prepare_freethreaded_python();
         let backend = Arc::new(MockBackend::new(3, true));
         let oracle = oracle(Arc::clone(&backend));
@@ -318,8 +320,8 @@ mod tests {
         assert_eq!(
             backend.chunk_sizes(),
             vec![3],
-            "the first chunk must be `max_batch_size` circuits, and the `?` must \
-             short-circuit the chunk loop instead of submitting the remainder"
+            "the first wave must be `max_concurrency` circuits, and the `?` must \
+             short-circuit the wave loop instead of submitting the remainder"
         );
     }
 
@@ -344,7 +346,7 @@ mod tests {
 
     #[test]
     fn multiple_successful_chunks_preserve_candidate_order() {
-        // `run_and_evaluate` still touches the GIL once for its signal check, so
+        // The Planner still touches the GIL once per wave for its signal check, so
         // the interpreter must be initialised even though the reduction is native.
         pyo3::prepare_freethreaded_python();
 
@@ -365,7 +367,7 @@ mod tests {
         assert_eq!(
             backend.chunk_sizes(),
             vec![3, 2],
-            "5 candidates at max_batch_size 3 must be submitted as 3 + 2"
+            "5 candidates at max_concurrency 3 must be submitted as 3 + 2"
         );
         // …and the circuits themselves reached the backend in candidate order.
         let expected: Vec<String> = candidates
