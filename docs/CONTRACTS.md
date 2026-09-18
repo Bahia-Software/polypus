@@ -62,7 +62,7 @@ violation.
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional), `seed: int` (optional, C-7) |
+| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7) |
 | cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
 `id` / `family_id` are `ExecutionConfig::id`, whose charset is constrained by
