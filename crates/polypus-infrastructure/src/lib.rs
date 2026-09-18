@@ -240,6 +240,30 @@ impl BoundCircuit {
             BoundCircuit::Qiskit(_) => self.duplicate(),
         }
     }
+
+    /// Qubit width of this circuit as read from its **native domain**, GIL-free:
+    /// [`Native`](Self::Native) exposes it directly and [`Qasm2`](Self::Qasm2) is
+    /// parsed for it (returning `None` if the program cannot be parsed). A
+    /// [`Qiskit`](Self::Qiskit) circuit returns `None`, because reading its
+    /// `num_qubits` would require the interpreter and "what to do about a Qiskit
+    /// circuit" is caller-specific — the native backend rejects it, and the local
+    /// backend has two different answers depending on the call site. Callers that
+    /// need a Qiskit width layer their own GIL-holding read on top of this
+    /// primitive.
+    ///
+    /// This is the single width-extraction rule shared by the memory-budget scans
+    /// in both [`NativeStatevectorBackend`](crate::NativeStatevectorBackend) and
+    /// [`LocalBackend`], sizing the widest statevector identically. It plays the
+    /// same cross-backend "shared arithmetic" role as [`wave_concurrency`].
+    pub(crate) fn native_qubit_width(&self) -> Option<usize> {
+        match self {
+            BoundCircuit::Native(cc) => Some(cc.num_qubits),
+            BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
+                .ok()
+                .map(|pc| pc.num_qubits),
+            BoundCircuit::Qiskit(_) => None,
+        }
+    }
 }
 
 /// Wave size a memory-budgeted backend (native/local) should report from
@@ -577,5 +601,48 @@ mod wave_concurrency_tests {
         assert_eq!(wave_concurrency(28, 8, 10), 4);
         // 28 qubits with only 2 cores: the cap is min(2, 4) = 2.
         assert_eq!(wave_concurrency(28, 2, 10), 2);
+    }
+}
+
+#[cfg(test)]
+mod native_qubit_width_tests {
+    use super::*;
+    use polypus_circuit::ParameterizedCircuit;
+
+    /// The shared width-extraction rule used by both backends' memory-budget
+    /// scans: `Native` exposes its width directly, `Qasm2` is parsed for it, and a
+    /// `Qiskit` circuit yields `None` (its width is caller-specific, read under the
+    /// GIL by whoever needs it).
+    #[test]
+    fn reads_native_and_qasm2_widths_and_is_none_for_qiskit() {
+        let native =
+            BoundCircuit::Native(ParameterizedCircuit::new(5).assign_parameters(&[]).unwrap());
+        assert_eq!(native.native_qubit_width(), Some(5));
+
+        let qasm = BoundCircuit::Qasm2(
+            ParameterizedCircuit::new(3)
+                .h(0)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap()
+                .to_qasm2(),
+        );
+        assert_eq!(qasm.native_qubit_width(), Some(3));
+
+        // A Qiskit circuit contributes nothing here: the arm never inspects the
+        // object, so any Python object stands in for one.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let qiskit = BoundCircuit::Qiskit(py.None());
+            assert_eq!(qiskit.native_qubit_width(), None);
+        });
+    }
+
+    /// Best-effort parsing: an unparseable `Qasm2` program has no readable width,
+    /// so the shared rule reports `None` rather than panicking.
+    #[test]
+    fn unparseable_qasm2_yields_none() {
+        let bad = BoundCircuit::Qasm2("this is definitely not valid openqasm".to_string());
+        assert_eq!(bad.native_qubit_width(), None);
     }
 }

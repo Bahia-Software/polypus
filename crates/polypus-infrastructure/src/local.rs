@@ -177,9 +177,10 @@ impl QuantumBackend for LocalBackend {
 }
 
 /// Qubit width of a single circuit for wave sizing, propagating a
-/// `KeyboardInterrupt` instead of swallowing it (issue #147 follow-up). `Native`
-/// and `Qasm2` are read GIL-free; a `Qiskit` circuit's `num_qubits` is read via
-/// `getattr`, and if that `getattr` fails **because CPython raised a
+/// `KeyboardInterrupt` instead of swallowing it (issue #147 follow-up). The
+/// `Native` and `Qasm2` arms come from the shared, GIL-free
+/// [`BoundCircuit::native_qubit_width`]; a `Qiskit` circuit's `num_qubits` is read
+/// via `getattr`, and if that `getattr` fails **because CPython raised a
 /// `KeyboardInterrupt`** for a pending Ctrl+C, the error is returned verbatim so
 /// the planner re-raises it — rather than being mistaken for a missing attribute
 /// and cleared. Any other failure (a genuine missing/incompatible attribute,
@@ -191,10 +192,6 @@ fn circuit_qubits_checked(
     py: Python<'_>,
 ) -> Result<Option<usize>, InfrastructureError> {
     match qc {
-        BoundCircuit::Native(cc) => Ok(Some(cc.num_qubits)),
-        BoundCircuit::Qasm2(qasm) => Ok(polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
-            .ok()
-            .map(|pc| pc.num_qubits)),
         BoundCircuit::Qiskit(obj) => match obj.bind(py).getattr("num_qubits") {
             Ok(attr) => Ok(attr.extract::<usize>().ok()),
             Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
@@ -202,6 +199,9 @@ fn circuit_qubits_checked(
             }
             Err(_) => Ok(None),
         },
+        // Native/Qasm2 use the shared GIL-free width rule; only the Qiskit read
+        // can raise, so only it needs the KeyboardInterrupt-propagating handling.
+        other => Ok(other.native_qubit_width()),
     }
 }
 
@@ -218,19 +218,21 @@ fn widest_qubits(qcs: &[BoundCircuit], py: Python<'_>) -> usize {
         .unwrap_or(0)
 }
 
-/// Qubit width of a single circuit, read where it is cheapest: `Native` exposes it
-/// directly, `Qasm2` is parsed for it, and a `Qiskit` circuit is read through the
-/// GIL (`num_qubits`), which the caller already holds. Shared by [`widest_qubits`]
-/// (over the batch `run_circuits` receives) and
-/// [`LocalBackend::capabilities_for`] (over the planner's task slice), so both
-/// size Aer's memory budget by the identical per-circuit rule.
+/// Qubit width of a single circuit, read where it is cheapest: the `Native` and
+/// `Qasm2` arms come from the shared, GIL-free
+/// [`BoundCircuit::native_qubit_width`], while a `Qiskit` circuit is read through
+/// the GIL (`num_qubits`), which the caller already holds. This is the swallowing
+/// variant: **any** failure reading the Qiskit width (including a
+/// `KeyboardInterrupt`) becomes `None`, which is deliberate at its sole call site
+/// (via [`widest_qubits`] inside [`LocalBackend::run_circuits`], immediately before
+/// a GIL-releasing Aer call). Contrast [`circuit_qubits_checked`], the hardened
+/// variant [`LocalBackend::capabilities_for`] uses, which propagates a
+/// `KeyboardInterrupt` verbatim.
 fn circuit_qubits(qc: &BoundCircuit, py: Python<'_>) -> Option<usize> {
     match qc {
-        BoundCircuit::Native(cc) => Some(cc.num_qubits),
-        BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
-            .ok()
-            .map(|pc| pc.num_qubits),
         BoundCircuit::Qiskit(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
+        // Native/Qasm2 use the shared GIL-free width rule.
+        other => other.native_qubit_width(),
     }
 }
 
