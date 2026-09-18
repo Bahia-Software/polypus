@@ -157,6 +157,19 @@ impl Planner for SequentialPlanner {
         config: &ExecutionConfig,
         cancel: &CancelToken,
     ) -> Result<Vec<Counts>, InfrastructureError> {
+        // An empty batch yields zero `tasks.chunks(wave)` iterations, so the wave
+        // loop below — including its `cancel.is_cancelled()` and between-wave
+        // `py.check_signals()` — never runs. Check both explicitly here so the
+        // "check at least once per `execute` call" guarantee (ENGINEERING §3)
+        // holds regardless of batch size, honouring a pending Ctrl+C/cancellation
+        // even when there is nothing to run.
+        if tasks.is_empty() {
+            if cancel.is_cancelled() {
+                return Err(InfrastructureError::Cancelled);
+            }
+            Python::with_gil(|py| py.check_signals()).map_err(InfrastructureError::Python)?;
+            return Ok(Vec::new());
+        }
         // Size the wave with the *batch-aware* cap: native/local derive it from a
         // statevector memory budget scaled by this batch's widest circuit
         // (`capabilities_for`), so a high-qubit batch is split into several waves
@@ -726,6 +739,28 @@ mod tests {
             vec![1],
             "the second wave must not launch after cancellation at the first wave boundary"
         );
+    }
+
+    /// Issue #162: an empty batch must still honour the signal/cancellation
+    /// checkpoint. `tasks.chunks(wave)` yields no iterations for an empty slice, so
+    /// without the explicit early check `execute` would return `Ok(vec![])` without
+    /// ever looking at the token. A pre-cancelled token (the file's convention for
+    /// simulating a pending signal — see the tests above) must therefore make an
+    /// empty-batch `execute` return `Cancelled`, not `Ok(vec![])`. The backend is
+    /// never invoked (there are no tasks), so `NativeStatevectorBackend::new(0)` is
+    /// only a stand-in that would panic-free never be called.
+    #[test]
+    fn empty_batch_still_honours_cancellation() {
+        pyo3::prepare_freethreaded_python();
+        let backend = NativeStatevectorBackend::new(0);
+        let cancel = CancelToken::default();
+        cancel.cancel();
+
+        let err = SequentialPlanner
+            .execute(&backend, &[], &wave_config(), &cancel)
+            .expect_err("a pre-cancelled empty batch must return Cancelled, not Ok(vec![])");
+
+        assert!(matches!(err, InfrastructureError::Cancelled));
     }
 
     /// A backend whose `capabilities_for` fails (e.g. a `KeyboardInterrupt` raised
