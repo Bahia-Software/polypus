@@ -1,7 +1,17 @@
 """Shared pytest fixtures for polypus tests."""
 
-import pytest
-from qiskit.circuit import ParameterVector, QuantumCircuit
+import os
+
+# Auto-calibration (issue #176) runs once at ``import polypus``. In the test-runner
+# process that would measure and write the *real* user cache during collection,
+# making the suite non-hermetic and order-dependent. Disable it here — before any
+# test module imports polypus — so the parent process is deterministic; the
+# auto-calibration behaviour itself is exercised in isolated child interpreters by
+# ``test_autocalibrate.py`` (which set the env explicitly per case).
+os.environ.setdefault("POLYPUS_NO_AUTOCALIBRATE", "1")
+
+import pytest  # noqa: E402
+from qiskit.circuit import ParameterVector, QuantumCircuit  # noqa: E402
 
 
 @pytest.fixture

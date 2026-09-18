@@ -13,14 +13,19 @@
 //!
 //! ## Default-visible fallback warning
 //!
-//! When a process runs the native statevector path with an *uncalibrated* (or
-//! stale) threshold, `polypus-sim` already emits a `log::warn!`/`log::info!` —
-//! but that is silent unless the user installed a logger, which most do not. So
-//! [`warn_if_using_default_threshold`] additionally raises a Python
-//! `UserWarning`, which the interpreter prints to stderr **by default** with no
-//! setup. This does not break the "the pure Rust core never prints, only logs"
-//! rule (that binds `polypus-sim`/`polypus-circuit`): this lives in the bindings
-//! layer, which already talks to the interpreter directly.
+//! When a process runs the native statevector path against a cache calibrated
+//! for *different* hardware (`FallbackReason::HardwareChanged`), `polypus-sim`
+//! emits a `log::warn!` — but that is silent unless the user installed a logger,
+//! which most do not. So [`warn_if_using_default_threshold`] additionally raises
+//! a Python `UserWarning`, which the interpreter prints to stderr **by default**
+//! with no setup. This does not break the "the pure Rust core never prints, only
+//! logs" rule (that binds `polypus-sim`/`polypus-circuit`): this lives in the
+//! bindings layer, which already talks to the interpreter directly.
+//!
+//! Since issue #176, `import polypus` auto-calibrates once per machine, so the
+//! `FallbackReason::NotCalibrated` case no longer raises a `UserWarning` (it
+//! would only nag on a read-only cache dir, where the result is still correct);
+//! it is demoted to a logger-only `info!`. See [`warn_if_using_default_threshold`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -37,13 +42,15 @@ use polypus_sim::FallbackReason;
 static THRESHOLD_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 /// Raise a one-time, default-visible `UserWarning` if this process resolved the
-/// gate-parallel threshold to the static default (because it was never
-/// calibrated, or the cached calibration was for different hardware).
+/// gate-parallel threshold to the static default *because the cache was
+/// calibrated for different hardware* (`FallbackReason::HardwareChanged`). The
+/// `NotCalibrated` case is handled quietly (a logger-only `info!`) since import
+/// auto-calibrates the machine (issue #176) — see the module docs.
 ///
 /// Called at the entry points that actually run the native statevector backend
 /// (`polypus.statevector`, and `run_quantum_circuit` only when it selects the
 /// native backend). No-op — and cheap — when the threshold came from a valid
-/// cache, or after the first call in a process. The message is actionable: it
+/// cache, or after the first warning in a process. The message is actionable: it
 /// names `polypus.calibrate_parallel_threshold()` so a user can fix it, matching
 /// the `log` records `polypus-sim` emits for the same conditions.
 ///
@@ -51,29 +58,42 @@ static THRESHOLD_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 /// per-process resolution the simulator uses, so the warning can never disagree
 /// with the threshold actually in force.
 pub(crate) fn warn_if_using_default_threshold(py: Python<'_>) -> PyResult<()> {
-    // Claim the one-shot slot up front: at most one warning per process, and
-    // safe if two threads reach here at once. A process whose threshold came
-    // from a valid cache has nothing to warn about, so consuming the slot then
-    // is harmless (the reason is fixed for the life of the process).
-    if THRESHOLD_WARNING_EMITTED.swap(true, Ordering::AcqRel) {
-        return Ok(());
-    }
     let Some(reason) = polypus_sim::resolved_fallback_reason() else {
         return Ok(());
     };
-    let message = match reason {
-        FallbackReason::HardwareChanged { cached_threads } => format!(
-            "polypus was calibrated for {cached_threads} thread(s) but this machine has {}; \
-             using the default gate-parallel threshold, which may not be optimal for this \
-             hardware. Call polypus.calibrate_parallel_threshold(force=True) to recalibrate.",
-            rayon::current_num_threads()
-        ),
-        FallbackReason::NotCalibrated => "polypus has not been calibrated on this machine; \
-             using the default gate-parallel threshold. Call \
-             polypus.calibrate_parallel_threshold() once to tune it for this hardware (or run \
-             install.sh, which does it automatically)."
-            .to_string(),
+    let cached_threads = match reason {
+        FallbackReason::HardwareChanged { cached_threads } => cached_threads,
+        // `NotCalibrated` no longer raises a default-visible `UserWarning`. Since
+        // issue #176, `import polypus` auto-calibrates once per machine, so on
+        // the happy path this reason does not occur at all. The one case that
+        // still reaches it — a read-only cache dir (containers/CI), where
+        // auto-calibration measures but cannot persist — is exactly where a
+        // stderr warning on every native run would be noise, not signal (the
+        // result is numerically identical, just possibly untuned). Demote it to
+        // an `info!` record, visible only to callers who installed a logger,
+        // matching the record `polypus-sim` already emits for the same reason.
+        FallbackReason::NotCalibrated => {
+            log::info!(
+                "polypus is using the default gate-parallel threshold (not calibrated on this \
+                 machine, e.g. a read-only cache dir). Results are unaffected; call \
+                 polypus.calibrate_parallel_threshold() to tune performance."
+            );
+            return Ok(());
+        }
     };
+    // Claim the one-shot slot: at most one `HardwareChanged` warning per process,
+    // and safe if two threads reach here at once. Only claimed once we know we
+    // are actually going to warn, so the `NotCalibrated` info path above never
+    // consumes it.
+    if THRESHOLD_WARNING_EMITTED.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let message = format!(
+        "polypus was calibrated for {cached_threads} thread(s) but this machine has {}; \
+         using the default gate-parallel threshold, which may not be optimal for this \
+         hardware. Call polypus.calibrate_parallel_threshold(force=True) to recalibrate.",
+        rayon::current_num_threads()
+    );
     let warnings = PyModule::import(py, "warnings")?;
     // Default category (UserWarning): shown on stderr by default, unlike a `log`
     // record. `stacklevel=2` points the warning at the caller of the native

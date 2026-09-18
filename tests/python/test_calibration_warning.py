@@ -1,27 +1,31 @@
 """
 Default-visible fallback warning for the gate-parallel threshold (issue #127
-follow-up).
+follow-up, revised for auto-calibration in issue #176).
 
-When a process runs the native statevector backend with an *uncalibrated* (or
-stale) threshold, ``polypus-sim`` logs a ``warn!``/``info!`` — but that is
-silent unless the user called ``polypus.init_logger()``, which most do not. The
-bindings therefore *also* raise a Python ``UserWarning``, printed to stderr by
-default with no setup, naming ``polypus.calibrate_parallel_threshold()`` so the
-user can fix it.
+Since issue #176 ``import polypus`` auto-calibrates the machine once, so on the
+happy path the native statevector backend resolves to a *calibrated* threshold
+and nothing warns. The only remaining default-visible ``UserWarning`` is the
+``HardwareChanged`` case; the ``NotCalibrated`` case (empty/unreadable cache) was
+demoted to a logger-only ``info!`` so it never nags ``pip install`` users whose
+cache dir happens to be read-only (containers/CI) — the result is numerically
+identical regardless.
+
+Every child here sets ``POLYPUS_NO_AUTOCALIBRATE=1`` so import does **not**
+silently calibrate the temp cache: that lets each scenario pin an exact cache
+state (empty / old-schema / foreign-thread-count / freshly calibrated) and assert
+what the *fallback* path does, which is the point of this file. The end-to-end
+"import calibrates so nothing warns" behaviour is covered in
+``test_autocalibrate.py``.
 
 Why subprocesses: ``resolve_threshold()`` memoises its answer in a process-life
 ``OnceLock``, and the bindings guard the warning with a process-global
-``AtomicBool``. Both are one-shot *per process*, so each scenario (uncalibrated
-/ old-schema cache / size-uncalibrated / calibrated / aer-vs-native) needs its
-**own** process to observe a fresh resolution — sharing one pytest process would
-let whichever test ran first fix the answer for all the others. This mirrors the
-subprocess isolation in ``test_interrupt.py``. The "at most once per process" case is the
-one exception that fits in a single process, but it too runs in a child so its
-count is not disturbed by other tests that already ran the native path.
+``AtomicBool``. Both are one-shot *per process*, so each scenario needs its own
+process to observe a fresh resolution. This mirrors the subprocess isolation in
+``test_interrupt.py``.
 
 Each child gets its own ``XDG_CACHE_HOME`` so it never reads or writes the real
-user cache; none of them call ``init_logger``, proving the warning is visible
-*by default*.
+user cache; none of them call ``init_logger``, proving no warning is visible *by
+default*.
 """
 
 import os
@@ -32,7 +36,8 @@ import pytest
 
 polypus = pytest.importorskip("polypus")
 
-# Substring present in *both* fallback messages — the actionable call to action.
+# Substring present in the fallback UserWarning and in the demoted info! log — the
+# actionable call to action. Absence from stderr proves nothing warned by default.
 CAL_MARKER = "calibrate_parallel_threshold"
 
 # A 2-qubit Bell circuit as OpenQASM 2.0, usable by both the native and the Aer
@@ -52,10 +57,13 @@ def _run_child(code: str, cache_home) -> subprocess.CompletedProcess:
 
     Inherits the parent environment (so the editable `polypus` install and any
     LD_LIBRARY_PATH are visible) but never installs a logger, so any warning the
-    child prints proves the warning is visible with no setup.
+    child prints proves the warning is visible with no setup. Auto-calibration at
+    import is disabled (POLYPUS_NO_AUTOCALIBRATE=1) so each test controls the
+    exact on-disk cache state; the fallback path is what these tests assert.
     """
     env = os.environ.copy()
     env["XDG_CACHE_HOME"] = str(cache_home)
+    env["POLYPUS_NO_AUTOCALIBRATE"] = "1"
     return subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
@@ -75,8 +83,8 @@ def _seed_old_schema_cache(cache_home) -> None:
     migration, worst case one recalibration. So this file does not model a
     "different hardware" cache (``FallbackReason::HardwareChanged`` is unreachable
     under thread-count keying); it models a cache the current build cannot read,
-    which resolves to the serious ``NotCalibrated`` fallback, exactly as an empty
-    cache dir does."""
+    which resolves to the ``NotCalibrated`` fallback, exactly as an empty cache
+    dir does."""
     d = cache_home / "polypus"
     d.mkdir(parents=True, exist_ok=True)
     (d / "parallel_threshold.json").write_text(
@@ -99,8 +107,9 @@ def _seed_foreign_thread_count_cache(cache_home) -> None:
     (d / "parallel_threshold.json").write_text('{"schema":2,"entries":{"999999":14}}')
 
 
-def test_statevector_warns_when_uncalibrated(tmp_path):
-    # Empty cache dir → NotCalibrated fallback → default-visible UserWarning.
+def test_statevector_does_not_warn_when_uncalibrated(tmp_path):
+    # Empty cache dir → NotCalibrated fallback. Since #176 this is demoted to a
+    # logger-only info!, so with no logger installed nothing reaches stderr.
     code = """
 import polypus
 polypus.statevector(polypus.Circuit(2).h(0).cx(0, 1))
@@ -109,17 +118,14 @@ print("DONE")
     r = _run_child(code, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "DONE" in r.stdout
-    assert CAL_MARKER in r.stderr, r.stderr
-    assert "has not been calibrated" in r.stderr, r.stderr
+    assert CAL_MARKER not in r.stderr, r.stderr
 
 
-def test_statevector_warns_when_cache_is_old_schema(tmp_path):
+def test_statevector_does_not_warn_when_cache_is_old_schema(tmp_path):
     # A cache written in the old flat ``schema:1`` layout is treated as *absent*
     # by a ``schema:2`` build (commit ea6562a — no migration), so this is the
-    # serious NotCalibrated fallback, exactly like an empty cache dir. It is NOT
-    # the HardwareChanged case: thread-count keying makes that reason unreachable,
-    # so the warning must be the "never calibrated" one and must NOT mention
-    # force=True (which belongs only to the unreachable hardware-changed message).
+    # NotCalibrated fallback, exactly like an empty cache dir: demoted to info!,
+    # no default-visible warning.
     _seed_old_schema_cache(tmp_path)
     code = """
 import polypus
@@ -129,18 +135,14 @@ print("DONE")
     r = _run_child(code, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "DONE" in r.stdout
-    assert CAL_MARKER in r.stderr, r.stderr
-    assert "has not been calibrated" in r.stderr, r.stderr
-    assert "force=True" not in r.stderr, r.stderr
+    assert CAL_MARKER not in r.stderr, r.stderr
 
 
 def test_statevector_does_not_warn_when_only_other_thread_counts_calibrated(tmp_path):
     # A current-schema cache calibrated for other thread counts but not this one is
     # the routine size-uncalibrated case on a shared node whose jobs get different
     # CPU allotments: it uses the default threshold silently (info! only), and the
-    # bindings must raise NO default-visible UserWarning. There was no Python-level
-    # test for this designed-for-SLURM behaviour before; only the Rust unit test
-    # ``decide_uses_the_entry_for_the_current_thread_count`` covered it.
+    # bindings raise NO default-visible UserWarning.
     _seed_foreign_thread_count_cache(tmp_path)
     code = """
 import polypus
@@ -168,8 +170,9 @@ print("DONE")
     assert CAL_MARKER not in r.stderr, r.stderr
 
 
-def test_run_quantum_circuit_native_warns_when_uncalibrated(tmp_path):
-    # The native ("polypus") backend consults the threshold, so it warns.
+def test_run_quantum_circuit_native_does_not_warn_when_uncalibrated(tmp_path):
+    # The native ("polypus") backend consults the threshold. Uncalibrated →
+    # NotCalibrated → demoted to info!, so no default-visible warning.
     code = f'''
 import polypus
 qasm = """{_BELL_QASM}"""
@@ -179,7 +182,7 @@ print("DONE")
     r = _run_child(code, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "DONE" in r.stdout
-    assert CAL_MARKER in r.stderr, r.stderr
+    assert CAL_MARKER not in r.stderr, r.stderr
 
 
 def test_run_quantum_circuit_aer_never_warns(tmp_path):
@@ -197,10 +200,12 @@ print("DONE")
     assert CAL_MARKER not in r.stderr, r.stderr
 
 
-def test_warns_at_most_once_per_process(tmp_path):
-    # Two native runs, one warning: the explicit AtomicBool guard fires once even
-    # with Python's own duplicate filter disabled ("always"), so a second call is
-    # provably suppressed by us, not by Python's dedup.
+def test_uncalibrated_native_runs_are_quiet_across_repeated_calls(tmp_path):
+    # Two native runs on an uncalibrated machine: neither emits a default-visible
+    # warning now that NotCalibrated is a logger-only info!. (Before #176 the first
+    # call raised exactly one UserWarning; the one-shot AtomicBool guard now only
+    # governs the still-reachable HardwareChanged case, which thread-count keying
+    # makes unreachable from Python.)
     code = """
 import warnings
 import polypus
@@ -212,6 +217,6 @@ with warnings.catch_warnings(record=True) as caught:
 hits = [w for w in caught if "calibrate_parallel_threshold" in str(w.message)]
 print("HITS", len(hits))
 """
-    r = _run_child(code, tmp_path)  # empty cache → NotCalibrated, so it does warn
+    r = _run_child(code, tmp_path)  # empty cache → NotCalibrated, now demoted
     assert r.returncode == 0, r.stderr
-    assert "HITS 1" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "HITS 0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
