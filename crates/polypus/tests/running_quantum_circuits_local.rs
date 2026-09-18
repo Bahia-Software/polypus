@@ -166,6 +166,41 @@ fn distribute_conserves_shots_when_divisible() {
 }
 
 #[test]
+fn distribute_rejects_empty_circuits() {
+    // The shot-distributing planner operates on exactly one circuit; zero is a
+    // typed error (surfaced as a ValueError at the FFI edge via
+    // `backend_error_to_pyerr`), never a silent no-op. Like the "multiple" case
+    // below, the `run_quantum_circuit` edge only ever passes one circuit, so this
+    // guards the planner's `tasks.len() != 1` check directly for the zero case
+    // (issue #162 — this guard already handled zero correctly but was untested).
+    pyo3::prepare_freethreaded_python();
+    let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
+    let resources = Resources::new(
+        backend,
+        Some(Arc::new(ShotDistributingPlanner)),
+        Arc::new(native_config(100, 2, "empty")),
+    )
+    .unwrap();
+    let scheduler = Scheduler::ephemeral(resources);
+    let err = scheduler
+        .run(RunCircuitFlow {
+            circuits: vec![],
+            shots: 100,
+        })
+        .expect_err("zero circuits must be a typed error, not a silent no-op");
+    assert!(
+        matches!(
+            err,
+            InfrastructureError::Backend(BackendError::InvalidCircuitCount {
+                expected: 1,
+                got: 0
+            })
+        ),
+        "expected InvalidCircuitCount, got {err:?}"
+    );
+}
+
+#[test]
 fn distribute_rejects_multiple_circuits() {
     // The shot-distributing planner operates on exactly one circuit; more than one
     // is a typed error (surfaced as a ValueError at the FFI edge), never a silent
