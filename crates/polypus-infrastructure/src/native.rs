@@ -256,31 +256,18 @@ impl NativeStatevectorBackend {
     }
 }
 
-/// The widest circuit in the batch, used to size the memory budget (plan §4.5):
-/// the native backend budgets for its largest statevector. `Native` circuits
-/// expose their width directly (GIL-free), a `Qasm2` program is parsed for it,
-/// and a `Qiskit` circuit (which this backend rejects at execution) contributes
-/// nothing. An empty or all-unsupported batch yields 0 — a one-amplitude budget
-/// that keeps full thread concurrency and lets `simulate_one` surface the real
-/// per-circuit error.
+/// The widest circuit in a batch, used to size the memory budget (plan §4.5):
+/// the native backend budgets for its largest statevector. Each circuit's width
+/// comes from the shared, GIL-free [`BoundCircuit::native_qubit_width`] — `Native`
+/// circuits expose it directly, a `Qasm2` program is parsed for it, and a `Qiskit`
+/// circuit (which this backend rejects at execution) contributes nothing. An empty
+/// or all-unsupported batch yields 0 — a one-amplitude budget that keeps full
+/// thread concurrency and lets `simulate_one` surface the real per-circuit error.
 fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
-    qcs.iter().filter_map(circuit_qubits).max().unwrap_or(0)
-}
-
-/// Qubit width of a single circuit as this backend sees it (GIL-free): `Native`
-/// exposes it directly, `Qasm2` is parsed for it, and a `Qiskit` circuit — which
-/// this backend rejects at execution — contributes nothing. Shared by
-/// [`representative_qubits`] (over the batch `run_circuits` receives) and
-/// [`NativeStatevectorBackend::capabilities_for`] (over the planner's task slice),
-/// so both size the memory budget by the identical per-circuit rule.
-fn circuit_qubits(qc: &BoundCircuit) -> Option<usize> {
-    match qc {
-        BoundCircuit::Native(cc) => Some(cc.num_qubits),
-        BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-            .ok()
-            .map(|pc| pc.num_qubits),
-        BoundCircuit::Qiskit(_) => None,
-    }
+    qcs.iter()
+        .filter_map(BoundCircuit::native_qubit_width)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
@@ -342,7 +329,7 @@ impl QuantumBackend for NativeStatevectorBackend {
     ) -> Result<BackendCapabilities, InfrastructureError> {
         let widest = tasks
             .iter()
-            .filter_map(|t| circuit_qubits(t.circuit))
+            .filter_map(|t| t.circuit.native_qubit_width())
             .max()
             .unwrap_or(0);
         Ok(BackendCapabilities {
@@ -802,6 +789,40 @@ mod tests {
             .unwrap()
             .max_concurrency;
         assert_eq!(cap, usize::MAX);
+    }
+
+    /// Native counterpart of local.rs's `widest_qubits_picks_the_largest_circuit`:
+    /// `representative_qubits` budgets for the largest statevector in a mixed batch.
+    /// The `Native`/`Qasm2` widths are read GIL-free; a `Qiskit` circuit — which
+    /// this backend rejects at execution — contributes nothing, so it must not raise
+    /// the budget; an empty batch yields 0.
+    #[test]
+    fn representative_qubits_picks_the_largest_circuit() {
+        use pyo3::prelude::*;
+
+        let small = ParameterizedCircuit::new(2)
+            .h(0)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap();
+        let big = ParameterizedCircuit::new(7)
+            .h(0)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap();
+
+        // Include a Qiskit variant: the native backend cannot read it, so despite
+        // standing in for an arbitrarily wide circuit it contributes nothing.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let batch = vec![
+                BoundCircuit::Native(small),
+                BoundCircuit::Qasm2(big.to_qasm2()),
+                BoundCircuit::Qiskit(py.None()),
+            ];
+            assert_eq!(representative_qubits(&batch), 7);
+        });
+        assert_eq!(representative_qubits(&[]), 0);
     }
 
     /// Acceptance criterion (defect #1), positive half: the *same explicit
