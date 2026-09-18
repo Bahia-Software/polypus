@@ -58,6 +58,15 @@ manifest-path = "crates/polypus/Cargo.toml"
 # this, maturin would expect the module to be `polypus_quantum` and `import
 # polypus` would break.
 module-name = "polypus"
+# Mixed Rust/Python layout: ship a hand-written `polypus/__init__.py` instead of
+# the wrapper maturin auto-generates. It re-exports the extension unchanged and
+# adds lazy auto-calibration of the gate-parallel threshold at import (issue
+# #176), so `pip install polypus-quantum` users — who have no `install.sh`
+# post-install hook — get a machine-tuned threshold with no manual step. With a
+# python source root present, maturin places the compiled extension at
+# `polypus/polypus*.so` next to that `__init__.py`, which does `from .polypus
+# import *` exactly as the generated wrapper did.
+python-source = "python"
 # Bundle the pure-Python helper package into the same wheel as a real top-level
 # `polypus_python` package. The extension imports it by that name at its
 # execution seams (`PyModule::import(py, "polypus_python")`), and users import
