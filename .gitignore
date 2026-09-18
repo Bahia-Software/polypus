@@ -34,6 +34,9 @@ qraise_*
 *.log
 logs/
 
+# Jupyter checkpoint dirs (tutorials/)
+.ipynb_checkpoints/
+
 CLAUDE.md
 AI_GUIDELINES.md
 .claude

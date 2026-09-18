@@ -1,0 +1,78 @@
+# Mirrors tutorials/ into the separate Bahia-Software/polypus-tutorials repo,
+# so learners can clone a lightweight, notebooks-only repo instead of the full
+# Rust workspace. Runs only when a release is published (not on every push),
+# so the mirror always matches exactly what `pip install polypus-quantum`
+# gives at that version. Acts as a quality gate: every notebook must execute
+# cleanly against the just-released version before anything is pushed to the
+# mirror — a failure here leaves the mirror on its last known-good state.
+name: Sync tutorials to polypus-tutorials
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout polypus (source of truth for tutorials/)
+        uses: actions/checkout@v7
+        with:
+          path: polypus
+
+      - name: Checkout polypus-tutorials (mirror)
+        uses: actions/checkout@v7
+        with:
+          repository: Bahia-Software/polypus-tutorials
+          token: ${{ secrets.TUTORIALS_MIRROR_TOKEN }}
+          path: mirror
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Resolve the released version
+        id: version
+        run: |
+          RAW_TAG="${{ github.event.release.tag_name }}"
+          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # README.md, LICENSE and .gitignore are the mirror's own files, hand-placed
+      # once — not generated from tutorials/, so they're excluded from the sync.
+      - name: Copy tutorials/ content into the mirror
+        run: |
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='README.md' \
+            --exclude='LICENSE' \
+            --exclude='.gitignore' \
+            polypus/tutorials/ mirror/
+
+      - name: Pin the just-released version in requirements.txt
+        run: |
+          cat > mirror/requirements.txt <<EOF
+          polypus-quantum==${{ steps.version.outputs.version }}
+          jupyterlab
+          matplotlib
+          numpy
+          EOF
+
+      - name: Install the pinned release and execute every notebook
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r mirror/requirements.txt nbclient nbformat
+          for nb in mirror/*.ipynb; do
+            echo "Executing $nb"
+            jupyter nbconvert --to notebook --execute --inplace "$nb"
+          done
+
+      - name: Commit and push only if everything above succeeded
+        run: |
+          cd mirror
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "Nothing changed, skipping commit" && exit 0
+          git commit -m "sync: tutorials as of polypus-quantum ${{ steps.version.outputs.version }}"
+          git push
