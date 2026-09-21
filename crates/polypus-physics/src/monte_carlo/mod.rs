@@ -288,7 +288,7 @@ where
     ///
     /// This is the spatial-dose counterpart of [`run`](Self::run): identical
     /// transport, plus a per-voxel energy tally that
-    /// [`VoxelGrid::dose_gy`] / [`VoxelGrid::relative_pdd`] turn into dose and
+    /// [`VoxelGrid::dose_gy`] / [`VoxelGrid::relative_pdd`] turn into a per-voxel dose and
     /// depth-dose curves. Pair it with a bounded
     /// [`Geometry`](Self::with_geometry) (e.g. a finite water cube) for a
     /// phantom experiment.
@@ -709,7 +709,9 @@ mod tests {
             .unwrap();
 
         // Log-linear fit over the central slices [1, 6) → z-centres 1.5–5.5 cm.
-        let profile = grid.depth_profile_mev();
+        // Window covers the full 10-voxel x/y extent so the fit stays robust to
+        // a pencil beam that happens to travel along a voxel edge in x/y.
+        let profile = grid.depth_profile_mev(5);
         let voxel = grid.voxel_size_m();
         let (mut sx, mut sy, mut sxx, mut sxy, mut count) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for (i, &e) in profile.iter().enumerate().take(6).skip(1) {
@@ -778,8 +780,17 @@ mod tests {
             .run_with_source_and_voxels(&beam, grid, &mut rng)
             .unwrap();
 
-        let pdd = grid.relative_pdd();
-        assert_eq!(pdd.len(), 40);
+        let pdd = grid.relative_pdd(2);
+        assert_eq!(pdd.len(), grid.dims()[2]);
+        let csv: String = std::iter::once("depth_m,relative_dose".to_string())
+            .chain(
+                pdd.iter()
+                    .enumerate()
+                    .map(|(i, d)| format!("{},{}", (i as f64 + 0.5) * voxel_size_m, d)),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write("pdd.csv", csv).unwrap();
 
         #[cfg(feature = "plotters")]
         {
@@ -797,6 +808,331 @@ mod tests {
             .unwrap();
 
             println!("Gráfica guardada en: {filename}");
+        }
+    }
+    #[test]
+    fn small_water_phantom_depth_dose_experiment() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10, // 10x10 cm, como tu configuración real
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.20], // 20 cm de profundidad en vez de 10
+        };
+
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400000,
+                seed: 456,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(456);
+        let (result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        println!(
+            "Depósito medio por historia: {:.6} MeV",
+            result.mean_deposit_mev
+        );
+        println!(
+            "Perfil de profundidad (MeV por capa, eje central): {:?}",
+            grid.depth_profile_mev(1)
+        );
+        println!("PDD relativo (%): {:?}", grid.relative_pdd(1));
+
+        let pdd = grid.relative_pdd(1);
+        assert_eq!(pdd.len(), 40);
+
+        #[cfg(feature = "plotters")]
+        {
+            let energy_kev = beam.energy_source.min_energy_mev() * 1000.0;
+            let field_cm = beam.field_side_m * 100.0;
+            let Geometry::Box { min, max } = geometry else {
+                panic!("expected a bounded geometry");
+            };
+            let depth_cm = (max[2] - min[2]) * 100.0;
+            let voxel_cm = voxel_size_m * 100.0;
+
+            let title = format!(
+                "PDD - H2O, {energy_kev:.0} keV, campo {field_cm:.0}x{field_cm:.0} cm, maniquí {depth_cm:.0} cm"
+            );
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+            let filename = format!(
+                "{graphics_dir}/pdd_rust_{energy_kev:.0}kev_{field_cm:.0}x{field_cm:.0}cm_{depth_cm:.0}cm_{voxel_cm:.2}cmvoxel.png"
+            );
+
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd,
+                voxel_size_m,
+                &title,
+                std::path::Path::new(&filename),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename}");
+        }
+    }
+
+    #[test]
+    fn divergent_vs_parallel_beam_pdd_comparison() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::{DivergentBeam, ParallelBeam};
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.20],
+        };
+        let voxel_size_m = 0.005;
+
+        // --- Haz divergente (fuente puntual, SSD=10 cm, campo 10x10 cm en la superficie) ---
+        let water_div = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let beam_div = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+        let grid_div = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+        let engine_div = MonteCarloEngine::new(
+            Photon,
+            water_div,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400_000,
+                seed: 456,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+        let mut rng_div = StdRng::seed_from_u64(456);
+        let (_result_div, grid_div) = engine_div
+            .run_with_source_and_voxels(&beam_div, grid_div, &mut rng_div)
+            .unwrap();
+        let pdd_div = grid_div.relative_pdd(1);
+
+        // --- Haz paralelo (sin divergencia, mismo campo 10x10 cm a toda profundidad) ---
+        let water_par = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let beam_par = ParallelBeam {
+            half_width_x_m: 0.05,
+            half_width_y_m: 0.05,
+            z0_m: 0.0,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+        let grid_par = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+        let engine_par = MonteCarloEngine::new(
+            Photon,
+            water_par,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 400_000,
+                seed: 456,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+        let mut rng_par = StdRng::seed_from_u64(456);
+        let (_result_par, grid_par) = engine_par
+            .run_with_source_and_voxels(&beam_par, grid_par, &mut rng_par)
+            .unwrap();
+        let pdd_par = grid_par.relative_pdd(1);
+
+        println!("PDD divergente (SSD=10cm): {:?}", pdd_div);
+        println!("PDD paralelo (sin divergencia): {:?}", pdd_par);
+
+        #[cfg(feature = "plotters")]
+        {
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+
+            let filename_div = format!("{graphics_dir}/pdd_divergente_100kev.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd_div,
+                voxel_size_m,
+                "PDD - H2O, 100 keV, haz DIVERGENTE (SSD=10cm)",
+                std::path::Path::new(&filename_div),
+            )
+            .unwrap();
+
+            let filename_par = format!("{graphics_dir}/pdd_paralelo_100kev.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &pdd_par,
+                voxel_size_m,
+                "PDD - H2O, 100 keV, haz PARALELO (sin divergencia)",
+                std::path::Path::new(&filename_par),
+            )
+            .unwrap();
+
+            println!("Gráficas guardadas en: {filename_div} y {filename_par}");
+        }
+    }
+
+    #[test]
+    fn central_axis_pdd_decays_monotonically() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::Monoenergetic;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.20],
+        };
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 2_600_000,
+                seed: 456,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(456);
+        let (_result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        let central_axis = grid.relative_pdd(1);
+
+        println!("PDD eje central: {:?}", central_axis);
+
+        assert!(
+            central_axis[0] > central_axis[10],
+            "expected roughly monotonic decay near the axis"
+        );
+
+        #[cfg(feature = "plotters")]
+        {
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+
+            let filename_axis = format!("{graphics_dir}/pdd_monoenergetico_eje_central.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &central_axis,
+                voxel_size_m,
+                "PDD - H2O, 100 keV monoenergético, EJE CENTRAL (~1.5x1.5 cm)",
+                std::path::Path::new(&filename_axis),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename_axis}");
+        }
+    }
+
+    #[test]
+    fn central_axis_pdd_polyenergetic() {
+        use crate::interactions::photon::PhotonInteractionModel;
+        use crate::medium::compound::CompoundMedium;
+        use crate::monte_carlo::beam::DivergentBeam;
+        use crate::monte_carlo::geometry::Geometry;
+        use crate::monte_carlo::spectrum::KramersSpectrum;
+        use crate::monte_carlo::voxel::VoxelGrid;
+        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
+        use crate::particle::photon::Photon;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
+        let spectrum = KramersSpectrum::from_kvp(100.0, 15.0).unwrap();
+        let beam = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(spectrum),
+        };
+        let geometry = Geometry::Box {
+            min: [-0.20, -0.20, 0.0],
+            max: [0.20, 0.20, 0.20],
+        };
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+
+        let engine = MonteCarloEngine::new(
+            Photon,
+            water,
+            PhotonInteractionModel,
+            RunConfig {
+                n_histories: 1_600_000,
+                seed: 42,
+                ..Default::default()
+            },
+        )
+        .with_geometry(geometry);
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let (_result, grid) = engine
+            .run_with_source_and_voxels(&beam, grid, &mut rng)
+            .unwrap();
+
+        let central_axis = grid.relative_pdd(2);
+
+        println!("PDD eje central (Kramers 100 kVp): {:?}", central_axis);
+
+        #[cfg(feature = "plotters")]
+        {
+            let graphics_dir = format!("{}/graphics", env!("CARGO_MANIFEST_DIR"));
+            std::fs::create_dir_all(&graphics_dir).unwrap();
+
+            let filename_axis = format!("{graphics_dir}/pdd_kramers_eje_central.png");
+            crate::monte_carlo::voxel_plots::plot_relative_pdd(
+                &central_axis,
+                voxel_size_m,
+                "PDD - H2O, 100 kVp (Kramers), EJE CENTRAL (~1.5x1.5 cm)",
+                std::path::Path::new(&filename_axis),
+            )
+            .unwrap();
+
+            println!("Gráfica guardada en: {filename_axis}");
         }
     }
 }

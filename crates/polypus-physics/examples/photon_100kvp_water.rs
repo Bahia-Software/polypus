@@ -199,8 +199,8 @@ fn transport_monoenergetic(water: &HomogeneousMedium) -> Result<SimulationResult
 /// through a *finite* 10 × 10 × 10 cm water cube (entrance face at z = 0) and
 /// tally the energy deposited in a 10 × 10 × 10 grid of 1 cm cubic voxels. The
 /// per-voxel mass is fixed (1 cm³ of water = 1 g), so the absorbed dose in gray
-/// is unambiguous. Prints the depth-dose profile (PDD) and returns the grid for
-/// plotting.
+/// is unambiguous (see [`VoxelGrid::dose_gy`]). Prints the central-axis
+/// depth-dose profile (PDD) and returns the grid for plotting.
 ///
 /// Local deposition is valid here: at 100 keV the secondary-electron range in
 /// water is < 0.2 mm, far below the 1 cm voxel, so no energy leaks between
@@ -230,30 +230,20 @@ fn transport_voxel_dose(water: &HomogeneousMedium) -> Result<VoxelGrid, PhysicsE
     let (_result, grid) = engine.run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)?;
 
     println!("[5] Voxel dosimetry: {N_HISTORIES} × 100 keV photons in a 10 cm water cube");
-    let profile = grid.depth_profile_mev();
-    let pdd = grid.relative_pdd();
-    let dose = grid.depth_dose_gy(water);
+    let profile = grid.depth_profile_mev(1);
+    let pdd = grid.relative_pdd(1);
     println!(
-        "    {:>7} | {:>12} | {:>10} | {:>15}",
-        "z (cm)", "deposit MeV", "rel. PDD", "slice dose Gy"
+        "    {:>7} | {:>12} | {:>10}",
+        "z (cm)", "deposit MeV", "rel. PDD"
     );
-    println!("    {}", "-".repeat(54));
+    println!("    {}", "-".repeat(38));
     let voxel_cm = grid.voxel_size_m() * 100.0;
     for iz in 0..grid.dims()[2] {
         let z_lo = iz as f64 * voxel_cm;
         let z_hi = z_lo + voxel_cm;
         let label = format!("{z_lo:.0}-{z_hi:.0}");
-        println!(
-            "    {label:>7} | {:>12.2} | {:>10.4} | {:>15.3e}",
-            profile[iz], pdd[iz], dose[iz]
-        );
+        println!("    {label:>7} | {:>12.2} | {:>10.4}", profile[iz], pdd[iz]);
     }
-    // The dose in gray is unambiguous once the voxel mass is fixed; the absolute
-    // value is "per the N simulated primaries" (normalize by N to compare runs).
-    let central = dose[dose.len() / 2 - 1];
-    println!(
-        "    → central slice (z = 4–5 cm) dose ≈ {central:.3e} Gy for {N_HISTORIES} primaries"
-    );
     println!("    → PDD falls more slowly than exp(-μz): forward Compton scatter (≈85 % of each");
     println!("      100 keV interaction's energy) is carried downstream and deposited deeper.\n");
     Ok(grid)
@@ -315,16 +305,18 @@ fn summarize(spectrum: &SimulationResult, mono: &SimulationResult) {
 /// PENELOPE).
 ///
 /// Two self-describing files are written:
-///   * `depth_dose_100kev_water.csv` — the 1-D depth-dose profile (PDD): the
-///     headline curve to overlay on a reference MC.
+///   * `depth_dose_100kev_water.csv` — the 1-D central-axis depth-dose profile
+///     (PDD): the headline curve to overlay on a reference MC.
 ///   * `voxel_dose_100kev_water.csv` — the full 3-D per-voxel tally (one row per
-///     voxel) for a complete 3-D dose comparison or gamma analysis.
+///     voxel), including absolute dose in gray, for a complete 3-D dose
+///     comparison or gamma analysis.
 ///
 /// Each file begins with a `#`-prefixed metadata block (beam, geometry,
-/// conservation totals) that pandas/NumPy skip with `comment='#'`. The
-/// `dose_gy_per_primary` column is the run-independent quantity to compare in
-/// absolute terms (a reference MC typically reports dose per source particle);
-/// `rel_pdd` is the dimensionless shape, robust to absolute normalization.
+/// conservation totals) that pandas/NumPy skip with `comment='#'`. In the PDD
+/// file, `rel_pdd` is the dimensionless shape, robust to absolute
+/// normalization; the per-voxel file's `dose_gy_per_primary` column is the
+/// run-independent quantity to compare in absolute terms (a reference MC
+/// typically reports dose per source particle).
 fn save_results(
     water: &HomogeneousMedium,
     grid: &VoxelGrid,
@@ -336,7 +328,7 @@ fn save_results(
     std::fs::create_dir_all(&dir)?;
 
     let header = results_header(water, grid, mu_per_m);
-    let p1 = write_depth_dose_csv(&dir, water, grid, &header)?;
+    let p1 = write_depth_dose_csv(&dir, grid, &header)?;
     let p2 = write_voxel_dose_csv(&dir, water, grid, &header)?;
 
     println!("\n[results] CSV files written (load with pandas read_csv(..., comment='#')):");
@@ -393,32 +385,26 @@ fn results_header(water: &HomogeneousMedium, grid: &VoxelGrid, mu_per_m: f64) ->
     h
 }
 
-/// Write the 1-D depth-dose profile (PDD), one row per `z`-slice.
+/// Write the 1-D central-axis depth-dose profile (PDD), one row per `z`-slice.
 fn write_depth_dose_csv(
     dir: &Path,
-    water: &HomogeneousMedium,
     grid: &VoxelGrid,
     header: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let profile = grid.depth_profile_mev();
-    let pdd = grid.relative_pdd();
-    let dose = grid.depth_dose_gy(water);
+    let profile = grid.depth_profile_mev(1);
+    let pdd = grid.relative_pdd(1);
     let s_cm = grid.voxel_size_m() * 100.0;
     let z0_cm = grid.origin()[2] * 100.0;
-    let n = N_HISTORIES as f64;
 
     let mut csv = String::from(header);
-    csv.push_str("z_min_cm,z_max_cm,z_center_cm,deposit_mev,rel_pdd,dose_gy,dose_gy_per_primary\n");
+    csv.push_str("z_min_cm,z_max_cm,z_center_cm,deposit_mev,rel_pdd\n");
     for iz in 0..grid.dims()[2] {
         let z_lo = z0_cm + iz as f64 * s_cm;
         let z_hi = z_lo + s_cm;
         let z_c = z_lo + 0.5 * s_cm;
         csv.push_str(&format!(
-            "{z_lo:.3},{z_hi:.3},{z_c:.3},{:.6e},{:.6},{:.6e},{:.6e}\n",
-            profile[iz],
-            pdd[iz],
-            dose[iz],
-            dose[iz] / n
+            "{z_lo:.3},{z_hi:.3},{z_c:.3},{:.6e},{:.6}\n",
+            profile[iz], pdd[iz],
         ));
     }
 
@@ -890,7 +876,7 @@ fn plot_depth_dose(
     grid: &VoxelGrid,
     mu_per_m: f64,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let pdd = grid.relative_pdd();
+    let pdd = grid.relative_pdd(1);
     let nz = pdd.len();
     let voxel_m = grid.voxel_size_m();
     let voxel_cm = voxel_m * 100.0;
