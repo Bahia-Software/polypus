@@ -5,6 +5,14 @@
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation
 //! across available hardware resources. The core is written in Rust; Python bindings are provided via PyO3.
 //!
+//! ## Installation — same project, three names
+//!
+//! `pip install polypus-quantum` · `import polypus` · `cargo add polypus`.
+//!
+//! The name `polypus` on PyPI is taken by an unrelated project, so the Python
+//! distribution is published as `polypus-quantum`; the Python import name and
+//! this Rust crate both stay `polypus`.
+//!
 //! Polypus is agnostic to the underlying hardware infrastructure. Currently three
 //! `infrastructure` values are supported:
 //! - **local**: Runs on local infrastructure. Defaults to Qiskit AerSimulator

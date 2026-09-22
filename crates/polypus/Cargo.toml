@@ -6,7 +6,14 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Rust-core quantum variational optimization framework with a Python (PyO3) interface: circuit simulation, VQC/QML training and population-based optimizers (DE, PSO, QNG)."
+description = "Rust-core quantum variational optimization framework with a Python (PyO3) interface: circuit simulation, VQC/QML training and population-based optimizers (DE, PSO, QNG). Python users: `pip install polypus-quantum` (the module imports as `polypus`)."
+# crates.io landing metadata. The Rust crate is `polypus`; the same project on
+# PyPI is the `polypus-quantum` distribution (which imports as `polypus`), so a
+# reader arriving from either side can find the other — see the Homepage/README.
+homepage = "https://github.com/Bahia-Software/polypus"
+documentation = "https://bahia-software.github.io/polypus/"
+keywords = ["quantum", "simulator", "qaoa", "optimization", "pyo3"]
+categories = ["science", "simulation"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]

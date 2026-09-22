@@ -8,6 +8,8 @@ contributions alike. Two companion documents complete the picture:
 
 ## Setting up
 
+> Same project, three names — `pip install polypus-quantum` · `import polypus` · `cargo add polypus`. The PyPI name `polypus` is taken, so the distribution is `polypus-quantum`; the import name and the Rust crate both stay `polypus`.
+
 The interactive installer handles dependencies, the wheel build and the test
 suite:
 

@@ -22,6 +22,7 @@
 - [Key Features](#key-features)
 - [Quickstart](#quickstart)
 - [Installation](#installation)
+  - [From source](#from-source)
   - [CUNQA](#cunqa)
 - [Usage](#usage)
   - [Running a Quantum Circuit](#running-a-quantum-circuit)
@@ -51,7 +52,7 @@ It is built for researchers and engineers who need to:
 - swap between a local simulator, CESGA's CUNQA platform, or CESGA's QMIO real QPU without touching algorithm code,
 - keep a Python-friendly API while getting Rust-level performance on the hot paths (parameter binding, batched simulation).
 
-> **Status:** Polypus is under active development (current version: `0.7.0`) and is not yet published on PyPI. Install from source — see [Installation](#installation).
+> **Status:** Polypus is under active development (current version: `0.7.0`) and is published on PyPI as [`polypus-quantum`](https://pypi.org/project/polypus-quantum/) — `pip install polypus-quantum` (it imports as `polypus`). See [Installation](#installation).
 
 ## Key Features
 
@@ -62,6 +63,8 @@ It is built for researchers and engineers who need to:
 - **A real Cargo workspace, not a monolith** — circuits, simulator, optimizers, cost observables, physics layer, execution backends, orchestration, evaluation, and logger are independent, individually testable crates; the pure-Rust ones have no Python dependency and are usable from any Rust project.
 
 ## Quickstart
+
+> Same project, three names — `pip install polypus-quantum` · `import polypus` · `cargo add polypus`. See [Installation](#installation).
 
 ```bash
 git clone https://github.com/Bahia-Software/polypus.git
@@ -81,7 +84,20 @@ See [Usage](#usage) for Qiskit circuits, multi-QPU distribution, and variational
 
 ## Installation
 
-The recommended way to install Polypus is using the provided script:
+> **Same project, three names** — `pip install polypus-quantum` · `import polypus` · `cargo add polypus`.
+> The name `polypus` on PyPI is taken by an unrelated project, so the Python distribution is published as `polypus-quantum`; the Python import name and the Rust crate both stay `polypus`.
+
+The recommended way to install Polypus is from PyPI:
+
+```bash
+pip install polypus-quantum
+```
+
+Then `import polypus` (see [Quickstart](#quickstart)). CUNQA and the QMIO real-QPU backend are optional extras — see [CUNQA](#cunqa) below and the from-source build for `--features qmio`.
+
+### From source
+
+To build from a checkout — for contributors, or to enable the `qmio` backend — use the provided script:
 
 ```bash
 bash install.sh
