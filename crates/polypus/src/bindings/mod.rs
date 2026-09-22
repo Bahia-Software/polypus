@@ -1218,6 +1218,13 @@ fn backend_cleanup_failures() -> u64 {
     crate::infrastructure::cleanup_failure_count()
 }
 
+/// Polypus — distributed quantum computing (Rust core, Python bindings).
+///
+/// Same project, three names: install `polypus-quantum` from PyPI
+/// (`pip install polypus-quantum`), but import it as `polypus`; the Rust crate
+/// is `polypus` (`cargo add polypus`). The PyPI name `polypus` is taken by an
+/// unrelated project, so the distribution is published as `polypus-quantum`
+/// while the import name and the Rust crate both stay `polypus`.
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::exceptions::register(m)?;

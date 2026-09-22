@@ -2,6 +2,11 @@
 # install.sh — Build and install polypus (Rust extension + Python wrapper),
 #              then optionally run the test suite and benchmark to verify the installation.
 #
+# Same project, three names: the PyPI distribution is `polypus-quantum`
+# (pip install polypus-quantum), the Python import name is `polypus`, and the
+# Rust crate is `polypus` (cargo add polypus). This script builds and installs
+# the `polypus-quantum` wheel from source; you then `import polypus`.
+#
 # Usage:
 #   ./install.sh              # interactive prompts (when run from a terminal)
 #   ./install.sh --yes        # accept all defaults, no prompts  (CI / scripts)

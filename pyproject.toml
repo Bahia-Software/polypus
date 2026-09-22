@@ -48,6 +48,9 @@ Homepage = "https://github.com/Bahia-Software/polypus"
 Repository = "https://github.com/Bahia-Software/polypus"
 Documentation = "https://bahia-software.github.io/polypus/"
 Issues = "https://github.com/Bahia-Software/polypus/issues"
+# Cross-reference to the Rust side: this wheel imports as `polypus`, and the same
+# project is published on crates.io as the `polypus` crate (`cargo add polypus`).
+"Rust crate (crates.io)" = "https://crates.io/crates/polypus"
 
 [tool.maturin]
 features = ["extension-module"]
