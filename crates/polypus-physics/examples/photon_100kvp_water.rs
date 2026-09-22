@@ -226,16 +226,17 @@ fn transport_monoenergetic(water: &CompoundMedium) -> Result<SimulationResult, P
 }
 
 /// Number of primary histories for the voxel-dosimetry beams, and their RNG
-/// seeds — matching, respectively, `small_water_phantom_depth_dose_experiment`
-/// and `polyenergetic_100kvp_pdd_experiment` in `monte_carlo::tests`, the
-/// validated reference configurations for these two PDDs.
+/// seeds. The phantom/beam geometry (not the history count, which is much
+/// higher here for a cleaner plot) is shared with
+/// `source_and_voxels_conserve_energy_for_divergent_and_parallel_beams` in
+/// `monte_carlo::tests`, so the two stay comparable.
 const PDD_N_HISTORIES: usize = 400_000;
 const PDD_SEED: u64 = 456;
 const PDD_KRAMERS_N_HISTORIES: usize = 400_000;
 const PDD_KRAMERS_SEED: u64 = 42;
 /// Inherent-filtration cutoff (keV) for the Kramers PDD beam specifically —
-/// mirrors `polyenergetic_100kvp_pdd_experiment`, distinct from
-/// `FILTER_CUTOFF_KEV` used by the spectrum-shape sections above.
+/// distinct from `FILTER_CUTOFF_KEV` used by the spectrum-shape sections
+/// above.
 const PDD_KRAMERS_FILTER_CUTOFF_KEV: f64 = 15.0;
 /// Shared phantom/grid geometry for both voxel-dosimetry beams: a 40 × 40 cm
 /// cross-section, 20 cm deep water phantom, entrance face at z = 0, tallied
@@ -247,14 +248,12 @@ const PDD_GRID_DIMS: [usize; 3] = [80, 80, 40];
 /// Central-axis window (voxels on each side) for the monoenergetic PDD.
 const PDD_WINDOW: usize = 1;
 /// Central-axis window (voxels on each side) for the Kramers PDD — wider,
-/// matching `polyenergetic_100kvp_pdd_experiment`.
+/// since the softer/broader Kramers spectrum scatters more off-axis.
 const PDD_KRAMERS_WINDOW: usize = 2;
 
 /// Section 5 — 3-D voxel dosimetry. Transport a monoenergetic ENERGY_KEV
 /// point-source beam (10 × 10 cm field at the surface, 10 cm source-to-surface
 /// distance) through the phantom described by the `PDD_*` constants above.
-/// This mirrors `small_water_phantom_depth_dose_experiment` in
-/// `monte_carlo::tests` exactly, so the two stay comparable.
 ///
 /// The per-voxel mass is fixed (a 5 mm cubic voxel of water = 0.125 g), so the
 /// absorbed dose in gray is unambiguous (see [`VoxelGrid::dose_gy`]). Prints
@@ -300,7 +299,6 @@ fn transport_voxel_dose(water: &CompoundMedium) -> Result<VoxelGrid, PhysicsErro
 
 /// Section 5b — same phantom/grid as [`transport_voxel_dose`], but with a
 /// polyenergetic TUBE_KVP Kramers spectrum beam instead of a single energy.
-/// Mirrors `polyenergetic_100kvp_pdd_experiment` in `monte_carlo::tests`.
 fn transport_voxel_dose_kramers(water: &CompoundMedium) -> Result<VoxelGrid, PhysicsError> {
     let spectrum = KramersSpectrum::from_kvp(TUBE_KVP, PDD_KRAMERS_FILTER_CUTOFF_KEV)?;
     let beam = DivergentBeam {
