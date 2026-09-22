@@ -1,0 +1,55 @@
+# CITATION.cff — how to cite Polypus.
+#
+# This file powers GitHub's "Cite this repository" button and gives a stable,
+# machine-readable citation. Zenodo also reads it to pre-fill a release's
+# metadata once the GitHub–Zenodo integration is enabled.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# The author list below matches the project's documented authors (Cargo.toml
+# `authors` / README "Credits" / BibTeX). Still PENDING before a release
+# (full list in docs/RELEASING.md → "Pending decisions"):
+#   • Affiliations for all authors, and ORCIDs beyond Diego's — none are
+#     recorded in the repo; add them when known. Do NOT invent them.
+#   • The DOI — assigned by Zenodo when the first release is archived.
+#   • `date-released` — the actual release date.
+# ─────────────────────────────────────────────────────────────────────────────
+
+cff-version: 1.2.0
+message: "If you use Polypus in your research, please cite it as below."
+title: "Polypus: A Distributed Quantum Computing Library"
+type: software
+version: "0.7.0"                # keep in sync with the released version
+license: EUPL-1.2
+repository-code: "https://github.com/Bahia-Software/polypus"
+url: "https://github.com/Bahia-Software/polypus"
+keywords:
+  - quantum
+  - quantum-computing
+  - vqc
+  - qml
+  - qaoa
+  - qiskit
+  - simulator
+  - optimization
+
+# PENDING — set to the release date (strict YYYY-MM-DD); uncomment before release.
+# date-released: "2026-01-01"
+
+# PENDING — Zenodo concept DOI (constant across versions); uncomment once known.
+# Must be a bare DOI, e.g. 10.5281/zenodo.1234567
+# doi: "10.5281/zenodo.PENDING"
+
+authors:
+  # Affiliations are omitted until recorded (none in the repo); add an
+  # `affiliation:` line per author when known. ORCIDs beyond Diego's are not yet
+  # provided — add `orcid: "https://orcid.org/..."` (a full URL) when available.
+  - given-names: "Diego Beltrán"
+    family-names: "Fernández Prada"
+    orcid: "https://orcid.org/0009-0007-9693-8384"
+  - given-names: "Víctor"
+    family-names: "Sóñora Pombo"
+  - given-names: "Sergio"
+    family-names: "Figueiras Gómez"
+  - given-names: "Miguel"
+    family-names: "Boubeta Martínez"
+  - name: "Galicia Supercomputing Center (CESGA)"
