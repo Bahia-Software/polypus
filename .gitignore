@@ -25,6 +25,7 @@ examples/plots_maxcut/
 /crates/polypus-physics/graphics/
 qft_results.csv
 qft*.png
+results/
 
 # SLURM / qraise job artifacts
 slurm-*.out
@@ -37,3 +38,7 @@ logs/
 CLAUDE.md
 AI_GUIDELINES.md
 .claude
+
+# Internal refactor plan + implementation prompt — kept on disk in docs/, never committed
+docs/REFACTOR_PLAN.md
+docs/IMPLEMENTATION_PROMPT.md
