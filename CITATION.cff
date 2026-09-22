@@ -5,17 +5,13 @@
 # metadata once the GitHub–Zenodo integration is enabled.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠️  PENDING TEAM AGREEMENT — do NOT publish a release until these are resolved
-#     (full list in docs/RELEASING.md → "Pending decisions"):
-#       • The author list, its order, and whether CESGA is listed as an entity
-#         author. The repo currently records contributors in `Cargo.toml`
-#         (`authors`) and README "Credits"/BibTeX — use that as the starting
-#         point, but the *citation* authorship is a separate, explicit decision.
-#       • Each author's ORCID and affiliation — NONE are recorded in the repo.
-#       • The DOI — assigned by Zenodo when the first release is archived.
-#       • `date-released` — the actual release date.
-#     Every value marked <... PENDING ...> below is a placeholder. Do NOT invent
-#     names, ORCIDs or affiliations; if it is not in the repo, leave the marker.
+# The author list below matches the project's documented authors (Cargo.toml
+# `authors` / README "Credits" / BibTeX). Still PENDING before a release
+# (full list in docs/RELEASING.md → "Pending decisions"):
+#   • Affiliations for all authors, and ORCIDs beyond Diego's — none are
+#     recorded in the repo; add them when known. Do NOT invent them.
+#   • The DOI — assigned by Zenodo when the first release is archived.
+#   • `date-released` — the actual release date.
 # ─────────────────────────────────────────────────────────────────────────────
 
 cff-version: 1.2.0
@@ -44,21 +40,16 @@ keywords:
 # doi: "10.5281/zenodo.PENDING"
 
 authors:
-  # PENDING PLACEHOLDERS — replace every <...> and add / remove / reorder entries
-  # to match the AGREED author list. Uncomment `affiliation` and `orcid` per
-  # author once known (an `orcid` must be a full https://orcid.org/... URL, so
-  # leave it commented rather than filled with a marker — a marker there would
-  # make the file invalid and hide the citation button).
-  - given-names: "<AUTHOR 1 GIVEN NAMES — PENDING>"
-    family-names: "<AUTHOR 1 FAMILY NAMES — PENDING>"
-    # affiliation: "<AUTHOR 1 AFFILIATION — PENDING>"
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
-  - given-names: "<AUTHOR 2 GIVEN NAMES — PENDING>"
-    family-names: "<AUTHOR 2 FAMILY NAMES — PENDING>"
-    # affiliation: "<AUTHOR 2 AFFILIATION — PENDING>"
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
-  # Add further individual authors following the pattern above.
-  #
-  # If an institution is agreed as an entity author (e.g. CESGA), add it as a
-  # `name:` entry instead of given/family-names, for example:
-  # - name: "<INSTITUTION — PENDING>"
+  # Affiliations are omitted until recorded (none in the repo); add an
+  # `affiliation:` line per author when known. ORCIDs beyond Diego's are not yet
+  # provided — add `orcid: "https://orcid.org/..."` (a full URL) when available.
+  - given-names: "Diego Beltrán"
+    family-names: "Fernández Prada"
+    orcid: "https://orcid.org/0009-0007-9693-8384"
+  - given-names: "Víctor"
+    family-names: "Sóñora Pombo"
+  - given-names: "Sergio"
+    family-names: "Figueiras Gómez"
+  - given-names: "Miguel"
+    family-names: "Boubeta Martínez"
+  - name: "Galicia Supercomputing Center (CESGA)"

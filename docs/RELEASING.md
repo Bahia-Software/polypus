@@ -62,8 +62,11 @@ Copy-paste starting point for the Zenodo record. Creators and funding are
 - **Title:** Polypus: A Distributed Quantum Computing Library.
 - **Version:** `X.Y.Z` (the released version; `0.7.0` today).
 - **License:** European Union Public Licence 1.2 (`EUPL-1.2`).
-- **Creators:** `<PENDING — must match the agreed CITATION.cff author list,
-  order, ORCID and affiliation. Do not invent.>`
+- **Creators (must match `CITATION.cff`):** Diego Beltrán Fernández Prada
+  (ORCID `0009-0007-9693-8384`), Víctor Sóñora Pombo, Sergio Figueiras Gómez,
+  Miguel Boubeta Martínez, and Galicia Supercomputing Center (CESGA) as an
+  organization. ORCIDs beyond Diego's and all affiliations are `<PENDING>` — add
+  when known, do not invent.
 - **Keywords:** quantum, quantum-computing, vqc, qml, qaoa, qiskit, simulator,
   optimization.
 - **Description:**
@@ -88,12 +91,13 @@ Copy-paste starting point for the Zenodo record. Creators and funding are
 Everything below must be decided by the team before the first release; each is a
 marker in the repo today (nothing here is invented):
 
-- **Author list & order** for the citation — who is listed, in what order, and
-  whether **CESGA** appears as an entity author. Starting reference: `Cargo.toml`
-  `authors` and the README "Credits"/BibTeX, but the citation authorship is an
-  explicit, separate agreement.
-- **ORCID** for each author — none are recorded in the repo.
-- **Affiliation** for each author — none are recorded in the repo.
+- **Author list & order** — **DECIDED**: Diego Beltrán Fernández Prada, Víctor
+  Sóñora Pombo, Sergio Figueiras Gómez, Miguel Boubeta Martínez, and Galicia
+  Supercomputing Center (CESGA) as an entity author (matches `CITATION.cff` and
+  the README BibTeX/Credits).
+- **ORCID** — Diego's is set (`0009-0007-9693-8384`); the others are not yet
+  provided (optional — add when available, do not invent).
+- **Affiliation** for each author — none recorded in the repo yet.
 - **DOI** — assigned by Zenodo on the first archived release (both the concept
   and version DOI); until then it is `PENDING` in `CITATION.cff`, the README
   badge and the BibTeX block.
