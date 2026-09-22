@@ -1,0 +1,64 @@
+# CITATION.cff — how to cite Polypus.
+#
+# This file powers GitHub's "Cite this repository" button and gives a stable,
+# machine-readable citation. Zenodo also reads it to pre-fill a release's
+# metadata once the GitHub–Zenodo integration is enabled.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️  PENDING TEAM AGREEMENT — do NOT publish a release until these are resolved
+#     (full list in docs/RELEASING.md → "Pending decisions"):
+#       • The author list, its order, and whether CESGA is listed as an entity
+#         author. The repo currently records contributors in `Cargo.toml`
+#         (`authors`) and README "Credits"/BibTeX — use that as the starting
+#         point, but the *citation* authorship is a separate, explicit decision.
+#       • Each author's ORCID and affiliation — NONE are recorded in the repo.
+#       • The DOI — assigned by Zenodo when the first release is archived.
+#       • `date-released` — the actual release date.
+#     Every value marked <... PENDING ...> below is a placeholder. Do NOT invent
+#     names, ORCIDs or affiliations; if it is not in the repo, leave the marker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+cff-version: 1.2.0
+message: "If you use Polypus in your research, please cite it as below."
+title: "Polypus: A Distributed Quantum Computing Library"
+type: software
+version: "0.7.0"                # keep in sync with the released version
+license: EUPL-1.2
+repository-code: "https://github.com/Bahia-Software/polypus"
+url: "https://github.com/Bahia-Software/polypus"
+keywords:
+  - quantum
+  - quantum-computing
+  - vqc
+  - qml
+  - qaoa
+  - qiskit
+  - simulator
+  - optimization
+
+# PENDING — set to the release date (strict YYYY-MM-DD); uncomment before release.
+# date-released: "2026-01-01"
+
+# PENDING — Zenodo concept DOI (constant across versions); uncomment once known.
+# Must be a bare DOI, e.g. 10.5281/zenodo.1234567
+# doi: "10.5281/zenodo.PENDING"
+
+authors:
+  # PENDING PLACEHOLDERS — replace every <...> and add / remove / reorder entries
+  # to match the AGREED author list. Uncomment `affiliation` and `orcid` per
+  # author once known (an `orcid` must be a full https://orcid.org/... URL, so
+  # leave it commented rather than filled with a marker — a marker there would
+  # make the file invalid and hide the citation button).
+  - given-names: "<AUTHOR 1 GIVEN NAMES — PENDING>"
+    family-names: "<AUTHOR 1 FAMILY NAMES — PENDING>"
+    # affiliation: "<AUTHOR 1 AFFILIATION — PENDING>"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - given-names: "<AUTHOR 2 GIVEN NAMES — PENDING>"
+    family-names: "<AUTHOR 2 FAMILY NAMES — PENDING>"
+    # affiliation: "<AUTHOR 2 AFFILIATION — PENDING>"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  # Add further individual authors following the pattern above.
+  #
+  # If an institution is agreed as an entity author (e.g. CESGA), add it as a
+  # `name:` entry instead of given/family-names, for example:
+  # - name: "<INSTITUTION — PENDING>"
