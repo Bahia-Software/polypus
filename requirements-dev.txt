@@ -20,3 +20,8 @@ pytest>=8.0
 # `ruff check` and `ruff format --check`)
 ruff==0.16.1  # pinned; keep in sync with .github/workflows/ci.yml (see pyproject [tool.ruff.lint])
 
+# Strips outputs from tutorials/*.ipynb on commit (.gitattributes); after
+# installing, run `nbstripout --install` once per clone to register the git
+# filter locally (the filter definition itself is never stored in the repo).
+nbstripout>=0.7
+
