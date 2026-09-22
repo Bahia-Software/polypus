@@ -1,55 +1,73 @@
-# CITATION.cff — how to cite Polypus.
-#
-# This file powers GitHub's "Cite this repository" button and gives a stable,
-# machine-readable citation. Zenodo also reads it to pre-fill a release's
-# metadata once the GitHub–Zenodo integration is enabled.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-# The author list below matches the project's documented authors (Cargo.toml
-# `authors` / README "Credits" / BibTeX). Still PENDING before a release
-# (full list in docs/RELEASING.md → "Pending decisions"):
-#   • Affiliations for all authors, and ORCIDs beyond Diego's — none are
-#     recorded in the repo; add them when known. Do NOT invent them.
-#   • The DOI — assigned by Zenodo when the first release is archived.
-#   • `date-released` — the actual release date.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# PENDIENTE ANTES DE PUBLICAR LA RELEASE:
+#   1. Descomentar y rellenar la afiliación de cada autor.
+#   2. Descomentar date-released con la fecha real de la release (YYYY-MM-DD).
+#   3. Sustituir el DOI de concepto una vez Zenodo archive la primera release.
+#      Debe ser el DOI DE CONCEPTO (apunta siempre a la última versión),
+#      no el DOI de esa versión concreta.
+#   4. Comprobar que esta lista de autores coincide exactamente con la sección
+#      "Credits" y con el bloque BibTeX del README.
+# -----------------------------------------------------------------------------
 
 cff-version: 1.2.0
 message: "If you use Polypus in your research, please cite it as below."
 title: "Polypus: A Distributed Quantum Computing Library"
 type: software
-version: "0.7.0"                # keep in sync with the released version
+version: 0.7.0
+# date-released: 2026-09-DD
 license: EUPL-1.2
 repository-code: "https://github.com/Bahia-Software/polypus"
-url: "https://github.com/Bahia-Software/polypus"
+url: "https://bahia-software.github.io/polypus/"
+
+abstract: >-
+  Polypus is an open-source distributed quantum computing library. It runs
+  quantum circuits and trains variational quantum algorithms (VQE, QAOA, QML)
+  across one or many QPUs, simulated or real, without changing the circuit
+  code. The core is written in Rust for performance and correctness, and
+  Python bindings via PyO3 make it a drop-in accelerator for existing Qiskit
+  workflows. Shot execution and population-based training are distributed
+  across QPUs, and backends range from local simulation through Qiskit Aer to
+  CESGA's CUNQA distributed QPU platform and CESGA's QMIO quantum processor.
+
 keywords:
-  - quantum
-  - quantum-computing
-  - vqc
-  - qml
-  - qaoa
-  - qiskit
-  - simulator
-  - optimization
-
-# PENDING — set to the release date (strict YYYY-MM-DD); uncomment before release.
-# date-released: "2026-01-01"
-
-# PENDING — Zenodo concept DOI (constant across versions); uncomment once known.
-# Must be a bare DOI, e.g. 10.5281/zenodo.1234567
-# doi: "10.5281/zenodo.PENDING"
+  - quantum computing
+  - distributed computing
+  - variational quantum algorithms
+  - VQE
+  - QAOA
+  - quantum machine learning
+  - high performance computing
+  - Rust
+  - QPU
 
 authors:
-  # Affiliations are omitted until recorded (none in the repo); add an
-  # `affiliation:` line per author when known. ORCIDs beyond Diego's are not yet
-  # provided — add `orcid: "https://orcid.org/..."` (a full URL) when available.
   - given-names: "Diego Beltrán"
     family-names: "Fernández Prada"
     orcid: "https://orcid.org/0009-0007-9693-8384"
+    # affiliation: "PENDIENTE"
   - given-names: "Víctor"
     family-names: "Sóñora Pombo"
+    orcid: "https://orcid.org/0009-0009-0417-5960"
+    # affiliation: "PENDIENTE"
   - given-names: "Sergio"
     family-names: "Figueiras Gómez"
+    orcid: "https://orcid.org/0009-0003-1680-9269"
+    # affiliation: "PENDIENTE"
   - given-names: "Miguel"
     family-names: "Boubeta Martínez"
+    orcid: "https://orcid.org/0000-0002-5128-7027"
+    # affiliation: "PENDIENTE"
+  - given-names: "Kevin"
+    family-names: "Pérez González"
+    orcid: "https://orcid.org/0009-0008-7774-2906"
+    # affiliation: "PENDIENTE"
+  - given-names: "Uxía"
+    family-names: "Sendón Caamaño"
+    orcid: "https://orcid.org/0009-0004-2837-3949"
+    # affiliation: "PENDIENTE"
   - name: "Galicia Supercomputing Center (CESGA)"
+
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.PENDIENTE"
+#     description: "Concept DOI: always resolves to the latest version."
