@@ -60,6 +60,14 @@ pub enum PhysicsError {
     UntabulatedMedium {
         message: String,
     },
+    /// Could not find a locally pre-downloaded ENDF-6 evaluation. This crate
+    /// never downloads data over the network — see the error message for how
+    /// to make it available.
+    EndfDataNotFound {
+        /// Atomic number that could not be found.
+        z: u32,
+        message: String,
+    },
 }
 
 impl fmt::Display for PhysicsError {
@@ -97,6 +105,9 @@ impl fmt::Display for PhysicsError {
             }
             PhysicsError::UntabulatedMedium { message } => {
                 write!(f, "untabulated medium: {message}")
+            }
+            PhysicsError::EndfDataNotFound { z, message } => {
+                write!(f, "ENDF-6 data not found for Z={z}: {message}")
             }
         }
     }
