@@ -1,0 +1,108 @@
+# Reusable clean-room verification that `pip install polypus-quantum` works for
+# someone with NO relation to CESGA: a stock `python:*` container (Debian) has no
+# Rust toolchain, no ZeroMQ/libzmq and none of the CESGA environment. We install
+# straight from PyPI, assert the dependency closure never pulls ZeroMQ or CUNQA
+# (i.e. the qmio/QMIO feature stayed out of the default build), and run a real
+# README example end to end.
+#
+# Called by:
+#   • release.yml         — after publishing, with the exact released version.
+#   • verify-pypi.yml     — on a schedule / on demand, with 'latest'.
+name: Verify PyPI install (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to verify: 'latest' or an exact X.Y.Z"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Wheel path: what a normal `pip install` gets. `--only-binary=:all:` means a
+  # self-contained wheel is the ONLY thing that can satisfy the install (no source
+  # build), so a green run proves the wheel needs no Rust and no system libs.
+  wheel:
+    name: wheel (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    container: python:${{ matrix.python }}-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Install from PyPI (wheels only) and run the README Bell example
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eux
+          python -m pip install --upgrade pip
+          if [ "$VERSION" = "latest" ]; then SPEC="polypus-quantum"; else SPEC="polypus-quantum==$VERSION"; fi
+          # PyPI's CDN can lag for a few seconds right after a publish; retry.
+          ok=0
+          for i in $(seq 1 20); do
+            if pip install --only-binary=:all: --no-cache-dir "$SPEC"; then ok=1; break; fi
+            echo "attempt $i: not available yet, waiting for PyPI to propagate…"; sleep 15
+          done
+          [ "$ok" = 1 ]
+          pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
+          python - <<'PY'
+          import importlib.util as u
+          assert u.find_spec("zmq") is None, "pyzmq leaked into the install"
+          assert u.find_spec("cunqa") is None, "cunqa leaked into the install"
+          import polypus
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+          counts = result.counts[0]
+          print("counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) <= {"00", "11"} and {"00", "11"} <= set(counts), counts
+          print("wheel + Bell example OK")
+          PY
+
+  # sdist path: what Spack and EasyBuild take. They provide a compiler + Rust
+  # toolchain (added here via rustup on a full `python:3.11` image, which already
+  # ships gcc), but still no ZeroMQ and no CESGA env. `--no-binary polypus-quantum`
+  # forces the source build so we prove the DEFAULT feature set compiles without
+  # the qmio/ZeroMQ stack.
+  sdist:
+    name: sdist (Spack/EasyBuild path)
+    runs-on: ubuntu-latest
+    container: python:3.11
+    steps:
+      - name: Install Rust toolchain (what Spack/EasyBuild provide)
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build from sdist and run the README Bell example
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eux
+          rustc --version
+          python -m pip install --upgrade pip
+          if [ "$VERSION" = "latest" ]; then SPEC="polypus-quantum"; else SPEC="polypus-quantum==$VERSION"; fi
+          ok=0
+          for i in $(seq 1 20); do
+            if pip install --no-cache-dir --no-binary polypus-quantum "$SPEC"; then ok=1; break; fi
+            echo "attempt $i: not available yet, waiting for PyPI to propagate…"; sleep 15
+          done
+          [ "$ok" = 1 ]
+          pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
+          python - <<'PY'
+          import importlib.util as u
+          assert u.find_spec("zmq") is None, "pyzmq leaked into the sdist build"
+          assert u.find_spec("cunqa") is None, "cunqa leaked into the sdist build"
+          import polypus
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+          counts = result.counts[0]
+          print("counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) <= {"00", "11"} and {"00", "11"} <= set(counts), counts
+          print("sdist build + Bell example OK")
+          PY

@@ -160,3 +160,28 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+
+  # ── Post-publish clean-room smoke test ──────────────────────────────────────
+  # Guarantee `pip install polypus-quantum` works for someone with NO relation to
+  # CESGA (no Rust, no ZeroMQ, no CESGA env), for both the wheel and the sdist
+  # (Spack/EasyBuild). The actual checks live in the reusable `_verify-pypi.yml`,
+  # so the on-release run here and the scheduled/on-demand run (verify-pypi.yml)
+  # can never drift apart. Runs on every real release; red here is the alarm that
+  # the published package is broken for outsiders.
+  resolve-version:
+    name: Resolve released version
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: ver
+        run: echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+  verify-clean-install:
+    name: Verify clean-room PyPI install
+    needs: resolve-version
+    uses: ./.github/workflows/_verify-pypi.yml
+    with:
+      version: ${{ needs.resolve-version.outputs.version }}

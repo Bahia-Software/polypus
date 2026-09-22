@@ -1,0 +1,28 @@
+# On-demand / scheduled clean-room check that the CURRENTLY published
+# `polypus-quantum` still installs and runs for an outsider (no CESGA, no Rust,
+# no ZeroMQ). Unlike the release-gated check in release.yml, this runs between
+# releases too, so it also catches breakage caused by dependency drift on PyPI
+# (e.g. a new qiskit/qiskit-aer) rather than only by our own publishes.
+#
+# It reuses the exact same checks as the release verification (_verify-pypi.yml).
+name: Verify PyPI (scheduled / on-demand)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify: 'latest' or an exact X.Y.Z"
+        type: string
+        default: latest
+  schedule:
+    # Mondays 06:00 UTC — catch PyPI / dependency drift between releases.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/_verify-pypi.yml
+    with:
+      version: ${{ inputs.version || 'latest' }}
