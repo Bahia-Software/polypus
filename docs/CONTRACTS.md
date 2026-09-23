@@ -132,11 +132,16 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  id  sx  sxdg  rx  ry  rz  u3(u/p/u1/u2/U canonicalised)
+h  x  y  z  s  t  sdg  tdg  id  u0  sx  sxdg  rx  ry  rz  u3(u/p/u1/u2/U canonicalised)
 cx(CX canonicalised)  cz  cy  ch  csx  swap  rzz  rxx  cp  cu1  crx  cry  crz  cu3  cu
-ccx  cswap
+ccx  cswap  rccx  rc3x  c3x  c3sqrtx  c4x
+calls of gates declared with `gate` blocks
 barrier  measure  measure_all
 ```
+
+This is all of Qiskit's `qelib1.inc`. Gates outside it (`ryy`, `rzx`, `ecr`,
+`iswap`, `xx_plus_yy`, `mcx`, …) reach Polypus the way Qiskit's exporter writes
+them — declared with `gate` blocks — and are handled as declared gates.
 
 **One instruction per statement, re-emitted under the same name.** The
 importer never decomposes: a `ccx` statement is one `Ccx` instruction and is
@@ -146,7 +151,9 @@ same gate count, same depth. The only spelling changes are the canonicalisations
 listed above (`p`/`u1`/`u2`/`u`/`U` → `u3`, `CX` → `cx`). Decomposition is
 allowed at exactly two *lowering* boundaries, both confined to their module and
 invisible to `to_qasm2`: the native simulator, for gates without a dedicated
-kernel (`ccx`, `cswap`), and the QIR exporter, for gates without a base-profile
+kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
+exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
+declared gates), and the QIR exporter, for gates without a base-profile
 intrinsic.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its

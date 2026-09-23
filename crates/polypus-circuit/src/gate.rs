@@ -180,6 +180,21 @@ pub enum GateInstruction {
         lam: GateParam,
         gamma: GateParam,
     },
+    /// `u0(gamma)`: the identity, "idle for `gamma` units" in `qelib1.inc`.
+    /// Kept (like [`Id`](GateInstruction::Id)) so gate counts and depth match.
+    U0 { qubit: usize, gamma: GateParam },
+    /// Simplified Toffoli (`rccx`): a Toffoli up to relative phases, with
+    /// controls `a`, `b` and target `c`.
+    Rccx(usize, usize, usize),
+    /// Simplified 3-controlled Toffoli (`rc3x`), up to relative phases: three
+    /// controls, then the target.
+    Rc3x(usize, usize, usize, usize),
+    /// 3-controlled X (`c3x`): three controls, then the target.
+    C3x(usize, usize, usize, usize),
+    /// 3-controlled √X (`c3sqrtx`): three controls, then the target.
+    C3sqrtx(usize, usize, usize, usize),
+    /// 4-controlled X (`c4x`): four controls, then the target.
+    C4x(usize, usize, usize, usize, usize),
     /// A call of a gate declared in the source program (an OpenQASM 2.0
     /// `gate` block), on qubits of any number. One instruction, like any other
     /// gate: it is re-emitted as the declaration plus the call, never as its
@@ -301,6 +316,7 @@ impl GateInstruction {
             | G::Cry { theta, .. }
             | G::Crz { theta, .. }
             | G::Cu1 { theta, .. } => [Some(theta), None, None, None],
+            G::U0 { gamma, .. } => [Some(gamma), None, None, None],
             G::U {
                 theta, phi, lam, ..
             }
@@ -333,6 +349,11 @@ impl GateInstruction {
             | G::Csx(..)
             | G::Ccx(..)
             | G::Cswap(..)
+            | G::Rccx(..)
+            | G::Rc3x(..)
+            | G::C3x(..)
+            | G::C3sqrtx(..)
+            | G::C4x(..)
             | G::Custom(_)
             | G::Barrier(_)
             | G::Measure { .. }
@@ -456,6 +477,10 @@ impl GateInstruction {
                 lam: f(lam)?,
                 gamma: f(gamma)?,
             },
+            G::U0 { qubit, gamma } => G::U0 {
+                qubit: *qubit,
+                gamma: f(gamma)?,
+            },
             G::Custom(call) => G::Custom(
                 call.with_params(call.params().iter().map(&mut f).collect::<Result<_, E>>()?),
             ),
@@ -478,9 +503,162 @@ impl GateInstruction {
             | G::Csx(..)
             | G::Ccx(..)
             | G::Cswap(..)
+            | G::Rccx(..)
+            | G::Rc3x(..)
+            | G::C3x(..)
+            | G::C3sqrtx(..)
+            | G::C4x(..)
             | G::Barrier(_)
             | G::Measure { .. }
             | G::MeasureAll => self.clone(),
+        })
+    }
+
+    /// The exact decomposition of a composite `qelib1.inc` gate — `ccx`,
+    /// `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — into simpler
+    /// instructions: the gate's own definition in `qelib1.inc` (with `u1`/`u2`
+    /// written as the equal `t`/`tdg`/`h` and `p` as the equal `u3(0,0,λ)`),
+    /// exact including the global phase. `None` for every other instruction.
+    ///
+    /// This is for backends with no native implementation of these gates (the
+    /// native simulator, the QIR exporter) to *lower* them. It is never applied
+    /// to the circuit itself: import and export keep each gate as one
+    /// instruction under its own name. The result may contain composite gates
+    /// again (`c4x` uses `c3x` and `c3sqrtx`), each lowered in turn.
+    pub fn lowering(&self) -> Option<Vec<GateInstruction>> {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_8};
+        use GateInstruction as G;
+        let phase = |qubit: usize, lam: f64| G::U {
+            qubit,
+            theta: GateParam::Fixed(0.0),
+            phi: GateParam::Fixed(0.0),
+            lam: GateParam::Fixed(lam),
+        };
+        let cu1 = |q0: usize, q1: usize, theta: f64| G::Cu1 {
+            q0,
+            q1,
+            theta: GateParam::Fixed(theta),
+        };
+        Some(match *self {
+            G::Ccx(a, b, c) => vec![
+                G::H(c),
+                G::Cx(b, c),
+                G::Tdg(c),
+                G::Cx(a, c),
+                G::T(c),
+                G::Cx(b, c),
+                G::Tdg(c),
+                G::Cx(a, c),
+                G::T(b),
+                G::T(c),
+                G::H(c),
+                G::Cx(a, b),
+                G::T(a),
+                G::Tdg(b),
+                G::Cx(a, b),
+            ],
+            G::Cswap(a, b, c) => vec![G::Cx(c, b), G::Ccx(a, b, c), G::Cx(c, b)],
+            G::Rccx(a, b, c) => vec![
+                G::H(c),
+                G::T(c),
+                G::Cx(b, c),
+                G::Tdg(c),
+                G::Cx(a, c),
+                G::T(c),
+                G::Cx(b, c),
+                G::Tdg(c),
+                G::H(c),
+            ],
+            G::Rc3x(a, b, c, d) => vec![
+                G::H(d),
+                G::T(d),
+                G::Cx(c, d),
+                G::Tdg(d),
+                G::H(d),
+                G::Cx(a, d),
+                G::T(d),
+                G::Cx(b, d),
+                G::Tdg(d),
+                G::Cx(a, d),
+                G::T(d),
+                G::Cx(b, d),
+                G::Tdg(d),
+                G::H(d),
+                G::T(d),
+                G::Cx(c, d),
+                G::Tdg(d),
+                G::H(d),
+            ],
+            G::C3x(a, b, c, d) => {
+                let p = FRAC_PI_8;
+                vec![
+                    G::H(d),
+                    phase(a, p),
+                    phase(b, p),
+                    phase(c, p),
+                    phase(d, p),
+                    G::Cx(a, b),
+                    phase(b, -p),
+                    G::Cx(a, b),
+                    G::Cx(b, c),
+                    phase(c, -p),
+                    G::Cx(a, c),
+                    phase(c, p),
+                    G::Cx(b, c),
+                    phase(c, -p),
+                    G::Cx(a, c),
+                    G::Cx(c, d),
+                    phase(d, -p),
+                    G::Cx(b, d),
+                    phase(d, p),
+                    G::Cx(c, d),
+                    phase(d, -p),
+                    G::Cx(a, d),
+                    phase(d, p),
+                    G::Cx(c, d),
+                    phase(d, -p),
+                    G::Cx(b, d),
+                    phase(d, p),
+                    G::Cx(c, d),
+                    phase(d, -p),
+                    G::Cx(a, d),
+                    G::H(d),
+                ]
+            }
+            G::C3sqrtx(a, b, c, d) => {
+                let p = FRAC_PI_8;
+                let mut ops = Vec::with_capacity(27);
+                // h d; cu1(±π/8) ctrl,d; h d — interleaved with the cx ladder.
+                let rotation = |ops: &mut Vec<G>, ctrl: usize, theta: f64| {
+                    ops.extend([G::H(d), cu1(ctrl, d, theta), G::H(d)]);
+                };
+                rotation(&mut ops, a, p);
+                ops.push(G::Cx(a, b));
+                rotation(&mut ops, b, -p);
+                ops.push(G::Cx(a, b));
+                rotation(&mut ops, b, p);
+                ops.push(G::Cx(b, c));
+                rotation(&mut ops, c, -p);
+                ops.push(G::Cx(a, c));
+                rotation(&mut ops, c, p);
+                ops.push(G::Cx(b, c));
+                rotation(&mut ops, c, -p);
+                ops.push(G::Cx(a, c));
+                rotation(&mut ops, c, p);
+                ops
+            }
+            G::C4x(a, b, c, d, e) => vec![
+                G::H(e),
+                cu1(d, e, FRAC_PI_2),
+                G::H(e),
+                G::C3x(a, b, c, d),
+                G::H(e),
+                cu1(d, e, -FRAC_PI_2),
+                G::H(e),
+                G::C3x(a, b, c, d),
+                G::C3sqrtx(a, b, c, e),
+            ],
+            _ => return None,
         })
     }
 
@@ -503,7 +681,17 @@ impl GateInstruction {
             | GateInstruction::Rz { qubit: q, .. }
             | GateInstruction::U { qubit: q, .. }
             | GateInstruction::Sx(q)
-            | GateInstruction::Sxdg(q) => ActsOn::Unitary(Operands::new(&[*q])),
+            | GateInstruction::Sxdg(q)
+            | GateInstruction::U0 { qubit: q, .. } => ActsOn::Unitary(Operands::new(&[*q])),
+            GateInstruction::Rccx(a, b, c) => ActsOn::Unitary(Operands::new(&[*a, *b, *c])),
+            GateInstruction::Rc3x(a, b, c, d)
+            | GateInstruction::C3x(a, b, c, d)
+            | GateInstruction::C3sqrtx(a, b, c, d) => {
+                ActsOn::Unitary(Operands::new(&[*a, *b, *c, *d]))
+            }
+            GateInstruction::C4x(a, b, c, d, e) => {
+                ActsOn::Unitary(Operands::new(&[*a, *b, *c, *d, *e]))
+            }
             GateInstruction::Cx(a, b)
             | GateInstruction::Cz(a, b)
             | GateInstruction::Swap(a, b)

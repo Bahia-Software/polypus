@@ -435,6 +435,40 @@ impl ParameterizedCircuit {
         })
     }
 
+    /// `u0(gamma)` on `qubit`: the identity ("idle for `gamma` units"), kept
+    /// as an instruction like [`id`](Self::id).
+    pub fn u0(self, qubit: usize, gamma: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U0 {
+            qubit,
+            gamma: gamma.into(),
+        })
+    }
+
+    /// Simplified Toffoli (`rccx`): a Toffoli up to relative phases.
+    pub fn rccx(self, control0: usize, control1: usize, target: usize) -> Self {
+        self.push(GateInstruction::Rccx(control0, control1, target))
+    }
+
+    /// Simplified 3-controlled Toffoli (`rc3x`), up to relative phases.
+    pub fn rc3x(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::Rc3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled X (`c3x`).
+    pub fn c3x(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::C3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled √X (`c3sqrtx`).
+    pub fn c3sqrtx(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::C3sqrtx(c0, c1, c2, target))
+    }
+
+    /// 4-controlled X (`c4x`).
+    pub fn c4x(self, c0: usize, c1: usize, c2: usize, c3: usize, target: usize) -> Self {
+        self.push(GateInstruction::C4x(c0, c1, c2, c3, target))
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier across the whole quantum register (`barrier q;`).

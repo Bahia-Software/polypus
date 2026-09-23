@@ -603,3 +603,83 @@ fn qelib1_gates_reject_unbound_and_non_finite_angles() {
     // Nothing was applied: the state is still |00>.
     assert!(close(sv.amplitudes()[0], c(1.0, 0.0)));
 }
+
+// ── The multi-qubit qelib1.inc gates (rccx, rc3x, c3x, c3sqrtx, c4x, u0) ────
+
+#[test]
+fn multi_controlled_gates_match_their_references() {
+    let x = [[c(0.0, 0.0), c(1.0, 0.0)], [c(1.0, 0.0), c(0.0, 0.0)]];
+    let sx = [[c(0.5, 0.5), c(0.5, -0.5)], [c(0.5, -0.5), c(0.5, 0.5)]];
+    for (a, b, cc, t) in [(0, 1, 2, 3), (3, 1, 0, 2), (2, 3, 1, 0)] {
+        assert_matrix_eq(
+            &unitary_of(4, &G::C3x(a, b, cc, t)),
+            &controlled_reference(4, &[a, b, cc], t, x),
+            "c3x",
+        );
+        assert_matrix_eq(
+            &unitary_of(4, &G::C3sqrtx(a, b, cc, t)),
+            &controlled_reference(4, &[a, b, cc], t, sx),
+            "c3sqrtx",
+        );
+    }
+    for (a, b, cc, d, t) in [(0, 1, 2, 3, 4), (4, 2, 0, 3, 1)] {
+        assert_matrix_eq(
+            &unitary_of(5, &G::C4x(a, b, cc, d, t)),
+            &controlled_reference(5, &[a, b, cc, d], t, x),
+            "c4x",
+        );
+    }
+}
+
+/// `rccx` is a Toffoli up to relative phases — Qiskit's `RCCXGate` matrix:
+/// with controls `a`, `b` and target `c` (little-endian `a + 2b + 4c`),
+/// |a b c⟩ = |1 1 0⟩ ↦ i|1 1 1⟩, |1 1 1⟩ ↦ −i|1 1 0⟩, |1 0 1⟩ ↦ −|1 0 1⟩, and
+/// every other basis state is fixed.
+#[test]
+fn rccx_matches_qiskits_matrix_including_relative_phases() {
+    for (a, b, t) in [(0, 1, 2), (2, 0, 1), (1, 2, 0)] {
+        let reference = reference(3, |col| {
+            let bit = |q: usize| (col >> q) & 1;
+            match (bit(a), bit(b), bit(t)) {
+                (1, 1, 0) => vec![(col | 1 << t, c(0.0, 1.0))],
+                (1, 1, 1) => vec![(col & !(1 << t), c(0.0, -1.0))],
+                (1, 0, 1) => vec![(col, c(-1.0, 0.0))],
+                _ => vec![(col, c(1.0, 0.0))],
+            }
+        });
+        assert_matrix_eq(&unitary_of(3, &G::Rccx(a, b, t)), &reference, "rccx");
+    }
+}
+
+/// `rc3x` acts as a 3-controlled X on the |c0 c1 c2⟩ = |111⟩ subspace up to
+/// relative phases: every basis state keeps its probability pattern of
+/// `c3x` (unit modulus on the same entries). Its exact phases are checked
+/// against Qiskit's `RC3XGate` in the Python equivalence tests.
+#[test]
+fn rc3x_has_the_permutation_structure_of_c3x() {
+    let rc3x = unitary_of(4, &G::Rc3x(2, 0, 3, 1));
+    let c3x = unitary_of(4, &G::C3x(2, 0, 3, 1));
+    for (col_r, col_c) in rc3x.iter().zip(&c3x) {
+        for (r, x) in col_r.iter().zip(col_c) {
+            assert!((r.norm() - x.norm()).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn u0_is_the_identity() {
+    let prep = [G::H(0), G::Cx(0, 1), G::T(1)];
+    let mut before = Statevector::new(2).unwrap();
+    for g in &prep {
+        before.apply(g).unwrap();
+    }
+    let after_u0 = after(
+        2,
+        &prep,
+        G::U0 {
+            qubit: 1,
+            gamma: Fixed(3.0),
+        },
+    );
+    assert_eq!(after_u0, before.amplitudes());
+}

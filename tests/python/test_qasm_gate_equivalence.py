@@ -136,10 +136,47 @@ GATES = [
         lambda qc: qc.cu(*ANGLES, 1, 2),
         lambda c: c.cu(1, 2, *ANGLES),
     ),
+    # u0 is the identity: Qiskit's reference circuit gets nothing appended.
+    ("u0", (4,), 1, lambda qc: None, lambda c: c.u0(4, 2.0)),
+    ("rccx", (4, 0, 2), 0, lambda qc: qc.rccx(4, 0, 2), lambda c: c.rccx(4, 0, 2)),
+    (
+        "rc3x",
+        (3, 1, 4, 0),
+        0,
+        lambda qc: qc.rcccx(3, 1, 4, 0),
+        lambda c: c.rc3x(3, 1, 4, 0),
+    ),
+    (
+        "c3x",
+        (2, 4, 0, 3),
+        0,
+        lambda qc: qc.mcx([2, 4, 0], 3),
+        lambda c: c.c3x(2, 4, 0, 3),
+    ),
+    (
+        "c3sqrtx",
+        (4, 3, 1, 2),
+        0,
+        lambda qc: qc.append(_c3sx(), [4, 3, 1, 2]),
+        lambda c: c.c3sqrtx(4, 3, 1, 2),
+    ),
+    (
+        "c4x",
+        (1, 4, 0, 3, 2),
+        0,
+        lambda qc: qc.mcx([1, 4, 0, 3], 2),
+        lambda c: c.c4x(1, 4, 0, 3, 2),
+    ),
 ]
 
 GATE_IDS = [g[0] for g in GATES]
-N_QUBITS = 3
+N_QUBITS = 5
+
+
+def _c3sx():
+    from qiskit.circuit.library import C3SXGate
+
+    return C3SXGate()
 
 
 def _u3(theta, phi, lam):
@@ -160,8 +197,14 @@ def _cu3(theta, phi, lam):
     return CU3Gate(theta, phi, lam)
 
 
+# Qiskit reads `u0(n)` as "idle for n identity slots" and rejects a non-integer
+# n, so `u0` gets an integer argument.
+_ANGLE_OVERRIDES = {"u0": (2.0,)}
+
+
 def _statement(name, qubits, n_angles):
-    angles = f"({_fmt(ANGLES[:n_angles])})" if n_angles else ""
+    values = _ANGLE_OVERRIDES.get(name, ANGLES[:n_angles])
+    angles = f"({_fmt(values)})" if n_angles else ""
     operands = ",".join(f"q[{q}]" for q in qubits)
     return f"{name}{angles} {operands};"
 
@@ -312,11 +355,13 @@ def test_bound_parameterised_gates_match_fixed_angle_circuit():
 # The real execution path: polypus.run_quantum_circuit on the local Aer backend
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Gates Aer executes natively. `ch` is in qelib1.inc but not in Aer's basis, and
-# the local backend submits circuits to Aer untranspiled, so a `ch` circuit does
-# not run there today (a local-backend limitation, not an import/export one:
-# the transpiled comparison above covers `ch`).
-_AER_NATIVE = [g for g in GATES if g[0] != "ch"]
+# Gates Aer executes natively. `ch`, `u0` and the multi-qubit qelib1.inc gates
+# (`rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x`) are not in Aer's basis, and the
+# local backend submits circuits to Aer untranspiled, so such a circuit does not
+# run there today (a local-backend limitation, not an import/export one: the
+# transpiled comparison above covers every gate).
+_NOT_IN_AER_BASIS = {"ch", "u0", "rccx", "rc3x", "c3x", "c3sqrtx", "c4x"}
+_AER_NATIVE = [g for g in GATES if g[0] not in _NOT_IN_AER_BASIS]
 
 
 @pytest.mark.integration
@@ -357,7 +402,7 @@ def test_wrong_arity_and_parameter_count_name_the_gate(name, qubits, n_angles, q
     import polypus
 
     too_many_qubits = tuple(range(len(qubits) + 1))
-    src = f"OPENQASM 2.0;\nqreg q[5];\n{_statement(name, too_many_qubits, n_angles)}\n"
+    src = f"OPENQASM 2.0;\nqreg q[8];\n{_statement(name, too_many_qubits, n_angles)}\n"
     with pytest.raises(
         ValueError,
         match=rf"line 3: gate '{name}' expects {len(qubits)} argument\(s\), found {len(qubits) + 1}",

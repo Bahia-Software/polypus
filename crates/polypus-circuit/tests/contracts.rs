@@ -18,7 +18,7 @@ use polypus_circuit::{CircuitError, GateInstruction, GateParam, Param, Parameter
 /// and `swap` (native gate added alongside the QFT template).
 /// Free parameters cover the `Param` path; everything else is fixed.
 fn full_vocabulary() -> ParameterizedCircuit {
-    ParameterizedCircuit::new(3)
+    ParameterizedCircuit::new(5)
         .h(0)
         .x(1)
         .y(2)
@@ -51,6 +51,12 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .cu1(2, 1, Param(0))
         .cu3(1, 0, 0.2, -0.4, Param(1))
         .cu(0, 2, 0.3, Param(0), -0.1, 0.9)
+        .u0(3, Param(1))
+        .rccx(4, 0, 2)
+        .rc3x(3, 1, 4, 0)
+        .c3x(2, 4, 0, 3)
+        .c3sqrtx(4, 3, 1, 2)
+        .c4x(1, 4, 0, 3, 2)
         .push(declared_gate_call())
         .barrier()
         .barrier_on(&[0, 2])
@@ -71,7 +77,7 @@ fn declared_gate_call() -> GateInstruction {
 }
 
 /// Number of instruction kinds in [`GateInstruction`].
-const INSTRUCTION_KINDS: usize = 36;
+const INSTRUCTION_KINDS: usize = 42;
 
 /// Every instruction kind, numbered `0..INSTRUCTION_KINDS`. The match is
 /// exhaustive, so adding a variant fails to build here until it is numbered;
@@ -116,6 +122,12 @@ fn instruction_kind(gate: &GateInstruction) -> usize {
         G::Measure { .. } => 33,
         G::MeasureAll => 34,
         G::Custom(_) => 35,
+        G::U0 { .. } => 36,
+        G::Rccx(..) => 37,
+        G::Rc3x(..) => 38,
+        G::C3x(..) => 39,
+        G::C3sqrtx(..) => 40,
+        G::C4x(..) => 41,
     }
 }
 
@@ -202,6 +214,12 @@ fn c2_every_gate_roundtrips_individually() {
             "cu",
             ParameterizedCircuit::new(2).cu(1, 0, 0.1, 0.2, 0.3, 0.4),
         ),
+        ("u0", ParameterizedCircuit::new(1).u0(0, 0.5)),
+        ("rccx", ParameterizedCircuit::new(3).rccx(2, 0, 1)),
+        ("rc3x", ParameterizedCircuit::new(4).rc3x(3, 1, 0, 2)),
+        ("c3x", ParameterizedCircuit::new(4).c3x(2, 3, 0, 1)),
+        ("c3sqrtx", ParameterizedCircuit::new(4).c3sqrtx(1, 3, 2, 0)),
+        ("c4x", ParameterizedCircuit::new(5).c4x(4, 0, 3, 1, 2)),
         ("barrier", ParameterizedCircuit::new(2).h(0).barrier()),
         // A partial measurement (qubit 1 left unmeasured) so the importer does
         // not canonicalise a full q[k]->c[k] run into `measure_all`.
@@ -266,9 +284,15 @@ fn c2_every_gate_statement_reemits_byte_identically() {
         "crz(1.250000000000) q[0],q[2];",
         "cu3(0.100000000000,-0.200000000000,0.300000000000) q[2],q[0];",
         "cu(0.100000000000,0.200000000000,-0.300000000000,0.400000000000) q[1],q[2];",
+        "u0(0.500000000000) q[4];",
+        "rccx q[2],q[4],q[0];",
+        "rc3x q[3],q[0],q[4],q[1];",
+        "c3x q[1],q[4],q[0],q[2];",
+        "c3sqrtx q[4],q[2],q[3],q[0];",
+        "c4x q[3],q[0],q[4],q[2],q[1];",
     ];
     for statement in statements {
-        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{statement}\n");
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
         let imported = ParameterizedCircuit::from_qasm2(&src)
             .unwrap_or_else(|e| panic!("{statement}: failed to parse: {e}"));
         assert_eq!(imported.gates.len(), 1, "{statement}: not one instruction");

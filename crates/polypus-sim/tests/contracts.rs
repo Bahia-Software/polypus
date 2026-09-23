@@ -277,6 +277,32 @@ fn qir_to_gates(ir: &str) -> Vec<G> {
     gates
 }
 
+/// The four- and five-qubit gates of `qelib1.inc` (and `u0`), on 5 qubits with
+/// operands in non-ascending order: their emitted QIR realises the native gate.
+#[test]
+fn c2_multi_qubit_gates_emitted_qir_matches_the_native_gate() {
+    let vocabulary = [
+        G::U0 {
+            qubit: 3,
+            gamma: Fixed(0.5),
+        },
+        G::Rccx(4, 0, 2),
+        G::Rc3x(3, 1, 4, 0),
+        G::C3x(2, 4, 0, 3),
+        G::C3sqrtx(4, 3, 1, 2),
+        G::C4x(1, 4, 0, 3, 2),
+    ];
+    for gate in vocabulary {
+        let ir = ConcreteCircuit {
+            num_qubits: 5,
+            gates: vec![gate.clone()],
+        }
+        .to_qir();
+        let lowered = qir_to_gates(&ir);
+        assert_equiv_up_to_global_phase(5, std::slice::from_ref(&gate), &lowered);
+    }
+}
+
 /// A call of a gate declared with a `gate` block (only the importer creates
 /// declarations): `g(0.37) q[2],q[0],q[1];`, whose body mixes built-in gates,
 /// a nested declared gate and parameter expressions.

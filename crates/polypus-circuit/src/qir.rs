@@ -24,10 +24,12 @@
 //! - `sx` / `sxdg` → `rx(±π/2)`
 //! - `cy`, `ch`, `csx`, `crx`, `cry`, `crz`, `cu3`, `cu` → the standard
 //!   `cnot`-based constructions (see each arm of [`write_qir`])
-//! - `ccx` → the exact 15-gate `h`/`t`/`t†`/`cnot` decomposition of
-//!   `qelib1.inc`; `cswap a,b,c` → `cnot c,b; ccx a,b,c; cnot c,b`
+//! - `ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` → their exact
+//!   `qelib1.inc` definitions ([`GateInstruction::lowering`]; e.g. `ccx` is the
+//!   15-gate `h`/`t`/`t†`/`cnot` circuit), each part lowered in turn
+//! - a call of a declared gate → its expanded body, each gate lowered in turn
 //! - `barrier` is dropped (QIR has no barrier; it is only a scheduling hint).
-//! - `id` is dropped (the identity has no intrinsic and no effect).
+//! - `id` and `u0` are dropped (the identity has no intrinsic and no effect).
 //!
 //! These rewrites are a *lowering* step confined to this module: they never
 //! change the circuit itself, nor what the OpenQASM exporter emits for it.
@@ -160,26 +162,6 @@ impl QirWriter {
         self.rot(RZ, theta / 2.0, q1);
     }
 
-    /// `ccx a,b,c` via the standard exact decomposition into `h`, `t`, `t†`
-    /// and `cnot` (the definition in `qelib1.inc`; no phase at all).
-    fn ccx(&mut self, a: usize, b: usize, c: usize) {
-        self.gate1(H, c);
-        self.gate2(CNOT, b, c);
-        self.gate1(T_ADJ, c);
-        self.gate2(CNOT, a, c);
-        self.gate1(T, c);
-        self.gate2(CNOT, b, c);
-        self.gate1(T_ADJ, c);
-        self.gate2(CNOT, a, c);
-        self.gate1(T, b);
-        self.gate1(T, c);
-        self.gate1(H, c);
-        self.gate2(CNOT, a, b);
-        self.gate1(T, a);
-        self.gate1(T_ADJ, b);
-        self.gate2(CNOT, a, b);
-    }
-
     /// Controlled `u3(θ,φ,λ)`, the `qelib1.inc` construction with each `u1`/`u3`
     /// rewritten to `rz`/`ry` (their global phases are global here: every one
     /// of them is applied unconditionally):
@@ -306,12 +288,23 @@ fn lower(
             w.cp(FRAC_PI_2, *c, *t);
             w.gate1(H, *t);
         }
-        GateInstruction::Ccx(a, b, c) => w.ccx(*a, *b, *c),
-        // cswap a,b,c = cnot c,b; ccx a,b,c; cnot c,b (exact).
-        GateInstruction::Cswap(a, b, c) => {
-            w.gate2(CNOT, *c, *b);
-            w.ccx(*a, *b, *c);
-            w.gate2(CNOT, *c, *b);
+        // The composite qelib1.inc gates have no base-profile intrinsic: each is
+        // lowered to its exact qelib1.inc definition (`GateInstruction::lowering`),
+        // every part lowered in turn.
+        GateInstruction::Ccx(..)
+        | GateInstruction::Cswap(..)
+        | GateInstruction::Rccx(..)
+        | GateInstruction::Rc3x(..)
+        | GateInstruction::C3x(..)
+        | GateInstruction::C3sqrtx(..)
+        | GateInstruction::C4x(..) => {
+            for part in gate.lowering().into_iter().flatten() {
+                lower(w, measurements, num_qubits, &part, params)?;
+            }
+        }
+        // `u0(γ)` is the identity (an idle marker): dropped like `id`.
+        GateInstruction::U0 { gamma, .. } => {
+            angle(gamma)?;
         }
         // crx(θ) c,t = s t; cnot c,t; ry(−θ/2) t; cnot c,t; ry(θ/2) t; s† t.
         GateInstruction::Crx {

@@ -610,6 +610,75 @@ impl Circuit {
         )
     }
 
+    /// `u0(gamma)`: the identity ("idle for `gamma` units"), kept as an
+    /// instruction like `id`.
+    fn u0(slf: PyRefMut<'_, Self>, qubit: usize, gamma: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::U0 {
+                qubit,
+                gamma: gamma.into(),
+            },
+        )
+    }
+
+    /// Simplified Toffoli `rccx(control0, control1, target)`, up to relative
+    /// phases.
+    fn rccx(
+        slf: PyRefMut<'_, Self>,
+        control0: usize,
+        control1: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Rccx(control0, control1, target))
+    }
+
+    /// Simplified 3-controlled Toffoli `rc3x(c0, c1, c2, target)`, up to
+    /// relative phases.
+    fn rc3x(
+        slf: PyRefMut<'_, Self>,
+        c0: usize,
+        c1: usize,
+        c2: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Rc3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled X `c3x(c0, c1, c2, target)`.
+    fn c3x(
+        slf: PyRefMut<'_, Self>,
+        c0: usize,
+        c1: usize,
+        c2: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::C3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled √X `c3sqrtx(c0, c1, c2, target)`.
+    fn c3sqrtx(
+        slf: PyRefMut<'_, Self>,
+        c0: usize,
+        c1: usize,
+        c2: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::C3sqrtx(c0, c1, c2, target))
+    }
+
+    /// 4-controlled X `c4x(c0, c1, c2, c3, target)`.
+    fn c4x(
+        slf: PyRefMut<'_, Self>,
+        c0: usize,
+        c1: usize,
+        c2: usize,
+        c3: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::C4x(c0, c1, c2, c3, target))
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier on all qubits, or on `qubits` when given.

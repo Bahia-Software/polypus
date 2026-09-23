@@ -4,11 +4,12 @@
 //! ([`crate::qasm`]) plus the common `qelib1.inc` vocabulary produced by other
 //! toolchains (notably Qiskit's `qasm2.dumps`):
 //!
-//! - Gates: `h x y z s t sdg tdg id sx sxdg rx ry rz p u1 u2 u3 u U cx CX cz
-//!   cy ch csx swap ccx cswap rzz rxx cp crx cry crz cu1 cu3 cu`. Each is
-//!   represented one-to-one and re-emitted under the same name — nothing is
-//!   decomposed here — except that `p`/`u1`/`u2`/`u`/`U` are canonicalised to
-//!   `u3` and `CX` to `cx`. `id` is an instruction of its own, never dropped.
+//! - Gates: all of Qiskit's `qelib1.inc` — `h x y z s t sdg tdg id u0 sx sxdg
+//!   rx ry rz p u1 u2 u3 u U cx CX cz cy ch csx swap ccx cswap rzz rxx cp crx
+//!   cry crz cu1 cu3 cu rccx rc3x c3x c3sqrtx c4x`. Each is represented
+//!   one-to-one and re-emitted under the same name — nothing is decomposed
+//!   here — except that `p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and
+//!   `CX` to `cx`. `id` is an instruction of its own, never dropped.
 //! - `gate` declarations (`gate name(params) qargs { body }`): each call of a
 //!   declared gate is one [`GateInstruction::Custom`] instruction, and the
 //!   exporter re-emits the declaration verbatim plus the call — the body is
@@ -457,6 +458,23 @@ static BUILTIN_GATES: &[BuiltinGate] = &[
         phi: p[1],
         lam: p[2],
         gamma: p[3],
+    }),
+    builtin("u0", 1, 1, |p, q| GateInstruction::U0 {
+        qubit: q[0],
+        gamma: p[0],
+    }),
+    builtin("rccx", 0, 3, |_, q| GateInstruction::Rccx(q[0], q[1], q[2])),
+    builtin("rc3x", 0, 4, |_, q| {
+        GateInstruction::Rc3x(q[0], q[1], q[2], q[3])
+    }),
+    builtin("c3x", 0, 4, |_, q| {
+        GateInstruction::C3x(q[0], q[1], q[2], q[3])
+    }),
+    builtin("c3sqrtx", 0, 4, |_, q| {
+        GateInstruction::C3sqrtx(q[0], q[1], q[2], q[3])
+    }),
+    builtin("c4x", 0, 5, |_, q| {
+        GateInstruction::C4x(q[0], q[1], q[2], q[3], q[4])
     }),
 ];
 

@@ -273,32 +273,6 @@ fn cx_4x4(control: usize, target: usize, qa: usize) -> [[C64; 4]; 4] {
     out
 }
 
-/// The Toffoli gate `ccx a,b,c` (controls `a`, `b`; target `c`) as the exact
-/// 15-gate `h`/`t`/`tdg`/`cx` decomposition that defines it in `qelib1.inc`
-/// (Nielsen & Chuang, Fig. 4.9) — no global or relative phase. The simulator
-/// has no three-qubit kernel, so [`Statevector::apply`] lowers `Ccx` (and
-/// `Cswap`, through it) to this sequence.
-fn ccx_lowering(a: usize, b: usize, c: usize) -> [GateInstruction; 15] {
-    use GateInstruction as G;
-    [
-        G::H(c),
-        G::Cx(b, c),
-        G::Tdg(c),
-        G::Cx(a, c),
-        G::T(c),
-        G::Cx(b, c),
-        G::Tdg(c),
-        G::Cx(a, c),
-        G::T(b),
-        G::T(c),
-        G::H(c),
-        G::Cx(a, b),
-        G::T(a),
-        G::Tdg(b),
-        G::Cx(a, b),
-    ]
-}
-
 /// `a · b` for 2×2 complex matrices (`a` applied after `b`).
 fn matmul2(a: &[[C64; 2]; 2], b: &[[C64; 2]; 2]) -> [[C64; 2]; 2] {
     let mut out = [[C64::new(0.0, 0.0); 2]; 2];
@@ -570,22 +544,25 @@ impl Statevector {
                 let m = u.map(|row| row.map(|entry| entry * phase));
                 kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
             }
-            // No dedicated three-qubit kernel: lowered here to the exact
-            // `qelib1.inc` decompositions (see `ccx_lowering`). This is the
-            // simulator's lowering boundary; the circuit itself, and its
-            // OpenQASM export, keep `ccx`/`cswap` as single instructions.
-            GateInstruction::Ccx(a, b, c) => {
-                for g in &ccx_lowering(*a, *b, *c) {
-                    self.apply(g)?;
+            // No dedicated kernel for the composite qelib1.inc gates: each is
+            // lowered here — the simulator's lowering boundary — to its exact
+            // qelib1.inc definition (`GateInstruction::lowering`, exact
+            // including the global phase), every part applied in turn. The
+            // circuit itself, and its OpenQASM export, keep the gate.
+            GateInstruction::Ccx(..)
+            | GateInstruction::Cswap(..)
+            | GateInstruction::Rccx(..)
+            | GateInstruction::Rc3x(..)
+            | GateInstruction::C3x(..)
+            | GateInstruction::C3sqrtx(..)
+            | GateInstruction::C4x(..) => {
+                for part in gate.lowering().into_iter().flatten() {
+                    self.apply(&part)?;
                 }
             }
-            GateInstruction::Cswap(a, b, c) => {
-                // cswap a,b,c = cx c,b; ccx a,b,c; cx c,b
-                self.apply(&GateInstruction::Cx(*c, *b))?;
-                for g in &ccx_lowering(*a, *b, *c) {
-                    self.apply(g)?;
-                }
-                self.apply(&GateInstruction::Cx(*c, *b))?;
+            // `u0(γ)` is the identity; its argument is still validated.
+            GateInstruction::U0 { gamma, .. } => {
+                angle(gamma)?;
             }
             // A call of a gate declared in the source program: expanded here —
             // the simulator's lowering boundary — into built-in instructions,

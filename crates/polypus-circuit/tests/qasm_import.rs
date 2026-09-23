@@ -538,8 +538,9 @@ fn qelib1_gates_import_with_their_operand_and_parameter_order() {
     }
 }
 
-/// (name, parameters, qubits) of every Tier-1 gate, for the signature checks.
-const TIER1_SIGNATURES: [(&str, usize, usize); 13] = [
+/// (name, parameters, qubits) of every gate added for the benchmark suites
+/// (Tier 1, then the multi-qubit `qelib1.inc` gates), for the signature checks.
+const TIER1_SIGNATURES: [(&str, usize, usize); 19] = [
     ("sx", 0, 1),
     ("sxdg", 0, 1),
     ("cy", 0, 2),
@@ -553,7 +554,45 @@ const TIER1_SIGNATURES: [(&str, usize, usize); 13] = [
     ("cu1", 1, 2),
     ("cu3", 3, 2),
     ("cu", 4, 2),
+    ("u0", 1, 1),
+    ("rccx", 0, 3),
+    ("rc3x", 0, 4),
+    ("c3x", 0, 4),
+    ("c3sqrtx", 0, 4),
+    ("c4x", 0, 5),
 ];
+
+/// The multi-qubit qelib1.inc gates import one-to-one, operands in source order.
+#[test]
+fn multi_qubit_qelib1_gates_import_with_their_operand_order() {
+    use GateInstruction as G;
+    let cases: Vec<(&str, GateInstruction)> = vec![
+        (
+            "u0(2) q[4];",
+            G::U0 {
+                qubit: 4,
+                gamma: GateParam::Fixed(2.0),
+            },
+        ),
+        ("rccx q[4],q[0],q[2];", G::Rccx(4, 0, 2)),
+        ("rc3x q[3],q[1],q[4],q[0];", G::Rc3x(3, 1, 4, 0)),
+        ("c3x q[2],q[4],q[0],q[3];", G::C3x(2, 4, 0, 3)),
+        ("c3sqrtx q[4],q[3],q[1],q[2];", G::C3sqrtx(4, 3, 1, 2)),
+        ("c4x q[1],q[4],q[0],q[3],q[2];", G::C4x(1, 4, 0, 3, 2)),
+    ];
+    for (statement, expected) in cases {
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
+        let qc =
+            ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
+        assert_eq!(qc.gates, [expected], "{statement}");
+    }
+    // Repeated operands are rejected at any arity.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[5];\nc4x q[0],q[1],q[2],q[1],q[4];\n",
+        "5-qubit gate requires distinct qubits, got (0, 1, 2, 1, 4)",
+        3,
+    );
+}
 
 /// Render a gate application with `params` angles on the qubits `operands`.
 fn application(name: &str, params: usize, operands: impl IntoIterator<Item = usize>) -> String {
@@ -577,7 +616,7 @@ fn qelib1_gates_reject_wrong_argument_and_parameter_counts() {
         }
         for wrong in wrong_arities {
             let src = format!(
-                "OPENQASM 2.0;\nqreg q[5];\n{}\n",
+                "OPENQASM 2.0;\nqreg q[8];\n{}\n",
                 application(name, params, 0..wrong)
             );
             assert_parse_err(
@@ -593,7 +632,7 @@ fn qelib1_gates_reject_wrong_argument_and_parameter_counts() {
         }
         for wrong in wrong_counts {
             let src = format!(
-                "OPENQASM 2.0;\nqreg q[5];\n{}\n",
+                "OPENQASM 2.0;\nqreg q[8];\n{}\n",
                 application(name, wrong, 0..qubits)
             );
             assert_parse_err(

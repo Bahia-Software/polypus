@@ -236,6 +236,24 @@ pub(crate) fn write_qasm2(
                     angle(gamma)?
                 );
             }
+            GateInstruction::U0 { qubit, gamma } => {
+                let _ = writeln!(out, "u0({}) q[{qubit}];", angle(gamma)?);
+            }
+            GateInstruction::Rccx(a, b, c) => {
+                let _ = writeln!(out, "rccx q[{a}],q[{b}],q[{c}];");
+            }
+            GateInstruction::Rc3x(a, b, c, d) => {
+                let _ = writeln!(out, "rc3x q[{a}],q[{b}],q[{c}],q[{d}];");
+            }
+            GateInstruction::C3x(a, b, c, d) => {
+                let _ = writeln!(out, "c3x q[{a}],q[{b}],q[{c}],q[{d}];");
+            }
+            GateInstruction::C3sqrtx(a, b, c, d) => {
+                let _ = writeln!(out, "c3sqrtx q[{a}],q[{b}],q[{c}],q[{d}];");
+            }
+            GateInstruction::C4x(a, b, c, d, e) => {
+                let _ = writeln!(out, "c4x q[{a}],q[{b}],q[{c}],q[{d}],q[{e}];");
+            }
             GateInstruction::Custom(call) => {
                 let operands: Vec<String> =
                     call.qubits().iter().map(|q| format!("q[{q}]")).collect();
