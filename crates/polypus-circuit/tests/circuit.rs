@@ -633,6 +633,62 @@ fn test_parameterized_circuit_try_push_rejects_non_finite() {
     assert_eq!(qc.gates.len(), 1);
 }
 
+/// A rejected push must not leak partial state: even when the valid slots of
+/// the rejected gate reference free parameters, `num_params` is unchanged.
+#[test]
+fn test_rejected_push_leaves_num_params_untouched() {
+    let mut qc = ParameterizedCircuit::new(1);
+    assert_eq!(
+        qc.try_push(GateInstruction::U {
+            qubit: 0,
+            theta: GateParam::Param(4),
+            phi: GateParam::Fixed(f64::NAN),
+            lam: GateParam::Param(7),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(qc.num_params, 0);
+    assert!(qc.gates.is_empty());
+
+    // Same for a structural rejection (out-of-range qubit) of a gate whose
+    // angle is a free parameter.
+    assert_eq!(
+        qc.try_push(GateInstruction::Rzz {
+            q0: 0,
+            q1: 3,
+            theta: GateParam::Param(2),
+        }),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 3,
+            num_qubits: 1
+        })
+    );
+    assert_eq!(qc.num_params, 0);
+    assert!(qc.gates.is_empty());
+}
+
+/// Structural checks run in a fixed order for every arity: range before
+/// distinctness, each reporting the first offending operand in operand order.
+#[test]
+fn test_try_push_reports_range_before_repeated_qubits() {
+    let mut qc = ParameterizedCircuit::new(2);
+    // Both operands out of range (and equal): the range error wins.
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(5, 5)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 5,
+            num_qubits: 2
+        })
+    );
+    // In range but repeated.
+    assert_eq!(
+        qc.try_push(GateInstruction::Swap(1, 1)),
+        Err(CircuitError::IdenticalQubits { qubit: 1 })
+    );
+    // A barrier may repeat a qubit; it is not a unitary.
+    assert_eq!(qc.try_push(GateInstruction::Barrier(vec![1, 1])), Ok(()));
+}
+
 /// Regression for issue #38 (acceptance criterion): a non-finite angle must
 /// never reach the QASM exporter as a literal `NaN`/`inf` string. Both a bound
 /// free parameter and a hand-assembled fixed angle are rejected at export.

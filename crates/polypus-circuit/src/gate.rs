@@ -128,6 +128,20 @@ pub enum GateInstruction {
 /// adding them never forces [`Operands`] to change shape.
 pub(crate) const MAX_GATE_ARITY: usize = 5;
 
+/// The most angle parameters a built-in instruction takes (`u3`).
+const MAX_GATE_PARAMS: usize = 3;
+
+/// The first qubit that appears more than once in `qubits` (reported at its
+/// second occurrence), or `None` when all are distinct. A unitary may never
+/// name the same qubit twice, whatever its arity.
+pub(crate) fn first_repeated_qubit(qubits: &[usize]) -> Option<usize> {
+    qubits
+        .iter()
+        .enumerate()
+        .find(|&(i, q)| qubits[..i].contains(q))
+        .map(|(_, &q)| q)
+}
+
 /// The qubit operands of a unitary instruction, in operand order (control(s)
 /// before target(s) for controlled gates).
 ///
@@ -188,6 +202,109 @@ impl GateInstruction {
             GateInstruction::Measure { cbit, .. } => Some(*cbit),
             _ => None,
         }
+    }
+
+    /// The angle parameters of this instruction, in QASM argument order
+    /// (`theta, phi, lambda` for `u3`). Empty for parameter-free instructions.
+    ///
+    /// Exhaustive over the vocabulary (no wildcard arm): a new parameterised
+    /// gate cannot compile until it says what its parameters are, so builder
+    /// validation and `num_params` tracking can never silently skip it.
+    pub(crate) fn params(&self) -> impl Iterator<Item = &GateParam> + '_ {
+        use GateInstruction as G;
+        let params: [Option<&GateParam>; MAX_GATE_PARAMS] = match self {
+            G::Rx { theta, .. }
+            | G::Ry { theta, .. }
+            | G::Rz { theta, .. }
+            | G::Rzz { theta, .. }
+            | G::Rxx { theta, .. }
+            | G::Cp { theta, .. } => [Some(theta), None, None],
+            G::U {
+                theta, phi, lam, ..
+            } => [Some(theta), Some(phi), Some(lam)],
+            G::H(_)
+            | G::X(_)
+            | G::Y(_)
+            | G::Z(_)
+            | G::S(_)
+            | G::T(_)
+            | G::Sdg(_)
+            | G::Tdg(_)
+            | G::Cx(..)
+            | G::Cz(..)
+            | G::Swap(..)
+            | G::Barrier(_)
+            | G::Measure { .. }
+            | G::MeasureAll => [None; MAX_GATE_PARAMS],
+        };
+        params.into_iter().flatten()
+    }
+
+    /// A copy of this instruction with every angle parameter replaced by
+    /// `f(parameter)`, visited in QASM argument order; the first error aborts.
+    /// Used to bind free parameters
+    /// ([`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters)).
+    ///
+    /// Exhaustive over the vocabulary, for the same reason as [`Self::params`].
+    pub(crate) fn try_map_params<E>(
+        &self,
+        mut f: impl FnMut(&GateParam) -> Result<GateParam, E>,
+    ) -> Result<GateInstruction, E> {
+        use GateInstruction as G;
+        Ok(match self {
+            G::Rx { qubit, theta } => G::Rx {
+                qubit: *qubit,
+                theta: f(theta)?,
+            },
+            G::Ry { qubit, theta } => G::Ry {
+                qubit: *qubit,
+                theta: f(theta)?,
+            },
+            G::Rz { qubit, theta } => G::Rz {
+                qubit: *qubit,
+                theta: f(theta)?,
+            },
+            G::Rzz { q0, q1, theta } => G::Rzz {
+                q0: *q0,
+                q1: *q1,
+                theta: f(theta)?,
+            },
+            G::Rxx { q0, q1, theta } => G::Rxx {
+                q0: *q0,
+                q1: *q1,
+                theta: f(theta)?,
+            },
+            G::Cp { q0, q1, theta } => G::Cp {
+                q0: *q0,
+                q1: *q1,
+                theta: f(theta)?,
+            },
+            G::U {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::U {
+                qubit: *qubit,
+                theta: f(theta)?,
+                phi: f(phi)?,
+                lam: f(lam)?,
+            },
+            G::H(_)
+            | G::X(_)
+            | G::Y(_)
+            | G::Z(_)
+            | G::S(_)
+            | G::T(_)
+            | G::Sdg(_)
+            | G::Tdg(_)
+            | G::Cx(..)
+            | G::Cz(..)
+            | G::Swap(..)
+            | G::Barrier(_)
+            | G::Measure { .. }
+            | G::MeasureAll => self.clone(),
+        })
     }
 
     /// Which qubits this instruction acts on *as a unitary* (see [`ActsOn`]).
@@ -597,6 +714,109 @@ mod tests {
             qubit_index_violation(&[GateInstruction::Barrier(vec![0, 7])], 2),
             Some(7)
         );
+    }
+
+    // ── Per-gate parameter access ─────────────────────────────────────────
+
+    #[test]
+    fn params_are_listed_in_qasm_argument_order() {
+        let u = GateInstruction::U {
+            qubit: 0,
+            theta: GateParam::Fixed(0.1),
+            phi: GateParam::Param(2),
+            lam: GateParam::Fixed(0.3),
+        };
+        let listed: Vec<GateParam> = u.params().copied().collect();
+        assert_eq!(
+            listed,
+            [
+                GateParam::Fixed(0.1),
+                GateParam::Param(2),
+                GateParam::Fixed(0.3)
+            ]
+        );
+        let cp = GateInstruction::Cp {
+            q0: 0,
+            q1: 1,
+            theta: GateParam::Param(0),
+        };
+        assert_eq!(
+            cp.params().copied().collect::<Vec<_>>(),
+            [GateParam::Param(0)]
+        );
+        for gate in [
+            GateInstruction::H(0),
+            GateInstruction::Cx(0, 1),
+            GateInstruction::Barrier(vec![]),
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::MeasureAll,
+        ] {
+            assert_eq!(gate.params().count(), 0, "{gate:?}");
+        }
+    }
+
+    #[test]
+    fn try_map_params_rewrites_every_parameter_in_order() {
+        let u = GateInstruction::U {
+            qubit: 2,
+            theta: GateParam::Param(0),
+            phi: GateParam::Param(1),
+            lam: GateParam::Fixed(0.5),
+        };
+        let mut seen = Vec::new();
+        let mapped = u
+            .try_map_params(|p| -> Result<GateParam, CircuitError> {
+                seen.push(*p);
+                Ok(GateParam::Fixed(p.resolve(&[10.0, 20.0])?))
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            [
+                GateParam::Param(0),
+                GateParam::Param(1),
+                GateParam::Fixed(0.5)
+            ]
+        );
+        assert_eq!(
+            mapped,
+            GateInstruction::U {
+                qubit: 2,
+                theta: GateParam::Fixed(10.0),
+                phi: GateParam::Fixed(20.0),
+                lam: GateParam::Fixed(0.5),
+            }
+        );
+        // Parameter-free instructions come back unchanged.
+        let barrier = GateInstruction::Barrier(vec![0, 1]);
+        assert_eq!(
+            barrier.try_map_params(|_| Err::<GateParam, ()>(())),
+            Ok(barrier.clone())
+        );
+    }
+
+    #[test]
+    fn try_map_params_stops_at_the_first_error() {
+        let rzz = GateInstruction::Rzz {
+            q0: 0,
+            q1: 1,
+            theta: GateParam::Param(3),
+        };
+        assert_eq!(
+            rzz.try_map_params(|p| p.resolve(&[]).map(GateParam::Fixed)),
+            Err(CircuitError::ParamIndexOutOfBounds {
+                index: 3,
+                num_params: 0
+            })
+        );
+    }
+
+    #[test]
+    fn first_repeated_qubit_reports_the_second_occurrence() {
+        assert_eq!(first_repeated_qubit(&[]), None);
+        assert_eq!(first_repeated_qubit(&[0, 1, 2]), None);
+        assert_eq!(first_repeated_qubit(&[1, 1]), Some(1));
+        assert_eq!(first_repeated_qubit(&[2, 0, 1, 0, 2]), Some(0));
     }
 
     // ── ActsOn / Operands (arity-generic operand lists) ──────────────────

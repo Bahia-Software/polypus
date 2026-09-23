@@ -2,7 +2,9 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
-use crate::gate::{GateInstruction, GateParam, MeasuredQubits};
+use crate::gate::{
+    first_repeated_qubit, qubit_index_violation, GateInstruction, GateParam, MeasuredQubits,
+};
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
@@ -102,25 +104,6 @@ impl ParameterizedCircuit {
 
     // ── Internal validation helpers ──────────────────────────────────────
 
-    fn check_qubit(&self, qubit: usize) -> Result<(), CircuitError> {
-        if qubit >= self.num_qubits {
-            return Err(CircuitError::QubitOutOfRange {
-                qubit,
-                num_qubits: self.num_qubits,
-            });
-        }
-        Ok(())
-    }
-
-    fn check_pair(&self, q0: usize, q1: usize) -> Result<(), CircuitError> {
-        self.check_qubit(q0)?;
-        self.check_qubit(q1)?;
-        if q0 == q1 {
-            return Err(CircuitError::IdenticalQubits { qubit: q0 });
-        }
-        Ok(())
-    }
-
     fn track_param(&mut self, param: &GateParam) {
         if let GateParam::Param(i) = param {
             self.num_params = self.num_params.max(i + 1);
@@ -161,60 +144,25 @@ impl ParameterizedCircuit {
         {
             return Err(CircuitError::QubitAlreadyMeasured { qubit });
         }
-        match &gate {
-            GateInstruction::H(q)
-            | GateInstruction::X(q)
-            | GateInstruction::Y(q)
-            | GateInstruction::Z(q)
-            | GateInstruction::S(q)
-            | GateInstruction::T(q)
-            | GateInstruction::Sdg(q)
-            | GateInstruction::Tdg(q) => self.check_qubit(*q)?,
-            GateInstruction::Rx { qubit, theta }
-            | GateInstruction::Ry { qubit, theta }
-            | GateInstruction::Rz { qubit, theta } => {
-                self.check_qubit(*qubit)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::Cx(q0, q1)
-            | GateInstruction::Cz(q0, q1)
-            | GateInstruction::Swap(q0, q1) => self.check_pair(*q0, *q1)?,
-            GateInstruction::Rzz { q0, q1, theta } | GateInstruction::Rxx { q0, q1, theta } => {
-                self.check_pair(*q0, *q1)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::Cp { q0, q1, theta } => {
-                self.check_pair(*q0, *q1)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::U {
+        // Every qubit reference in range: unitary operands, a measurement target
+        // and barrier operands (`MeasureAll` spans the register by definition).
+        if let Some(qubit) = qubit_index_violation(std::slice::from_ref(&gate), self.num_qubits) {
+            return Err(CircuitError::QubitOutOfRange {
                 qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                self.check_qubit(*qubit)?;
-                Self::check_finite(theta)?;
-                Self::check_finite(phi)?;
-                Self::check_finite(lam)?;
-                let (theta, phi, lam) = (*theta, *phi, *lam);
-                self.track_param(&theta);
-                self.track_param(&phi);
-                self.track_param(&lam);
-            }
-            GateInstruction::Barrier(qubits) => {
-                for q in qubits {
-                    self.check_qubit(*q)?;
-                }
-            }
-            GateInstruction::Measure { qubit, .. } => self.check_qubit(*qubit)?,
-            GateInstruction::MeasureAll => {}
+                num_qubits: self.num_qubits,
+            });
+        }
+        // A unitary never names the same qubit twice (a barrier may).
+        if let Some(qubit) = first_repeated_qubit(gate.acts_on().qubits()) {
+            return Err(CircuitError::IdenticalQubits { qubit });
+        }
+        // Every angle is validated before any is tracked, so a rejected gate
+        // leaves `num_params` untouched.
+        for param in gate.params() {
+            Self::check_finite(param)?;
+        }
+        for param in gate.params() {
+            self.track_param(param);
         }
         self.measured.record(&gate);
         self.gates.push(gate);
@@ -420,47 +368,9 @@ impl ParameterizedCircuit {
 
         let mut gates = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
-            let bound = match gate {
-                GateInstruction::Rx { qubit, theta } => GateInstruction::Rx {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Ry { qubit, theta } => GateInstruction::Ry {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rz { qubit, theta } => GateInstruction::Rz {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rzz { q0, q1, theta } => GateInstruction::Rzz {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rxx { q0, q1, theta } => GateInstruction::Rxx {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::U {
-                    qubit,
-                    theta,
-                    phi,
-                    lam,
-                } => GateInstruction::U {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                    phi: resolve(phi)?,
-                    lam: resolve(lam)?,
-                },
-                other => other.clone(),
-            };
+            // Exhaustive over the vocabulary (no wildcard arm), so a new
+            // parameterised gate can never slip through unbound.
+            let bound = gate.try_map_params(resolve)?;
             gates.push(bound);
         }
 

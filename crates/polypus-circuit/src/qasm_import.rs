@@ -32,7 +32,7 @@
 
 use crate::circuit::ParameterizedCircuit;
 use crate::error::CircuitError;
-use crate::gate::{GateInstruction, GateParam};
+use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
 use std::collections::BTreeSet;
 
 /// Maximum nesting depth of a constant angle expression. Bounds parser
@@ -825,11 +825,7 @@ impl Parser {
     /// twice, for any arity: `cx q[1],q[1];`, or `ccx a,b,c;` where two of the
     /// arguments resolve to the same qubit after expansion.
     fn check_distinct(qubits: &[usize], line: usize) -> Result<(), CircuitError> {
-        let repeated = qubits
-            .iter()
-            .enumerate()
-            .any(|(i, q)| qubits[..i].contains(q));
-        if !repeated {
+        if first_repeated_qubit(qubits).is_none() {
             return Ok(());
         }
         let arity = match qubits.len() {
