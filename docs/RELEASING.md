@@ -62,10 +62,9 @@ and any future change must be applied to both.
   release time).
 - **DOI** — assigned by Zenodo on the first archived release; until then the
   `identifiers:` block in `CITATION.cff` and the README badge/BibTeX stay unset.
-- **Affiliations** — commented as `PENDIENTE` in `CITATION.cff` (and absent from
-  `.zenodo.json`). Add per author when agreed, to **both** files; do not invent.
 - **Version to archive** — `0.7.0` is already on PyPI; decide whether the first
   DOI is cut for a fresh `0.7.0` GitHub Release or a subsequent version.
 
-_Author list, order, ORCIDs and the license are **final** (6 authors + CESGA as
-an entity), identical in `CITATION.cff` and `.zenodo.json`._
+_Author list, order, ORCIDs, affiliations and the license are **final** (6
+authors, all affiliated to Bahía Software S.L.U., + CESGA as an entity),
+identical in `CITATION.cff` and `.zenodo.json`._

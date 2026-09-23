@@ -409,7 +409,7 @@ If Polypus is useful in your research, please cite it:
 
 ```bibtex
 @software{polypus,
-  author  = {Fernández Prada, Diego Beltrán and Sóñora Pombo, Víctor and Figueiras Gómez, Sergio and Boubeta Martínez, Miguel and {Galicia Supercomputing Center (CESGA)}},
+  author  = {Fernández Prada, Diego Beltrán and Sóñora Pombo, Víctor and Figueiras Gómez, Sergio and Boubeta Martínez, Miguel and Pérez González, Kevin and Sendón Caamaño, Uxía and {Galicia Supercomputing Center (CESGA)}},
   title   = {{Polypus: A Distributed Quantum Computing Library}},
   year    = {2026},
   url     = {https://github.com/Bahia-Software/polypus},
