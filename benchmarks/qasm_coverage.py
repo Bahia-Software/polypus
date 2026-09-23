@@ -17,7 +17,8 @@ SupermarQ), and for every file:
    but some instructions re-spelled (e.g. ``p`` → ``u3``); ``different`` would
    be a bug (a decomposition or a lost instruction);
 4. optionally (``--aer``) runs both circuits on Aer with a fixed seed after the
-   same transpilation and compares the counts.
+   same transpilation and compares the counts. A file Aer cannot run in its
+   original form is reported as not compared, not as a Polypus failure.
 
 Each file is processed in its own subprocess, so a pathological input (time
 or memory) cannot take the run down; it is reported as a timeout or crash.
@@ -195,14 +196,22 @@ def process_file(path: str, aer: bool, aer_max_qubits: int, seed: int, shots: in
             f"size {ref['size']}→{got['size']}, depth {ref['depth']}→{got['depth']}"
         )
 
-    # 4. Optional: the same Aer run on both programs.
+    # 4. Optional: the same Aer run on both programs. The original runs first:
+    # a program Aer itself cannot run is not compared (not a Polypus failure);
+    # only a failure on the re-emitted program is an error.
     if aer and reference.num_qubits <= aer_max_qubits and reference.num_clbits > 0:
         try:
-            same = _aer_counts(src, seed, shots) == _aer_counts(emitted, seed, shots)
-            record["aer"] = "equal" if same else "differ"
+            expected = _aer_counts(src, seed, shots)
         except Exception as exc:  # noqa: BLE001
-            record["aer"] = "error"
+            record["aer"] = "unsupported"
             record["aer_error"] = str(exc)[:200]
+        else:
+            try:
+                same = _aer_counts(emitted, seed, shots) == expected
+                record["aer"] = "equal" if same else "differ"
+            except Exception as exc:  # noqa: BLE001
+                record["aer"] = "error"
+                record["aer_error"] = str(exc)[:200]
     return record
 
 
@@ -307,11 +316,14 @@ def render_markdown(records, rows, roots, args):
         f" over: {', '.join(str(r) for r in roots)}."
     )
     try:
-        import polypus
+        from importlib.metadata import version
+
         import qiskit
 
+        # The Python module has no `__version__`; the installed distribution
+        # (published on PyPI as `polypus-quantum`) carries it.
         out.append(
-            f"polypus {getattr(polypus, '__version__', '?')}, qiskit {qiskit.__version__}."
+            f"polypus {version('polypus-quantum')}, qiskit {qiskit.__version__}."
         )
     except ImportError:
         pass
@@ -321,7 +333,14 @@ def render_markdown(records, rows, roots, args):
         "**re-emitted** = Polypus imports / exports it; **identical** = Qiskit sees "
         "the same instruction counts per name, size and depth in the re-emitted "
         "text as in the original; **renamed** = same size and depth, some "
-        "instructions re-spelled; **different** = a fidelity failure.",
+        "instructions re-spelled; **different** = a fidelity failure."
+        + (
+            " **Aer equal / checked** = both programs give the same counts on Aer"
+            " (fixed seed); files Aer cannot run in their original form are not"
+            " checked."
+            if args.aer
+            else ""
+        ),
         "",
         "| suite | files | skipped | valid | parsed | re-emitted | identical | renamed | different"
         + (" | Aer equal / checked" if args.aer else "")
@@ -381,7 +400,7 @@ def render_markdown(records, rows, roots, args):
         rec
         for rec in records
         if rec.get("fidelity") in ("different", "unparseable")
-        or rec.get("aer") == "differ"
+        or rec.get("aer") in ("differ", "error")
     ]
     out += ["", "## Fidelity failures", ""]
     if bad:
@@ -404,6 +423,12 @@ def render_markdown(records, rows, roots, args):
             out.append(f"| {message} | {n} |")
     else:
         out.append("_none_")
+
+    unsupported = [rec for rec in records if rec.get("aer") == "unsupported"]
+    if unsupported:
+        out += ["", "## Not compared on Aer (Aer cannot run the original either)", ""]
+        for rec in unsupported:
+            out.append(f"- `{rec['path']}`: {rec.get('aer_error', '')}")
 
     skipped = Counter(rec["skipped"] for rec in records if "skipped" in rec)
     if skipped:

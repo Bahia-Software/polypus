@@ -75,3 +75,28 @@ def test_failures_are_classified_by_construct():
         == "gate after measurement (C-4)"
     )
     assert classify("QASM parse error at line 9: something new").startswith("other: ")
+
+
+def test_aer_is_compared_only_where_it_runs_the_original(monkeypatch):
+    """A program Aer cannot run in its original form is not compared (not a
+    Polypus failure); a failure on the re-emitted program alone is an error."""
+    script = _load_script()
+    grover = str(FIXTURES / "mqtbench" / "grover_n3.qasm")
+
+    def aer_rejects_every_program(qasm, seed, shots):
+        raise RuntimeError("Aer cannot run this program")
+
+    monkeypatch.setattr(script, "_aer_counts", aer_rejects_every_program)
+    assert script.process_file(grover, True, 16, 1, 32)["aer"] == "unsupported"
+
+    runs = []
+
+    def aer_rejects_the_reemission(qasm, seed, shots):
+        runs.append(qasm)
+        if len(runs) == 2:
+            raise RuntimeError("unknown instruction")
+        return {"000": shots}
+
+    monkeypatch.setattr(script, "_aer_counts", aer_rejects_the_reemission)
+    assert script.process_file(grover, True, 16, 1, 32)["aer"] == "error"
+    assert runs[0] == Path(grover).read_text(encoding="utf-8")
