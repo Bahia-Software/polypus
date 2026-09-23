@@ -19,8 +19,13 @@
 //!
 //! - `rzz(θ)` → `cnot; rz(θ); cnot`
 //! - `rxx(θ)` → `h h; cnot; rz(θ); cnot; h h`
-//! - `cp(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
+//! - `cp(θ)` / `cu1(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
 //! - `u3(θ,φ,λ)` → `rz(λ); ry(θ); rz(φ)` (ZYZ Euler decomposition)
+//! - `sx` / `sxdg` → `rx(±π/2)`
+//! - `cy`, `ch`, `csx`, `crx`, `cry`, `crz`, `cu3`, `cu` → the standard
+//!   `cnot`-based constructions (see each arm of [`write_qir`])
+//! - `ccx` → the exact 15-gate `h`/`t`/`t†`/`cnot` decomposition of
+//!   `qelib1.inc`; `cswap a,b,c` → `cnot c,b; ccx a,b,c; cnot c,b`
 //! - `barrier` is dropped (QIR has no barrier; it is only a scheduling hint).
 //! - `id` is dropped (the identity has no intrinsic and no effect).
 //!
@@ -47,6 +52,7 @@
 use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::FRAC_PI_2;
 use std::fmt::Write;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -141,6 +147,54 @@ impl QirWriter {
         self.decls
             .insert(format!("declare void @{intrinsic}(%Qubit*, %Qubit*)"));
     }
+
+    /// `cp(θ)` (= `cu1(θ)`) = diag(1,1,1,e^{iθ}), up to global phase:
+    ///   rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1
+    /// (`cz; rz(θ); cz` is wrong: all-diagonal, cz² = I, collapses to rz(θ) —
+    /// see contract C-2 / audit item C3.)
+    fn cp(&mut self, theta: f64, q0: usize, q1: usize) {
+        self.rot(RZ, theta / 2.0, q0);
+        self.gate2(CNOT, q0, q1);
+        self.rot(RZ, -theta / 2.0, q1);
+        self.gate2(CNOT, q0, q1);
+        self.rot(RZ, theta / 2.0, q1);
+    }
+
+    /// `ccx a,b,c` via the standard exact decomposition into `h`, `t`, `t†`
+    /// and `cnot` (the definition in `qelib1.inc`; no phase at all).
+    fn ccx(&mut self, a: usize, b: usize, c: usize) {
+        self.gate1(H, c);
+        self.gate2(CNOT, b, c);
+        self.gate1(T_ADJ, c);
+        self.gate2(CNOT, a, c);
+        self.gate1(T, c);
+        self.gate2(CNOT, b, c);
+        self.gate1(T_ADJ, c);
+        self.gate2(CNOT, a, c);
+        self.gate1(T, b);
+        self.gate1(T, c);
+        self.gate1(H, c);
+        self.gate2(CNOT, a, b);
+        self.gate1(T, a);
+        self.gate1(T_ADJ, b);
+        self.gate2(CNOT, a, b);
+    }
+
+    /// Controlled `u3(θ,φ,λ)`, the `qelib1.inc` construction with each `u1`/`u3`
+    /// rewritten to `rz`/`ry` (their global phases are global here: every one
+    /// of them is applied unconditionally):
+    ///   rz((λ+φ)/2) c; rz((λ−φ)/2) t; cnot c,t; rz(−(φ+λ)/2) t; ry(−θ/2) t;
+    ///   cnot c,t; ry(θ/2) t; rz(φ) t
+    fn cu3(&mut self, (theta, phi, lam): (f64, f64, f64), c: usize, t: usize) {
+        self.rot(RZ, (lam + phi) / 2.0, c);
+        self.rot(RZ, (lam - phi) / 2.0, t);
+        self.gate2(CNOT, c, t);
+        self.rot(RZ, -(phi + lam) / 2.0, t);
+        self.rot(RY, -theta / 2.0, t);
+        self.gate2(CNOT, c, t);
+        self.rot(RY, theta / 2.0, t);
+        self.rot(RZ, phi, t);
+    }
 }
 
 /// Serialize a gate sequence to a complete QIR Base Profile LLVM IR module.
@@ -220,17 +274,101 @@ pub(crate) fn write_qir(
                 w.gate1(H, *q0);
                 w.gate1(H, *q1);
             }
-            // cp(θ) = diag(1,1,1,e^{iθ}), up to global phase:
-            //   rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1
-            // (`cz; rz(θ); cz` is wrong: all-diagonal, cz² = I, collapses to
-            // rz(θ) — see contract C-2 / audit item C3.)
-            GateInstruction::Cp { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.rot(RZ, t / 2.0, *q0);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, -t / 2.0, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t / 2.0, *q1);
+            // cp(θ) and its `cu1` spelling: see `QirWriter::cp`.
+            GateInstruction::Cp { q0, q1, theta } | GateInstruction::Cu1 { q0, q1, theta } => {
+                w.cp(angle(theta)?, *q0, *q1)
+            }
+            // √X = e^{iπ/4}·rx(π/2) and √X† = e^{−iπ/4}·rx(−π/2).
+            GateInstruction::Sx(q) => w.rot(RX, FRAC_PI_2, *q),
+            GateInstruction::Sxdg(q) => w.rot(RX, -FRAC_PI_2, *q),
+            // cy c,t = s† t; cnot c,t; s t (exact).
+            GateInstruction::Cy(c, t) => {
+                w.gate1(S_ADJ, *t);
+                w.gate2(CNOT, *c, *t);
+                w.gate1(S, *t);
+            }
+            // ch c,t = s t; h t; t t; cnot c,t; t† t; h t; s† t (exact).
+            GateInstruction::Ch(c, t) => {
+                w.gate1(S, *t);
+                w.gate1(H, *t);
+                w.gate1(T, *t);
+                w.gate2(CNOT, *c, *t);
+                w.gate1(T_ADJ, *t);
+                w.gate1(H, *t);
+                w.gate1(S_ADJ, *t);
+            }
+            // csx c,t = h t; cp(π/2) c,t; h t.
+            GateInstruction::Csx(c, t) => {
+                w.gate1(H, *t);
+                w.cp(FRAC_PI_2, *c, *t);
+                w.gate1(H, *t);
+            }
+            GateInstruction::Ccx(a, b, c) => w.ccx(*a, *b, *c),
+            // cswap a,b,c = cnot c,b; ccx a,b,c; cnot c,b (exact).
+            GateInstruction::Cswap(a, b, c) => {
+                w.gate2(CNOT, *c, *b);
+                w.ccx(*a, *b, *c);
+                w.gate2(CNOT, *c, *b);
+            }
+            // crx(θ) c,t = s t; cnot c,t; ry(−θ/2) t; cnot c,t; ry(θ/2) t; s† t.
+            GateInstruction::Crx {
+                control,
+                target,
+                theta,
+            } => {
+                let th = angle(theta)?;
+                w.gate1(S, *target);
+                w.gate2(CNOT, *control, *target);
+                w.rot(RY, -th / 2.0, *target);
+                w.gate2(CNOT, *control, *target);
+                w.rot(RY, th / 2.0, *target);
+                w.gate1(S_ADJ, *target);
+            }
+            // cry(θ) c,t = ry(θ/2) t; cnot c,t; ry(−θ/2) t; cnot c,t (exact).
+            GateInstruction::Cry {
+                control,
+                target,
+                theta,
+            } => {
+                let th = angle(theta)?;
+                w.rot(RY, th / 2.0, *target);
+                w.gate2(CNOT, *control, *target);
+                w.rot(RY, -th / 2.0, *target);
+                w.gate2(CNOT, *control, *target);
+            }
+            // crz(θ) c,t = rz(θ/2) t; cnot c,t; rz(−θ/2) t; cnot c,t (exact).
+            GateInstruction::Crz {
+                control,
+                target,
+                theta,
+            } => {
+                let th = angle(theta)?;
+                w.rot(RZ, th / 2.0, *target);
+                w.gate2(CNOT, *control, *target);
+                w.rot(RZ, -th / 2.0, *target);
+                w.gate2(CNOT, *control, *target);
+            }
+            GateInstruction::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => w.cu3((angle(theta)?, angle(phi)?, angle(lam)?), *control, *target),
+            // cu(θ,φ,λ,γ): the phase γ on the controlled branch is a relative
+            // phase between the control's states, i.e. `p(γ)` on the control
+            // (`rz(γ)` up to global phase), then cu3(θ,φ,λ).
+            GateInstruction::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => {
+                let angles = (angle(theta)?, angle(phi)?, angle(lam)?);
+                w.rot(RZ, angle(gamma)?, *control);
+                w.cu3(angles, *control, *target);
             }
             // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
             // left-to-right that is rz(λ), ry(θ), rz(φ).

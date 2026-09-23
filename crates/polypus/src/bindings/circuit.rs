@@ -448,6 +448,167 @@ impl Circuit {
         )
     }
 
+    // ── The rest of qelib1.inc ───────────────────────────────────────────
+
+    /// √X gate `sx`.
+    fn sx(slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Sx(qubit))
+    }
+
+    /// √X† gate `sxdg`.
+    fn sxdg(slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Sxdg(qubit))
+    }
+
+    /// Controlled-Y `cy(control, target)`.
+    fn cy(slf: PyRefMut<'_, Self>, control: usize, target: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Cy(control, target))
+    }
+
+    /// Controlled-Hadamard `ch(control, target)`.
+    fn ch(slf: PyRefMut<'_, Self>, control: usize, target: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Ch(control, target))
+    }
+
+    /// Controlled-√X `csx(control, target)`.
+    fn csx(slf: PyRefMut<'_, Self>, control: usize, target: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Csx(control, target))
+    }
+
+    /// Toffoli `ccx(control0, control1, target)`.
+    fn ccx(
+        slf: PyRefMut<'_, Self>,
+        control0: usize,
+        control1: usize,
+        target: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Ccx(control0, control1, target))
+    }
+
+    /// Fredkin `cswap(control, target0, target1)`.
+    fn cswap(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target0: usize,
+        target1: usize,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Cswap(control, target0, target1))
+    }
+
+    /// Controlled X-rotation `crx(control, target, theta)`.
+    fn crx(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Crx {
+                control,
+                target,
+                theta: theta.into(),
+            },
+        )
+    }
+
+    /// Controlled Y-rotation `cry(control, target, theta)`.
+    fn cry(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Cry {
+                control,
+                target,
+                theta: theta.into(),
+            },
+        )
+    }
+
+    /// Controlled Z-rotation `crz(control, target, theta)`.
+    fn crz(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Crz {
+                control,
+                target,
+                theta: theta.into(),
+            },
+        )
+    }
+
+    /// Controlled phase in its `cu1` spelling, `cu1(q0, q1, theta)`: the same
+    /// operator as `cp`, exported as `cu1`.
+    fn cu1(
+        slf: PyRefMut<'_, Self>,
+        q0: usize,
+        q1: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Cu1 {
+                q0,
+                q1,
+                theta: theta.into(),
+            },
+        )
+    }
+
+    /// Controlled `u3`: `cu3(control, target, theta, phi, lam)`.
+    fn cu3(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+        theta: AngleArg,
+        phi: AngleArg,
+        lam: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Cu3 {
+                control,
+                target,
+                theta: theta.into(),
+                phi: phi.into(),
+                lam: lam.into(),
+            },
+        )
+    }
+
+    /// Controlled `u` with phase `gamma` on the controlled branch (Qiskit's
+    /// `cu`): `cu(control, target, theta, phi, lam, gamma)`.
+    fn cu(
+        slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+        theta: AngleArg,
+        phi: AngleArg,
+        lam: AngleArg,
+        gamma: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::Cu {
+                control,
+                target,
+                theta: theta.into(),
+                phi: phi.into(),
+                lam: lam.into(),
+                gamma: gamma.into(),
+            },
+        )
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier on all qubits, or on `qubits` when given.

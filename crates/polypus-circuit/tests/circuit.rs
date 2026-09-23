@@ -849,3 +849,160 @@ fn test_concrete_circuit_to_qasm2_panics_on_param() {
 
     let _ = qc.to_qasm2();
 }
+
+// ── Tier-1 qelib1.inc gates: builder, validation and parameter binding ──────
+
+#[test]
+fn test_qelib1_builder_methods_push_one_instruction_each() {
+    use GateInstruction as G;
+    use GateParam::Fixed;
+    let qc = ParameterizedCircuit::new(3)
+        .sx(0)
+        .sxdg(1)
+        .cy(2, 0)
+        .ch(1, 2)
+        .csx(0, 1)
+        .ccx(2, 1, 0)
+        .cswap(0, 2, 1)
+        .crx(1, 0, 0.1)
+        .cry(2, 1, 0.2)
+        .crz(0, 2, 0.3)
+        .cu1(1, 2, 0.4)
+        .cu3(2, 0, 0.5, 0.6, 0.7)
+        .cu(0, 1, 0.8, 0.9, 1.0, 1.1);
+    assert_eq!(
+        qc.gates,
+        [
+            G::Sx(0),
+            G::Sxdg(1),
+            G::Cy(2, 0),
+            G::Ch(1, 2),
+            G::Csx(0, 1),
+            G::Ccx(2, 1, 0),
+            G::Cswap(0, 2, 1),
+            G::Crx {
+                control: 1,
+                target: 0,
+                theta: Fixed(0.1)
+            },
+            G::Cry {
+                control: 2,
+                target: 1,
+                theta: Fixed(0.2)
+            },
+            G::Crz {
+                control: 0,
+                target: 2,
+                theta: Fixed(0.3)
+            },
+            G::Cu1 {
+                q0: 1,
+                q1: 2,
+                theta: Fixed(0.4)
+            },
+            G::Cu3 {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+            G::Cu {
+                control: 0,
+                target: 1,
+                theta: Fixed(0.8),
+                phi: Fixed(0.9),
+                lam: Fixed(1.0),
+                gamma: Fixed(1.1)
+            },
+        ]
+    );
+    assert_eq!(qc.num_params, 0);
+}
+
+#[test]
+fn test_qelib1_param_tracking_covers_every_angle_slot() {
+    // The highest index anywhere in a gate — including `cu`'s fourth slot —
+    // sizes `num_params`.
+    assert_eq!(
+        ParameterizedCircuit::new(2).crx(0, 1, Param(3)).num_params,
+        4
+    );
+    assert_eq!(
+        ParameterizedCircuit::new(2)
+            .cu3(0, 1, 0.1, Param(1), 0.2)
+            .num_params,
+        2
+    );
+    assert_eq!(
+        ParameterizedCircuit::new(2)
+            .cu(0, 1, 0.1, 0.2, 0.3, Param(6))
+            .num_params,
+        7
+    );
+}
+
+#[test]
+fn test_try_push_validates_three_qubit_gates() {
+    let mut qc = ParameterizedCircuit::new(3);
+    assert_eq!(
+        qc.try_push(GateInstruction::Ccx(0, 1, 5)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 5,
+            num_qubits: 3
+        })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Ccx(0, 2, 0)),
+        Err(CircuitError::IdenticalQubits { qubit: 0 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cswap(1, 2, 2)),
+        Err(CircuitError::IdenticalQubits { qubit: 2 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cu {
+            control: 0,
+            target: 1,
+            theta: GateParam::Fixed(0.1),
+            phi: GateParam::Fixed(0.2),
+            lam: GateParam::Fixed(0.3),
+            gamma: GateParam::Fixed(f64::NAN),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert!(qc.gates.is_empty());
+    assert_eq!(qc.try_push(GateInstruction::Cswap(2, 0, 1)), Ok(()));
+}
+
+/// Parameter binding for every parameterised Tier-1 gate: binding free
+/// parameters yields exactly the circuit built with those angles fixed, both
+/// as instructions and as exported QASM. This is the binding path the
+/// orchestration benchmark measures.
+#[test]
+fn test_qelib1_bound_circuit_matches_fixed_angle_circuit() {
+    let values = [0.3, -1.2, 2.5, 0.7];
+    let parameterised = ParameterizedCircuit::new(3)
+        .crx(0, 1, Param(0))
+        .cry(2, 0, Param(1))
+        .crz(1, 2, Param(2))
+        .cu1(2, 1, Param(3))
+        .cu3(0, 2, Param(2), Param(0), Param(1))
+        .cu(1, 0, Param(3), Param(2), Param(1), Param(0));
+    let fixed = ParameterizedCircuit::new(3)
+        .crx(0, 1, values[0])
+        .cry(2, 0, values[1])
+        .crz(1, 2, values[2])
+        .cu1(2, 1, values[3])
+        .cu3(0, 2, values[2], values[0], values[1])
+        .cu(1, 0, values[3], values[2], values[1], values[0]);
+    assert_eq!(parameterised.num_params, 4);
+
+    let bound = parameterised.assign_parameters(&values).unwrap();
+    assert_eq!(bound.gates, fixed.gates);
+    assert_eq!(
+        parameterised.to_qasm2_with_params(&values).unwrap(),
+        fixed.to_qasm2_with_params(&[]).unwrap()
+    );
+    assert_eq!(bound.to_qasm2(), fixed.to_qasm2_with_params(&[]).unwrap());
+}

@@ -113,6 +113,83 @@ pub(crate) fn write_qasm2(
                     angle(lam)?
                 );
             }
+            GateInstruction::Sx(q) => {
+                let _ = writeln!(out, "sx q[{q}];");
+            }
+            GateInstruction::Sxdg(q) => {
+                let _ = writeln!(out, "sxdg q[{q}];");
+            }
+            GateInstruction::Cy(c, t) => {
+                let _ = writeln!(out, "cy q[{c}],q[{t}];");
+            }
+            GateInstruction::Ch(c, t) => {
+                let _ = writeln!(out, "ch q[{c}],q[{t}];");
+            }
+            GateInstruction::Csx(c, t) => {
+                let _ = writeln!(out, "csx q[{c}],q[{t}];");
+            }
+            GateInstruction::Ccx(c0, c1, t) => {
+                let _ = writeln!(out, "ccx q[{c0}],q[{c1}],q[{t}];");
+            }
+            GateInstruction::Cswap(c, t0, t1) => {
+                let _ = writeln!(out, "cswap q[{c}],q[{t0}],q[{t1}];");
+            }
+            GateInstruction::Crx {
+                control,
+                target,
+                theta,
+            } => {
+                let _ = writeln!(out, "crx({}) q[{control}],q[{target}];", angle(theta)?);
+            }
+            GateInstruction::Cry {
+                control,
+                target,
+                theta,
+            } => {
+                let _ = writeln!(out, "cry({}) q[{control}],q[{target}];", angle(theta)?);
+            }
+            GateInstruction::Crz {
+                control,
+                target,
+                theta,
+            } => {
+                let _ = writeln!(out, "crz({}) q[{control}],q[{target}];", angle(theta)?);
+            }
+            GateInstruction::Cu1 { q0, q1, theta } => {
+                let _ = writeln!(out, "cu1({}) q[{q0}],q[{q1}];", angle(theta)?);
+            }
+            GateInstruction::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "cu3({},{},{}) q[{control}],q[{target}];",
+                    angle(theta)?,
+                    angle(phi)?,
+                    angle(lam)?
+                );
+            }
+            GateInstruction::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "cu({},{},{},{}) q[{control}],q[{target}];",
+                    angle(theta)?,
+                    angle(phi)?,
+                    angle(lam)?,
+                    angle(gamma)?
+                );
+            }
             GateInstruction::Barrier(qubits) => {
                 if qubits.is_empty() {
                     out.push_str("barrier q;\n");

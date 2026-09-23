@@ -65,6 +65,28 @@ pub(crate) fn u(theta: f64, phi: f64, lam: f64) -> [[C64; 2]; 2] {
     ]
 }
 
+/// √X: `½ [[1+i, 1−i], [1−i, 1+i]]` (Qiskit `sx`).
+pub(crate) fn sx() -> [[C64; 2]; 2] {
+    let (p, m) = (C64::new(0.5, 0.5), C64::new(0.5, -0.5));
+    [[p, m], [m, p]]
+}
+
+/// √X† = `½ [[1−i, 1+i], [1+i, 1−i]]` (Qiskit `sxdg`).
+pub(crate) fn sxdg() -> [[C64; 2]; 2] {
+    let (p, m) = (C64::new(0.5, 0.5), C64::new(0.5, -0.5));
+    [[m, p], [p, m]]
+}
+
+/// A diagonal gate `diag(d0, d1)` as a dense 2×2, for the controlled kernel.
+pub(crate) fn diag_matrix((d0, d1): (C64, C64)) -> [[C64; 2]; 2] {
+    [[d0, re(0.0)], [re(0.0), d1]]
+}
+
+/// Phase gate `P(λ) = diag(1, e^{iλ})` (Qiskit `p`/`u1`).
+pub(crate) fn phase(lam: f64) -> (C64, C64) {
+    (re(1.0), C64::from_polar(1.0, lam))
+}
+
 // ── Diagonal single-qubit gates: (factor for bit 0, factor for bit 1) ─────
 
 /// Pauli-Z.

@@ -318,6 +318,119 @@ impl ParameterizedCircuit {
         })
     }
 
+    // ── The rest of qelib1.inc ───────────────────────────────────────────
+
+    /// √X gate on `qubit`.
+    pub fn sx(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Sx(qubit))
+    }
+
+    /// √X† gate on `qubit`.
+    pub fn sxdg(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Sxdg(qubit))
+    }
+
+    /// Controlled-Y with `control` and `target`.
+    pub fn cy(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Cy(control, target))
+    }
+
+    /// Controlled-Hadamard with `control` and `target`.
+    pub fn ch(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Ch(control, target))
+    }
+
+    /// Controlled-√X with `control` and `target`.
+    pub fn csx(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Csx(control, target))
+    }
+
+    /// Toffoli: flips `target` when both `control0` and `control1` are 1.
+    pub fn ccx(self, control0: usize, control1: usize, target: usize) -> Self {
+        self.push(GateInstruction::Ccx(control0, control1, target))
+    }
+
+    /// Fredkin: swaps `target0` and `target1` when `control` is 1.
+    pub fn cswap(self, control: usize, target0: usize, target1: usize) -> Self {
+        self.push(GateInstruction::Cswap(control, target0, target1))
+    }
+
+    /// Controlled X-rotation.
+    pub fn crx(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Crx {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled Y-rotation.
+    pub fn cry(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cry {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled Z-rotation.
+    pub fn crz(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Crz {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled phase in its `cu1` spelling (the same operator as
+    /// [`cp`](Self::cp), exported as `cu1`).
+    pub fn cu1(self, q0: usize, q1: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cu1 {
+            q0,
+            q1,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled `u3(theta, phi, lam)`.
+    pub fn cu3(
+        self,
+        control: usize,
+        target: usize,
+        theta: impl Into<GateParam>,
+        phi: impl Into<GateParam>,
+        lam: impl Into<GateParam>,
+    ) -> Self {
+        self.push(GateInstruction::Cu3 {
+            control,
+            target,
+            theta: theta.into(),
+            phi: phi.into(),
+            lam: lam.into(),
+        })
+    }
+
+    /// Controlled `u(theta, phi, lam)` with phase `gamma` on the controlled
+    /// branch (Qiskit's `cu`).
+    pub fn cu(
+        self,
+        control: usize,
+        target: usize,
+        theta: impl Into<GateParam>,
+        phi: impl Into<GateParam>,
+        lam: impl Into<GateParam>,
+        gamma: impl Into<GateParam>,
+    ) -> Self {
+        self.push(GateInstruction::Cu {
+            control,
+            target,
+            theta: theta.into(),
+            phi: phi.into(),
+            lam: lam.into(),
+            gamma: gamma.into(),
+        })
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier across the whole quantum register (`barrier q;`).

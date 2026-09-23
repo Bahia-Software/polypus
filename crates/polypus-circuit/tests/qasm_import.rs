@@ -429,6 +429,201 @@ fn id_rejects_wrong_arity_parameters_and_range() {
     assert_parse_err("OPENQASM 2.0;\nqreg q[2];\nid q[2];\n", "out of range", 3);
 }
 
+// ─────────────── Tier-1 qelib1.inc gates: one-to-one import ───────────────
+
+/// Each gate imports into its own instruction with the operands in source
+/// order (control(s) first) and the angles in source order. The operands are
+/// deliberately not ascending, so a swapped control/target shows up.
+#[test]
+fn qelib1_gates_import_with_their_operand_and_parameter_order() {
+    use GateInstruction as G;
+    use GateParam::Fixed;
+    let cases: Vec<(&str, GateInstruction)> = vec![
+        ("sx q[2];", G::Sx(2)),
+        ("sxdg q[1];", G::Sxdg(1)),
+        ("cy q[2],q[0];", G::Cy(2, 0)),
+        ("ch q[1],q[0];", G::Ch(1, 0)),
+        ("csx q[2],q[1];", G::Csx(2, 1)),
+        ("ccx q[2],q[0],q[1];", G::Ccx(2, 0, 1)),
+        ("cswap q[1],q[2],q[0];", G::Cswap(1, 2, 0)),
+        (
+            "crx(0.5) q[2],q[0];",
+            G::Crx {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.5),
+            },
+        ),
+        (
+            "cry(-0.5) q[1],q[0];",
+            G::Cry {
+                control: 1,
+                target: 0,
+                theta: Fixed(-0.5),
+            },
+        ),
+        (
+            "crz(pi/4) q[0],q[2];",
+            G::Crz {
+                control: 0,
+                target: 2,
+                theta: Fixed(std::f64::consts::FRAC_PI_4),
+            },
+        ),
+        (
+            "cu1(0.25) q[2],q[1];",
+            G::Cu1 {
+                q0: 2,
+                q1: 1,
+                theta: Fixed(0.25),
+            },
+        ),
+        (
+            "cu3(0.1,0.2,0.3) q[1],q[2];",
+            G::Cu3 {
+                control: 1,
+                target: 2,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: Fixed(0.3),
+            },
+        ),
+        (
+            "cu(0.1,0.2,0.3,0.4) q[2],q[0];",
+            G::Cu {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: Fixed(0.3),
+                gamma: Fixed(0.4),
+            },
+        ),
+    ];
+    for (statement, expected) in cases {
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{statement}\n");
+        let qc =
+            ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
+        assert_eq!(qc.gates, [expected], "{statement}");
+    }
+}
+
+/// (name, parameters, qubits) of every Tier-1 gate, for the signature checks.
+const TIER1_SIGNATURES: [(&str, usize, usize); 13] = [
+    ("sx", 0, 1),
+    ("sxdg", 0, 1),
+    ("cy", 0, 2),
+    ("ch", 0, 2),
+    ("csx", 0, 2),
+    ("ccx", 0, 3),
+    ("cswap", 0, 3),
+    ("crx", 1, 2),
+    ("cry", 1, 2),
+    ("crz", 1, 2),
+    ("cu1", 1, 2),
+    ("cu3", 3, 2),
+    ("cu", 4, 2),
+];
+
+/// Render a gate application with `params` angles on the qubits `operands`.
+fn application(name: &str, params: usize, operands: impl IntoIterator<Item = usize>) -> String {
+    let angles: Vec<String> = (0..params).map(|i| format!("0.{}", i + 1)).collect();
+    let angle_list = if params == 0 {
+        String::new()
+    } else {
+        format!("({})", angles.join(","))
+    };
+    let operands: Vec<String> = operands.into_iter().map(|q| format!("q[{q}]")).collect();
+    format!("{name}{angle_list} {};", operands.join(","))
+}
+
+#[test]
+fn qelib1_gates_reject_wrong_argument_and_parameter_counts() {
+    for (name, params, qubits) in TIER1_SIGNATURES {
+        // One argument too many (and, for multi-qubit gates, one too few).
+        let mut wrong_arities = vec![qubits + 1];
+        if qubits > 1 {
+            wrong_arities.push(qubits - 1);
+        }
+        for wrong in wrong_arities {
+            let src = format!(
+                "OPENQASM 2.0;\nqreg q[5];\n{}\n",
+                application(name, params, 0..wrong)
+            );
+            assert_parse_err(
+                &src,
+                &format!("gate '{name}' expects {qubits} argument(s), found {wrong}"),
+                3,
+            );
+        }
+        // One parameter too many (and one too few for parameterised gates).
+        let mut wrong_counts = vec![params + 1];
+        if params > 0 {
+            wrong_counts.push(params - 1);
+        }
+        for wrong in wrong_counts {
+            let src = format!(
+                "OPENQASM 2.0;\nqreg q[5];\n{}\n",
+                application(name, wrong, 0..qubits)
+            );
+            assert_parse_err(
+                &src,
+                &format!("gate '{name}' expects {params} parameter(s), found {wrong}"),
+                3,
+            );
+        }
+    }
+}
+
+#[test]
+fn qelib1_gates_reject_out_of_range_qubits() {
+    for (name, params, qubits) in TIER1_SIGNATURES {
+        // A `qubits`-wide register; the last operand is one past its end.
+        let statement = application(name, params, (0..qubits - 1).chain([qubits]));
+        let src = format!("OPENQASM 2.0;\nqreg q[{qubits}];\n{statement}\n");
+        assert_parse_err(&src, "out of range", 3);
+    }
+}
+
+#[test]
+fn three_qubit_gates_reject_repeated_operands() {
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[3];\nccx q[0],q[1],q[0];\n",
+        "three-qubit gate requires distinct qubits, got (0, 1, 0)",
+        3,
+    );
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[3];\ncswap q[2],q[1],q[1];\n",
+        "three-qubit gate requires distinct qubits, got (2, 1, 1)",
+        3,
+    );
+}
+
+/// OpenQASM 2.0 broadcasting for a three-qubit gate over mixed register and
+/// single-bit arguments: `ccx a,b,c[0];` is `ccx a[k],b[k],c[0];` for each k —
+/// the same expansion Qiskit's loader produces.
+#[test]
+fn three_qubit_gates_broadcast_over_registers() {
+    let src = "OPENQASM 2.0;\nqreg a[2];\nqreg b[2];\nqreg c[1];\nccx a,b,c[0];\ncswap c[0],a,b;\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    // a = q[0..2], b = q[2..4], c = q[4]
+    assert_eq!(
+        qc.gates,
+        [
+            GateInstruction::Ccx(0, 2, 4),
+            GateInstruction::Ccx(1, 3, 4),
+            GateInstruction::Cswap(4, 0, 2),
+            GateInstruction::Cswap(4, 1, 3),
+        ]
+    );
+    // Registers of different sizes cannot broadcast together.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg a[2];\nqreg b[3];\nqreg c[1];\nccx a,b,c[0];\n",
+        "register size mismatch",
+        5,
+    );
+}
+
 // ─────────────────────── Imported circuits are usable ─────────────────────
 
 /// An imported circuit must behave like any other ParameterizedCircuit:

@@ -38,10 +38,90 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .rzz(0, 2, Param(0))
         .rxx(1, 2, 2.0)
         .cp(0, 1, 0.75)
+        .sx(1)
+        .sxdg(2)
+        .cy(2, 0)
+        .ch(1, 2)
+        .csx(0, 2)
+        .ccx(2, 0, 1)
+        .cswap(1, 2, 0)
+        .crx(1, 0, Param(1))
+        .cry(2, 1, -0.6)
+        .crz(0, 2, 1.1)
+        .cu1(2, 1, Param(0))
+        .cu3(1, 0, 0.2, -0.4, Param(1))
+        .cu(0, 2, 0.3, Param(0), -0.1, 0.9)
         .barrier()
         .barrier_on(&[0, 2])
         .measure(0, 0)
         .measure(2, 1)
+}
+
+/// Number of instruction kinds in [`GateInstruction`].
+const INSTRUCTION_KINDS: usize = 35;
+
+/// Every instruction kind, numbered `0..INSTRUCTION_KINDS`. The match is
+/// exhaustive, so adding a variant fails to build here until it is numbered;
+/// `c2_full_vocabulary_covers_every_instruction` then fails until
+/// `full_vocabulary` exercises it.
+fn instruction_kind(gate: &GateInstruction) -> usize {
+    use GateInstruction as G;
+    match gate {
+        G::H(_) => 0,
+        G::X(_) => 1,
+        G::Y(_) => 2,
+        G::Z(_) => 3,
+        G::S(_) => 4,
+        G::T(_) => 5,
+        G::Sdg(_) => 6,
+        G::Tdg(_) => 7,
+        G::Id(_) => 8,
+        G::Rx { .. } => 9,
+        G::Ry { .. } => 10,
+        G::Rz { .. } => 11,
+        G::Cx(..) => 12,
+        G::Cz(..) => 13,
+        G::Swap(..) => 14,
+        G::Rzz { .. } => 15,
+        G::Rxx { .. } => 16,
+        G::Cp { .. } => 17,
+        G::U { .. } => 18,
+        G::Sx(_) => 19,
+        G::Sxdg(_) => 20,
+        G::Cy(..) => 21,
+        G::Ch(..) => 22,
+        G::Csx(..) => 23,
+        G::Ccx(..) => 24,
+        G::Cswap(..) => 25,
+        G::Crx { .. } => 26,
+        G::Cry { .. } => 27,
+        G::Crz { .. } => 28,
+        G::Cu1 { .. } => 29,
+        G::Cu3 { .. } => 30,
+        G::Cu { .. } => 31,
+        G::Barrier(_) => 32,
+        G::Measure { .. } => 33,
+        G::MeasureAll => 34,
+    }
+}
+
+#[test]
+fn c2_full_vocabulary_covers_every_instruction() {
+    let mut seen = [false; INSTRUCTION_KINDS];
+    // `MeasureAll` has its own round-trip case below: `full_vocabulary` keeps a
+    // partial measurement so the importer does not collapse it.
+    for gate in full_vocabulary()
+        .gates
+        .iter()
+        .chain([&GateInstruction::MeasureAll])
+    {
+        seen[instruction_kind(gate)] = true;
+    }
+    let missing: Vec<usize> = (0..INSTRUCTION_KINDS).filter(|&k| !seen[k]).collect();
+    assert!(
+        missing.is_empty(),
+        "instruction kinds missing from full_vocabulary: {missing:?}"
+    );
 }
 
 #[test]
@@ -90,6 +170,24 @@ fn c2_every_gate_roundtrips_individually() {
         ("rxx", ParameterizedCircuit::new(2).rxx(0, 1, 0.3)),
         ("cp", ParameterizedCircuit::new(2).cp(0, 1, 0.3)),
         ("u3", ParameterizedCircuit::new(1).u(0, 0.1, 0.2, 0.3)),
+        ("sx", ParameterizedCircuit::new(1).sx(0)),
+        ("sxdg", ParameterizedCircuit::new(1).sxdg(0)),
+        // Operands deliberately out of ascending order: a swapped control and
+        // target (or a re-sorted operand list) would change the instruction.
+        ("cy", ParameterizedCircuit::new(2).cy(1, 0)),
+        ("ch", ParameterizedCircuit::new(2).ch(1, 0)),
+        ("csx", ParameterizedCircuit::new(2).csx(1, 0)),
+        ("ccx", ParameterizedCircuit::new(3).ccx(2, 0, 1)),
+        ("cswap", ParameterizedCircuit::new(3).cswap(1, 2, 0)),
+        ("crx", ParameterizedCircuit::new(2).crx(1, 0, 0.3)),
+        ("cry", ParameterizedCircuit::new(2).cry(1, 0, 0.3)),
+        ("crz", ParameterizedCircuit::new(2).crz(1, 0, 0.3)),
+        ("cu1", ParameterizedCircuit::new(2).cu1(1, 0, 0.3)),
+        ("cu3", ParameterizedCircuit::new(2).cu3(1, 0, 0.1, 0.2, 0.3)),
+        (
+            "cu",
+            ParameterizedCircuit::new(2).cu(1, 0, 0.1, 0.2, 0.3, 0.4),
+        ),
         ("barrier", ParameterizedCircuit::new(2).h(0).barrier()),
         // A partial measurement (qubit 1 left unmeasured) so the importer does
         // not canonicalise a full q[k]->c[k] run into `measure_all`.
@@ -113,6 +211,84 @@ fn c2_every_gate_roundtrips_individually() {
             "gate '{name}' instruction sequence changed on round-trip"
         );
     }
+}
+
+/// The text-first direction, gate by gate: an OpenQASM statement in canonical
+/// form parses into one instruction and is re-emitted byte-identically. This is
+/// what keeps a benchmark file's circuit intact on its way to Aer: the same
+/// names, the same operand order, no decomposition.
+#[test]
+fn c2_every_gate_statement_reemits_byte_identically() {
+    let statements = [
+        "h q[2];",
+        "x q[0];",
+        "y q[1];",
+        "z q[2];",
+        "s q[0];",
+        "t q[1];",
+        "sdg q[2];",
+        "tdg q[0];",
+        "id q[1];",
+        "sx q[2];",
+        "sxdg q[0];",
+        "rx(0.250000000000) q[1];",
+        "ry(-1.500000000000) q[2];",
+        "rz(3.141592653590) q[0];",
+        "u3(0.100000000000,0.200000000000,0.300000000000) q[1];",
+        "cx q[2],q[0];",
+        "cz q[1],q[2];",
+        "cy q[2],q[1];",
+        "ch q[0],q[2];",
+        "csx q[2],q[0];",
+        "swap q[1],q[0];",
+        "ccx q[2],q[0],q[1];",
+        "cswap q[1],q[2],q[0];",
+        "rzz(0.400000000000) q[2],q[1];",
+        "rxx(-0.400000000000) q[1],q[0];",
+        "cp(0.750000000000) q[2],q[0];",
+        "cu1(0.750000000000) q[2],q[0];",
+        "crx(0.500000000000) q[1],q[0];",
+        "cry(-0.500000000000) q[2],q[1];",
+        "crz(1.250000000000) q[0],q[2];",
+        "cu3(0.100000000000,-0.200000000000,0.300000000000) q[2],q[0];",
+        "cu(0.100000000000,0.200000000000,-0.300000000000,0.400000000000) q[1],q[2];",
+    ];
+    for statement in statements {
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{statement}\n");
+        let imported = ParameterizedCircuit::from_qasm2(&src)
+            .unwrap_or_else(|e| panic!("{statement}: failed to parse: {e}"));
+        assert_eq!(imported.gates.len(), 1, "{statement}: not one instruction");
+        assert_eq!(
+            imported.to_qasm2_with_params(&[]).unwrap(),
+            src,
+            "{statement}: not re-emitted byte-identically"
+        );
+    }
+}
+
+/// `cu1` and `cp` are the same operator but distinct instructions: each keeps
+/// its own spelling through import and export (the byte-identical round-trip
+/// guarantee), rather than one being normalised into the other.
+#[test]
+fn c2_cu1_and_cp_keep_their_own_spelling() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncu1(0.500000000000) q[0],q[1];\ncp(0.500000000000) q[0],q[1];\n";
+    let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(
+        imported.gates,
+        [
+            GateInstruction::Cu1 {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Fixed(0.5)
+            },
+            GateInstruction::Cp {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Fixed(0.5)
+            },
+        ]
+    );
+    assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), src);
 }
 
 /// `cp` specifically must import back to a `Cp` instruction (audit item C2:
@@ -177,6 +353,57 @@ fn c4_id_after_measure_is_rejected_by_builder_and_importer() {
     match ParameterizedCircuit::from_qasm2(src) {
         Err(CircuitError::Parse { line: 5, message }) => {
             assert!(message.contains("after it was measured"), "{message}")
+        }
+        other => panic!("expected a C-4 parse error at line 5, got {other:?}"),
+    }
+}
+
+/// C-4 holds at every arity: a three-qubit gate is rejected if *any* of its
+/// operands was measured, and the first measured operand (in operand order) is
+/// the one reported — by the builder, the importer and the QIR exporter alike.
+#[test]
+fn c4_three_qubit_gates_reject_any_measured_operand() {
+    for (measured, gate, offending) in [
+        (2, GateInstruction::Ccx(0, 1, 2), 2), // the target
+        (0, GateInstruction::Ccx(0, 1, 2), 0), // a control
+        (1, GateInstruction::Cswap(0, 1, 2), 1),
+        (2, GateInstruction::Cswap(2, 0, 1), 2),
+    ] {
+        let mut qc = ParameterizedCircuit::new(3);
+        qc.try_push(GateInstruction::Measure {
+            qubit: measured,
+            cbit: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            qc.try_push(gate.clone()),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: offending }),
+            "builder, {gate:?}"
+        );
+
+        let mut hand = ParameterizedCircuit::new(3);
+        hand.gates = vec![
+            GateInstruction::Measure {
+                qubit: measured,
+                cbit: 0,
+            },
+            gate.clone(),
+        ];
+        assert_eq!(
+            hand.to_qir_with_params(&[]),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: offending }),
+            "QIR exporter, {gate:?}"
+        );
+    }
+
+    let src =
+        "OPENQASM 2.0;\nqreg q[3];\ncreg c[1];\nmeasure q[1] -> c[0];\ncswap q[0],q[2],q[1];\n";
+    match ParameterizedCircuit::from_qasm2(src) {
+        Err(CircuitError::Parse { line: 5, message }) => {
+            assert!(
+                message.contains("qubit 1 after it was measured"),
+                "{message}"
+            )
         }
         other => panic!("expected a C-4 parse error at line 5, got {other:?}"),
     }

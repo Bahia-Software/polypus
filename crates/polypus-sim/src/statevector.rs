@@ -271,6 +271,32 @@ fn cx_4x4(control: usize, target: usize, qa: usize) -> [[C64; 4]; 4] {
     out
 }
 
+/// The Toffoli gate `ccx a,b,c` (controls `a`, `b`; target `c`) as the exact
+/// 15-gate `h`/`t`/`tdg`/`cx` decomposition that defines it in `qelib1.inc`
+/// (Nielsen & Chuang, Fig. 4.9) — no global or relative phase. The simulator
+/// has no three-qubit kernel, so [`Statevector::apply`] lowers `Ccx` (and
+/// `Cswap`, through it) to this sequence.
+fn ccx_lowering(a: usize, b: usize, c: usize) -> [GateInstruction; 15] {
+    use GateInstruction as G;
+    [
+        G::H(c),
+        G::Cx(b, c),
+        G::Tdg(c),
+        G::Cx(a, c),
+        G::T(c),
+        G::Cx(b, c),
+        G::Tdg(c),
+        G::Cx(a, c),
+        G::T(b),
+        G::T(c),
+        G::H(c),
+        G::Cx(a, b),
+        G::T(a),
+        G::Tdg(b),
+        G::Cx(a, b),
+    ]
+}
+
 /// `a · b` for 2×2 complex matrices (`a` applied after `b`).
 fn matmul2(a: &[[C64; 2]; 2], b: &[[C64; 2]; 2]) -> [[C64; 2]; 2] {
     let mut out = [[C64::new(0.0, 0.0); 2]; 2];
@@ -472,6 +498,92 @@ impl Statevector {
             } => {
                 let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
                 kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            GateInstruction::Sx(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::sx(), par),
+            GateInstruction::Sxdg(q) => {
+                kernels::apply_1q(&mut self.data, n, *q, &gates::sxdg(), par)
+            }
+            // Controlled single-qubit gates: the target's exact 2×2 on the
+            // controlled kernel (for `cu`, including its phase γ).
+            GateInstruction::Cy(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::y(), par);
+            }
+            GateInstruction::Ch(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::h(), par);
+            }
+            GateInstruction::Csx(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::sx(), par);
+            }
+            GateInstruction::Crx {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::rx(angle(theta)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Cry {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::ry(angle(theta)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Crz {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::diag_matrix(gates::rz(angle(theta)?));
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            // The same operator as `Cp`. It takes the controlled path rather
+            // than `Cp`'s diagonal one so that the diagonal arms here stay
+            // exactly the ones `diagonal_op` classifies for run fusion.
+            GateInstruction::Cu1 { q0, q1, theta } => {
+                let m = gates::diag_matrix(gates::phase(angle(theta)?));
+                kernels::apply_controlled_1q(&mut self.data, n, *q0, *q1, &m, par);
+            }
+            GateInstruction::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => {
+                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => {
+                let u = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                let phase = C64::from_polar(1.0, angle(gamma)?);
+                let m = u.map(|row| row.map(|entry| entry * phase));
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            // No dedicated three-qubit kernel: lowered here to the exact
+            // `qelib1.inc` decompositions (see `ccx_lowering`). This is the
+            // simulator's lowering boundary; the circuit itself, and its
+            // OpenQASM export, keep `ccx`/`cswap` as single instructions.
+            GateInstruction::Ccx(a, b, c) => {
+                for g in &ccx_lowering(*a, *b, *c) {
+                    self.apply(g)?;
+                }
+            }
+            GateInstruction::Cswap(a, b, c) => {
+                // cswap a,b,c = cx c,b; ccx a,b,c; cx c,b
+                self.apply(&GateInstruction::Cx(*c, *b))?;
+                for g in &ccx_lowering(*a, *b, *c) {
+                    self.apply(g)?;
+                }
+                self.apply(&GateInstruction::Cx(*c, *b))?;
             }
             // The identity leaves the state unchanged (the qubit index was
             // still range-checked above, like every operand).

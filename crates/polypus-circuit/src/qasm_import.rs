@@ -4,9 +4,11 @@
 //! ([`crate::qasm`]) plus the common `qelib1.inc` vocabulary produced by other
 //! toolchains (notably Qiskit's `qasm2.dumps`):
 //!
-//! - Gates: `h x y z s t sdg tdg id rx ry rz p u1 u2 u3 u U cx CX cz swap rzz
-//!   rxx cp` (`p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and `CX` to
-//!   `cx`; `id` is kept as an instruction of its own, never dropped).
+//! - Gates: `h x y z s t sdg tdg id sx sxdg rx ry rz p u1 u2 u3 u U cx CX cz
+//!   cy ch csx swap ccx cswap rzz rxx cp crx cry crz cu1 cu3 cu`. Each is
+//!   represented one-to-one and re-emitted under the same name — nothing is
+//!   decomposed here — except that `p`/`u1`/`u2`/`u`/`U` are canonicalised to
+//!   `u3` and `CX` to `cx`. `id` is an instruction of its own, never dropped.
 //! - `barrier`, `measure` (including register broadcast `measure q -> c;`).
 //! - Multiple `qreg`/`creg` declarations, flattened into one index space in
 //!   declaration order.
@@ -356,6 +358,52 @@ static BUILTIN_GATES: &[BuiltinGate] = &[
         q0: q[0],
         q1: q[1],
         theta: p[0],
+    }),
+    // ── The rest of qelib1.inc: every one kept under its own spelling ──
+    builtin("sx", 0, 1, |_, q| GateInstruction::Sx(q[0])),
+    builtin("sxdg", 0, 1, |_, q| GateInstruction::Sxdg(q[0])),
+    builtin("cy", 0, 2, |_, q| GateInstruction::Cy(q[0], q[1])),
+    builtin("ch", 0, 2, |_, q| GateInstruction::Ch(q[0], q[1])),
+    builtin("csx", 0, 2, |_, q| GateInstruction::Csx(q[0], q[1])),
+    builtin("ccx", 0, 3, |_, q| GateInstruction::Ccx(q[0], q[1], q[2])),
+    builtin("cswap", 0, 3, |_, q| {
+        GateInstruction::Cswap(q[0], q[1], q[2])
+    }),
+    builtin("crx", 1, 2, |p, q| GateInstruction::Crx {
+        control: q[0],
+        target: q[1],
+        theta: p[0],
+    }),
+    builtin("cry", 1, 2, |p, q| GateInstruction::Cry {
+        control: q[0],
+        target: q[1],
+        theta: p[0],
+    }),
+    builtin("crz", 1, 2, |p, q| GateInstruction::Crz {
+        control: q[0],
+        target: q[1],
+        theta: p[0],
+    }),
+    // The same operator as `cp`, but its own instruction: `cu1` stays `cu1`.
+    builtin("cu1", 1, 2, |p, q| GateInstruction::Cu1 {
+        q0: q[0],
+        q1: q[1],
+        theta: p[0],
+    }),
+    builtin("cu3", 3, 2, |p, q| GateInstruction::Cu3 {
+        control: q[0],
+        target: q[1],
+        theta: p[0],
+        phi: p[1],
+        lam: p[2],
+    }),
+    builtin("cu", 4, 2, |p, q| GateInstruction::Cu {
+        control: q[0],
+        target: q[1],
+        theta: p[0],
+        phi: p[1],
+        lam: p[2],
+        gamma: p[3],
     }),
 ];
 

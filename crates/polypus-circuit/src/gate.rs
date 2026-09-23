@@ -120,6 +120,65 @@ pub enum GateInstruction {
         phi: GateParam,
         lam: GateParam,
     },
+    /// √X (`sx`).
+    Sx(usize),
+    /// Conjugate transpose of √X (`sxdg`).
+    Sxdg(usize),
+    /// Controlled-Y (`cy`): control, target.
+    Cy(usize, usize),
+    /// Controlled-Hadamard (`ch`): control, target.
+    Ch(usize, usize),
+    /// Controlled-√X (`csx`): control, target.
+    Csx(usize, usize),
+    /// Toffoli (`ccx`): control, control, target.
+    Ccx(usize, usize, usize),
+    /// Fredkin (`cswap`): control, target, target.
+    Cswap(usize, usize, usize),
+    /// Controlled X-rotation (`crx`).
+    Crx {
+        control: usize,
+        target: usize,
+        theta: GateParam,
+    },
+    /// Controlled Y-rotation (`cry`).
+    Cry {
+        control: usize,
+        target: usize,
+        theta: GateParam,
+    },
+    /// Controlled Z-rotation (`crz`).
+    Crz {
+        control: usize,
+        target: usize,
+        theta: GateParam,
+    },
+    /// Controlled phase in its `cu1` spelling: the same operator as
+    /// [`Cp`](GateInstruction::Cp), kept as its own variant so that a `cu1`
+    /// statement is re-emitted as `cu1`, never rewritten to `cp`.
+    Cu1 {
+        q0: usize,
+        q1: usize,
+        theta: GateParam,
+    },
+    /// Controlled `u3(theta, phi, lambda)` (`cu3`).
+    Cu3 {
+        control: usize,
+        target: usize,
+        theta: GateParam,
+        phi: GateParam,
+        lam: GateParam,
+    },
+    /// Controlled `u(theta, phi, lambda)` with an extra phase `gamma` on the
+    /// controlled branch (`cu`, Qiskit's `CUGate`): applies
+    /// `e^{i·gamma} · U(theta, phi, lambda)` to the target when the control is 1.
+    Cu {
+        control: usize,
+        target: usize,
+        theta: GateParam,
+        phi: GateParam,
+        lam: GateParam,
+        gamma: GateParam,
+    },
     /// Barrier. An empty vector means "all qubits" (`barrier q;`).
     Barrier(Vec<usize>),
     /// Measure one qubit into one classical bit.
@@ -133,8 +192,8 @@ pub enum GateInstruction {
 /// adding them never forces [`Operands`] to change shape.
 pub(crate) const MAX_GATE_ARITY: usize = 5;
 
-/// The most angle parameters a built-in instruction takes (`u3`).
-const MAX_GATE_PARAMS: usize = 3;
+/// The most angle parameters a built-in instruction takes (`cu`).
+const MAX_GATE_PARAMS: usize = 4;
 
 /// The first qubit that appears more than once in `qubits` (reported at its
 /// second occurrence), or `None` when all are distinct. A unitary may never
@@ -223,10 +282,24 @@ impl GateInstruction {
             | G::Rz { theta, .. }
             | G::Rzz { theta, .. }
             | G::Rxx { theta, .. }
-            | G::Cp { theta, .. } => [Some(theta), None, None],
+            | G::Cp { theta, .. }
+            | G::Crx { theta, .. }
+            | G::Cry { theta, .. }
+            | G::Crz { theta, .. }
+            | G::Cu1 { theta, .. } => [Some(theta), None, None, None],
             G::U {
                 theta, phi, lam, ..
-            } => [Some(theta), Some(phi), Some(lam)],
+            }
+            | G::Cu3 {
+                theta, phi, lam, ..
+            } => [Some(theta), Some(phi), Some(lam), None],
+            G::Cu {
+                theta,
+                phi,
+                lam,
+                gamma,
+                ..
+            } => [Some(theta), Some(phi), Some(lam), Some(gamma)],
             G::H(_)
             | G::X(_)
             | G::Y(_)
@@ -236,9 +309,16 @@ impl GateInstruction {
             | G::Sdg(_)
             | G::Tdg(_)
             | G::Id(_)
+            | G::Sx(_)
+            | G::Sxdg(_)
             | G::Cx(..)
             | G::Cz(..)
             | G::Swap(..)
+            | G::Cy(..)
+            | G::Ch(..)
+            | G::Csx(..)
+            | G::Ccx(..)
+            | G::Cswap(..)
             | G::Barrier(_)
             | G::Measure { .. }
             | G::MeasureAll => [None; MAX_GATE_PARAMS],
@@ -296,6 +376,66 @@ impl GateInstruction {
                 phi: f(phi)?,
                 lam: f(lam)?,
             },
+            G::Crx {
+                control,
+                target,
+                theta,
+            } => G::Crx {
+                control: *control,
+                target: *target,
+                theta: f(theta)?,
+            },
+            G::Cry {
+                control,
+                target,
+                theta,
+            } => G::Cry {
+                control: *control,
+                target: *target,
+                theta: f(theta)?,
+            },
+            G::Crz {
+                control,
+                target,
+                theta,
+            } => G::Crz {
+                control: *control,
+                target: *target,
+                theta: f(theta)?,
+            },
+            G::Cu1 { q0, q1, theta } => G::Cu1 {
+                q0: *q0,
+                q1: *q1,
+                theta: f(theta)?,
+            },
+            G::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => G::Cu3 {
+                control: *control,
+                target: *target,
+                theta: f(theta)?,
+                phi: f(phi)?,
+                lam: f(lam)?,
+            },
+            G::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => G::Cu {
+                control: *control,
+                target: *target,
+                theta: f(theta)?,
+                phi: f(phi)?,
+                lam: f(lam)?,
+                gamma: f(gamma)?,
+            },
             G::H(_)
             | G::X(_)
             | G::Y(_)
@@ -305,9 +445,16 @@ impl GateInstruction {
             | G::Sdg(_)
             | G::Tdg(_)
             | G::Id(_)
+            | G::Sx(_)
+            | G::Sxdg(_)
             | G::Cx(..)
             | G::Cz(..)
             | G::Swap(..)
+            | G::Cy(..)
+            | G::Ch(..)
+            | G::Csx(..)
+            | G::Ccx(..)
+            | G::Cswap(..)
             | G::Barrier(_)
             | G::Measure { .. }
             | G::MeasureAll => self.clone(),
@@ -329,13 +476,47 @@ impl GateInstruction {
             | GateInstruction::Rx { qubit: q, .. }
             | GateInstruction::Ry { qubit: q, .. }
             | GateInstruction::Rz { qubit: q, .. }
-            | GateInstruction::U { qubit: q, .. } => ActsOn::Unitary(Operands::new(&[*q])),
+            | GateInstruction::U { qubit: q, .. }
+            | GateInstruction::Sx(q)
+            | GateInstruction::Sxdg(q) => ActsOn::Unitary(Operands::new(&[*q])),
             GateInstruction::Cx(a, b)
             | GateInstruction::Cz(a, b)
             | GateInstruction::Swap(a, b)
             | GateInstruction::Rzz { q0: a, q1: b, .. }
             | GateInstruction::Rxx { q0: a, q1: b, .. }
-            | GateInstruction::Cp { q0: a, q1: b, .. } => ActsOn::Unitary(Operands::new(&[*a, *b])),
+            | GateInstruction::Cp { q0: a, q1: b, .. }
+            | GateInstruction::Cy(a, b)
+            | GateInstruction::Ch(a, b)
+            | GateInstruction::Csx(a, b)
+            | GateInstruction::Crx {
+                control: a,
+                target: b,
+                ..
+            }
+            | GateInstruction::Cry {
+                control: a,
+                target: b,
+                ..
+            }
+            | GateInstruction::Crz {
+                control: a,
+                target: b,
+                ..
+            }
+            | GateInstruction::Cu1 { q0: a, q1: b, .. }
+            | GateInstruction::Cu3 {
+                control: a,
+                target: b,
+                ..
+            }
+            | GateInstruction::Cu {
+                control: a,
+                target: b,
+                ..
+            } => ActsOn::Unitary(Operands::new(&[*a, *b])),
+            GateInstruction::Ccx(a, b, c) | GateInstruction::Cswap(a, b, c) => {
+                ActsOn::Unitary(Operands::new(&[*a, *b, *c]))
+            }
             GateInstruction::Barrier(_)
             | GateInstruction::Measure { .. }
             | GateInstruction::MeasureAll => ActsOn::None,

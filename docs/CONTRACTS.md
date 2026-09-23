@@ -132,9 +132,25 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  id  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
+h  x  y  z  s  t  sdg  tdg  id  sx  sxdg  rx  ry  rz  u3(u/p/u1/u2/U canonicalised)
+cx(CX canonicalised)  cz  cy  ch  csx  swap  rzz  rxx  cp  cu1  crx  cry  crz  cu3  cu
+ccx  cswap
 barrier  measure  measure_all
 ```
+
+**One instruction per statement, re-emitted under the same name.** The
+importer never decomposes: a `ccx` statement is one `Ccx` instruction and is
+exported as `ccx` again, with its operands in the same order, so a benchmark
+file reaches a backend (e.g. Aer, through the exporter) as the same program —
+same gate count, same depth. The only spelling changes are the canonicalisations
+listed above (`p`/`u1`/`u2`/`u`/`U` → `u3`, `CX` → `cx`). Decomposition is
+allowed at exactly two *lowering* boundaries, both confined to their module and
+invisible to `to_qasm2`: the native simulator, for gates without a dedicated
+kernel (`ccx`, `cswap`), and the QIR exporter, for gates without a base-profile
+intrinsic.
+
+`cu1` and `cp` are the same operator but distinct instructions: each keeps its
+own spelling through import and export (neither is normalised into the other).
 
 `id` is an instruction like any other, never a no-op to drop: it is imported,
 exported and round-tripped one-to-one, so the gate count and depth of an
@@ -156,7 +172,10 @@ Corollaries:
   `to_qasm2(from_qasm2(to_qasm2(c)))` is **byte-identical** to `to_qasm2(c)`
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
   is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
-  reproduces the same instruction sequence and parameters as `c`.
+  reproduces the same instruction sequence and parameters as `c`. Conversely,
+  a single gate statement already in canonical form (a `q` register, 12-decimal
+  angles, canonical spelling) is re-emitted byte-identically:
+  `to_qasm2(from_qasm2(s)) == s`.
 - Adding a gate is a **five-place change** plus a row in the equivalence test —
   the OpenQASM exporter (`qasm.rs`), the importer (`qasm_import.rs`), the native
   simulator (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
@@ -169,9 +188,15 @@ Corollaries:
   serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
   No producer may emit, and no consumer may accept, a non-finite parameter.
 
-**Enforcing test:** parametric round-trip test over the whole vocabulary in
-`crates/polypus-circuit/tests/contracts.rs`, plus the QIR-vs-simulator
-unitary-equivalence test in `crates/polypus-sim/tests/contracts.rs`.
+**Enforcing test:** parametric round-trip tests over the whole vocabulary in
+`crates/polypus-circuit/tests/contracts.rs` (export → import → export per gate
+and for a circuit using every instruction kind — an exhaustive match fails the
+build when a new variant is not covered — plus canonical statement → import →
+export byte identity per gate, and `cu1`/`cp` spelling preservation); the
+table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; and the
+QIR-vs-simulator unitary-equivalence test in
+`crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
+for every gate and compares it with the native gate up to global phase.
 
 ---
 
