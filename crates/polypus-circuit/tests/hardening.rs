@@ -120,6 +120,40 @@ fn register_at_a_reasonable_size_is_accepted() {
     assert_eq!(qc.num_qubits, 1000);
 }
 
+// ─────────────────────── huge integer literals ──────────────────────
+
+/// An integer literal too large for `usize` is still a number: it is accepted
+/// in an expression (as the nearest `f64`), and where a register size or
+/// index is required it is reported as such — not as an unreadable token that
+/// hides the statement it belongs to.
+#[test]
+fn integer_literals_beyond_usize_are_numbers_not_lexer_errors() {
+    let huge = "1427247692705959881058285969449495136382746624";
+    let qc =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}rz({huge}/{huge}) q[0];\n")).unwrap();
+    assert_eq!(
+        qc.gates,
+        [polypus_circuit::GateInstruction::Rz {
+            qubit: 0,
+            theta: polypus_circuit::GateParam::Fixed(1.0),
+        }]
+    );
+
+    // QASMBench's `cc_n151` compares a classical register with such a value:
+    // the error names the unsupported `if`, not the literal.
+    let src = format!("{HEADER}creg c[1];\nif(c=={huge}) x q[0];\n");
+    let (line, message) = parse_err(&src);
+    assert_eq!(line, 4);
+    assert!(
+        message.contains("'if' statements are not supported"),
+        "{message}"
+    );
+
+    let (line, message) = parse_err(&format!("OPENQASM 2.0;\nqreg q[{huge}];\n"));
+    assert_eq!(line, 2);
+    assert!(message.contains("expected register size"), "{message}");
+}
+
 // ─────────────────── long (not deep) expressions ────────────────────
 
 /// A sum or product of hundreds of thousands of terms is not nesting: it must

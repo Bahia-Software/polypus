@@ -272,11 +272,17 @@ fn tokenize(src: &str) -> Result<Tokens, CircuitError> {
                         .parse()
                         .map_err(|_| err(line, format!("invalid number '{text}'")))?;
                     toks.push((Tok::Real(v), line));
+                } else if let Ok(v) = text.parse::<usize>() {
+                    toks.push((Tok::Int(v), line));
                 } else {
-                    let v: usize = text
+                    // Too large for a register size or index, but still a valid
+                    // number in an expression (it is lexed as the nearest `f64`,
+                    // as Qiskit does); where an index is required, the parser
+                    // reports the real token.
+                    let v: f64 = text
                         .parse()
                         .map_err(|_| err(line, format!("invalid integer '{text}'")))?;
-                    toks.push((Tok::Int(v), line));
+                    toks.push((Tok::Real(v), line));
                 }
             }
             _ if c.is_ascii_alphabetic() || c == '_' => {
