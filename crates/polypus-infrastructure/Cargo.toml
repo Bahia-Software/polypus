@@ -15,6 +15,10 @@ description = "Execution-backend layer for Polypus: quantum circuit backends (na
 qmio = ["dep:zeromq", "dep:serde-pickle", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
+# The pyo3-free backend contract this crate implements and re-exports. Third
+# parties depend on `polypus-backend` alone; this crate adds the four concrete
+# Polypus backends, the `Infrastructure` factory and the Qiskit/ZeroMQ machinery.
+polypus-backend = { workspace = true }
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-observable = { workspace = true }

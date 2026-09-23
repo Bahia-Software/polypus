@@ -1,0 +1,18 @@
+[package]
+name = "polypus-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The pyo3-free execution-backend contract for Polypus: the QuantumBackend trait, its circuit/params/error/capabilities types, the transpiler seam and the Planner. A third party can implement a backend against this crate without pulling PyO3, Qiskit or the Polypus runtime."
+
+# Minimal, pyo3-free dependency tree (see docs/backends.md): a third-party backend
+# implementer depending on this crate never pulls PyO3, Qiskit or a Python runtime.
+# `polypus-circuit` is the native circuit IR carried by `BoundCircuit::Native` and
+# parsed out of `BoundCircuit::Qasm2`; `polypus-observable` is the `CostObservable`
+# the `Planner::evaluate` reduces counts with. Neither depends on pyo3.
+[dependencies]
+polypus-circuit = { workspace = true }
+polypus-observable = { workspace = true }

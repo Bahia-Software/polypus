@@ -23,7 +23,7 @@
 #   - crates/polypus         : the Polypus Python extension module and PyO3 edge (bindings,
 #                              typed exception hierarchy, workspace re-exports)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -47,6 +47,7 @@ repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
 polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.1" }
+polypus-backend    = { path = "crates/polypus-backend", version = "0.7.1" }
 polypus-physics    = { path = "crates/polypus-physics", version = "0.7.1" }
 polypus-sim        = { path = "crates/polypus-sim", version = "0.7.1" }
 polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.1" }

@@ -4,7 +4,7 @@
 //! endpoint, **without going through the Python interpreter**. For the
 //! [`BoundCircuit::Native`] and [`BoundCircuit::Qasm2`] variants the whole
 //! round-trip — circuit serialisation, request framing, response parsing — runs
-//! in Rust, so it never acquires the GIL. (A [`BoundCircuit::Qiskit`] cannot be
+//! in Rust, so it never acquires the GIL. (A [`BoundCircuit::Foreign`] Qiskit object cannot be
 //! read without the interpreter and is rejected with an actionable message.)
 //!
 //! # Wire protocol (verified against the `qmio` 0.1.3 client)
@@ -57,7 +57,7 @@
 //!    Verify acceptance against the live QPU (point 6).
 
 use crate::error::BackendError;
-use crate::{record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use serde_json::json;
 use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
@@ -87,7 +87,7 @@ enum ProgramPayload {
 /// Errors raised on the QMIO network/serialisation path.
 ///
 /// These bubble up through [`QuantumBackend::run_circuits`] as a
-/// [`BackendError::Qmio`], which the FFI boundary maps to the typed
+/// [`BackendError::External`] (a boxed `QmioError`), which the FFI boundary maps to the typed
 /// `polypus.QmioError` Python exception — never a panic. The enum keeps its own
 /// rich variants (verified against the wire protocol) instead of being
 /// flattened into [`BackendError`]; see [`crate::error`] for the
@@ -315,7 +315,7 @@ impl QmioBackend {
         match circuit {
             BoundCircuit::Native(cc) => Ok(cc.to_qasm2()),
             BoundCircuit::Qasm2(s) => Ok(s.clone()),
-            BoundCircuit::Qiskit(_) => Err(QmioError::UnsupportedCircuit),
+            BoundCircuit::Foreign(_) => Err(QmioError::UnsupportedCircuit),
         }
     }
 
@@ -341,7 +341,7 @@ impl QmioBackend {
             BoundCircuit::Qasm2(s) => ParameterizedCircuit::from_qasm2(s)
                 .and_then(|pc| pc.assign_parameters(&[]))
                 .map_err(|e| QmioError::Circuit(e.to_string())),
-            BoundCircuit::Qiskit(_) => Err(QmioError::UnsupportedCircuit),
+            BoundCircuit::Foreign(_) => Err(QmioError::UnsupportedCircuit),
         }
     }
 
@@ -511,11 +511,14 @@ impl QuantumBackend for QmioBackend {
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         self.run_all(qcs, config).map_err(|e| {
             log::error!("QMIO backend error talking to {}: {e}", self.endpoint);
-            BackendError::Qmio(e)
+            // The provider-specific QMIO error crosses the pyo3-free backend
+            // contract type-erased in `External`; the FFI edge downcasts it back to
+            // raise the typed `polypus.QmioError`.
+            BackendError::External(Box::new(e))
         })
     }
 
@@ -561,7 +564,7 @@ impl QmioBackend {
     fn run_all(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, QmioError> {
         // The config JSON is identical for every circuit in the batch.
         let config_value = build_config_json(
@@ -1029,7 +1032,7 @@ mod tests {
         // initialise the interpreter for this test only (the GIL-free paths in
         // native.rs and native_circuit_path.rs are unaffected).
         pyo3::prepare_freethreaded_python();
-        let circuit = pyo3::Python::with_gil(|py| BoundCircuit::Qiskit(py.None()));
+        let circuit = pyo3::Python::with_gil(|py| crate::QiskitCircuit::into_bound(py.None()));
         let err = backend(QmioProgramFormat::OpenQasm)
             .serialize_program(&circuit)
             .unwrap_err();
@@ -1111,7 +1114,7 @@ mod tests {
     /// [`QmioBackend`] path without the actual QPU.
     #[test]
     fn simulated_rep_server_end_to_end() {
-        use crate::BackendConfig;
+        use crate::{BackendConfig, ExecutionConfig};
         use std::sync::mpsc;
         use zeromq::RepSocket;
 
@@ -1197,7 +1200,7 @@ mod tests {
         };
 
         let counts = backend
-            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .run_circuits(&[BoundCircuit::Native(bell())], &config.run_params())
             .unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].get("00"), Some(&500));
@@ -1216,7 +1219,7 @@ mod tests {
     /// request was not resent.
     #[test]
     fn recv_timeout_after_delivery_is_result_unknown_not_resent() {
-        use crate::{BackendConfig, BackendError};
+        use crate::{BackendConfig, BackendError, ExecutionConfig};
         use std::sync::mpsc;
         use zeromq::RepSocket;
 
@@ -1278,11 +1281,19 @@ mod tests {
         };
 
         let err = backend
-            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .run_circuits(&[BoundCircuit::Native(bell())], &config.run_params())
             .unwrap_err();
+        // The QMIO error crosses the pyo3-free contract type-erased in
+        // `External`; recover the concrete `QmioError` to assert the variant.
+        let qmio_err = match &err {
+            BackendError::External(boxed) => boxed
+                .downcast_ref::<QmioError>()
+                .expect("the boxed error must be the original QmioError"),
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        };
         assert!(
-            matches!(err, BackendError::Qmio(QmioError::ResultUnknown { .. })),
-            "a delivered-but-unreplied request must be ResultUnknown (not resent); got: {err:?}"
+            matches!(qmio_err, QmioError::ResultUnknown { .. }),
+            "a delivered-but-unreplied request must be ResultUnknown (not resent); got: {qmio_err:?}"
         );
         // The request was delivered to the server exactly once.
         delivered_rx.recv().unwrap();
@@ -1306,7 +1317,7 @@ mod tests {
     /// in the other simulated-server tests.
     #[test]
     fn concurrent_callers_are_serialized_over_a_single_socket() {
-        use crate::BackendConfig;
+        use crate::{BackendConfig, ExecutionConfig};
         use std::sync::mpsc;
         use std::sync::Arc;
         use zeromq::RepSocket;
@@ -1382,7 +1393,7 @@ mod tests {
                 let config = make_config(endpoint.clone());
                 std::thread::spawn(move || {
                     let counts = backend
-                        .run_circuits(&[BoundCircuit::Native(bell())], &config)
+                        .run_circuits(&[BoundCircuit::Native(bell())], &config.run_params())
                         .unwrap();
                     assert_eq!(counts.len(), 1);
                     *counts[0]
@@ -1408,7 +1419,7 @@ mod tests {
     #[test]
     #[ignore = "requires ZMQ_SERVER and live access to the CESGA QMIO QPU"]
     fn real_qpu_smoke() {
-        use crate::BackendConfig;
+        use crate::{BackendConfig, ExecutionConfig};
 
         let endpoint = std::env::var("ZMQ_SERVER")
             .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://10.255.3.70:5556");
@@ -1437,7 +1448,7 @@ mod tests {
             seed: None,
         };
         let counts = backend
-            .run_circuits(&[BoundCircuit::Native(bell())], &config)
+            .run_circuits(&[BoundCircuit::Native(bell())], &config.run_params())
             .unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].values().sum::<u64>(), 1000);
@@ -1528,8 +1539,9 @@ mod tests {
         }
     }
 
-    // The mapping of `BackendError::Qmio` to the typed `polypus.QmioError`
-    // Python class is tested at the `polypus` FFI edge
-    // (`exceptions::backend_error_to_pyerr`), which owns that `#[pyclass]`; this
-    // crate tests only that a bad reply becomes a `QmioError::Schema` (above).
+    // The mapping of a QMIO failure to the typed `polypus.QmioError` Python class
+    // is tested at the `polypus` FFI edge (`exceptions::backend_error_to_pyerr`),
+    // which owns that `#[pyclass]` and downcasts the `QmioError` back out of the
+    // pyo3-free `BackendError::External` box; this crate tests only that a bad reply
+    // becomes a `QmioError::Schema` (above).
 }

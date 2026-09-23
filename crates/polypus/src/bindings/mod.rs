@@ -40,6 +40,28 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
+/// Between-wave interrupt guard backed by CPython's pending-signal check, so a
+/// Ctrl+C (`SIGINT`) aborts a run at the next wave boundary.
+///
+/// The [`Planner`] is now pyo3-free (in `polypus-backend`): instead of calling
+/// `py.check_signals()` itself, it invokes the [`Interrupt`](crate::infrastructure::Interrupt)
+/// guard optionally attached to the run's `CancelToken`. This is the guard the edge
+/// attaches. A pending signal is boxed into `BackendError::External` and re-raised
+/// verbatim at the FFI edge (contract C-1), preserving its `KeyboardInterrupt` class.
+struct SignalInterrupt;
+
+impl crate::infrastructure::Interrupt for SignalInterrupt {
+    fn poll(&self) -> Result<(), crate::infrastructure::BackendError> {
+        Python::with_gil(|py| py.check_signals()).map_err(crate::infrastructure::seam_error)
+    }
+}
+
+/// A run token whose wave-boundary check honours a pending Ctrl+C, restoring the
+/// interruptibility the planner's former inline `check_signals` provided.
+fn interruptible_token() -> crate::infrastructure::CancelToken {
+    crate::infrastructure::CancelToken::with_interrupt(Arc::new(SignalInterrupt))
+}
+
 /// Result of [`run_quantum_circuit`]: the measurement counts plus the run
 /// manifest that lets a run be logged and replayed (contract C-7).
 ///
@@ -583,7 +605,12 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     if let Ok(qasm) = qc.extract::<String>() {
         return Ok(BoundCircuit::Qasm2(qasm));
     }
-    Ok(BoundCircuit::Qiskit(qc.clone().unbind()))
+    // Anything else is a Qiskit `QuantumCircuit`: carry it opaquely through the
+    // pyo3-free `BoundCircuit` enum via its `Foreign` escape hatch, so the Aer/CUNQA
+    // backends still receive the native Qiskit object unchanged.
+    Ok(crate::infrastructure::QiskitCircuit::into_bound(
+        qc.clone().unbind(),
+    ))
 }
 
 /// Interpret the `expectation_function` argument as a cost observable.
@@ -684,24 +711,20 @@ pub fn run_quantum_circuit<'py>(
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
     let bound_qc = extract_bound_circuit(&qc)?;
-    if is_native_backend(backend) {
-        if let BoundCircuit::Qiskit(_) = &bound_qc {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
-                 pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
-            ));
-        }
+    if is_native_backend(backend) && bound_qc.is_foreign() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
+             pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
+        ));
     }
     // The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
     // read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
-    if infrastructure == "qmio" {
-        if let BoundCircuit::Qiskit(_) = &bound_qc {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
-                 serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
-                 2.0 string",
-            ));
-        }
+    if infrastructure == "qmio" && bound_qc.is_foreign() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+             serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+             2.0 string",
+        ));
     }
     // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
     // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
@@ -777,14 +800,20 @@ pub fn run_quantum_circuit<'py>(
                 let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
                     None
                 } else {
-                    Some(Arc::new(ShotDistributingPlanner))
+                    Some(Arc::new(ShotDistributingPlanner::new(n_qpus)))
                 };
-                let resources = Resources::new(backend, planner, Arc::new(config))?;
+                let resources = Resources::new(backend, planner, Arc::new(config.run_params()))?;
                 let scheduler = Scheduler::ephemeral(resources);
-                let out = scheduler.run(RunCircuitFlow {
-                    circuits: vec![bound_qc],
-                    shots,
-                });
+                // A Ctrl+C during the run aborts it at the next wave boundary: the
+                // token carries the `check_signals`-backed interrupt guard the
+                // pyo3-free planner calls between waves.
+                let out = scheduler.run_cancellable(
+                    RunCircuitFlow {
+                        circuits: vec![bound_qc],
+                        shots,
+                    },
+                    &interruptible_token(),
+                );
                 scheduler.close();
                 out
             });
@@ -969,7 +998,7 @@ pub fn train<'py>(
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
     // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
     // and validate the pairing up front.
-    let resources = Resources::new(backend, None, Arc::clone(&config))
+    let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
@@ -985,8 +1014,13 @@ pub fn train<'py>(
     // Release the GIL for the whole optimization: parameter binding and native
     // simulation are GIL-free, so holding it would stall every other Python
     // thread and (with the Planner's between-wave check_signals) keep Ctrl+C from
-    // taking effect until the run ends. See docs/ENGINEERING.md §3.
-    let result = method.py().allow_threads(|| scheduler.run(flow));
+    // taking effect until the run ends. See docs/ENGINEERING.md §3. The run token
+    // carries the `check_signals`-backed interrupt guard the pyo3-free planner
+    // calls between waves, so Ctrl+C still aborts at the next wave boundary.
+    let token = interruptible_token();
+    let result = method
+        .py()
+        .allow_threads(|| scheduler.run_cancellable(flow, &token));
     scheduler.close();
     finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
@@ -1188,7 +1222,7 @@ pub fn qml_train<'py>(
     let errors = OracleErrorSlot::new();
     let observable = extract_cost_observable(&expectation_function)?;
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
-    let resources = Resources::new(backend, None, Arc::clone(&config))
+    let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
@@ -1202,9 +1236,11 @@ pub fn qml_train<'py>(
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
-    // §3): the Qiskit binding + Aer calls re-acquire it, and the Planner's
-    // between-wave check_signals keeps Ctrl+C prompt.
-    let result = py.allow_threads(|| scheduler.run(flow));
+    // §3): the Qiskit binding + Aer calls re-acquire it, and the run token's
+    // `check_signals`-backed interrupt guard — which the pyo3-free planner calls
+    // between waves — keeps Ctrl+C prompt.
+    let token = interruptible_token();
+    let result = py.allow_threads(|| scheduler.run_cancellable(flow, &token));
     scheduler.close();
     finish_optimization(py, result, effective_seed, effective_id, start)
 }
@@ -1792,7 +1828,8 @@ mod tests {
         Python::with_gil(|py| {
             let bound = extract_bound_circuit(py.None().bind(py))
                 .expect("a non-Circuit, non-str object is assumed to be a Qiskit circuit");
-            assert!(matches!(bound, BoundCircuit::Qiskit(_)));
+            // A Qiskit circuit rides through the pyo3-free enum's `Foreign` hatch.
+            assert!(bound.is_foreign());
         });
     }
 

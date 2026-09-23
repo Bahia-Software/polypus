@@ -1,9 +1,8 @@
 use polypus::algorithms::{AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG};
 use polypus::circuit::ParameterizedCircuit;
 use polypus::infrastructure::{
-    BackendConfig, BackendError, BoundCircuit, ExecutionConfig, Infrastructure,
-    InfrastructureError, NativeStatevectorBackend, OptLevel, QuantumBackend,
-    ShotDistributingPlanner,
+    BackendError, BoundCircuit, Infrastructure, InfrastructureError, NativeStatevectorBackend,
+    OptLevel, QuantumBackend, RunParams, ShotDistributingPlanner,
 };
 use polypus::orchestration::{Resources, RunCircuitFlow, Scheduler};
 use std::collections::HashMap;
@@ -99,13 +98,10 @@ fn native_bell_circuit() -> BoundCircuit {
     BoundCircuit::Native(bell)
 }
 
-fn native_config(shots: u32, n_qpus: u32, id: &str) -> ExecutionConfig {
-    ExecutionConfig {
+fn native_params(shots: u32, id: &str) -> RunParams {
+    RunParams {
         id: id.to_string(),
         shots,
-        n_qpus,
-        infrastructure: "local".to_string(),
-        backend_config: BackendConfig::LocalNative { fusion: true },
         opt_level: OptLevel::default(),
         // Fixed seed: these tests assert only shot conservation, and a fixed seed
         // keeps the native backend's sampling deterministic across runs.
@@ -120,8 +116,8 @@ fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64>
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,
-        Some(Arc::new(ShotDistributingPlanner)),
-        Arc::new(native_config(shots, n_qpus, id)),
+        Some(Arc::new(ShotDistributingPlanner::new(n_qpus))),
+        Arc::new(native_params(shots, id)),
     )
     .expect("the native backend supports shot distribution");
     let scheduler = Scheduler::ephemeral(resources);
@@ -177,8 +173,8 @@ fn distribute_rejects_empty_circuits() {
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,
-        Some(Arc::new(ShotDistributingPlanner)),
-        Arc::new(native_config(100, 2, "empty")),
+        Some(Arc::new(ShotDistributingPlanner::new(2))),
+        Arc::new(native_params(100, "empty")),
     )
     .unwrap();
     let scheduler = Scheduler::ephemeral(resources);
@@ -210,8 +206,8 @@ fn distribute_rejects_multiple_circuits() {
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,
-        Some(Arc::new(ShotDistributingPlanner)),
-        Arc::new(native_config(100, 2, "multi")),
+        Some(Arc::new(ShotDistributingPlanner::new(2))),
+        Arc::new(native_params(100, "multi")),
     )
     .unwrap();
     let scheduler = Scheduler::ephemeral(resources);

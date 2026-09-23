@@ -1,6 +1,6 @@
 use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot};
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
+    BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
 };
 use polypus_orchestration::{OracleFactory, Resources};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub struct VqcOracle {
     /// Parameterised circuit template (ansatz parameters unbound).
     pub circuit: CircuitSource,
-    pub config: Arc<ExecutionConfig>,
+    pub config: Arc<RunParams>,
     pub backend: Arc<dyn QuantumBackend>,
     /// Owns how the bound circuits are executed and reduced (waves, concurrency).
     pub planner: Arc<dyn Planner>,
@@ -144,7 +144,7 @@ impl OracleFactory for VqcOracleFactory {
 mod tests {
     use super::*;
     use polypus_circuit::{GateParam, ParameterizedCircuit};
-    use polypus_infrastructure::{BackendConfig, BackendError, OptLevel};
+    use polypus_infrastructure::{BackendError, OptLevel, RunParams};
     use polypus_observable::ObservableError;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -207,7 +207,7 @@ mod tests {
         fn run_circuits(
             &self,
             qcs: &[BoundCircuit],
-            config: &ExecutionConfig,
+            config: &RunParams,
         ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
             let mut calls = self.locked_calls();
             // Index of the first circuit of this chunk within the whole batch;
@@ -253,7 +253,7 @@ mod tests {
         match circuit {
             BoundCircuit::Native(cc) => cc.to_qasm2(),
             BoundCircuit::Qasm2(qasm) => qasm.clone(),
-            BoundCircuit::Qiskit(_) => panic!("the mock never receives a Qiskit circuit"),
+            BoundCircuit::Foreign(_) => panic!("the mock never receives a Qiskit circuit"),
         }
     }
 
@@ -267,15 +267,12 @@ mod tests {
         )
     }
 
-    fn config() -> Arc<ExecutionConfig> {
-        Arc::new(ExecutionConfig {
+    fn config() -> Arc<RunParams> {
+        Arc::new(RunParams {
             id: "vqc-oracle-test".to_string(),
             shots: 16,
-            n_qpus: 1,
-            infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative { fusion: true },
-            opt_level: OptLevel::default(),
             seed: Some(7),
+            opt_level: OptLevel::default(),
         })
     }
 

@@ -1,6 +1,6 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
-use crate::{record_cleanup_failure, BoundCircuit, ExecutionConfig, QuantumBackend};
+use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ impl QuantumBackend for CunqaBackend {
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         Python::with_gil(|py| {
             // Native circuits are transpiled in pure Rust before submission;
@@ -51,11 +51,11 @@ impl QuantumBackend for CunqaBackend {
             for qc in qcs {
                 let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
                 qcs_pylist
-                    .append(qc.to_py_object(py)?)
+                    .append(crate::to_py_object(&qc, py)?)
                     .map_err(|e| BackendError::Conversion(e.to_string()))?;
             }
 
-            let module = PyModule::import(py, "polypus_python").map_err(BackendError::Seam)?;
+            let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
             let kwargs = PyDict::new(py);
             let conv = |e: PyErr| BackendError::Conversion(e.to_string());
             kwargs.set_item("family_id", &config.id).map_err(conv)?;
@@ -80,7 +80,7 @@ impl QuantumBackend for CunqaBackend {
                     // Surface the failure at error level (mirrors the QMIO/local
                     // error paths) before it crosses the FFI as an exception.
                     log::error!("CUNQA circuit execution failed: {e}");
-                    BackendError::Seam(e)
+                    crate::seam_error(e)
                 })?;
             // `run_qcs` returned successfully; a wrong-shaped value is a
             // Rust-side conversion failure, not a seam exception (contract C-1).
@@ -98,6 +98,13 @@ impl QuantumBackend for CunqaBackend {
             max_concurrency: self.n_qpus as usize,
             supports_shot_distribution: true,
         }
+    }
+
+    /// CUNQA allocated exactly `n_qpus` QPUs, so a shot-distributing planner paired
+    /// with it must split into the same number of replicas (validated in
+    /// `Resources::new`).
+    fn replica_count(&self) -> Option<u32> {
+        Some(self.n_qpus)
     }
 
     fn close(&self) {
@@ -198,12 +205,12 @@ fn raise_qpus(
             .set_item("cores_per_qpu", cores_per_qpu)
             .map_err(conv)?;
 
-        let module = PyModule::import(py, "polypus_python").map_err(BackendError::Seam)?;
+        let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
         let connection = module
             .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
             .map_err(|e| {
                 log::error!("CUNQA QPU allocation failed: {e}");
-                BackendError::Seam(e)
+                crate::seam_error(e)
             })?;
         let family: Py<PyAny> = connection.extract().map_err(|e| {
             BackendError::Cunqa(format!("could not extract the CUNQA family handle: {e}"))
@@ -224,14 +231,14 @@ fn raise_qpus(
 /// panic through an in-progress unwind.
 fn drop_qpus(family: &Py<PyAny>) -> Result<(), BackendError> {
     Python::with_gil(|py| {
-        let module = PyModule::import(py, "polypus_python").map_err(BackendError::Seam)?;
+        let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
         let kwargs = PyDict::new(py);
         kwargs
             .set_item("family", family.clone_ref(py))
             .map_err(|e| BackendError::Conversion(e.to_string()))?;
         module
             .call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))
-            .map_err(BackendError::Seam)?;
+            .map_err(crate::seam_error)?;
         Ok(())
     })
 }

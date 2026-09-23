@@ -56,7 +56,8 @@ Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
 
-`family_name` is `ExecutionConfig::id`, whose charset is constrained by C-9.
+`family_name` is the run id (`RunParams::id`, derived from `ExecutionConfig::id`
+at backend construction), whose charset is constrained by C-9.
 
 ### `run_qcs(infrastructure: str, **kwargs)`
 
@@ -65,9 +66,10 @@ violation.
 | local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7) |
 | cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
-`id` / `family_id` are `ExecutionConfig::id`, whose charset is constrained by
-C-9. `qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
-strings; the Python side parses strings (`QuantumCircuit.from_qasm_str`).
+`id` / `family_id` are the run id (`RunParams::id`, derived from
+`ExecutionConfig::id`), whose charset is constrained by C-9. `qcs` elements are
+either Qiskit `QuantumCircuit` objects or OpenQASM 2.0 strings; the Python side
+parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
 
@@ -424,7 +426,8 @@ above.
 
 The `id` kwarg of `polypus.train` and `polypus.qml.train` is a caller-supplied
 *prefix*: the entry point appends a UUID v4 to it and the result becomes
-`ExecutionConfig::id`, which names the run's temp files and log streams and —
+`ExecutionConfig::id` (and the `RunParams::id` derived from it), which names the
+run's temp files and log streams and —
 on `infrastructure="cunqa"` — travels to SLURM as the C-1 kwargs `family_name`
 (`connect_to_infrastructure`) and `family_id` (`run_qcs`), and from there
 verbatim into `qraise`. The crate cannot see how `qraise`/SLURM interpolate that

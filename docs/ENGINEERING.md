@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has ten crates:
+with PyO3 Python bindings. The Cargo workspace has eleven crates:
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -25,7 +25,8 @@ with PyO3 Python bindings. The Cargo workspace has ten crates:
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
-| `polypus-infrastructure` | Execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Planner`, circuit/config types, and the backend-layer error (`BackendError`/`InfrastructureError`) | GIL only |
+| `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam and the memory budget. Zero PyO3 in its dependency tree | No |
+| `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory, the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
 | `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
 | `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
@@ -40,10 +41,15 @@ boundary stays out-of-process and explicit; see
 
 ## 2. Workspace boundaries
 
-- `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`
-  and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or
-  Python**. Do not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python
-  types into them.
+- `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
+  `polypus-observable`, `polypus-backend` and `polypus-logger` are **pure Rust:
+  they must not depend on `pyo3` or Python**. Do not introduce `Py<...>`, `PyAny`,
+  `Python`, the GIL, or Python types into them. `polypus-backend` is the strictest
+  of these: it is the public backend contract, so its **whole dependency tree must
+  stay PyO3-free** (a third party implements a backend against it without pulling
+  the interpreter) — a Python/provider failure crosses it type-erased in
+  `BackendError::External`, and the concrete backends live one layer up in
+  `polypus-infrastructure`.
 - `polypus-infrastructure` may depend on `pyo3` for the GIL and for carrying a
   `PyErr` verbatim (its Aer/CUNQA/QMIO seams call into Python), but it defines
   **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
@@ -89,14 +95,29 @@ boundary stays out-of-process and explicit; see
   deaf to Ctrl+C until it returns. So a GIL-free loop that must stay
   interruptible has to call `py.check_signals()` at a safe boundary: the
   optimizer entry points (`train` / `qml.train`) release the GIL around the
-  whole `optimize()` call, and the `Planner` calls `py.check_signals()` between
-  execution waves (inside `execute`) — the one place that boundary now lives, so
-  both the VQC and QML oracles stay interruptible without their own signal loop.
+  whole `optimize()` call, and the `Planner` runs a **host-interrupt check**
+  between execution waves (inside `execute`) — the one place that boundary now
+  lives, so both the VQC and QML oracles stay interruptible without their own
+  signal loop.
+  - **The `Planner` itself no longer names `py.check_signals()` — it moved to the
+    edge.** The planner and all its types now live in the pyo3-free
+    `polypus-backend` crate, so between waves it calls a small injected guard, the
+    `Interrupt` trait, carried (optionally) on the `CancelToken`
+    (`CancelToken::poll_interrupt`). The one implementation that actually calls
+    `Python::with_gil(|py| py.check_signals())` is `SignalInterrupt` in
+    `crates/polypus/src/bindings/mod.rs` (the edge); `train`, `qml.train` and
+    `run_quantum_circuit` build a guarded token with it and drive the run through
+    `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less token
+    (`Scheduler::run`) and the check is a no-op — which is why `run` is documented
+    as **not** interruptible and is never used on a Python-facing path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
-  **original** exception (`EvaluationError::Python` carries it verbatim), never
-  swallowed into a panic by an `.expect()` (that would surface as an opaque
+  **original** exception. The interrupt travels type-erased through the pyo3-free
+  layers, boxed in `BackendError::External`, and the edge downcasts it back and
+  re-raises it verbatim (`external_to_pyerr`); a callback exception rides in
+  `EvaluationError::Python` / `ObservableError::External` the same way. It is
+  never swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
 - **How many waves that boundary produces is backend- *and* batch-dependent
   (issue #147).** `SequentialPlanner::execute` sizes each wave from
@@ -106,8 +127,9 @@ boundary stays out-of-process and explicit; see
   by the batch's *widest* circuit (`mem_budget::max_statevector_concurrency`);
   they override `capabilities_for` to expose that cap **only when the whole batch
   cannot be held in the budget at once** — the high-qubit regime — so a high-qubit
-  batch is split into several waves and `py.check_signals()` runs **once per
-  wave**: a whole training generation is no longer one uninterruptible call. When
+  batch is split into several waves and the between-wave interrupt check (the
+  edge's `SignalInterrupt`, above) runs **once per wave**: a whole training
+  generation is no longer one uninterruptible call. When
   the batch fits (the common low-qubit case) they report an unbounded wave, so the
   whole population still reaches the backend as a **single** call (Aer
   parallelises the experiments internally; splitting would only add per-call
@@ -130,12 +152,13 @@ boundary stays out-of-process and explicit; see
     common QML case) is still wave-split for interruptibility. That `getattr` runs
     Python bytecode, which CPython can abort with a `KeyboardInterrupt` for a
     pending Ctrl+C; mapping *that* to "width unknown" (an `.ok()` that discards it)
-    clears the signal before the planner's between-wave `py.check_signals()` can see
+    clears the signal before the planner's between-wave interrupt check can see
     it, which made `qml.train` unresponsive to Ctrl+C on constrained runners
     (issue #147 follow-up). So `capabilities_for` returns
     `Result<BackendCapabilities, InfrastructureError>`: a `KeyboardInterrupt` from
-    the read is propagated verbatim (as `InfrastructureError::Python`, re-raised by
-    the planner), and only a genuine non-interrupt failure (a missing attribute,
+    the read is propagated verbatim (boxed in `BackendError::External` inside
+    `InfrastructureError::Backend`, re-raised by the edge), and only a genuine
+    non-interrupt failure (a missing attribute,
     which a real `QuantumCircuit` never has) falls back to "width unknown". The
     default impl and the native backend read widths GIL-free and never error (they
     return `Ok`); the call site in `execute` propagates with `?`, the same way it
@@ -152,10 +175,10 @@ boundary stays out-of-process and explicit; see
     matches the memory bound the backend would enforce anyway — and collapses to a
     single wave whenever the batch fits in the budget.
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
-  around the whole `scheduler.run(flow)` call; the `Planner` calls
-  `py.check_signals()` between execution waves (in `execute`), and the counts are
-  converted to a Python object back at the edge — GIL re-acquired — only after the
-  run returns. A pending Ctrl+C surfaces there as a `KeyboardInterrupt`
+  around the whole `scheduler.run_cancellable(flow, &token)` call, where `token`
+  carries the edge's `SignalInterrupt` guard; the `Planner` runs that guard between
+  execution waves (in `execute`), and the counts are converted to a Python object
+  back at the edge — GIL re-acquired — only after the run returns. A pending Ctrl+C surfaces there as a `KeyboardInterrupt`
   propagated verbatim through the function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
   around the `StatevectorSimulator::run_cancellable` call (parameter binding

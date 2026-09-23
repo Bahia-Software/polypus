@@ -110,12 +110,12 @@ impl From<ObservableError> for EvaluationError {
 impl From<InfrastructureError> for EvaluationError {
     fn from(err: InfrastructureError) -> Self {
         match err {
-            // These three reproduce exactly what the former `run_and_evaluate`
-            // returned (a backend error, an observable error, a verbatim Python
-            // exception from the between-wave `check_signals`).
+            // A backend failure (including a between-wave interrupt, which now
+            // arrives as `Backend(BackendError::External(boxed PyErr))`) and an
+            // observable failure map straight through, exactly as the former
+            // `run_and_evaluate` returned them.
             InfrastructureError::Backend(e) => EvaluationError::Backend(e),
             InfrastructureError::Observable(e) => EvaluationError::Observable(e),
-            InfrastructureError::Python(e) => EvaluationError::Python(e),
             // A cooperative cancel surfaces as a KeyboardInterrupt, the same class
             // a SIGINT would (unreachable while nothing sets the token).
             InfrastructureError::Cancelled => EvaluationError::Python(

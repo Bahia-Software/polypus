@@ -11,8 +11,8 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
-    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
-    InfrastructureError, QuantumBackend,
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask,
+    InfrastructureError, QuantumBackend, RunParams,
 };
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// The backend *composes* a [`Transpiler`] (the rewriting *strategy*) and runs
 /// it on every native circuit before simulating, passing the per-run
-/// [`TranspileOptions`] (the *tuning*) derived from the [`ExecutionConfig`].
+/// [`TranspileOptions`] (the *tuning*) derived from the [`RunParams`].
 /// It defaults to the no-op [`IdentityTranspiler`]; inject another strategy with
 /// [`with_transpiler`](Self::with_transpiler).
 pub struct NativeStatevectorBackend {
@@ -79,7 +79,7 @@ impl NativeStatevectorBackend {
     /// apply the injected transpiler — all GIL-free. Shared by
     /// [`simulate_one`](Self::simulate_one) and
     /// [`run_shots_distributed`](Self::run_shots_distributed) so both paths
-    /// handle the `Native`/`Qasm2`/`Qiskit` variants and transpile identically.
+    /// handle the `Native`/`Qasm2`/`Foreign` variants and transpile identically.
     ///
     /// Returns a borrow of `circuit` whenever possible instead of an owned
     /// clone: the `Native` variant borrows directly, and when the transpiler
@@ -107,7 +107,7 @@ impl NativeStatevectorBackend {
                         ))
                     })?,
             ),
-            BoundCircuit::Qiskit(_) => {
+            BoundCircuit::Foreign(_) => {
                 return Err(BackendError::UnsupportedCircuit(
                     "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
                      pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
@@ -169,7 +169,7 @@ impl NativeStatevectorBackend {
     fn run_batch_with_cap(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
         cap: usize,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         // Tuning travels as an argument; the strategy is the injected field.
@@ -288,7 +288,7 @@ impl QuantumBackend for NativeStatevectorBackend {
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         // Bound the peak memory to a statevector budget (plan §4.5, P1-memory):
         // the real cost of a population batch is the concurrent statevectors
@@ -357,7 +357,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         &self,
         qc: &BoundCircuit,
         shot_batches: &[u32],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         let opts = TranspileOptions {
             level: config.opt_level,
@@ -390,7 +390,7 @@ impl QuantumBackend for NativeStatevectorBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OptLevel;
+    use crate::{ExecutionConfig, OptLevel};
     use polypus_circuit::{GateInstruction, ParameterizedCircuit};
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
@@ -499,13 +499,13 @@ mod tests {
         cfg.backend_config = crate::BackendConfig::LocalNative { fusion: true };
         let fused = Infrastructure::create_backend(&cfg)
             .unwrap()
-            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
             .unwrap();
 
         cfg.backend_config = crate::BackendConfig::LocalNative { fusion: false };
         let unfused = Infrastructure::create_backend(&cfg)
             .unwrap()
-            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
             .unwrap();
 
         assert_eq!(fused, unfused);
@@ -672,7 +672,7 @@ mod tests {
         );
         let cfg = config_with(OptLevel::Heavy);
         backend
-            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
             .unwrap();
         assert_eq!(seen.load(Ordering::SeqCst), OptLevel::Heavy as u8);
     }
@@ -686,7 +686,7 @@ mod tests {
         let backend = NativeStatevectorBackend::with_transpiler(0, Box::new(BarrierTranspiler));
         let cfg = config_with(OptLevel::default());
         let counts = backend
-            .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+            .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
             .unwrap();
         assert_eq!(counts.len(), 1);
         let total: u64 = counts[0].values().sum();
@@ -715,13 +715,13 @@ mod tests {
 
         // Reference: whole batch in one window (cap >= len => fast path).
         let full = NativeStatevectorBackend::new(2024)
-            .run_batch_with_cap(&batch, &cfg, usize::MAX)
+            .run_batch_with_cap(&batch, &cfg.run_params(), usize::MAX)
             .unwrap();
         assert_eq!(full.len(), n);
 
         for cap in [1usize, 2, 3, n - 1, n, n + 100] {
             let capped = NativeStatevectorBackend::new(2024)
-                .run_batch_with_cap(&batch, &cfg, cap)
+                .run_batch_with_cap(&batch, &cfg.run_params(), cap)
                 .unwrap();
             assert_eq!(
                 capped, full,
@@ -818,7 +818,7 @@ mod tests {
             let batch = vec![
                 BoundCircuit::Native(small),
                 BoundCircuit::Qasm2(big.to_qasm2()),
-                BoundCircuit::Qiskit(py.None()),
+                crate::QiskitCircuit::into_bound(py.None()),
             ];
             assert_eq!(representative_qubits(&batch), 7);
         });
@@ -835,8 +835,8 @@ mod tests {
         let b = NativeStatevectorBackend::new(2024);
         let batch = vec![BoundCircuit::Native(bell())];
         assert_eq!(
-            a.run_circuits(&batch, &cfg).unwrap(),
-            b.run_circuits(&batch, &cfg).unwrap()
+            a.run_circuits(&batch, &cfg.run_params()).unwrap(),
+            b.run_circuits(&batch, &cfg.run_params()).unwrap()
         );
     }
 
@@ -849,8 +849,8 @@ mod tests {
         let b = NativeStatevectorBackend::new(2);
         let batch = vec![BoundCircuit::Native(uniform3())];
         assert_ne!(
-            a.run_circuits(&batch, &cfg).unwrap(),
-            b.run_circuits(&batch, &cfg).unwrap()
+            a.run_circuits(&batch, &cfg.run_params()).unwrap(),
+            b.run_circuits(&batch, &cfg.run_params()).unwrap()
         );
     }
 
@@ -869,14 +869,14 @@ mod tests {
         let cfg = config_with(OptLevel::default());
         let batches = [3u32, 3, 2]; // 8 shots over 3 "QPUs", uneven split.
         let out = NativeStatevectorBackend::new(2024)
-            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg.run_params())
             .unwrap();
         assert_eq!(out.len(), batches.len());
         let total: u64 = out.iter().flat_map(|m| m.values()).sum();
         assert_eq!(total, u64::from(batches.iter().sum::<u32>()));
         // Same base seed reproduces byte-identical batches.
         let again = NativeStatevectorBackend::new(2024)
-            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg)
+            .run_shots_distributed(&BoundCircuit::Native(bell()), &batches, &cfg.run_params())
             .unwrap();
         assert_eq!(out, again);
         for m in &out {
@@ -897,7 +897,7 @@ mod tests {
             .run_shots_distributed(
                 &BoundCircuit::Native(bell()),
                 &batches,
-                &config_with(OptLevel::default()),
+                &config_with(OptLevel::default()).run_params(),
             )
             .unwrap();
 
@@ -910,7 +910,7 @@ mod tests {
                 let mut cfg = config_with(OptLevel::default());
                 cfg.shots = shots;
                 NativeStatevectorBackend::new(99u64.wrapping_add(i as u64))
-                    .run_circuits(&[BoundCircuit::Native(bell())], &cfg)
+                    .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
                     .unwrap()
                     .remove(0)
             })
@@ -925,7 +925,11 @@ mod tests {
     fn run_shots_distributed_zero_batch_is_empty() {
         let cfg = config_with(OptLevel::default());
         let out = NativeStatevectorBackend::new(1)
-            .run_shots_distributed(&BoundCircuit::Native(bell()), &[1u32, 0, 0], &cfg)
+            .run_shots_distributed(
+                &BoundCircuit::Native(bell()),
+                &[1u32, 0, 0],
+                &cfg.run_params(),
+            )
             .unwrap();
         assert_eq!(out.len(), 3);
         assert!(out[1].is_empty() && out[2].is_empty());
@@ -940,11 +944,11 @@ mod tests {
         let batch = vec![BoundCircuit::Native(uniform3())];
         let a = Infrastructure::create_backend(&cfg)
             .unwrap()
-            .run_circuits(&batch, &cfg)
+            .run_circuits(&batch, &cfg.run_params())
             .unwrap();
         let b = Infrastructure::create_backend(&cfg)
             .unwrap()
-            .run_circuits(&batch, &cfg)
+            .run_circuits(&batch, &cfg.run_params())
             .unwrap();
         assert_ne!(
             a, b,
