@@ -31,9 +31,9 @@ and any future change must be applied to both.
 
 ## What's left
 
-1. **Set the release date.** In `CITATION.cff`, uncomment `date-released` and set
-   it to the real release date (`YYYY-MM-DD`). (If releasing a version other than
-   `0.7.0`, also bump `version:` here and the versions in `Cargo.toml` /
+1. **Release date — set.** `CITATION.cff` has `date-released: 2026-09-23`. If the
+   release actually happens on another day, update it. (If releasing a version
+   other than `0.7.0`, also bump `version:` here and in `Cargo.toml` /
    `Cargo.lock`.) Validate:
    ```bash
    pipx run cffconvert --validate -i CITATION.cff   # "valid according to schema 1.2.0"
@@ -58,8 +58,6 @@ and any future change must be applied to both.
 
 ## Pending decisions
 
-- **`date-released`** — the actual release date (uncomment in `CITATION.cff` at
-  release time).
 - **DOI** — assigned by Zenodo on the first archived release; until then the
   `identifiers:` block in `CITATION.cff` and the README badge/BibTeX stay unset.
 - **Version to archive** — `0.7.0` is already on PyPI; decide whether the first

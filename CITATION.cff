@@ -1,10 +1,9 @@
 # -----------------------------------------------------------------------------
 # PENDIENTE ANTES DE PUBLICAR LA RELEASE:
-#   1. Descomentar date-released con la fecha real de la release (YYYY-MM-DD).
-#   2. Sustituir el DOI de concepto una vez Zenodo archive la primera release.
+#   1. Sustituir el DOI de concepto una vez Zenodo archive la primera release.
 #      Debe ser el DOI DE CONCEPTO (apunta siempre a la última versión),
 #      no el DOI de esa versión concreta.
-#   3. Comprobar que esta lista de autores coincide exactamente con la sección
+#   2. Comprobar que esta lista de autores coincide exactamente con la sección
 #      "Credits" y con el bloque BibTeX del README.
 # -----------------------------------------------------------------------------
 
@@ -13,7 +12,7 @@ message: "If you use Polypus in your research, please cite it as below."
 title: "Polypus: A Distributed Quantum Computing Library"
 type: software
 version: 0.7.0
-# date-released: 2026-09-DD
+date-released: 2026-09-23
 license: EUPL-1.2
 repository-code: "https://github.com/Bahia-Software/polypus"
 url: "https://bahia-software.github.io/polypus/"
