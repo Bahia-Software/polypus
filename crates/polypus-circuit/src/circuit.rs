@@ -2,7 +2,7 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
-use crate::gate::{ActsOn, GateInstruction, GateParam, MeasuredQubits};
+use crate::gate::{GateInstruction, GateParam, MeasuredQubits};
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
@@ -152,19 +152,14 @@ impl ParameterizedCircuit {
         // a circuit quadratic in its gate count. Checked before any mutation
         // below; the cache itself is only advanced on the success path.
         self.measured.sync(&self.gates);
-        match gate.acts_on() {
-            ActsOn::One(q) if self.measured.contains(q) => {
-                return Err(CircuitError::QubitAlreadyMeasured { qubit: q });
-            }
-            ActsOn::Two(a, b) => {
-                if self.measured.contains(a) {
-                    return Err(CircuitError::QubitAlreadyMeasured { qubit: a });
-                }
-                if self.measured.contains(b) {
-                    return Err(CircuitError::QubitAlreadyMeasured { qubit: b });
-                }
-            }
-            _ => {}
+        // The first measured operand in operand order, for any arity.
+        if let Some(&qubit) = gate
+            .acts_on()
+            .qubits()
+            .iter()
+            .find(|&&q| self.measured.contains(q))
+        {
+            return Err(CircuitError::QubitAlreadyMeasured { qubit });
         }
         match &gate {
             GateInstruction::H(q)

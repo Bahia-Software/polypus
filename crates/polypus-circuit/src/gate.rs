@@ -123,6 +123,39 @@ pub enum GateInstruction {
     MeasureAll,
 }
 
+/// The most qubits a built-in instruction acts on. Sized for the four- and
+/// five-qubit multi-controlled gates of `qelib1.inc` (`c3x`, `c4x`, …) so that
+/// adding them never forces [`Operands`] to change shape.
+pub(crate) const MAX_GATE_ARITY: usize = 5;
+
+/// The qubit operands of a unitary instruction, in operand order (control(s)
+/// before target(s) for controlled gates).
+///
+/// Stored inline rather than in a `Vec`: [`GateInstruction::acts_on`] runs on
+/// every builder push and on every gate the simulator applies, so building an
+/// operand list must not allocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Operands {
+    qubits: [usize; MAX_GATE_ARITY],
+    len: usize,
+}
+
+impl Operands {
+    fn new(qubits: &[usize]) -> Self {
+        let mut buf = [0; MAX_GATE_ARITY];
+        buf[..qubits.len()].copy_from_slice(qubits);
+        Operands {
+            qubits: buf,
+            len: qubits.len(),
+        }
+    }
+
+    /// The operands, in operand order.
+    pub(crate) fn as_slice(&self) -> &[usize] {
+        &self.qubits[..self.len]
+    }
+}
+
 /// The qubits an instruction evolves *unitarily*.
 ///
 /// Used by the terminal-measurement check (contract C-4): only unitary
@@ -133,10 +166,18 @@ pub enum GateInstruction {
 pub(crate) enum ActsOn {
     /// A non-unitary instruction (barrier / measure / measure_all).
     None,
-    /// A single-qubit unitary on this qubit.
-    One(usize),
-    /// A two-qubit unitary on these qubits.
-    Two(usize, usize),
+    /// A unitary on these qubits, of any arity up to [`MAX_GATE_ARITY`].
+    Unitary(Operands),
+}
+
+impl ActsOn {
+    /// The unitary operands, in operand order; empty for [`ActsOn::None`].
+    pub(crate) fn qubits(&self) -> &[usize] {
+        match self {
+            ActsOn::None => &[],
+            ActsOn::Unitary(operands) => operands.as_slice(),
+        }
+    }
 }
 
 impl GateInstruction {
@@ -163,13 +204,13 @@ impl GateInstruction {
             | GateInstruction::Rx { qubit: q, .. }
             | GateInstruction::Ry { qubit: q, .. }
             | GateInstruction::Rz { qubit: q, .. }
-            | GateInstruction::U { qubit: q, .. } => ActsOn::One(*q),
+            | GateInstruction::U { qubit: q, .. } => ActsOn::Unitary(Operands::new(&[*q])),
             GateInstruction::Cx(a, b)
             | GateInstruction::Cz(a, b)
             | GateInstruction::Swap(a, b)
             | GateInstruction::Rzz { q0: a, q1: b, .. }
             | GateInstruction::Rxx { q0: a, q1: b, .. }
-            | GateInstruction::Cp { q0: a, q1: b, .. } => ActsOn::Two(*a, *b),
+            | GateInstruction::Cp { q0: a, q1: b, .. } => ActsOn::Unitary(Operands::new(&[*a, *b])),
             GateInstruction::Barrier(_)
             | GateInstruction::Measure { .. }
             | GateInstruction::MeasureAll => ActsOn::None,
@@ -262,12 +303,13 @@ pub fn terminal_measurement_violation(gates: &[GateInstruction]) -> Option<usize
     let mut measure_all = false;
     let mut measured: Vec<usize> = Vec::new();
     for gate in gates {
-        let offending = match gate.acts_on() {
-            ActsOn::One(q) if measure_all || measured.contains(&q) => Some(q),
-            ActsOn::Two(a, _) if measure_all || measured.contains(&a) => Some(a),
-            ActsOn::Two(_, b) if measure_all || measured.contains(&b) => Some(b),
-            _ => None,
-        };
+        // The first measured operand in operand order, for any arity.
+        let offending = gate
+            .acts_on()
+            .qubits()
+            .iter()
+            .copied()
+            .find(|q| measure_all || measured.contains(q));
         if offending.is_some() {
             return offending;
         }
@@ -305,10 +347,12 @@ pub fn terminal_measurement_violation(gates: &[GateInstruction]) -> Option<usize
 pub fn qubit_index_violation(gates: &[GateInstruction], num_qubits: usize) -> Option<usize> {
     for gate in gates {
         let offending = match gate.acts_on() {
-            ActsOn::One(q) => (q >= num_qubits).then_some(q),
-            ActsOn::Two(a, b) => (a >= num_qubits)
-                .then_some(a)
-                .or_else(|| (b >= num_qubits).then_some(b)),
+            // The first out-of-range operand in operand order, for any arity.
+            ActsOn::Unitary(operands) => operands
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|&q| q >= num_qubits),
             ActsOn::None => match gate {
                 GateInstruction::Measure { qubit, .. } => (*qubit >= num_qubits).then_some(*qubit),
                 GateInstruction::Barrier(qubits) => {
@@ -552,6 +596,75 @@ mod tests {
         assert_eq!(
             qubit_index_violation(&[GateInstruction::Barrier(vec![0, 7])], 2),
             Some(7)
+        );
+    }
+
+    // ── ActsOn / Operands (arity-generic operand lists) ──────────────────
+
+    #[test]
+    fn operands_keep_operand_order_for_every_arity() {
+        for qubits in [
+            &[][..],
+            &[4][..],
+            &[3, 1][..],
+            &[2, 0, 1][..],
+            &[4, 3, 2, 1, 0][..],
+        ] {
+            assert_eq!(Operands::new(qubits).as_slice(), qubits);
+        }
+    }
+
+    #[test]
+    fn acts_on_reports_unitary_operands_in_operand_order() {
+        assert_eq!(GateInstruction::H(3).acts_on().qubits(), &[3]);
+        // Control before target: the order the C-4 and index checks report in.
+        assert_eq!(GateInstruction::Cx(2, 0).acts_on().qubits(), &[2, 0]);
+        let rzz = GateInstruction::Rzz {
+            q0: 1,
+            q1: 4,
+            theta: GateParam::Fixed(0.1),
+        };
+        assert_eq!(rzz.acts_on().qubits(), &[1, 4]);
+        // Non-unitary instructions have no unitary operands.
+        for gate in [
+            GateInstruction::Barrier(vec![0, 1]),
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::MeasureAll,
+        ] {
+            assert_eq!(gate.acts_on(), ActsOn::None);
+            assert!(gate.acts_on().qubits().is_empty());
+        }
+    }
+
+    #[test]
+    fn terminal_measurement_violation_reports_first_measured_operand() {
+        // Only the target is measured: the target is reported.
+        let gates = [
+            GateInstruction::Measure { qubit: 1, cbit: 0 },
+            GateInstruction::Cx(0, 1),
+        ];
+        assert_eq!(terminal_measurement_violation(&gates), Some(1));
+        // Both measured: the first operand in operand order wins.
+        let gates = [
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::Measure { qubit: 1, cbit: 1 },
+            GateInstruction::Cx(1, 0),
+        ];
+        assert_eq!(terminal_measurement_violation(&gates), Some(1));
+        // After MeasureAll every operand is measured.
+        let gates = [GateInstruction::MeasureAll, GateInstruction::Cz(2, 3)];
+        assert_eq!(terminal_measurement_violation(&gates), Some(2));
+    }
+
+    #[test]
+    fn qubit_index_violation_reports_first_out_of_range_operand() {
+        assert_eq!(
+            qubit_index_violation(&[GateInstruction::Cx(7, 9)], 2),
+            Some(7)
+        );
+        assert_eq!(
+            qubit_index_violation(&[GateInstruction::Cx(1, 9)], 2),
+            Some(9)
         );
     }
 

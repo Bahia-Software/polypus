@@ -32,7 +32,7 @@
 
 use crate::circuit::ParameterizedCircuit;
 use crate::error::CircuitError;
-use crate::gate::{ActsOn, GateInstruction, GateParam};
+use crate::gate::{GateInstruction, GateParam};
 use std::collections::BTreeSet;
 
 /// Maximum nesting depth of a constant angle expression. Bounds parser
@@ -520,8 +520,12 @@ impl Parser {
         }
     }
 
-    /// Expand register-broadcast semantics: every register argument must have
-    /// the same length; single-bit arguments are repeated.
+    /// Expand register-broadcast semantics (OpenQASM 2.0 §3.1), for a gate of
+    /// any arity: every register argument must have the same length `n`, the
+    /// gate is applied `n` times (the `k`-th application takes element `k` of
+    /// every register argument), and single-bit arguments are repeated in every
+    /// application. E.g. `ccx a,b,c[0];` over `qreg a[2]; qreg b[2];` expands to
+    /// `ccx a[0],b[0],c[0]; ccx a[1],b[1],c[0];`.
     fn broadcast(args: &[ArgIndices], line: usize) -> Result<Vec<Vec<usize>>, CircuitError> {
         let span = args
             .iter()
@@ -788,8 +792,8 @@ impl Parser {
                 n_params(0)?;
                 arity(2)?;
                 for t in Self::broadcast(args, line)? {
+                    Self::check_distinct(&t, line)?;
                     let (a, b) = (t[0], t[1]);
-                    self.check_distinct(a, b, line)?;
                     match name {
                         "cz" => self.push_validated(GateInstruction::Cz(a, b), line)?,
                         "swap" => self.push_validated(GateInstruction::Swap(a, b), line)?,
@@ -802,8 +806,8 @@ impl Parser {
                 n_params(1)?;
                 arity(2)?;
                 for t in Self::broadcast(args, line)? {
+                    Self::check_distinct(&t, line)?;
                     let (q0, q1, theta) = (t[0], t[1], fixed(0));
-                    self.check_distinct(q0, q1, line)?;
                     let gate = match name {
                         "rzz" => GateInstruction::Rzz { q0, q1, theta },
                         "rxx" => GateInstruction::Rxx { q0, q1, theta },
@@ -817,15 +821,30 @@ impl Parser {
         }
     }
 
-    fn check_distinct(&self, q0: usize, q1: usize, line: usize) -> Result<(), CircuitError> {
-        if q0 == q1 {
-            Err(err(
-                line,
-                format!("two-qubit gate requires distinct qubits, got ({q0}, {q1})"),
-            ))
-        } else {
-            Ok(())
+    /// Reject a (broadcast-expanded) gate application that names the same qubit
+    /// twice, for any arity: `cx q[1],q[1];`, or `ccx a,b,c;` where two of the
+    /// arguments resolve to the same qubit after expansion.
+    fn check_distinct(qubits: &[usize], line: usize) -> Result<(), CircuitError> {
+        let repeated = qubits
+            .iter()
+            .enumerate()
+            .any(|(i, q)| qubits[..i].contains(q));
+        if !repeated {
+            return Ok(());
         }
+        let arity = match qubits.len() {
+            2 => "two-qubit".to_string(),
+            3 => "three-qubit".to_string(),
+            n => format!("{n}-qubit"),
+        };
+        let list: Vec<String> = qubits.iter().map(usize::to_string).collect();
+        Err(err(
+            line,
+            format!(
+                "{arity} gate requires distinct qubits, got ({})",
+                list.join(", ")
+            ),
+        ))
     }
 
     /// Append a fully-resolved instruction, enforcing the terminal-measurement
@@ -833,12 +852,13 @@ impl Parser {
     /// is rejected with the offending line, rather than silently accepted. This
     /// is the single push point for every statement handler.
     fn push_validated(&mut self, gate: GateInstruction, line: usize) -> Result<(), CircuitError> {
-        let violated = match gate.acts_on() {
-            ActsOn::One(q) if self.measured.contains(&q) => Some(q),
-            ActsOn::Two(a, _) if self.measured.contains(&a) => Some(a),
-            ActsOn::Two(_, b) if self.measured.contains(&b) => Some(b),
-            _ => None,
-        };
+        // The first measured operand in operand order, for any arity.
+        let violated = gate
+            .acts_on()
+            .qubits()
+            .iter()
+            .copied()
+            .find(|q| self.measured.contains(q));
         if let Some(q) = violated {
             return Err(err(
                 line,
@@ -1035,6 +1055,81 @@ impl Parser {
             // `MeasureAll`, so the builder's cache is rebuilt from `gates` on the
             // first push into the imported circuit.
             measured: Default::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg(indices: std::ops::Range<usize>) -> ArgIndices {
+        ArgIndices {
+            indices: indices.collect(),
+            is_register: true,
+        }
+    }
+
+    fn bit(index: usize) -> ArgIndices {
+        ArgIndices {
+            indices: vec![index],
+            is_register: false,
+        }
+    }
+
+    #[test]
+    fn broadcast_three_arguments_mixed_registers_and_bits() {
+        // `ccx a,b,c[0];` with a = q[0..2], b = q[2..4], c[0] = q[4]: the same
+        // expansion Qiskit's QASM 2 loader produces for this statement.
+        let args = [reg(0..2), reg(2..4), bit(4)];
+        assert_eq!(
+            Parser::broadcast(&args, 1).unwrap(),
+            vec![vec![0, 2, 4], vec![1, 3, 4]]
+        );
+        // A single register in any position drives the expansion.
+        let args = [bit(0), reg(1..4), bit(5)];
+        assert_eq!(
+            Parser::broadcast(&args, 1).unwrap(),
+            vec![vec![0, 1, 5], vec![0, 2, 5], vec![0, 3, 5]]
+        );
+        // All single bits: exactly one application.
+        let args = [bit(2), bit(0), bit(1)];
+        assert_eq!(Parser::broadcast(&args, 1).unwrap(), vec![vec![2, 0, 1]]);
+    }
+
+    #[test]
+    fn broadcast_rejects_register_size_mismatch_at_any_arity() {
+        let args = [reg(0..2), reg(2..5), bit(5)];
+        match Parser::broadcast(&args, 7) {
+            Err(CircuitError::Parse { line: 7, message }) => {
+                assert!(message.contains("register size mismatch"), "{message}")
+            }
+            other => panic!("expected a size-mismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_distinct_rejects_repeats_at_any_arity() {
+        assert!(Parser::check_distinct(&[0, 1], 1).is_ok());
+        assert!(Parser::check_distinct(&[2, 0, 1], 1).is_ok());
+        for (qubits, expected) in [
+            (
+                &[1, 1][..],
+                "two-qubit gate requires distinct qubits, got (1, 1)",
+            ),
+            (
+                &[0, 1, 0][..],
+                "three-qubit gate requires distinct qubits, got (0, 1, 0)",
+            ),
+            (
+                &[3, 2, 1, 2][..],
+                "4-qubit gate requires distinct qubits, got (3, 2, 1, 2)",
+            ),
+        ] {
+            match Parser::check_distinct(qubits, 9) {
+                Err(CircuitError::Parse { line: 9, message }) => assert_eq!(message, expected),
+                other => panic!("expected a distinct-qubits error, got {other:?}"),
+            }
         }
     }
 }
