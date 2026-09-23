@@ -564,6 +564,27 @@ impl Statevector {
             GateInstruction::U0 { gamma, .. } => {
                 angle(gamma)?;
             }
+            // The other spellings of the generic single-qubit gate, each with
+            // its exact matrix. `p`/`u1` take the dense path (not the diagonal
+            // one) so the diagonal arms here stay exactly what `diagonal_op`
+            // classifies for run fusion.
+            GateInstruction::P { qubit, lam } | GateInstruction::U1 { qubit, lam } => {
+                let m = gates::diag_matrix(gates::phase(angle(lam)?));
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            GateInstruction::U2 { qubit, phi, lam } => {
+                let m = gates::u(std::f64::consts::FRAC_PI_2, angle(phi)?, angle(lam)?);
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            GateInstruction::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => {
+                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
             // A call of a gate declared in the source program: expanded here —
             // the simulator's lowering boundary — into built-in instructions,
             // each applied like any other. The call's own angles are resolved

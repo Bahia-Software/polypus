@@ -367,8 +367,14 @@ fn lower(
             w.cu3(angles, *control, *target);
         }
         // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
-        // left-to-right that is rz(λ), ry(θ), rz(φ).
+        // left-to-right that is rz(λ), ry(θ), rz(φ). `u` is the same operator.
         GateInstruction::U {
+            qubit,
+            theta,
+            phi,
+            lam,
+        }
+        | GateInstruction::UGate {
             qubit,
             theta,
             phi,
@@ -378,6 +384,17 @@ fn lower(
             w.rot(RZ, la, *qubit);
             w.rot(RY, th, *qubit);
             w.rot(RZ, ph, *qubit);
+        }
+        // u2(φ,λ) = u3(π/2,φ,λ).
+        GateInstruction::U2 { qubit, phi, lam } => {
+            let (ph, la) = (angle(phi)?, angle(lam)?);
+            w.rot(RZ, la, *qubit);
+            w.rot(RY, FRAC_PI_2, *qubit);
+            w.rot(RZ, ph, *qubit);
+        }
+        // p(λ) = u1(λ) = diag(1, e^{iλ}) = e^{iλ/2}·rz(λ).
+        GateInstruction::P { qubit, lam } | GateInstruction::U1 { qubit, lam } => {
+            w.rot(RZ, angle(lam)?, *qubit)
         }
         // Barriers are scheduling hints with no QIR representation.
         GateInstruction::Barrier(_) => {}

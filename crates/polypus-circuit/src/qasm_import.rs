@@ -7,9 +7,11 @@
 //! - Gates: all of Qiskit's `qelib1.inc` — `h x y z s t sdg tdg id u0 sx sxdg
 //!   rx ry rz p u1 u2 u3 u U cx CX cz cy ch csx swap ccx cswap rzz rxx cp crx
 //!   cry crz cu1 cu3 cu rccx rc3x c3x c3sqrtx c4x`. Each is represented
-//!   one-to-one and re-emitted under the same name — nothing is decomposed
-//!   here — except that `p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and
-//!   `CX` to `cx`. `id` is an instruction of its own, never dropped.
+//!   one-to-one and re-emitted under the same name — nothing is decomposed or
+//!   re-spelled here (`p`, `u1`, `u2`, `u`, `u3` all stay as written) — except
+//!   the language builtins `U` and `CX`, re-emitted as `u` and `cx`, which is
+//!   what Qiskit names them too. `id` is an instruction of its own, never
+//!   dropped.
 //! - `gate` declarations (`gate name(params) qargs { body }`): each call of a
 //!   declared gate is one [`GateInstruction::Custom`] instruction, and the
 //!   exporter re-emits the declaration verbatim plus the call — the body is
@@ -381,18 +383,30 @@ static BUILTIN_GATES: &[BuiltinGate] = &[
         qubit: q[0],
         theta: p[0],
     }),
-    // ── 1-qubit generic family, canonicalised to u3 ──
-    builtin("p", 1, 1, u3_from_phase),
-    builtin("u1", 1, 1, u3_from_phase),
-    builtin("u2", 2, 1, |p, q| GateInstruction::U {
+    // ── 1-qubit generic family: every spelling kept ──
+    builtin("p", 1, 1, |p, q| GateInstruction::P {
         qubit: q[0],
-        theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
+        lam: p[0],
+    }),
+    builtin("u1", 1, 1, |p, q| GateInstruction::U1 {
+        qubit: q[0],
+        lam: p[0],
+    }),
+    builtin("u2", 2, 1, |p, q| GateInstruction::U2 {
+        qubit: q[0],
         phi: p[0],
         lam: p[1],
     }),
-    builtin("u3", 3, 1, u3),
-    builtin("u", 3, 1, u3),
-    builtin("U", 3, 1, u3),
+    builtin("u3", 3, 1, |p, q| GateInstruction::U {
+        qubit: q[0],
+        theta: p[0],
+        phi: p[1],
+        lam: p[2],
+    }),
+    builtin("u", 3, 1, u_gate),
+    // The language builtin `U` is Qiskit's `u` (it names both `u`), so it is
+    // re-emitted as `u`: the same instruction for any Qiskit consumer.
+    builtin("U", 3, 1, u_gate),
     // ── 2-qubit gates ──
     builtin("cx", 0, 2, |_, q| GateInstruction::Cx(q[0], q[1])),
     builtin("CX", 0, 2, |_, q| GateInstruction::Cx(q[0], q[1])),
@@ -478,19 +492,9 @@ static BUILTIN_GATES: &[BuiltinGate] = &[
     }),
 ];
 
-/// `p(λ)` / `u1(λ)` as the equal `u3(0, 0, λ)`.
-fn u3_from_phase(p: &[GateParam], q: &[usize]) -> GateInstruction {
-    GateInstruction::U {
-        qubit: q[0],
-        theta: GateParam::Fixed(0.0),
-        phi: GateParam::Fixed(0.0),
-        lam: p[0],
-    }
-}
-
-/// `u3(θ, φ, λ)` and its synonyms `u` / `U`.
-fn u3(p: &[GateParam], q: &[usize]) -> GateInstruction {
-    GateInstruction::U {
+/// `u(θ, φ, λ)` and the builtin `U(θ, φ, λ)`.
+fn u_gate(p: &[GateParam], q: &[usize]) -> GateInstruction {
+    GateInstruction::UGate {
         qubit: q[0],
         theta: p[0],
         phi: p[1],
@@ -1551,12 +1555,13 @@ mod tests {
         }
     }
 
-    /// The spellings the importer canonicalises instead of preserving. Every
-    /// other built-in must be re-emitted under exactly the name it was parsed
-    /// from, or a benchmark file would reach Aer as a different program.
+    /// The spellings the importer canonicalises instead of preserving: the
+    /// language builtins `U` and `CX`, which Qiskit itself names `u` and `cx`.
+    /// Every other built-in must be re-emitted under exactly the name it was
+    /// parsed from, or a benchmark file would reach Aer as a different program.
     fn canonical_spelling(name: &str) -> &str {
         match name {
-            "p" | "u1" | "u2" | "u" | "U" => "u3",
+            "U" => "u",
             "CX" => "cx",
             other => other,
         }
@@ -1591,41 +1596,25 @@ mod tests {
             let statement = qasm.lines().last().unwrap();
 
             let operands: Vec<String> = qubits.iter().map(|q| format!("q[{q}]")).collect();
-            let expected_params = match canonical_spelling(gate.name) {
-                // The canonical u3 form carries the synthesised angles.
-                "u3" => None,
-                _ if gate.params == 0 => Some(String::new()),
-                _ => Some(format!(
-                    "({})",
-                    params
-                        .iter()
-                        .map(|p| match p {
-                            GateParam::Fixed(v) => format!("{v:.12}"),
-                            GateParam::Param(_) => unreachable!(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )),
+            let angles = if gate.params == 0 {
+                String::new()
+            } else {
+                let values: Vec<String> = params
+                    .iter()
+                    .map(|p| match p {
+                        GateParam::Fixed(v) => format!("{v:.12}"),
+                        GateParam::Param(_) => unreachable!(),
+                    })
+                    .collect();
+                format!("({})", values.join(","))
             };
             let head = canonical_spelling(gate.name);
-            assert!(
-                statement.starts_with(head),
-                "{}: exported as {statement:?}",
+            assert_eq!(
+                statement,
+                format!("{head}{angles} {};", operands.join(",")),
+                "{}: not exported under its own name, angles and operand order",
                 gate.name
             );
-            assert!(
-                statement.ends_with(&format!(" {};", operands.join(","))),
-                "{}: operands reordered in {statement:?}",
-                gate.name
-            );
-            if let Some(expected) = expected_params {
-                assert_eq!(
-                    statement,
-                    format!("{head}{expected} {};", operands.join(",")),
-                    "{}",
-                    gate.name
-                );
-            }
         }
     }
 

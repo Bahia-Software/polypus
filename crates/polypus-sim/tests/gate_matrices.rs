@@ -666,6 +666,58 @@ fn rc3x_has_the_permutation_structure_of_c3x() {
     }
 }
 
+/// The spellings of the generic single-qubit gate: `p`/`u1` are the phase
+/// gate, `u2(φ,λ)` is `u3(π/2,φ,λ)`, and `u` is `u3` — each exactly.
+#[test]
+fn single_qubit_spellings_match_their_matrices() {
+    let (th, ph, la) = (0.7, -1.3, 2.1);
+    let phase = [
+        [c(1.0, 0.0), c(0.0, 0.0)],
+        [c(0.0, 0.0), C64::from_polar(1.0, la)],
+    ];
+    for gate in [
+        G::P {
+            qubit: 1,
+            lam: Fixed(la),
+        },
+        G::U1 {
+            qubit: 1,
+            lam: Fixed(la),
+        },
+    ] {
+        assert_matrix_eq(
+            &unitary_of(2, &gate),
+            &one_qubit_reference(2, 1, phase),
+            "p/u1",
+        );
+    }
+    assert_matrix_eq(
+        &unitary_of(
+            2,
+            &G::U2 {
+                qubit: 0,
+                phi: Fixed(ph),
+                lam: Fixed(la),
+            },
+        ),
+        &one_qubit_reference(2, 0, u_matrix(std::f64::consts::FRAC_PI_2, ph, la)),
+        "u2",
+    );
+    assert_matrix_eq(
+        &unitary_of(
+            2,
+            &G::UGate {
+                qubit: 1,
+                theta: Fixed(th),
+                phi: Fixed(ph),
+                lam: Fixed(la),
+            },
+        ),
+        &one_qubit_reference(2, 1, u_matrix(th, ph, la)),
+        "u",
+    );
+}
+
 #[test]
 fn u0_is_the_identity() {
     let prep = [G::H(0), G::Cx(0, 1), G::T(1)];

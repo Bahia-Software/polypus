@@ -175,7 +175,8 @@ gate nop a {{ }}\nqreg q[2];\ng q[0],q[1];\nnop q[1];\n"
     assert_eq!(
         expanded,
         [
-            GateInstruction::U {
+            // The builtin `U` is Qiskit's `u`.
+            GateInstruction::UGate {
                 qubit: 0,
                 theta: GateParam::Fixed(0.1),
                 phi: GateParam::Fixed(0.2),

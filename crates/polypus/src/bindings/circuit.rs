@@ -261,10 +261,10 @@ impl Circuit {
     /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
     ///
     /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output,
-    /// `gate` declarations included (`u`/`p`/`u1`/`u2` are canonicalised to
-    /// `u3`; every other instruction, `id` and calls of declared gates
-    /// included, is kept one-to-one; multiple registers are flattened in
-    /// declaration order). The
+    /// `gate` declarations included (every instruction — `p`, `u1`, `u2`, `u`,
+    /// `id` and calls of declared gates included — is kept one-to-one under its
+    /// own spelling; only the builtins `U`/`CX` become `u`/`cx`; multiple
+    /// registers are flattened in declaration order). The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.
     ///
@@ -606,6 +606,45 @@ impl Circuit {
                 phi: phi.into(),
                 lam: lam.into(),
                 gamma: gamma.into(),
+            },
+        )
+    }
+
+    /// Phase gate `p(qubit, lam)`.
+    fn p(slf: PyRefMut<'_, Self>, qubit: usize, lam: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::P {
+                qubit,
+                lam: lam.into(),
+            },
+        )
+    }
+
+    /// `u1(qubit, lam)`: the phase gate in its `u1` spelling.
+    fn u1(slf: PyRefMut<'_, Self>, qubit: usize, lam: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::U1 {
+                qubit,
+                lam: lam.into(),
+            },
+        )
+    }
+
+    /// `u2(qubit, phi, lam)` (= `u3(π/2, phi, lam)`).
+    fn u2(
+        slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        phi: AngleArg,
+        lam: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        push(
+            slf,
+            GateInstruction::U2 {
+                qubit,
+                phi: phi.into(),
+                lam: lam.into(),
             },
         )
     }

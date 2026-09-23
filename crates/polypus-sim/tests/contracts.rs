@@ -438,6 +438,25 @@ fn c2_every_gate_emitted_qir_matches_the_native_gate() {
             lam: Fixed(c),
             gamma: Fixed(0.61),
         },
+        G::P {
+            qubit: 0,
+            lam: Fixed(a),
+        },
+        G::U1 {
+            qubit: 2,
+            lam: Fixed(b),
+        },
+        G::U2 {
+            qubit: 1,
+            phi: Fixed(b),
+            lam: Fixed(c),
+        },
+        G::UGate {
+            qubit: 2,
+            theta: Fixed(a),
+            phi: Fixed(b),
+            lam: Fixed(c),
+        },
         declared_gate_call(),
     ];
     for gate in vocabulary {

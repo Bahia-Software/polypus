@@ -57,6 +57,15 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .c3x(2, 4, 0, 3)
         .c3sqrtx(4, 3, 1, 2)
         .c4x(1, 4, 0, 3, 2)
+        .p(4, Param(0))
+        .u1(3, 0.45)
+        .u2(2, -0.2, Param(1))
+        .push(GateInstruction::UGate {
+            qubit: 1,
+            theta: GateParam::Fixed(0.1),
+            phi: GateParam::Param(0),
+            lam: GateParam::Fixed(-0.7),
+        })
         .push(declared_gate_call())
         .barrier()
         .barrier_on(&[0, 2])
@@ -77,7 +86,7 @@ fn declared_gate_call() -> GateInstruction {
 }
 
 /// Number of instruction kinds in [`GateInstruction`].
-const INSTRUCTION_KINDS: usize = 42;
+const INSTRUCTION_KINDS: usize = 46;
 
 /// Every instruction kind, numbered `0..INSTRUCTION_KINDS`. The match is
 /// exhaustive, so adding a variant fails to build here until it is numbered;
@@ -128,6 +137,10 @@ fn instruction_kind(gate: &GateInstruction) -> usize {
         G::C3x(..) => 39,
         G::C3sqrtx(..) => 40,
         G::C4x(..) => 41,
+        G::P { .. } => 42,
+        G::U1 { .. } => 43,
+        G::U2 { .. } => 44,
+        G::UGate { .. } => 45,
     }
 }
 
@@ -220,6 +233,18 @@ fn c2_every_gate_roundtrips_individually() {
         ("c3x", ParameterizedCircuit::new(4).c3x(2, 3, 0, 1)),
         ("c3sqrtx", ParameterizedCircuit::new(4).c3sqrtx(1, 3, 2, 0)),
         ("c4x", ParameterizedCircuit::new(5).c4x(4, 0, 3, 1, 2)),
+        ("p", ParameterizedCircuit::new(1).p(0, 0.3)),
+        ("u1", ParameterizedCircuit::new(1).u1(0, 0.3)),
+        ("u2", ParameterizedCircuit::new(1).u2(0, 0.2, 0.3)),
+        (
+            "u",
+            ParameterizedCircuit::new(1).push(GateInstruction::UGate {
+                qubit: 0,
+                theta: GateParam::Fixed(0.1),
+                phi: GateParam::Fixed(0.2),
+                lam: GateParam::Fixed(0.3),
+            }),
+        ),
         ("barrier", ParameterizedCircuit::new(2).h(0).barrier()),
         // A partial measurement (qubit 1 left unmeasured) so the importer does
         // not canonicalise a full q[k]->c[k] run into `measure_all`.
@@ -290,6 +315,10 @@ fn c2_every_gate_statement_reemits_byte_identically() {
         "c3x q[1],q[4],q[0],q[2];",
         "c3sqrtx q[4],q[2],q[3],q[0];",
         "c4x q[3],q[0],q[4],q[2],q[1];",
+        "p(0.250000000000) q[3];",
+        "u1(0.250000000000) q[3];",
+        "u2(0.100000000000,-0.200000000000) q[2];",
+        "u(0.100000000000,0.200000000000,0.300000000000) q[4];",
     ];
     for statement in statements {
         let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");

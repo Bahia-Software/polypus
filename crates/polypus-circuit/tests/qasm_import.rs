@@ -119,9 +119,10 @@ measure q[2] -> meas[2];
     assert_eq!(qc.num_qubits, 3);
     assert_eq!(qc.num_clbits(), 3);
 
-    // swap → native Swap; id kept one-to-one (it counts towards gate count and
-    // depth); explicit full barrier → whole-register form; 3 contiguous
-    // measures → MeasureAll.
+    // `u` and `p` keep their own spelling (not rewritten to `u3`); swap →
+    // native Swap; id kept one-to-one (it counts towards gate count and depth);
+    // explicit full barrier → whole-register form; 3 contiguous measures →
+    // MeasureAll.
     let expected = [
         GateInstruction::H(0),
         GateInstruction::Rzz {
@@ -133,16 +134,14 @@ measure q[2] -> meas[2];
             qubit: 2,
             theta: GateParam::Fixed(0.8),
         },
-        GateInstruction::U {
+        GateInstruction::UGate {
             qubit: 0,
             theta: GateParam::Fixed(0.1),
             phi: GateParam::Fixed(0.2),
             lam: GateParam::Fixed(0.3),
         },
-        GateInstruction::U {
+        GateInstruction::P {
             qubit: 1,
-            theta: GateParam::Fixed(0.0),
-            phi: GateParam::Fixed(0.0),
             lam: GateParam::Fixed(0.5),
         },
         GateInstruction::Swap(0, 2),
@@ -457,6 +456,64 @@ fn id_rejects_wrong_arity_parameters_and_range() {
         3,
     );
     assert_parse_err("OPENQASM 2.0;\nqreg q[2];\nid q[2];\n", "out of range", 3);
+}
+
+// ─────────────────── Every spelling is kept as written ────────────────────
+
+/// `p`, `u1`, `u2`, `u` and `u3` are one family, but each spelling is its own
+/// instruction and is re-emitted as written — nothing is rewritten to `u3`.
+/// Only the language builtins `U`/`CX` change spelling, to `u`/`cx`, which is
+/// what Qiskit calls them too.
+#[test]
+fn single_qubit_spellings_are_kept_as_written() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\n\
+               p(0.100000000000) q[0];\nu1(0.200000000000) q[0];\n\
+               u2(0.300000000000,0.400000000000) q[0];\n\
+               u(0.500000000000,0.600000000000,0.700000000000) q[0];\n\
+               u3(0.500000000000,0.600000000000,0.700000000000) q[0];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    use GateParam::Fixed;
+    assert_eq!(
+        qc.gates,
+        [
+            GateInstruction::P {
+                qubit: 0,
+                lam: Fixed(0.1)
+            },
+            GateInstruction::U1 {
+                qubit: 0,
+                lam: Fixed(0.2)
+            },
+            GateInstruction::U2 {
+                qubit: 0,
+                phi: Fixed(0.3),
+                lam: Fixed(0.4)
+            },
+            GateInstruction::UGate {
+                qubit: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+            GateInstruction::U {
+                qubit: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+        ]
+    );
+    assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), src);
+
+    let builtins = "OPENQASM 2.0;\nqreg q[2];\nU(0.1,0.2,0.3) q[0];\nCX q[0],q[1];\n";
+    let out = ParameterizedCircuit::from_qasm2(builtins)
+        .unwrap()
+        .to_qasm2_with_params(&[])
+        .unwrap();
+    assert!(
+        out.ends_with("u(0.100000000000,0.200000000000,0.300000000000) q[0];\ncx q[0],q[1];\n"),
+        "{out}"
+    );
 }
 
 // ─────────────── Tier-1 qelib1.inc gates: one-to-one import ───────────────

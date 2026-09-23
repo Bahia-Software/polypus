@@ -285,10 +285,11 @@ Additionally:
   transpiled first (`qiskit.transpile(qc, AerSimulator())`) — Aer never unrolls
   them by itself.
 - `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
-  `gate` declarations included. Canonicalizations performed on import:
-  `u`/`p`/`u1`/`u2`/`U` → `u3`, `CX` → `cx`, multiple `qreg`/`creg`
-  declarations flattened into one index space, constant parameter expressions
-  (e.g. `pi/2`) evaluated. Nothing is decomposed (C-2).
+  `gate` declarations included. Canonicalizations performed on import: the
+  builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple
+  `qreg`/`creg` declarations flattened into one index space, constant
+  parameter expressions (e.g. `pi/2`) evaluated. Nothing is decomposed or
+  re-spelled otherwise (C-2): `p`, `u1`, `u2`, `u`, `u3` all stay as written.
 - Parse errors carry the **1-based line number** (`CircuitError::Parse` on
   the Rust side, `ValueError` once across the Python boundary).
 

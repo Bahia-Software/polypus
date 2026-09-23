@@ -132,8 +132,8 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  id  u0  sx  sxdg  rx  ry  rz  u3(u/p/u1/u2/U canonicalised)
-cx(CX canonicalised)  cz  cy  ch  csx  swap  rzz  rxx  cp  cu1  crx  cry  crz  cu3  cu
+h  x  y  z  s  t  sdg  tdg  id  u0  sx  sxdg  rx  ry  rz  p  u1  u2  u  u3  (U → u)
+cx  (CX → cx)  cz  cy  ch  csx  swap  rzz  rxx  cp  cu1  crx  cry  crz  cu3  cu
 ccx  cswap  rccx  rc3x  c3x  c3sqrtx  c4x
 calls of gates declared with `gate` blocks
 barrier  measure  measure_all
@@ -147,8 +147,9 @@ them — declared with `gate` blocks — and are handled as declared gates.
 importer never decomposes: a `ccx` statement is one `Ccx` instruction and is
 exported as `ccx` again, with its operands in the same order, so a benchmark
 file reaches a backend (e.g. Aer, through the exporter) as the same program —
-same gate count, same depth. The only spelling changes are the canonicalisations
-listed above (`p`/`u1`/`u2`/`u`/`U` → `u3`, `CX` → `cx`). Decomposition is
+same gate count, same depth, same instruction names. The only spelling changes
+are the language builtins `U` → `u` and `CX` → `cx`, which Qiskit names `u`
+and `cx` itself, so no Qiskit consumer can tell them apart. Decomposition is
 allowed at exactly two *lowering* boundaries, both confined to their module and
 invisible to `to_qasm2`: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
@@ -158,6 +159,8 @@ intrinsic.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
+Likewise `p`/`u1` (one operator), and `u`/`u3` (one operator) with `u2`: every
+spelling is its own instruction, re-emitted as written.
 
 `id` is an instruction like any other, never a no-op to drop: it is imported,
 exported and round-tripped one-to-one, so the gate count and depth of an

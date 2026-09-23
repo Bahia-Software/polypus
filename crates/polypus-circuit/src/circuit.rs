@@ -89,8 +89,9 @@ impl ParameterizedCircuit {
     /// QASM again.
     ///
     /// Known model differences (semantics-preserving):
-    /// - `p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and `CX` to `cx`.
-    ///   Every other instruction, `id` included, is kept one-to-one.
+    /// - The language builtins `U` and `CX` are re-emitted as `u` and `cx`
+    ///   (what Qiskit names them too). Every other instruction — `p`, `u1`,
+    ///   `u2`, `u`, `u3`, `id` included — is kept one-to-one, as spelled.
     /// - Gate declarations are re-emitted right after the include, in source
     ///   order; a declaration no instruction uses is not re-emitted.
     /// - The classical register is implicit (sized by the measurements), so
@@ -432,6 +433,31 @@ impl ParameterizedCircuit {
             phi: phi.into(),
             lam: lam.into(),
             gamma: gamma.into(),
+        })
+    }
+
+    /// Phase gate `p(lam)` on `qubit`.
+    pub fn p(self, qubit: usize, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::P {
+            qubit,
+            lam: lam.into(),
+        })
+    }
+
+    /// `u1(lam)` on `qubit`: the phase gate in its `u1` spelling.
+    pub fn u1(self, qubit: usize, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U1 {
+            qubit,
+            lam: lam.into(),
+        })
+    }
+
+    /// `u2(phi, lam)` on `qubit` (= `u3(π/2, phi, lam)`).
+    pub fn u2(self, qubit: usize, phi: impl Into<GateParam>, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U2 {
+            qubit,
+            phi: phi.into(),
+            lam: lam.into(),
         })
     }
 

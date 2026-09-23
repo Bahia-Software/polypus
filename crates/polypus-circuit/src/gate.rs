@@ -183,6 +183,26 @@ pub enum GateInstruction {
     /// `u0(gamma)`: the identity, "idle for `gamma` units" in `qelib1.inc`.
     /// Kept (like [`Id`](GateInstruction::Id)) so gate counts and depth match.
     U0 { qubit: usize, gamma: GateParam },
+    /// Phase gate `p(lambda)` = diag(1, e^{iλ}). The same operator as
+    /// `u1(λ)` and `u3(0,0,λ)`, kept under its own spelling.
+    P { qubit: usize, lam: GateParam },
+    /// `u1(lambda)`: the phase gate in its `u1` spelling (see [`P`](GateInstruction::P)).
+    U1 { qubit: usize, lam: GateParam },
+    /// `u2(phi, lambda)` = `u3(π/2, φ, λ)`, kept under its own spelling.
+    U2 {
+        qubit: usize,
+        phi: GateParam,
+        lam: GateParam,
+    },
+    /// `u(theta, phi, lambda)` (Qiskit's `UGate`): the same operator as
+    /// [`U`](GateInstruction::U), which is spelled `u3`; kept as its own
+    /// variant so a `u` statement is re-emitted as `u`.
+    UGate {
+        qubit: usize,
+        theta: GateParam,
+        phi: GateParam,
+        lam: GateParam,
+    },
     /// Simplified Toffoli (`rccx`): a Toffoli up to relative phases, with
     /// controls `a`, `b` and target `c`.
     Rccx(usize, usize, usize),
@@ -317,7 +337,12 @@ impl GateInstruction {
             | G::Crz { theta, .. }
             | G::Cu1 { theta, .. } => [Some(theta), None, None, None],
             G::U0 { gamma, .. } => [Some(gamma), None, None, None],
+            G::P { lam, .. } | G::U1 { lam, .. } => [Some(lam), None, None, None],
+            G::U2 { phi, lam, .. } => [Some(phi), Some(lam), None, None],
             G::U {
+                theta, phi, lam, ..
+            }
+            | G::UGate {
                 theta, phi, lam, ..
             }
             | G::Cu3 {
@@ -480,6 +505,30 @@ impl GateInstruction {
             G::U0 { qubit, gamma } => G::U0 {
                 qubit: *qubit,
                 gamma: f(gamma)?,
+            },
+            G::P { qubit, lam } => G::P {
+                qubit: *qubit,
+                lam: f(lam)?,
+            },
+            G::U1 { qubit, lam } => G::U1 {
+                qubit: *qubit,
+                lam: f(lam)?,
+            },
+            G::U2 { qubit, phi, lam } => G::U2 {
+                qubit: *qubit,
+                phi: f(phi)?,
+                lam: f(lam)?,
+            },
+            G::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => G::UGate {
+                qubit: *qubit,
+                theta: f(theta)?,
+                phi: f(phi)?,
+                lam: f(lam)?,
             },
             G::Custom(call) => G::Custom(
                 call.with_params(call.params().iter().map(&mut f).collect::<Result<_, E>>()?),
@@ -682,7 +731,11 @@ impl GateInstruction {
             | GateInstruction::U { qubit: q, .. }
             | GateInstruction::Sx(q)
             | GateInstruction::Sxdg(q)
-            | GateInstruction::U0 { qubit: q, .. } => ActsOn::Unitary(Operands::new(&[*q])),
+            | GateInstruction::U0 { qubit: q, .. }
+            | GateInstruction::P { qubit: q, .. }
+            | GateInstruction::U1 { qubit: q, .. }
+            | GateInstruction::U2 { qubit: q, .. }
+            | GateInstruction::UGate { qubit: q, .. } => ActsOn::Unitary(Operands::new(&[*q])),
             GateInstruction::Rccx(a, b, c) => ActsOn::Unitary(Operands::new(&[*a, *b, *c])),
             GateInstruction::Rc3x(a, b, c, d)
             | GateInstruction::C3x(a, b, c, d)

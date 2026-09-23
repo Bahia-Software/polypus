@@ -59,6 +59,24 @@ GATES = [
         lambda qc: qc.append(_u3(*ANGLES[:3]), [0]),
         lambda c: c.u(0, *ANGLES[:3]),
     ),
+    # The other spellings of the same family, each kept as written.
+    ("p", (3,), 1, lambda qc: qc.p(ANGLES[0], 3), lambda c: c.p(3, ANGLES[0])),
+    (
+        "u1",
+        (2,),
+        1,
+        lambda qc: qc.append(_u1(ANGLES[0]), [2]),
+        lambda c: c.u1(2, ANGLES[0]),
+    ),
+    (
+        "u2",
+        (0,),
+        2,
+        lambda qc: qc.append(_u2(*ANGLES[:2]), [0]),
+        lambda c: c.u2(0, *ANGLES[:2]),
+    ),
+    # Polypus's `u()` builder spells `u3`; the operator is the same.
+    ("u", (4,), 3, lambda qc: qc.u(*ANGLES[:3], 4), lambda c: c.u(4, *ANGLES[:3])),
     ("cx", (2, 0), 0, lambda qc: qc.cx(2, 0), lambda c: c.cx(2, 0)),
     ("cz", (1, 2), 0, lambda qc: qc.cz(1, 2), lambda c: c.cz(1, 2)),
     ("cy", (2, 1), 0, lambda qc: qc.cy(2, 1), lambda c: c.cy(2, 1)),
@@ -183,6 +201,18 @@ def _u3(theta, phi, lam):
     from qiskit.circuit.library import U3Gate
 
     return U3Gate(theta, phi, lam)
+
+
+def _u1(lam):
+    from qiskit.circuit.library import U1Gate
+
+    return U1Gate(lam)
+
+
+def _u2(phi, lam):
+    from qiskit.circuit.library import U2Gate
+
+    return U2Gate(phi, lam)
 
 
 def _cu1(lam):
