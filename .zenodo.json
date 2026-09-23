@@ -7,27 +7,33 @@
   "creators": [
     {
       "name": "Fernández Prada, Diego Beltrán",
-      "orcid": "0009-0007-9693-8384"
+      "orcid": "0009-0007-9693-8384",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Sóñora Pombo, Víctor",
-      "orcid": "0009-0009-0417-5960"
+      "orcid": "0009-0009-0417-5960",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Figueiras Gómez, Sergio",
-      "orcid": "0009-0003-1680-9269"
+      "orcid": "0009-0003-1680-9269",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Boubeta Martínez, Miguel",
-      "orcid": "0000-0002-5128-7027"
+      "orcid": "0000-0002-5128-7027",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Pérez González, Kevin",
-      "orcid": "0009-0008-7774-2906"
+      "orcid": "0009-0008-7774-2906",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Sendón Caamaño, Uxía",
-      "orcid": "0009-0004-2837-3949"
+      "orcid": "0009-0004-2837-3949",
+      "affiliation": "Bahía Software S.L.U."
     },
     {
       "name": "Galicia Supercomputing Center (CESGA)"
