@@ -33,7 +33,8 @@
 use crate::circuit::ParameterizedCircuit;
 use crate::error::CircuitError;
 use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 /// Maximum nesting depth of a constant angle expression. Bounds parser
 /// recursion so untrusted input like `((((…))))` or `----…-1` cannot overflow
@@ -258,6 +259,134 @@ fn tokenize(src: &str) -> Result<Vec<(Tok, usize)>, CircuitError> {
         }
     }
     Ok(toks)
+}
+
+// ──────────────────────────── Gate vocabulary ────────────────────────────
+
+/// Builds one instruction from its angle parameters and qubit operands, both
+/// already checked against the gate's signature.
+type BuildGate = fn(&[GateParam], &[usize]) -> GateInstruction;
+
+/// A built-in gate: its OpenQASM 2.0 spelling and signature, and its IR
+/// constructor.
+struct BuiltinGate {
+    /// Spelling in OpenQASM 2.0 source.
+    name: &'static str,
+    /// Number of angle parameters.
+    params: usize,
+    /// Number of qubit arguments.
+    qubits: usize,
+    /// The IR constructor.
+    build: BuildGate,
+}
+
+const fn builtin(
+    name: &'static str,
+    params: usize,
+    qubits: usize,
+    build: BuildGate,
+) -> BuiltinGate {
+    BuiltinGate {
+        name,
+        params,
+        qubits,
+        build,
+    }
+}
+
+/// The importer's whole gate vocabulary (the `qelib1.inc` gates it accepts),
+/// in one table. Supporting a new gate is one row here, plus the other places
+/// contract C-2 lists (exporter, simulator, QIR, bindings); the unit tests
+/// check every row against the exporter. A `static` (not a `const`), so the
+/// lookup index can hand out `&'static` references into this one table.
+static BUILTIN_GATES: &[BuiltinGate] = &[
+    // ── 1-qubit, no parameters ──
+    builtin("h", 0, 1, |_, q| GateInstruction::H(q[0])),
+    builtin("x", 0, 1, |_, q| GateInstruction::X(q[0])),
+    builtin("y", 0, 1, |_, q| GateInstruction::Y(q[0])),
+    builtin("z", 0, 1, |_, q| GateInstruction::Z(q[0])),
+    builtin("s", 0, 1, |_, q| GateInstruction::S(q[0])),
+    builtin("t", 0, 1, |_, q| GateInstruction::T(q[0])),
+    builtin("sdg", 0, 1, |_, q| GateInstruction::Sdg(q[0])),
+    builtin("tdg", 0, 1, |_, q| GateInstruction::Tdg(q[0])),
+    // Kept, not dropped: it counts towards the gate count and depth the source
+    // program (and Qiskit) reports.
+    builtin("id", 0, 1, |_, q| GateInstruction::Id(q[0])),
+    // ── 1-qubit rotations ──
+    builtin("rx", 1, 1, |p, q| GateInstruction::Rx {
+        qubit: q[0],
+        theta: p[0],
+    }),
+    builtin("ry", 1, 1, |p, q| GateInstruction::Ry {
+        qubit: q[0],
+        theta: p[0],
+    }),
+    builtin("rz", 1, 1, |p, q| GateInstruction::Rz {
+        qubit: q[0],
+        theta: p[0],
+    }),
+    // ── 1-qubit generic family, canonicalised to u3 ──
+    builtin("p", 1, 1, u3_from_phase),
+    builtin("u1", 1, 1, u3_from_phase),
+    builtin("u2", 2, 1, |p, q| GateInstruction::U {
+        qubit: q[0],
+        theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
+        phi: p[0],
+        lam: p[1],
+    }),
+    builtin("u3", 3, 1, u3),
+    builtin("u", 3, 1, u3),
+    builtin("U", 3, 1, u3),
+    // ── 2-qubit gates ──
+    builtin("cx", 0, 2, |_, q| GateInstruction::Cx(q[0], q[1])),
+    builtin("CX", 0, 2, |_, q| GateInstruction::Cx(q[0], q[1])),
+    builtin("cz", 0, 2, |_, q| GateInstruction::Cz(q[0], q[1])),
+    builtin("swap", 0, 2, |_, q| GateInstruction::Swap(q[0], q[1])),
+    builtin("rzz", 1, 2, |p, q| GateInstruction::Rzz {
+        q0: q[0],
+        q1: q[1],
+        theta: p[0],
+    }),
+    builtin("rxx", 1, 2, |p, q| GateInstruction::Rxx {
+        q0: q[0],
+        q1: q[1],
+        theta: p[0],
+    }),
+    builtin("cp", 1, 2, |p, q| GateInstruction::Cp {
+        q0: q[0],
+        q1: q[1],
+        theta: p[0],
+    }),
+];
+
+/// `p(λ)` / `u1(λ)` as the equal `u3(0, 0, λ)`.
+fn u3_from_phase(p: &[GateParam], q: &[usize]) -> GateInstruction {
+    GateInstruction::U {
+        qubit: q[0],
+        theta: GateParam::Fixed(0.0),
+        phi: GateParam::Fixed(0.0),
+        lam: p[0],
+    }
+}
+
+/// `u3(θ, φ, λ)` and its synonyms `u` / `U`.
+fn u3(p: &[GateParam], q: &[usize]) -> GateInstruction {
+    GateInstruction::U {
+        qubit: q[0],
+        theta: p[0],
+        phi: p[1],
+        lam: p[2],
+    }
+}
+
+/// Look up a built-in gate by its OpenQASM 2.0 spelling (O(1): the table is
+/// indexed once, on first use).
+fn builtin_gate(name: &str) -> Option<&'static BuiltinGate> {
+    static INDEX: OnceLock<HashMap<&'static str, &'static BuiltinGate>> = OnceLock::new();
+    INDEX
+        .get_or_init(|| BUILTIN_GATES.iter().map(|g| (g.name, g)).collect())
+        .get(name)
+        .copied()
 }
 
 // ─────────────────────────────── Parser ──────────────────────────────────
@@ -661,9 +790,10 @@ impl Parser {
         self.apply_gate(&name, &params, &args, line)
     }
 
-    /// Translate one (broadcast-expanded) gate application into instructions.
-    ///
-    /// This match is the single place to extend when adding gate support.
+    /// Translate one gate application into (broadcast-expanded) instructions:
+    /// look the name up in the built-in vocabulary ([`builtin_gate`]), check
+    /// the parameter and argument counts, expand register arguments, and push
+    /// one instruction per expansion.
     fn apply_gate(
         &mut self,
         name: &str,
@@ -671,155 +801,35 @@ impl Parser {
         args: &[ArgIndices],
         line: usize,
     ) -> Result<(), CircuitError> {
-        let arity = |n: usize| -> Result<(), CircuitError> {
-            if args.len() != n {
-                Err(err(
-                    line,
-                    format!(
-                        "gate '{name}' expects {n} argument(s), found {}",
-                        args.len()
-                    ),
-                ))
-            } else {
-                Ok(())
-            }
+        let Some(spec) = builtin_gate(name) else {
+            return Err(err(line, format!("unsupported gate '{name}'")));
         };
-        let n_params = |n: usize| -> Result<(), CircuitError> {
-            if params.len() != n {
-                Err(err(
-                    line,
-                    format!(
-                        "gate '{name}' expects {n} parameter(s), found {}",
-                        params.len()
-                    ),
-                ))
-            } else {
-                Ok(())
-            }
-        };
-        let fixed = |i: usize| GateParam::Fixed(params[i]);
-
-        match name {
-            // ── 1-qubit, no parameters ──
-            "h" | "x" | "y" | "z" | "s" | "t" | "sdg" | "tdg" | "id" => {
-                n_params(0)?;
-                arity(1)?;
-                for t in Self::broadcast(args, line)? {
-                    let q = t[0];
-                    let gate = match name {
-                        "h" => GateInstruction::H(q),
-                        "x" => GateInstruction::X(q),
-                        "y" => GateInstruction::Y(q),
-                        "z" => GateInstruction::Z(q),
-                        "s" => GateInstruction::S(q),
-                        "t" => GateInstruction::T(q),
-                        "sdg" => GateInstruction::Sdg(q),
-                        "tdg" => GateInstruction::Tdg(q),
-                        // Kept, not dropped: it counts towards the gate count
-                        // and depth the source program (and Qiskit) reports.
-                        "id" => GateInstruction::Id(q),
-                        _ => unreachable!(),
-                    };
-                    self.push_validated(gate, line)?;
-                }
-                Ok(())
-            }
-            // ── 1-qubit rotations ──
-            "rx" | "ry" | "rz" => {
-                n_params(1)?;
-                arity(1)?;
-                for t in Self::broadcast(args, line)? {
-                    let (qubit, theta) = (t[0], fixed(0));
-                    let gate = match name {
-                        "rx" => GateInstruction::Rx { qubit, theta },
-                        "ry" => GateInstruction::Ry { qubit, theta },
-                        _ => GateInstruction::Rz { qubit, theta },
-                    };
-                    self.push_validated(gate, line)?;
-                }
-                Ok(())
-            }
-            // ── 1-qubit generic family, canonicalised to u3 ──
-            "p" | "u1" => {
-                n_params(1)?;
-                arity(1)?;
-                for t in Self::broadcast(args, line)? {
-                    self.push_validated(
-                        GateInstruction::U {
-                            qubit: t[0],
-                            theta: GateParam::Fixed(0.0),
-                            phi: GateParam::Fixed(0.0),
-                            lam: fixed(0),
-                        },
-                        line,
-                    )?;
-                }
-                Ok(())
-            }
-            "u2" => {
-                n_params(2)?;
-                arity(1)?;
-                for t in Self::broadcast(args, line)? {
-                    self.push_validated(
-                        GateInstruction::U {
-                            qubit: t[0],
-                            theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
-                            phi: fixed(0),
-                            lam: fixed(1),
-                        },
-                        line,
-                    )?;
-                }
-                Ok(())
-            }
-            "u3" | "u" | "U" => {
-                n_params(3)?;
-                arity(1)?;
-                for t in Self::broadcast(args, line)? {
-                    self.push_validated(
-                        GateInstruction::U {
-                            qubit: t[0],
-                            theta: fixed(0),
-                            phi: fixed(1),
-                            lam: fixed(2),
-                        },
-                        line,
-                    )?;
-                }
-                Ok(())
-            }
-            // ── 2-qubit gates ──
-            "cx" | "CX" | "cz" | "swap" => {
-                n_params(0)?;
-                arity(2)?;
-                for t in Self::broadcast(args, line)? {
-                    Self::check_distinct(&t, line)?;
-                    let (a, b) = (t[0], t[1]);
-                    match name {
-                        "cz" => self.push_validated(GateInstruction::Cz(a, b), line)?,
-                        "swap" => self.push_validated(GateInstruction::Swap(a, b), line)?,
-                        _ => self.push_validated(GateInstruction::Cx(a, b), line)?,
-                    }
-                }
-                Ok(())
-            }
-            "rzz" | "rxx" | "cp" => {
-                n_params(1)?;
-                arity(2)?;
-                for t in Self::broadcast(args, line)? {
-                    Self::check_distinct(&t, line)?;
-                    let (q0, q1, theta) = (t[0], t[1], fixed(0));
-                    let gate = match name {
-                        "rzz" => GateInstruction::Rzz { q0, q1, theta },
-                        "rxx" => GateInstruction::Rxx { q0, q1, theta },
-                        _ => GateInstruction::Cp { q0, q1, theta },
-                    };
-                    self.push_validated(gate, line)?;
-                }
-                Ok(())
-            }
-            _ => Err(err(line, format!("unsupported gate '{name}'"))),
+        if params.len() != spec.params {
+            return Err(err(
+                line,
+                format!(
+                    "gate '{name}' expects {} parameter(s), found {}",
+                    spec.params,
+                    params.len()
+                ),
+            ));
         }
+        if args.len() != spec.qubits {
+            return Err(err(
+                line,
+                format!(
+                    "gate '{name}' expects {} argument(s), found {}",
+                    spec.qubits,
+                    args.len()
+                ),
+            ));
+        }
+        let params: Vec<GateParam> = params.iter().map(|&v| GateParam::Fixed(v)).collect();
+        for qubits in Self::broadcast(args, line)? {
+            Self::check_distinct(&qubits, line)?;
+            self.push_validated((spec.build)(&params, &qubits), line)?;
+        }
+        Ok(())
     }
 
     /// Reject a (broadcast-expanded) gate application that names the same qubit
@@ -1071,6 +1081,84 @@ mod tests {
         ArgIndices {
             indices: vec![index],
             is_register: false,
+        }
+    }
+
+    /// The spellings the importer canonicalises instead of preserving. Every
+    /// other built-in must be re-emitted under exactly the name it was parsed
+    /// from, or a benchmark file would reach Aer as a different program.
+    fn canonical_spelling(name: &str) -> &str {
+        match name {
+            "p" | "u1" | "u2" | "u" | "U" => "u3",
+            "CX" => "cx",
+            other => other,
+        }
+    }
+
+    #[test]
+    fn builtin_vocabulary_has_unique_spellings() {
+        let mut names: Vec<&str> = BUILTIN_GATES.iter().map(|g| g.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate spelling in BUILTIN_GATES");
+        for gate in BUILTIN_GATES {
+            assert!(std::ptr::eq(builtin_gate(gate.name).unwrap(), gate));
+        }
+        assert!(builtin_gate("ccz").is_none());
+    }
+
+    /// Table ↔ exporter agreement, row by row: the instruction a row builds is
+    /// exported under the row's own spelling (modulo `canonical_spelling`),
+    /// with the row's parameter and operand counts, in operand order.
+    #[test]
+    fn every_builtin_is_exported_under_its_own_name() {
+        for gate in BUILTIN_GATES {
+            let params: Vec<GateParam> = (1..=gate.params)
+                .map(|i| GateParam::Fixed(0.125 * i as f64))
+                .collect();
+            // Descending operands, so an exporter that re-sorted them shows.
+            let qubits: Vec<usize> = (0..gate.qubits).rev().collect();
+            let instruction = (gate.build)(&params, &qubits);
+            let qasm = crate::qasm::write_qasm2(gate.qubits, 0, &[instruction], &[]).unwrap();
+            let statement = qasm.lines().last().unwrap();
+
+            let operands: Vec<String> = qubits.iter().map(|q| format!("q[{q}]")).collect();
+            let expected_params = match canonical_spelling(gate.name) {
+                // The canonical u3 form carries the synthesised angles.
+                "u3" => None,
+                _ if gate.params == 0 => Some(String::new()),
+                _ => Some(format!(
+                    "({})",
+                    params
+                        .iter()
+                        .map(|p| match p {
+                            GateParam::Fixed(v) => format!("{v:.12}"),
+                            GateParam::Param(_) => unreachable!(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
+            };
+            let head = canonical_spelling(gate.name);
+            assert!(
+                statement.starts_with(head),
+                "{}: exported as {statement:?}",
+                gate.name
+            );
+            assert!(
+                statement.ends_with(&format!(" {};", operands.join(","))),
+                "{}: operands reordered in {statement:?}",
+                gate.name
+            );
+            if let Some(expected) = expected_params {
+                assert_eq!(
+                    statement,
+                    format!("{head}{expected} {};", operands.join(",")),
+                    "{}",
+                    gate.name
+                );
+            }
         }
     }
 
