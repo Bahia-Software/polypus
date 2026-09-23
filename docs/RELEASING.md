@@ -33,7 +33,7 @@ and any future change must be applied to both.
 
 1. **Release date — set.** `CITATION.cff` has `date-released: 2026-09-23`. If the
    release actually happens on another day, update it. (If releasing a version
-   other than `0.7.0`, also bump `version:` here and in `Cargo.toml` /
+   other than `0.7.1`, also bump `version:` here and in `Cargo.toml` /
    `Cargo.lock`.) Validate:
    ```bash
    pipx run cffconvert --validate -i CITATION.cff   # "valid according to schema 1.2.0"
@@ -60,8 +60,9 @@ and any future change must be applied to both.
 
 - **DOI** — assigned by Zenodo on the first archived release; until then the
   `identifiers:` block in `CITATION.cff` and the README badge/BibTeX stay unset.
-- **Version to archive** — `0.7.0` is already on PyPI; decide whether the first
-  DOI is cut for a fresh `0.7.0` GitHub Release or a subsequent version.
+- **Version to archive** — **decided: `0.7.1`.** `0.7.0` is already on PyPI, so
+  the first DOI is cut from a fresh `0.7.1` GitHub Release (the workspace version,
+  `Cargo.lock`, `CITATION.cff` and the README are already bumped to `0.7.1`).
 
 _Author list, order, ORCIDs, affiliations and the license are **final** (6
 authors, all affiliated to Bahía Software S.L.U., + CESGA as an entity),

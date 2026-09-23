@@ -55,7 +55,7 @@ It is built for researchers and engineers who need to:
 - swap between a local simulator, CESGA's CUNQA platform, or CESGA's QMIO real QPU without touching algorithm code,
 - keep a Python-friendly API while getting Rust-level performance on the hot paths (parameter binding, batched simulation).
 
-> **Status:** Polypus is under active development (current version: `0.7.0`) and is published on PyPI as [`polypus-quantum`](https://pypi.org/project/polypus-quantum/) — `pip install polypus-quantum` (it imports as `polypus`). See [Installation](#installation).
+> **Status:** Polypus is under active development (current version: `0.7.1`) and is published on PyPI as [`polypus-quantum`](https://pypi.org/project/polypus-quantum/) — `pip install polypus-quantum` (it imports as `polypus`). See [Installation](#installation).
 
 ## Key Features
 
@@ -414,7 +414,7 @@ If Polypus is useful in your research, please cite it:
   year    = {2026},
   url     = {https://github.com/Bahia-Software/polypus},
   doi     = {PENDING},  % PENDING: Zenodo concept DOI once the first release is archived (see docs/RELEASING.md)
-  version = {0.7.0}
+  version = {0.7.1}
 }
 ```
 
