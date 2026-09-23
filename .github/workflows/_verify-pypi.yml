@@ -41,11 +41,15 @@ jobs:
           set -eux
           python -m pip install --upgrade pip
           if [ "$VERSION" = "latest" ]; then SPEC="polypus-quantum"; else SPEC="polypus-quantum==$VERSION"; fi
-          # PyPI's CDN can lag for a few seconds right after a publish; retry.
+          # Right after a publish, PyPI's index/CDN can take several minutes to
+          # serve a new version — and different per-interpreter wheel files can
+          # propagate at different times (a real 0.7.1 release saw cp311/cp312
+          # ready while cp39/cp310/cp313 briefly 404'd). Retry generously
+          # (~20 min ceiling; exits as soon as the install succeeds).
           ok=0
-          for i in $(seq 1 20); do
+          for i in $(seq 1 40); do
             if pip install --only-binary=:all: --no-cache-dir "$SPEC"; then ok=1; break; fi
-            echo "attempt $i: not available yet, waiting for PyPI to propagate…"; sleep 15
+            echo "attempt $i/40: not on PyPI yet, waiting for the index/CDN to propagate…"; sleep 30
           done
           [ "$ok" = 1 ]
           pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
@@ -87,9 +91,9 @@ jobs:
           python -m pip install --upgrade pip
           if [ "$VERSION" = "latest" ]; then SPEC="polypus-quantum"; else SPEC="polypus-quantum==$VERSION"; fi
           ok=0
-          for i in $(seq 1 20); do
+          for i in $(seq 1 40); do
             if pip install --no-cache-dir --no-binary polypus-quantum "$SPEC"; then ok=1; break; fi
-            echo "attempt $i: not available yet, waiting for PyPI to propagate…"; sleep 15
+            echo "attempt $i/40: not on PyPI yet, waiting for the index/CDN to propagate…"; sleep 30
           done
           [ "$ok" = 1 ]
           pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
