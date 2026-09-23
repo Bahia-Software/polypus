@@ -10,14 +10,53 @@
 //! paper version of `qelib1.inc` may need Qiskit's
 //! `qasm2.LEGACY_CUSTOM_INSTRUCTIONS` to recognise them.
 
+use crate::custom_gate::GateDefinition;
 use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 /// Format an angle with 12 decimal places (≥ 10 required for round-tripping
 /// optimizer outputs without observable precision loss).
 fn fmt_angle(value: f64) -> String {
     format!("{value:.12}")
+}
+
+/// Every gate declaration `gates` needs: the definitions of the declared gates
+/// it calls and, transitively, of the declared gates their bodies call — each
+/// once, in source order (a body only calls gates declared before it, so this
+/// order also puts every declaration before its first use). Declarations no
+/// instruction reaches are not re-emitted.
+///
+/// # Errors
+///
+/// [`CircuitError::ConflictingGateDefinitions`] if two *different* definitions
+/// share a name (only possible when combining calls from separately imported
+/// programs): one OpenQASM 2.0 program cannot declare both.
+fn declared_gates(gates: &[GateInstruction]) -> Result<Vec<&GateDefinition>, CircuitError> {
+    let mut found: HashMap<&str, &GateDefinition> = HashMap::new();
+    let mut pending: Vec<&GateDefinition> = gates
+        .iter()
+        .filter_map(|g| match g {
+            GateInstruction::Custom(call) => Some(call.definition()),
+            _ => None,
+        })
+        .collect();
+    while let Some(definition) = pending.pop() {
+        if let Some(&seen) = found.get(definition.name()) {
+            if !std::ptr::eq(seen, definition) && seen != definition {
+                return Err(CircuitError::ConflictingGateDefinitions {
+                    name: definition.name().to_string(),
+                });
+            }
+            continue;
+        }
+        found.insert(definition.name(), definition);
+        pending.extend(definition.callees().map(|callee| &**callee));
+    }
+    let mut ordered: Vec<&GateDefinition> = found.into_values().collect();
+    ordered.sort_by(|a, b| a.ordinal().cmp(&b.ordinal()).then(a.name().cmp(b.name())));
+    Ok(ordered)
 }
 
 /// Serialize a gate sequence to a complete OpenQASM 2.0 program.
@@ -33,6 +72,13 @@ pub(crate) fn write_qasm2(
     let mut out = String::new();
     out.push_str("OPENQASM 2.0;\n");
     out.push_str("include \"qelib1.inc\";\n");
+    // The declarations of the gates the circuit calls (and of the gates those
+    // call), verbatim and in their source order, before the registers — where
+    // Qiskit's exporter puts them too.
+    for definition in declared_gates(gates)? {
+        out.push_str(definition.declaration());
+        out.push('\n');
+    }
     if num_qubits > 0 {
         let _ = writeln!(out, "qreg q[{num_qubits}];");
     }
@@ -189,6 +235,26 @@ pub(crate) fn write_qasm2(
                     angle(lam)?,
                     angle(gamma)?
                 );
+            }
+            GateInstruction::Custom(call) => {
+                let operands: Vec<String> =
+                    call.qubits().iter().map(|q| format!("q[{q}]")).collect();
+                if call.params().is_empty() {
+                    let _ = writeln!(out, "{} {};", call.name(), operands.join(","));
+                } else {
+                    let angles = call
+                        .params()
+                        .iter()
+                        .map(angle)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let _ = writeln!(
+                        out,
+                        "{}({}) {};",
+                        call.name(),
+                        angles.join(","),
+                        operands.join(",")
+                    );
+                }
             }
             GateInstruction::Barrier(qubits) => {
                 if qubits.is_empty() {

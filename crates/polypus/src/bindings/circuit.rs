@@ -260,9 +260,10 @@ impl Circuit {
 
     /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
     ///
-    /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output
-    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`; every other instruction,
-    /// `id` included, is kept one-to-one; multiple registers are flattened in
+    /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output,
+    /// `gate` declarations included (`u`/`p`/`u1`/`u2` are canonicalised to
+    /// `u3`; every other instruction, `id` and calls of declared gates
+    /// included, is kept one-to-one; multiple registers are flattened in
     /// declaration order). The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.

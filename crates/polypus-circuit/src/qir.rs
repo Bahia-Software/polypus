@@ -222,178 +222,206 @@ pub(crate) fn write_qir(
     if let Some(qubit) = crate::gate::terminal_measurement_violation(gates) {
         return Err(CircuitError::QubitAlreadyMeasured { qubit });
     }
+    write_qir_module(num_qubits, num_clbits, gates, params)
+}
 
+/// Lower one instruction to QIR base-profile calls into `w`. Measurements are
+/// only recorded in `measurements`: they are emitted after every unitary.
+fn lower(
+    w: &mut QirWriter,
+    measurements: &mut BTreeMap<usize, usize>,
+    num_qubits: usize,
+    gate: &GateInstruction,
+    params: &[f64],
+) -> Result<(), CircuitError> {
     let angle = |p: &GateParam| -> Result<f64, CircuitError> { p.resolve(params) };
+    match gate {
+        GateInstruction::H(q) => w.gate1(H, *q),
+        GateInstruction::X(q) => w.gate1(X, *q),
+        GateInstruction::Y(q) => w.gate1(Y, *q),
+        GateInstruction::Z(q) => w.gate1(Z, *q),
+        GateInstruction::S(q) => w.gate1(S, *q),
+        GateInstruction::T(q) => w.gate1(T, *q),
+        GateInstruction::Sdg(q) => w.gate1(S_ADJ, *q),
+        GateInstruction::Tdg(q) => w.gate1(T_ADJ, *q),
+        // The identity has no QIS intrinsic and no effect: dropped here, at
+        // the QIR lowering boundary only (it stays in the circuit and in
+        // the OpenQASM export).
+        GateInstruction::Id(_) => {}
+        GateInstruction::Rx { qubit, theta } => w.rot(RX, angle(theta)?, *qubit),
+        GateInstruction::Ry { qubit, theta } => w.rot(RY, angle(theta)?, *qubit),
+        GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),
+        GateInstruction::Cx(c, t) => w.gate2(CNOT, *c, *t),
+        GateInstruction::Cz(c, t) => w.gate2(CZ, *c, *t),
+        // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
+        GateInstruction::Swap(q0, q1) => {
+            w.gate2(CNOT, *q0, *q1);
+            w.gate2(CNOT, *q1, *q0);
+            w.gate2(CNOT, *q0, *q1);
+        }
+        // rzz(θ) = cnot · rz(θ) · cnot
+        GateInstruction::Rzz { q0, q1, theta } => {
+            let t = angle(theta)?;
+            w.gate2(CNOT, *q0, *q1);
+            w.rot(RZ, t, *q1);
+            w.gate2(CNOT, *q0, *q1);
+        }
+        // rxx(θ) = (h⊗h) · cnot · rz(θ) · cnot · (h⊗h)
+        GateInstruction::Rxx { q0, q1, theta } => {
+            let t = angle(theta)?;
+            w.gate1(H, *q0);
+            w.gate1(H, *q1);
+            w.gate2(CNOT, *q0, *q1);
+            w.rot(RZ, t, *q1);
+            w.gate2(CNOT, *q0, *q1);
+            w.gate1(H, *q0);
+            w.gate1(H, *q1);
+        }
+        // cp(θ) and its `cu1` spelling: see `QirWriter::cp`.
+        GateInstruction::Cp { q0, q1, theta } | GateInstruction::Cu1 { q0, q1, theta } => {
+            w.cp(angle(theta)?, *q0, *q1)
+        }
+        // √X = e^{iπ/4}·rx(π/2) and √X† = e^{−iπ/4}·rx(−π/2).
+        GateInstruction::Sx(q) => w.rot(RX, FRAC_PI_2, *q),
+        GateInstruction::Sxdg(q) => w.rot(RX, -FRAC_PI_2, *q),
+        // cy c,t = s† t; cnot c,t; s t (exact).
+        GateInstruction::Cy(c, t) => {
+            w.gate1(S_ADJ, *t);
+            w.gate2(CNOT, *c, *t);
+            w.gate1(S, *t);
+        }
+        // ch c,t = s t; h t; t t; cnot c,t; t† t; h t; s† t (exact).
+        GateInstruction::Ch(c, t) => {
+            w.gate1(S, *t);
+            w.gate1(H, *t);
+            w.gate1(T, *t);
+            w.gate2(CNOT, *c, *t);
+            w.gate1(T_ADJ, *t);
+            w.gate1(H, *t);
+            w.gate1(S_ADJ, *t);
+        }
+        // csx c,t = h t; cp(π/2) c,t; h t.
+        GateInstruction::Csx(c, t) => {
+            w.gate1(H, *t);
+            w.cp(FRAC_PI_2, *c, *t);
+            w.gate1(H, *t);
+        }
+        GateInstruction::Ccx(a, b, c) => w.ccx(*a, *b, *c),
+        // cswap a,b,c = cnot c,b; ccx a,b,c; cnot c,b (exact).
+        GateInstruction::Cswap(a, b, c) => {
+            w.gate2(CNOT, *c, *b);
+            w.ccx(*a, *b, *c);
+            w.gate2(CNOT, *c, *b);
+        }
+        // crx(θ) c,t = s t; cnot c,t; ry(−θ/2) t; cnot c,t; ry(θ/2) t; s† t.
+        GateInstruction::Crx {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.gate1(S, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, th / 2.0, *target);
+            w.gate1(S_ADJ, *target);
+        }
+        // cry(θ) c,t = ry(θ/2) t; cnot c,t; ry(−θ/2) t; cnot c,t (exact).
+        GateInstruction::Cry {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.rot(RY, th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+        }
+        // crz(θ) c,t = rz(θ/2) t; cnot c,t; rz(−θ/2) t; cnot c,t (exact).
+        GateInstruction::Crz {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.rot(RZ, th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RZ, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+        }
+        GateInstruction::Cu3 {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+        } => w.cu3((angle(theta)?, angle(phi)?, angle(lam)?), *control, *target),
+        // cu(θ,φ,λ,γ): the phase γ on the controlled branch is a relative
+        // phase between the control's states, i.e. `p(γ)` on the control
+        // (`rz(γ)` up to global phase), then cu3(θ,φ,λ).
+        GateInstruction::Cu {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+            gamma,
+        } => {
+            let angles = (angle(theta)?, angle(phi)?, angle(lam)?);
+            w.rot(RZ, angle(gamma)?, *control);
+            w.cu3(angles, *control, *target);
+        }
+        // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
+        // left-to-right that is rz(λ), ry(θ), rz(φ).
+        GateInstruction::U {
+            qubit,
+            theta,
+            phi,
+            lam,
+        } => {
+            let (th, ph, la) = (angle(theta)?, angle(phi)?, angle(lam)?);
+            w.rot(RZ, la, *qubit);
+            w.rot(RY, th, *qubit);
+            w.rot(RZ, ph, *qubit);
+        }
+        // Barriers are scheduling hints with no QIR representation.
+        GateInstruction::Barrier(_) => {}
+        GateInstruction::Measure { qubit, cbit } => {
+            measurements.insert(*cbit, *qubit);
+        }
+        GateInstruction::MeasureAll => {
+            for q in 0..num_qubits {
+                measurements.insert(q, q);
+            }
+        }
+        // A call of a declared gate: expanded into built-in instructions
+        // here, at the QIR lowering boundary, each lowered like any other.
+        GateInstruction::Custom(call) => {
+            for expanded in call.expand(params)? {
+                lower(w, measurements, num_qubits, &expanded, &[])?;
+            }
+        }
+    }
+    Ok(())
+}
 
+/// Serialize a gate sequence to a complete QIR Base Profile LLVM IR module
+/// (the body of [`write_qir`] after its C-4 check).
+fn write_qir_module(
+    num_qubits: usize,
+    num_clbits: usize,
+    gates: &[GateInstruction],
+    params: &[f64],
+) -> Result<String, CircuitError> {
     let mut w = QirWriter::new();
     // Deferred measurements: result (classical bit) -> measured qubit.
     // A BTreeMap keeps results in ascending order and collapses any repeated
     // measurement of the same classical bit to its last assignment.
     let mut measurements: BTreeMap<usize, usize> = BTreeMap::new();
-
     for gate in gates {
-        match gate {
-            GateInstruction::H(q) => w.gate1(H, *q),
-            GateInstruction::X(q) => w.gate1(X, *q),
-            GateInstruction::Y(q) => w.gate1(Y, *q),
-            GateInstruction::Z(q) => w.gate1(Z, *q),
-            GateInstruction::S(q) => w.gate1(S, *q),
-            GateInstruction::T(q) => w.gate1(T, *q),
-            GateInstruction::Sdg(q) => w.gate1(S_ADJ, *q),
-            GateInstruction::Tdg(q) => w.gate1(T_ADJ, *q),
-            // The identity has no QIS intrinsic and no effect: dropped here, at
-            // the QIR lowering boundary only (it stays in the circuit and in
-            // the OpenQASM export).
-            GateInstruction::Id(_) => {}
-            GateInstruction::Rx { qubit, theta } => w.rot(RX, angle(theta)?, *qubit),
-            GateInstruction::Ry { qubit, theta } => w.rot(RY, angle(theta)?, *qubit),
-            GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),
-            GateInstruction::Cx(c, t) => w.gate2(CNOT, *c, *t),
-            GateInstruction::Cz(c, t) => w.gate2(CZ, *c, *t),
-            // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
-            GateInstruction::Swap(q0, q1) => {
-                w.gate2(CNOT, *q0, *q1);
-                w.gate2(CNOT, *q1, *q0);
-                w.gate2(CNOT, *q0, *q1);
-            }
-            // rzz(θ) = cnot · rz(θ) · cnot
-            GateInstruction::Rzz { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t, *q1);
-                w.gate2(CNOT, *q0, *q1);
-            }
-            // rxx(θ) = (h⊗h) · cnot · rz(θ) · cnot · (h⊗h)
-            GateInstruction::Rxx { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.gate1(H, *q0);
-                w.gate1(H, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.gate1(H, *q0);
-                w.gate1(H, *q1);
-            }
-            // cp(θ) and its `cu1` spelling: see `QirWriter::cp`.
-            GateInstruction::Cp { q0, q1, theta } | GateInstruction::Cu1 { q0, q1, theta } => {
-                w.cp(angle(theta)?, *q0, *q1)
-            }
-            // √X = e^{iπ/4}·rx(π/2) and √X† = e^{−iπ/4}·rx(−π/2).
-            GateInstruction::Sx(q) => w.rot(RX, FRAC_PI_2, *q),
-            GateInstruction::Sxdg(q) => w.rot(RX, -FRAC_PI_2, *q),
-            // cy c,t = s† t; cnot c,t; s t (exact).
-            GateInstruction::Cy(c, t) => {
-                w.gate1(S_ADJ, *t);
-                w.gate2(CNOT, *c, *t);
-                w.gate1(S, *t);
-            }
-            // ch c,t = s t; h t; t t; cnot c,t; t† t; h t; s† t (exact).
-            GateInstruction::Ch(c, t) => {
-                w.gate1(S, *t);
-                w.gate1(H, *t);
-                w.gate1(T, *t);
-                w.gate2(CNOT, *c, *t);
-                w.gate1(T_ADJ, *t);
-                w.gate1(H, *t);
-                w.gate1(S_ADJ, *t);
-            }
-            // csx c,t = h t; cp(π/2) c,t; h t.
-            GateInstruction::Csx(c, t) => {
-                w.gate1(H, *t);
-                w.cp(FRAC_PI_2, *c, *t);
-                w.gate1(H, *t);
-            }
-            GateInstruction::Ccx(a, b, c) => w.ccx(*a, *b, *c),
-            // cswap a,b,c = cnot c,b; ccx a,b,c; cnot c,b (exact).
-            GateInstruction::Cswap(a, b, c) => {
-                w.gate2(CNOT, *c, *b);
-                w.ccx(*a, *b, *c);
-                w.gate2(CNOT, *c, *b);
-            }
-            // crx(θ) c,t = s t; cnot c,t; ry(−θ/2) t; cnot c,t; ry(θ/2) t; s† t.
-            GateInstruction::Crx {
-                control,
-                target,
-                theta,
-            } => {
-                let th = angle(theta)?;
-                w.gate1(S, *target);
-                w.gate2(CNOT, *control, *target);
-                w.rot(RY, -th / 2.0, *target);
-                w.gate2(CNOT, *control, *target);
-                w.rot(RY, th / 2.0, *target);
-                w.gate1(S_ADJ, *target);
-            }
-            // cry(θ) c,t = ry(θ/2) t; cnot c,t; ry(−θ/2) t; cnot c,t (exact).
-            GateInstruction::Cry {
-                control,
-                target,
-                theta,
-            } => {
-                let th = angle(theta)?;
-                w.rot(RY, th / 2.0, *target);
-                w.gate2(CNOT, *control, *target);
-                w.rot(RY, -th / 2.0, *target);
-                w.gate2(CNOT, *control, *target);
-            }
-            // crz(θ) c,t = rz(θ/2) t; cnot c,t; rz(−θ/2) t; cnot c,t (exact).
-            GateInstruction::Crz {
-                control,
-                target,
-                theta,
-            } => {
-                let th = angle(theta)?;
-                w.rot(RZ, th / 2.0, *target);
-                w.gate2(CNOT, *control, *target);
-                w.rot(RZ, -th / 2.0, *target);
-                w.gate2(CNOT, *control, *target);
-            }
-            GateInstruction::Cu3 {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-            } => w.cu3((angle(theta)?, angle(phi)?, angle(lam)?), *control, *target),
-            // cu(θ,φ,λ,γ): the phase γ on the controlled branch is a relative
-            // phase between the control's states, i.e. `p(γ)` on the control
-            // (`rz(γ)` up to global phase), then cu3(θ,φ,λ).
-            GateInstruction::Cu {
-                control,
-                target,
-                theta,
-                phi,
-                lam,
-                gamma,
-            } => {
-                let angles = (angle(theta)?, angle(phi)?, angle(lam)?);
-                w.rot(RZ, angle(gamma)?, *control);
-                w.cu3(angles, *control, *target);
-            }
-            // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
-            // left-to-right that is rz(λ), ry(θ), rz(φ).
-            GateInstruction::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                let (th, ph, la) = (angle(theta)?, angle(phi)?, angle(lam)?);
-                w.rot(RZ, la, *qubit);
-                w.rot(RY, th, *qubit);
-                w.rot(RZ, ph, *qubit);
-            }
-            // Barriers are scheduling hints with no QIR representation.
-            GateInstruction::Barrier(_) => {}
-            GateInstruction::Measure { qubit, cbit } => {
-                measurements.insert(*cbit, *qubit);
-            }
-            GateInstruction::MeasureAll => {
-                for q in 0..num_qubits {
-                    measurements.insert(q, q);
-                }
-            }
-        }
+        lower(&mut w, &mut measurements, num_qubits, gate, params)?;
     }
 
     // Measurements come after every unitary (Base Profile: terminal).

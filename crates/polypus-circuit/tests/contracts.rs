@@ -51,14 +51,27 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .cu1(2, 1, Param(0))
         .cu3(1, 0, 0.2, -0.4, Param(1))
         .cu(0, 2, 0.3, Param(0), -0.1, 0.9)
+        .push(declared_gate_call())
         .barrier()
         .barrier_on(&[0, 2])
         .measure(0, 0)
         .measure(2, 1)
 }
 
+/// A call of a gate declared with a `gate` block (only the importer creates
+/// declarations): `g(0.25) q[2],q[0];`, whose body calls a second declared gate.
+fn declared_gate_call() -> GateInstruction {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+               gate inner(t) a { rz(t/2) a; }\n\
+               gate g(t) a,b { inner(t) b; cx a,b; }\n\
+               qreg q[3];\ng(0.25) q[2],q[0];\n";
+    let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(imported.gates.len(), 1);
+    imported.gates[0].clone()
+}
+
 /// Number of instruction kinds in [`GateInstruction`].
-const INSTRUCTION_KINDS: usize = 35;
+const INSTRUCTION_KINDS: usize = 36;
 
 /// Every instruction kind, numbered `0..INSTRUCTION_KINDS`. The match is
 /// exhaustive, so adding a variant fails to build here until it is numbered;
@@ -102,6 +115,7 @@ fn instruction_kind(gate: &GateInstruction) -> usize {
         G::Barrier(_) => 32,
         G::Measure { .. } => 33,
         G::MeasureAll => 34,
+        G::Custom(_) => 35,
     }
 }
 

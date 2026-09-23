@@ -299,9 +299,9 @@ fn rejects_unsupported_gate_with_line_number() {
 }
 
 #[test]
-fn rejects_custom_gate_definitions() {
-    let src = "OPENQASM 2.0;\nqreg q[1];\ngate mygate a { h a; }\n";
-    assert_parse_err(src, "custom gate definitions", 3);
+fn rejects_opaque_declarations_by_name() {
+    let src = "OPENQASM 2.0;\nqreg q[1];\nopaque magic(t) a;\n";
+    assert_parse_err(src, "opaque gate 'magic' has no definition", 3);
 }
 
 #[test]
@@ -351,6 +351,36 @@ fn rejects_reset_and_if() {
     assert_parse_err("OPENQASM 2.0;\nqreg q[1];\nreset q[0];\n", "'reset'", 3);
     let src = "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nif (c==1) x q[0];\n";
     assert_parse_err(src, "'if'", 4);
+}
+
+/// The known limitations are reported by name, with the reason, rather than as
+/// a generic failure.
+#[test]
+fn known_limitations_have_actionable_errors() {
+    // Classical control: names the construct and the terminal-measurement model.
+    let src = "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nif (c==1) x q[0];\n";
+    assert_parse_err(src, "classical control", 4);
+    assert_parse_err(src, "contract C-4", 4);
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nreset q[0];\n",
+        "known limitation",
+        3,
+    );
+    // An arbitrary-control multi-controlled gate without a declaration...
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[4];\nmcx q[0],q[1],q[2],q[3];\n",
+        "multi-controlled gates with an arbitrary number of controls",
+        3,
+    );
+    // ... is fine when the program declares it (Qiskit's exporter does).
+    let declared = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\ngate mcx q0,q1,q2,q3 { h q3; ccx q0,q1,q2; h q3; }\nqreg q[4];\nmcx q[0],q[1],q[2],q[3];\n";
+    assert!(ParameterizedCircuit::from_qasm2(declared).is_ok());
+    // Any other unknown name says it is neither built in nor declared.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nfoo q[0];\n",
+        "neither a qelib1.inc gate nor declared with a `gate` block",
+        3,
+    );
 }
 
 #[test]

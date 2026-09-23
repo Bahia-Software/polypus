@@ -146,12 +146,14 @@ pub(crate) enum DenseQubits {
 /// The qubits `gate` touches if it is one of the nine dense-fusable instructions
 /// (`H, X, Y, Rx, Ry, U` and `Cx, Swap, Rxx`), or `None` otherwise.
 ///
-/// These nine are exactly the gates [`Statevector::apply`] dispatches through
-/// [`kernels::apply_1q`] / [`kernels::apply_2q`] (its dense, non-diagonal arms):
-/// disjoint from the nine [`diagonal_op`] classifies and from the boundaries
-/// (every other instruction: the `Id`/`Barrier`/`Measure`/`MeasureAll` no-ops,
-/// …), so a gate is dense-fusable, diagonal, or a boundary, never two of those. A run of these fuses into one composed
-/// matrix per connected qubit component; see
+/// These nine are the dense gates fusion covers, all dispatched by
+/// [`Statevector::apply`] through [`kernels::apply_1q`] / [`kernels::apply_2q`].
+/// They are disjoint from the nine [`diagonal_op`] classifies and from the
+/// boundaries (every other instruction: the `Id`/`Barrier`/`Measure`/
+/// `MeasureAll` no-ops, the other dense and controlled gates, calls of declared
+/// gates), so a gate is dense-fusable, diagonal, or a boundary, never two of
+/// those. A run of these fuses into one composed matrix per connected qubit
+/// component; see
 /// [`Statevector::apply_composed_1q`] / [`Statevector::apply_composed_2q`] and
 /// their caller
 /// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator).
@@ -584,6 +586,20 @@ impl Statevector {
                     self.apply(g)?;
                 }
                 self.apply(&GateInstruction::Cx(*c, *b))?;
+            }
+            // A call of a gate declared in the source program: expanded here —
+            // the simulator's lowering boundary — into built-in instructions,
+            // each applied like any other. The call's own angles are resolved
+            // first, so an unbound or non-finite one fails exactly as it would
+            // on a built-in gate.
+            GateInstruction::Custom(call) => {
+                for p in call.params() {
+                    angle(p)?;
+                }
+                let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
+                for g in &expanded {
+                    self.apply(g)?;
+                }
             }
             // The identity leaves the state unchanged (the qubit index was
             // still range-checked above, like every operand).

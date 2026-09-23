@@ -1,8 +1,12 @@
 //! Hardening of the untrusted OpenQASM 2.0 import surface against
 //! denial-of-service inputs:
 //!
-//! - expression recursion depth cap (no stack overflow);
+//! - expression recursion depth cap (no stack overflow), and long flat sums or
+//!   products evaluated without recursion;
 //! - register-size cap (no multi-gigabyte allocation).
+//!
+//! (The caps on `gate` declarations — nesting, expansion size, validation
+//! budget — are covered in `gate_declarations.rs`.)
 //!
 //! (Non-finite angle rejection is covered by the crate's existing tests, which
 //! exercise `CircuitError::NonFiniteParam`.)
@@ -114,4 +118,39 @@ fn register_at_a_reasonable_size_is_accepted() {
     let src = "OPENQASM 2.0;\nqreg q[1000];\ncreg c[1000];\nh q[0];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     assert_eq!(qc.num_qubits, 1000);
+}
+
+// ─────────────────── long (not deep) expressions ────────────────────
+
+/// A sum or product of hundreds of thousands of terms is not nesting: it must
+/// evaluate — without overflowing the stack — to the value the terms spell,
+/// whether at top level or through a declared gate's body.
+#[test]
+fn very_long_sums_and_products_evaluate_without_recursion() {
+    let terms = 300_000;
+    let sum = vec!["1"; terms].join("+");
+    let src = format!("{HEADER}rx({sum}) q[0];\n");
+    let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
+    assert_eq!(
+        qc.gates,
+        [polypus_circuit::GateInstruction::Rx {
+            qubit: 0,
+            theta: polypus_circuit::GateParam::Fixed(terms as f64),
+        }]
+    );
+
+    let product = vec!["t"; terms].join("*");
+    let src =
+        format!("OPENQASM 2.0;\ngate g(t) a {{ rz({product}) a; }}\nqreg q[1];\ng(1) q[0];\n");
+    let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
+    let polypus_circuit::GateInstruction::Custom(call) = &qc.gates[0] else {
+        panic!("expected a call");
+    };
+    assert_eq!(
+        call.expand(&[]).unwrap(),
+        [polypus_circuit::GateInstruction::Rz {
+            qubit: 0,
+            theta: polypus_circuit::GateParam::Fixed(1.0),
+        }]
+    );
 }

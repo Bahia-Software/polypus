@@ -158,6 +158,19 @@ imported circuit match the source program (and what Qiskit computes for it).
 Only the QIR lowering drops it (there is no identity intrinsic); the simulator
 applies it as the identity. As a unitary it is subject to C-4.
 
+**Declared gates.** An OpenQASM 2.0 `gate` declaration is kept as a
+definition (a template over its formal arguments, plus its source text) and
+each call of it is *one* instruction, `GateInstruction::Custom`, a unitary on
+all its qubits for C-4. The exporter re-emits the declaration verbatim (only
+CRLF normalised to LF) plus the call — never the expanded body — so a backend
+that parses the export builds the same program as from the original file.
+Canonical form: the declarations the circuit reaches (directly or through
+other declarations) are emitted right after the include, in source order;
+unreachable declarations are not re-emitted. Expansion into built-in
+instructions is a lowering step of the simulator and the QIR exporter only.
+Redeclaring a gate, or declaring one with a `qelib1.inc` name (always provided),
+is rejected; so is recursion (a body may only call earlier declarations).
+
 **Invariant:** the four consumers/producers of this vocabulary — the OpenQASM
 2.0 exporter (`qasm.rs`), the OpenQASM importer (`qasm_import.rs`), the native
 simulator (`polypus-sim`) and the QIR exporter (`qir.rs`) — must all support

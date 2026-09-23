@@ -1,5 +1,6 @@
 //! Core gate data types: [`GateParam`] and [`GateInstruction`].
 
+use crate::custom_gate::CustomGate;
 use crate::error::CircuitError;
 use std::collections::BTreeSet;
 
@@ -179,6 +180,11 @@ pub enum GateInstruction {
         lam: GateParam,
         gamma: GateParam,
     },
+    /// A call of a gate declared in the source program (an OpenQASM 2.0
+    /// `gate` block), on qubits of any number. One instruction, like any other
+    /// gate: it is re-emitted as the declaration plus the call, never as its
+    /// expanded body (see [`CustomGate`]).
+    Custom(CustomGate),
     /// Barrier. An empty vector means "all qubits" (`barrier q;`).
     Barrier(Vec<usize>),
     /// Measure one qubit into one classical bit.
@@ -209,20 +215,25 @@ pub(crate) fn first_repeated_qubit(qubits: &[usize]) -> Option<usize> {
 /// The qubit operands of a unitary instruction, in operand order (control(s)
 /// before target(s) for controlled gates).
 ///
-/// Stored inline rather than in a `Vec`: [`GateInstruction::acts_on`] runs on
-/// every builder push and on every gate the simulator applies, so building an
-/// operand list must not allocate.
+/// A built-in gate's operands are stored inline rather than in a `Vec`:
+/// [`GateInstruction::acts_on`] runs on every builder push and on every gate
+/// the simulator applies, so building an operand list must not allocate. A
+/// call of a declared gate, which may act on any number of qubits, lends its
+/// own operand list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Operands {
-    qubits: [usize; MAX_GATE_ARITY],
-    len: usize,
+pub(crate) enum Operands<'a> {
+    Inline {
+        qubits: [usize; MAX_GATE_ARITY],
+        len: usize,
+    },
+    Borrowed(&'a [usize]),
 }
 
-impl Operands {
+impl Operands<'_> {
     fn new(qubits: &[usize]) -> Self {
         let mut buf = [0; MAX_GATE_ARITY];
         buf[..qubits.len()].copy_from_slice(qubits);
-        Operands {
+        Operands::Inline {
             qubits: buf,
             len: qubits.len(),
         }
@@ -230,7 +241,10 @@ impl Operands {
 
     /// The operands, in operand order.
     pub(crate) fn as_slice(&self) -> &[usize] {
-        &self.qubits[..self.len]
+        match self {
+            Operands::Inline { qubits, len } => &qubits[..*len],
+            Operands::Borrowed(qubits) => qubits,
+        }
     }
 }
 
@@ -241,14 +255,14 @@ impl Operands {
 /// `Measure` and `MeasureAll` do not evolve the state and therefore report
 /// [`ActsOn::None`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActsOn {
+pub(crate) enum ActsOn<'a> {
     /// A non-unitary instruction (barrier / measure / measure_all).
     None,
-    /// A unitary on these qubits, of any arity up to [`MAX_GATE_ARITY`].
-    Unitary(Operands),
+    /// A unitary on these qubits, of any arity.
+    Unitary(Operands<'a>),
 }
 
-impl ActsOn {
+impl ActsOn<'_> {
     /// The unitary operands, in operand order; empty for [`ActsOn::None`].
     pub(crate) fn qubits(&self) -> &[usize] {
         match self {
@@ -319,11 +333,17 @@ impl GateInstruction {
             | G::Csx(..)
             | G::Ccx(..)
             | G::Cswap(..)
+            | G::Custom(_)
             | G::Barrier(_)
             | G::Measure { .. }
             | G::MeasureAll => [None; MAX_GATE_PARAMS],
         };
-        params.into_iter().flatten()
+        // A call of a declared gate takes any number of arguments.
+        let call_params: &[GateParam] = match self {
+            G::Custom(call) => call.params(),
+            _ => &[],
+        };
+        params.into_iter().flatten().chain(call_params)
     }
 
     /// A copy of this instruction with every angle parameter replaced by
@@ -436,6 +456,9 @@ impl GateInstruction {
                 lam: f(lam)?,
                 gamma: f(gamma)?,
             },
+            G::Custom(call) => G::Custom(
+                call.with_params(call.params().iter().map(&mut f).collect::<Result<_, E>>()?),
+            ),
             G::H(_)
             | G::X(_)
             | G::Y(_)
@@ -462,8 +485,10 @@ impl GateInstruction {
     }
 
     /// Which qubits this instruction acts on *as a unitary* (see [`ActsOn`]).
-    pub(crate) fn acts_on(&self) -> ActsOn {
+    pub(crate) fn acts_on(&self) -> ActsOn<'_> {
         match self {
+            // A declared gate is a unitary on all its qubits, whatever its body.
+            GateInstruction::Custom(call) => ActsOn::Unitary(Operands::Borrowed(call.qubits())),
             GateInstruction::H(q)
             | GateInstruction::X(q)
             | GateInstruction::Y(q)

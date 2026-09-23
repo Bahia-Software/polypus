@@ -75,11 +75,12 @@ impl ParameterizedCircuit {
     /// Import an OpenQASM 2.0 program (the inverse of
     /// [`to_qasm2_with_params`](Self::to_qasm2_with_params)).
     ///
-    /// Supports the gate vocabulary emitted by this crate plus the common
-    /// `qelib1.inc` names produced by Qiskit's `qasm2.dumps` (`u`, `p`, `u1`,
-    /// `u2`, `swap`, `id`, …), multiple `qreg`/`creg` declarations (flattened
-    /// in declaration order), register broadcasting, and constant angle
-    /// expressions such as `pi/2`.
+    /// Supports the `qelib1.inc` vocabulary produced by Qiskit's `qasm2.dumps`
+    /// (`u`, `p`, `u1`, `u2`, `sx`, `ccx`, `cu3`, `id`, …), `gate`
+    /// declarations (each call becomes one [`GateInstruction::Custom`], never
+    /// its expanded body), multiple `qreg`/`creg` declarations (flattened in
+    /// declaration order), register broadcasting, and angle expressions such
+    /// as `pi/2`.
     ///
     /// Since OpenQASM 2.0 has no free parameters, the result is always fully
     /// concrete (`num_params == 0`). Round-trip guarantee: for any circuit
@@ -90,14 +91,17 @@ impl ParameterizedCircuit {
     /// Known model differences (semantics-preserving):
     /// - `p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and `CX` to `cx`.
     ///   Every other instruction, `id` included, is kept one-to-one.
+    /// - Gate declarations are re-emitted right after the include, in source
+    ///   order; a declaration no instruction uses is not re-emitted.
     /// - The classical register is implicit (sized by the measurements), so
     ///   trailing *unmeasured* classical bits are not preserved.
     ///
     /// # Errors
     ///
     /// [`CircuitError::Parse`] (with a 1-based line number) on malformed
-    /// input, undeclared registers, out-of-range indices, or unsupported
-    /// statements (`gate` definitions, `opaque`, `if`, `reset`).
+    /// input, undeclared registers, out-of-range indices, unsupported
+    /// statements (`opaque`, `if`, `reset`) or gates that are neither built in
+    /// nor declared — each naming the construct.
     pub fn from_qasm2(source: &str) -> Result<Self, CircuitError> {
         qasm_import::parse_qasm2(source)
     }

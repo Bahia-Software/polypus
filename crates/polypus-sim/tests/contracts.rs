@@ -277,6 +277,49 @@ fn qir_to_gates(ir: &str) -> Vec<G> {
     gates
 }
 
+/// A call of a gate declared with a `gate` block (only the importer creates
+/// declarations): `g(0.37) q[2],q[0],q[1];`, whose body mixes built-in gates,
+/// a nested declared gate and parameter expressions.
+fn declared_gate_call() -> G {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+               gate inner(t) a,b { crz(2*t) a,b; sx b; }\n\
+               gate g(t) a,b,c { h a; inner(t) a,c; ccx a,b,c; ry(-t/3) b; }\n\
+               qreg q[3];\ng(0.37) q[2],q[0],q[1];\n";
+    polypus_circuit::ParameterizedCircuit::from_qasm2(src)
+        .unwrap()
+        .gates
+        .remove(0)
+}
+
+/// The simulator applies a call exactly as its expanded body, and the call
+/// counts as one unitary on all its qubits for C-4.
+#[test]
+fn c2_simulator_applies_a_call_as_its_expanded_body() {
+    let call = declared_gate_call();
+    let expanded = match &call {
+        G::Custom(c) => c.expand(&[]).unwrap(),
+        other => panic!("expected a call, got {other:?}"),
+    };
+    assert_equiv_up_to_global_phase(3, std::slice::from_ref(&call), &expanded);
+    // Exactly equal, not only up to a phase: same gates, same order.
+    for k in 0..8 {
+        let a = column(3, k, std::slice::from_ref(&call));
+        let b = column(3, k, &expanded);
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).norm() < 1e-14);
+        }
+    }
+
+    let cc = ConcreteCircuit {
+        num_qubits: 3,
+        gates: vec![G::Measure { qubit: 1, cbit: 0 }, call],
+    };
+    assert_eq!(
+        StatevectorSimulator::new().run(&cc).unwrap_err(),
+        SimError::GateAfterMeasure { qubit: 1 }
+    );
+}
+
 #[test]
 fn c2_every_gate_emitted_qir_matches_the_native_gate() {
     let (a, b, c) = (0.37, -1.21, 2.03);
@@ -369,6 +412,7 @@ fn c2_every_gate_emitted_qir_matches_the_native_gate() {
             lam: Fixed(c),
             gamma: Fixed(0.61),
         },
+        declared_gate_call(),
     ];
     for gate in vocabulary {
         let ir = ConcreteCircuit {
