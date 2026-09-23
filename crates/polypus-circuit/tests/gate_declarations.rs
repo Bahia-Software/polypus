@@ -231,7 +231,7 @@ fn declarations_cannot_be_repeated_or_shadow_qelib1() {
 
 #[test]
 fn malformed_declarations_are_rejected_with_the_gate_named() {
-    let cases: [(&str, &str); 10] = [
+    let cases: [(&str, &str); 13] = [
         (
             "gate g(t,t) a { rz(t) a; }",
             "parameter 't' of gate 'g' is declared twice",
@@ -268,6 +268,20 @@ fn malformed_declarations_are_rejected_with_the_gate_named() {
         (
             "gate g a { rz a; }",
             "gate 'rz' expects 1 parameter(s), found 0",
+        ),
+        // Keywords of the expression grammar are not identifiers: a parameter
+        // named `pi` would silently read as the constant inside the body.
+        (
+            "gate g(pi) a { rz(pi) a; }",
+            "'pi' is an OpenQASM 2.0 keyword and cannot name a parameter of gate 'g'",
+        ),
+        (
+            "gate g(t) sqrt { rz(t) sqrt; }",
+            "'sqrt' is an OpenQASM 2.0 keyword and cannot name an argument of gate 'g'",
+        ),
+        (
+            "gate sin a { x a; }",
+            "'sin' is an OpenQASM 2.0 keyword and cannot name a gate",
         ),
     ];
     for (declaration, needle) in cases {

@@ -179,7 +179,9 @@ other declarations) are emitted right after the include, in source order;
 unreachable declarations are not re-emitted. Expansion into built-in
 instructions is a lowering step of the simulator and the QIR exporter only.
 Redeclaring a gate, or declaring one with a `qelib1.inc` name (always provided),
-is rejected; so is recursion (a body may only call earlier declarations).
+is rejected; so is recursion (a body may only call earlier declarations), and
+so is naming a gate, parameter or argument `pi`, `sin`, `cos`, `tan`, `exp`,
+`ln` or `sqrt` (keywords of the expression grammar, not identifiers).
 
 **Invariant:** the four consumers/producers of this vocabulary — the OpenQASM
 2.0 exporter (`qasm.rs`), the OpenQASM importer (`qasm_import.rs`), the native

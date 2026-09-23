@@ -568,6 +568,15 @@ fn unsupported_gate(name: &str, line: usize) -> CircuitError {
     err(line, format!("unsupported gate '{name}': {reason}"))
 }
 
+/// Whether `name` is a keyword of the OpenQASM 2.0 expression grammar — `pi`
+/// or one of its unary functions — rather than an identifier. A gate
+/// declaration may not use one as the name of the gate, of a parameter or of
+/// an argument (Qiskit rejects these too): in a body, a parameter named `pi`
+/// would otherwise silently mean the constant.
+fn is_expression_keyword(name: &str) -> bool {
+    name == "pi" || Func::from_name(name).is_some()
+}
+
 // ─────────────────────────────── Parser ──────────────────────────────────
 
 /// A declared register, mapped into the flat global index space.
@@ -1086,6 +1095,12 @@ impl Parser<'_> {
     fn gate_decl(&mut self, line: usize) -> Result<(), CircuitError> {
         let start = self.starts[self.pos - 1];
         let (name, _) = self.expect_ident("gate name")?;
+        if is_expression_keyword(&name) {
+            return Err(err(
+                line,
+                format!("'{name}' is an OpenQASM 2.0 keyword and cannot name a gate"),
+            ));
+        }
         if builtin_gate(&name).is_some() {
             return Err(err(
                 line,
@@ -1107,6 +1122,14 @@ impl Parser<'_> {
             } else {
                 loop {
                     let (param, l) = self.expect_ident("a parameter name")?;
+                    if is_expression_keyword(&param) {
+                        return Err(err(
+                            l,
+                            format!(
+                                "'{param}' is an OpenQASM 2.0 keyword and cannot name a parameter of gate '{name}'"
+                            ),
+                        ));
+                    }
                     if param_names.contains(&param) {
                         return Err(err(
                             l,
@@ -1132,6 +1155,14 @@ impl Parser<'_> {
         let mut qubit_names: Vec<String> = Vec::new();
         loop {
             let (qubit, l) = self.expect_ident("a qubit argument name")?;
+            if is_expression_keyword(&qubit) {
+                return Err(err(
+                    l,
+                    format!(
+                        "'{qubit}' is an OpenQASM 2.0 keyword and cannot name an argument of gate '{name}'"
+                    ),
+                ));
+            }
             if qubit_names.contains(&qubit) || param_names.contains(&qubit) {
                 return Err(err(
                     l,
