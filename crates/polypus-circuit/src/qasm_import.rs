@@ -5,8 +5,8 @@
 //! toolchains (notably Qiskit's `qasm2.dumps`):
 //!
 //! - Gates: `h x y z s t sdg tdg id rx ry rz p u1 u2 u3 u U cx CX cz swap rzz
-//!   rxx cp` (`p`/`u1`/`u2` are canonicalised to `u3`, `swap` to its standard
-//!   3×`cx` decomposition, `id` is dropped — it is the identity).
+//!   rxx cp` (`p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and `CX` to
+//!   `cx`; `id` is kept as an instruction of its own, never dropped).
 //! - `barrier`, `measure` (including register broadcast `measure q -> c;`).
 //! - Multiple `qreg`/`creg` declarations, flattened into one index space in
 //!   declaration order.
@@ -715,8 +715,9 @@ impl Parser {
                         "t" => GateInstruction::T(q),
                         "sdg" => GateInstruction::Sdg(q),
                         "tdg" => GateInstruction::Tdg(q),
-                        // Identity: a no-op for any backend; dropped.
-                        "id" => continue,
+                        // Kept, not dropped: it counts towards the gate count
+                        // and depth the source program (and Qiskit) reports.
+                        "id" => GateInstruction::Id(q),
                         _ => unreachable!(),
                     };
                     self.push_validated(gate, line)?;

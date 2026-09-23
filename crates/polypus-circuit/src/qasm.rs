@@ -69,6 +69,9 @@ pub(crate) fn write_qasm2(
             GateInstruction::Tdg(q) => {
                 let _ = writeln!(out, "tdg q[{q}];");
             }
+            GateInstruction::Id(q) => {
+                let _ = writeln!(out, "id q[{q}];");
+            }
             GateInstruction::Rx { qubit, theta } => {
                 let _ = writeln!(out, "rx({}) q[{qubit}];", angle(theta)?);
             }

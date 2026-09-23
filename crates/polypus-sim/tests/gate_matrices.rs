@@ -29,6 +29,27 @@ fn hadamard_on_zero() {
 }
 
 #[test]
+fn identity_leaves_every_amplitude_unchanged() {
+    // A generic two-qubit state, so a mis-applied phase or swap would show.
+    let prep = [
+        G::H(0),
+        G::Ry {
+            qubit: 1,
+            theta: Fixed(0.7),
+        },
+        G::Cx(0, 1),
+        G::T(0),
+    ];
+    let mut before = Statevector::new(2).unwrap();
+    for g in &prep {
+        before.apply(g).unwrap();
+    }
+    for q in 0..2 {
+        assert_eq!(after(2, &prep, G::Id(q)), before.amplitudes());
+    }
+}
+
+#[test]
 fn pauli_x_flips() {
     let a = after(1, &[], G::X(0));
     assert!(close(a[0], C64::new(0.0, 0.0)));

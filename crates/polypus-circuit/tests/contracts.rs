@@ -27,6 +27,7 @@ fn full_vocabulary() -> ParameterizedCircuit {
         .t(2)
         .sdg(0)
         .tdg(1)
+        .id(2)
         .rx(0, 0.25)
         .ry(1, Param(0))
         .rz(2, -1.5)
@@ -78,6 +79,7 @@ fn c2_every_gate_roundtrips_individually() {
         ("t", ParameterizedCircuit::new(1).t(0)),
         ("sdg", ParameterizedCircuit::new(1).sdg(0)),
         ("tdg", ParameterizedCircuit::new(1).tdg(0)),
+        ("id", ParameterizedCircuit::new(1).id(0)),
         ("rx", ParameterizedCircuit::new(1).rx(0, 0.3)),
         ("ry", ParameterizedCircuit::new(1).ry(0, 0.3)),
         ("rz", ParameterizedCircuit::new(1).rz(0, 0.3)),
@@ -157,6 +159,27 @@ fn c4_builder_rejects_two_qubit_gate_touching_measured_qubit() {
 #[should_panic(expected = "after it was measured")]
 fn c4_fluent_builder_panics_on_gate_after_measure() {
     let _ = ParameterizedCircuit::new(1).measure(0, 0).h(0);
+}
+
+/// `id` is a unitary (the identity) like any gate: it may not act on a measured
+/// qubit, at push time or at parse time.
+#[test]
+fn c4_id_after_measure_is_rejected_by_builder_and_importer() {
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
+        .unwrap();
+    assert_eq!(
+        qc.try_push(GateInstruction::Id(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+
+    let src = "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nmeasure q[0] -> c[0];\nid q[0];\n";
+    match ParameterizedCircuit::from_qasm2(src) {
+        Err(CircuitError::Parse { line: 5, message }) => {
+            assert!(message.contains("after it was measured"), "{message}")
+        }
+        other => panic!("expected a C-4 parse error at line 5, got {other:?}"),
+    }
 }
 
 #[test]

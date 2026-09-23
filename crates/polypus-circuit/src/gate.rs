@@ -78,6 +78,11 @@ pub enum GateInstruction {
     Sdg(usize),
     /// Conjugate transpose of T.
     Tdg(usize),
+    /// Identity (`id`). It has no effect on the state, but it is an instruction
+    /// of the circuit: kept (never dropped) so gate counts and depth match the
+    /// source program and what Qiskit computes for it. As a unitary, it is
+    /// subject to the terminal-measurement rule (contract C-4) like any gate.
+    Id(usize),
     /// Rotation around the X axis.
     Rx { qubit: usize, theta: GateParam },
     /// Rotation around the Y axis.
@@ -230,6 +235,7 @@ impl GateInstruction {
             | G::T(_)
             | G::Sdg(_)
             | G::Tdg(_)
+            | G::Id(_)
             | G::Cx(..)
             | G::Cz(..)
             | G::Swap(..)
@@ -298,6 +304,7 @@ impl GateInstruction {
             | G::T(_)
             | G::Sdg(_)
             | G::Tdg(_)
+            | G::Id(_)
             | G::Cx(..)
             | G::Cz(..)
             | G::Swap(..)
@@ -318,6 +325,7 @@ impl GateInstruction {
             | GateInstruction::T(q)
             | GateInstruction::Sdg(q)
             | GateInstruction::Tdg(q)
+            | GateInstruction::Id(q)
             | GateInstruction::Rx { qubit: q, .. }
             | GateInstruction::Ry { qubit: q, .. }
             | GateInstruction::Rz { qubit: q, .. }

@@ -88,8 +88,8 @@ impl ParameterizedCircuit {
     /// QASM again.
     ///
     /// Known model differences (semantics-preserving):
-    /// - `p`/`u1`/`u2`/`u` are canonicalised to `u3`, `swap` to its standard
-    ///   3×`cx` decomposition, and `id` is dropped.
+    /// - `p`/`u1`/`u2`/`u`/`U` are canonicalised to `u3` and `CX` to `cx`.
+    ///   Every other instruction, `id` included, is kept one-to-one.
     /// - The classical register is implicit (sized by the measurements), so
     ///   trailing *unmeasured* classical bits are not preserved.
     ///
@@ -226,6 +226,12 @@ impl ParameterizedCircuit {
     /// T† gate on `qubit`.
     pub fn tdg(self, qubit: usize) -> Self {
         self.push(GateInstruction::Tdg(qubit))
+    }
+
+    /// Identity gate on `qubit` (`id`): no effect on the state, but it is kept
+    /// as an instruction, so it counts towards gate count and depth.
+    pub fn id(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Id(qubit))
     }
 
     /// X-rotation on `qubit`; `theta` is a fixed `f64` or a [`Param`](GateParam::Param).

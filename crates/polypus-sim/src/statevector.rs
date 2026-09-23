@@ -148,9 +148,9 @@ pub(crate) enum DenseQubits {
 ///
 /// These nine are exactly the gates [`Statevector::apply`] dispatches through
 /// [`kernels::apply_1q`] / [`kernels::apply_2q`] (its dense, non-diagonal arms):
-/// disjoint from the nine [`diagonal_op`] classifies and from the
-/// `Barrier`/`Measure`/`MeasureAll` no-ops, so a gate is dense-fusable, diagonal,
-/// or a boundary, never two of those. A run of these fuses into one composed
+/// disjoint from the nine [`diagonal_op`] classifies and from the boundaries
+/// (every other instruction: the `Id`/`Barrier`/`Measure`/`MeasureAll` no-ops,
+/// …), so a gate is dense-fusable, diagonal, or a boundary, never two of those. A run of these fuses into one composed
 /// matrix per connected qubit component; see
 /// [`Statevector::apply_composed_1q`] / [`Statevector::apply_composed_2q`] and
 /// their caller
@@ -473,6 +473,9 @@ impl Statevector {
                 let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
                 kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
             }
+            // The identity leaves the state unchanged (the qubit index was
+            // still range-checked above, like every operand).
+            GateInstruction::Id(_) => {}
             GateInstruction::Barrier(_)
             | GateInstruction::Measure { .. }
             | GateInstruction::MeasureAll => {}
@@ -645,6 +648,8 @@ mod tests {
                 phi: GateParam::Fixed(0.4),
                 lam: GateParam::Fixed(0.4),
             },
+            // A no-op: takes the single-gate path, never joins a fused run.
+            GateInstruction::Id(0),
             GateInstruction::Barrier(vec![]),
             GateInstruction::Measure { qubit: 0, cbit: 0 },
             GateInstruction::MeasureAll,

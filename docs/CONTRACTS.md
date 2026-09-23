@@ -132,9 +132,15 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
+h  x  y  z  s  t  sdg  tdg  id  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
 barrier  measure  measure_all
 ```
+
+`id` is an instruction like any other, never a no-op to drop: it is imported,
+exported and round-tripped one-to-one, so the gate count and depth of an
+imported circuit match the source program (and what Qiskit computes for it).
+Only the QIR lowering drops it (there is no identity intrinsic); the simulator
+applies it as the identity. As a unitary it is subject to C-4.
 
 **Invariant:** the four consumers/producers of this vocabulary — the OpenQASM
 2.0 exporter (`qasm.rs`), the OpenQASM importer (`qasm_import.rs`), the native

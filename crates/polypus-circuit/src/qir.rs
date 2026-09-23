@@ -22,6 +22,10 @@
 //! - `cp(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
 //! - `u3(θ,φ,λ)` → `rz(λ); ry(θ); rz(φ)` (ZYZ Euler decomposition)
 //! - `barrier` is dropped (QIR has no barrier; it is only a scheduling hint).
+//! - `id` is dropped (the identity has no intrinsic and no effect).
+//!
+//! These rewrites are a *lowering* step confined to this module: they never
+//! change the circuit itself, nor what the OpenQASM exporter emits for it.
 //!
 //! ## Angle encoding
 //!
@@ -183,6 +187,10 @@ pub(crate) fn write_qir(
             GateInstruction::T(q) => w.gate1(T, *q),
             GateInstruction::Sdg(q) => w.gate1(S_ADJ, *q),
             GateInstruction::Tdg(q) => w.gate1(T_ADJ, *q),
+            // The identity has no QIS intrinsic and no effect: dropped here, at
+            // the QIR lowering boundary only (it stays in the circuit and in
+            // the OpenQASM export).
+            GateInstruction::Id(_) => {}
             GateInstruction::Rx { qubit, theta } => w.rot(RX, angle(theta)?, *qubit),
             GateInstruction::Ry { qubit, theta } => w.rot(RY, angle(theta)?, *qubit),
             GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),

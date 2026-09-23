@@ -261,8 +261,9 @@ impl Circuit {
     /// Import an OpenQASM 2.0 program (inverse of [`to_qasm2`](Circuit::to_qasm2)).
     ///
     /// Accepts the QASM this class exports plus Qiskit's `qasm2.dumps` output
-    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`, `id` is dropped; multiple
-    /// registers are flattened in declaration order). The
+    /// (`u`/`p`/`u1`/`u2` are canonicalised to `u3`; every other instruction,
+    /// `id` included, is kept one-to-one; multiple registers are flattened in
+    /// declaration order). The
     /// result is fully concrete (`num_params == 0`); builder methods can keep
     /// extending it.
     ///
@@ -326,6 +327,12 @@ impl Circuit {
 
     fn tdg(slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
         push(slf, GateInstruction::Tdg(qubit))
+    }
+
+    /// Identity gate `id`: no effect on the state, but kept as an instruction
+    /// (it counts towards gate count and depth, as in Qiskit).
+    fn id(slf: PyRefMut<'_, Self>, qubit: usize) -> PyResult<PyRefMut<'_, Self>> {
+        push(slf, GateInstruction::Id(qubit))
     }
 
     fn rx(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {

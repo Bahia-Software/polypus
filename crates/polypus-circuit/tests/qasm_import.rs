@@ -15,6 +15,7 @@ fn full_vocabulary_circuit() -> ParameterizedCircuit {
         .t(2)
         .sdg(0)
         .tdg(1)
+        .id(2)
         .rx(0, 0.25)
         .ry(1, Param(0))
         .rz(2, -1.5)
@@ -118,8 +119,9 @@ measure q[2] -> meas[2];
     assert_eq!(qc.num_qubits, 3);
     assert_eq!(qc.num_clbits(), 3);
 
-    // swap → native Swap; id dropped; explicit full barrier → whole-register
-    // form; 3 contiguous measures → MeasureAll.
+    // swap → native Swap; id kept one-to-one (it counts towards gate count and
+    // depth); explicit full barrier → whole-register form; 3 contiguous
+    // measures → MeasureAll.
     let expected = [
         GateInstruction::H(0),
         GateInstruction::Rzz {
@@ -144,6 +146,7 @@ measure q[2] -> meas[2];
             lam: GateParam::Fixed(0.5),
         },
         GateInstruction::Swap(0, 2),
+        GateInstruction::Id(1),
         GateInstruction::Barrier(Vec::new()),
         GateInstruction::MeasureAll,
     ];
@@ -374,6 +377,56 @@ fn rejects_truncated_input() {
         ParameterizedCircuit::from_qasm2(src),
         Err(CircuitError::Parse { .. })
     ));
+}
+
+// ───────────────────── `id` is an instruction, not a no-op ────────────────
+
+/// Regression: `id` used to be dropped at parse time, which silently changed
+/// the gate count and depth of the imported circuit relative to the source
+/// (and to what Qiskit reports for the same file).
+#[test]
+fn id_is_preserved_and_roundtrips_byte_identically() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\nh q[0];\nid q[1];\nid q[0];\ncx q[0],q[1];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(
+        qc.gates,
+        [
+            GateInstruction::H(0),
+            GateInstruction::Id(1),
+            GateInstruction::Id(0),
+            GateInstruction::Cx(0, 1),
+        ]
+    );
+    assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), src);
+}
+
+#[test]
+fn id_broadcasts_over_a_register() {
+    let src = "OPENQASM 2.0;\nqreg q[3];\nid q;\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(
+        qc.gates,
+        [
+            GateInstruction::Id(0),
+            GateInstruction::Id(1),
+            GateInstruction::Id(2)
+        ]
+    );
+}
+
+#[test]
+fn id_rejects_wrong_arity_parameters_and_range() {
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[2];\nid q[0],q[1];\n",
+        "gate 'id' expects 1 argument(s), found 2",
+        3,
+    );
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nid(0.5) q[0];\n",
+        "gate 'id' expects 0 parameter(s), found 1",
+        3,
+    );
+    assert_parse_err("OPENQASM 2.0;\nqreg q[2];\nid q[2];\n", "out of range", 3);
 }
 
 // ─────────────────────── Imported circuits are usable ─────────────────────

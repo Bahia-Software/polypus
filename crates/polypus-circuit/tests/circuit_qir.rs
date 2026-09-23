@@ -167,6 +167,24 @@ fn barrier_is_dropped() {
     assert_eq!(call_lines(&ir).len(), 2); // only h and cnot
 }
 
+/// `id` has no QIS intrinsic: the QIR lowering drops it, while the circuit
+/// (and its OpenQASM export) keeps it.
+#[test]
+fn id_is_dropped_at_the_qir_boundary_only() {
+    let qc = ParameterizedCircuit::new(2).h(0).id(1).id(0).cx(0, 1);
+    let ir = qc.to_qir_with_params(&[]).unwrap();
+    assert_eq!(
+        call_lines(&ir),
+        [
+            "call void @__quantum__qis__h__body(%Qubit* null)",
+            "call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))",
+        ]
+    );
+    assert_eq!(qc.gates.len(), 4);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.contains("id q[1];\nid q[0];\n"), "{qasm}");
+}
+
 #[test]
 fn no_measurement_has_no_recording_or_irreversible_attribute() {
     let ir = ParameterizedCircuit::new(1)
