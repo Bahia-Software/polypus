@@ -40,9 +40,9 @@
 //!   [`MAX_REGISTER_BITS`] (no multi-gigabyte index vector from a hostile
 //!   `qreg q[4000000000];`);
 //! - a gate declaration may nest calls at most [`MAX_GATE_NESTING`] levels and
-//!   expand to at most [`MAX_GATE_EXPANSION`] built-in instructions (no
-//!   exponential blow-up from a few nested lines), and validating all calls
-//!   instantiates at most [`MAX_VALIDATED_EXPANSION`] instructions in total.
+//!   its full expansion may visit at most [`MAX_GATE_EXPANSION`] body
+//!   statements (no exponential blow-up from a few nested lines), and
+//!   validating all calls visits at most [`MAX_VALIDATED_EXPANSION`] in total.
 //!
 //! OpenQASM 2.0 has no free parameters, so imported circuits are always fully
 //! concrete (`num_params == 0`).
@@ -607,13 +607,13 @@ struct Parser<'src> {
     /// Formal parameter names in scope while parsing a gate body (empty at
     /// top level, where expressions are constant).
     param_scope: Vec<String>,
-    /// Built-in instructions the importer may still instantiate to validate
-    /// calls of declared gates (see [`MAX_VALIDATED_EXPANSION`]).
+    /// Body statements the importer may still visit to validate calls of
+    /// declared gates (see [`MAX_VALIDATED_EXPANSION`]).
     expansion_budget: usize,
 }
 
-/// Upper bound on the built-in instructions the importer instantiates, over
-/// the whole program, to validate calls of declared gates (each call's angles
+/// Upper bound on the body statements the importer visits, over the whole
+/// program, to validate calls of declared gates (each call's angles
 /// are evaluated through its whole body, so a non-finite angle or a division
 /// by zero is rejected at parse time like everywhere else, contract C-2).
 /// Bounds the parse time of hostile input that calls a large declaration many
@@ -1061,7 +1061,7 @@ impl Parser<'_> {
                 err(
                     line,
                     format!(
-                        "validating the calls of declared gates would instantiate more than {MAX_VALIDATED_EXPANSION} instructions"
+                        "validating the calls of declared gates would expand more than {MAX_VALIDATED_EXPANSION} instructions (built-in gates and nested calls)"
                     ),
                 )
             })?;
@@ -1176,7 +1176,7 @@ impl Parser<'_> {
             DefinitionError::TooLarge => err(
                 line,
                 format!(
-                    "gate '{name}' expands to more than {MAX_GATE_EXPANSION} built-in instructions"
+                    "gate '{name}' expands to more than {MAX_GATE_EXPANSION} instructions (built-in gates and nested calls)"
                 ),
             ),
         })?;

@@ -15,9 +15,9 @@
 //!
 //! Declarations come only from the importer, which validates them once:
 //! recursion is impossible (a body may only call gates declared *before* it),
-//! nesting is capped at [`MAX_GATE_NESTING`] levels and a single declaration may
-//! expand to at most [`MAX_GATE_EXPANSION`] built-in instructions, so expansion
-//! is always bounded (`qasm_import` is an untrusted input surface).
+//! nesting is capped at [`MAX_GATE_NESTING`] levels and a single declaration's
+//! full expansion may visit at most [`MAX_GATE_EXPANSION`] body statements, so
+//! expansion is always bounded (`qasm_import` is an untrusted input surface).
 
 use crate::error::CircuitError;
 use crate::gate::{GateInstruction, GateParam};
@@ -30,9 +30,11 @@ use std::sync::Arc;
 /// recursion of expansion itself. Real hierarchies nest a handful of levels.
 pub(crate) const MAX_GATE_NESTING: usize = 64;
 
-/// Most built-in instructions one declaration may expand to. Without it, a
-/// few lines of nested declarations (each calling the previous one twice)
-/// would describe an exponentially large circuit.
+/// Most body statements one full expansion of a declaration may visit
+/// (built-in instructions, barriers and nested calls alike). Without it, a few
+/// lines of nested declarations (each calling the previous one twice) would
+/// describe an exponentially large circuit — or, with empty bodies, an
+/// exponentially long walk that produces nothing.
 pub(crate) const MAX_GATE_EXPANSION: usize = 1_000_000;
 
 // ───────────────────────────── Expressions ──────────────────────────────
@@ -229,7 +231,11 @@ pub struct GateDefinition {
     /// Position among the declarations of its source program, so the exporter
     /// can emit declarations in their original order.
     ordinal: usize,
-    /// Number of built-in instructions one call expands to.
+    /// Number of body statements one full expansion of a call visits: every
+    /// built-in instruction and barrier, *and* every nested call. Counting the
+    /// calls themselves matters: gates with empty bodies expand to nothing, yet
+    /// `g1 { g0; g0; }`, `g2 { g1; g1; }`, … still make expansion (and the
+    /// importer's validation of each call) walk an exponential number of nodes.
     expansion_size: usize,
     /// Nesting depth: 1 for a body of built-in gates only.
     depth: usize,
@@ -261,7 +267,10 @@ impl GateDefinition {
                     expansion_size = expansion_size.saturating_add(1);
                 }
                 BodyOp::Call { definition, .. } => {
-                    expansion_size = expansion_size.saturating_add(definition.expansion_size);
+                    // The call node itself, then everything its body visits.
+                    expansion_size = expansion_size
+                        .saturating_add(1)
+                        .saturating_add(definition.expansion_size);
                     depth = depth.max(definition.depth + 1);
                 }
             }
@@ -467,7 +476,9 @@ impl CustomGate {
             .iter()
             .map(|p| p.resolve(params))
             .collect::<Result<Vec<f64>, _>>()?;
-        let mut out = Vec::with_capacity(self.definition.expansion_size());
+        // Not pre-sized with `expansion_size`: that also counts the nested
+        // calls, so it can far exceed the number of instructions produced.
+        let mut out = Vec::new();
         self.definition
             .instantiate(&args, &self.qubits, &mut |g| out.push(g))
             .map_err(|_| CircuitError::NonFiniteParam)?;

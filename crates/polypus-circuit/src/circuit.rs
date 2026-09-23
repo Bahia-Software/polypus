@@ -632,10 +632,15 @@ impl ConcreteCircuit {
     /// value (`NaN` or infinity). Neither can happen for circuits produced by
     /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
     /// values at binding time); both are only possible when the `gates` field
-    /// was assembled manually.
+    /// was assembled manually. Also panics if the circuit calls two different
+    /// declared gates under one name
+    /// ([`CircuitError::ConflictingGateDefinitions`]), which only happens when
+    /// calls from different imported programs are combined in one circuit. For
+    /// a fallible export, use
+    /// [`ParameterizedCircuit::to_qasm2_with_params`](crate::ParameterizedCircuit::to_qasm2_with_params).
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param, a non-finite fixed angle, or two different declared gates under one name; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params",
         )
     }
 

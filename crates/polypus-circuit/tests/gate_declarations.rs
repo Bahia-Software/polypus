@@ -341,42 +341,67 @@ fn nesting_depth_is_capped() {
     assert_parse_err(&src, "nests gate calls more than 64 levels deep", 67);
 }
 
-/// Exponential blow-up is capped: each level calls the previous one twice, so
-/// level 20 would expand to 2^20 built-in instructions.
-#[test]
-fn exponential_expansion_is_capped() {
-    let mut src = format!("{HEADER}gate g0 a {{ x a; }}\n");
-    for level in 1..=20 {
+/// `gate g0 a { <leaf> }` followed by `gate gk a { g(k-1) a; g(k-1) a; }` for
+/// k = 1..=levels: each level calls the previous one twice.
+fn doubling_declarations(leaf: &str, levels: usize) -> String {
+    let mut src = format!("{HEADER}gate g0 a {{ {leaf} }}\n");
+    for level in 1..=levels {
         src.push_str(&format!(
             "gate g{level} a {{ g{p} a; g{p} a; }}\n",
             p = level - 1
         ));
     }
-    assert_parse_err(&src, "gate 'g20' expands to more than 1000000", 23);
+    src
+}
+
+/// Exponential blow-up is capped. A full expansion of level k visits
+/// 3·2^k − 2 body statements (2^k `x` gates plus 2^(k+1) − 2 nested calls), so
+/// level 19 (1572862) is the first beyond the 1000000 cap.
+#[test]
+fn exponential_expansion_is_capped() {
+    assert!(ParameterizedCircuit::from_qasm2(&doubling_declarations("x a;", 18)).is_ok());
+    assert_parse_err(
+        &doubling_declarations("x a;", 19),
+        "gate 'g19' expands to more than 1000000",
+        22,
+    );
+}
+
+/// The cap counts nested calls, not only the built-in gates they reach: with
+/// an empty `g0` every level expands to *nothing*, yet expanding (or
+/// validating a call of) level k walks 2^(k+1) − 2 nested calls. Were calls
+/// not counted, all 64 levels the nesting cap allows would be accepted, and a
+/// single call of the last one would take 2^64 steps to validate.
+#[test]
+fn nested_calls_of_empty_gates_count_toward_the_cap() {
+    assert!(ParameterizedCircuit::from_qasm2(&doubling_declarations("", 18)).is_ok());
+    assert_parse_err(
+        &doubling_declarations("", 19),
+        "gate 'g19' expands to more than 1000000",
+        22,
+    );
 }
 
 /// Calling a large declaration many times hits the program-wide validation
-/// budget instead of taking unbounded time.
+/// budget (20000000) instead of taking unbounded time — also when the calls
+/// expand to nothing.
 #[test]
 fn repeated_calls_of_large_declarations_are_bounded() {
-    let mut src = format!("{HEADER}gate g0 a {{ x a; }}\n");
-    for level in 1..=19 {
-        src.push_str(&format!(
-            "gate g{level} a {{ g{p} a; g{p} a; }}\n",
-            p = level - 1
-        ));
-    }
-    src.push_str("qreg q[1];\n");
-    // g19 expands to 2^19 = 524288 instructions; 40 calls exceed 20M.
-    for _ in 0..40 {
-        src.push_str("g19 q[0];\n");
-    }
-    match ParameterizedCircuit::from_qasm2(&src) {
-        Err(CircuitError::Parse { message, .. }) => assert!(
-            message.contains("validating the calls of declared gates"),
-            "{message}"
-        ),
-        other => panic!("expected the validation budget to trip, got {other:?}"),
+    // A call of g18 visits 786430 body statements with `x` leaves, 524286 with
+    // an empty g0: 64 calls exceed the budget either way.
+    for leaf in ["x a;", ""] {
+        let mut src = doubling_declarations(leaf, 18);
+        src.push_str("qreg q[1];\n");
+        for _ in 0..64 {
+            src.push_str("g18 q[0];\n");
+        }
+        match ParameterizedCircuit::from_qasm2(&src) {
+            Err(CircuitError::Parse { message, .. }) => assert!(
+                message.contains("validating the calls of declared gates"),
+                "{message}"
+            ),
+            other => panic!("expected the validation budget to trip, got {other:?}"),
+        }
     }
 }
 
