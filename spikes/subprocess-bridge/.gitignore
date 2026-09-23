@@ -1,0 +1,3 @@
+/target
+*.out
+slurm/last_worker_pid.txt

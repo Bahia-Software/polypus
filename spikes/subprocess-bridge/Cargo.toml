@@ -1,0 +1,29 @@
+# Fase 2 spike — subprocess bridge for third-party Python backends.
+#
+# STANDALONE / NOT INTEGRATED. The empty [workspace] table below makes this
+# crate its own workspace, completely independent of the Polypus workspace at
+# the repo root. It is NOT a member of that workspace, is never built by
+# `cargo build/test --workspace`, and ships no production code. It lives on
+# branch 188 as a validation prototype only (see README.md).
+[workspace]
+
+[package]
+name = "subprocess-bridge-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Pinned to versions already in the local cargo cache so the spike builds
+# offline. JSON (not msgpack) was chosen as the wire format for the prototype:
+# human-inspectable frames make a spike far easier to debug, and the IPC
+# measurement (see README) shows the format is not the bottleneck anyway.
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+# Needed only to send arbitrary signals (SIGINT/SIGTERM) to the child and to
+# arm PR_SET_PDEATHSIG. std::process::Child can only SIGKILL via .kill().
+libc = "=0.2.186"
+
+[[bin]]
+name = "overhead"
+path = "src/bin/overhead.rs"
