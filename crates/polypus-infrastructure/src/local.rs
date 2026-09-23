@@ -1,8 +1,8 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
-    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask, ExecutionConfig,
-    InfrastructureError, QuantumBackend,
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask,
+    InfrastructureError, QuantumBackend, RunParams,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -37,7 +37,7 @@ impl QuantumBackend for LocalBackend {
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
-        config: &ExecutionConfig,
+        config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         Python::with_gil(|py| {
             // Native circuits are transpiled in pure Rust before submission;
@@ -50,18 +50,18 @@ impl QuantumBackend for LocalBackend {
             for qc in qcs {
                 let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
                 qcs_pylist
-                    .append(qc.to_py_object(py)?)
+                    .append(crate::to_py_object(&qc, py)?)
                     .map_err(|e| BackendError::Conversion(e.to_string()))?;
             }
 
-            let module = PyModule::import(py, "polypus_python").map_err(BackendError::Seam)?;
+            let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
             let connection = module
                 .call_method("connect_to_infrastructure", ("local",), None)
                 .map_err(|e| {
                     // Surface the failure before it crosses the FFI as a Python
                     // exception (mirrors the QMIO/CUNQA error paths).
                     log::error!("local infrastructure connection failed: {e}");
-                    BackendError::Seam(e)
+                    crate::seam_error(e)
                 })?;
             // The call above succeeded; a wrong-shaped return value is our
             // Rust-side conversion failure, not a seam exception (contract C-1).
@@ -109,7 +109,7 @@ impl QuantumBackend for LocalBackend {
                 .call_method("run_qcs", (connection_str,), Some(&kwargs))
                 .map_err(|e| {
                     log::error!("local circuit execution failed: {e}");
-                    BackendError::Seam(e)
+                    crate::seam_error(e)
                 })?;
             // As above: `run_qcs` returned successfully, so a wrong-shaped
             // value is a Rust-side conversion failure, not a seam exception.
@@ -139,7 +139,7 @@ impl QuantumBackend for LocalBackend {
     /// cleared the pending signal before the planner's between-wave
     /// `py.check_signals()` could see it, leaving `qml.train` unresponsive to
     /// Ctrl+C. Here the interrupt is instead **propagated verbatim** as
-    /// [`InfrastructureError::Python`]; only a genuine non-interrupt failure (e.g. a
+    /// [`BackendError::External`]; only a genuine non-interrupt failure (e.g. a
     /// missing attribute, which a real `QuantumCircuit` never has) falls back to
     /// "width unknown". The Qiskit path's memory bound is separately enforced in
     /// `run_circuits`.
@@ -191,17 +191,21 @@ fn circuit_qubits_checked(
     qc: &BoundCircuit,
     py: Python<'_>,
 ) -> Result<Option<usize>, InfrastructureError> {
-    match qc {
-        BoundCircuit::Qiskit(obj) => match obj.bind(py).getattr("num_qubits") {
+    match crate::as_qiskit(qc) {
+        Some(obj) => match obj.bind(py).getattr("num_qubits") {
             Ok(attr) => Ok(attr.extract::<usize>().ok()),
+            // Carry the KeyboardInterrupt verbatim across the pyo3-free contract in
+            // `BackendError::External`; the FFI edge downcasts it back and re-raises
+            // it as the `KeyboardInterrupt` the planner's interrupt guard expects.
             Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => {
-                Err(InfrastructureError::Python(e))
+                Err(InfrastructureError::Backend(crate::seam_error(e)))
             }
             Err(_) => Ok(None),
         },
-        // Native/Qasm2 use the shared GIL-free width rule; only the Qiskit read
-        // can raise, so only it needs the KeyboardInterrupt-propagating handling.
-        other => Ok(other.native_qubit_width()),
+        // Native/Qasm2 (and any non-Qiskit foreign) use the shared GIL-free width
+        // rule; only the Qiskit read can raise, so only it needs the
+        // KeyboardInterrupt-propagating handling.
+        None => Ok(qc.native_qubit_width()),
     }
 }
 
@@ -229,10 +233,10 @@ fn widest_qubits(qcs: &[BoundCircuit], py: Python<'_>) -> usize {
 /// variant [`LocalBackend::capabilities_for`] uses, which propagates a
 /// `KeyboardInterrupt` verbatim.
 fn circuit_qubits(qc: &BoundCircuit, py: Python<'_>) -> Option<usize> {
-    match qc {
-        BoundCircuit::Qiskit(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
-        // Native/Qasm2 use the shared GIL-free width rule.
-        other => other.native_qubit_width(),
+    match crate::as_qiskit(qc) {
+        Some(obj) => obj.bind(py).getattr("num_qubits").ok()?.extract().ok(),
+        // Native/Qasm2 (and any non-Qiskit foreign) use the shared GIL-free rule.
+        None => qc.native_qubit_width(),
     }
 }
 
@@ -360,7 +364,7 @@ mod tests {
                 .unbind();
 
             let circuits: Vec<BoundCircuit> = (0..64)
-                .map(|_| BoundCircuit::Qiskit(wide_obj.clone_ref(py)))
+                .map(|_| crate::QiskitCircuit::into_bound(wide_obj.clone_ref(py)))
                 .collect();
             let tasks: Vec<CircuitTask> = circuits
                 .iter()
@@ -381,7 +385,7 @@ mod tests {
 
     /// Issue #147 follow-up: a `KeyboardInterrupt` CPython raises while reading a
     /// Qiskit `num_qubits` (a pending Ctrl+C landing during the `getattr`) must be
-    /// **propagated** as [`InfrastructureError::Python`], not swallowed as "width
+    /// **propagated** as [`BackendError::External`], not swallowed as "width
     /// unknown" — otherwise the pending signal is cleared and the planner's
     /// between-wave `check_signals` never fires. Simulated with a Python object
     /// whose `num_qubits` property raises `KeyboardInterrupt`.
@@ -404,7 +408,7 @@ mod tests {
             .unwrap();
             let boom: Py<PyAny> = module.getattr("Boom").unwrap().call0().unwrap().unbind();
 
-            let circuit = BoundCircuit::Qiskit(boom);
+            let circuit = crate::QiskitCircuit::into_bound(boom);
             let tasks = vec![CircuitTask {
                 circuit: &circuit,
                 shots: 8,
@@ -413,12 +417,22 @@ mod tests {
                 LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
 
             let err = backend.capabilities_for(&tasks).unwrap_err();
+            // The KeyboardInterrupt is carried verbatim, type-erased in
+            // `BackendError::External`, so the FFI edge can downcast it back and
+            // re-raise it with its original class (see `polypus::exceptions`).
             match err {
-                InfrastructureError::Python(e) => assert!(
-                    e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py),
-                    "expected the KeyboardInterrupt to be carried verbatim"
-                ),
-                other => panic!("expected InfrastructureError::Python, got {other:?}"),
+                InfrastructureError::Backend(BackendError::External(boxed)) => {
+                    let py_err = boxed
+                        .downcast_ref::<PyErr>()
+                        .expect("the boxed error must be the original PyErr");
+                    assert!(
+                        py_err.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py),
+                        "expected the KeyboardInterrupt to be carried verbatim"
+                    );
+                }
+                other => {
+                    panic!("expected InfrastructureError::Backend(External), got {other:?}")
+                }
             }
         });
     }

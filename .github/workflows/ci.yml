@@ -148,6 +148,7 @@ jobs:
           -p polypus-physics
           -p polypus-optimizers
           -p polypus-observable
+          -p polypus-backend
           --all-features
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*

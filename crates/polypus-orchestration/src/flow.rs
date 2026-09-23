@@ -141,19 +141,15 @@ mod tests {
     use super::*;
     use crate::{Resources, Scheduler};
     use polypus_infrastructure::{
-        BackendConfig, BackendError, ExecutionConfig, OptLevel, Planner, PlannerRequirements,
-        QuantumBackend,
+        BackendError, OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn config() -> ExecutionConfig {
-        ExecutionConfig {
+    fn config() -> RunParams {
+        RunParams {
             id: "flow-test".to_string(),
             shots: 500,
-            n_qpus: 1,
-            infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative { fusion: true },
             opt_level: OptLevel::default(),
             seed: Some(2024),
         }
@@ -166,7 +162,7 @@ mod tests {
         fn run_circuits(
             &self,
             qcs: &[BoundCircuit],
-            _config: &ExecutionConfig,
+            _config: &RunParams,
         ) -> Result<Vec<Counts>, BackendError> {
             Ok(qcs.iter().map(|_| HashMap::new()).collect())
         }
@@ -189,7 +185,7 @@ mod tests {
             &self,
             _backend: &dyn QuantumBackend,
             tasks: &[CircuitTask<'_>],
-            _config: &ExecutionConfig,
+            _config: &RunParams,
             _cancel: &CancelToken,
         ) -> Result<Vec<Counts>, InfrastructureError> {
             Ok(tasks

@@ -2,7 +2,7 @@ use crate::{
     assign_parameters_qiskit, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot,
 };
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, ExecutionConfig, Planner, QuantumBackend,
+    BoundCircuit, CancelToken, CircuitTask, Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
 use polypus_orchestration::{OracleFactory, Resources};
 use pyo3::prelude::*;
@@ -88,7 +88,7 @@ fn candidate_window_size() -> usize {
 pub struct QmlOracle {
     /// Pre-bound training circuits (feature-map parameters already fixed).
     pub training_circuits: Vec<Py<PyAny>>,
-    pub config: Arc<ExecutionConfig>,
+    pub config: Arc<RunParams>,
     pub backend: Arc<dyn QuantumBackend>,
     /// Owns how the bound circuits are executed and reduced (waves, concurrency).
     pub planner: Arc<dyn Planner>,
@@ -159,7 +159,7 @@ impl QmlOracle {
                 Vec::with_capacity(window_candidates.len() * n_train);
             for theta in window_candidates {
                 for qc_xi in &self.training_circuits {
-                    bound.push(BoundCircuit::Qiskit(assign_parameters_qiskit(
+                    bound.push(QiskitCircuit::into_bound(assign_parameters_qiskit(
                         qc_xi, theta,
                     )?));
                 }
@@ -268,9 +268,7 @@ impl OracleFactory for QmlOracleFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polypus_infrastructure::{
-        BackendCapabilities, BackendConfig, BackendError, OptLevel, SequentialPlanner,
-    };
+    use polypus_infrastructure::{BackendCapabilities, BackendError, OptLevel, SequentialPlanner};
     use polypus_observable::ObservableError;
     use pyo3::types::PyModule;
     use std::collections::HashMap;
@@ -421,7 +419,7 @@ class Bound:
         fn run_circuits(
             &self,
             qcs: &[BoundCircuit],
-            config: &ExecutionConfig,
+            config: &RunParams,
         ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
             let mut sizes = self.call_sizes.lock().unwrap_or_else(|p| p.into_inner());
             // Global index of this call's first circuit within the whole run — the
@@ -460,15 +458,12 @@ class Bound:
         }
     }
 
-    fn config(shots: u32) -> Arc<ExecutionConfig> {
-        Arc::new(ExecutionConfig {
+    fn config(shots: u32) -> Arc<RunParams> {
+        Arc::new(RunParams {
             id: "qml-oracle-test".to_string(),
             shots,
-            n_qpus: 1,
-            infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative { fusion: true },
-            opt_level: OptLevel::default(),
             seed: Some(7),
+            opt_level: OptLevel::default(),
         })
     }
 

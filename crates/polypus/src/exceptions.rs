@@ -22,10 +22,12 @@
 //!
 //! Contract C-1 (see `docs/CONTRACTS.md`) keeps its documented failure modes:
 //! an *unknown infrastructure* still surfaces as `ValueError` and a *bad kwarg*
-//! at the `polypus_python` seam still surfaces as `TypeError`, because
-//! [`BackendError::Seam`](crate::infrastructure::BackendError::Seam) re-raises
-//! the original Python exception verbatim. The classes below are raised for the
-//! Rust-originated runtime failures that previously *panicked*.
+//! at the `polypus_python` seam still surfaces as `TypeError`, because a seam
+//! exception is carried type-erased in
+//! [`BackendError::External`](crate::infrastructure::BackendError::External) and
+//! `external_to_pyerr` re-raises the original Python exception verbatim. The
+//! classes below are raised for the Rust-originated runtime failures that
+//! previously *panicked*.
 
 use crate::infrastructure::BackendError as InfraBackendError;
 use pyo3::create_exception;
@@ -77,13 +79,12 @@ create_exception!(
 /// backend→exception-class decision is made here, once. `run_quantum_circuit`
 /// and the oracle path reach it directly or via
 /// [`infrastructure_error_to_pyerr`](crate::exceptions::infrastructure_error_to_pyerr).
-/// Contract C-1's documented failure modes are preserved: a `Seam` error
-/// re-raises the original Python exception verbatim (keeping its
-/// `ValueError`/`TypeError` type), and an unknown infrastructure is a `ValueError`.
+/// Contract C-1's documented failure modes are preserved: a seam exception boxed
+/// in [`External`](InfraBackendError::External) re-raises the original Python
+/// exception verbatim (keeping its `ValueError`/`TypeError` type, via
+/// `external_to_pyerr`), and an unknown infrastructure is a `ValueError`.
 pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
     match err {
-        // Re-raise the original Python exception unchanged (contract C-1).
-        InfraBackendError::Seam(py_err) => py_err,
         InfraBackendError::UnknownInfrastructure { name } => PyValueError::new_err(format!(
             "unknown infrastructure '{name}'; expected \"local\", \"cunqa\" or \"qmio\""
         )),
@@ -99,9 +100,42 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
         InfraBackendError::NativeCircuit(m) => NativeCircuitError::new_err(m),
         InfraBackendError::Cunqa(m) => CunqaError::new_err(m),
         InfraBackendError::Conversion(m) => BackendError::new_err(m),
-        #[cfg(feature = "qmio")]
-        InfraBackendError::Qmio(qmio_err) => QmioError::new_err(qmio_err.to_string()),
+        // A backend that stopped responding mid-call (Fase-2 subprocess-bridge
+        // finding): the typed backend base class.
+        InfraBackendError::Unresponsive(m) => {
+            BackendError::new_err(format!("the backend stopped responding: {m}"))
+        }
+        // The pyo3-free contract carries any provider/Python failure type-erased
+        // here; recover its original class so contract C-1 holds (a seam
+        // `ValueError`/`TypeError`, a `KeyboardInterrupt`, or a `polypus.QmioError`
+        // all re-raise as themselves).
+        InfraBackendError::External(boxed) => external_to_pyerr(boxed),
     }
+}
+
+/// Recover the concrete class of a type-erased
+/// [`BackendError::External`](InfraBackendError::External) payload.
+///
+/// A Polypus Python backend boxes a `PyErr` here (a `polypus_python` seam
+/// exception, or a `KeyboardInterrupt` from `check_signals` / a Qiskit width
+/// read); the QMIO backend boxes its own `QmioError`; anything else is a
+/// third-party provider error. This is the FFI-edge counterpart of the old
+/// `BackendError::Seam`/`BackendError::Qmio` variants, preserving contract C-1's
+/// verbatim re-raise now that the boxing is generic and pyo3-free.
+fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
+    // A boxed Python exception re-raises verbatim, keeping its original class.
+    let boxed = match boxed.downcast::<PyErr>() {
+        Ok(py_err) => return *py_err,
+        Err(other) => other,
+    };
+    // The QMIO backend boxes its own error; surface it as the typed class.
+    #[cfg(feature = "qmio")]
+    let boxed = match boxed.downcast::<polypus_infrastructure::qmio::QmioError>() {
+        Ok(qmio_err) => return QmioError::new_err(qmio_err.to_string()),
+        Err(other) => other,
+    };
+    // Any other provider error: the typed backend base class, message preserved.
+    BackendError::new_err(boxed.to_string())
 }
 
 /// Map a native cost-observable
@@ -184,7 +218,6 @@ pub(crate) fn infrastructure_error_to_pyerr(
         // observable, and its original class must re-raise verbatim rather than
         // being discarded into a generic `polypus.EvaluationError`.
         InfraErr::Observable(e) => observable_error_to_pyerr(e),
-        InfraErr::Python(e) => e,
         InfraErr::Cancelled => PyKeyboardInterrupt::new_err("the run was cancelled"),
         InfraErr::IncompatiblePlanner(m) => PyValueError::new_err(m),
     }
@@ -269,6 +302,36 @@ mod tests {
         assert_maps_to::<CunqaError>(
             InfraBackendError::Cunqa("injected release failure".to_string()),
             "injected release failure",
+        );
+    }
+
+    #[test]
+    fn unresponsive_maps_to_the_backend_error_base_class() {
+        // A backend that stopped responding mid-call (the Fase-2 subprocess-bridge
+        // finding) surfaces as the typed backend base class, message preserved.
+        assert_maps_to::<BackendError>(
+            InfraBackendError::Unresponsive("worker died (signal 9)".to_string()),
+            "the backend stopped responding: worker died (signal 9)",
+        );
+    }
+
+    #[test]
+    fn external_provider_error_maps_to_the_backend_error_base_class() {
+        // A non-Python, non-QMIO provider error boxed in `External` surfaces as the
+        // typed backend base class with its message (the seam/KeyboardInterrupt/QMIO
+        // recovery paths are covered by `external_backend_error_reraises_verbatim`
+        // and the QMIO tests).
+        #[derive(Debug)]
+        struct Provider(&'static str);
+        impl std::fmt::Display for Provider {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "provider failure: {}", self.0)
+            }
+        }
+        impl std::error::Error for Provider {}
+        assert_maps_to::<BackendError>(
+            InfraBackendError::External(Box::new(Provider("device offline"))),
+            "provider failure: device offline",
         );
     }
 
@@ -564,12 +627,13 @@ mod infrastructure_mapping_tests {
     }
 
     #[test]
-    fn python_variant_reraises_verbatim() {
-        // A `check_signals` SIGINT (or any planner-raised Python exception) keeps
-        // its original class across the FFI.
+    fn external_backend_error_reraises_verbatim() {
+        // A `check_signals` SIGINT (or any planner-raised Python exception) now
+        // arrives as `Backend(BackendError::External(boxed PyErr))`; its boxed
+        // original class must re-raise verbatim across the FFI.
         pyo3::prepare_freethreaded_python();
-        let py_err = infrastructure_error_to_pyerr(InfraErr::Python(PyRuntimeError::new_err(
-            "planner boom",
+        let py_err = infrastructure_error_to_pyerr(InfraErr::Backend(InfraBackendError::External(
+            Box::new(PyRuntimeError::new_err("planner boom")),
         )));
         Python::with_gil(|py| {
             assert!(

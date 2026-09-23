@@ -1,16 +1,18 @@
 use pyo3::prelude::*;
 
-use crate::transpiler::OptLevel;
+use polypus_backend::{OptLevel, RunParams};
 
-/// Provider-agnostic execution parameters, fully decoupled from circuit data.
+/// **Construction-time** execution configuration: everything the
+/// [`Infrastructure`](crate::Infrastructure) factory needs to *build* a backend,
+/// including the provider-specific [`BackendConfig`] (Aer noise model, CUNQA node
+/// count) and the `n_qpus` replica count.
 ///
-/// Only fields that *every* backend needs live here. Anything provider-specific
-/// (Aer simulation method, CUNQA node count, future IBM token, …) belongs in
-/// [`BackendConfig`], so adding a new provider never widens this struct.
-///
-/// Passed to [`crate::QuantumBackend::run_circuits`] alongside
-/// the circuits, so the backend knows *how* and *where* to run them without
-/// coupling to algorithm logic.
+/// This is deliberately distinct from [`RunParams`], the small, pyo3-free struct a
+/// backend reads on *every* [`run_circuits`](crate::QuantumBackend::run_circuits)
+/// call. The audit (plan Fase 1) confirmed no backend reads `backend_config`,
+/// `infrastructure` or `n_qpus` at execution time — they are consumed once, here,
+/// at construction (or, for `n_qpus`, by the shot-distributing planner it is passed
+/// to). Deriving the per-call view is [`run_params`](Self::run_params).
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
     /// Unique identifier for this run (logging, temp files, SLURM job names).
@@ -59,6 +61,20 @@ pub struct ExecutionConfig {
     /// its own unseeded default. Decoupled from [`id`](Self::id), which is
     /// only a logging/temp-file/SLURM label.
     pub seed: Option<u64>,
+}
+
+impl ExecutionConfig {
+    /// Project the per-call view a backend and planner actually read: the pyo3-free
+    /// [`RunParams`]. Drops the construction-only fields (`backend_config`,
+    /// `infrastructure`, `n_qpus`), which no `run_circuits` consults.
+    pub fn run_params(&self) -> RunParams {
+        RunParams {
+            id: self.id.clone(),
+            shots: self.shots,
+            seed: self.seed,
+            opt_level: self.opt_level,
+        }
+    }
 }
 
 /// Draw a fresh 64-bit seed from OS entropy.

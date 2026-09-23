@@ -35,7 +35,7 @@ pub use vqc_oracle::{VqcOracle, VqcOracleFactory};
 pub use polypus_observable::CostObservable;
 
 use polypus_circuit::ParameterizedCircuit;
-use polypus_infrastructure::BoundCircuit;
+use polypus_infrastructure::{BoundCircuit, QiskitCircuit};
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 
@@ -77,9 +77,12 @@ impl CircuitSource {
     /// unreachable — but it is reported, never a panic.
     pub fn bind(&self, params: &[f64]) -> Result<BoundCircuit, EvaluationError> {
         match self {
-            CircuitSource::Qiskit(circuit) => Ok(BoundCircuit::Qiskit(assign_parameters_qiskit(
-                circuit, params,
-            )?)),
+            // The bound Qiskit object rides through the pyo3-free `BoundCircuit`
+            // enum in its `Foreign` escape hatch (a `QiskitCircuit`), so the Aer/
+            // CUNQA backends still receive the native Qiskit object unchanged.
+            CircuitSource::Qiskit(circuit) => Ok(QiskitCircuit::into_bound(
+                assign_parameters_qiskit(circuit, params)?,
+            )),
             // Pure Rust: no GIL anywhere on this path. The bound circuit keeps
             // its native structure so the statevector backend can simulate it
             // directly; Python backends serialise it to OpenQASM 2.0 on demand.

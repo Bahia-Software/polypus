@@ -47,7 +47,7 @@ fn native_bind_requires_no_python_interpreter() {
             assert!(qasm.contains("rx(0.800000000000) q[3];"));
             assert!(qasm.ends_with("measure q -> c;\n"));
         }
-        BoundCircuit::Qasm2(_) | BoundCircuit::Qiskit(_) => {
+        BoundCircuit::Qasm2(_) | BoundCircuit::Foreign(_) => {
             panic!("native template must bind to the native variant")
         }
     }

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use polypus_infrastructure::{
-    CancelToken, ExecutionConfig, InfrastructureError, Planner, QuantumBackend,
+    CancelToken, InfrastructureError, Planner, QuantumBackend, RunParams,
 };
 
 use crate::flow::Flow;
@@ -18,10 +18,12 @@ pub struct Resources {
     /// The planner paired with `backend` (its `default_planner()` unless the edge
     /// chose another, e.g. the shot-distributing planner).
     pub planner: Arc<dyn Planner>,
-    /// The run configuration (id, shots, seed, backend config, …). An `Arc` so a
-    /// training [`Flow`] can share it with the oracle it builds without cloning it
-    /// under the GIL (the config holds a `Py<PyAny>` noise model).
-    pub config: Arc<ExecutionConfig>,
+    /// The per-call run parameters a backend/planner reads (id, shots, seed,
+    /// opt_level — the pyo3-free [`RunParams`]). An `Arc` so a training [`Flow`] can
+    /// share it with the oracle it builds without re-cloning. The construction-time
+    /// config (noise model, `n_qpus`, backend config) was already consumed when the
+    /// edge built the backend, so it does not travel here.
+    pub config: Arc<RunParams>,
 }
 
 impl Resources {
@@ -33,10 +35,27 @@ impl Resources {
     pub fn new(
         backend: Arc<dyn QuantumBackend>,
         planner: Option<Arc<dyn Planner>>,
-        config: Arc<ExecutionConfig>,
+        config: Arc<RunParams>,
     ) -> Result<Self, InfrastructureError> {
         let planner = planner.unwrap_or_else(|| backend.default_planner());
         planner.requirements().check(&backend.capabilities())?;
+        // A shot-distributing planner splits into a fixed replica count; a backend
+        // with a fixed execution-unit allocation (CUNQA's `n_qpus`) must match it,
+        // or the run would leave QPUs idle / over-subscribe them. Both values default
+        // to `None` (native/local/QMIO backends, non-distributing planners), so this
+        // only fires for the genuinely dangerous CUNQA mismatch — the two `n_qpus`
+        // are otherwise a coincidence the type system does not enforce.
+        if let (Some(planner_replicas), Some(backend_replicas)) =
+            (planner.required_replicas(), backend.replica_count())
+        {
+            if planner_replicas != backend_replicas {
+                return Err(InfrastructureError::IncompatiblePlanner(format!(
+                    "the shot-distributing planner splits shots across {planner_replicas} \
+                     replica(s), but the backend allocated {backend_replicas} execution unit(s); \
+                     they must match"
+                )));
+            }
+        }
         Ok(Self {
             backend,
             planner,
@@ -61,9 +80,21 @@ impl Scheduler {
         Self { resources }
     }
 
-    /// Run `flow` to completion with a fresh, private [`CancelToken`] — the common
-    /// case, where the caller keeps no handle on cancellation. A convenience over
-    /// [`run_cancellable`](Self::run_cancellable) with a default token (plan §4.2).
+    /// Run `flow` to completion with a fresh, private, **guard-less**
+    /// [`CancelToken`] — a convenience for callers that keep no handle on
+    /// cancellation (its only users today are the crate/integration tests and
+    /// simple Rust embeddings).
+    ///
+    /// **This method does NOT observe host interrupts.** The default token carries
+    /// no [`Interrupt`](polypus_infrastructure::Interrupt) guard, so the planner's
+    /// between-wave interrupt check is a no-op and a Ctrl+C (`SIGINT`) will *not*
+    /// abort the run. That is deliberate — a pure-Rust caller has no CPython signal
+    /// state to poll — but it means **any real, interruptible run must use
+    /// [`run_cancellable`](Self::run_cancellable) with a token built via
+    /// `CancelToken::with_interrupt(...)`** instead. The Polypus Python edge does
+    /// exactly this (its `SignalInterrupt` guard backs the token it passes to
+    /// `run_cancellable`); this `run` shortcut is not used on any Python-facing
+    /// path, precisely so Ctrl+C is never silently lost there.
     pub fn run<F: Flow>(&self, flow: F) -> Result<F::Output, F::Error> {
         self.run_cancellable(flow, &CancelToken::default())
     }
@@ -102,21 +133,18 @@ mod tests {
     use super::*;
     use crate::RunCircuitFlow;
     use polypus_infrastructure::{
-        BackendCapabilities, BackendConfig, BackendError, BoundCircuit, CircuitTask, Counts,
-        ExecutionConfig, OptLevel, PlannerRequirements, SequentialPlanner, ShotDistributingPlanner,
+        BackendCapabilities, BackendError, BoundCircuit, CircuitTask, Counts, OptLevel,
+        PlannerRequirements, RunParams, SequentialPlanner, ShotDistributingPlanner,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Mutex};
     use std::thread;
 
-    fn config() -> ExecutionConfig {
-        ExecutionConfig {
+    fn config() -> RunParams {
+        RunParams {
             id: "scheduler-test".to_string(),
             shots: 1,
-            n_qpus: 1,
-            infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative { fusion: true },
             opt_level: OptLevel::default(),
             seed: Some(7),
         }
@@ -128,7 +156,7 @@ mod tests {
         fn run_circuits(
             &self,
             qcs: &[BoundCircuit],
-            _config: &ExecutionConfig,
+            _config: &RunParams,
         ) -> Result<Vec<Counts>, BackendError> {
             Ok(qcs.iter().map(|_| HashMap::new()).collect())
         }
@@ -138,6 +166,60 @@ mod tests {
                 supports_shot_distribution: false,
             }
         }
+    }
+
+    /// A backend that supports shot distribution and advertises a fixed replica
+    /// count (CUNQA-shaped), so the `Resources::new` replica cross-check can be
+    /// exercised without a live CUNQA allocation.
+    struct FixedReplicaBackend(u32);
+    impl QuantumBackend for FixedReplicaBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            _config: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Ok(qcs.iter().map(|_| HashMap::new()).collect())
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                max_concurrency: self.0 as usize,
+                supports_shot_distribution: true,
+            }
+        }
+        fn replica_count(&self) -> Option<u32> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn new_rejects_a_replica_count_mismatch() {
+        // A shot-distributing planner splitting into 3 replicas paired with a backend
+        // that allocated 4 execution units is a mis-sized configuration, rejected up
+        // front rather than silently leaving a QPU idle.
+        let backend = Arc::new(FixedReplicaBackend(4));
+        let result = Resources::new(
+            backend,
+            Some(Arc::new(ShotDistributingPlanner::new(3))),
+            Arc::new(config()),
+        );
+        assert!(
+            matches!(result, Err(InfrastructureError::IncompatiblePlanner(_))),
+            "a planner/backend replica-count mismatch must be rejected at construction",
+        );
+    }
+
+    #[test]
+    fn new_accepts_a_matching_replica_count() {
+        let backend = Arc::new(FixedReplicaBackend(4));
+        assert!(
+            Resources::new(
+                backend,
+                Some(Arc::new(ShotDistributingPlanner::new(4))),
+                Arc::new(config()),
+            )
+            .is_ok(),
+            "matching replica counts must pair successfully",
+        );
     }
 
     #[test]
@@ -159,7 +241,7 @@ mod tests {
         // `Result` directly rather than via `expect_err`.
         let result = Resources::new(
             backend,
-            Some(Arc::new(ShotDistributingPlanner)),
+            Some(Arc::new(ShotDistributingPlanner::new(1))),
             Arc::new(config()),
         );
         assert!(
@@ -219,7 +301,7 @@ mod tests {
             &self,
             _backend: &dyn QuantumBackend,
             _tasks: &[CircuitTask<'_>],
-            _config: &ExecutionConfig,
+            _config: &RunParams,
             cancel: &CancelToken,
         ) -> Result<Vec<Counts>, InfrastructureError> {
             for wave in 0..2 {
