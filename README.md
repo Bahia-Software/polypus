@@ -14,9 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue.svg" alt="Python 3.8+">
   <a href="https://bahia-software.github.io/polypus/"><img src="https://img.shields.io/badge/docs-rustdoc-blue.svg" alt="Documentation"></a>
   <img src="https://img.shields.io/badge/status-active%20development-yellow.svg" alt="Status: active development">
-  <!-- DOI badge — PENDING: uncomment and replace PENDING with the Zenodo concept DOI once the first release is archived (see docs/RELEASING.md):
-  <a href="https://doi.org/10.5281/zenodo.PENDING"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.PENDING.svg" alt="DOI"></a>
-  -->
+  <a href="https://doi.org/10.5281/zenodo.22913065"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.22913065.svg" alt="DOI"></a>
 </p>
 
 ## Table of Contents
@@ -413,7 +411,7 @@ If Polypus is useful in your research, please cite it:
   title   = {{Polypus: A Distributed Quantum Computing Library}},
   year    = {2026},
   url     = {https://github.com/Bahia-Software/polypus},
-  doi     = {PENDING},  % PENDING: Zenodo concept DOI once the first release is archived (see docs/RELEASING.md)
+  doi     = {10.5281/zenodo.22913065},
   version = {0.7.1}
 }
 ```
