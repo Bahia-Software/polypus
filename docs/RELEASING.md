@@ -58,8 +58,9 @@ and any future change must be applied to both.
 
 ## Pending decisions
 
-- **DOI** — assigned by Zenodo on the first archived release; until then the
-  `identifiers:` block in `CITATION.cff` and the README badge/BibTeX stay unset.
+- **DOI** — **set**: the Zenodo concept DOI is `10.5281/zenodo.22913065`
+  (constant across versions), wired into `CITATION.cff` (`identifiers`) and the
+  README badge + BibTeX. Future releases reuse the same concept DOI.
 - **Version to archive** — **decided: `0.7.1`.** `0.7.0` is already on PyPI, so
   the first DOI is cut from a fresh `0.7.1` GitHub Release (the workspace version,
   `Cargo.lock`, `CITATION.cff` and the README are already bumped to `0.7.1`).

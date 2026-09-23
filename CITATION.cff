@@ -1,10 +1,10 @@
 # -----------------------------------------------------------------------------
-# PENDIENTE ANTES DE PUBLICAR LA RELEASE:
-#   1. Sustituir el DOI de concepto una vez Zenodo archive la primera release.
-#      Debe ser el DOI DE CONCEPTO (apunta siempre a la última versión),
-#      no el DOI de esa versión concreta.
-#   2. Comprobar que esta lista de autores coincide exactamente con la sección
-#      "Credits" y con el bloque BibTeX del README.
+# MANTENIMIENTO (en cada release):
+#   - Actualizar `version` y `date-released` a la nueva release.
+#   - `identifiers` usa el DOI DE CONCEPTO (apunta siempre a la última versión),
+#     no el DOI de una versión concreta; no hace falta cambiarlo entre releases.
+#   - Mantener esta lista de autores en sync con la sección "Credits" y el
+#     bloque BibTeX del README, y con `.zenodo.json`.
 # -----------------------------------------------------------------------------
 
 cff-version: 1.2.0
@@ -65,7 +65,7 @@ authors:
     affiliation: "Bahía Software S.L.U."
   - name: "Galicia Supercomputing Center (CESGA)"
 
-# identifiers:
-#   - type: doi
-#     value: "10.5281/zenodo.PENDIENTE"
-#     description: "Concept DOI: always resolves to the latest version."
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.22913065"
+    description: "Concept DOI: always resolves to the latest version."
