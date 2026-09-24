@@ -34,11 +34,12 @@ pub mod transpiler;
 
 // --- re-export the pyo3-free contract so downstream import paths are unchanged ---
 pub use polypus_backend::{
-    max_statevector_concurrency, validate_run_results, wave_concurrency, BackendCapabilities,
-    BackendError, BoundCircuit, CancelToken, CircuitTask, Counts, ForeignCircuit,
-    IdentityTranspiler, InfrastructureError, Interrupt, OptLevel, Planner, PlannerRequirements,
-    QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner, TranspileOptions,
-    Transpiler,
+    create_registered_backend, is_registered, max_statevector_concurrency, register_backend,
+    registered_names, validate_run_results, wave_concurrency, BackendBuildContext,
+    BackendCapabilities, BackendError, BackendFactory, BoundCircuit, CancelToken, CircuitTask,
+    Counts, ForeignCircuit, IdentityTranspiler, InfrastructureError, Interrupt, OptLevel, Planner,
+    PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
+    TranspileOptions, Transpiler,
 };
 
 // --- this crate's own additions ---
@@ -66,6 +67,41 @@ pub fn record_cleanup_failure() {
 /// Number of backend cleanup failures recorded so far this process (diagnostic).
 pub fn cleanup_failure_count() -> u64 {
     CLEANUP_FAILURES.load(Ordering::SeqCst)
+}
+
+/// Register the backends Polypus ships through the runtime registry, once per
+/// process. Idempotent (a `Once` guard), and called at the top of
+/// [`Infrastructure::create_backend`] so a name-driven build always finds them.
+///
+/// - `"subprocess"` — the Python subprocess bridge (`polypus-subprocess-backend`),
+///   always available (pyo3-free).
+/// - `"qmio"` — the CESGA QMIO QPU, only with `--features qmio`; without it, the
+///   name stays unregistered and selecting it yields the actionable
+///   "requires --features qmio" error at the edge.
+///
+/// A third party's own `register_backend(...)` call composes with these: last
+/// registration wins, so an embedder can even override a built-in name.
+pub fn register_builtin_backends() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Never clobber a name an embedder already registered: registering is
+        // last-wins, so an embedder who registered their own `"subprocess"` (or
+        // `"qmio"`) *before* the first `create_backend` keeps it. Only fill in a name
+        // that is still free.
+        //
+        // The subprocess bridge is Unix-only (POSIX process controls), so on
+        // non-Unix (Windows) the `"subprocess"` name is simply never registered and
+        // resolves to `UnknownInfrastructure` like any other unknown backend.
+        #[cfg(unix)]
+        if !is_registered(polypus_subprocess_backend::BACKEND_NAME) {
+            polypus_subprocess_backend::register();
+        }
+        #[cfg(feature = "qmio")]
+        if !is_registered("qmio") {
+            register_backend("qmio", qmio::qmio_factory);
+        }
+    });
 }
 
 /// Supported quantum execution infrastructures.
@@ -102,6 +138,9 @@ impl Infrastructure {
     pub fn create_backend(
         config: &ExecutionConfig,
     ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
+        // Ensure Polypus's registry-migrated backends (subprocess, qmio) — and any
+        // the embedder registered before us — are discoverable by name.
+        register_builtin_backends();
         match &config.backend_config {
             BackendConfig::Local {
                 backend,
@@ -137,27 +176,23 @@ impl Infrastructure {
                 )
                 .with_fusion(*fusion),
             )),
-            #[cfg(feature = "qmio")]
-            BackendConfig::Qmio {
-                endpoint,
-                program_format,
-                optimization,
-                repetition_period,
-                res_format,
-            } => Ok(Arc::new(
-                QmioBackend::new(
-                    endpoint.clone(),
-                    *program_format,
-                    *optimization,
-                    *repetition_period,
-                    res_format.clone(),
-                )
-                // The QMIO wire/serialisation error is provider-specific and stays
-                // in this crate (feature `qmio`); it crosses the pyo3-free contract
-                // type-erased in `BackendError::External`, and the FFI edge downcasts
-                // it back to raise the typed `polypus.QmioError`.
-                .map_err(|e| BackendError::External(Box::new(e)))?,
-            )),
+            // A registry-dispatched backend (QMIO, the subprocess bridge, or a
+            // third party's own). The typed construction fields are gone; the factory
+            // reads its configuration from the pyo3-free `BackendBuildContext`. A
+            // QMIO wire error still crosses the contract type-erased in
+            // `BackendError::External` (the factory boxes it), and the FFI edge
+            // downcasts it back to raise the typed `polypus.QmioError`.
+            BackendConfig::Registered { name, options } => {
+                let ctx = BackendBuildContext {
+                    id: config.id.clone(),
+                    shots: config.shots,
+                    n_qpus: config.n_qpus,
+                    seed: config.seed,
+                    opt_level: config.opt_level,
+                    options: options.clone(),
+                };
+                create_registered_backend(name, &ctx)
+            }
         }
     }
 }

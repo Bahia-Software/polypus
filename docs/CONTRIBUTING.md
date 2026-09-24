@@ -34,6 +34,8 @@ Everything CI runs, you can run locally:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                     # all crates, no hand-maintained list
+                                           # (polypus-subprocess-backend's tests spawn a Python
+                                           #  worker; they skip gracefully if python3 is absent)
 cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
 cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
 pytest tests/python                        # needs the extension installed

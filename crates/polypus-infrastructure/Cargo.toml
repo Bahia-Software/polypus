@@ -36,3 +36,11 @@ zeromq = { version = "0.6", optional = true }
 serde-pickle = { version = "1.2", optional = true }
 serde_json = { version = "1.0", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"], optional = true }
+
+# The subprocess bridge, registered as the built-in `"subprocess"` backend by
+# `register_builtin_backends`. Pyo3-free, so it does not widen this crate's FFI
+# edge. Unix-only: it drives a worker via POSIX process controls (fork/exec
+# `pre_exec`, `SIGINT`), so it is not pulled into the Windows extension-module
+# build — where the `"subprocess"` backend is simply not registered.
+[target.'cfg(unix)'.dependencies]
+polypus-subprocess-backend = { workspace = true }

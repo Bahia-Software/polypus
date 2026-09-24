@@ -71,6 +71,21 @@ pub enum BackendError {
     /// [`External`](Self::External), because the caller may choose to *retry with
     /// a fresh worker* rather than treat it as a definitive failure.
     Unresponsive(String),
+    /// The backend call was **aborted by an external signal** (a terminal Ctrl+C
+    /// delivered to the process group, or any other interrupt the backend observed)
+    /// and must be treated as a *cancellation*, whatever its source.
+    ///
+    /// This is distinct from [`Unresponsive`](Self::Unresponsive) (the backend
+    /// *failed*) and from [`External`](Self::External) (a clean provider error): it
+    /// is the cooperative, expected end of an interrupted run. The FFI edge maps it
+    /// to `KeyboardInterrupt`, the same class a between-wave `check_signals` cancel
+    /// produces, so an interrupt observed *inside* a blocked backend call surfaces
+    /// identically to one observed between waves — regardless of which thread saw it.
+    ///
+    /// A third-party backend that can tell its call was interrupted (e.g. a
+    /// subprocess worker that caught SIGINT and replied "aborted") returns this to
+    /// get that consistent classification for free.
+    Aborted(String),
     /// Any provider-specific failure, type-erased.
     ///
     /// The Polypus Python backends box a `PyErr` here so the FFI edge can
@@ -97,6 +112,7 @@ impl fmt::Display for BackendError {
             BackendError::Cunqa(m) => write!(f, "CUNQA backend error: {m}"),
             BackendError::Conversion(m) => write!(f, "data conversion failed: {m}"),
             BackendError::Unresponsive(m) => write!(f, "the backend stopped responding: {m}"),
+            BackendError::Aborted(m) => write!(f, "the backend call was aborted: {m}"),
             BackendError::External(err) => write!(f, "{err}"),
         }
     }
@@ -193,6 +209,10 @@ mod tests {
         assert_eq!(
             BackendError::Unresponsive("worker died (signal 9)".to_string()).to_string(),
             "the backend stopped responding: worker died (signal 9)"
+        );
+        assert_eq!(
+            BackendError::Aborted("Ctrl+C".to_string()).to_string(),
+            "the backend call was aborted: Ctrl+C"
         );
     }
 

@@ -58,18 +58,86 @@
 
 use crate::error::BackendError;
 use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
+use polypus_backend::BackendBuildContext;
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use serde_json::json;
 use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 pub use crate::execution_config::QmioProgramFormat;
+
+/// Registry factory for the QMIO backend — the bridge between the pyo3-free runtime
+/// registry ([`polypus_backend::register_backend`]) and [`QmioBackend::new`].
+///
+/// Registered under the name `"qmio"` by `register_builtin_backends` (only with
+/// `--features qmio`). It reads its configuration from the
+/// [`BackendBuildContext`]'s `options`, mirroring the former typed
+/// `BackendConfig::Qmio`:
+///
+/// | option | meaning | default |
+/// |--------|---------|---------|
+/// | `endpoint` | ZMQ REQ endpoint | the built-in default endpoint |
+/// | `program_format` | `openqasm` / `qir_text` / `qir_bitcode` | `openqasm` |
+/// | `optimization` | Tket optimisation level (u8) | `0` |
+/// | `repetition_period` | seconds (f64), or absent for the server default | absent |
+/// | `res_format` | results format | `binary_count` |
+///
+/// The provider-specific [`QmioError`] is boxed into
+/// [`BackendError::External`], keeping the registry contract pyo3-free; the FFI edge
+/// downcasts it back to the typed `polypus.QmioError`.
+pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>, BackendError> {
+    let endpoint = ctx.option("endpoint").unwrap_or("").to_string();
+    let program_format = match ctx.option("program_format").unwrap_or("openqasm") {
+        "openqasm" => QmioProgramFormat::OpenQasm,
+        "qir_text" => QmioProgramFormat::QirText,
+        "qir_bitcode" => QmioProgramFormat::QirBitcode,
+        other => {
+            return Err(BackendError::Conversion(format!(
+                "unknown qmio program_format '{other}'; expected \"openqasm\", \"qir_text\", or \
+                 \"qir_bitcode\""
+            )))
+        }
+    };
+    // Present-but-malformed numeric options are a configuration mistake — surface
+    // them, like the unknown-program_format branch above, rather than silently
+    // falling back to the default (which only an *absent* key uses).
+    let optimization = match ctx.option("optimization") {
+        None => 0,
+        Some(v) => v.parse::<u8>().map_err(|_| {
+            BackendError::Conversion(format!(
+                "qmio 'optimization' must be an integer 0-255, got {v:?}"
+            ))
+        })?,
+    };
+    let repetition_period = match ctx.option("repetition_period") {
+        None => None,
+        Some(v) => Some(v.parse::<f64>().map_err(|_| {
+            BackendError::Conversion(format!(
+                "qmio 'repetition_period' must be a number of seconds, got {v:?}"
+            ))
+        })?),
+    };
+    let res_format = ctx
+        .option("res_format")
+        .unwrap_or("binary_count")
+        .to_string();
+    let backend = QmioBackend::new(
+        endpoint,
+        program_format,
+        optimization,
+        repetition_period,
+        res_format,
+    )
+    .map_err(|e| BackendError::External(Box::new(e)))?;
+    Ok(Arc::new(backend))
+}
 
 /// Default endpoint, used only when `ZMQ_SERVER` is unset. Documented fallback,
 /// never silently hard-coded over an explicit configuration.
@@ -887,6 +955,65 @@ mod tests {
             .unwrap()
     }
 
+    /// A `BackendBuildContext` with the given qmio options (endpoint left empty so
+    /// `QmioBackend::new` uses its default; it connects lazily, so no live server is
+    /// needed to *build* the backend).
+    fn qmio_ctx(options: &[(&str, &str)]) -> BackendBuildContext {
+        BackendBuildContext {
+            id: "qmio-factory-test".to_string(),
+            shots: 1024,
+            n_qpus: 1,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+            options: options
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// The registry factory reads the qmio options and validates them: the three
+    /// program formats build, an unknown format and malformed numerics error, and a
+    /// present optimization / repetition_period is consulted (a bad value is
+    /// rejected, proving it is not ignored).
+    #[test]
+    fn qmio_factory_reads_and_validates_options() {
+        // The three valid program formats build (no server needed to construct).
+        for pf in ["openqasm", "qir_text", "qir_bitcode"] {
+            assert!(
+                qmio_factory(&qmio_ctx(&[("program_format", pf)])).is_ok(),
+                "program_format {pf:?} should build"
+            );
+        }
+        // Absent program_format defaults to openqasm and builds.
+        assert!(qmio_factory(&qmio_ctx(&[])).is_ok());
+
+        // Unknown program_format → Conversion error.
+        match qmio_factory(&qmio_ctx(&[("program_format", "bogus")])) {
+            Err(BackendError::Conversion(m)) => assert!(m.contains("program_format")),
+            Err(other) => panic!("expected Conversion, got {other:?}"),
+            Ok(_) => panic!("an unknown program_format must be rejected"),
+        }
+        // Malformed optimization → error (proves it is read).
+        match qmio_factory(&qmio_ctx(&[("optimization", "high")])) {
+            Err(BackendError::Conversion(m)) => assert!(m.contains("optimization")),
+            Err(other) => panic!("expected Conversion, got {other:?}"),
+            Ok(_) => panic!("a malformed optimization must be rejected, not defaulted"),
+        }
+        // Malformed repetition_period → error (proves it is read).
+        match qmio_factory(&qmio_ctx(&[("repetition_period", "fast")])) {
+            Err(BackendError::Conversion(m)) => assert!(m.contains("repetition_period")),
+            Err(other) => panic!("expected Conversion, got {other:?}"),
+            Ok(_) => panic!("a malformed repetition_period must be rejected, not defaulted"),
+        }
+        // Valid optimization + repetition_period build.
+        assert!(qmio_factory(&qmio_ctx(&[
+            ("optimization", "3"),
+            ("repetition_period", "0.001"),
+        ]))
+        .is_ok());
+    }
+
     fn backend(format: QmioProgramFormat) -> QmioBackend {
         QmioBackend::new(
             "tcp://10.255.3.70:5556".to_string(),
@@ -1187,12 +1314,12 @@ mod tests {
             shots: 1024,
             n_qpus: 1,
             infrastructure: "qmio".to_string(),
-            backend_config: BackendConfig::Qmio {
-                endpoint,
-                program_format: QmioProgramFormat::OpenQasm,
-                optimization: 0,
-                repetition_period: None,
-                res_format: "binary_count".to_string(),
+            // QMIO is now registry-dispatched; this test builds the backend directly
+            // above and only needs a config to derive `run_params()` (which ignores
+            // `backend_config`), so the registry variant with empty options suffices.
+            backend_config: BackendConfig::Registered {
+                name: "qmio".to_string(),
+                options: std::collections::HashMap::new(),
             },
             opt_level: crate::OptLevel::default(),
             // QMIO does not consume the sampling seed (real QPU / server-side).
@@ -1269,12 +1396,12 @@ mod tests {
             shots: 1024,
             n_qpus: 1,
             infrastructure: "qmio".to_string(),
-            backend_config: BackendConfig::Qmio {
-                endpoint,
-                program_format: QmioProgramFormat::OpenQasm,
-                optimization: 0,
-                repetition_period: None,
-                res_format: "binary_count".to_string(),
+            // QMIO is now registry-dispatched; this test builds the backend directly
+            // above and only needs a config to derive `run_params()` (which ignores
+            // `backend_config`), so the registry variant with empty options suffices.
+            backend_config: BackendConfig::Registered {
+                name: "qmio".to_string(),
+                options: std::collections::HashMap::new(),
             },
             opt_level: crate::OptLevel::default(),
             seed: None,
@@ -1371,17 +1498,20 @@ mod tests {
             .unwrap(),
         );
 
-        let make_config = |endpoint: String| ExecutionConfig {
+        // `endpoint` is no longer part of the config (QMIO reads it from the
+        // registry options now); the closure keeps the arg only so its two call
+        // sites stay unchanged.
+        let make_config = |_endpoint: String| ExecutionConfig {
             id: "qmio-concurrent".to_string(),
             shots: 1024,
             n_qpus: 1,
             infrastructure: "qmio".to_string(),
-            backend_config: BackendConfig::Qmio {
-                endpoint,
-                program_format: QmioProgramFormat::OpenQasm,
-                optimization: 0,
-                repetition_period: None,
-                res_format: "binary_count".to_string(),
+            // QMIO is now registry-dispatched; this test builds the backend directly
+            // above and only needs a config to derive `run_params()` (which ignores
+            // `backend_config`), so the registry variant with empty options suffices.
+            backend_config: BackendConfig::Registered {
+                name: "qmio".to_string(),
+                options: std::collections::HashMap::new(),
             },
             opt_level: crate::OptLevel::default(),
             seed: None,
@@ -1436,12 +1566,10 @@ mod tests {
             shots: 1000,
             n_qpus: 1,
             infrastructure: "qmio".to_string(),
-            backend_config: BackendConfig::Qmio {
-                endpoint,
-                program_format: QmioProgramFormat::OpenQasm,
-                optimization: 1,
-                repetition_period: None,
-                res_format: "binary_count".to_string(),
+            // QMIO is now registry-dispatched; only `run_params()` is read here.
+            backend_config: BackendConfig::Registered {
+                name: "qmio".to_string(),
+                options: std::collections::HashMap::new(),
             },
             opt_level: crate::OptLevel::default(),
             // QMIO does not consume the sampling seed (real QPU / server-side).

@@ -140,6 +140,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
       # whose results must be bit-identical to the sequential path).
+      # `polypus-subprocess-backend` is pyo3-free (belongs here), but its
+      # integration tests spawn a Python worker; they resolve `python3` (provided by
+      # the setup-python step in this job) and skip gracefully if none is found.
       - name: Test pure-Rust crates (all features)
         run: >
           cargo test --locked
@@ -149,6 +152,7 @@ jobs:
           -p polypus-optimizers
           -p polypus-observable
           -p polypus-backend
+          -p polypus-subprocess-backend
           --all-features
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*

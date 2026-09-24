@@ -235,9 +235,20 @@ impl Planner for SequentialPlanner {
             let circuits: Vec<BoundCircuit> = chunk.iter().map(|t| t.circuit.duplicate()).collect();
             let mut cfg = params.clone();
             cfg.shots = shots;
-            let counts = backend
-                .run_circuits(&circuits, &cfg)
-                .map_err(InfrastructureError::Backend)?;
+            let counts = match backend.run_circuits(&circuits, &cfg) {
+                Ok(counts) => counts,
+                // A mid-wave cooperative cancel (the watcher fired
+                // `QuantumBackend::cancel`, aborting a blocked call) surfaces as the
+                // backend erroring *while the token is set*. Report it as the
+                // cancellation it is, not as a raw backend failure — but do not let
+                // the original message vanish silently: log it, so a backend error
+                // that merely *coincided* with a cancel is still diagnosable.
+                Err(e) if cancel.is_cancelled() => {
+                    log::warn!("backend error during cancellation, reporting as Cancelled: {e}");
+                    return Err(InfrastructureError::Cancelled);
+                }
+                Err(e) => return Err(InfrastructureError::Backend(e)),
+            };
             validate_run_results(&counts, chunk.len(), shots)
                 .map_err(InfrastructureError::Backend)?;
             // Honour a pending interrupt/Ctrl+C after each wave's run.
@@ -323,9 +334,17 @@ impl Planner for ShotDistributingPlanner {
             if cancel.is_cancelled() {
                 return Err(InfrastructureError::Cancelled);
             }
-            let counts_vec = backend
-                .run_shots_distributed(task.circuit, chunk, params)
-                .map_err(InfrastructureError::Backend)?;
+            let counts_vec = match backend.run_shots_distributed(task.circuit, chunk, params) {
+                Ok(counts) => counts,
+                // Same mid-wave cooperative-cancel translation as SequentialPlanner:
+                // an aborted blocked call while the token is set is a cancellation,
+                // and the original error is logged so nothing is lost silently.
+                Err(e) if cancel.is_cancelled() => {
+                    log::warn!("backend error during cancellation, reporting as Cancelled: {e}");
+                    return Err(InfrastructureError::Cancelled);
+                }
+                Err(e) => return Err(InfrastructureError::Backend(e)),
+            };
             // Merge this chunk's replicas into the running result (the merge, C-3,
             // lives in the planner).
             for counts in counts_vec {
@@ -586,6 +605,43 @@ mod tests {
             err,
             InfrastructureError::Backend(BackendError::External(_))
         ));
+    }
+
+    /// A backend that errors *while the token is cancelled* (the shape produced when
+    /// the mid-wave watcher fires `cancel()` and the blocked call aborts) is reported
+    /// as `Cancelled`, not as the raw backend error — so a cooperative cancel of a
+    /// blocking backend surfaces cleanly.
+    #[test]
+    fn a_backend_error_while_cancelled_is_reported_as_cancelled() {
+        struct AbortsWhenCancelled {
+            cancel: CancelToken,
+        }
+        impl QuantumBackend for AbortsWhenCancelled {
+            fn run_circuits(
+                &self,
+                _qcs: &[BoundCircuit],
+                _params: &RunParams,
+            ) -> Result<Vec<Counts>, BackendError> {
+                // Model a blocked call the watcher just aborted: the token is set,
+                // and the call returns an error (as the subprocess bridge does on
+                // an `aborted` reply).
+                self.cancel.cancel();
+                Err(BackendError::External("aborted by signal".into()))
+            }
+        }
+        let cancel = CancelToken::default();
+        let backend = AbortsWhenCancelled {
+            cancel: cancel.clone(),
+        };
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let tasks = one_task(&circuit, 8);
+        let err = SequentialPlanner
+            .execute(&backend, &tasks, &params(8), &cancel)
+            .expect_err("an abort-while-cancelled run must not return Ok");
+        assert!(
+            matches!(err, InfrastructureError::Cancelled),
+            "a backend error while cancelled must surface as Cancelled, got {err:?}"
+        );
     }
 
     /// A backend whose `capabilities_for` fails must have that error propagate out

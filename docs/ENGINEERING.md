@@ -25,8 +25,9 @@ with PyO3 Python bindings. The Cargo workspace has eleven crates:
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
-| `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam and the memory budget. Zero PyO3 in its dependency tree | No |
-| `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory, the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
+| `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
+| `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
+| `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
 | `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
 | `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
@@ -42,14 +43,17 @@ boundary stays out-of-process and explicit; see
 ## 2. Workspace boundaries
 
 - `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
-  `polypus-observable`, `polypus-backend` and `polypus-logger` are **pure Rust:
-  they must not depend on `pyo3` or Python**. Do not introduce `Py<...>`, `PyAny`,
-  `Python`, the GIL, or Python types into them. `polypus-backend` is the strictest
-  of these: it is the public backend contract, so its **whole dependency tree must
-  stay PyO3-free** (a third party implements a backend against it without pulling
-  the interpreter) — a Python/provider failure crosses it type-erased in
-  `BackendError::External`, and the concrete backends live one layer up in
-  `polypus-infrastructure`.
+  `polypus-observable`, `polypus-backend`, `polypus-subprocess-backend` and
+  `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
+  not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python types into them.
+  `polypus-backend` is the strictest of these: it is the public backend contract, so
+  its **whole dependency tree must stay PyO3-free** (a third party implements a
+  backend against it without pulling the interpreter) — a Python/provider failure
+  crosses it type-erased in `BackendError::External`, and the concrete backends live
+  one layer up in `polypus-infrastructure`. `polypus-subprocess-backend` is pure Rust
+  too and stays PyO3-free **by construction**: it reaches a provider's Python SDK by
+  running it in a separate process, not by embedding the interpreter (its own tests
+  spawn a `python3` worker as a subprocess, which is not a link-time dependency).
 - `polypus-infrastructure` may depend on `pyo3` for the GIL and for carrying a
   `PyErr` verbatim (its Aer/CUNQA/QMIO seams call into Python), but it defines
   **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
@@ -274,12 +278,29 @@ boundary stays out-of-process and explicit; see
 
 - `unsafe` is allowed **only** in the `polypus-sim` kernels
   (`crates/polypus-sim/src/kernels.rs`), where raw-pointer access to the
-  statevector is performance-critical.
+  statevector is performance-critical, and in the one **signed-off exception**
+  below.
 - **Every** `unsafe` block keeps its `// SAFETY: ...` comment justifying the
   invariants (indices `< 2^n = data.len()`; the amplitude pair does not
   alias). Do not weaken those invariants.
 - Adding `unsafe` anywhere else requires a benchmark that justifies it, the
   same `// SAFETY:` documentation, and explicit maintainer sign-off in the PR.
+- **Signed-off exception — `polypus-subprocess-backend`'s `pre_exec`.** The
+  subprocess bridge holds exactly one `unsafe` block, in `Worker::spawn`
+  (`crates/polypus-subprocess-backend/src/lib.rs`): `Command::pre_exec`, used to
+  arm the `PR_SET_PDEATHSIG` orphan guard on the worker child so it cannot outlive
+  a hard kill of the host process (a real HPC requirement — an orphaned worker
+  would hold a SLURM node/QPU). This one is **not** a performance optimisation, so
+  the "benchmark that justifies it" rule does not apply; it is unavoidable because
+  `Command::pre_exec` is an `unsafe fn` in std with no safe equivalent, and
+  `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed in the child,
+  between fork and exec — which is exactly what `pre_exec` is for. The block's body
+  is itself safe: it calls `nix`'s audited `set_pdeathsig` wrapper (a single
+  async-signal-safe `prctl(2)`), not hand-written FFI, and carries the mandated
+  `// SAFETY:` comment. Everything else the bridge needs from POSIX — notably
+  `kill` for out-of-band cancellation — goes through `nix`'s safe wrappers with no
+  `unsafe`. Do not add a second `unsafe` block to this crate without the same
+  sign-off.
 - Let the compiler prove `Send`/`Sync`; never force them with `unsafe impl`.
 
 ## 6. Feature hygiene
@@ -408,8 +429,9 @@ it into an unrelated diff. `cargo deny check` gates licenses and advisories.
 - [ ] If it touches the simulator: statevector normalized, gates unitary, and
       parallel == sequential with tests? (§4)
 - [ ] Deterministic given a seed? (§4)
-- [ ] Any new `unsafe`? Only in `sim/kernels.rs`, with `// SAFETY:` and a
-      benchmark that justifies it. (§5)
+- [ ] Any new `unsafe`? Only in `sim/kernels.rs` (with `// SAFETY:` and a
+      benchmark) or the signed-off `pre_exec` exception in
+      `polypus-subprocess-backend`; anything else needs the same sign-off. (§5)
 - [ ] If it touches circuits: byte-identical round-trip and Qiskit
       compatibility preserved? (§7, contract C-2)
 - [ ] Heavy dependencies behind an opt-in feature? Default build lean? (§6)

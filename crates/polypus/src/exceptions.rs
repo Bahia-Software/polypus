@@ -105,6 +105,15 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
         InfraBackendError::Unresponsive(m) => {
             BackendError::new_err(format!("the backend stopped responding: {m}"))
         }
+        // A backend call aborted by an external signal (a terminal Ctrl+C reaching a
+        // subprocess worker via the process group, say) is a cancellation whatever
+        // its source, so it raises `KeyboardInterrupt` — the same class a between-wave
+        // `check_signals` cancel (`InfrastructureError::Cancelled`) produces. This is
+        // what makes an interrupt observed *inside* a blocked backend call surface
+        // identically to one observed between waves.
+        InfraBackendError::Aborted(m) => {
+            PyKeyboardInterrupt::new_err(format!("the run was aborted: {m}"))
+        }
         // The pyo3-free contract carries any provider/Python failure type-erased
         // here; recover its original class so contract C-1 holds (a seam
         // `ValueError`/`TypeError`, a `KeyboardInterrupt`, or a `polypus.QmioError`
@@ -319,6 +328,28 @@ mod tests {
             InfraBackendError::Unresponsive("worker died (signal 9)".to_string()),
             "the backend stopped responding: worker died (signal 9)",
         );
+    }
+
+    #[test]
+    fn aborted_maps_to_keyboard_interrupt() {
+        // A backend call aborted by an external signal (a terminal Ctrl+C reaching a
+        // subprocess worker via the process group) is a cancellation whatever its
+        // source, so it surfaces as a native `KeyboardInterrupt` — NOT a `polypus.*`
+        // class — exactly like `InfrastructureError::Cancelled` does. Assert directly
+        // rather than via `assert_maps_to`, which requires `PolypusError` catchability.
+        pyo3::prepare_freethreaded_python();
+        let py_err = backend_error_to_pyerr(InfraBackendError::Aborted("Ctrl+C".to_string()));
+        Python::with_gil(|py| {
+            assert!(
+                py_err.is_instance_of::<PyKeyboardInterrupt>(py),
+                "an aborted backend call must surface as KeyboardInterrupt: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<PolypusError>(py),
+                "KeyboardInterrupt is a native Python exception, not a polypus.* class"
+            );
+            assert!(py_err.to_string().contains("the run was aborted: Ctrl+C"));
+        });
     }
 
     #[test]
