@@ -1151,6 +1151,62 @@ pub fn train<'py>(
     finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
 
+/// Compose `feature_map` with `ansatz` into the QML circuit template, adding a
+/// terminal `measure_all` when there are no classical bits (Aer needs them to
+/// return counts).
+fn compose_qml_template<'py>(
+    feature_map: &Bound<'py, PyAny>,
+    ansatz: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let composed = feature_map.call_method1("compose", (ansatz,))?;
+    let num_clbits: usize = composed.getattr("num_clbits")?.extract()?;
+    if num_clbits == 0 {
+        composed.call_method0("measure_all")?;
+    }
+    Ok(composed)
+}
+
+/// Bind each row of `rows` by name to the feature-map parameters of `template`,
+/// one circuit per row. The binding is partial: the ansatz parameters stay free.
+///
+/// A row whose length differs from `len(feature_map.parameters)` is a
+/// `ValueError` naming `rows_name` and the 0-based row (contract C-8); zipping
+/// would otherwise drop extra features or leave some unbound.
+fn bind_feature_rows<'py>(
+    template: &Bound<'py, PyAny>,
+    feature_map: &Bound<'py, PyAny>,
+    rows: &Bound<'py, PyAny>,
+    rows_name: &str,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let py = template.py();
+    let fm_params = feature_map.getattr("parameters")?;
+    let builtins = PyModule::import(py, "builtins")?;
+    let fm_params_list = builtins.call_method1("list", (&fm_params,))?;
+    let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
+    let fm_len = fm_params_list.len()?;
+    let mut circuits: Vec<Py<PyAny>> = Vec::new();
+    for (row_idx, row_result) in rows.try_iter()?.enumerate() {
+        let row = row_result?;
+        let row_len = row.len()?;
+        if row_len != fm_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{rows_name} row {row_idx} has {row_len} features, but feature_map expects \
+                 {fm_len} (len(feature_map.parameters))"
+            )));
+        }
+        let param_dict = PyDict::new(py);
+        for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
+            param_dict.set_item(param?, val?)?;
+        }
+        circuits.push(
+            template
+                .call_method("assign_parameters", (&param_dict,), Some(&kwargs_assign))?
+                .unbind(),
+        );
+    }
+    Ok(circuits)
+}
+
 /// QML entry point: train a data-encoding VQC where `feature_map` encodes each
 /// training sample and `ansatz` holds the trainable weights.
 ///
@@ -1273,51 +1329,9 @@ pub fn qml_train<'py>(
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
     let py = feature_map.py();
 
-    // 1. Compose feature_map + ansatz
-    let composed = feature_map.call_method1("compose", (&ansatz,))?;
-
-    // 2. Add measurements if the composed circuit has no classical bits.
-    //    Qiskit's AerSimulator requires classical bits to return counts.
-    let num_clbits: usize = composed.getattr("num_clbits")?.extract()?;
-    if num_clbits == 0 {
-        composed.call_method0("measure_all")?;
-    }
-
-    // 3. Collect feature-map parameters in their canonical (sorted-by-name) order
-    let fm_params = feature_map.getattr("parameters")?;
-    let builtins = PyModule::import(py, "builtins")?;
-    let fm_params_list = builtins.call_method1("list", (&fm_params,))?;
-
-    // 4. Pre-bind each training sample to the feature-map parameters.
-    //    We pass a dict so Qiskit performs *partial* binding, leaving the ansatz
-    //    parameters unbound for the optimizer to fill in later.
-    let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
-    let mut qcs: Vec<Py<PyAny>> = Vec::new();
-    // Each row must supply exactly one value per feature-map parameter. Zipping
-    // the two iterators would stop at the shorter one — a longer row silently
-    // drops features, a shorter row leaves feature-map parameters unbound and
-    // fails later as a cryptic Qiskit error inside the oracle. Materialize both
-    // lengths and reject a mismatch upfront with the row index and both lengths
-    // (contract C-8).
-    let fm_len = fm_params_list.len()?;
-    for (row_idx, row_result) in x_train.try_iter()?.enumerate() {
-        let row = row_result?;
-        let row_len = row.len()?;
-        if row_len != fm_len {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "x_train row {row_idx} has {row_len} features, but feature_map expects {fm_len} \
-                 (len(feature_map.parameters))"
-            )));
-        }
-        let param_dict = PyDict::new(py);
-        for (param, val) in fm_params_list.try_iter()?.zip(row.try_iter()?) {
-            param_dict.set_item(param?, val?)?;
-        }
-        let bound_qc = composed
-            .call_method("assign_parameters", (&param_dict,), Some(&kwargs_assign))?
-            .unbind();
-        qcs.push(bound_qc);
-    }
+    let composed = compose_qml_template(&feature_map, &ansatz)?;
+    // Pre-bind each sample, leaving the ansatz parameters for the optimizer.
+    let qcs = bind_feature_rows(&composed, &feature_map, &x_train, "x_train")?;
 
     if qcs.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
