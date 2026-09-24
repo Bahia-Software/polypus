@@ -1,5 +1,6 @@
 """
-Integration tests — run real quantum circuits using the local AerSimulator backend.
+Integration tests — run real quantum circuits on the local infrastructure
+(AerSimulator unless a test selects the native backend).
 
 These tests require qiskit-aer to be installed. They are marked with the
 'integration' pytest mark and can be skipped in CI with:
@@ -140,3 +141,27 @@ class TestRunQuantumCircuitMultipleQpus:
             bell_circuit, shots=shots, infrastructure="local", n_qpus=8
         )
         assert sum(result.counts.values()) == shots
+
+
+class TestCountsKeyOrder:
+    """Contract C-3: every counts dict lists its keys in ascending bitstring
+    order, so a float reduction over ``.items()`` adds its terms in the same
+    order in every call and every process."""
+
+    @pytest.mark.parametrize("n_qpus", [1, 4])
+    def test_keys_in_ascending_bitstring_order(self, n_qpus):
+        import polypus
+
+        qc = polypus.Circuit(4).h(0).h(1).h(2).h(3).measure_all()
+        result = polypus.run_quantum_circuit(
+            qc,
+            shots=4000,
+            infrastructure="local",
+            backend="polypus",
+            n_qpus=n_qpus,
+            seed=5,
+        )
+        counts = result.counts[0] if n_qpus == 1 else result.counts
+        # With all 16 outcomes present, a random order passes with probability 1/16!.
+        assert len(counts) == 16
+        assert list(counts) == sorted(counts)

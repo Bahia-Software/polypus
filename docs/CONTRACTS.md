@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
@@ -238,17 +238,26 @@ for every gate and compares it with the native gate up to global phase.
   `shots % n` is spread over the first QPUs, never dropped.
 - If several `measure` instructions write the same classical bit, the **last
   measurement wins** (OpenQASM 2.0 register semantics).
+- Every counts dict Polypus hands to Python lists its keys in **ascending
+  bitstring order** (`00`, `01`, `10`, `11`): `RunResult.counts` from
+  `run_quantum_circuit` and `qml.predict`, and the dict a `SampleCost` callback
+  receives. A float reduction over `.items()` therefore adds its terms in the
+  same order in every call and process. Dicts travelling the other way
+  (`run_qcs`, C-1) may list their keys in any order.
 
 The per-circuit dict format above is unchanged by C-7: `run_quantum_circuit`
 now returns that payload as the `counts` attribute of a `RunResult` wrapper
 (`list[dict]` for a single-QPU run, a merged `dict` for `n_qpus > 1`), so
 callers read `result.counts` rather than the bare value. The dict shape,
-bit order and shot-conservation rule are exactly as specified here.
+bit order, key order and shot-conservation rule are exactly as specified here.
 
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
-public-API case in `tests/python/test_local_run.py`; audit C6) and
-last-write-wins case in `polypus-sim` tests (to be added).
+public-API case in `tests/python/test_local_run.py`; audit C6); key order in
+`tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs),
+`tests/python/test_qml_predict.py` and `tests/python/test_qml_supervised.py`
+(the `SampleCost` dict); last-write-wins case in `polypus-sim` tests (to be
+added).
 
 ---
 
