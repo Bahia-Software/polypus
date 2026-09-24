@@ -3,7 +3,9 @@
 //! **How a candidate is evaluated** — the oracles that turn a parameter vector
 //! into a scalar fitness. Holds [`VqcOracle`], [`QmlOracle`],
 //! [`PyVarianceOracle`], the Python-callback observable [`PyCallbackObservable`],
-//! the [`CircuitSource`] binding boundary and the evaluation error type.
+//! the supervised QML objectives ([`SupervisedObjective`]: [`PyLabelledCost`],
+//! [`PySampleCost`]), the [`CircuitSource`] binding boundary and the evaluation
+//! error type.
 //!
 //! It also holds the [`OracleFactory`](polypus_orchestration::OracleFactory)
 //! implementations — [`VqcOracleFactory`] and [`QmlOracleFactory`] — that assemble
@@ -21,12 +23,14 @@
 pub mod error;
 pub mod py_callback_observable;
 pub mod qml_oracle;
+pub mod supervised;
 pub mod variance_oracle;
 pub mod vqc_oracle;
 
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
-pub use qml_oracle::{QmlOracle, QmlOracleFactory};
+pub use qml_oracle::{QmlObjective, QmlOracle, QmlOracleFactory};
+pub use supervised::{Label, PyLabelledCost, PySampleCost, SupervisedObjective};
 pub use variance_oracle::PyVarianceOracle;
 pub use vqc_oracle::{VqcOracle, VqcOracleFactory};
 
