@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyModule};
+use pyo3::types::{IntoPyDict, PyDict, PyList, PyModule};
 use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
@@ -103,6 +103,29 @@ impl RunResult {
             self.id, self.seed, self.backend, self.infrastructure
         )
     }
+}
+
+/// A counts map as a Python `dict` with its keys in ascending bitstring order
+/// (contract C-3). A `HashMap` iterates in an order that differs per map and per
+/// process, and a `dict` keeps insertion order, so a float reduction over the
+/// returned `.items()` could otherwise differ in the last bit between runs.
+fn counts_to_pydict<'py>(py: Python<'py>, counts: &Counts) -> PyResult<Bound<'py, PyDict>> {
+    let mut outcomes: Vec<(&String, &u64)> = counts.iter().collect();
+    outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let dict = PyDict::new(py);
+    for (bitstring, n) in outcomes {
+        dict.set_item(bitstring, n)?;
+    }
+    Ok(dict)
+}
+
+/// One [`counts_to_pydict`] dict per map, in order, as a Python `list`.
+fn counts_to_pylist<'py>(py: Python<'py>, counts: &[Counts]) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for map in counts {
+        list.append(counts_to_pydict(py, map)?)?;
+    }
+    Ok(list)
 }
 
 /// Result of [`train`] / [`qml_train`]: the full [`OptimizationOutcome`] plus
@@ -997,17 +1020,13 @@ pub fn run_quantum_circuit<'py>(
     log::info!("run {id} completed: duration={:?}", start.elapsed());
     // Convert at the FFI boundary, preserving the historical output shapes:
     // `n_qpus == 1` yields one `list[dict]` (one map per circuit); `n_qpus > 1`
-    // yields the single merged `dict`.
+    // yields the single merged `dict`. Either way the keys are sorted (C-3).
     let counts: PyObject = Python::with_gil(|py| -> PyResult<PyObject> {
         if n_qpus == 1 {
-            Ok(counts_vec.into_pyobject(py)?.into_any().unbind())
+            Ok(counts_to_pylist(py, &counts_vec)?.into_any().unbind())
         } else {
             let total = counts_vec.into_iter().next().unwrap_or_default();
-            let py_dict = PyDict::new(py);
-            for (k, v) in total {
-                py_dict.set_item(k, v)?;
-            }
-            Ok(py_dict.into_any().unbind())
+            Ok(counts_to_pydict(py, &total)?.into_any().unbind())
         }
     })?;
     Python::with_gil(|py| {
@@ -1615,7 +1634,7 @@ pub fn qml_predict<'py>(
     });
     let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     log::info!("qml.predict {id} completed: duration={:?}", start.elapsed());
-    let counts = counts_vec.into_pyobject(py)?.into_any().unbind();
+    let counts = counts_to_pylist(py, &counts_vec)?.into_any().unbind();
     Py::new(
         py,
         RunResult {

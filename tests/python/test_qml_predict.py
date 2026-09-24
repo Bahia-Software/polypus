@@ -3,10 +3,11 @@
 dict per row from a single run.
 
 The mocked-seam tests answer each circuit from its bound angles to check the row
-order, the bound weights and the single backend call. The validation cases
-(contract C-8) run with the seam forbidden. The Aer tests cover the manifest and
-seed replay (contract C-7), shot conservation (contract C-3) and a trained model's
-held-out accuracy.
+order, the bound weights and the single backend call; one more checks the key
+order of each returned dict (contract C-3). The validation cases (contract C-8)
+run with the seam forbidden. The Aer tests cover the manifest and seed replay
+(contract C-7), shot conservation (contract C-3) and a trained model's held-out
+accuracy.
 """
 
 import math
@@ -98,6 +99,28 @@ def test_predict_accepts_numpy_rows_and_weights(monkeypatch):
 
     run = _predict(np.array([[0.1], [3.0]]), np.array([0.2]))
     assert run.counts == [{"0": 64}, {"1": 64}]
+
+
+def test_predict_returns_counts_keys_in_ascending_bitstring_order(monkeypatch):
+    import polypus
+    import polypus_python
+    from qiskit.circuit import Parameter, QuantumCircuit
+
+    descending = {format(i, "03b"): 8 for i in reversed(range(8))}
+    monkeypatch.setattr(
+        polypus_python,
+        "run_qcs",
+        lambda _infrastructure, **kwargs: [dict(descending) for _ in kwargs["qcs"]],
+    )
+    feature_map = QuantumCircuit(3)
+    feature_map.ry(Parameter("x"), 0)
+    ansatz = QuantumCircuit(3)
+    ansatz.ry(Parameter("theta"), 0)
+
+    run = polypus.qml.predict(
+        feature_map, ansatz, [[0.1], [0.2]], [0.0], shots=64, infrastructure="local"
+    )
+    assert [list(c) for c in run.counts] == [sorted(descending)] * 2
 
 
 # ── Validation (contract C-8): rejected with nothing executed ────────────────
