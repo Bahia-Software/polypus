@@ -40,7 +40,12 @@ pub mod protocol;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+// `ExitStatusExt::signal` works on every Unix; `CommandExt::pre_exec` is only
+// called to arm the Linux-only `PR_SET_PDEATHSIG`, so its import is Linux-gated
+// to avoid an unused-import warning on other Unix (e.g. macOS).
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -218,22 +223,37 @@ impl Worker {
             cmd.env(k, v);
         }
         if arm_pdeathsig {
-            // POLICY EXCEPTION (docs/ENGINEERING.md §5, recorded there as the one
-            // signed-off `unsafe` outside polypus-sim/kernels.rs): this is the crate's
-            // **only** `unsafe`, and it is unavoidable — `Command::pre_exec` is an
-            // `unsafe fn` in std, with no safe equivalent, and `PR_SET_PDEATHSIG` resets
-            // across `fork` so it can only be armed here, in the child between fork and
-            // exec. It is not a performance optimisation. The body itself is safe: it
-            // calls `nix`'s audited `set_pdeathsig` wrapper, not hand-written FFI.
-            //
-            // SAFETY: `pre_exec` runs in the forked child before `exec`. We call only
-            // the async-signal-safe `prctl(2)` via `nix`; no allocation, no locks.
-            unsafe {
-                cmd.pre_exec(|| {
-                    nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
-                        .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
-                });
+            // `PR_SET_PDEATHSIG` is a Linux-only kernel feature (`nix::sys::prctl`
+            // does not exist on other Unix such as macOS), so the orphan guard is
+            // armed only on Linux. Elsewhere the request is honoured as a no-op and
+            // logged — the worker will not be auto-killed if this process dies. This
+            // is the portable-fallback caveat documented in docs/backends.md.
+            #[cfg(target_os = "linux")]
+            {
+                // POLICY EXCEPTION (docs/ENGINEERING.md §5, recorded there as the one
+                // signed-off `unsafe` outside polypus-sim/kernels.rs): this is the
+                // crate's **only** `unsafe`, and it is unavoidable — `Command::pre_exec`
+                // is an `unsafe fn` in std, with no safe equivalent, and
+                // `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed here,
+                // in the child between fork and exec. It is not a performance
+                // optimisation. The body itself is safe: it calls `nix`'s audited
+                // `set_pdeathsig` wrapper, not hand-written FFI.
+                //
+                // SAFETY: `pre_exec` runs in the forked child before `exec`. We call
+                // only the async-signal-safe `prctl(2)` via `nix`; no alloc, no locks.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
+                            .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
+                    });
+                }
             }
+            #[cfg(not(target_os = "linux"))]
+            log::warn!(
+                "arm_pdeathsig was requested but PR_SET_PDEATHSIG is Linux-only; \
+                 the orphan guard is not armed on this platform, so the worker will \
+                 not be auto-killed if this process dies unexpectedly"
+            );
         }
         let mut child = cmd
             .spawn()

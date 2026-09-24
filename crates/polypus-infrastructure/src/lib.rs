@@ -89,6 +89,11 @@ pub fn register_builtin_backends() {
         // last-wins, so an embedder who registered their own `"subprocess"` (or
         // `"qmio"`) *before* the first `create_backend` keeps it. Only fill in a name
         // that is still free.
+        //
+        // The subprocess bridge is Unix-only (POSIX process controls), so on
+        // non-Unix (Windows) the `"subprocess"` name is simply never registered and
+        // resolves to `UnknownInfrastructure` like any other unknown backend.
+        #[cfg(unix)]
         if !is_registered(polypus_subprocess_backend::BACKEND_NAME) {
             polypus_subprocess_backend::register();
         }

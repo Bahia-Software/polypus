@@ -40,6 +40,7 @@ naturally to the whole process group on a terminal Ctrl+C). The handler below se
 flag; a cooperative SDK call should check `should_abort()` and stop, after which the
 worker replies `aborted` and stays alive for the next run.
 """
+
 import json
 import os
 import signal
@@ -146,8 +147,9 @@ def _run(req, stdout):
         deadline = time.monotonic() + int(delay) / 1000.0
         while time.monotonic() < deadline:
             if _ABORT:
-                _write_frame(stdout, {"op": "aborted", "id": req.get("id"),
-                                      "reason": "signal"})
+                _write_frame(
+                    stdout, {"op": "aborted", "id": req.get("id"), "reason": "signal"}
+                )
                 _log("run aborted; worker stays alive and reusable")
                 return
             time.sleep(0.005)
@@ -157,8 +159,14 @@ def _run(req, stdout):
             req.get("circuits", []), int(req.get("shots", 0)), req.get("seed")
         )
     except Exception as exc:  # a clean, in-band failure
-        _write_frame(stdout, {"op": "error", "id": req.get("id"),
-                              "message": f"{type(exc).__name__}: {exc}"})
+        _write_frame(
+            stdout,
+            {
+                "op": "error",
+                "id": req.get("id"),
+                "message": f"{type(exc).__name__}: {exc}",
+            },
+        )
         return
     if _ABORT:
         _write_frame(stdout, {"op": "aborted", "id": req.get("id"), "reason": "signal"})
@@ -186,8 +194,10 @@ def main() -> int:
             _log("shutdown requested")
             return 0
         else:
-            _write_frame(stdout, {"op": "error", "id": req.get("id"),
-                                  "message": f"unknown op {op!r}"})
+            _write_frame(
+                stdout,
+                {"op": "error", "id": req.get("id"), "message": f"unknown op {op!r}"},
+            )
 
 
 if __name__ == "__main__":

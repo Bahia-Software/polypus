@@ -263,15 +263,16 @@ backend against that protocol (like QMIO) is preferable.
 import polypus
 
 polypus.run_quantum_circuit(
-    qc, shots=1024,
+    qc,
+    shots=1024,
     infrastructure="subprocess",
     options={
         # Required: the worker command (argv, split on whitespace).
         "command": "python3 /path/to/my_worker.py",
         # Optional:
-        "recv_timeout_ms": "600000",   # read timeout; default 300000 (5 min)
-        "arm_pdeathsig": "true",       # orphan guard (Linux); default true
-        "cwd": "/path/to/workdir",     # worker working directory
+        "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
+        "arm_pdeathsig": "true",  # orphan guard (Linux); default true
+        "cwd": "/path/to/workdir",  # worker working directory
     },
 )
 ```
