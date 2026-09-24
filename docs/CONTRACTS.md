@@ -27,7 +27,7 @@ Rules of the road:
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
-| C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
+| C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
@@ -388,7 +388,7 @@ install.
 
 ---
 
-## C-8 · qml.train row/dimension symmetry (Python entry point)
+## C-8 · qml.train row/dimension/label symmetry (Python entry point)
 
 `polypus.qml.train` composes a Qiskit `feature_map` with an `ansatz`, pre-binds
 each row of `x_train` to the feature-map parameters, and hands the resulting
@@ -396,7 +396,8 @@ circuits to the optimizer, which searches a `dimensions`-wide vector and binds
 it to the ansatz's free parameters. Two shape agreements must hold, and both are
 validated **upfront** with a clear `ValueError` — before any circuit is composed
 or executed — rather than surfacing as a silent truncation or a cryptic Qiskit
-binding error deep inside the oracle.
+binding error deep inside the oracle. A third agreement governs the optional
+labels.
 
 - **Row width.** Every row of `x_train` must have **exactly
   `len(feature_map.parameters)`** elements. A longer row would silently drop the
@@ -414,11 +415,25 @@ binding error deep inside the oracle.
   mismatch is a `ValueError` naming both `dimensions` and the ansatz's free
   parameter count.
 
+- **Labels.** `y_train` (keyword-only, optional) holds **exactly one label per
+  `x_train` row**, in row order, because the oracle pairs circuits with labels by
+  position; a mismatch is a `ValueError` naming both counts. Each label is a
+  single finite number: a `str`, another non-number or a nested row (one-hot,
+  column vector) is a `TypeError`, and `NaN`/`inf` a `ValueError`, each naming the
+  0-based index. All-integer labels reach the objective as `int`, otherwise all as
+  `float`. With labels, `expectation_function` must be a callable
+  `(bitstring, label) -> float`, a `polypus.CachedCost(callable)` or a
+  `polypus.SampleCost((counts, label) -> float)`; a `Qubo`/`Ising` is a
+  `TypeError`, and so is a `SampleCost` without labels. These checks run before
+  any backend is created. `y_train=None` is the unsupervised path, unchanged.
+
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
-above.
+above. `y_train` itself is only iterated, so a generator is fine there.
 
-**Enforcing test:** `tests/python/test_qml_train_validation.py`.
+**Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
+with nothing executed) and `tests/python/test_qml_supervised.py` (each sample's
+counts meet its own label; the objective calling convention).
 
 ---
 

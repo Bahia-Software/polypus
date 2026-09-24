@@ -16,13 +16,14 @@ use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
 use de::DE;
 use logging::init_logger;
-use observable::{CachedCost, Ising, Qubo};
+use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
 
 use crate::evaluation::{
-    CircuitSource, CostObservable, OracleErrorSlot, PyCallbackObservable, PyVarianceOracle,
-    QmlObjective, QmlOracleFactory, VqcOracleFactory,
+    CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
+    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, SupervisedObjective,
+    VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
@@ -648,10 +649,135 @@ fn extract_cost_observable(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn CostObser
             Arc::new(PyCallbackObservable::new(obj.clone().unbind(), false));
         return Ok(obs);
     }
+    // Not callable either; this only gives a better message than the one below.
+    if obj.extract::<PyRef<'_, SampleCost>>().is_ok() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "polypus.SampleCost scores each training sample against its label, so it needs \
+             labels: use it with polypus.qml.train(..., y_train=...). Without labels, pass a \
+             callable (bitstring -> float)",
+        ));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "expectation_function must be a callable (bitstring -> float), a \
          polypus.CachedCost(callable), or a polypus.Qubo / polypus.Ising observable",
     ))
+}
+
+/// Interpret `qml.train`'s `expectation_function` when `y_train` is given: a
+/// callable is a per-shot `f(bitstring, label)` ([`PyLabelledCost`]),
+/// `polypus.CachedCost(f)` the same with a memo, and `polypus.SampleCost(g)` a
+/// per-sample `g(counts, label)` ([`PySampleCost`]). A `Qubo`/`Ising` cannot read
+/// labels, so it is a `TypeError` rather than silently training without them.
+fn extract_supervised_objective(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn SupervisedObjective>> {
+    if let Ok(sample) = obj.extract::<PyRef<'_, SampleCost>>() {
+        let objective: Arc<dyn SupervisedObjective> =
+            Arc::new(PySampleCost::new(sample.cost_fn.clone_ref(obj.py())));
+        return Ok(objective);
+    }
+    if let Ok(cached) = obj.extract::<PyRef<'_, CachedCost>>() {
+        let objective: Arc<dyn SupervisedObjective> = Arc::new(PyLabelledCost::new(
+            cached.cost_fn.clone_ref(obj.py()),
+            true,
+        ));
+        return Ok(objective);
+    }
+    if obj.extract::<PyRef<'_, Qubo>>().is_ok() || obj.extract::<PyRef<'_, Ising>>().is_ok() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "a polypus.Qubo / polypus.Ising observable cannot read labels; with y_train, \
+             expectation_function must be a callable (bitstring, label) -> float, a \
+             polypus.CachedCost(callable) or a polypus.SampleCost(callable)",
+        ));
+    }
+    if obj.is_callable() {
+        let objective: Arc<dyn SupervisedObjective> =
+            Arc::new(PyLabelledCost::new(obj.clone().unbind(), false));
+        return Ok(objective);
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "with y_train, expectation_function must be a callable (bitstring, label) -> float, \
+         a polypus.CachedCost(callable) or a polypus.SampleCost((counts, label) -> float)",
+    ))
+}
+
+/// Normalise `y_train` into one [`Label`] per sample (contract C-8). If every
+/// element is an integer (Python or NumPy ints and bools) they are `Class` labels,
+/// otherwise all are `Real`. A non-number or a nested row is a `TypeError`, and
+/// `NaN`/`inf` a `ValueError`, naming the index. The caller checks the count.
+fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
+    use pyo3::exceptions::{PyTypeError, PyValueError};
+    use pyo3::types::PyString;
+
+    enum Raw {
+        Int(i64),
+        Float(f64),
+    }
+    // For error messages only, so an unreadable name is not itself an error.
+    let type_name = |item: &Bound<'_, PyAny>| {
+        item.get_type()
+            .name()
+            .map_or_else(|_| "an unknown type".to_string(), |name| name.to_string())
+    };
+    let mut raw = Vec::new();
+    for (idx, item) in y_train.try_iter()?.enumerate() {
+        let item = item?;
+        if item.is_instance_of::<PyString>() {
+            return Err(PyTypeError::new_err(format!(
+                "y_train[{idx}] is a str; labels must be numbers (int class labels or float \
+                 targets) — encode class names as integers first"
+            )));
+        }
+        // Checked before the numeric reads: NumPy converts a length-1 array to a
+        // float, which would silently accept a column vector.
+        if let Ok(len) = item.len() {
+            return Err(PyTypeError::new_err(format!(
+                "y_train[{idx}] is a sequence ({} of length {len}), not a single label; pass \
+                 one number per x_train row (class indices rather than one-hot rows; \
+                 y.ravel() for a column vector)",
+                type_name(&item)
+            )));
+        }
+        // Through `__index__`: accepts Python and NumPy integers, never truncates
+        // a float.
+        if let Ok(value) = item.extract::<i64>() {
+            raw.push(Raw::Int(value));
+            continue;
+        }
+        // A NumPy bool has no `__index__`, but a boolean mask is a natural binary
+        // `y`. Detected through `dtype.kind`, so NumPy is never imported.
+        let is_numpy_bool = item
+            .getattr("dtype")
+            .and_then(|dtype| dtype.getattr("kind"))
+            .and_then(|kind| kind.extract::<String>())
+            .is_ok_and(|kind| kind == "b");
+        if is_numpy_bool {
+            raw.push(Raw::Int(i64::from(item.is_truthy()?)));
+            continue;
+        }
+        match item.extract::<f64>() {
+            Ok(value) if value.is_finite() => raw.push(Raw::Float(value)),
+            Ok(value) => {
+                return Err(PyValueError::new_err(format!(
+                    "y_train[{idx}] is {value}; labels must be finite numbers"
+                )));
+            }
+            Err(_) => {
+                return Err(PyTypeError::new_err(format!(
+                    "y_train[{idx}] has type {}; labels must be numbers (int class labels or \
+                     float targets)",
+                    type_name(&item)
+                )));
+            }
+        }
+    }
+    let all_integers = raw.iter().all(|r| matches!(r, Raw::Int(_)));
+    Ok(raw
+        .into_iter()
+        .map(|r| match r {
+            Raw::Int(value) if all_integers => Label::Class(value),
+            Raw::Int(value) => Label::Real(value as f64),
+            Raw::Float(value) => Label::Real(value),
+        })
+        .collect())
 }
 
 /// Function to run a quantum circuit called from Python.
@@ -1034,8 +1160,25 @@ pub fn train<'py>(
 ///    one partially-bound circuit per training sample.
 /// 3. Delegates to the chosen optimizer with `TrainMode::Qml`, so that for
 ///    every candidate parameter vector θ the optimizer binds θ to all training
-///    circuits, runs them, and averages the expectation values into a single
-///    fitness value.
+///    circuits, runs them, and averages the per-sample values into a single
+///    fitness value (maximised).
+///
+/// # Labels (`y_train`)
+///
+/// Without `y_train`, every sample is scored by the same
+/// `expectation_function(bitstring) -> float`. With `y_train` (keyword-only, one
+/// label per `x_train` row), each sample is scored against its own label and
+/// `expectation_function` is one of:
+///
+/// - a callable `f(bitstring, label) -> float`, averaged over each sample's shots
+///   (the expected accuracy, when `f` returns `1.0` for a correct read-out);
+/// - `polypus.CachedCost(f)`, the same memoised by `(label, bitstring)`;
+/// - `polypus.SampleCost(g)`, where `g(counts, label) -> float` sees the sample's
+///   whole distribution, for non-linear losses such as a log-likelihood.
+///
+/// Integer labels reach the objective as `int`; if any label is not an integer,
+/// all are passed as `float`. `y_train` is validated before anything runs
+/// (contract C-8).
 ///
 /// `seed` follows the same precedence as [`train`] and makes the optimizer's
 /// search reproducible; it returns a [`TrainResult`]. `qml.train` runs on the
@@ -1060,18 +1203,22 @@ pub fn train<'py>(
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
 ///
-/// Example:
+/// Example (supervised binary classifier, parity read-out):
 ///
 /// ```ignore
+///     def correct(bitstring, label):
+///         return float(bitstring.count("1") % 2 == label)
+///
 ///     result = polypus.qml.train(
 ///         feature_map, ansatz, X_train,
 ///         polypus.PSO(generations=50, population_size=20, bounds=(0, np.pi)),
 ///         shots=1024, n_qpus=4, dimensions=12,
-///         expectation_function=my_loss,
+///         expectation_function=correct,
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="qml_run",
+///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, *, y_train=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1089,6 +1236,7 @@ pub fn qml_train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    y_train: Option<Bound<'py, PyAny>>,
 ) -> PyResult<PyObject> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1120,6 +1268,9 @@ pub fn qml_train<'py>(
             "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
         )));
     }
+    // Type-checked before any circuit is composed; the count is checked once
+    // `x_train` has been read (contract C-8).
+    let labels = y_train.as_ref().map(extract_labels).transpose()?;
     let py = feature_map.py();
 
     // 1. Compose feature_map + ansatz
@@ -1174,6 +1325,23 @@ pub fn qml_train<'py>(
         ));
     }
 
+    // One label per row (contract C-8), and an objective that can read labels:
+    // both checked before any backend, and so any CUNQA allocation, exists.
+    let supervised = match labels {
+        Some(labels) => {
+            if labels.len() != qcs.len() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "y_train has {} labels, but x_train has {} rows; qml.train needs exactly \
+                     one label per training sample",
+                    labels.len(),
+                    qcs.len()
+                )));
+            }
+            Some((extract_supervised_objective(&expectation_function)?, labels))
+        }
+        None => None,
+    };
+
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path (native backend already rejected above): `backend` can only be
     // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
@@ -1220,7 +1388,10 @@ pub fn qml_train<'py>(
     // Shared error slot (see `train`): the oracle records the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
-    let observable = extract_cost_observable(&expectation_function)?;
+    let objective = match supervised {
+        Some((objective, labels)) => QmlObjective::Supervised { objective, labels },
+        None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
+    };
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
@@ -1228,7 +1399,7 @@ pub fn qml_train<'py>(
     let flow = TrainFlow {
         factory: QmlOracleFactory {
             training_circuits: qcs,
-            objective: QmlObjective::Unsupervised(observable),
+            objective,
         },
         method: method_enum,
         dimensions,
@@ -1274,6 +1445,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Qubo>()?;
     m.add_class::<Ising>()?;
     m.add_class::<CachedCost>()?;
+    m.add_class::<SampleCost>()?;
     m.add_function(wrap_pyfunction!(train, m)?)?;
     m.add_function(wrap_pyfunction!(run_quantum_circuit, m)?)?;
     m.add_function(wrap_pyfunction!(statevector, m)?)?;
@@ -1878,6 +2050,187 @@ mod tests {
                 err.to_string().contains("unbound parameters"),
                 "the message must explain what to do instead: {err}"
             );
+        });
+    }
+
+    /// `extract_labels` over a Python expression (builtins only: no NumPy here).
+    fn labels_of(py: Python<'_>, expr: &std::ffi::CStr) -> PyResult<Vec<Label>> {
+        let y_train = py
+            .eval(expr, None, None)
+            .expect("the test expression evaluates");
+        extract_labels(&y_train)
+    }
+
+    /// The `(class, message)` of a rejected `y_train`.
+    fn label_error(py: Python<'_>, expr: &std::ffi::CStr) -> (String, String) {
+        let err = labels_of(py, expr).expect_err("these labels must be rejected");
+        let class = err
+            .get_type(py)
+            .name()
+            .expect("an exception type has a name")
+            .to_string();
+        (class, err.to_string())
+    }
+
+    #[test]
+    fn extract_labels_keeps_all_integer_labels_as_classes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                labels_of(py, c"[0, 2, -1, True]").expect("integers are labels"),
+                [0, 2, -1, 1].map(Label::Class),
+                "ints and bools stay class labels"
+            );
+            // y_train is only iterated, so a generator works too.
+            assert_eq!(
+                labels_of(py, c"(k % 2 for k in range(3))").expect("a generator is iterable"),
+                [0, 1, 0].map(Label::Class)
+            );
+        });
+    }
+
+    #[test]
+    fn extract_labels_makes_every_label_a_float_when_any_is_not_an_integer() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                labels_of(py, c"[0, 1.5, 2]").expect("mixed numbers are labels"),
+                [0.0, 1.5, 2.0].map(Label::Real),
+                "one float makes every label a float"
+            );
+            // The type decides, not the value.
+            assert_eq!(
+                labels_of(py, c"[1.0, 0.0]").expect("floats are labels"),
+                [1.0, 0.0].map(Label::Real)
+            );
+        });
+    }
+
+    #[test]
+    fn extract_labels_rejects_non_numbers_and_nested_rows_naming_the_index() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (class, msg) = label_error(py, c"[0, 'cat']");
+            assert_eq!(class, "TypeError");
+            assert!(msg.contains("y_train[1] is a str"), "{msg}");
+
+            let (class, msg) = label_error(py, c"[0, [1, 0]]");
+            assert_eq!(class, "TypeError");
+            assert!(
+                msg.contains("y_train[1] is a sequence (list of length 2)"),
+                "a one-hot row is not a label: {msg}"
+            );
+
+            let (class, msg) = label_error(py, c"[None]");
+            assert_eq!(class, "TypeError");
+            assert!(msg.contains("y_train[0] has type NoneType"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn extract_labels_rejects_non_finite_values_naming_the_index() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (class, msg) = label_error(py, c"[0.5, float('nan')]");
+            assert_eq!(class, "ValueError");
+            assert!(msg.contains("y_train[1] is NaN"), "{msg}");
+
+            let (class, msg) = label_error(py, c"[float('-inf')]");
+            assert_eq!(class, "ValueError");
+            assert!(msg.contains("y_train[0] is -inf"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn extract_supervised_objective_accepts_callables_and_the_two_wrappers() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval(c"lambda bitstring, label: 0.0", None, None)
+                .expect("a lambda evaluates");
+            let cached = Py::new(
+                py,
+                CachedCost {
+                    cost_fn: callable.clone().unbind(),
+                },
+            )
+            .expect("the pyclass instantiates");
+            let sample = Py::new(
+                py,
+                SampleCost {
+                    cost_fn: callable.clone().unbind(),
+                },
+            )
+            .expect("the pyclass instantiates");
+            for accepted in [
+                callable,
+                cached.into_bound(py).into_any(),
+                sample.into_bound(py).into_any(),
+            ] {
+                assert!(
+                    extract_supervised_objective(&accepted).is_ok(),
+                    "{accepted:?} is a valid supervised objective"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn extract_supervised_objective_rejects_observables_that_cannot_read_labels() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let qubo = Py::new(
+                py,
+                Qubo {
+                    inner: Arc::new(
+                        polypus_observable::QuboObservable::new(
+                            1,
+                            vec![(0, 1.0)],
+                            vec![],
+                            0.0,
+                            1.0,
+                        )
+                        .expect("a one-variable QUBO is valid"),
+                    ),
+                },
+            )
+            .expect("the pyclass instantiates");
+            let err = extract_supervised_objective(qubo.bind(py).as_any())
+                .err()
+                .expect("a Qubo cannot read labels");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("cannot read labels"), "{err}");
+
+            let not_callable = 42i64.into_pyobject(py).expect("an int converts").into_any();
+            let err = extract_supervised_objective(&not_callable)
+                .err()
+                .expect("a non-callable is not an objective");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("with y_train"), "{err}");
+        });
+    }
+
+    #[test]
+    fn extract_cost_observable_rejects_a_sample_cost_without_labels() {
+        // Without labels (polypus.train, or qml.train without y_train) a SampleCost
+        // gets a TypeError that says why, not the generic message.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let sample = Py::new(
+                py,
+                SampleCost {
+                    cost_fn: py
+                        .eval(c"lambda counts, label: 0.0", None, None)
+                        .expect("a lambda evaluates")
+                        .unbind(),
+                },
+            )
+            .expect("the pyclass instantiates");
+            let err = extract_cost_observable(sample.bind(py).as_any())
+                .err()
+                .expect("a SampleCost needs labels");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("y_train"), "{err}");
         });
     }
 }
