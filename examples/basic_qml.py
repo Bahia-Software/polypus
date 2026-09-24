@@ -75,23 +75,25 @@ result = polypus.qml.train(
 )
 print(result)
 
-# Inference: bind a sample and the trained weights, then take the majority vote.
-# `best_params` follows the order of `ansatz.parameters`.
-template = feature_map.compose(ansatz)
-template.measure_all()
-weights = dict(zip(ansatz.parameters, result.best_params))
+# Inference: one run for all held-out samples, one counts dict per row. A
+# sample's class is the majority vote of its read-out.
+run = polypus.qml.predict(
+    feature_map,
+    ansatz,
+    X_test,
+    result.best_params,
+    shots=512,
+    infrastructure="local",
+    seed=7,
+)
 
 
-def predict(sample, seed):
-    circuit = template.assign_parameters({**dict(zip(x, sample)), **weights})
-    counts = polypus.run_quantum_circuit(
-        circuit, shots=512, infrastructure="local", seed=seed
-    ).counts[0]
+def majority_class(counts):
     votes = np.zeros(2)
     for bits, n in counts.items():
         votes[predicted_class(bits)] += n
     return int(votes.argmax())
 
 
-predictions = [predict(sample, seed=i) for i, sample in enumerate(X_test)]
-print(f"test accuracy: {np.mean(np.array(predictions) == y_test):.2f}")
+predictions = np.array([majority_class(counts) for counts in run.counts])
+print(f"test accuracy: {np.mean(predictions == y_test):.2f}")

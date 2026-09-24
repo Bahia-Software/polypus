@@ -26,8 +26,8 @@ Rules of the road:
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
-| C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
+| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
+| C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
@@ -303,9 +303,9 @@ note above).
 
 ## C-7 · Seeding & run manifest (Python entry points)
 
-This contract governs the outer Rust↔Python boundary of the three public entry
-points `polypus.run_quantum_circuit`, `polypus.train` and `polypus.qml.train`:
-their `seed` kwarg and their return shape. (It is distinct from C-1, which
+This contract governs the outer Rust↔Python boundary of the four public entry
+points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
+`polypus.qml.predict`: their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -349,6 +349,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
   too, its reproducibility guarantee covers both the optimizer trajectory and
   Aer's sampling.
+- **`qml.predict(..., seed=None)`** seeds shot sampling like
+  `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
+  from OS entropy, and the effective value is reported. `qmio` is rejected
+  outright, since a QML model is a Qiskit circuit.
 
 ### The run manifest (return shapes)
 
@@ -357,6 +361,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `n_qpus > 1`), `id` (str), `seed` (`int | None`; the effective seed used, or
   `None` only for the `qmio` infrastructure), `backend` (str), `infrastructure`
   (str).
+- `qml.predict` returns the same **`RunResult`**, but `counts` is always a
+  `list[dict]`, one C-3 dict per row of `x` in row order: `n_qpus` spreads the
+  rows, never one row's shots. `seed` is always an `int`; `id` is generated
+  internally (`predict_<n_qpus>_<infrastructure>_<uuid>`).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
   `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
@@ -371,7 +379,8 @@ replay it exactly.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
-rejection, and the returned manifest/outcome fields), plus the Rust tests in
+rejection, and the returned manifest/outcome fields), `tests/python/test_qml_predict.py`
+(the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, and the seed-resolution
 precedence / optimizer determinism) and `crates/polypus-infrastructure/src/native.rs`
@@ -427,13 +436,20 @@ labels.
   `TypeError`, and so is a `SampleCost` without labels. These checks run before
   any backend is created. `y_train=None` is the unsupervised path, unchanged.
 
+**Inference (`polypus.qml.predict`).** The same agreements hold, so a model runs
+the circuit it was trained as: each row of `x` has exactly
+`len(feature_map.parameters)` values (the row-width `ValueError`, naming `x`),
+and `params` has exactly `len(ansatz.parameters)` finite values. An empty `x` is
+rejected too, all before anything runs.
+
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
-with nothing executed) and `tests/python/test_qml_supervised.py` (each sample's
-counts meet its own label; the objective calling convention).
+with nothing executed), `tests/python/test_qml_supervised.py` (each sample's
+counts meet its own label; the objective calling convention) and
+`tests/python/test_qml_predict.py` (the inference agreements).
 
 ---
 

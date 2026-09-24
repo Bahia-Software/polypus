@@ -1430,6 +1430,151 @@ pub fn qml_train<'py>(
     finish_optimization(py, result, effective_seed, effective_id, start)
 }
 
+/// Batched QML inference: run a trained `qml.train` model on every row of `x` in
+/// one scheduled run, returning a [`RunResult`] whose `counts` holds one dict per
+/// row, in row order.
+///
+/// The circuits are built as in training: each row bound to the feature map, then
+/// `params` (typically `TrainResult.best_params`) bound positionally to the
+/// ansatz, as `QmlOracle` binds a candidate. With `n_qpus > 1` the rows are spread
+/// over the QPUs; one row's shots are never split. `seed` behaves as in
+/// `run_quantum_circuit` (contract C-7). The native backend and `qmio` are
+/// rejected, since the model is a Qiskit circuit. Row width, the number and
+/// finiteness of `params`, and a non-empty `x` are checked before anything runs
+/// (contract C-8).
+///
+/// Example:
+///
+/// ```ignore
+///     run = polypus.qml.predict(
+///         feature_map, ansatz, X_test, result.best_params,
+///         shots=1024, infrastructure="local", seed=7,
+///     )
+///     predictions = [readout(counts) for counts in run.counts]
+/// ```
+#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+pub fn qml_predict<'py>(
+    feature_map: Bound<'py, PyAny>,
+    ansatz: Bound<'py, PyAny>,
+    x: Bound<'py, PyAny>,
+    params: Vec<f64>,
+    shots: u32,
+    infrastructure: String,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    sim_method: &str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: &str,
+    seed: Option<u64>,
+) -> PyResult<PyObject> {
+    let start = Instant::now();
+    validate_shots_and_qpus(shots, n_qpus)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
+    if is_native_backend(backend) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "the native 'polypus' backend is not supported for qml.predict (feature maps \
+             and ansätze are Qiskit circuits); use backend=\"aer\"",
+        ));
+    }
+    if infrastructure == "qmio" {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+             serialize the Qiskit circuits of a QML model",
+        ));
+    }
+    // The weights must fill the ansatz exactly (contract C-8).
+    let num_ansatz_params = ansatz.getattr("parameters")?.len()?;
+    if params.len() != num_ansatz_params {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "params has {} values, but the ansatz has {num_ansatz_params} free parameters",
+            params.len()
+        )));
+    }
+    if let Some((index, value)) = params.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "params[{index}] is {value}; every weight must be a finite number"
+        )));
+    }
+    let py = feature_map.py();
+
+    // Built as in training: rows by name, then the weights positionally.
+    let composed = compose_qml_template(&feature_map, &ansatz)?;
+    let rows = bind_feature_rows(&composed, &feature_map, &x, "x")?;
+    if rows.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "x must contain at least one sample",
+        ));
+    }
+    let kwargs_assign = [("inplace", false)].into_py_dict(py)?;
+    let circuits: Vec<BoundCircuit> = rows
+        .iter()
+        .map(|row| {
+            let circuit = row
+                .bind(py)
+                .call_method("assign_parameters", (params.clone(),), Some(&kwargs_assign))?
+                .unbind();
+            Ok(crate::infrastructure::QiskitCircuit::into_bound(circuit))
+        })
+        .collect::<PyResult<_>>()?;
+
+    // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
+    let effective_seed = seed.unwrap_or_else(random_seed);
+    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure));
+    let backend_config = build_backend_config(
+        &infrastructure,
+        backend,
+        sim_method,
+        noise_model.map(|nm| nm.unbind()),
+        nodes,
+        cores_per_qpu,
+        None,
+    )?;
+    let config = ExecutionConfig {
+        id: id.clone(),
+        shots,
+        n_qpus,
+        infrastructure: infrastructure.clone(),
+        backend_config,
+        opt_level: OptLevel::default(),
+        seed: Some(effective_seed),
+    };
+    let n_rows = circuits.len();
+    log::info!(
+        "qml.predict {id} starting: rows={n_rows}, infrastructure={infrastructure}, \
+         backend={backend}, n_qpus={n_qpus}, shots={shots}, seed={effective_seed}"
+    );
+
+    // One run, GIL released. The default planner (never the shot-distributing one)
+    // sends the rows in waves of the backend's concurrency; Ctrl+C is honoured
+    // between waves.
+    let counts_result = py.allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
+        let backend =
+            Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
+        let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
+        let scheduler = Scheduler::ephemeral(resources);
+        let out =
+            scheduler.run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
+        scheduler.close();
+        out
+    });
+    let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+    log::info!("qml.predict {id} completed: duration={:?}", start.elapsed());
+    let counts = counts_vec.into_pyobject(py)?.into_any().unbind();
+    Py::new(
+        py,
+        RunResult {
+            counts,
+            id,
+            seed: Some(effective_seed),
+            backend: backend.to_string(),
+            infrastructure,
+        },
+    )
+    .map(|result| result.into_any())
+}
+
 /// Number of backend resource-cleanup (`close`/`Drop`) failures recorded this
 /// process. A `Drop` must never panic, so a failed teardown (e.g. releasing a
 /// CUNQA SLURM allocation) is logged and counted rather than raised; this
@@ -1471,6 +1616,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     let qml = PyModule::new(py, "polypus.qml")?;
     qml.add_function(wrap_pyfunction!(qml_train, &qml)?)?;
+    qml.add_function(wrap_pyfunction!(qml_predict, &qml)?)?;
     // Attach under the short key: `add_submodule` would use the dotted `__name__`
     // verbatim as the attribute name, breaking `polypus.qml.train` access.
     m.add("qml", &qml)?;

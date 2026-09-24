@@ -337,7 +337,31 @@ def log_likelihood(counts, label):
 expectation_function = polypus.SampleCost(log_likelihood)
 ```
 
-Integer labels (Python or NumPy ints and bools) reach your function as `int`; if any label is not an integer, all of them arrive as `float` (regression targets). `y_train` is validated before anything runs: a length other than the number of rows, a `NaN`/`inf`, a string or a one-hot row is rejected with the offending index. Without `y_train`, one `expectation_function(bitstring)` is shared by every sample, as before. See [`examples/basic_qml.py`](examples/basic_qml.py) for a complete classifier, including inference.
+Integer labels (Python or NumPy ints and bools) reach your function as `int`; if any label is not an integer, all of them arrive as `float` (regression targets). `y_train` is validated before anything runs: a length other than the number of rows, a `NaN`/`inf`, a string or a one-hot row is rejected with the offending index. Without `y_train`, one `expectation_function(bitstring)` is shared by every sample, as before.
+
+To evaluate a trained model, `polypus.qml.predict()` builds the circuits training ran and executes every sample in one scheduled run: one backend batch and, on CUNQA, one allocation. Its `RunResult.counts` holds one dict per row, in row order; map them to classes with the objective's read-out:
+
+```python
+run = polypus.qml.predict(
+    feature_map,
+    ansatz,
+    X_test,
+    result.best_params,
+    shots=1024,
+    infrastructure="local",
+    seed=7,
+)
+
+
+def majority_parity(counts):
+    odd = sum(n for bits, n in counts.items() if bits.count("1") % 2)
+    return int(odd > sum(counts.values()) - odd)
+
+
+predictions = [majority_parity(counts) for counts in run.counts]
+```
+
+With `n_qpus > 1` the samples are spread over the QPUs; one sample's shots are never split. See [`examples/basic_qml.py`](examples/basic_qml.py) for a complete classifier, from training to held-out accuracy.
 
 ## Rust-Native Circuits
 
