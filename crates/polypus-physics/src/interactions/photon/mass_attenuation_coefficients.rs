@@ -2,7 +2,7 @@
 
 use crate::constants::{AVOGADRO, BARN_TO_CM2};
 use crate::error::PhysicsError;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(feature = "csv-export")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -439,9 +439,9 @@ pub fn write_compound_csv(
 }
 
 /// Parses a chemical formula (e.g. `"H2O"`, `"Fe2O3"`) into a map from
-/// element symbol to atom count.
-fn parse_formula(formula: &str) -> Result<HashMap<String, u32>, PhysicsError> {
-    let mut elements: HashMap<String, u32> = HashMap::new();
+/// element symbol to atom count, ordered by symbol.
+fn parse_formula(formula: &str) -> Result<BTreeMap<String, u32>, PhysicsError> {
+    let mut elements: BTreeMap<String, u32> = BTreeMap::new();
     let chars: Vec<char> = formula.chars().collect();
     let mut i = 0;
 
@@ -609,7 +609,8 @@ pub struct CompoundResult {
     /// The compound's molar mass (g/mol), computed from its formula.
     pub molar_mass: f64,
     /// Mass fraction of each element (symbol -> fraction), summing to 1.0.
-    pub mass_fractions: HashMap<String, f64>,
+    /// Iterates in symbol order.
+    pub mass_fractions: BTreeMap<String, f64>,
     /// The (energy, mu_m) points, on a common energy grid shared by all
     /// constituent elements.
     pub points: Vec<MuPoint>,
@@ -619,6 +620,10 @@ pub struct CompoundResult {
 /// mixture (e.g. `"H2O"`, `"Fe2O3"`) for a given ENDF-6 reaction type,
 /// interpolating each constituent element onto a common, geometrically
 /// spaced energy grid of `n_points` points.
+///
+/// The sums over the constituent elements run in symbol order, so the result
+/// is bit-for-bit reproducible: hash-map iteration order differs per map and
+/// per process, and floating-point addition is not associative.
 pub fn mu_m_for_compound(
     formula: &str,
     mt: u32,
@@ -632,7 +637,7 @@ pub fn mu_m_for_compound(
         points: Vec<MuPoint>,
     }
 
-    let mut elements: HashMap<String, ElementData> = HashMap::new();
+    let mut elements: BTreeMap<String, ElementData> = BTreeMap::new();
     let mut molar_mass = 0.0;
 
     for (symbol, &atom_count) in &composition {
@@ -648,7 +653,7 @@ pub fn mu_m_for_compound(
         );
     }
 
-    let mut mass_fractions: HashMap<String, f64> = HashMap::new();
+    let mut mass_fractions: BTreeMap<String, f64> = BTreeMap::new();
     for (symbol, data) in &elements {
         let fraction = (data.atom_count as f64) * data.atomic_mass / molar_mass;
         mass_fractions.insert(symbol.clone(), fraction);
@@ -904,6 +909,53 @@ mod tests {
         let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
         let total: f64 = result.mass_fractions.values().sum();
         assert!((total - 1.0).abs() < 1e-12);
+    }
+
+    /// Compares every float bit for bit (`==` would equate 0.0 and -0.0), and
+    /// `mass_fractions` in iteration order, which a caller's sum over it follows.
+    fn assert_bit_identical(formula: &str, expected: &CompoundResult, actual: &CompoundResult) {
+        assert_eq!(
+            expected.molar_mass.to_bits(),
+            actual.molar_mass.to_bits(),
+            "{formula}: molar mass {} vs {}",
+            expected.molar_mass,
+            actual.molar_mass
+        );
+        let fraction_bits = |result: &CompoundResult| -> Vec<(String, u64)> {
+            result
+                .mass_fractions
+                .iter()
+                .map(|(symbol, fraction)| (symbol.clone(), fraction.to_bits()))
+                .collect()
+        };
+        assert_eq!(
+            fraction_bits(expected),
+            fraction_bits(actual),
+            "{formula}: mass fractions"
+        );
+        assert_eq!(expected.points.len(), actual.points.len());
+        for (i, (e, a)) in expected.points.iter().zip(&actual.points).enumerate() {
+            assert!(
+                e.energy_ev.to_bits() == a.energy_ev.to_bits()
+                    && e.mu_m.to_bits() == a.mu_m.to_bits(),
+                "{formula}: point {i} {e:?} vs {a:?}"
+            );
+        }
+    }
+
+    /// Every `HashMap` built inside a call gets a fresh `RandomState` and with
+    /// it a new iteration order, so repeated calls expose any sum that follows
+    /// one. For CaCO3 and C6H12O6 only the `points` sums are order-sensitive;
+    /// for C3H7NO2 the molar mass is too.
+    #[test]
+    fn compound_results_do_not_depend_on_hash_map_order() {
+        for formula in ["CaCO3", "C6H12O6", "C3H7NO2"] {
+            let expected = mu_m_for_compound(formula, 501, 5000).unwrap();
+            for _ in 0..16 {
+                let actual = mu_m_for_compound(formula, 501, 5000).unwrap();
+                assert_bit_identical(formula, &expected, &actual);
+            }
+        }
     }
 
     #[test]
