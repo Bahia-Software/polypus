@@ -32,6 +32,7 @@ pub mod error;
 pub mod mem_budget;
 pub mod params;
 pub mod planner;
+pub mod registry;
 pub mod transpiler;
 
 pub use circuit::{BoundCircuit, ForeignCircuit};
@@ -41,6 +42,10 @@ pub use params::RunParams;
 pub use planner::{
     BackendCapabilities, CancelToken, CircuitTask, Counts, Interrupt, Planner, PlannerRequirements,
     SequentialPlanner, ShotDistributingPlanner,
+};
+pub use registry::{
+    create_registered_backend, is_registered, register_backend, registered_names,
+    BackendBuildContext, BackendFactory,
 };
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 
@@ -160,11 +165,26 @@ pub trait QuantumBackend: Send + Sync {
     /// hook.
     ///
     /// The default is a no-op — correct for every backend whose calls are
-    /// self-terminating. Wiring a planner watcher thread that calls this when a
-    /// [`CancelToken`] flips mid-wave is deferred to the subprocess-bridge phase,
-    /// which is the first backend that needs it; the hook is defined now so that
-    /// addition is purely additive.
+    /// self-terminating. The planner-side watcher thread that calls this when a
+    /// [`CancelToken`] flips mid-wave lives in `polypus-orchestration`'s
+    /// `Scheduler::run_cancellable`, and is spawned only for backends that opt in via
+    /// [`wants_cancel_watcher`](Self::wants_cancel_watcher).
     fn cancel(&self) {}
+
+    /// Whether a run driving this backend should spawn the mid-wave cancellation
+    /// **watcher thread** that calls [`cancel`](Self::cancel) when the run's
+    /// [`CancelToken`] flips.
+    ///
+    /// The default is `false`: every built-in backend's `run_circuits` is
+    /// self-terminating (a fast CPU loop, or a blocking Python/network call that
+    /// returns on its own), so a watcher would be a thread spawned per run for a
+    /// no-op `cancel` — pure overhead and no behaviour change. A backend that can
+    /// block for a long time on an external resource and *needs* an out-of-band
+    /// abort — the subprocess bridge, a cloud session — overrides this to `true`,
+    /// and only then does `Scheduler::run_cancellable` spawn the watcher for it.
+    fn wants_cancel_watcher(&self) -> bool {
+        false
+    }
 
     /// What this backend can do, so a [`Planner`] can size its execution waves.
     ///

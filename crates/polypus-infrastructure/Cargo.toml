@@ -19,6 +19,9 @@ qmio = ["dep:zeromq", "dep:serde-pickle", "dep:serde_json", "dep:tokio"]
 # parties depend on `polypus-backend` alone; this crate adds the four concrete
 # Polypus backends, the `Infrastructure` factory and the Qiskit/ZeroMQ machinery.
 polypus-backend = { workspace = true }
+# The subprocess bridge, registered as the built-in `"subprocess"` backend by
+# `register_builtin_backends`. Pyo3-free, so it does not widen this crate's FFI edge.
+polypus-subprocess-backend = { workspace = true }
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-observable = { workspace = true }

@@ -1,13 +1,77 @@
 //! [`Resources`] — a backend paired with its planner and run config — and the
 //! thin [`Scheduler`] that runs a [`Flow`] over them.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use polypus_infrastructure::{
     CancelToken, InfrastructureError, Planner, QuantumBackend, RunParams,
 };
 
 use crate::flow::Flow;
+
+/// Poll interval of the [`CancelWatcher`]: how often it checks the token. Small
+/// enough that cancellation latency is imperceptible next to QPU latency, large
+/// enough to cost nothing over a long run.
+const CANCEL_WATCHER_POLL: Duration = Duration::from_millis(50);
+
+/// A background thread that calls [`QuantumBackend::cancel`] the moment a run's
+/// [`CancelToken`] flips — the out-of-band abort a backend blocked mid-wave needs
+/// (the cooperative between-wave check cannot reach a call already in flight).
+///
+/// Spawned by [`Scheduler::run_cancellable`] **only** for backends that opt in via
+/// [`QuantumBackend::wants_cancel_watcher`], so the built-in backends (whose calls
+/// are self-terminating) never pay for a thread. Its `Drop` stops and joins the
+/// thread, so it is torn down when the run returns — normally or by unwind.
+struct CancelWatcher {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl CancelWatcher {
+    fn spawn(backend: Arc<dyn QuantumBackend>, cancel: CancelToken) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                // React only to an explicit cooperative cancel (someone holding the
+                // `CancelToken` called `.cancel()` from another thread). Signal the
+                // backend once, then exit — a second signal is the backend's own
+                // concern (the subprocess bridge latches it).
+                //
+                // NOTE — deliberately does NOT poll the token's `Interrupt` guard to
+                // catch a real Ctrl+C. The guard is `py.check_signals()`, which PyO3
+                // documents as a guaranteed **no-op on any non-main thread** (it
+                // "does nothing yet still returns Ok(())"; pyo3 marker.rs). This
+                // watcher runs on a `std::thread::spawn`ed thread, which is never the
+                // Python main thread, so polling it here would silently never fire.
+                // A terminal Ctrl+C instead reaches a subprocess backend directly via
+                // the OS process group and comes back as `BackendError::Aborted` →
+                // `KeyboardInterrupt`; do not reintroduce a guard-poll here.
+                if cancel.is_cancelled() {
+                    backend.cancel();
+                    return;
+                }
+                std::thread::sleep(CANCEL_WATCHER_POLL);
+            }
+        });
+        CancelWatcher {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for CancelWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// The bound execution context for a flow: a backend, the planner paired with it,
 /// and the run configuration. Built once — validating the pairing up front — and
@@ -119,6 +183,19 @@ impl Scheduler {
         flow: F,
         cancel: &CancelToken,
     ) -> Result<F::Output, F::Error> {
+        // Backends that can block for a long time on an external resource opt into an
+        // out-of-band abort: a watcher thread that calls `backend.cancel()` when this
+        // run's token flips, unblocking a call parked mid-wave. Built-in backends do
+        // not opt in, so no thread is spawned for them. The watcher is torn down when
+        // `_watcher` drops, i.e. when this run returns (normally or by unwind).
+        let _watcher = if self.resources.backend.wants_cancel_watcher() {
+            Some(CancelWatcher::spawn(
+                Arc::clone(&self.resources.backend),
+                cancel.clone(),
+            ))
+        } else {
+            None
+        };
         flow.run(&self.resources, cancel)
     }
 
@@ -402,6 +479,87 @@ mod tests {
             waves_run.load(Ordering::SeqCst),
             1,
             "cancellation must stop the next wave from launching",
+        );
+        scheduler.close();
+    }
+
+    /// A backend that opts into the cancel watcher and **blocks in `run_circuits`**
+    /// until its `cancel()` is invoked — modelling a subprocess worker parked in
+    /// `recv()`. Proves the watcher (spawned by `run_cancellable`) reaches a call
+    /// already in flight mid-wave, which the cooperative between-wave check cannot.
+    struct BlockingCancelBackend {
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        cancel_called: Arc<AtomicBool>,
+    }
+    impl QuantumBackend for BlockingCancelBackend {
+        fn run_circuits(
+            &self,
+            _qcs: &[BoundCircuit],
+            _config: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            // Park until cancel() opens the gate — like a worker blocked in recv().
+            let (lock, cv) = &*self.gate;
+            let mut opened = lock.lock().unwrap_or_else(|p| p.into_inner());
+            while !*opened {
+                opened = cv.wait(opened).unwrap_or_else(|p| p.into_inner());
+            }
+            // Unblocked by the abort: report it as the bridge does on an `aborted`
+            // reply, so the planner's cancel-translation yields `Cancelled`.
+            Err(BackendError::External("aborted by cancel signal".into()))
+        }
+        fn wants_cancel_watcher(&self) -> bool {
+            true
+        }
+        fn cancel(&self) {
+            self.cancel_called.store(true, Ordering::SeqCst);
+            let (lock, cv) = &*self.gate;
+            *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            cv.notify_all();
+        }
+    }
+
+    /// End-to-end: a backend blocked mid-wave is aborted by the watcher when the
+    /// run's token is cancelled from another thread — `cancel()` is invoked, the
+    /// blocked call unblocks, and the run ends as `Cancelled` (not a hang).
+    #[test]
+    fn watcher_cancels_a_backend_blocked_mid_wave() {
+        let cancel_called = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(BlockingCancelBackend {
+            gate: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            cancel_called: Arc::clone(&cancel_called),
+        });
+        let resources = Resources::new(
+            backend,
+            Some(Arc::new(SequentialPlanner)),
+            Arc::new(config()),
+        )
+        .expect("blocking backend pairs with the sequential planner");
+        let scheduler = Scheduler::ephemeral(resources);
+
+        let cancel = CancelToken::default();
+        let canceller = cancel.clone();
+        let handle = thread::spawn(move || {
+            // Let the run reach its blocked run_circuits, then cancel.
+            thread::sleep(std::time::Duration::from_millis(150));
+            canceller.cancel();
+        });
+
+        let result = scheduler.run_cancellable(
+            RunCircuitFlow {
+                circuits: two_circuits(),
+                shots: 100,
+            },
+            &cancel,
+        );
+        handle.join().expect("canceller thread must not panic");
+
+        assert!(
+            cancel_called.load(Ordering::SeqCst),
+            "the watcher must have invoked backend.cancel()",
+        );
+        assert!(
+            matches!(result, Err(InfrastructureError::Cancelled)),
+            "a watcher-driven mid-wave abort must surface as Cancelled",
         );
         scheduler.close();
     }

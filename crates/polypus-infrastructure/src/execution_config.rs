@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 
 use polypus_backend::{OptLevel, RunParams};
@@ -130,24 +132,23 @@ pub enum BackendConfig {
         /// CPU cores reserved per QPU.
         cores_per_qpu: u32,
     },
-    /// CESGA QMIO real QPU, reached directly over its ZeroMQ REQ endpoint.
+    /// A backend built through the **runtime registry**
+    /// ([`polypus_backend::register_backend`]), selected by `name`. This is how a
+    /// third-party backend — and Polypus's own registry-migrated backends (QMIO, the
+    /// subprocess bridge) — are dispatched without a dedicated typed variant here.
     ///
-    /// Unlike [`Local`](Self::Local)/[`Cunqa`](Self::Cunqa), this backend speaks
-    /// the QMIO wire protocol (pickle over ZMQ) entirely from Rust, so the
-    /// `Native`/`Qasm2` execution path never touches the Python interpreter.
-    /// Only compiled with `--features qmio`.
-    #[cfg(feature = "qmio")]
-    Qmio {
-        /// ZMQ REQ endpoint of the QMIO server (e.g. `"tcp://10.133.29.226:5556"`).
-        endpoint: String,
-        /// Representation of the program submitted to the QPU.
-        program_format: QmioProgramFormat,
-        /// Tket optimisation level (`0`/`1`/`2`/`3` → Tket `$value` `0`/`1`/`18`/`30`).
-        optimization: u8,
-        /// Repetition period (`None` = server default).
-        repetition_period: Option<f64>,
-        /// Results format requested from the server (`"binary_count"` by default).
-        res_format: String,
+    /// `options` is the provider-specific configuration as string key/value pairs,
+    /// handed to the factory in the [`BackendBuildContext`](polypus_backend::BackendBuildContext).
+    /// It replaced the former hardcoded `Qmio { … }` variant: QMIO now registers a
+    /// factory (`qmio::qmio_factory`) that reads its `endpoint`/`program_format`/…
+    /// from here. Only the endpoints that carry a `Py<PyAny>` (Aer's noise model)
+    /// still need a typed variant; everything pyo3-free flows through this one.
+    Registered {
+        /// The registered backend name (e.g. `"qmio"`, `"subprocess"`, or a third
+        /// party's own).
+        name: String,
+        /// Provider-specific configuration, as documented per backend.
+        options: HashMap<String, String>,
     },
 }
 
@@ -183,19 +184,9 @@ impl Clone for BackendConfig {
                 nodes: *nodes,
                 cores_per_qpu: *cores_per_qpu,
             },
-            #[cfg(feature = "qmio")]
-            BackendConfig::Qmio {
-                endpoint,
-                program_format,
-                optimization,
-                repetition_period,
-                res_format,
-            } => BackendConfig::Qmio {
-                endpoint: endpoint.clone(),
-                program_format: *program_format,
-                optimization: *optimization,
-                repetition_period: *repetition_period,
-                res_format: res_format.clone(),
+            BackendConfig::Registered { name, options } => BackendConfig::Registered {
+                name: name.clone(),
+                options: options.clone(),
             },
         }
     }

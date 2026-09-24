@@ -11,6 +11,11 @@
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
 #                              diagonal costs) mapping measurement counts to expectation values
+#   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,
+#                              plus the runtime backend registry (register_backend) — no PyO3
+#   - crates/polypus-subprocess-backend : pyo3-free QuantumBackend bridging to a provider's
+#                              Python SDK in its own subprocess over a versioned JSON protocol;
+#                              the built-in "subprocess" backend — the interpreter runs in the child
 #   - crates/polypus-infrastructure : execution backends (local Aer, native, CUNQA, QMIO) and
 #                              the Planner that sizes/runs circuit waves — how a circuit runs (PyO3)
 #   - crates/polypus-orchestration : Flow/Scheduler/Resources policy + optimizer dispatch —
@@ -23,7 +28,7 @@
 #   - crates/polypus         : the Polypus Python extension module and PyO3 edge (bindings,
 #                              typed exception hierarchy, workspace re-exports)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-backend", "crates/polypus-subprocess-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
@@ -52,6 +57,7 @@ polypus-physics    = { path = "crates/polypus-physics", version = "0.7.1" }
 polypus-sim        = { path = "crates/polypus-sim", version = "0.7.1" }
 polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.1" }
 polypus-observable = { path = "crates/polypus-observable", version = "0.7.1" }
+polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.7.1" }
 polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.7.1" }
 polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.7.1" }
 polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.1" }
@@ -65,6 +71,14 @@ log                = "0.4"
 uuid               = { version = "1", features = ["v4"] }
 # RNG shared by `polypus` and `polypus-optimizers`; keep default features.
 rand               = "0.8"
+# The subprocess bridge's wire protocol: length-prefixed JSON over the worker's
+# stdin/stdout (see `polypus-subprocess-backend`). `serde`/`serde_json` are
+# pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
+# `PR_SET_PDEATHSIG` orphan guard and `kill` for out-of-band cancellation) in
+# audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+nix                = { version = "0.29", features = ["signal", "process"] }
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #

@@ -16,3 +16,6 @@ description = "The pyo3-free execution-backend contract for Polypus: the Quantum
 [dependencies]
 polypus-circuit = { workspace = true }
 polypus-observable = { workspace = true }
+# The logging facade (no sink): the runtime backend registry emits debug lines when
+# a backend is registered or replaced. `log` is a tiny, pyo3-free facade crate.
+log = { workspace = true }
