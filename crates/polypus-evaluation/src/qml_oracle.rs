@@ -1,5 +1,6 @@
 use crate::{
-    assign_parameters_qiskit, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot,
+    assign_parameters_qiskit, CostObservable, EvaluationError, EvaluationOracle, Label,
+    OracleErrorSlot, SupervisedObjective,
 };
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, Planner, QiskitCircuit, QuantumBackend, RunParams,
@@ -42,15 +43,36 @@ fn candidate_window_size() -> usize {
     parallelism.saturating_mul(CONCURRENCY_MULTIPLIER).max(1)
 }
 
+/// How [`QmlOracle`] turns each training circuit's counts into a per-sample value.
+pub enum QmlObjective {
+    /// No labels: one cost observable for every sample, applied through
+    /// [`Planner::evaluate`].
+    Unsupervised(Arc<dyn CostObservable>),
+    /// With `y_train`: each sample is scored against its own label.
+    Supervised {
+        objective: Arc<dyn SupervisedObjective>,
+        /// One label per training circuit, in `training_circuits` order.
+        labels: Vec<Label>,
+    },
+}
+
 /// Oracle for QML training with feature-map encoding.
 ///
 /// Holds N pre-bound training circuits (one per training sample, with feature-map
 /// parameters already fixed). For each candidate `θ`, it binds `θ` to every
 /// training circuit, runs those circuits through the [`Planner`], and returns the
-/// **mean** expectation value per candidate as the fitness.
+/// **mean** per-sample value per candidate as the fitness ([`QmlObjective`]).
+///
+/// # Supervised evaluation
+///
+/// With labels, the circuits run through [`Planner::execute`] and the oracle pairs
+/// the counts with the labels itself: the window is candidate-major, so circuit `i`
+/// belongs to sample `i % n_train`. The planner's reducer is position-free by
+/// contract and cannot do this pairing. The unsupervised path calls
+/// [`Planner::evaluate`] as before.
 ///
 /// The oracle owns only the *what*: bind the candidates, submit the tasks, reduce
-/// each candidate's expectations to their mean, and validate contract C-5. The
+/// each candidate's per-sample values to their mean, and validate contract C-5. The
 /// [`Planner`] owns the *how* — waves, the per-wave concurrency cap, the
 /// between-wave `check_signals` (ENGINEERING §3) and cancellation. The GIL still
 /// serialises the Qiskit binding and the Aer simulation calls; genuine parallelism
@@ -92,7 +114,8 @@ pub struct QmlOracle {
     pub backend: Arc<dyn QuantumBackend>,
     /// Owns how the bound circuits are executed and reduced (waves, concurrency).
     pub planner: Arc<dyn Planner>,
-    pub observable: Arc<dyn CostObservable>,
+    /// Turns each training circuit's counts into its per-sample value.
+    pub objective: QmlObjective,
     /// Cooperative cancellation, shared with the run's `Scheduler`/entry point.
     pub cancel: CancelToken,
     /// Shared with the `qml.train` entry point: the first evaluation failure is
@@ -141,6 +164,16 @@ impl QmlOracle {
         window: usize,
     ) -> Result<Vec<f64>, EvaluationError> {
         let n_train = self.training_circuits.len();
+        // Labels are paired with circuits by position. The edge rejects a mismatch
+        // up front (contract C-8); this covers direct Rust callers.
+        if let QmlObjective::Supervised { labels, .. } = &self.objective {
+            if labels.len() != n_train {
+                return Err(EvaluationError::LabelCount {
+                    labels: labels.len(),
+                    samples: n_train,
+                });
+            }
+        }
         let mut means: Vec<f64> = Vec::with_capacity(candidates.len());
 
         // Process the population in windows of at most `window` candidates. Each
@@ -175,36 +208,30 @@ impl QmlOracle {
                 })
                 .collect();
 
-            // Delegate execution + reduction to the Planner: it owns the waves, the
-            // per-wave concurrency cap, the between-wave `check_signals` and the
-            // shot merge. A failure here propagates via `?` before the next window
-            // is built, so a fault in window N never lets window N+1 be constructed
-            // (the eager `dispatch_bounded` short-circuit, preserved).
-            let expectations = self.planner.evaluate(
-                self.backend.as_ref(),
-                &tasks,
-                self.observable.as_ref(),
-                &self.config,
-                &self.cancel,
-            )?;
+            // Delegate execution to the Planner: it owns the waves, the per-wave
+            // concurrency cap, the between-wave `check_signals` and the shot merge.
+            // A failure here propagates via `?` before the next window is built, so
+            // a fault in window N never lets window N+1 be constructed (the eager
+            // `dispatch_bounded` short-circuit, preserved).
+            let values = self.per_sample_values(&tasks, window_candidates.len(), n_train)?;
 
-            // Structural C-5: exactly one expectation per submitted circuit. The
-            // Planner guarantees this, but a short/long batch would misalign the
-            // reshape below, so it is checked before the means are taken.
-            if expectations.len() != tasks.len() {
+            // Structural C-5: exactly one value per submitted circuit. The Planner
+            // guarantees this, but a short/long batch would misalign the reshape
+            // below, so it is checked before the means are taken.
+            if values.len() != tasks.len() {
                 return Err(EvaluationError::WrongLength {
                     expected: tasks.len(),
-                    got: expectations.len(),
+                    got: values.len(),
                 });
             }
 
-            // Reduce each candidate's `n_train` expectations to their mean — the QML
-            // fitness. Sliced manually (not `chunks(n_train)`) so an empty training
-            // set yields `NaN` (caught by the finiteness check below) instead of a
-            // `chunks(0)` panic. The sum is over the same values, in the same order,
-            // as the eager flat batch, so the mean is byte-identical.
+            // Reduce each candidate's `n_train` per-sample values to their mean — the
+            // QML fitness. Sliced manually (not `chunks(n_train)`) so an empty
+            // training set yields `NaN` (caught by the finiteness check below)
+            // instead of a `chunks(0)` panic. The sum is over the same values, in the
+            // same order, as the eager flat batch, so the mean is byte-identical.
             for w in 0..window_candidates.len() {
-                let slice = &expectations[w * n_train..(w + 1) * n_train];
+                let slice = &values[w * n_train..(w + 1) * n_train];
                 means.push(slice.iter().sum::<f64>() / n_train as f64);
             }
             // `tasks` (which borrows `bound`) and `bound` drop here, releasing this
@@ -219,19 +246,69 @@ impl QmlOracle {
         }
         Ok(means)
     }
+
+    /// One value per circuit of a window, in order. The window is candidate-major,
+    /// so task `i` belongs to sample `i % n_train`.
+    fn per_sample_values(
+        &self,
+        tasks: &[CircuitTask<'_>],
+        n_candidates: usize,
+        n_train: usize,
+    ) -> Result<Vec<f64>, EvaluationError> {
+        match &self.objective {
+            // Unchanged: the Planner executes and reduces.
+            QmlObjective::Unsupervised(observable) => Ok(self.planner.evaluate(
+                self.backend.as_ref(),
+                tasks,
+                observable.as_ref(),
+                &self.config,
+                &self.cancel,
+            )?),
+            QmlObjective::Supervised { objective, labels } => {
+                // Execute only; the pairing happens here, where the layout is known.
+                let counts = self.planner.execute(
+                    self.backend.as_ref(),
+                    tasks,
+                    &self.config,
+                    &self.cancel,
+                )?;
+                // The caller checked `labels.len() == n_train`, so cycling pairs task
+                // `i` with `labels[i % n_train]`.
+                let window_labels: Vec<Label> = labels
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .take(n_candidates * n_train)
+                    .collect();
+                let scores = objective.score_batch(&counts, &window_labels)?;
+                // Checked per sample so the error names the `x_train` row (typically
+                // a `log(0)`).
+                if let Some((index, &value)) =
+                    scores.iter().enumerate().find(|(_, v)| !v.is_finite())
+                {
+                    return Err(EvaluationError::NonFiniteScore {
+                        sample: index % n_train.max(1),
+                        value,
+                    });
+                }
+                Ok(scores)
+            }
+        }
+    }
 }
 
 /// Assembles a [`QmlOracle`] for a training flow from the run's [`Resources`].
 ///
 /// The QML counterpart of [`VqcOracleFactory`](crate::VqcOracleFactory): it carries
-/// the pre-bound training circuits and the reducer, and wires them to the run
-/// context when [`polypus_orchestration::TrainFlow`] runs. See
+/// the pre-bound training circuits and the objective, and wires them to the run
+/// context when
+/// [`polypus_orchestration::TrainFlow`] runs. See
 /// [`VqcOracleFactory`](crate::VqcOracleFactory) for the order-vs-assembly split.
 pub struct QmlOracleFactory {
     /// Pre-bound training circuits (feature-map parameters already fixed).
     pub training_circuits: Vec<Py<PyAny>>,
-    /// Reduces each candidate's measurement counts to the fitness scalar.
-    pub observable: Arc<dyn CostObservable>,
+    /// Turns each training circuit's counts into its per-sample value.
+    pub objective: QmlObjective,
 }
 
 impl OracleFactory for QmlOracleFactory {
@@ -246,7 +323,7 @@ impl OracleFactory for QmlOracleFactory {
             config: Arc::clone(&resources.config),
             backend: Arc::clone(&resources.backend),
             planner: Arc::clone(&resources.planner),
-            observable: self.observable,
+            objective: self.objective,
             cancel: cancel.clone(),
             errors: errors.clone(),
         })
@@ -473,9 +550,76 @@ class Bound:
             config: config(shots),
             backend,
             planner: Arc::new(SequentialPlanner),
-            observable: Arc::new(KeyOneObservable),
+            objective: QmlObjective::Unsupervised(Arc::new(KeyOneObservable)),
             cancel: CancelToken::default(),
             errors: OracleErrorSlot::new(),
+        }
+    }
+
+    /// Records `(submission index, label)` pairs, reading the index from the
+    /// positional mock's "1" count, and scores each as `index + 1000 * label`.
+    struct RecordingObjective {
+        seen: Mutex<Vec<(u64, i64)>>,
+        /// Return NaN for the pair at this global submission index.
+        nan_at: Option<u64>,
+    }
+
+    impl RecordingObjective {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+                nan_at: None,
+            }
+        }
+
+        fn seen(&self) -> Vec<(u64, i64)> {
+            self.seen.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    impl SupervisedObjective for RecordingObjective {
+        fn score_batch(
+            &self,
+            counts: &[HashMap<String, u64>],
+            labels: &[Label],
+        ) -> Result<Vec<f64>, EvaluationError> {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(counts
+                .iter()
+                .zip(labels)
+                .map(|(c, label)| {
+                    let index = c.get("1").copied().unwrap_or(0);
+                    let Label::Class(label) = *label else {
+                        panic!("these tests use class labels only");
+                    };
+                    seen.push((index, label));
+                    if self.nan_at == Some(index) {
+                        f64::NAN
+                    } else {
+                        index as f64 + 1000.0 * label as f64
+                    }
+                })
+                .collect())
+        }
+    }
+
+    fn supervised_oracle(
+        stub: &Stub,
+        labels: &[i64],
+        objective: Arc<RecordingObjective>,
+        shots: u32,
+    ) -> QmlOracle {
+        QmlOracle {
+            objective: QmlObjective::Supervised {
+                objective,
+                labels: labels.iter().map(|&l| Label::Class(l)).collect(),
+            },
+            ..oracle(
+                stub,
+                labels.len(),
+                Arc::new(MockBackend::positional()),
+                shots,
+            )
         }
     }
 
@@ -602,6 +746,99 @@ class Bound:
             2 * WINDOW * N_TRAIN,
             "window 3+ must not be constructed once window 2 has failed"
         );
+    }
+
+    #[test]
+    fn supervised_labels_follow_their_samples_across_windows() {
+        const POPULATION: usize = 7;
+        // Distinct labels, so a mis-paired circuit shows in the record and the mean.
+        const LABELS: [i64; 3] = [3, 1, 4];
+        const N_TRAIN: usize = LABELS.len();
+        // Max submission index is POPULATION*N_TRAIN-1 = 20 < shots (no underflow).
+        const SHOTS: u32 = 64;
+
+        let cands = candidates(POPULATION);
+        let mut results = Vec::new();
+        // Windows that split the population unevenly, exactly, and not at all.
+        for window in [1, 2, 3, POPULATION * 4] {
+            let stub = Stub::new();
+            let objective = Arc::new(RecordingObjective::new());
+            let means = supervised_oracle(&stub, &LABELS, Arc::clone(&objective), SHOTS)
+                .try_evaluate_windowed(&cands, window)
+                .expect("a healthy supervised evaluation succeeds");
+
+            let seen = objective.seen();
+            assert_eq!(
+                seen.len(),
+                POPULATION * N_TRAIN,
+                "every circuit scored once"
+            );
+            for (index, label) in seen {
+                assert_eq!(
+                    label,
+                    LABELS[index as usize % N_TRAIN],
+                    "window {window}: circuit {index} was scored against another sample's label"
+                );
+            }
+            results.push(means);
+        }
+
+        // Candidate c's circuits are the indices c*N + j, scored against LABELS[j].
+        let expected: Vec<f64> = (0..POPULATION)
+            .map(|c| {
+                let sum: f64 = (0..N_TRAIN)
+                    .map(|j| (c * N_TRAIN + j) as f64 + 1000.0 * LABELS[j] as f64)
+                    .sum();
+                sum / N_TRAIN as f64
+            })
+            .collect();
+        for means in results {
+            assert_eq!(
+                means, expected,
+                "windowing must not change the supervised means"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_supervised_score_names_its_training_sample() {
+        const LABELS: [i64; 4] = [0, 1, 0, 1];
+        let stub = Stub::new();
+        // Global index 11 = candidate 2, sample 3.
+        let objective = Arc::new(RecordingObjective {
+            nan_at: Some(11),
+            ..RecordingObjective::new()
+        });
+        let err = supervised_oracle(&stub, &LABELS, objective, 64)
+            .try_evaluate_windowed(&candidates(5), 2)
+            .expect_err("a NaN score must not reach the optimizer");
+        match err {
+            EvaluationError::NonFiniteScore { sample, value } => {
+                assert_eq!(sample, 3, "the x_train row, not the candidate or the index");
+                assert!(value.is_nan());
+            }
+            other => panic!("expected NonFiniteScore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_label_count_mismatch_is_an_error_before_any_circuit_is_built() {
+        let stub = Stub::new();
+        let oracle = QmlOracle {
+            objective: QmlObjective::Supervised {
+                objective: Arc::new(RecordingObjective::new()),
+                labels: vec![Label::Class(0), Label::Class(1)],
+            },
+            // Three training circuits, two labels.
+            ..oracle(&stub, 3, Arc::new(MockBackend::recording()), 8)
+        };
+        match oracle.try_evaluate_windowed(&candidates(4), WINDOW) {
+            Err(EvaluationError::LabelCount { labels, samples }) => {
+                assert_eq!((labels, samples), (2, 3));
+            }
+            other => panic!("expected LabelCount, got {other:?}"),
+        }
+        assert_eq!(stub.assign_calls(), 0, "nothing may be bound or run");
     }
 
     #[test]

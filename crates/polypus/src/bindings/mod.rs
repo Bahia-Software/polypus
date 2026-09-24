@@ -22,7 +22,7 @@ use qng::QNG;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, OracleErrorSlot, PyCallbackObservable, PyVarianceOracle,
-    QmlOracleFactory, VqcOracleFactory,
+    QmlObjective, QmlOracleFactory, VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::random_seed;
 #[cfg(feature = "qmio")]
@@ -1228,7 +1228,7 @@ pub fn qml_train<'py>(
     let flow = TrainFlow {
         factory: QmlOracleFactory {
             training_circuits: qcs,
-            observable,
+            objective: QmlObjective::Unsupervised(observable),
         },
         method: method_enum,
         dimensions,
