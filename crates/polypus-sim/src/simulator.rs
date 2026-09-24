@@ -464,7 +464,8 @@ impl Simulator for StatevectorSimulator {
         //    most two qubits between them, into one composed matrix per component.
         //
         // The two never overlap: a gate is dense-fusable, diagonal, or a boundary
-        // (`Barrier`/`Measure`/`MeasureAll`). A diagonal gate or a boundary is a
+        // (every other instruction: `Barrier`/`Measure`/`MeasureAll`, the `Id`
+        // no-op, …). A diagonal gate or a boundary is a
         // hard boundary for the open dense components — their gates all occurred
         // earlier, so they must reach the state first — so it flushes them before
         // taking its own path.

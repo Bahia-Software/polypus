@@ -53,6 +53,17 @@ pub enum EvaluationError {
     /// The Python-backed oracle returned a non-finite expectation value
     /// (contract C-5 requires every output to be a finite f64).
     NonFinite { index: usize, value: f64 },
+    /// A supervised objective scored a training sample as `NaN`/infinite. Reported
+    /// per sample so the message names the `x_train` row (typically a `log(0)`).
+    NonFiniteScore {
+        /// The 0-based `x_train` row.
+        sample: usize,
+        value: f64,
+    },
+    /// A supervised [`QmlOracle`](crate::QmlOracle) has a different number of labels
+    /// than training circuits. The `qml.train` edge rejects this up front (contract
+    /// C-8), so only a direct Rust caller can reach it.
+    LabelCount { labels: usize, samples: usize },
     /// The Python `variance_function` (QNG) returned an invalid QFIM diagonal
     /// element: a `NaN`/infinite value or a negative one. A variance must be a
     /// finite, non-negative number — zero is allowed (Tikhonov regularisation
@@ -84,6 +95,14 @@ impl fmt::Display for EvaluationError {
             EvaluationError::NonFinite { index, value } => write!(
                 f,
                 "oracle returned a non-finite expectation value {value} at index {index}; contract C-5 requires every output to be a finite f64"
+            ),
+            EvaluationError::NonFiniteScore { sample, value } => write!(
+                f,
+                "the supervised objective scored x_train row {sample} as {value}; every per-sample score must be finite (clip probabilities before taking a log)"
+            ),
+            EvaluationError::LabelCount { labels, samples } => write!(
+                f,
+                "{labels} labels were given for {samples} training samples; supervised QML needs exactly one label per training sample (contract C-8)"
             ),
             EvaluationError::InvalidVariance { param_index, value } => write!(
                 f,
@@ -163,5 +182,32 @@ mod tests {
         .to_string();
         assert!(msg.contains('3'), "offending index missing from: {msg}");
         assert!(msg.contains("NaN"), "offending value missing from: {msg}");
+    }
+
+    #[test]
+    fn non_finite_score_display_names_the_x_train_row_and_value() {
+        let msg = EvaluationError::NonFiniteScore {
+            sample: 7,
+            value: f64::NEG_INFINITY,
+        }
+        .to_string();
+        assert!(
+            msg.contains("x_train row 7"),
+            "offending row missing from: {msg}"
+        );
+        assert!(msg.contains("-inf"), "offending value missing from: {msg}");
+    }
+
+    #[test]
+    fn label_count_display_names_both_counts() {
+        let msg = EvaluationError::LabelCount {
+            labels: 9,
+            samples: 10,
+        }
+        .to_string();
+        assert!(
+            msg.contains("9 labels") && msg.contains("10 training samples"),
+            "both counts must be named: {msg}"
+        );
     }
 }

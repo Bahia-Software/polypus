@@ -200,6 +200,12 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
             EvaluationError::new_err(wrong_length.to_string())
         }
         non_finite @ EvalErr::NonFinite { .. } => EvaluationError::new_err(non_finite.to_string()),
+        non_finite_score @ EvalErr::NonFiniteScore { .. } => {
+            EvaluationError::new_err(non_finite_score.to_string())
+        }
+        label_count @ EvalErr::LabelCount { .. } => {
+            EvaluationError::new_err(label_count.to_string())
+        }
         invalid_variance @ EvalErr::InvalidVariance { .. } => {
             EvaluationError::new_err(invalid_variance.to_string())
         }
@@ -494,6 +500,28 @@ mod evaluation_mapping_tests {
                 value: f64::NAN,
             },
             "contract C-5",
+        );
+    }
+
+    #[test]
+    fn non_finite_score_maps_to_evaluation_error_naming_the_row() {
+        assert_maps_to_evaluation_error(
+            EvalErr::NonFiniteScore {
+                sample: 5,
+                value: f64::NEG_INFINITY,
+            },
+            "x_train row 5",
+        );
+    }
+
+    #[test]
+    fn label_count_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::LabelCount {
+                labels: 2,
+                samples: 3,
+            },
+            "contract C-8",
         );
     }
 

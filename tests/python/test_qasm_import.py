@@ -60,6 +60,31 @@ class TestQasmImport:
         back = QuantumCircuit.from_qasm_str(imported.to_qasm2())
         assert back.num_qubits == 2
 
+    def test_id_is_preserved_not_dropped(self):
+        """`id` counts towards gate count and depth, so it must survive
+        import and export one-to-one (it used to be dropped at parse time)."""
+        import polypus
+        from qiskit import QuantumCircuit
+
+        src = (
+            'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\n'
+            "h q[0];\nid q[1];\nid q[0];\ncx q[0],q[1];\n"
+        )
+        imported = polypus.Circuit.from_qasm2(src)
+        assert len(imported) == 4
+        assert imported.to_qasm2() == src
+        reference = QuantumCircuit.from_qasm_str(src)
+        back = QuantumCircuit.from_qasm_str(imported.to_qasm2())
+        assert back.count_ops() == reference.count_ops()
+        assert back.depth() == reference.depth()
+
+    def test_id_builder_method(self):
+        import polypus
+
+        qc = polypus.Circuit(2).id(1)
+        assert len(qc) == 1
+        assert "id q[1];" in qc.to_qasm2()
+
     def test_imported_circuit_extends_with_builder(self):
         import polypus
 

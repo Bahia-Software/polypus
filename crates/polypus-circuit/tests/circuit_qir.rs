@@ -167,6 +167,57 @@ fn barrier_is_dropped() {
     assert_eq!(call_lines(&ir).len(), 2); // only h and cnot
 }
 
+/// `id` has no QIS intrinsic: the QIR lowering drops it, while the circuit
+/// (and its OpenQASM export) keeps it.
+#[test]
+fn id_is_dropped_at_the_qir_boundary_only() {
+    let qc = ParameterizedCircuit::new(2).h(0).id(1).id(0).cx(0, 1);
+    let ir = qc.to_qir_with_params(&[]).unwrap();
+    assert_eq!(
+        call_lines(&ir),
+        [
+            "call void @__quantum__qis__h__body(%Qubit* null)",
+            "call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))",
+        ]
+    );
+    assert_eq!(qc.gates.len(), 4);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.contains("id q[1];\nid q[0];\n"), "{qasm}");
+}
+
+/// `cu1` lowers exactly like `cp` (the same operator), and neither leaves the
+/// base intrinsic set. (Unitary equivalence with the native gates, for the
+/// whole vocabulary, is checked in `polypus-sim`'s contract tests.)
+#[test]
+fn cu1_lowers_like_cp() {
+    let cu1 = ParameterizedCircuit::new(2)
+        .cu1(1, 0, 0.8)
+        .to_qir_with_params(&[])
+        .unwrap();
+    let cp = ParameterizedCircuit::new(2)
+        .cp(1, 0, 0.8)
+        .to_qir_with_params(&[])
+        .unwrap();
+    assert_eq!(call_lines(&cu1), call_lines(&cp));
+}
+
+/// `ccx` has no QIR base intrinsic: it lowers to the exact 15-gate
+/// h/t/t†/cnot decomposition; `cswap` wraps it in two cnots. The circuit and
+/// its OpenQASM export keep each as one instruction.
+#[test]
+fn three_qubit_gates_lower_to_the_base_set() {
+    let qc = ParameterizedCircuit::new(3).ccx(0, 1, 2).cswap(2, 0, 1);
+    let calls = call_lines(&qc.to_qir_with_params(&[]).unwrap());
+    assert_eq!(calls.len(), 15 + 17);
+    let base = ["h__body", "t__body", "t__adj", "cnot__body"];
+    for call in &calls {
+        assert!(base.iter().any(|b| call.contains(b)), "{call}");
+    }
+    assert_eq!(qc.gates.len(), 2);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.ends_with("ccx q[0],q[1],q[2];\ncswap q[2],q[0],q[1];\n"));
+}
+
 #[test]
 fn no_measurement_has_no_recording_or_irreversible_attribute() {
     let ir = ParameterizedCircuit::new(1)

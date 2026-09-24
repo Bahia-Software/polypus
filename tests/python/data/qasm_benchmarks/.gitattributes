@@ -1,0 +1,3 @@
+# Keep these fixtures byte-for-byte as published (one of them uses CRLF line
+# endings on purpose): no end-of-line normalisation.
+* -text

@@ -29,7 +29,7 @@ with PyO3 Python bindings. The Cargo workspace has eleven crates:
 | `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
 | `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
 | `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
-| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, `CircuitSource` and `EvaluationError` | GIL only |
+| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
@@ -321,13 +321,19 @@ boundary stays out-of-process and explicit; see
 Contract C-2 owns the gate vocabulary and the byte-identical round-trip.
 Additionally:
 
-- Exported OpenQASM 2.0 uses standard `qelib1.inc` names and must remain
-  accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
-- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output.
-  Canonicalizations performed on import: `u`/`p`/`u1`/`u2` → `u3`, `swap` →
-  its standard 3×`cx` decomposition, multiple `qreg`/`creg` declarations
-  flattened into one index space, constant parameter expressions (e.g.
-  `pi/2`) evaluated.
+- Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the verbatim
+  `gate` declarations of any declared gate it calls) and must remain accepted
+  by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs it directly as long as
+  every instruction is in Aer's basis; `ch`, `u0`, `rccx`, `rc3x`, `c3x`,
+  `c3sqrtx`, `c4x` and every declared gate are not, so such a circuit must be
+  transpiled first (`qiskit.transpile(qc, AerSimulator())`) — Aer never unrolls
+  them by itself.
+- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
+  `gate` declarations included. Canonicalizations performed on import: the
+  builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple
+  `qreg`/`creg` declarations flattened into one index space, constant
+  parameter expressions (e.g. `pi/2`) evaluated. Nothing is decomposed or
+  re-spelled otherwise (C-2): `p`, `u1`, `u2`, `u`, `u3` all stay as written.
 - Parse errors carry the **1-based line number** (`CircuitError::Parse` on
   the Rust side, `ValueError` once across the Python boundary).
 

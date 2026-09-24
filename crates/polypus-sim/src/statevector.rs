@@ -146,12 +146,14 @@ pub(crate) enum DenseQubits {
 /// The qubits `gate` touches if it is one of the nine dense-fusable instructions
 /// (`H, X, Y, Rx, Ry, U` and `Cx, Swap, Rxx`), or `None` otherwise.
 ///
-/// These nine are exactly the gates [`Statevector::apply`] dispatches through
-/// [`kernels::apply_1q`] / [`kernels::apply_2q`] (its dense, non-diagonal arms):
-/// disjoint from the nine [`diagonal_op`] classifies and from the
-/// `Barrier`/`Measure`/`MeasureAll` no-ops, so a gate is dense-fusable, diagonal,
-/// or a boundary, never two of those. A run of these fuses into one composed
-/// matrix per connected qubit component; see
+/// These nine are the dense gates fusion covers, all dispatched by
+/// [`Statevector::apply`] through [`kernels::apply_1q`] / [`kernels::apply_2q`].
+/// They are disjoint from the nine [`diagonal_op`] classifies and from the
+/// boundaries (every other instruction: the `Id`/`Barrier`/`Measure`/
+/// `MeasureAll` no-ops, the other dense and controlled gates, calls of declared
+/// gates), so a gate is dense-fusable, diagonal, or a boundary, never two of
+/// those. A run of these fuses into one composed matrix per connected qubit
+/// component; see
 /// [`Statevector::apply_composed_1q`] / [`Statevector::apply_composed_2q`] and
 /// their caller
 /// [`StatevectorSimulator::run_cancellable`](crate::StatevectorSimulator).
@@ -473,6 +475,133 @@ impl Statevector {
                 let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
                 kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
             }
+            GateInstruction::Sx(q) => kernels::apply_1q(&mut self.data, n, *q, &gates::sx(), par),
+            GateInstruction::Sxdg(q) => {
+                kernels::apply_1q(&mut self.data, n, *q, &gates::sxdg(), par)
+            }
+            // Controlled single-qubit gates: the target's exact 2×2 on the
+            // controlled kernel (for `cu`, including its phase γ).
+            GateInstruction::Cy(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::y(), par);
+            }
+            GateInstruction::Ch(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::h(), par);
+            }
+            GateInstruction::Csx(c, t) => {
+                kernels::apply_controlled_1q(&mut self.data, n, *c, *t, &gates::sx(), par);
+            }
+            GateInstruction::Crx {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::rx(angle(theta)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Cry {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::ry(angle(theta)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Crz {
+                control,
+                target,
+                theta,
+            } => {
+                let m = gates::diag_matrix(gates::rz(angle(theta)?));
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            // The same operator as `Cp`. It takes the controlled path rather
+            // than `Cp`'s diagonal one so that the diagonal arms here stay
+            // exactly the ones `diagonal_op` classifies for run fusion.
+            GateInstruction::Cu1 { q0, q1, theta } => {
+                let m = gates::diag_matrix(gates::phase(angle(theta)?));
+                kernels::apply_controlled_1q(&mut self.data, n, *q0, *q1, &m, par);
+            }
+            GateInstruction::Cu3 {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+            } => {
+                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            GateInstruction::Cu {
+                control,
+                target,
+                theta,
+                phi,
+                lam,
+                gamma,
+            } => {
+                let u = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                let phase = C64::from_polar(1.0, angle(gamma)?);
+                let m = u.map(|row| row.map(|entry| entry * phase));
+                kernels::apply_controlled_1q(&mut self.data, n, *control, *target, &m, par);
+            }
+            // No dedicated kernel for the composite qelib1.inc gates: each is
+            // lowered here — the simulator's lowering boundary — to its exact
+            // qelib1.inc definition (`GateInstruction::lowering`, exact
+            // including the global phase), every part applied in turn. The
+            // circuit itself, and its OpenQASM export, keep the gate.
+            GateInstruction::Ccx(..)
+            | GateInstruction::Cswap(..)
+            | GateInstruction::Rccx(..)
+            | GateInstruction::Rc3x(..)
+            | GateInstruction::C3x(..)
+            | GateInstruction::C3sqrtx(..)
+            | GateInstruction::C4x(..) => {
+                for part in gate.lowering().into_iter().flatten() {
+                    self.apply(&part)?;
+                }
+            }
+            // `u0(γ)` is the identity; its argument is still validated.
+            GateInstruction::U0 { gamma, .. } => {
+                angle(gamma)?;
+            }
+            // The other spellings of the generic single-qubit gate, each with
+            // its exact matrix. `p`/`u1` take the dense path (not the diagonal
+            // one) so the diagonal arms here stay exactly what `diagonal_op`
+            // classifies for run fusion.
+            GateInstruction::P { qubit, lam } | GateInstruction::U1 { qubit, lam } => {
+                let m = gates::diag_matrix(gates::phase(angle(lam)?));
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            GateInstruction::U2 { qubit, phi, lam } => {
+                let m = gates::u(std::f64::consts::FRAC_PI_2, angle(phi)?, angle(lam)?);
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            GateInstruction::UGate {
+                qubit,
+                theta,
+                phi,
+                lam,
+            } => {
+                let m = gates::u(angle(theta)?, angle(phi)?, angle(lam)?);
+                kernels::apply_1q(&mut self.data, n, *qubit, &m, par);
+            }
+            // A call of a gate declared in the source program: expanded here —
+            // the simulator's lowering boundary — into built-in instructions,
+            // each applied like any other. The call's own angles are resolved
+            // first, so an unbound or non-finite one fails exactly as it would
+            // on a built-in gate.
+            GateInstruction::Custom(call) => {
+                for p in call.params() {
+                    angle(p)?;
+                }
+                let expanded = call.expand(&[]).map_err(|_| SimError::NonFiniteAmplitude)?;
+                for g in &expanded {
+                    self.apply(g)?;
+                }
+            }
+            // The identity leaves the state unchanged (the qubit index was
+            // still range-checked above, like every operand).
+            GateInstruction::Id(_) => {}
             GateInstruction::Barrier(_)
             | GateInstruction::Measure { .. }
             | GateInstruction::MeasureAll => {}
@@ -645,6 +774,8 @@ mod tests {
                 phi: GateParam::Fixed(0.4),
                 lam: GateParam::Fixed(0.4),
             },
+            // A no-op: takes the single-gate path, never joins a fused run.
+            GateInstruction::Id(0),
             GateInstruction::Barrier(vec![]),
             GateInstruction::Measure { qubit: 0, cbit: 0 },
             GateInstruction::MeasureAll,
