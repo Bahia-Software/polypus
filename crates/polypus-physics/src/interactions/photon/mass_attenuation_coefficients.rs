@@ -609,7 +609,8 @@ pub struct CompoundResult {
     /// The compound's molar mass (g/mol), computed from its formula.
     pub molar_mass: f64,
     /// Mass fraction of each element (symbol -> fraction), summing to 1.0.
-    pub mass_fractions: HashMap<String, f64>,
+    /// Iterates in symbol order.
+    pub mass_fractions: BTreeMap<String, f64>,
     /// The (energy, mu_m) points, on a common energy grid shared by all
     /// constituent elements.
     pub points: Vec<MuPoint>,
@@ -652,7 +653,7 @@ pub fn mu_m_for_compound(
         );
     }
 
-    let mut mass_fractions: HashMap<String, f64> = HashMap::new();
+    let mut mass_fractions: BTreeMap<String, f64> = BTreeMap::new();
     for (symbol, data) in &elements {
         let fraction = (data.atom_count as f64) * data.atomic_mass / molar_mass;
         mass_fractions.insert(symbol.clone(), fraction);
@@ -910,7 +911,8 @@ mod tests {
         assert!((total - 1.0).abs() < 1e-12);
     }
 
-    /// Compares every float bit for bit (`==` would equate 0.0 and -0.0).
+    /// Compares every float bit for bit (`==` would equate 0.0 and -0.0), and
+    /// `mass_fractions` in iteration order, which a caller's sum over it follows.
     fn assert_bit_identical(formula: &str, expected: &CompoundResult, actual: &CompoundResult) {
         assert_eq!(
             expected.molar_mass.to_bits(),
@@ -919,15 +921,18 @@ mod tests {
             expected.molar_mass,
             actual.molar_mass
         );
-        assert_eq!(expected.mass_fractions.len(), actual.mass_fractions.len());
-        for (symbol, fraction) in &expected.mass_fractions {
-            let other = actual.mass_fractions[symbol];
-            assert_eq!(
-                fraction.to_bits(),
-                other.to_bits(),
-                "{formula}: mass fraction of {symbol} {fraction} vs {other}"
-            );
-        }
+        let fraction_bits = |result: &CompoundResult| -> Vec<(String, u64)> {
+            result
+                .mass_fractions
+                .iter()
+                .map(|(symbol, fraction)| (symbol.clone(), fraction.to_bits()))
+                .collect()
+        };
+        assert_eq!(
+            fraction_bits(expected),
+            fraction_bits(actual),
+            "{formula}: mass fractions"
+        );
         assert_eq!(expected.points.len(), actual.points.len());
         for (i, (e, a)) in expected.points.iter().zip(&actual.points).enumerate() {
             assert!(
