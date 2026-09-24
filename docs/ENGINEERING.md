@@ -300,13 +300,19 @@ boundary stays out-of-process and explicit; see
 Contract C-2 owns the gate vocabulary and the byte-identical round-trip.
 Additionally:
 
-- Exported OpenQASM 2.0 uses standard `qelib1.inc` names and must remain
-  accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
-- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output.
-  Canonicalizations performed on import: `u`/`p`/`u1`/`u2` → `u3`, `swap` →
-  its standard 3×`cx` decomposition, multiple `qreg`/`creg` declarations
-  flattened into one index space, constant parameter expressions (e.g.
-  `pi/2`) evaluated.
+- Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the verbatim
+  `gate` declarations of any declared gate it calls) and must remain accepted
+  by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs it directly as long as
+  every instruction is in Aer's basis; `ch`, `u0`, `rccx`, `rc3x`, `c3x`,
+  `c3sqrtx`, `c4x` and every declared gate are not, so such a circuit must be
+  transpiled first (`qiskit.transpile(qc, AerSimulator())`) — Aer never unrolls
+  them by itself.
+- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
+  `gate` declarations included. Canonicalizations performed on import: the
+  builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple
+  `qreg`/`creg` declarations flattened into one index space, constant
+  parameter expressions (e.g. `pi/2`) evaluated. Nothing is decomposed or
+  re-spelled otherwise (C-2): `p`, `u1`, `u2`, `u`, `u3` all stay as written.
 - Parse errors carry the **1-based line number** (`CircuitError::Parse` on
   the Rust side, `ValueError` once across the Python boundary).
 

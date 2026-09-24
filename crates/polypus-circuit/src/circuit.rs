@@ -2,7 +2,9 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
-use crate::gate::{ActsOn, GateInstruction, GateParam, MeasuredQubits};
+use crate::gate::{
+    first_repeated_qubit, qubit_index_violation, GateInstruction, GateParam, MeasuredQubits,
+};
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
@@ -73,11 +75,12 @@ impl ParameterizedCircuit {
     /// Import an OpenQASM 2.0 program (the inverse of
     /// [`to_qasm2_with_params`](Self::to_qasm2_with_params)).
     ///
-    /// Supports the gate vocabulary emitted by this crate plus the common
-    /// `qelib1.inc` names produced by Qiskit's `qasm2.dumps` (`u`, `p`, `u1`,
-    /// `u2`, `swap`, `id`, …), multiple `qreg`/`creg` declarations (flattened
-    /// in declaration order), register broadcasting, and constant angle
-    /// expressions such as `pi/2`.
+    /// Supports the `qelib1.inc` vocabulary produced by Qiskit's `qasm2.dumps`
+    /// (`u`, `p`, `u1`, `u2`, `sx`, `ccx`, `cu3`, `id`, …), `gate`
+    /// declarations (each call becomes one [`GateInstruction::Custom`], never
+    /// its expanded body), multiple `qreg`/`creg` declarations (flattened in
+    /// declaration order), register broadcasting, and angle expressions such
+    /// as `pi/2`.
     ///
     /// Since OpenQASM 2.0 has no free parameters, the result is always fully
     /// concrete (`num_params == 0`). Round-trip guarantee: for any circuit
@@ -86,40 +89,25 @@ impl ParameterizedCircuit {
     /// QASM again.
     ///
     /// Known model differences (semantics-preserving):
-    /// - `p`/`u1`/`u2`/`u` are canonicalised to `u3`, `swap` to its standard
-    ///   3×`cx` decomposition, and `id` is dropped.
+    /// - The language builtins `U` and `CX` are re-emitted as `u` and `cx`
+    ///   (what Qiskit names them too). Every other instruction — `p`, `u1`,
+    ///   `u2`, `u`, `u3`, `id` included — is kept one-to-one, as spelled.
+    /// - Gate declarations are re-emitted right after the include, in source
+    ///   order; a declaration no instruction uses is not re-emitted.
     /// - The classical register is implicit (sized by the measurements), so
     ///   trailing *unmeasured* classical bits are not preserved.
     ///
     /// # Errors
     ///
     /// [`CircuitError::Parse`] (with a 1-based line number) on malformed
-    /// input, undeclared registers, out-of-range indices, or unsupported
-    /// statements (`gate` definitions, `opaque`, `if`, `reset`).
+    /// input, undeclared registers, out-of-range indices, unsupported
+    /// statements (`opaque`, `if`, `reset`) or gates that are neither built in
+    /// nor declared — each naming the construct.
     pub fn from_qasm2(source: &str) -> Result<Self, CircuitError> {
         qasm_import::parse_qasm2(source)
     }
 
     // ── Internal validation helpers ──────────────────────────────────────
-
-    fn check_qubit(&self, qubit: usize) -> Result<(), CircuitError> {
-        if qubit >= self.num_qubits {
-            return Err(CircuitError::QubitOutOfRange {
-                qubit,
-                num_qubits: self.num_qubits,
-            });
-        }
-        Ok(())
-    }
-
-    fn check_pair(&self, q0: usize, q1: usize) -> Result<(), CircuitError> {
-        self.check_qubit(q0)?;
-        self.check_qubit(q1)?;
-        if q0 == q1 {
-            return Err(CircuitError::IdenticalQubits { qubit: q0 });
-        }
-        Ok(())
-    }
 
     fn track_param(&mut self, param: &GateParam) {
         if let GateParam::Param(i) = param {
@@ -152,74 +140,34 @@ impl ParameterizedCircuit {
         // a circuit quadratic in its gate count. Checked before any mutation
         // below; the cache itself is only advanced on the success path.
         self.measured.sync(&self.gates);
-        match gate.acts_on() {
-            ActsOn::One(q) if self.measured.contains(q) => {
-                return Err(CircuitError::QubitAlreadyMeasured { qubit: q });
-            }
-            ActsOn::Two(a, b) => {
-                if self.measured.contains(a) {
-                    return Err(CircuitError::QubitAlreadyMeasured { qubit: a });
-                }
-                if self.measured.contains(b) {
-                    return Err(CircuitError::QubitAlreadyMeasured { qubit: b });
-                }
-            }
-            _ => {}
+        // The first measured operand in operand order, for any arity.
+        if let Some(&qubit) = gate
+            .acts_on()
+            .qubits()
+            .iter()
+            .find(|&&q| self.measured.contains(q))
+        {
+            return Err(CircuitError::QubitAlreadyMeasured { qubit });
         }
-        match &gate {
-            GateInstruction::H(q)
-            | GateInstruction::X(q)
-            | GateInstruction::Y(q)
-            | GateInstruction::Z(q)
-            | GateInstruction::S(q)
-            | GateInstruction::T(q)
-            | GateInstruction::Sdg(q)
-            | GateInstruction::Tdg(q) => self.check_qubit(*q)?,
-            GateInstruction::Rx { qubit, theta }
-            | GateInstruction::Ry { qubit, theta }
-            | GateInstruction::Rz { qubit, theta } => {
-                self.check_qubit(*qubit)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::Cx(q0, q1)
-            | GateInstruction::Cz(q0, q1)
-            | GateInstruction::Swap(q0, q1) => self.check_pair(*q0, *q1)?,
-            GateInstruction::Rzz { q0, q1, theta } | GateInstruction::Rxx { q0, q1, theta } => {
-                self.check_pair(*q0, *q1)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::Cp { q0, q1, theta } => {
-                self.check_pair(*q0, *q1)?;
-                Self::check_finite(theta)?;
-                let theta = *theta;
-                self.track_param(&theta);
-            }
-            GateInstruction::U {
+        // Every qubit reference in range: unitary operands, a measurement target
+        // and barrier operands (`MeasureAll` spans the register by definition).
+        if let Some(qubit) = qubit_index_violation(std::slice::from_ref(&gate), self.num_qubits) {
+            return Err(CircuitError::QubitOutOfRange {
                 qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                self.check_qubit(*qubit)?;
-                Self::check_finite(theta)?;
-                Self::check_finite(phi)?;
-                Self::check_finite(lam)?;
-                let (theta, phi, lam) = (*theta, *phi, *lam);
-                self.track_param(&theta);
-                self.track_param(&phi);
-                self.track_param(&lam);
-            }
-            GateInstruction::Barrier(qubits) => {
-                for q in qubits {
-                    self.check_qubit(*q)?;
-                }
-            }
-            GateInstruction::Measure { qubit, .. } => self.check_qubit(*qubit)?,
-            GateInstruction::MeasureAll => {}
+                num_qubits: self.num_qubits,
+            });
+        }
+        // A unitary never names the same qubit twice (a barrier may).
+        if let Some(qubit) = first_repeated_qubit(gate.acts_on().qubits()) {
+            return Err(CircuitError::IdenticalQubits { qubit });
+        }
+        // Every angle is validated before any is tracked, so a rejected gate
+        // leaves `num_params` untouched.
+        for param in gate.params() {
+            Self::check_finite(param)?;
+        }
+        for param in gate.params() {
+            self.track_param(param);
         }
         self.measured.record(&gate);
         self.gates.push(gate);
@@ -283,6 +231,12 @@ impl ParameterizedCircuit {
     /// T† gate on `qubit`.
     pub fn tdg(self, qubit: usize) -> Self {
         self.push(GateInstruction::Tdg(qubit))
+    }
+
+    /// Identity gate on `qubit` (`id`): no effect on the state, but it is kept
+    /// as an instruction, so it counts towards gate count and depth.
+    pub fn id(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Id(qubit))
     }
 
     /// X-rotation on `qubit`; `theta` is a fixed `f64` or a [`Param`](GateParam::Param).
@@ -369,6 +323,178 @@ impl ParameterizedCircuit {
         })
     }
 
+    // ── The rest of qelib1.inc ───────────────────────────────────────────
+
+    /// √X gate on `qubit`.
+    pub fn sx(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Sx(qubit))
+    }
+
+    /// √X† gate on `qubit`.
+    pub fn sxdg(self, qubit: usize) -> Self {
+        self.push(GateInstruction::Sxdg(qubit))
+    }
+
+    /// Controlled-Y with `control` and `target`.
+    pub fn cy(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Cy(control, target))
+    }
+
+    /// Controlled-Hadamard with `control` and `target`.
+    pub fn ch(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Ch(control, target))
+    }
+
+    /// Controlled-√X with `control` and `target`.
+    pub fn csx(self, control: usize, target: usize) -> Self {
+        self.push(GateInstruction::Csx(control, target))
+    }
+
+    /// Toffoli: flips `target` when both `control0` and `control1` are 1.
+    pub fn ccx(self, control0: usize, control1: usize, target: usize) -> Self {
+        self.push(GateInstruction::Ccx(control0, control1, target))
+    }
+
+    /// Fredkin: swaps `target0` and `target1` when `control` is 1.
+    pub fn cswap(self, control: usize, target0: usize, target1: usize) -> Self {
+        self.push(GateInstruction::Cswap(control, target0, target1))
+    }
+
+    /// Controlled X-rotation.
+    pub fn crx(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Crx {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled Y-rotation.
+    pub fn cry(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cry {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled Z-rotation.
+    pub fn crz(self, control: usize, target: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Crz {
+            control,
+            target,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled phase in its `cu1` spelling (the same operator as
+    /// [`cp`](Self::cp), exported as `cu1`).
+    pub fn cu1(self, q0: usize, q1: usize, theta: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::Cu1 {
+            q0,
+            q1,
+            theta: theta.into(),
+        })
+    }
+
+    /// Controlled `u3(theta, phi, lam)`.
+    pub fn cu3(
+        self,
+        control: usize,
+        target: usize,
+        theta: impl Into<GateParam>,
+        phi: impl Into<GateParam>,
+        lam: impl Into<GateParam>,
+    ) -> Self {
+        self.push(GateInstruction::Cu3 {
+            control,
+            target,
+            theta: theta.into(),
+            phi: phi.into(),
+            lam: lam.into(),
+        })
+    }
+
+    /// Controlled `u(theta, phi, lam)` with phase `gamma` on the controlled
+    /// branch (Qiskit's `cu`).
+    pub fn cu(
+        self,
+        control: usize,
+        target: usize,
+        theta: impl Into<GateParam>,
+        phi: impl Into<GateParam>,
+        lam: impl Into<GateParam>,
+        gamma: impl Into<GateParam>,
+    ) -> Self {
+        self.push(GateInstruction::Cu {
+            control,
+            target,
+            theta: theta.into(),
+            phi: phi.into(),
+            lam: lam.into(),
+            gamma: gamma.into(),
+        })
+    }
+
+    /// Phase gate `p(lam)` on `qubit`.
+    pub fn p(self, qubit: usize, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::P {
+            qubit,
+            lam: lam.into(),
+        })
+    }
+
+    /// `u1(lam)` on `qubit`: the phase gate in its `u1` spelling.
+    pub fn u1(self, qubit: usize, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U1 {
+            qubit,
+            lam: lam.into(),
+        })
+    }
+
+    /// `u2(phi, lam)` on `qubit` (= `u3(π/2, phi, lam)`).
+    pub fn u2(self, qubit: usize, phi: impl Into<GateParam>, lam: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U2 {
+            qubit,
+            phi: phi.into(),
+            lam: lam.into(),
+        })
+    }
+
+    /// `u0(gamma)` on `qubit`: the identity ("idle for `gamma` units"), kept
+    /// as an instruction like [`id`](Self::id).
+    pub fn u0(self, qubit: usize, gamma: impl Into<GateParam>) -> Self {
+        self.push(GateInstruction::U0 {
+            qubit,
+            gamma: gamma.into(),
+        })
+    }
+
+    /// Simplified Toffoli (`rccx`): a Toffoli up to relative phases.
+    pub fn rccx(self, control0: usize, control1: usize, target: usize) -> Self {
+        self.push(GateInstruction::Rccx(control0, control1, target))
+    }
+
+    /// Simplified 3-controlled Toffoli (`rc3x`), up to relative phases.
+    pub fn rc3x(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::Rc3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled X (`c3x`).
+    pub fn c3x(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::C3x(c0, c1, c2, target))
+    }
+
+    /// 3-controlled √X (`c3sqrtx`).
+    pub fn c3sqrtx(self, c0: usize, c1: usize, c2: usize, target: usize) -> Self {
+        self.push(GateInstruction::C3sqrtx(c0, c1, c2, target))
+    }
+
+    /// 4-controlled X (`c4x`).
+    pub fn c4x(self, c0: usize, c1: usize, c2: usize, c3: usize, target: usize) -> Self {
+        self.push(GateInstruction::C4x(c0, c1, c2, c3, target))
+    }
+
     // ── Non-unitary instructions ─────────────────────────────────────────
 
     /// Barrier across the whole quantum register (`barrier q;`).
@@ -425,47 +551,9 @@ impl ParameterizedCircuit {
 
         let mut gates = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
-            let bound = match gate {
-                GateInstruction::Rx { qubit, theta } => GateInstruction::Rx {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Ry { qubit, theta } => GateInstruction::Ry {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rz { qubit, theta } => GateInstruction::Rz {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rzz { q0, q1, theta } => GateInstruction::Rzz {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Rxx { q0, q1, theta } => GateInstruction::Rxx {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::Cp { q0, q1, theta } => GateInstruction::Cp {
-                    q0: *q0,
-                    q1: *q1,
-                    theta: resolve(theta)?,
-                },
-                GateInstruction::U {
-                    qubit,
-                    theta,
-                    phi,
-                    lam,
-                } => GateInstruction::U {
-                    qubit: *qubit,
-                    theta: resolve(theta)?,
-                    phi: resolve(phi)?,
-                    lam: resolve(lam)?,
-                },
-                other => other.clone(),
-            };
+            // Exhaustive over the vocabulary (no wildcard arm), so a new
+            // parameterised gate can never slip through unbound.
+            let bound = gate.try_map_params(resolve)?;
             gates.push(bound);
         }
 
@@ -544,10 +632,15 @@ impl ConcreteCircuit {
     /// value (`NaN` or infinity). Neither can happen for circuits produced by
     /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
     /// values at binding time); both are only possible when the `gates` field
-    /// was assembled manually.
+    /// was assembled manually. Also panics if the circuit calls two different
+    /// declared gates under one name
+    /// ([`CircuitError::ConflictingGateDefinitions`]), which only happens when
+    /// calls from different imported programs are combined in one circuit. For
+    /// a fallible export, use
+    /// [`ParameterizedCircuit::to_qasm2_with_params`](crate::ParameterizedCircuit::to_qasm2_with_params).
     pub fn to_qasm2(&self) -> String {
         qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param or a non-finite fixed angle; use ParameterizedCircuit::assign_parameters",
+            "ConcreteCircuit contains an unbound Param, a non-finite fixed angle, or two different declared gates under one name; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params",
         )
     }
 

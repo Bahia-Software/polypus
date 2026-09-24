@@ -36,6 +36,10 @@ pub enum CircuitError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// The circuit calls two different gates declared under the same name
+    /// (only possible when combining calls from separately imported programs),
+    /// which one OpenQASM 2.0 program cannot declare.
+    ConflictingGateDefinitions { name: String },
     /// QIR bitcode export requires an external assembler (`llvm-as`) that is
     /// not available on `PATH`.
     QirAssemblyToolNotFound { tool: String },
@@ -74,6 +78,10 @@ impl fmt::Display for CircuitError {
             CircuitError::Parse { line, message } => {
                 write!(f, "QASM parse error at line {line}: {message}")
             }
+            CircuitError::ConflictingGateDefinitions { name } => write!(
+                f,
+                "the circuit calls two different gates declared as '{name}'; one OpenQASM 2.0 program cannot declare a gate twice"
+            ),
             CircuitError::QirAssemblyToolNotFound { tool } => write!(
                 f,
                 "QIR bitcode export requires '{tool}', but it was not found on PATH"
