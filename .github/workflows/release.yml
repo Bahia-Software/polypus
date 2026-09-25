@@ -138,6 +138,8 @@ jobs:
           path: dist
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   # Manual dry run: publish to TestPyPI (the default target for a manual run).
   publish-testpypi:
@@ -160,6 +162,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   # ── Post-publish clean-room smoke test ──────────────────────────────────────
   # Guarantee `pip install polypus-quantum` works for someone with NO relation to
