@@ -10,9 +10,14 @@
 //! - **C-4 · Terminal measurement placement (simulator half).** The simulator
 //!   rejects a circuit that operates on an already-measured qubit rather than
 //!   silently treating the measurement as a no-op.
+//! - **C-3 · Last measurement wins.** When several measurements write the same
+//!   classical bit, the counts report the value of the last one in program
+//!   order (OpenQASM 2.0 register semantics, as Qiskit/Aer do) — each write
+//!   overwrites the bit, it is never OR-ed into it.
 
 use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
 use polypus_sim::{SimError, Simulator, Statevector, StatevectorSimulator, C64};
+use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_3, PI};
 
 // ─────────────────── C-2 · QIR-vs-simulator equivalence ───────────────────
@@ -205,6 +210,101 @@ fn c4_simulator_rejects_three_qubit_gate_on_measured_operand() {
     };
     let err = StatevectorSimulator::new().run(&cc).unwrap_err();
     assert_eq!(err, SimError::GateAfterMeasure { qubit: 1 });
+}
+
+// ─────────────────────── C-3 · last measurement wins ───────────────────────
+
+const SHOTS: usize = 200;
+
+/// Counts of `gates` on `num_qubits` qubits, keyed by classical register.
+fn sample(num_qubits: usize, gates: Vec<G>, seed: u64) -> HashMap<usize, u64> {
+    let cc = ConcreteCircuit { num_qubits, gates };
+    StatevectorSimulator::new()
+        .run_and_sample(&cc, SHOTS, seed)
+        .unwrap()
+}
+
+/// The issue #205 evidence circuit: `q[0]` is 1, `q[1]` is 0, and both are
+/// measured into `c[0]` — the second measurement must overwrite the first
+/// (Aer reports `{'0': shots}`; OR-ing the writes reported `{'1': shots}`).
+#[test]
+fn c3_repeated_measure_into_one_cbit_matches_the_evidence_circuit() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[1];\n\
+               x q[0];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[0];\n";
+    let cc = polypus_circuit::ParameterizedCircuit::from_qasm2(src)
+        .unwrap()
+        .assign_parameters(&[])
+        .unwrap();
+    let counts = StatevectorSimulator::new()
+        .run_and_sample(&cc, SHOTS, 7)
+        .unwrap();
+    assert_eq!(counts, HashMap::from([(0, SHOTS as u64)]));
+}
+
+/// Two qubits with different values written to the same classical bit: the
+/// later write decides the bit, in either order.
+#[test]
+fn c3_last_of_two_measures_into_one_cbit_wins_in_either_order() {
+    let one_then_zero = vec![
+        G::X(0),
+        G::Measure { qubit: 0, cbit: 0 },
+        G::Measure { qubit: 1, cbit: 0 },
+    ];
+    assert_eq!(
+        sample(2, one_then_zero, 1),
+        HashMap::from([(0, SHOTS as u64)])
+    );
+
+    let zero_then_one = vec![
+        G::X(0),
+        G::Measure { qubit: 1, cbit: 0 },
+        G::Measure { qubit: 0, cbit: 0 },
+    ];
+    assert_eq!(
+        sample(2, zero_then_one, 1),
+        HashMap::from([(1, SHOTS as u64)])
+    );
+}
+
+/// One qubit measured twice into distinct classical bits reports the same
+/// value in both, whatever the order of the two writes — also when that value
+/// is random (a qubit in superposition).
+#[test]
+fn c3_one_qubit_measured_into_two_cbits_agrees_in_both() {
+    let forward = vec![
+        G::H(0),
+        G::Measure { qubit: 0, cbit: 0 },
+        G::Measure { qubit: 0, cbit: 1 },
+    ];
+    let backward = vec![
+        G::H(0),
+        G::Measure { qubit: 0, cbit: 1 },
+        G::Measure { qubit: 0, cbit: 0 },
+    ];
+    let counts = sample(1, forward, 3);
+    assert!(counts.keys().all(|&k| k == 0b00 || k == 0b11), "{counts:?}");
+    assert_eq!(counts.len(), 2, "both outcomes must appear: {counts:?}");
+    assert_eq!(counts.values().sum::<u64>(), SHOTS as u64);
+    assert_eq!(sample(1, backward, 3), counts);
+}
+
+/// `MeasureAll` writes every classical bit where it appears in the program: an
+/// explicit `Measure` after it overwrites its bit, and one before it is
+/// overwritten by it.
+#[test]
+fn c3_measure_all_orders_against_explicit_measures_by_program_position() {
+    // q0 = 1, q1 = 0.
+    let explicit_after = vec![G::X(0), G::MeasureAll, G::Measure { qubit: 1, cbit: 0 }];
+    assert_eq!(
+        sample(2, explicit_after, 5),
+        HashMap::from([(0b00, SHOTS as u64)])
+    );
+
+    let explicit_before = vec![G::X(0), G::Measure { qubit: 1, cbit: 0 }, G::MeasureAll];
+    assert_eq!(
+        sample(2, explicit_before, 5),
+        HashMap::from([(0b01, SHOTS as u64)])
+    );
 }
 
 // ──────────── C-2 · every gate's emitted QIR vs. the native gate ─────────────
