@@ -152,6 +152,7 @@ jobs:
           -p polypus-optimizers
           -p polypus-observable
           -p polypus-backend
+          -p polypus-backend-conformance
           -p polypus-subprocess-backend
           --all-features
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
@@ -180,6 +181,15 @@ jobs:
         run: cargo test --locked -p polypus
       - name: Test polypus (qmio backend)
         run: cargo test --locked -p polypus --features qmio
+      # The two backend templates are standalone crates (their own `[workspace]`),
+      # so `cargo test --workspace` above does not reach them; run each explicitly.
+      # Both certify themselves against the conformance battery. The Python one spawns
+      # a worker through the subprocess bridge and skips gracefully without an
+      # interpreter (setup-python above provides one).
+      - name: Test the Rust backend template
+        run: cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
+      - name: Test the Python backend template
+        run: cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
 
   # Sanity-check that the rustdoc still builds cleanly across the whole
   # workspace (broken intra-doc links fail via -D warnings). Catches
