@@ -14,7 +14,10 @@ target).
 > work (issue #191). The runtime **registry** (use a backend by name without editing
 > Polypus) and the **subprocess bridge** for Python SDKs landed next (issue #194) and
 > have their own sections below: [Registering a backend from Rust](#registering-a-backend-from-rust)
-> and [The Python subprocess bridge](#the-python-subprocess-bridge).
+> and [The Python subprocess bridge](#the-python-subprocess-bridge). Finally, two
+> copy-me [reference templates](#reference-templates) and a
+> [conformance battery](#testing-your-backend-the-conformance-battery) (issue #199) let
+> you write a backend and verify it against this contract.
 
 ## The one crate you depend on: `polypus-backend`
 
@@ -380,6 +383,206 @@ Two paths reach the worker, and both end the run as `KeyboardInterrupt`:
   `Cancelled` (→ `KeyboardInterrupt`). **Polypus does not yet expose a cancellation
   handle from Python**, so this path is only reachable from Rust today.
 
+## Reference templates
+
+Two copy-me starting points ship in `examples/`, each a **standalone crate outside
+the workspace** (their own `[workspace]`), so they depend on `polypus-backend` exactly
+as your crate would. Both are certified by the conformance battery (below).
+
+- **[`examples/rust-backend-template`](../examples/rust-backend-template)** — the
+  *native / wire-protocol* path (option D, the one QMIO uses). One `src/lib.rs` of
+  ~150 lines, pyo3-free: it serialises each circuit, calls one `transport` function
+  (the single thing you replace with your device's protocol), classifies failures,
+  self-checks the results, and registers itself. Run its battery with
+  `cd examples/rust-backend-template && cargo test`.
+- **[`examples/python-backend-template`](../examples/python-backend-template)** — the
+  *subprocess bridge* path, for a provider that only ships a Python SDK. Its
+  [`worker.py`](../examples/python-backend-template/worker.py) is
+  `worker_template.py` with the one `execute_circuits` function filled in; the framing
+  and handshake are copied verbatim (they are the frozen protocol). Run its battery —
+  which spawns the worker through the real bridge — with
+  `cd examples/python-backend-template && cargo test` (needs a `python3`).
+
+## Testing your backend: the conformance battery
+
+`polypus-backend-conformance` is a reusable test battery that certifies a
+`QuantumBackend` against the semantics documented above. It depends only on
+`polypus-backend` (and `polypus-circuit`, to build its probe circuits), so it is as
+pyo3-free as the contract — add it as a dev-dependency and nothing else:
+
+```toml
+[dev-dependencies]
+polypus-backend-conformance = "0.7"
+```
+
+```rust
+use std::sync::Arc;
+use polypus_backend::QuantumBackend;
+use polypus_backend_conformance::{Conformance, Fault};
+
+let report = Conformance::new("my-backend", || Ok(Arc::new(MyBackend::new()) as Arc<dyn QuantumBackend>))
+    .shots(1024)
+    // Supply a factory for each fault your backend can be driven into:
+    .fault(Fault::Unresponsive, || Ok(Arc::new(MyBackend::rigged_dead()) as _))
+    .fault(Fault::CleanError,   || Ok(Arc::new(MyBackend::rigged_error()) as _))
+    .fault(Fault::Aborted,      || Ok(Arc::new(MyBackend::rigged_slow()) as _))
+    .run();
+
+println!("{report}");
+report.assert_conformant(); // panics with the full report if any check FAILED
+```
+
+### What it checks
+
+**Behaviour** (needs only a healthy backend): results satisfy
+[`validate_run_results`](#reporting-failure-backenderror) over both the native and
+OpenQASM 2.0 representations (count, non-empty, shot conservation C-3, bitstring
+keys); batch order is preserved; an empty batch returns no maps; a batch larger than
+`max_concurrency` runs correctly in waves; shot distribution conserves the total,
+including a zero-shot replica; a backend declaring a *finite* `max_concurrency` runs a
+full wave of that size.
+
+**Error classification** (needs the backend driven into each fault): an unrecognised
+`Foreign` circuit → `UnsupportedCircuit`; a dead/hung backend → `Unresponsive`; an
+out-of-band cancelled call → `Aborted`; a clean provider failure → a definitive error
+(neither `Unresponsive` nor `Aborted`).
+
+### Skips are honest, not passes
+
+The battery cannot force a live QPU to hang, so each error-classification check runs
+**only** against a backend *you* rig into that state via `.fault(...)`. A fault you do
+not supply is **skipped, not passed**, and the report says so. A skip does not break
+conformance (`assert_conformant` only fails on a `FAIL`): a backend that genuinely
+cannot enter a fault — a synchronous in-process simulator cannot "stop responding" —
+should show that check skipped, never fake a pass. So "passes the battery" always
+comes with an exact statement of what was and was not exercised.
+
+### A backend whose healthy instance needs hardware
+
+If your backend has no simulator mode (like QMIO), its behavioural checks cannot run
+without a device, but its error classification still can — against a mock or
+unreachable endpoint. Use `Conformance::run_error_classification()`, which runs only
+the foreign-rejection and fault checks and skips the behavioural group.
+
+## Conformance of the built-in backends
+
+We ran the battery against Polypus's own four backends
+([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs)),
+so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
+**every failure is documented here before any fix**. The behavioural checks pass for
+every runnable backend; the interesting results are all in error classification, and
+they trace exactly the **recoverable-vs-fatal** split between the Rust-native backends
+(which fail *in Rust* with a typed variant) and the seal-delegating backends (which
+have no failure variants of their own).
+
+> **These results are a one-off manual run, not a continuous CI guard.** Only the
+> pure-Rust `native_backend_conforms` test runs on every build; the Local, CUNQA and
+> QMIO tests are `#[ignore]`d (they need Aer / SLURM / the qmio feature, and Aer is
+> fragile off the main thread). The table below is the record of running them by hand
+> for this phase — re-run them (commands are on each test) when touching a backend;
+> do not read them as verified on each build.
+
+| Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
+|---|---|---|---|---|---|---|
+| **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
+| **Local (Aer)** | full battery (Aer present) | ✅ pass¹ | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
+| **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
+| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ❌ **QMIO-1** |
+
+¹ except the empty-batch edge case — finding **LOCAL-1** below.
+
+### Native — fully conformant
+
+The pure-Rust statevector backend passes every behavioural check and rejects a
+`Foreign` circuit with `UnsupportedCircuit`. It has **no** `Unresponsive`, `Aborted`,
+or clean-provider-error path: a synchronous CPU simulation cannot stop responding, be
+signalled mid-call, or report a provider failure on a valid circuit. Those three
+classification checks are therefore **skipped** (not applicable), and nothing fails.
+This is the shape a self-contained in-process backend should have.
+
+### Local (Aer) and CUNQA — seal-delegating
+
+Both hand the whole call to the in-process `polypus_python` seal (contract C-1). Two
+consequences the battery makes concrete:
+
+- **No `Unresponsive`/`Aborted` path.** Unlike a subprocess or wire backend, these run
+  the provider *inside our own process*. A dead interpreter is not a recoverable
+  "backend stopped responding" — it is a crash of the host process — and there is no
+  in-flight call to signal, so neither variant is reachable. The battery skips both.
+  This is the recoverable-vs-fatal distinction the phase set out to surface: a
+  crash/hang is *retryable* only when the backend is isolated (subprocess/wire); an
+  in-process seal cannot offer that, by construction.
+- **Clean provider error → `External`.** An Aer failure (the battery rigs one with a
+  bogus `sim_method`) surfaces as a Python exception, boxed into `External` and
+  re-raised verbatim at the FFI edge. This check passes.
+
+Findings, **documented not fixed** (they live in `local.rs` / the seal — outside this
+phase's module scope):
+
+- **LOCAL-1 — an empty batch raises.** `LocalBackend::run_circuits(&[])` fails with
+  `ValueError: not enough values to unpack (expected 2, got 0)` from the seal, instead
+  of returning `Ok(vec![])` as the native backend does. It is **latent**: the
+  `Planner` special-cases an empty batch and never calls a backend with one, so no
+  Polypus path hits it today. Proposed fix: short-circuit `if qcs.is_empty() { return
+  Ok(Vec::new()); }` at the top of `LocalBackend::run_circuits` (and the CUNQA one).
+  Of the three findings this is the **cheapest to close**: unlike LOCAL-2 (seal /
+  contract territory) and QMIO-1 (changes a Python exception class), the fix is a
+  self-contained guard clause entirely inside `local.rs`/`cunqa.rs` with **no
+  contract implications**. It is left documented-not-fixed purely to respect this
+  phase's module boundary, not because it is hard.
+- **LOCAL-2 — the `backend` kwarg is ignored (a C-1 contract violation).**
+  `LocalBackend` sends a `backend` kwarg to the seal's `run_qcs`, but the seal's local
+  path never reads it (it hard-codes `AerSimulator`). This is not cosmetic: contract
+  C-1 states that every kwarg the Rust side sends **must be consumed**, and silently
+  ignoring one is "a contract violation" — the same class of break as the historical
+  `cores_per_qpu` one. It is now recorded in the C-1 known-breaks list in
+  [`docs/CONTRACTS.md`](CONTRACTS.md) (audit LOCAL-2, open). Proposed fix: consume it
+  in the seal or stop sending it from `local.rs`.
+
+CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
+row is by analysis: it shares the seal-delegation profile above, including LOCAL-1's
+empty-batch behaviour.
+
+### QMIO — native wire backend
+
+QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
+`QmioError`. Run against an unreachable endpoint:
+
+- **Clean error → `External`.** A wire failure (connect/timeout) is boxed into
+  `External` (a `QmioError`), which the edge re-raises as the typed `polypus.QmioError`.
+  This check passes.
+- **`Unresponsive` is not applicable — by design.** A QMIO timeout *is* "wedged past a
+  deadline", which the contract lists under `Unresponsive`. But QMIO exhausts its **own**
+  internal retries (`QMIO_MAX_RETRIES`) before returning, so by the time it fails the
+  outcome is *definitive*, not retryable — `External` is the honest classification, and
+  the battery's `Unresponsive` check is simply not supplied for QMIO (skip). This is a
+  deliberate reading of recoverable-vs-fatal, not a defect.
+- **QMIO-1 — a `Foreign` circuit surfaces as `External`, not `UnsupportedCircuit`.**
+  `QmioBackend::run_circuits` maps *every* `QmioError` — including
+  `QmioError::UnsupportedCircuit` for a `Foreign` circuit — into `External`, so a caller
+  matching on `BackendError::UnsupportedCircuit` misses it (it arrives as a
+  `polypus.QmioError` at the edge, not the structural unsupported-circuit error). The
+  foreign-rejection check **fails** for QMIO. Proposed fix: in `run_circuits`, map
+  `QmioError::UnsupportedCircuit` to `BackendError::UnsupportedCircuit` before the
+  catch-all `External`.
+
+### Status of the open findings
+
+| Finding | Severity | Reachable today | Fix touches | Deferred because |
+|---|---|---|---|---|
+| LOCAL-1 (empty batch) | low (latent) | no (planner shields it) | `local.rs`, `cunqa.rs` | outside module scope; cheapest to close (self-contained guard clause, no contract impact) |
+| LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
+| QMIO-1 (Foreign→External) | low | only on a misuse (Qiskit circuit to QMIO) | `qmio.rs` | outside scope; **changes the Python exception class**, so needs a contract call |
+
+None of these code changes has been made. The only edit to a contract document is a
+**record** of LOCAL-2 in the C-1 known-breaks list of
+[`docs/CONTRACTS.md`](CONTRACTS.md) — documenting an existing violation where the
+contract already says it belongs, not altering the contract or fixing the break. Note
+that fixing QMIO-1 would change the Python-visible exception for that case (from
+`polypus.QmioError` to the structural unsupported-circuit error), which is a
+contract-visible decision and
+should be taken as one.
+
 ## Stability commitment
 
 `polypus-backend` is a **public contract**: the whole reason it exists is that a
@@ -401,12 +604,16 @@ third party can build against it. We treat it accordingly.
   bridge protocol** (version 1, above) is a second stable contract: the frame shapes
   are versioned by the `protocol` field, and a breaking change bumps that version
   (workers declare the version they speak in their `ready` handshake). The
-  `polypus-subprocess-backend` crate inherits the same workspace version.
-- **crates.io.** `polypus-backend` (and `polypus-subprocess-backend`) are **not yet
-  published to crates.io.** The contract is still settling as the conformance phase
-  (a published conformance suite) lands; publishing before then would freeze a
-  surface we still intend to extend. Until it is published, depend on it by path or
-  git. This document will be updated when it goes to the registry.
+  `polypus-subprocess-backend` crate inherits the same workspace version. The
+  **conformance battery's API** (`Conformance`, `Fault`, `Report`, `Check`, `Status`
+  in `polypus-backend-conformance`) is likewise a surface third parties build tests
+  against, and follows the same pre-1.0 SemVer discipline.
+- **crates.io.** `polypus-backend`, `polypus-subprocess-backend` and
+  `polypus-backend-conformance` are **not yet published to crates.io.** The conformance
+  battery has now landed (this phase), so the contract's shape is exercised end-to-end;
+  publishing still waits on a deliberate decision to freeze the surface. Until it is
+  published, depend on these crates by path or git. This document will be updated when
+  they go to the registry.
 
 When the contract reaches 1.0, this section will state the post-1.0 SemVer guarantee
 (breaking changes only on a major bump).

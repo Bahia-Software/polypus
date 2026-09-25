@@ -44,3 +44,8 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sy
 # build — where the `"subprocess"` backend is simply not registered.
 [target.'cfg(unix)'.dependencies]
 polypus-subprocess-backend = { workspace = true }
+
+[dev-dependencies]
+# The conformance battery, used by `tests/conformance.rs` to certify the four
+# built-in backends against the documented semantics. Pyo3-free dev-only dependency.
+polypus-backend-conformance = { workspace = true }

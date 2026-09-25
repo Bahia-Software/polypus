@@ -827,6 +827,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "polypus-backend-conformance"
+version = "0.7.1"
+dependencies = [
+ "polypus-backend",
+ "polypus-circuit",
+]
+
+[[package]]
 name = "polypus-circuit"
 version = "0.7.1"
 
@@ -850,6 +858,7 @@ version = "0.7.1"
 dependencies = [
  "log",
  "polypus-backend",
+ "polypus-backend-conformance",
  "polypus-circuit",
  "polypus-observable",
  "polypus-sim",

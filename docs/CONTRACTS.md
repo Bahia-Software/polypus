@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -72,6 +72,15 @@ either Qiskit `QuantumCircuit` objects or OpenQASM 2.0 strings; the Python side
 parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
+
+*(Known break, audit LOCAL-2, open: the `local` path's `run_qcs` receives the
+`backend` kwarg the Rust side sends but never consumes it — the Python side
+hard-codes `AerSimulator`. This is the same "must-be-consumed" violation as
+`cores_per_qpu` above. Surfaced by the Fase-5 conformance run (see
+`docs/backends.md` §"Conformance of the built-in backends"); recorded here and not
+yet fixed, because the fix lives in the `polypus_python` seal, outside that phase's
+module scope. Its resolution is either to consume the kwarg on the Python side or to
+stop sending it from `local.rs`.)*
 
 ### `disconnect_from_infrastructure(infrastructure: str, **kwargs)`
 
