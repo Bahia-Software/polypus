@@ -1,6 +1,7 @@
 //! Circuit types: [`ParameterizedCircuit`] (free parameters) and
 //! [`ConcreteCircuit`] (all angles bound).
 
+use crate::custom_gate::GateDefinition;
 use crate::error::CircuitError;
 use crate::expr::{evaluate_constant, Classified, ExprArena, ParamExpr};
 use crate::gate::{
@@ -9,6 +10,8 @@ use crate::gate::{
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 /// A quantum circuit that may contain free parameters ([`GateParam::Param`])
@@ -54,13 +57,19 @@ pub struct ParameterizedCircuit {
     pub(crate) measured: MeasuredQubits,
     /// The expressions [`GateParam::Expr`] angles refer to.
     pub(crate) exprs: ExprArena,
+    /// The names given to free parameters `0..param_names.len()` (by an
+    /// importer). Every other parameter has a default name; see
+    /// [`param_names`](Self::param_names).
+    pub(crate) param_names: Vec<String>,
 }
 
 /// Structural equality over the circuit itself. The `measured` cache is derived
 /// from `gates`, so two circuits that differ only in whether that cache has been
 /// materialised yet are the same circuit. Expressions compare by content, not
 /// by where they are stored: two circuits whose gates use equal expressions are
-/// equal even if one of them also stores an expression no gate uses.
+/// equal even if one of them also stores an expression no gate uses. The
+/// parameters' names ([`ParameterizedCircuit::param_names`]) are part of the
+/// circuit.
 impl PartialEq for ParameterizedCircuit {
     fn eq(&self, other: &Self) -> bool {
         self.num_qubits == other.num_qubits
@@ -71,6 +80,7 @@ impl PartialEq for ParameterizedCircuit {
                 .iter()
                 .zip(&other.gates)
                 .all(|(a, b)| same_instruction(a, &self.exprs, b, &other.exprs))
+            && self.names().eq(other.names())
     }
 }
 
@@ -111,6 +121,7 @@ impl ParameterizedCircuit {
             gates: Vec::new(),
             measured: MeasuredQubits::default(),
             exprs: ExprArena::default(),
+            param_names: Vec::new(),
         }
     }
 
@@ -180,6 +191,65 @@ impl ParameterizedCircuit {
             Classified::Constant => GateParam::Fixed(evaluate_constant(&expr)?),
             Classified::Expr { max_input } => GateParam::Expr(self.exprs.insert(&expr, max_input)?),
         })
+    }
+
+    // ── Parameter names ──────────────────────────────────────────────────
+
+    /// The name of each free parameter, in index order: exactly
+    /// [`num_params`](Self::num_params) names.
+    ///
+    /// A parameter that was given a name keeps it (an importer names the
+    /// parameters it reads). Every other parameter, including an index no gate
+    /// uses, is named `theta_<index>` — or, if that name is already taken by a
+    /// named parameter or by a declared gate the circuit calls (directly or
+    /// through other declarations), the first free `theta_<index>_<k>` for
+    /// `k = 1, 2, …`. The names are therefore a deterministic function of the
+    /// circuit. They are part of its identity (`==`) and kept by `clone`.
+    /// Names belong to the circuit, not to its gates: a gate pushed from
+    /// another circuit refers to parameters by index and takes this circuit's
+    /// names. Binding removes the parameters, and their names with them (a
+    /// [`ConcreteCircuit`] has neither).
+    ///
+    /// ```
+    /// use polypus_circuit::{Param, ParameterizedCircuit};
+    ///
+    /// let qc = ParameterizedCircuit::new(1).rx(0, Param(2));
+    /// assert_eq!(qc.param_names(), ["theta_0", "theta_1", "theta_2"]);
+    /// ```
+    pub fn param_names(&self) -> Vec<String> {
+        self.names().map(Cow::into_owned).collect()
+    }
+
+    /// [`Self::param_names`], one name at a time.
+    fn names(&self) -> impl Iterator<Item = Cow<'_, str>> + '_ {
+        let mut taken: BTreeSet<&str> = self.param_names.iter().map(String::as_str).collect();
+        taken.extend(self.declared_gate_names());
+        (0..self.num_params).map(move |index| match self.param_names.get(index) {
+            Some(name) => Cow::Borrowed(name.as_str()),
+            None => Cow::Owned(default_param_name(index, &taken)),
+        })
+    }
+
+    /// The names of the declared gates the circuit calls, directly or through
+    /// other declarations. Each definition is visited once.
+    fn declared_gate_names(&self) -> BTreeSet<&str> {
+        let mut names = BTreeSet::new();
+        let mut visited: BTreeSet<*const GateDefinition> = BTreeSet::new();
+        let mut pending: Vec<&GateDefinition> = self
+            .gates
+            .iter()
+            .filter_map(|gate| match gate {
+                GateInstruction::Custom(call) => Some(call.definition()),
+                _ => None,
+            })
+            .collect();
+        while let Some(definition) = pending.pop() {
+            if visited.insert(definition) {
+                names.insert(definition.name());
+                pending.extend(definition.callees().map(|callee| &**callee));
+            }
+        }
+        names
     }
 
     // ── Internal validation helpers ──────────────────────────────────────
@@ -824,6 +894,21 @@ impl ConcreteCircuit {
     }
 }
 
+/// The default name of parameter `index`: `theta_<index>`, or the first
+/// `theta_<index>_<k>` (k = 1, 2, …) not in `taken`. Default names never
+/// collide with each other: `<index>` has no underscore, so every candidate
+/// names one index only.
+fn default_param_name(index: usize, taken: &BTreeSet<&str>) -> String {
+    let base = format!("theta_{index}");
+    if !taken.contains(base.as_str()) {
+        return base;
+    }
+    (1usize..)
+        .map(|k| format!("{base}_{k}"))
+        .find(|name| !taken.contains(name.as_str()))
+        .unwrap_or(base)
+}
+
 /// Shared classical-register sizing logic.
 fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
     let mut n = 0;
@@ -835,4 +920,51 @@ fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Param;
+
+    fn named(names: &[&str]) -> ParameterizedCircuit {
+        let mut qc = ParameterizedCircuit::new(1).rx(0, Param(names.len().saturating_sub(1)));
+        qc.param_names = names.iter().map(|n| n.to_string()).collect();
+        qc
+    }
+
+    #[test]
+    fn given_names_are_kept_and_the_rest_default() {
+        let mut qc = named(&["gamma", "beta"]);
+        assert_eq!(qc.param_names(), ["gamma", "beta"]);
+        qc = qc.rz(0, Param(3));
+        assert_eq!(qc.param_names(), ["gamma", "beta", "theta_2", "theta_3"]);
+        // Names beyond `num_params` are not reported.
+        qc.num_params = 1;
+        assert_eq!(qc.param_names(), ["gamma"]);
+    }
+
+    #[test]
+    fn default_names_avoid_given_ones() {
+        // Parameter 0 was named like parameter 1's default.
+        let qc = named(&["theta_1"]).ry(0, Param(1));
+        assert_eq!(qc.param_names(), ["theta_1", "theta_1_1"]);
+        let qc = named(&["theta_1", "theta_1_1"]).ry(0, Param(2));
+        assert_eq!(qc.param_names(), ["theta_1", "theta_1_1", "theta_2"]);
+        let qc = named(&["theta_2", "theta_2_1"]).ry(0, Param(2));
+        assert_eq!(qc.param_names(), ["theta_2", "theta_2_1", "theta_2_2"]);
+    }
+
+    #[test]
+    fn names_are_part_of_the_circuit() {
+        assert_eq!(named(&["a", "b"]), named(&["a", "b"]));
+        assert_ne!(named(&["a", "b"]), named(&["a", "c"]));
+        // A given name equal to the default is the same name.
+        assert_eq!(
+            named(&["theta_0"]),
+            ParameterizedCircuit::new(1).rx(0, Param(0))
+        );
+        let qc = named(&["gamma"]);
+        assert_eq!(qc.clone().param_names(), ["gamma"]);
+    }
 }

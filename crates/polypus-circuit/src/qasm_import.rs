@@ -1609,6 +1609,7 @@ impl Parser<'_> {
             // first push into the imported circuit.
             measured: Default::default(),
             exprs: Default::default(),
+            param_names: Vec::new(),
         }
     }
 }
