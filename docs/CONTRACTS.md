@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
@@ -265,8 +265,11 @@ bit order, key order and shot-conservation rule are exactly as specified here.
 public-API case in `tests/python/test_local_run.py`; audit C6); key order in
 `tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs),
 `tests/python/test_qml_predict.py` and `tests/python/test_qml_supervised.py`
-(the `SampleCost` dict); last-write-wins case in `polypus-sim` tests (to be
-added).
+(the `SampleCost` dict); last-write-wins in the `c3_*` tests of
+`crates/polypus-sim/tests/contracts.rs` (simulator semantics, incl. `MeasureAll`
+ordering against explicit `Measure`s) and `TestLastMeasurementWins` in
+`tests/python/test_backend_selection.py` (native vs. Aer, byte-identical
+counts; issue #205).
 
 ---
 

@@ -11,6 +11,7 @@ Aer-compatible counts, and that invalid combinations are rejected early.
 """
 
 import math
+import random
 
 import pytest
 
@@ -322,6 +323,108 @@ class TestNativeVsAerEquivalence:
             pa = aer.get(k, 0) / shots
             pn = native.get(k, 0) / shots
             assert abs(pa - pn) < 0.05, f"{k}: aer={pa:.3f} native={pn:.3f}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Repeated measurements into one classical bit: last write wins (contract C-3)
+#
+# OpenQASM 2.0 register semantics — what Aer implements — let a later `measure`
+# into a classical bit overwrite the earlier one. The native backend used to OR
+# the writes together (issue #205), so a bit once set to 1 never went back to 0.
+# Aer and the native backend sample with different RNGs, so every circuit here
+# is deterministic per shot (X gates only, no superposition): `last write wins`
+# is then the only behaviour under comparison and the counts must be identical.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVIDENCE_QASM = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[1];
+x q[0];
+measure q[0] -> c[0];
+measure q[1] -> c[0];
+"""
+
+
+def _run_both(circuit, shots):
+    import polypus
+
+    return tuple(
+        polypus.run_quantum_circuit(
+            circuit, shots=shots, infrastructure="local", backend=b, seed=11
+        ).counts
+        for b in ("aer", "polypus")
+    )
+
+
+def _random_repeated_measure_circuit(seed):
+    """A seeded random circuit of X gates followed by measurements where at
+    least one classical bit is written more than once. Returns the circuit and
+    the bitstrings its register reads under last-write-wins and under OR."""
+    import polypus
+
+    rng = random.Random(seed)
+    n = rng.randint(2, 5)
+    m = rng.randint(1, n)
+    ones = {q for q in range(n) if rng.random() < 0.5}
+    # Every classical bit written at least once, plus at least `m` more writes:
+    # more writes than bits, so some bit is written twice.
+    writes = [(rng.randrange(n), c) for c in range(m)]
+    writes += [
+        (rng.randrange(n), rng.randrange(m)) for _ in range(rng.randint(m, 3 * m))
+    ]
+    rng.shuffle(writes)
+
+    qc = polypus.Circuit(n)
+    for q in sorted(ones):
+        qc.x(q)
+    last = [0] * m
+    ored = [0] * m
+    for q, c in writes:
+        qc.measure(q, c)
+        last[c] = int(q in ones)
+        ored[c] |= int(q in ones)
+
+    # Qiskit little-endian: classical bit 0 is the rightmost character.
+    def bitstring(bits):
+        return "".join(str(b) for b in reversed(bits))
+
+    return qc, bitstring(last), bitstring(ored)
+
+
+@pytest.mark.integration
+class TestLastMeasurementWins:
+    def test_evidence_circuit_matches_aer(self):
+        aer, native = _run_both(_EVIDENCE_QASM, shots=200)
+        assert aer == [{"0": 200}]
+        assert native == aer
+
+    def test_explicit_measure_after_measure_all_overwrites_it(self):
+        import polypus
+
+        # q0 = 1, q1 = 0; measure_all writes c = "01", then c[0] <- q1 = 0.
+        qc = polypus.Circuit(2).x(0).measure_all().measure(1, 0)
+        aer, native = _run_both(qc, shots=128)
+        assert aer == [{"00": 128}]
+        assert native == aer
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_random_repeated_measures_match_aer(self, seed):
+        qc, expected, _ = _random_repeated_measure_circuit(seed)
+        aer, native = _run_both(qc, shots=64)
+        assert aer == [{expected: 64}]
+        assert native == aer
+
+    def test_random_circuits_exercise_overwrites(self):
+        """Guard for the parametrized case above: some of its circuits must
+        overwrite a 1 with a 0, which OR-ing the writes gets wrong — otherwise
+        it could not tell last-write-wins from the old behaviour."""
+        assert any(
+            last != ored
+            for last, ored in (
+                _random_repeated_measure_circuit(s)[1:] for s in range(20)
+            )
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

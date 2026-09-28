@@ -319,7 +319,9 @@ impl StatevectorSimulator {
 /// `seed`, and project each sampled basis state onto `circuit`'s classical
 /// register (the qubit → classical-bit mapping declared by its `Measure` /
 /// `MeasureAll` instructions; a circuit that measures nothing reports the full
-/// basis state, matching the "measure all" convention).
+/// basis state, matching the "measure all" convention). Writes are applied in
+/// program order, so when several measurements target the same classical bit
+/// the last one wins (C-3).
 ///
 /// This is the sampling half of [`StatevectorSimulator::run_and_sample`],
 /// factored out so a caller that evolves a circuit **once** can sample it many
@@ -337,35 +339,33 @@ pub fn sample_projected(
     let mut rng = SplitMix64::new(seed);
     let raw = sv.sample(shots, &mut rng);
 
-    // Collect the qubit → classical-bit mapping declared by the circuit.
+    // Collect the qubit → classical-bit writes declared by the circuit, in
+    // program order: `MeasureAll` is expanded where it appears, so it orders
+    // correctly against explicit `Measure`s that touch the same bit.
     let mut measured: Vec<(usize, usize)> = Vec::new();
-    let mut measure_all = false;
     for gate in &circuit.gates {
         match gate {
             GateInstruction::Measure { qubit, cbit } => measured.push((*qubit, *cbit)),
-            GateInstruction::MeasureAll => measure_all = true,
+            GateInstruction::MeasureAll => measured.extend((0..sv.num_qubits()).map(|q| (q, q))),
             _ => {}
         }
     }
 
     // No measurements: report the full basis state directly.
-    if !measure_all && measured.is_empty() {
+    if measured.is_empty() {
         return raw;
     }
-    if measure_all {
-        for q in 0..sv.num_qubits() {
-            measured.push((q, q));
-        }
-    }
 
-    // Project each sampled basis state onto the classical register.
+    // Project each sampled basis state onto the classical register. When
+    // several writes target the same classical bit the last one wins (C-3,
+    // OpenQASM 2.0 register semantics): each write overwrites the bit rather
+    // than OR-ing into it.
     let mut counts = HashMap::new();
     for (state, c) in raw {
         let mut key = 0usize;
         for &(qubit, cbit) in &measured {
-            if (state >> qubit) & 1 == 1 {
-                key |= 1usize << cbit;
-            }
+            let bit = (state >> qubit) & 1;
+            key = (key & !(1usize << cbit)) | (bit << cbit);
         }
         *counts.entry(key).or_insert(0) += c;
     }
