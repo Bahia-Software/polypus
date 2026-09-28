@@ -2,7 +2,9 @@
 //! call one [`GateInstruction::Custom`] instruction (never its expanded body),
 //! and the exporter re-emits the declaration verbatim plus the calls.
 
-use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
+use polypus_circuit::{
+    CircuitError, CustomGate, GateInstruction, GateParam, Param, ParamExpr, ParameterizedCircuit,
+};
 use std::f64::consts::PI;
 
 const HEADER: &str = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
@@ -490,4 +492,175 @@ fn builder_validates_pushed_calls() {
         measured.try_push(imported.gates[0].clone()),
         Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
     );
+}
+
+// ──────────────────────── Calls with free parameters ──────────────────────
+
+/// The call a program with `declarations` makes as its only statement,
+/// `call` (on a two-qubit register).
+fn declared_call(declarations: &str, call: &str) -> CustomGate {
+    let imported = parse(&format!("{HEADER}{declarations}\nqreg q[2];\n{call}\n"));
+    match &imported.gates[..] {
+        [GateInstruction::Custom(call)] => call.clone(),
+        other => panic!("expected one call, got {other:?}"),
+    }
+}
+
+/// A declared gate can be called with free parameters and expressions:
+/// binding evaluates them, and the bound call is the call imported with those
+/// values — same expansion, same export.
+#[test]
+fn calls_take_free_parameters_and_expressions() {
+    let g = declared_call(
+        "gate g(t,u) a,b { rz(t/2) a; cx a,b; ry(u*t) b; }",
+        "g(0,0) q[0],q[1];",
+    );
+    let mut qc = ParameterizedCircuit::new(2);
+    let twice = qc.add_expr(2.0 * ParamExpr::param(1)).unwrap();
+    let call = g.with_arguments(vec![Param(0), twice], vec![1, 0]).unwrap();
+    qc.try_push(GateInstruction::Custom(call)).unwrap();
+    assert_eq!(qc.num_params, 2);
+
+    let values = [0.5, 0.25];
+    let bound = qc.assign_parameters(&values).unwrap();
+    let reference = declared_call(
+        "gate g(t,u) a,b { rz(t/2) a; cx a,b; ry(u*t) b; }",
+        "g(0.5,0.5) q[1],q[0];",
+    );
+    let GateInstruction::Custom(bound_call) = &bound.gates[0] else {
+        panic!("binding must keep the call");
+    };
+    assert_eq!(
+        bound_call.params(),
+        [GateParam::Fixed(0.5), GateParam::Fixed(0.5)]
+    );
+    assert_eq!(bound_call.expand(&[]), reference.expand(&[]));
+
+    let qasm = qc.to_qasm2_with_params(&values).unwrap();
+    assert!(
+        qasm.contains("g(0.500000000000,0.500000000000) q[1],q[0];"),
+        "{qasm}"
+    );
+    assert_eq!(qasm, bound.to_qasm2());
+    assert_eq!(parse(&qasm).to_qasm2_with_params(&[]).unwrap(), qasm);
+    assert_eq!(qc.to_qir_with_params(&values).unwrap(), bound.to_qir());
+}
+
+/// The body is checked for the values a call is bound to, through every
+/// nested declaration, by binding and by both exports that take values.
+#[test]
+fn call_angles_are_checked_through_nested_bodies_when_bound() {
+    let outer = declared_call(
+        "gate inner(t) a { rz(ln(t)) a; }\ngate outer(t) a { rz(1/t) a; inner(t) a; }",
+        "outer(1) q[0];",
+    );
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.try_push(GateInstruction::Custom(
+        outer.with_arguments(vec![Param(0)], vec![0]).unwrap(),
+    ))
+    .unwrap();
+
+    assert!(qc.assign_parameters(&[2.0]).is_ok());
+    assert_eq!(
+        qc.assign_parameters(&[0.0]).err(),
+        Some(CircuitError::DivisionByZero)
+    );
+    assert_eq!(
+        qc.assign_parameters(&[-1.0]).err(),
+        Some(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        qc.to_qasm2_with_params(&[0.0]),
+        Err(CircuitError::DivisionByZero)
+    );
+    assert_eq!(
+        qc.to_qasm2_with_params(&[-1.0]),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        qc.to_qir_with_params(&[0.0]),
+        Err(CircuitError::DivisionByZero)
+    );
+    assert_eq!(
+        qc.to_qir_with_params(&[-1.0]),
+        Err(CircuitError::NonFiniteParam)
+    );
+}
+
+/// Fixed arguments are checked through the body at once, as the importer
+/// checks a call; the signature is checked for every call.
+#[test]
+fn call_arguments_are_checked_against_the_declaration() {
+    let g = declared_call(
+        "gate g(t) a,b { rz(1/t) a; rz(ln(t)) b; }",
+        "g(1) q[0],q[1];",
+    );
+    assert!(g
+        .with_arguments(vec![GateParam::Fixed(2.0)], vec![0, 1])
+        .is_ok());
+    assert_eq!(
+        g.with_arguments(vec![GateParam::Fixed(0.0)], vec![0, 1])
+            .err(),
+        Some(CircuitError::DivisionByZero)
+    );
+    assert_eq!(
+        g.with_arguments(vec![GateParam::Fixed(-1.0)], vec![0, 1])
+            .err(),
+        Some(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(
+        g.with_arguments(vec![GateParam::Fixed(f64::NAN)], vec![0, 1])
+            .err(),
+        Some(CircuitError::NonFiniteParam)
+    );
+    let signature = |params: u32, qubits: u32| {
+        Some(CircuitError::GateSignature {
+            name: "g".to_string(),
+            params: (1, params),
+            qubits: (2, qubits),
+        })
+    };
+    assert_eq!(
+        g.with_arguments(vec![Param(0), Param(1)], vec![0, 1]).err(),
+        signature(2, 2)
+    );
+    assert_eq!(
+        g.with_arguments(vec![Param(0)], vec![0]).err(),
+        signature(1, 1)
+    );
+
+    // Qubits are checked when the call is pushed.
+    let mut qc = ParameterizedCircuit::new(2);
+    let repeated = g.with_arguments(vec![Param(0)], vec![1, 1]).unwrap();
+    assert_eq!(
+        qc.try_push(GateInstruction::Custom(repeated)),
+        Err(CircuitError::IdenticalQubits { qubit: 1 })
+    );
+    let out_of_range = g.with_arguments(vec![Param(0)], vec![0, 2]).unwrap();
+    assert_eq!(
+        qc.try_push(GateInstruction::Custom(out_of_range)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 2,
+            num_qubits: 2
+        })
+    );
+}
+
+/// An expression argument belongs to the circuit that stores it.
+#[test]
+fn call_expressions_belong_to_their_circuit() {
+    let g = declared_call("gate g(t) a { rz(t) a; }", "g(1) q[0];");
+    let mut owner = ParameterizedCircuit::new(1);
+    let angle = owner.add_expr(ParamExpr::param(0) * 3.0).unwrap();
+    let call = GateInstruction::Custom(g.with_arguments(vec![angle], vec![0]).unwrap());
+    assert_eq!(
+        ParameterizedCircuit::new(1).try_push(call.clone()),
+        Err(CircuitError::UnknownExpression)
+    );
+    owner.try_push(call).unwrap();
+    let bound = owner.assign_parameters(&[0.5]).unwrap();
+    let GateInstruction::Custom(bound_call) = &bound.gates[0] else {
+        panic!("binding must keep the call");
+    };
+    assert_eq!(bound_call.params(), [GateParam::Fixed(1.5)]);
 }

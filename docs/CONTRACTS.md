@@ -182,7 +182,12 @@ applies it as the identity. As a unitary it is subject to C-4.
 **Declared gates.** An OpenQASM 2.0 `gate` declaration is kept as a
 definition (a template over its formal arguments, plus its source text) and
 each call of it is *one* instruction, `GateInstruction::Custom`, a unitary on
-all its qubits for C-4. The exporter re-emits the declaration verbatim (only
+all its qubits for C-4. A call's angles may be free parameters or expressions
+of them (`CustomGate::with_arguments`); such a call is checked through its whole
+body, nested declarations included, whenever its parameters are bound —
+binding and the exports that take parameter values report `NonFiniteParam` or
+`DivisionByZero` there — just as a call with fixed angles is checked when it is
+created. The exporter re-emits the declaration verbatim (only
 CRLF normalised to LF) plus the call — never the expanded body — so a backend
 that parses the export builds the same program as from the original file.
 Canonical form: the declarations the circuit reaches (directly or through
@@ -253,7 +258,9 @@ QIR-vs-simulator unitary-equivalence test in
 for every gate and compares it with the native gate up to global phase; and,
 for expressions, `crates/polypus-circuit/tests/expressions.rs` (binding
 semantics, the non-finite and division-by-zero rules, ids foreign to a
-circuit, bounds) and `unbound_expression_is_rejected` in
+circuit, bounds), the calls-with-free-parameters tests in
+`crates/polypus-circuit/tests/gate_declarations.rs`, and
+`unbound_expression_is_rejected` in
 `crates/polypus-sim/tests/gate_matrices.rs`.
 
 ---

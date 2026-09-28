@@ -54,6 +54,19 @@ pub enum CircuitError {
         /// Human-readable description of the problem.
         message: String,
     },
+    /// A call of a declared gate was given a different number of angles or
+    /// qubits than the declaration takes
+    /// ([`CustomGate::with_arguments`](crate::CustomGate::with_arguments)).
+    GateSignature {
+        /// The declared gate.
+        name: String,
+        /// Angles the declaration takes, and angles given (saturating at
+        /// `u32::MAX`; 32-bit counts keep the error, which binding returns for
+        /// every angle, as small as it was).
+        params: (u32, u32),
+        /// Qubits the declaration takes, and qubits given.
+        qubits: (u32, u32),
+    },
     /// The circuit calls two different gates declared under the same name
     /// (only possible when combining calls from separately imported programs),
     /// which one OpenQASM 2.0 program cannot declare.
@@ -106,6 +119,15 @@ impl fmt::Display for CircuitError {
             CircuitError::Parse { line, message } => {
                 write!(f, "QASM parse error at line {line}: {message}")
             }
+            CircuitError::GateSignature {
+                name,
+                params,
+                qubits,
+            } => write!(
+                f,
+                "gate '{name}' takes {} angle(s) and {} qubit(s), got {} and {}",
+                params.0, qubits.0, params.1, qubits.1
+            ),
             CircuitError::ConflictingGateDefinitions { name } => write!(
                 f,
                 "the circuit calls two different gates declared as '{name}'; one OpenQASM 2.0 program cannot declare a gate twice"

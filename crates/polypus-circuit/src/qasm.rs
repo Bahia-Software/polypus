@@ -93,6 +93,8 @@ pub(crate) fn write_qasm2(
     let mut angle = |p: &GateParam| -> Result<String, CircuitError> {
         Ok(fmt_angle(p.resolve(params, exprs, &mut stack)?))
     };
+    // Calls of declared gates resolve their angles apart: `angle` holds `stack`.
+    let mut call_stack = Vec::new();
 
     for gate in gates {
         match gate {
@@ -285,14 +287,20 @@ pub(crate) fn write_qasm2(
             GateInstruction::Custom(call) => {
                 let operands: Vec<String> =
                     call.qubits().iter().map(|q| format!("q[{q}]")).collect();
-                if call.params().is_empty() {
+                let values = call
+                    .params()
+                    .iter()
+                    .map(|p| p.resolve(params, exprs, &mut call_stack))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                // A call with free angles is checked through its body for the
+                // values it is exported with.
+                if call.has_free_angles() {
+                    call.check_body(&values)?;
+                }
+                if values.is_empty() {
                     let _ = writeln!(out, "{} {};", call.name(), operands.join(","));
                 } else {
-                    let angles = call
-                        .params()
-                        .iter()
-                        .map(&mut angle)
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let angles: Vec<String> = values.iter().map(|&v| fmt_angle(v)).collect();
                     let _ = writeln!(
                         out,
                         "{}({}) {};",

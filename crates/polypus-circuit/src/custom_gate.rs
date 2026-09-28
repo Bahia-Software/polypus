@@ -301,6 +301,62 @@ impl CustomGate {
         &self.qubits
     }
 
+    /// A call of the same declared gate with other arguments: `params` for
+    /// its angles — fixed values, free parameters, or expressions stored in
+    /// the circuit the call is pushed onto — and `qubits` for its qubits.
+    ///
+    /// A call whose angles are all fixed is checked now, through its whole
+    /// body, as the importer checks a call. A call with free parameters is
+    /// checked through its whole body whenever they are bound: by
+    /// [`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters)
+    /// and by the exports that take parameter values.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
+    ///
+    /// let src = "OPENQASM 2.0;\ngate g(t) a { rz(t/2) a; }\nqreg q[1];\ng(0) q[0];\n";
+    /// let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
+    /// let GateInstruction::Custom(call) = &imported.gates[0] else { unreachable!() };
+    ///
+    /// let mut qc = ParameterizedCircuit::new(2);
+    /// qc.try_push(GateInstruction::Custom(call.with_arguments(vec![Param(0)], vec![1]).unwrap()))
+    ///     .unwrap();
+    /// assert_eq!(qc.num_params, 1);
+    /// assert!(qc.to_qasm2_with_params(&[0.5]).unwrap().contains("g(0.500000000000) q[1];"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::GateSignature`] if the numbers of angles or qubits
+    /// differ from the declaration's; for fixed angles,
+    /// [`CircuitError::NonFiniteParam`] or [`CircuitError::DivisionByZero`]
+    /// if an angle, or an angle of the body, is not usable. Qubit indices and
+    /// expressions are checked when the call is pushed onto a circuit.
+    pub fn with_arguments(
+        &self,
+        params: Vec<GateParam>,
+        qubits: Vec<usize>,
+    ) -> Result<CustomGate, CircuitError> {
+        let definition = &self.definition;
+        if params.len() != definition.num_params() || qubits.len() != definition.num_qubits() {
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            return Err(CircuitError::GateSignature {
+                name: definition.name().to_string(),
+                params: (count(definition.num_params()), count(params.len())),
+                qubits: (count(definition.num_qubits()), count(qubits.len())),
+            });
+        }
+        let call = CustomGate {
+            definition: Arc::clone(definition),
+            params,
+            qubits,
+        };
+        if !call.has_free_angles() {
+            call.check_bound()?;
+        }
+        Ok(call)
+    }
+
     /// The same call with its parameters replaced (binding).
     pub(crate) fn with_params(&self, params: Vec<GateParam>) -> Self {
         CustomGate {
@@ -308,6 +364,49 @@ impl CustomGate {
             params,
             qubits: self.qubits.clone(),
         }
+    }
+
+    /// The call with its angles replaced by `resolve(angle)`, checked through
+    /// its body for them (binding a call with free angles).
+    pub(crate) fn bind(
+        &self,
+        resolve: impl FnMut(&GateParam) -> Result<GateParam, CircuitError>,
+    ) -> Result<CustomGate, CircuitError> {
+        let bound = self.with_params(self.params.iter().map(resolve).collect::<Result<_, _>>()?);
+        bound.check_bound()?;
+        Ok(bound)
+    }
+
+    /// Whether an angle is a free parameter or an expression: the call has
+    /// not been checked through its body yet.
+    pub(crate) fn has_free_angles(&self) -> bool {
+        self.params
+            .iter()
+            .any(|p| !matches!(p, GateParam::Fixed(_)))
+    }
+
+    /// Check a call whose angles are fixed through its whole body.
+    pub(crate) fn check_bound(&self) -> Result<(), CircuitError> {
+        let values = self
+            .params
+            .iter()
+            .map(|p| match *p {
+                GateParam::Fixed(v) if v.is_finite() => Ok(v),
+                GateParam::Fixed(_) => Err(CircuitError::NonFiniteParam),
+                GateParam::Param(index) => Err(CircuitError::ParamIndexOutOfBounds {
+                    index,
+                    num_params: 0,
+                }),
+                GateParam::Expr(_) => Err(CircuitError::UnknownExpression),
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+        self.check_body(&values)
+    }
+
+    /// Check that every angle of the body is usable when the call's angles
+    /// are `values`.
+    pub(crate) fn check_body(&self, values: &[f64]) -> Result<(), CircuitError> {
+        self.definition.validate(values).map_err(body_error)
     }
 
     /// Expand the call into built-in instructions — through every nested

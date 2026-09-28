@@ -624,6 +624,8 @@ impl ParameterizedCircuit {
     ///   final value of an expression is an angle: an infinite intermediate
     ///   whose result is finite (`1/exp(x)` for a large `x`) is accepted.
     /// - [`CircuitError::DivisionByZero`] if an expression divides by zero.
+    ///   The same two errors report an angle of a declared gate's body that
+    ///   the values bound to the call make unusable.
     /// - [`CircuitError::UnknownExpression`] if a gate refers to an expression
     ///   this circuit does not hold (only possible when `gates` was assembled
     ///   by hand).
@@ -648,9 +650,16 @@ impl ParameterizedCircuit {
 
         let mut gates = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
-            // Exhaustive over the vocabulary (no wildcard arm), so a new
-            // parameterised gate can never slip through unbound.
-            let bound = gate.try_map_params(&mut resolve)?;
+            let bound = match gate {
+                // A call with free angles is checked through its body now that
+                // they have values; one with fixed angles already was.
+                GateInstruction::Custom(call) if call.has_free_angles() => {
+                    GateInstruction::Custom(call.bind(&mut resolve)?)
+                }
+                // Exhaustive over the vocabulary (no wildcard arm), so a new
+                // parameterised gate can never slip through unbound.
+                _ => gate.try_map_params(&mut resolve)?,
+            };
             gates.push(bound);
         }
 
