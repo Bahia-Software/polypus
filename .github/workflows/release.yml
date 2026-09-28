@@ -3,6 +3,8 @@
 # to PyPI via Trusted Publishing (OIDC — no API tokens stored in the repo).
 #
 #   • Push a tag `vX.Y.Z`   → build everything and publish to PyPI.
+#   • Either way the `gate` job runs first (tag ↔ Cargo.toml version, green
+#     ci.yml for the commit) — see its comment for what is enforced when.
 #   • Manual "Run workflow" → build everything; the `target` input picks the index
 #                             (testpypi = default dry run, or pypi).
 #
@@ -30,10 +32,113 @@ permissions:
   contents: read
 
 jobs:
-  # Linux: manylinux wheels for x86_64 and aarch64. The manylinux container ships
-  # CPython 3.9–3.13, so `--find-interpreter` builds all of them in one job.
+  # ── Release gate ────────────────────────────────────────────────────────────
+  # Refuse to publish anything that was not verified. Every build job needs this
+  # job, so a release that would be refused aborts before spending build minutes
+  # (publish-* and the post-publish checks inherit it through their `needs`).
+  #
+  #   1. Tag ↔ version. On a tag push the tag must be exactly `vX.Y.Z` (so a
+  #      malformed tag like `v.0.5.0` is rejected) and equal `v` + the
+  #      `[workspace.package].version` in the root Cargo.toml — the single source
+  #      of truth (docs/CONTRIBUTING.md). A manual run has no tag: skipped.
+  #   2. Green CI for this exact commit. ci.yml never runs on a tag push, so we
+  #      ask the Actions API for a successful ci.yml run whose head_sha is the
+  #      commit this workflow builds (`github.sha`, the one every build job checks
+  #      out). Only `push` runs count — ci.yml runs on push to main, and those
+  #      test that commit itself; a `pull_request` run reports the PR head as
+  #      head_sha but tests the merge ref, i.e. a different tree. The per-workflow
+  #      runs endpoint is used instead of the commit's check-runs because
+  #      check-runs mix jobs from every workflow (this one, docs.yml, …) and
+  #      carry no workflow identity, so filtering them would mean hard-coding
+  #      ci.yml job names. If ci.yml is still running for the commit (tag pushed
+  #      right after the merge) we wait for it; a cancelled/failed run fails the
+  #      gate — re-run ci.yml, then re-run this workflow.
+  #      Enforced for a tag push and a manual run with target=pypi. A TestPyPI
+  #      dry run only warns, so branches that never ran ci.yml on push can
+  #      still be dry-run (and the query itself is exercised on every dry run).
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read   # checkout
+      actions: read    # list ci.yml runs for the commit
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Read workspace version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not read an X.Y.Z version from Cargo.toml (got '$version')"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Tag matches Cargo.toml version
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            echo "::notice::Not a tag push ($GITHUB_EVENT_NAME on $GITHUB_REF): tag/version check does not apply"
+            exit 0
+          fi
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          if [[ "$TAG" != "v$VERSION" ]]; then
+            echo "::error::Tag '$TAG' does not match Cargo.toml [workspace.package].version '$VERSION' (expected 'v$VERSION')"
+            exit 1
+          fi
+          echo "Tag $TAG matches Cargo.toml version $VERSION"
+      - name: ci.yml is green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          ENFORCE: ${{ github.event_name == 'push' || inputs.target == 'pypi' }}
+        run: |
+          deadline=$((SECONDS + 30 * 60))
+          while :; do
+            # Plain assignment so an API error (e.g. missing permission) fails
+            # the step, even on a dry run.
+            counts=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+              --jq '[([.workflow_runs[] | select(.conclusion == "success")] | length),
+                     ([.workflow_runs[] | select(.status != "completed")] | length)] | @tsv')
+            read -r ok pending <<< "$counts"
+            if (( ok > 0 )); then
+              echo "ci.yml has a successful push run for $SHA"
+              exit 0
+            fi
+            if (( pending == 0 || SECONDS >= deadline )); then
+              break
+            fi
+            echo "ci.yml still running for $SHA; waiting..."
+            sleep 30
+          done
+          msg="No successful ci.yml push run for $SHA (pending runs: $pending)"
+          if [[ "$ENFORCE" == true ]]; then
+            echo "::error::$msg — refusing to publish to PyPI"
+            exit 1
+          fi
+          echo "::warning::$msg — TestPyPI dry run, continuing"
+
+  # Linux: manylinux wheels for x86_64 and aarch64, one job per arch. The
+  # interpreters are listed explicitly: CPython 3.9–3.13, the same range as
+  # windows (macos starts at 3.10). ci.yml only tests the floor and ceiling of
+  # that range (3.9 and 3.13, on Linux); 3.10–3.12 are bracketed by those, not
+  # tested on their own — same as for macos/windows. `--find-interpreter` is
+  # NOT used: the container also ships 3.14, 3.14t (free-threaded) and PyPy,
+  # which lie outside that range and would be published untested (they were
+  # for 0.7.1). On aarch64 (cross-compiled) maturin resolves `pythonX.Y` from
+  # its bundled sysconfig. The check step fails the job if the built set ever
+  # drifts from that list.
   linux:
     name: wheels (linux ${{ matrix.target }})
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,8 +152,22 @@ jobs:
           target: ${{ matrix.target }}
           # Features come from the root pyproject `[tool.maturin]`; the include
           # rule bundles `polypus_python` into every wheel.
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i python3.9 python3.10 python3.11 python3.12 python3.13
           manylinux: auto
+      - name: Check built interpreters
+        run: |
+          ls dist
+          # Wheel name: {dist}-{version}-{python tag}-{abi tag}-{platform}.whl;
+          # keep "{python tag}-{abi tag}" for any interpreter (cp39-cp39,
+          # cp314-cp314t, pp311-pypy311_pp73, …).
+          shopt -s nullglob
+          got=$(for w in dist/*.whl; do basename "$w" .whl; done \
+            | sed -E 's/^.*-([^-]+-[^-]+)-[^-]+$/\1/' | sort | tr '\n' ' ')
+          want="cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp39-cp39 "
+          if [[ "$got" != "$want" ]]; then
+            echo "::error::Built wheels '$got' differ from the expected '$want'"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -60,6 +179,7 @@ jobs:
   # no reliable 3.9 on arm64, so macOS wheels are 3.10–3.13.
   macos:
     name: wheels (macos-arm64 py${{ matrix.python-version }})
+    needs: gate
     runs-on: macos-14
     strategy:
       fail-fast: false
@@ -82,6 +202,7 @@ jobs:
   # Windows: x64, per-version wheels.
   windows:
     name: wheels (windows py${{ matrix.python-version }})
+    needs: gate
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -104,6 +225,7 @@ jobs:
   # Source distribution (also carries the bundled polypus_python + vendored crates).
   sdist:
     name: sdist
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -171,20 +293,11 @@ jobs:
   # so the on-release run here and the scheduled/on-demand run (verify-pypi.yml)
   # can never drift apart. Runs on every real release; red here is the alarm that
   # the published package is broken for outsiders.
-  resolve-version:
-    name: Resolve released version
-    needs: publish-pypi
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.ver.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: ver
-        run: echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
-
+  # The version comes from the gate, which already read (and, on a tag push,
+  # checked) it.
   verify-clean-install:
     name: Verify clean-room PyPI install
-    needs: resolve-version
+    needs: [gate, publish-pypi]
     uses: ./.github/workflows/_verify-pypi.yml
     with:
-      version: ${{ needs.resolve-version.outputs.version }}
+      version: ${{ needs.gate.outputs.version }}
