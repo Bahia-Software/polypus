@@ -265,11 +265,13 @@ bit order, key order and shot-conservation rule are exactly as specified here.
 public-API case in `tests/python/test_local_run.py`; audit C6); key order in
 `tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs),
 `tests/python/test_qml_predict.py` and `tests/python/test_qml_supervised.py`
-(the `SampleCost` dict); last-write-wins in the `c3_*` tests of
-`crates/polypus-sim/tests/contracts.rs` (simulator semantics, incl. `MeasureAll`
-ordering against explicit `Measure`s) and `TestLastMeasurementWins` in
-`tests/python/test_backend_selection.py` (native vs. Aer, byte-identical
-counts; issue #205).
+(the `SampleCost` dict); flat bitstring keys for circuits with several
+classical registers (Aer vs native parity) in
+`tests/python/test_local_run_multi_register.py` (issue #206); last-write-wins
+in the `c3_*` tests of `crates/polypus-sim/tests/contracts.rs` (simulator
+semantics, incl. `MeasureAll` ordering against explicit `Measure`s) and
+`TestLastMeasurementWins` in `tests/python/test_backend_selection.py` (native
+vs. Aer, byte-identical counts; issue #205).
 
 ---
 

@@ -67,4 +67,10 @@ class Local(Infraestructure):
         else:
             result = sim.run(qcs, shots=shots).result()
 
-        return [result.get_counts(i) for i in range(len(qcs))]
+        # Qiskit space-separates the keys per ClassicalRegister ("0 1 0") when a
+        # circuit declares several; contract C-3 wants one flat bitstring. The
+        # groups are already in clbit order, so dropping the spaces is enough.
+        return [
+            {key.replace(" ", ""): count for key, count in result.get_counts(i).items()}
+            for i in range(len(qcs))
+        ]
