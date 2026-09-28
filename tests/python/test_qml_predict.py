@@ -76,6 +76,23 @@ def test_predict_returns_one_counts_dict_per_row_in_row_order(monkeypatch):
     run = _predict([[0.1], [3.0], [0.2], [2.9], [2.8]], [0.0])
     assert run.counts == [{"0": 64}, {"1": 64}, {"0": 64}, {"1": 64}, {"1": 64}]
     assert seam.batches == [5], "the whole batch is one backend call"
+    # The rows are distinct circuits, not replicas of one, so there is no merged
+    # total (C-3, issue #211).
+    assert run.merged_counts is None
+    assert "merged_counts=None" in repr(run)
+
+
+def test_predict_keeps_one_dict_per_row_with_several_qpus(monkeypatch):
+    """n_qpus>1 spreads the rows over the QPUs but never splits a row's shots,
+    so ``counts`` stays one dict per row and ``merged_counts`` stays None."""
+    import polypus_python
+
+    seam = _Seam(lambda x, _theta, shots: {"1" if x > math.pi / 2 else "0": shots})
+    monkeypatch.setattr(polypus_python, "run_qcs", seam)
+
+    run = _predict([[0.1], [3.0], [0.2]], [0.0], n_qpus=2)
+    assert run.counts == [{"0": 64}, {"1": 64}, {"0": 64}]
+    assert run.merged_counts is None
 
 
 def test_predict_binds_the_trained_weights_to_the_ansatz(monkeypatch):
@@ -181,6 +198,7 @@ def test_predict_reports_a_replayable_manifest_and_conserves_shots():
     assert first.id.startswith("predict_1_local_")
     assert (first.backend, first.infrastructure) == ("aer", "local")
     assert [sum(c.values()) for c in first.counts] == [200, 200, 200]
+    assert first.merged_counts is None
     assert _predict(rows, [0.1], shots=200, seed=first.seed).counts == first.counts
     assert isinstance(_predict(rows, [0.1], shots=200).seed, int)
 

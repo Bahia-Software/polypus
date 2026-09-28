@@ -272,10 +272,10 @@ def _hamming_cost_bitstring(bitstring: str) -> float:
 
 def _hamming_cost_counts(result) -> float:
     """SciPy objective: expected fraction of 1s from run_quantum_circuit output."""
-    # run_quantum_circuit returns a RunResult wrapping the counts payload
-    # (contract C-7): a list for a single QPU, a merged dict for n_qpus > 1.
-    payload = result.counts
-    counts = payload[0] if isinstance(payload, list) else payload
+    # `merged_counts` is the circuit's total over every QPU replica (contract
+    # C-3), so the cost is right for any n_qpus; `counts[0]` would be only the
+    # first QPU's share once n_qpus > 1.
+    counts = result.merged_counts
     total = sum(counts.values())
     return sum((bs.count("1") / len(bs)) * c for bs, c in counts.items()) / total
 

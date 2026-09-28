@@ -1,8 +1,8 @@
 use polypus::algorithms::{AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG};
 use polypus::circuit::ParameterizedCircuit;
 use polypus::infrastructure::{
-    BackendError, BoundCircuit, Infrastructure, InfrastructureError, NativeStatevectorBackend,
-    OptLevel, QuantumBackend, RunParams, ShotDistributingPlanner,
+    merge_counts, BackendError, BoundCircuit, Infrastructure, InfrastructureError,
+    NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams, ShotDistributingPlanner,
 };
 use polypus::orchestration::{Resources, RunCircuitFlow, Scheduler};
 use std::collections::HashMap;
@@ -109,9 +109,10 @@ fn native_params(shots: u32, id: &str) -> RunParams {
     }
 }
 
-/// Distribute `shots` of a Bell circuit across `n_qpus` on the native backend and
-/// return the merged counts, driving the real `Scheduler`/`RunCircuitFlow` path.
-fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64> {
+/// Distribute `shots` of a Bell circuit across `n_qpus` on the native backend,
+/// driving the real `Scheduler`/`RunCircuitFlow` path, and return the per-replica
+/// counts exactly as the edge receives them.
+fn distributed_replicas(shots: u32, n_qpus: u32, id: &str) -> Vec<HashMap<String, u64>> {
     pyo3::prepare_freethreaded_python();
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
@@ -121,14 +122,25 @@ fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64>
     )
     .expect("the native backend supports shot distribution");
     let scheduler = Scheduler::ephemeral(resources);
-    let mut merged = scheduler
+    let replicas = scheduler
         .run(RunCircuitFlow {
             circuits: vec![native_bell_circuit()],
             shots,
         })
         .expect("distribute-by-shots must succeed on the native backend");
-    // The shot-distributing planner merges its replicas into exactly one map.
-    merged.pop().unwrap_or_default()
+    // `RunCircuitFlow` hands back one map per replica, unmerged (issue #211).
+    assert_eq!(
+        replicas.len(),
+        n_qpus as usize,
+        "one counts map per replica"
+    );
+    replicas
+}
+
+/// [`distributed_replicas`], merged key by key into the circuit's total — the
+/// `RunResult.merged_counts` the edge builds.
+fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64> {
+    merge_counts(&distributed_replicas(shots, n_qpus, id))
 }
 
 #[test]
@@ -159,6 +171,16 @@ fn distribute_conserves_shots_when_divisible() {
     let counts = distributed_counts(400, 4, "c3-even");
     let total: u64 = counts.values().sum();
     assert_eq!(total, 400);
+}
+
+#[test]
+fn distribute_returns_each_replica_with_its_apportioned_shots() {
+    // 5 shots over 8 QPUs apportion as [1, 1, 1, 1, 1, 0, 0, 0]: the list keeps
+    // all 8 replicas, in order, with the zero-shot ones as empty maps.
+    let replicas = distributed_replicas(5, 8, "c3-replicas");
+    let sums: Vec<u64> = replicas.iter().map(|r| r.values().sum()).collect();
+    assert_eq!(sums, vec![1, 1, 1, 1, 1, 0, 0, 0]);
+    assert!(replicas[5..].iter().all(HashMap::is_empty));
 }
 
 #[test]

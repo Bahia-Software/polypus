@@ -40,8 +40,8 @@ pub use error::{BackendError, InfrastructureError};
 pub use mem_budget::max_statevector_concurrency;
 pub use params::RunParams;
 pub use planner::{
-    BackendCapabilities, CancelToken, CircuitTask, Counts, Interrupt, Planner, PlannerRequirements,
-    SequentialPlanner, ShotDistributingPlanner,
+    merge_counts, BackendCapabilities, CancelToken, CircuitTask, Counts, Interrupt, Planner,
+    PlannerRequirements, SequentialPlanner, ShotDistributingPlanner,
 };
 pub use registry::{
     create_registered_backend, is_registered, register_backend, registered_names,

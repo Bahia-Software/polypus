@@ -4,8 +4,10 @@
 //! [`Planner`] owns the *how*: split the work into waves capped by the backend's
 //! concurrency, run each wave, honour cancellation and host interrupts between
 //! waves, merge shot-split results, and preserve input order. Two consumers share
-//! one trait: a circuit run calls [`Planner::execute`] (wants counts) and the
-//! training oracle calls [`Planner::evaluate`] (wants one `f64` per circuit).
+//! one trait: a circuit run calls [`Planner::execute_replicas`] (wants counts,
+//! one map per shot-split replica) and the training oracle calls
+//! [`Planner::execute`] / [`Planner::evaluate`] (wants merged counts, or one `f64`
+//! per circuit).
 //!
 //! Two concrete planners reproduce today's two execution paths exactly:
 //! [`SequentialPlanner`] and [`ShotDistributingPlanner`].
@@ -28,6 +30,22 @@ use crate::{validate_run_results, BoundCircuit, QuantumBackend, RunParams};
 
 /// Native measurement counts for one circuit: bitstring → count.
 pub type Counts = HashMap<String, u64>;
+
+/// The C-3 merge: sum `replicas` key by key into one counts map. This is how
+/// [`ShotDistributingPlanner`]'s [`execute`](Planner::execute) reduces the output
+/// of its [`execute_replicas`](Planner::execute_replicas), exposed so a caller
+/// holding the replicas of any planner can compute the same total without
+/// re-running anything (for a planner that does not split shots, the single
+/// replica merges to itself).
+pub fn merge_counts(replicas: &[Counts]) -> Counts {
+    let mut merged: Counts = HashMap::new();
+    for counts in replicas {
+        for (k, v) in counts {
+            *merged.entry(k.clone()).or_insert(0) += v;
+        }
+    }
+    merged
+}
 
 /// One unit of work: a bound circuit and the shots it needs. `shots` is the
 /// single source of truth — a planner reads it here, never from `params`.
@@ -167,6 +185,22 @@ pub trait Planner: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<Vec<Counts>, InfrastructureError>;
 
+    /// Like [`execute`](Self::execute), but *without* the C-3 merge: a planner that
+    /// splits one circuit's shots across replicas returns one [`Counts`] per
+    /// replica, in the order the shots were apportioned, so a caller can expose the
+    /// per-replica breakdown. The default delegates to `execute` unchanged, which is
+    /// exact for any planner that does not split shots (there, a task *is* its one
+    /// replica). [`ShotDistributingPlanner`] overrides it.
+    fn execute_replicas(
+        &self,
+        backend: &dyn QuantumBackend,
+        tasks: &[CircuitTask<'_>],
+        params: &RunParams,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Counts>, InfrastructureError> {
+        self.execute(backend, tasks, params, cancel)
+    }
+
     /// Run every task and reduce it to one `f64`. The default preserves today's
     /// numerics exactly (`execute`, then `expectation_batch`).
     fn evaluate(
@@ -260,7 +294,10 @@ impl Planner for SequentialPlanner {
 }
 
 /// Runs *one* circuit by splitting its shots across `n_qpus` replicas and merging
-/// them (contract C-3). The replicas run in waves of `≤ max_concurrency` (QMIO: 1,
+/// them (contract C-3). [`execute`](Planner::execute) returns the merged total;
+/// [`execute_replicas`](Planner::execute_replicas) returns the `n_qpus` replicas
+/// unmerged (a replica apportioned zero shots, when `shots < n_qpus`, is an empty
+/// map). The replicas run in waves of `≤ max_concurrency` (QMIO: 1,
 /// CUNQA: `n_qpus`), with a between-wave interrupt check so a distributed-shots run
 /// stays interruptible on slow/real hardware, just like [`SequentialPlanner`].
 /// Opt-in; the `polypus` edge selects it for a single-circuit run with `n_qpus > 1`.
@@ -299,6 +336,19 @@ impl Planner for ShotDistributingPlanner {
         params: &RunParams,
         cancel: &CancelToken,
     ) -> Result<Vec<Counts>, InfrastructureError> {
+        // `execute_replicas` has already validated the replicas and their total, so
+        // the merge here cannot break C-3.
+        let replicas = self.execute_replicas(backend, tasks, params, cancel)?;
+        Ok(vec![merge_counts(&replicas)])
+    }
+
+    fn execute_replicas(
+        &self,
+        backend: &dyn QuantumBackend,
+        tasks: &[CircuitTask<'_>],
+        params: &RunParams,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Counts>, InfrastructureError> {
         // This planner distributes a single circuit's shots; reject any other
         // count with a typed error rather than panicking or silently dropping
         // circuits.
@@ -326,10 +376,10 @@ impl Planner for ShotDistributingPlanner {
         // running the interrupt check after every chunk so a slow/real-hardware run
         // stays interruptible between waves. Chunking is numerically transparent:
         // `run_shots_distributed` seeds each replica from a per-backend contiguous
-        // block, independent of how the batch is chunked (C-7), and the C-3 merge
-        // below accumulates across chunks.
+        // block, independent of how the batch is chunked (C-7), and the replicas
+        // are collected in apportionment order across chunks.
         let wave = backend.capabilities().max_concurrency.max(1);
-        let mut merged: Counts = HashMap::new();
+        let mut replicas: Vec<Counts> = Vec::with_capacity(shot_batches.len());
         for chunk in shot_batches.chunks(wave) {
             if cancel.is_cancelled() {
                 return Err(InfrastructureError::Cancelled);
@@ -345,21 +395,40 @@ impl Planner for ShotDistributingPlanner {
                 }
                 Err(e) => return Err(InfrastructureError::Backend(e)),
             };
-            // Merge this chunk's replicas into the running result (the merge, C-3,
-            // lives in the planner).
-            for counts in counts_vec {
-                for (k, v) in counts {
-                    *merged.entry(k).or_insert(0) += v;
-                }
+            // One map per replica is what makes the result a per-replica breakdown;
+            // a backend returning any other number would silently misalign it.
+            if counts_vec.len() != chunk.len() {
+                return Err(InfrastructureError::Backend(BackendError::InvalidResults(
+                    format!(
+                        "expected one counts map per replica ({}), got {}",
+                        chunk.len(),
+                        counts_vec.len()
+                    ),
+                )));
             }
+            replicas.extend(counts_vec);
             // Honour a pending interrupt/Ctrl+C after each chunk's run.
             cancel.poll_interrupt()?;
         }
-        // Validate once over the fully-merged map: shot conservation (C-3) is a
-        // property of the total, unaffected by how many backend calls produced it.
-        validate_run_results(std::slice::from_ref(&merged), 1, shots)
+        // Each replica must hold exactly the shots apportioned to it, so the
+        // exposed breakdown is itself shot-conserving (C-3), not just its total.
+        for (i, (replica, &want)) in replicas.iter().zip(&shot_batches).enumerate() {
+            let got: u64 = replica.values().sum();
+            if got != u64::from(want) {
+                return Err(InfrastructureError::Backend(BackendError::InvalidResults(
+                    format!(
+                        "counts for replica {i} sum to {got} shot(s) but {want} were apportioned \
+                         to it (contract C-3 shot conservation)"
+                    ),
+                )));
+            }
+        }
+        // Validate the merged total as well: shot conservation, a non-empty map and
+        // well-formed bitstring keys (C-3) are properties of the total, unaffected
+        // by how many backend calls produced it.
+        validate_run_results(&[merge_counts(&replicas)], 1, shots)
             .map_err(InfrastructureError::Backend)?;
-        Ok(vec![merged])
+        Ok(replicas)
     }
 }
 
@@ -543,6 +612,210 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].values().sum::<u64>(), u64::from(shots));
         assert_eq!(backend.call_sizes(), vec![n_qpus as usize]);
+    }
+
+    #[test]
+    fn execute_replicas_returns_one_unmerged_map_per_replica_in_order() {
+        // 10 shots over 4 replicas apportion as [3, 3, 2, 2]. A cap of 1 forces one
+        // backend call per replica, so this also proves the order survives chunking.
+        let backend = RecordingBackend::new(1);
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let replicas = ShotDistributingPlanner::new(4)
+            .execute_replicas(
+                &backend,
+                &one_task(&circuit, 10),
+                &params(10),
+                &CancelToken::default(),
+            )
+            .expect("execute_replicas succeeds");
+        let sums: Vec<u64> = replicas.iter().map(|r| r.values().sum()).collect();
+        assert_eq!(sums, vec![3, 3, 2, 2]);
+        assert_eq!(backend.call_sizes(), vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn execute_returns_the_merge_of_execute_replicas() {
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let planner = ShotDistributingPlanner::new(4);
+        let replicas = planner
+            .execute_replicas(
+                &RecordingBackend::new(usize::MAX),
+                &one_task(&circuit, 10),
+                &params(10),
+                &CancelToken::default(),
+            )
+            .expect("execute_replicas succeeds");
+        let merged = planner
+            .execute(
+                &RecordingBackend::new(usize::MAX),
+                &one_task(&circuit, 10),
+                &params(10),
+                &CancelToken::default(),
+            )
+            .expect("execute succeeds");
+        assert_eq!(replicas.len(), 4);
+        assert_eq!(merged, vec![merge_counts(&replicas)]);
+        assert_eq!(merged[0], HashMap::from([("0".to_string(), 10)]));
+    }
+
+    #[test]
+    fn execute_replicas_keeps_zero_shot_replicas_as_empty_maps() {
+        // 2 shots over 4 replicas apportion as [1, 1, 0, 0]. The default
+        // `run_shots_distributed` (StubBackend does not override it) yields an empty
+        // map for a zero-shot replica; it must stay in the list so its length is
+        // still `n_qpus`.
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let replicas = ShotDistributingPlanner::new(4)
+            .execute_replicas(
+                &StubBackend,
+                &one_task(&circuit, 2),
+                &params(2),
+                &CancelToken::default(),
+            )
+            .expect("execute_replicas succeeds");
+        let one = HashMap::from([("0".to_string(), 1)]);
+        assert_eq!(
+            replicas,
+            vec![one.clone(), one, HashMap::new(), HashMap::new()]
+        );
+    }
+
+    #[test]
+    fn sequential_execute_replicas_is_execute() {
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let tasks = vec![
+            CircuitTask {
+                circuit: &circuit,
+                shots: 8,
+            },
+            CircuitTask {
+                circuit: &circuit,
+                shots: 8,
+            },
+        ];
+        let token = CancelToken::default();
+        let replicas = SequentialPlanner
+            .execute_replicas(&StubBackend, &tasks, &params(8), &token)
+            .expect("execute_replicas succeeds");
+        let merged = SequentialPlanner
+            .execute(&StubBackend, &tasks, &params(8), &token)
+            .expect("execute succeeds");
+        assert_eq!(replicas, merged);
+        assert_eq!(replicas.len(), 2);
+    }
+
+    #[test]
+    fn merge_counts_sums_key_by_key() {
+        let a = HashMap::from([("00".to_string(), 3), ("11".to_string(), 2)]);
+        let b = HashMap::from([("11".to_string(), 4), ("01".to_string(), 1)]);
+        let merged = merge_counts(&[a, b, HashMap::new()]);
+        assert_eq!(
+            merged,
+            HashMap::from([
+                ("00".to_string(), 3),
+                ("01".to_string(), 1),
+                ("11".to_string(), 6),
+            ])
+        );
+        assert!(merge_counts(&[]).is_empty());
+    }
+
+    /// A backend whose `run_shots_distributed` returns a fixed, deliberately
+    /// malformed replica list, so the planner's replica validation can be probed.
+    struct FixedReplicas(Vec<Counts>);
+    impl QuantumBackend for FixedReplicas {
+        fn run_circuits(
+            &self,
+            _qcs: &[BoundCircuit],
+            _params: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            panic!("the shot-distributing planner calls run_shots_distributed only");
+        }
+        fn run_shots_distributed(
+            &self,
+            _qc: &BoundCircuit,
+            _shot_batches: &[u32],
+            _params: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn execute_replicas_rejects_a_wrong_replica_count() {
+        // Three maps for four replicas: the total is conserved, but the breakdown
+        // would be misaligned, so it must be rejected.
+        let backend = FixedReplicas(vec![
+            HashMap::from([("0".to_string(), 4)]),
+            HashMap::from([("0".to_string(), 3)]),
+            HashMap::from([("0".to_string(), 3)]),
+        ]);
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let err = ShotDistributingPlanner::new(4)
+            .execute_replicas(
+                &backend,
+                &one_task(&circuit, 10),
+                &params(10),
+                &CancelToken::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                InfrastructureError::Backend(BackendError::InvalidResults(m)) if m.contains("per replica")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn execute_replicas_rejects_a_replica_that_breaks_its_own_shot_count() {
+        // [4, 2] instead of the apportioned [3, 3]: the total (6) is conserved, but
+        // neither replica holds its own shots, which the breakdown promises (C-3).
+        let backend = FixedReplicas(vec![
+            HashMap::from([("0".to_string(), 4)]),
+            HashMap::from([("0".to_string(), 2)]),
+        ]);
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let err = ShotDistributingPlanner::new(2)
+            .execute(
+                &backend,
+                &one_task(&circuit, 6),
+                &params(6),
+                &CancelToken::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                InfrastructureError::Backend(BackendError::InvalidResults(m)) if m.contains("replica 0")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn execute_replicas_rejects_a_malformed_key_in_the_total() {
+        let backend = FixedReplicas(vec![
+            HashMap::from([("0".to_string(), 3)]),
+            HashMap::from([("0 1".to_string(), 3)]),
+        ]);
+        let circuit = BoundCircuit::Qasm2(String::new());
+        let err = ShotDistributingPlanner::new(2)
+            .execute_replicas(
+                &backend,
+                &one_task(&circuit, 6),
+                &params(6),
+                &CancelToken::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                InfrastructureError::Backend(BackendError::InvalidResults(m)) if m.contains("non-bitstring")
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

@@ -49,6 +49,21 @@ class TestRunQuantumCircuitBackends:
         # X|0> = |1>: every shot reads "1".
         assert result.counts[0] == {"1": 256}
 
+    @pytest.mark.parametrize("backend", ["polypus", "aer"])
+    def test_distributed_counts_shape_is_the_same_on_every_backend(self, backend):
+        """n_qpus>1 keeps the n_qpus=1 shape on both local backends: ``counts``
+        is one dict per QPU replica, ``merged_counts`` their total (C-3, #211).
+        X|0> = |1> makes every count deterministic: 256 shots over 3 QPUs
+        apportion as 86/85/85."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure_all()
+        result = polypus.run_quantum_circuit(
+            qc, shots=256, infrastructure="local", backend=backend, n_qpus=3
+        )
+        assert result.counts == [{"1": 86}, {"1": 85}, {"1": 85}]
+        assert result.merged_counts == {"1": 256}
+
     def test_default_backend_is_aer(self):
         import polypus
 
