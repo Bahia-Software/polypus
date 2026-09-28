@@ -27,8 +27,8 @@ use crate::evaluation::{
 };
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
-    OptLevel, Planner, ShotDistributingPlanner,
+    merge_counts, BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure,
+    InfrastructureError, OptLevel, Planner, ShotDistributingPlanner,
 };
 use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
@@ -65,11 +65,17 @@ fn interruptible_token() -> crate::infrastructure::CancelToken {
 /// Result of [`run_quantum_circuit`]: the measurement counts plus the run
 /// manifest that lets a run be logged and replayed (contract C-7).
 ///
-/// `counts` is the exact payload the runner produced before this wrapper
-/// existed — a `list[dict[str, int]]` for a single-QPU run (the backend's default
-/// atomic-wave planner), or a single merged `dict[str, int]` for a distributed
-/// (`n_qpus > 1`) run (the shot-distributing planner); the
-/// per-dict format is contract C-3. The manifest fields make a simulated run
+/// `counts` is always a `list[dict[str, int]]`, whatever `n_qpus` is (contract
+/// C-3). For [`run_quantum_circuit`] it holds one dict per QPU replica, in the
+/// order the shots were apportioned (length `n_qpus`, so length 1 for a
+/// single-QPU run); a replica apportioned zero shots (`shots < n_qpus`) is an
+/// empty dict. `merged_counts` is the key-by-key sum of those dicts as one
+/// `dict[str, int]` — the circuit's total over all `shots`. For [`qml_predict`]
+/// `counts` holds one dict per input row, and since the rows are different
+/// circuits, not replicas of one, `merged_counts` is `None` there. Every dict
+/// follows the C-3 format (keys in ascending bitstring order).
+///
+/// The manifest fields make a simulated run
 /// reproducible: feeding the reported [`seed`](Self::seed) back into
 /// `run_quantum_circuit(..., seed=...)` reproduces the counts byte-for-byte on
 /// any of the native, Aer, or CUNQA (simulated-QPU) backends. `seed` is `None`
@@ -77,9 +83,14 @@ fn interruptible_token() -> crate::infrastructure::CancelToken {
 /// Polypus cannot seed.
 #[pyclass(module = "polypus", frozen)]
 pub struct RunResult {
-    /// Measurement counts. Shape depends on `n_qpus` (see the type docs).
+    /// Measurement counts: always a `list[dict]`, one per QPU replica (or per
+    /// `qml.predict` row). See the type docs.
     #[pyo3(get)]
     pub counts: PyObject,
+    /// The key-by-key sum of every dict in `counts` (a `dict`), or `None` for
+    /// `qml.predict`, whose entries are distinct circuits.
+    #[pyo3(get)]
+    pub merged_counts: PyObject,
     /// Run identifier used for logging, temp files and SLURM job names.
     #[pyo3(get)]
     pub id: String,
@@ -97,11 +108,22 @@ pub struct RunResult {
 
 #[pymethods]
 impl RunResult {
-    fn __repr__(&self) -> String {
-        format!(
-            "RunResult(id={:?}, seed={:?}, backend={:?}, infrastructure={:?})",
-            self.id, self.seed, self.backend, self.infrastructure
-        )
+    /// Every field, in declaration order. `counts` / `merged_counts` use their
+    /// Python `repr` (sorted keys, C-3), and `seed` reads `None` rather than
+    /// Rust's `Some(..)`/`None`, so the output looks like a Python value.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let seed = self
+            .seed
+            .map_or_else(|| "None".to_string(), |s| s.to_string());
+        Ok(format!(
+            "RunResult(counts={}, merged_counts={}, id={:?}, seed={seed}, backend={:?}, \
+             infrastructure={:?})",
+            self.counts.bind(py).repr()?,
+            self.merged_counts.bind(py).repr()?,
+            self.id,
+            self.backend,
+            self.infrastructure
+        ))
     }
 }
 
@@ -871,8 +893,10 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `>= 1` — a zero has no sane meaning once it reaches SLURM and is rejected.
 /// They default to `nodes=1, cores_per_qpu=2`.
 ///
-/// Returns a [`RunResult`] carrying the counts plus a manifest (`id`,
-/// effective `seed`, `backend`, `infrastructure`) for logging and replay.
+/// Returns a [`RunResult`] carrying the counts — `counts`, always a
+/// `list[dict]` with one dict per QPU replica, and `merged_counts`, their total as
+/// one `dict` — plus a manifest (`id`, effective `seed`, `backend`,
+/// `infrastructure`) for logging and replay.
 ///
 /// `fusion` applies only to `backend="polypus"`, the one backend that fuses
 /// gates. Omit it (the default) and each backend does its own thing — the
@@ -986,8 +1010,9 @@ pub fn run_quantum_circuit<'py>(
     // and (with the Planner's between-wave check_signals) keep Ctrl+C from taking
     // effect until the run finishes. See docs/ENGINEERING.md §3. `n_qpus > 1`
     // selects the shot-distributing planner (which apportions this one circuit's
-    // shots across replicas and merges, conserving the total per C-3); otherwise
-    // the backend's default atomic-wave planner runs the circuit as-is.
+    // shots across replicas, conserving the total per C-3, and returns one counts
+    // map per replica); otherwise the backend's default atomic-wave planner runs
+    // the circuit as-is, as its single replica.
     let counts_result =
         qc.py()
             .allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
@@ -1018,22 +1043,18 @@ pub fn run_quantum_circuit<'py>(
     // iterations/convergence notion on this path (those are `TrainResult`
     // fields), so this reports only the run and how long it took.
     log::info!("run {id} completed: duration={:?}", start.elapsed());
-    // Convert at the FFI boundary, preserving the historical output shapes:
-    // `n_qpus == 1` yields one `list[dict]` (one map per circuit); `n_qpus > 1`
-    // yields the single merged `dict`. Either way the keys are sorted (C-3).
-    let counts: PyObject = Python::with_gil(|py| -> PyResult<PyObject> {
-        if n_qpus == 1 {
-            Ok(counts_to_pylist(py, &counts_vec)?.into_any().unbind())
-        } else {
-            let total = counts_vec.into_iter().next().unwrap_or_default();
-            Ok(counts_to_pydict(py, &total)?.into_any().unbind())
-        }
-    })?;
+    // Convert at the FFI boundary with one shape for every `n_qpus` (C-3):
+    // `counts` is a `list[dict]` with one map per replica, and `merged_counts` is
+    // their key-by-key sum as a single `dict`. Keys are sorted in both.
+    let merged = merge_counts(&counts_vec);
     Python::with_gil(|py| {
+        let counts = counts_to_pylist(py, &counts_vec)?.into_any().unbind();
+        let merged_counts = counts_to_pydict(py, &merged)?.into_any().unbind();
         Py::new(
             py,
             RunResult {
                 counts,
+                merged_counts,
                 id,
                 seed: effective_seed,
                 backend: backend.to_string(),
@@ -1502,7 +1523,8 @@ pub fn qml_train<'py>(
 
 /// Batched QML inference: run a trained `qml.train` model on every row of `x` in
 /// one scheduled run, returning a [`RunResult`] whose `counts` holds one dict per
-/// row, in row order.
+/// row, in row order, and whose `merged_counts` is `None` (the rows are distinct
+/// circuits, so summing them has no meaning).
 ///
 /// The circuits are built as in training: each row bound to the feature map, then
 /// `params` (typically `TrainResult.best_params`) bound positionally to the
@@ -1639,6 +1661,9 @@ pub fn qml_predict<'py>(
         py,
         RunResult {
             counts,
+            // Each entry is a different row's circuit, not a replica of one, so
+            // there is no meaningful merged total (C-3).
+            merged_counts: py.None(),
             id,
             seed: Some(effective_seed),
             backend: backend.to_string(),

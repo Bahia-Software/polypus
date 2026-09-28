@@ -37,10 +37,12 @@
 //! result = polypus.run_quantum_circuit(qc, shots=1000, infrastructure="local", n_qpus=10)
 //! ```
 //!
-//! Both calls return a `RunResult`: `result.counts` holds the payload (a
-//! `list[dict]` for a single QPU, a merged `dict` for `n_qpus > 1`), plus
-//! `result.id` / `result.seed` / `result.backend` / `result.infrastructure`
-//! for logging and replay. Pass `seed=...` for reproducible shot noise on
+//! Both calls return a `RunResult` with the same shape whatever `n_qpus` is:
+//! `result.counts` is always a `list[dict]`, one dict per QPU (so
+//! `result.counts[0]` works for any `n_qpus`), and `result.merged_counts` is their
+//! total as one `dict` over all `shots`. `result.id` / `result.seed` /
+//! `result.backend` / `result.infrastructure` carry the manifest for logging and
+//! replay. Pass `seed=...` for reproducible shot noise on
 //! every simulated backend (native, Aer, CUNQA); `result.seed` reports the
 //! effective seed (`None` only for the `"qmio"` infrastructure, real hardware
 //! that cannot be seeded).

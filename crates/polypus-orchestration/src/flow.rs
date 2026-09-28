@@ -28,7 +28,11 @@ pub trait Flow {
 }
 
 /// Runs a batch of bound circuits through the resources' planner and returns the
-/// counts — one [`Counts`] per circuit, in input order.
+/// counts — one [`Counts`] per circuit, in input order, or, when the planner splits
+/// one circuit's shots across replicas, one per replica in apportionment order
+/// (contract C-3). It calls [`Planner::execute_replicas`](polypus_infrastructure::Planner::execute_replicas),
+/// so the per-replica breakdown reaches the edge unmerged; the merged total is
+/// computed there.
 ///
 /// The single-vs-distributed decision is **which planner is in
 /// [`Resources`]** (chosen by the `polypus` edge when it parses kwargs), not this
@@ -58,7 +62,7 @@ impl Flow for RunCircuitFlow {
                 shots: self.shots,
             })
             .collect();
-        resources.planner.execute(
+        resources.planner.execute_replicas(
             resources.backend.as_ref(),
             &tasks,
             &resources.config,
@@ -227,6 +231,62 @@ mod tests {
         for (i, c) in counts.iter().enumerate() {
             assert_eq!(c.get(&format!("task{i}")), Some(&500));
         }
+        scheduler.close();
+    }
+
+    /// A planner whose `execute` and `execute_replicas` answer differently (merged
+    /// vs. per-replica), so a test can tell which one `RunCircuitFlow` called.
+    struct ReplicaPlanner;
+    impl Planner for ReplicaPlanner {
+        fn requirements(&self) -> PlannerRequirements {
+            PlannerRequirements {
+                needs_shot_distribution: false,
+                min_concurrency: 1,
+            }
+        }
+        fn execute(
+            &self,
+            _backend: &dyn QuantumBackend,
+            _tasks: &[CircuitTask<'_>],
+            _config: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            Ok(vec![HashMap::from([("0".to_string(), 500)])])
+        }
+        fn execute_replicas(
+            &self,
+            _backend: &dyn QuantumBackend,
+            _tasks: &[CircuitTask<'_>],
+            _config: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            Ok(vec![
+                HashMap::from([("0".to_string(), 250)]),
+                HashMap::from([("0".to_string(), 250)]),
+            ])
+        }
+    }
+
+    /// `RunCircuitFlow` returns the planner's *per-replica* counts, not its merged
+    /// total, so `run_quantum_circuit(n_qpus > 1)` can expose one dict per replica
+    /// (issue #211, contract C-3).
+    #[test]
+    fn run_circuit_flow_returns_the_per_replica_counts() {
+        let resources = Resources::new(
+            Arc::new(StubBackend),
+            Some(Arc::new(ReplicaPlanner)),
+            Arc::new(config()),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+        let counts = scheduler
+            .run(RunCircuitFlow {
+                circuits: vec![BoundCircuit::Qasm2("a".to_string())],
+                shots: 500,
+            })
+            .expect("the flow must run");
+        assert_eq!(counts.len(), 2);
+        assert!(counts.iter().all(|c| c.get("0") == Some(&250)));
         scheduler.close();
     }
 

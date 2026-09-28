@@ -164,9 +164,11 @@ class TestRunNativeCircuit:
         result = polypus.run_quantum_circuit(
             native_bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
-        assert isinstance(result.counts, dict)
-        assert set(result.counts.keys()).issubset({"00", "11"})
-        assert sum(result.counts.values()) == 400
+        # One dict per QPU replica, plus their merged total (C-3, issue #211).
+        assert isinstance(result.counts, list) and len(result.counts) == 4
+        assert [sum(c.values()) for c in result.counts] == [100, 100, 100, 100]
+        assert set(result.merged_counts.keys()).issubset({"00", "11"})
+        assert sum(result.merged_counts.values()) == 400
 
     def test_qasm_string_input(self, native_bell_circuit):
         import polypus

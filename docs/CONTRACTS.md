@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
@@ -255,15 +255,43 @@ for every gate and compares it with the native gate up to global phase.
   (`run_qcs`, C-1) may list their keys in any order.
 
 The per-circuit dict format above is unchanged by C-7: `run_quantum_circuit`
-now returns that payload as the `counts` attribute of a `RunResult` wrapper
-(`list[dict]` for a single-QPU run, a merged `dict` for `n_qpus > 1`), so
-callers read `result.counts` rather than the bare value. The dict shape,
-bit order, key order and shot-conservation rule are exactly as specified here.
+returns that payload inside a `RunResult` wrapper, whose shape does **not**
+depend on `n_qpus` (issue #211):
+
+- `result.counts` is always a `list[dict]` with **one dict per QPU replica**,
+  in the order the shots were apportioned (length `n_qpus`; length 1 for a
+  single-QPU run). Replica `i` holds exactly the shots apportioned to it
+  (`shots // n`, plus one for each of the first `shots % n` replicas). When
+  `shots < n_qpus`, the replicas apportioned zero shots are **empty dicts**
+  `{}` that stay in the list, so its length is still `n_qpus`.
+- `result.merged_counts` is a single `dict`: the key-by-key sum of every
+  entry of `counts`, i.e. the circuit's total over all `shots` (for
+  `n_qpus = 1` it equals `counts[0]`). It follows every rule above: ascending
+  key order, and `sum(merged_counts.values()) == shots`.
+
+`qml.predict` also returns a `RunResult`, but there each entry of `counts` is a
+different row's circuit, not a replica of one circuit, so summing them has no
+meaning and `merged_counts` is `None`. The dict shape, bit order, key order
+and shot-conservation rule are exactly as specified here.
 
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
-public-API case in `tests/python/test_local_run.py`; audit C6); key order in
-`tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs),
+public-API case in `tests/python/test_local_run.py`; audit C6); the stable
+`RunResult` shape — `counts` one dict per replica with its own apportioned
+shots (zero-shot replicas kept as `{}`), `merged_counts` their key-by-key sum —
+in the `execute_replicas` / `merge_counts` tests of
+`crates/polypus-backend/src/planner.rs`,
+`run_circuit_flow_returns_the_per_replica_counts` in
+`crates/polypus-orchestration/src/flow.rs`,
+`distribute_returns_each_replica_with_its_apportioned_shots` in
+`crates/polypus/tests/running_quantum_circuits_local.rs`,
+`TestRunQuantumCircuitMultipleQpus` and `TestMergedCounts` in
+`tests/python/test_local_run.py`, and
+`test_distributed_counts_shape_is_the_same_on_every_backend` in
+`tests/python/test_backend_selection.py`, with `merged_counts is None` for
+`qml.predict` in `tests/python/test_qml_predict.py` (issue #211); key order in
+`tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs,
+`counts` and `merged_counts`),
 `tests/python/test_qml_predict.py` and `tests/python/test_qml_supervised.py`
 (the `SampleCost` dict); flat bitstring keys for circuits with several
 classical registers (Aer vs native parity) in
@@ -436,13 +464,15 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 ### The run manifest (return shapes)
 
 - `run_quantum_circuit` returns a **`RunResult`** exposing:
-  `counts` (the C-3 payload — `list[dict]` for one QPU, merged `dict` for
-  `n_qpus > 1`), `id` (str), `seed` (`int | None`; the effective seed used, or
+  `counts` (the C-3 payload — always a `list[dict]`, one dict per QPU
+  replica, length `n_qpus`), `merged_counts` (`dict`, the key-by-key sum of
+  `counts` over all `shots`; see C-3), `id` (str), `seed` (`int | None`; the effective seed used, or
   `None` only for the `qmio` infrastructure), `backend` (str), `infrastructure`
   (str).
 - `qml.predict` returns the same **`RunResult`**, but `counts` is always a
   `list[dict]`, one C-3 dict per row of `x` in row order: `n_qpus` spreads the
-  rows, never one row's shots. `seed` is always an `int`; `id` is generated
+  rows, never one row's shots. `merged_counts` is `None`: the rows are
+  distinct circuits, so there is no meaningful total. `seed` is always an `int`; `id` is generated
   internally (`predict_<n_qpus>_<infrastructure>_<uuid>`).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),

@@ -79,7 +79,8 @@ import polypus
 
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
 result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-print(result.counts[0])  # e.g. {'00': 512, '11': 488}
+print(result.counts[0])      # first (here, only) QPU, e.g. {'00': 512, '11': 488}
+print(result.merged_counts)  # total over every QPU — the one to read with n_qpus > 1
 ```
 
 See [Usage](#usage) for Qiskit circuits, multi-QPU distribution, and variational training.
@@ -172,11 +173,13 @@ When `infrastructure="cunqa"`, two optional kwargs size the SLURM allocation for
 result = polypus.run_quantum_circuit(
     qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4
 )
+print(len(result.counts))    # 10 — one counts dict per QPU
+print(result.merged_counts)  # their total, over all NUM_SHOTS shots
 ```
 
 Both must be `>= 1` for `"cunqa"` (a `0` reaching SLURM is rejected with a `ValueError`). They are ignored by `infrastructure="local"` and `"qmio"`, so those calls omit them.
 
-Both calls return a `RunResult`: `result.counts` holds the measurement payload — a `list[dict[str, int]]` for a single QPU, or a single merged `dict[str, int]` when `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay. Pass `seed=...` to `run_quantum_circuit()` for reproducible shot noise on every simulated backend (native `"polypus"`, Aer, and CUNQA's simulated QPUs); `result.seed` reports the effective seed used (`None` only for the `"qmio"` infrastructure, which is real hardware and rejects an explicit seed).
+Both calls return a `RunResult` with the same shape whatever `n_qpus` is. `result.counts` is always a `list[dict[str, int]]` with one dict per QPU, in the order the shots were split (length `n_qpus`, so `result.counts[0]` is the first QPU's counts for any `n_qpus`; a QPU left with no shots when `shots < n_qpus` is an empty `{}`). `result.merged_counts` is a single `dict[str, int]` summing all of them — the circuit's counts over every shot, and usually what you want with `n_qpus > 1`. The manifest fields `result.id`, `result.seed`, `result.backend` and `result.infrastructure` record the run for logging and replay. Pass `seed=...` to `run_quantum_circuit()` for reproducible shot noise on every simulated backend (native `"polypus"`, Aer, and CUNQA's simulated QPUs); `result.seed` reports the effective seed used (`None` only for the `"qmio"` infrastructure, which is real hardware and rejects an explicit seed).
 
 ### Training Variational Circuits
 

@@ -46,19 +46,25 @@ def _uniform3():
 
 @pytest.mark.integration
 class TestRunQuantumCircuitSeed:
+    @pytest.mark.parametrize("n_qpus", [1, 4])
     @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
-    def test_same_seed_reproduces_counts(self, backend_name):
+    def test_same_seed_reproduces_counts(self, backend_name, n_qpus):
         import polypus
 
         qc = _uniform3()
-        r1 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
+        kwargs = dict(
+            shots=2000,
+            infrastructure="local",
+            backend=backend_name,
+            n_qpus=n_qpus,
+            seed=42,
         )
-        r2 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
-        )
+        r1 = polypus.run_quantum_circuit(qc, **kwargs)
+        r2 = polypus.run_quantum_circuit(qc, **kwargs)
         assert r1.seed == 42 and r2.seed == 42
+        # Both the per-QPU breakdown and the merged total replay exactly.
         assert r1.counts == r2.counts
+        assert r1.merged_counts == r2.merged_counts
 
     @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
     def test_no_seed_differs_across_calls(self, backend_name):
