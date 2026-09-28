@@ -2,14 +2,18 @@
 //! [`ConcreteCircuit`] (all angles bound).
 
 use crate::error::CircuitError;
+use crate::expr::{evaluate_constant, Classified, ExprArena, ParamExpr};
 use crate::gate::{
     first_repeated_qubit, qubit_index_violation, GateInstruction, GateParam, MeasuredQubits,
 };
 use crate::qasm;
 use crate::qasm_import;
 use crate::qir;
+use std::convert::Infallible;
 
-/// A quantum circuit that may contain free parameters ([`GateParam::Param`]).
+/// A quantum circuit that may contain free parameters ([`GateParam::Param`])
+/// and angle expressions of them ([`GateParam::Expr`], see
+/// [`add_expr`](Self::add_expr)).
 ///
 /// Built with a fluent API; bind values with [`assign_parameters`](Self::assign_parameters)
 /// or export directly with [`to_qasm2_with_params`](Self::to_qasm2_with_params).
@@ -48,17 +52,54 @@ pub struct ParameterizedCircuit {
     /// `gates` directly leaves it in its "not derived yet" state, from which the
     /// next push rebuilds it.
     pub(crate) measured: MeasuredQubits,
+    /// The expressions [`GateParam::Expr`] angles refer to.
+    pub(crate) exprs: ExprArena,
 }
 
-/// Structural equality over the circuit itself: the `measured` cache is derived
+/// Structural equality over the circuit itself. The `measured` cache is derived
 /// from `gates`, so two circuits that differ only in whether that cache has been
-/// materialised yet are the same circuit.
+/// materialised yet are the same circuit. Expressions compare by content, not
+/// by where they are stored: two circuits whose gates use equal expressions are
+/// equal even if one of them also stores an expression no gate uses.
 impl PartialEq for ParameterizedCircuit {
     fn eq(&self, other: &Self) -> bool {
         self.num_qubits == other.num_qubits
             && self.num_params == other.num_params
-            && self.gates == other.gates
+            && self.gates.len() == other.gates.len()
+            && self
+                .gates
+                .iter()
+                .zip(&other.gates)
+                .all(|(a, b)| same_instruction(a, &self.exprs, b, &other.exprs))
     }
+}
+
+/// Whether `a`, with its expressions in `a_exprs`, and `b`, with its
+/// expressions in `b_exprs`, are the same instruction: equal once their angles
+/// are set aside, and with equal angles, where two expressions are equal if
+/// their content is.
+fn same_instruction(
+    a: &GateInstruction,
+    a_exprs: &ExprArena,
+    b: &GateInstruction,
+    b_exprs: &ExprArena,
+) -> bool {
+    let without_angles = |g: &GateInstruction| {
+        g.try_map_params(|_| Ok::<_, Infallible>(GateParam::Fixed(0.0)))
+            .unwrap_or_else(|never| match never {})
+    };
+    a.params().count() == b.params().count()
+        && a.params().zip(b.params()).all(|(p, q)| match (p, q) {
+            (GateParam::Expr(x), GateParam::Expr(y)) => {
+                match (a_exprs.nodes(*x), b_exprs.nodes(*y)) {
+                    (Some(n), Some(m)) => n == m,
+                    (None, None) => x == y,
+                    _ => false,
+                }
+            }
+            _ => p == q,
+        })
+        && without_angles(a) == without_angles(b)
 }
 
 impl ParameterizedCircuit {
@@ -69,6 +110,7 @@ impl ParameterizedCircuit {
             num_params: 0,
             gates: Vec::new(),
             measured: MeasuredQubits::default(),
+            exprs: ExprArena::default(),
         }
     }
 
@@ -107,25 +149,64 @@ impl ParameterizedCircuit {
         qasm_import::parse_qasm2(source)
     }
 
+    // ── Expressions ──────────────────────────────────────────────────────
+
+    /// Store the angle expression `expr` in this circuit and return the angle
+    /// to pass to a gate.
+    ///
+    /// The angle is canonical: a bare free parameter comes back as
+    /// [`GateParam::Param`]; an expression without free parameters is
+    /// evaluated now and comes back as [`GateParam::Fixed`]; anything else is
+    /// stored and comes back as a [`GateParam::Expr`], which only this circuit
+    /// (and its clones) can resolve. Like a `Param`, the free parameters an
+    /// expression refers to count towards [`num_params`](Self::num_params)
+    /// once a gate that uses it is pushed. Binding evaluates the expression
+    /// exactly as it is written, left to right and without reassociation.
+    ///
+    /// # Errors
+    ///
+    /// - [`CircuitError::NonFiniteParam`] if a number in `expr` is `NaN` or
+    ///   infinite, or a constant expression evaluates to one.
+    /// - [`CircuitError::DivisionByZero`] if a constant expression divides by
+    ///   zero.
+    /// - [`CircuitError::InvalidExpression`] if `expr` has more than 1 000 000
+    ///   nodes, or nests more than 64 levels deep as OpenQASM writes it (one
+    ///   level per parenthesised subexpression, unary minus, function argument
+    ///   and exponent; a chain such as `a + b + c` does not nest). Beyond that
+    ///   depth an exported expression could not be imported again.
+    pub fn add_expr(&mut self, expr: ParamExpr) -> Result<GateParam, CircuitError> {
+        Ok(match ExprArena::classify(&expr)? {
+            Classified::Param(index) => GateParam::Param(index),
+            Classified::Constant => GateParam::Fixed(evaluate_constant(&expr)?),
+            Classified::Expr { max_input } => GateParam::Expr(self.exprs.insert(&expr, max_input)?),
+        })
+    }
+
     // ── Internal validation helpers ──────────────────────────────────────
 
     fn track_param(&mut self, param: &GateParam) {
-        if let GateParam::Param(i) = param {
+        let highest = match param {
+            GateParam::Fixed(_) => None,
+            GateParam::Param(i) => Some(*i),
+            GateParam::Expr(id) => self.exprs.max_input(*id),
+        };
+        if let Some(i) = highest {
             self.num_params = self.num_params.max(i + 1);
         }
     }
 
-    /// Reject a `Fixed` angle that is not finite (`NaN` or infinity) at
-    /// construction time. `Param` angles are unchecked here — their values are
-    /// only known at binding time, where [`GateParam::resolve`] enforces the
-    /// same rule.
-    fn check_finite(param: &GateParam) -> Result<(), CircuitError> {
-        if let GateParam::Fixed(v) = param {
-            if !v.is_finite() {
-                return Err(CircuitError::NonFiniteParam);
+    /// Reject, at construction time, a `Fixed` angle that is not finite (`NaN`
+    /// or infinity) and an `Expr` this circuit does not hold. `Param` angles
+    /// are unchecked here — their values are only known at binding time, where
+    /// [`GateParam::resolve`] enforces the same rule.
+    fn check_param(&self, param: &GateParam) -> Result<(), CircuitError> {
+        match param {
+            GateParam::Fixed(v) if !v.is_finite() => Err(CircuitError::NonFiniteParam),
+            GateParam::Expr(id) if self.exprs.nodes(*id).is_none() => {
+                Err(CircuitError::UnknownExpression)
             }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Fallible version of [`push`](Self::push): append a raw
@@ -164,7 +245,7 @@ impl ParameterizedCircuit {
         // Every angle is validated before any is tracked, so a rejected gate
         // leaves `num_params` untouched.
         for param in gate.params() {
-            Self::check_finite(param)?;
+            self.check_param(param)?;
         }
         for param in gate.params() {
             self.track_param(param);
@@ -530,13 +611,22 @@ impl ParameterizedCircuit {
     // ── Binding and export ───────────────────────────────────────────────
 
     /// Bind concrete values to the circuit's free parameters, producing a
-    /// [`ConcreteCircuit`] in which every [`GateParam`] is `Fixed`.
+    /// [`ConcreteCircuit`] in which every [`GateParam`] is `Fixed`. Every
+    /// expression is evaluated with these values.
     ///
     /// # Errors
     ///
     /// - [`CircuitError::WrongNumberOfParams`] if `params.len() != self.num_params`.
     /// - [`CircuitError::ParamIndexOutOfBounds`] if a gate references an index
     ///   `>= params.len()` (only possible for manually assembled circuits).
+    /// - [`CircuitError::NonFiniteParam`] if a value bound to a parameter a
+    ///   gate uses, or the value of an angle, is `NaN` or infinite. Only the
+    ///   final value of an expression is an angle: an infinite intermediate
+    ///   whose result is finite (`1/exp(x)` for a large `x`) is accepted.
+    /// - [`CircuitError::DivisionByZero`] if an expression divides by zero.
+    /// - [`CircuitError::UnknownExpression`] if a gate refers to an expression
+    ///   this circuit does not hold (only possible when `gates` was assembled
+    ///   by hand).
     pub fn assign_parameters(&self, params: &[f64]) -> Result<ConcreteCircuit, CircuitError> {
         if params.len() != self.num_params {
             return Err(CircuitError::WrongNumberOfParams {
@@ -545,15 +635,22 @@ impl ParameterizedCircuit {
             });
         }
 
-        let resolve = |p: &GateParam| -> Result<GateParam, CircuitError> {
-            Ok(GateParam::Fixed(p.resolve(params)?))
+        // Scratch space for expression evaluation; never allocates for
+        // circuits without expressions.
+        let mut stack = Vec::new();
+        let mut resolve = |p: &GateParam| -> Result<GateParam, CircuitError> {
+            Ok(GateParam::Fixed(p.resolve(
+                params,
+                &self.exprs,
+                &mut stack,
+            )?))
         };
 
         let mut gates = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
             // Exhaustive over the vocabulary (no wildcard arm), so a new
             // parameterised gate can never slip through unbound.
-            let bound = gate.try_map_params(resolve)?;
+            let bound = gate.try_map_params(&mut resolve)?;
             gates.push(bound);
         }
 
@@ -572,7 +669,13 @@ impl ParameterizedCircuit {
                 got: params.len(),
             });
         }
-        qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, params)
+        qasm::write_qasm2(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            params,
+            &self.exprs,
+        )
     }
 
     /// Bind `params` and serialize to a QIR Base Profile LLVM IR module in one
@@ -587,7 +690,13 @@ impl ParameterizedCircuit {
                 got: params.len(),
             });
         }
-        qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, params)
+        qir::write_qir(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            params,
+            &self.exprs,
+        )
     }
 
     /// Bind `params` and serialize to QIR LLVM bitcode (`.bc`) in one step.
@@ -601,7 +710,13 @@ impl ParameterizedCircuit {
                 got: params.len(),
             });
         }
-        qir::write_qir_bitcode(self.num_qubits, self.num_clbits(), &self.gates, params)
+        qir::write_qir_bitcode(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            params,
+            &self.exprs,
+        )
     }
 }
 
@@ -627,20 +742,27 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate parameter cannot be resolved: either an unbound
-    /// [`GateParam::Param`], or a [`GateParam::Fixed`] holding a non-finite
-    /// value (`NaN` or infinity). Neither can happen for circuits produced by
-    /// [`ParameterizedCircuit::assign_parameters`] (which rejects non-finite
-    /// values at binding time); both are only possible when the `gates` field
-    /// was assembled manually. Also panics if the circuit calls two different
-    /// declared gates under one name
+    /// Panics if a gate parameter cannot be resolved: an unbound
+    /// [`GateParam::Param`] or [`GateParam::Expr`], or a [`GateParam::Fixed`]
+    /// holding a non-finite value (`NaN` or infinity). None can happen for
+    /// circuits produced by [`ParameterizedCircuit::assign_parameters`] (which
+    /// rejects non-finite values at binding time); all are only possible when
+    /// the `gates` field was assembled manually. Also panics if the circuit
+    /// calls two different declared gates under one name
     /// ([`CircuitError::ConflictingGateDefinitions`]), which only happens when
     /// calls from different imported programs are combined in one circuit. For
     /// a fallible export, use
     /// [`ParameterizedCircuit::to_qasm2_with_params`](crate::ParameterizedCircuit::to_qasm2_with_params).
     pub fn to_qasm2(&self) -> String {
-        qasm::write_qasm2(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit contains an unbound Param, a non-finite fixed angle, or two different declared gates under one name; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params",
+        qasm::write_qasm2(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            &[],
+            &ExprArena::EMPTY,
+        )
+        .expect(
+            "ConcreteCircuit contains an unbound Param or Expr, a non-finite fixed angle, or two different declared gates under one name; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params",
         )
     }
 
@@ -654,16 +776,23 @@ impl ConcreteCircuit {
     /// # Panics
     ///
     /// Panics if a gate parameter cannot be resolved (an unbound
-    /// [`GateParam::Param`] or a [`GateParam::Fixed`] holding a non-finite
-    /// value), or if the sequence violates the terminal-measurement model (a
+    /// [`GateParam::Param`] or [`GateParam::Expr`], or a [`GateParam::Fixed`]
+    /// holding a non-finite value), or if the sequence violates the terminal-measurement model (a
     /// gate acting on an already-measured qubit; contract C-4). None can happen
     /// for circuits produced by [`ParameterizedCircuit::assign_parameters`];
     /// all are only possible when the `gates` field was assembled manually. For
     /// a fallible export, use
     /// [`ParameterizedCircuit::to_qir_with_params`](crate::ParameterizedCircuit::to_qir_with_params).
     pub fn to_qir(&self) -> String {
-        qir::write_qir(self.num_qubits, self.num_clbits(), &self.gates, &[]).expect(
-            "ConcreteCircuit is invalid (unbound Param, non-finite fixed angle, or a gate after a measurement); build it via ParameterizedCircuit",
+        qir::write_qir(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            &[],
+            &ExprArena::EMPTY,
+        )
+        .expect(
+            "ConcreteCircuit is invalid (unbound Param or Expr, non-finite fixed angle, or a gate after a measurement); build it via ParameterizedCircuit",
         )
     }
 
@@ -676,7 +805,13 @@ impl ConcreteCircuit {
     /// Returns an error when `llvm-as` is unavailable or fails to assemble the
     /// generated textual QIR module.
     pub fn to_qir_bitcode(&self) -> Result<Vec<u8>, CircuitError> {
-        qir::write_qir_bitcode(self.num_qubits, self.num_clbits(), &self.gates, &[])
+        qir::write_qir_bitcode(
+            self.num_qubits,
+            self.num_clbits(),
+            &self.gates,
+            &[],
+            &ExprArena::EMPTY,
+        )
     }
 }
 

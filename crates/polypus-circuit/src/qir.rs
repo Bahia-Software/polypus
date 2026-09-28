@@ -52,6 +52,7 @@
 //! by one `__quantum__rt__result_record_output` per measured result.
 
 use crate::error::CircuitError;
+use crate::expr::ExprArena;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::FRAC_PI_2;
@@ -181,9 +182,11 @@ impl QirWriter {
 
 /// Serialize a gate sequence to a complete QIR Base Profile LLVM IR module.
 ///
-/// `params` supplies values for any unresolved [`GateParam::Param`]; pass an
-/// empty slice for fully concrete circuits. `num_clbits` is the size of the
-/// implicit classical register (reported as `required_num_results`).
+/// `params` supplies values for any unresolved [`GateParam::Param`], and
+/// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
+/// them; pass an empty slice and arena for fully concrete circuits.
+/// `num_clbits` is the size of the implicit classical register (reported as
+/// `required_num_results`).
 ///
 /// # Errors
 ///
@@ -198,13 +201,28 @@ pub(crate) fn write_qir(
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<String, CircuitError> {
     // Contract C-4: reject a gate acting on an already-measured qubit rather
     // than deferring/reordering it past the measurement below.
     if let Some(qubit) = crate::gate::terminal_measurement_violation(gates) {
         return Err(CircuitError::QubitAlreadyMeasured { qubit });
     }
-    write_qir_module(num_qubits, num_clbits, gates, params)
+    write_qir_module(num_qubits, num_clbits, gates, params, exprs)
+}
+
+/// Where [`lower`] resolves angles: the parameter values, the circuit's
+/// expressions, and scratch space to evaluate them.
+struct Angles<'a> {
+    params: &'a [f64],
+    exprs: &'a ExprArena,
+    stack: Vec<f64>,
+}
+
+impl Angles<'_> {
+    fn of(&mut self, p: &GateParam) -> Result<f64, CircuitError> {
+        p.resolve(self.params, self.exprs, &mut self.stack)
+    }
 }
 
 /// Lower one instruction to QIR base-profile calls into `w`. Measurements are
@@ -214,9 +232,9 @@ fn lower(
     measurements: &mut BTreeMap<usize, usize>,
     num_qubits: usize,
     gate: &GateInstruction,
-    params: &[f64],
+    angles: &mut Angles<'_>,
 ) -> Result<(), CircuitError> {
-    let angle = |p: &GateParam| -> Result<f64, CircuitError> { p.resolve(params) };
+    let mut angle = |p: &GateParam| angles.of(p);
     match gate {
         GateInstruction::H(q) => w.gate1(H, *q),
         GateInstruction::X(q) => w.gate1(X, *q),
@@ -299,7 +317,7 @@ fn lower(
         | GateInstruction::C3sqrtx(..)
         | GateInstruction::C4x(..) => {
             for part in gate.lowering().into_iter().flatten() {
-                lower(w, measurements, num_qubits, &part, params)?;
+                lower(w, measurements, num_qubits, &part, angles)?;
             }
         }
         // `u0(γ)` is the identity (an idle marker): dropped like `id`.
@@ -409,8 +427,9 @@ fn lower(
         // A call of a declared gate: expanded into built-in instructions
         // here, at the QIR lowering boundary, each lowered like any other.
         GateInstruction::Custom(call) => {
-            for expanded in call.expand(params)? {
-                lower(w, measurements, num_qubits, &expanded, &[])?;
+            let expanded = call.expand_with(angles.params, angles.exprs, &mut angles.stack)?;
+            for expanded in expanded {
+                lower(w, measurements, num_qubits, &expanded, angles)?;
             }
         }
     }
@@ -424,14 +443,20 @@ fn write_qir_module(
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<String, CircuitError> {
     let mut w = QirWriter::new();
+    let mut angles = Angles {
+        params,
+        exprs,
+        stack: Vec::new(),
+    };
     // Deferred measurements: result (classical bit) -> measured qubit.
     // A BTreeMap keeps results in ascending order and collapses any repeated
     // measurement of the same classical bit to its last assignment.
     let mut measurements: BTreeMap<usize, usize> = BTreeMap::new();
     for gate in gates {
-        lower(&mut w, &mut measurements, num_qubits, gate, params)?;
+        lower(&mut w, &mut measurements, num_qubits, gate, &mut angles)?;
     }
 
     // Measurements come after every unitary (Base Profile: terminal).
@@ -522,8 +547,9 @@ pub(crate) fn write_qir_bitcode(
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<Vec<u8>, CircuitError> {
-    let ir = write_qir(num_qubits, num_clbits, gates, params)?;
+    let ir = write_qir(num_qubits, num_clbits, gates, params, exprs)?;
     assemble_qir_bitcode_with("llvm-as", &ir)
 }
 
@@ -609,7 +635,7 @@ mod tests {
             GateInstruction::Cx(0, 1),
             GateInstruction::MeasureAll,
         ];
-        let ir = write_qir(2, 2, &gates, &[]).unwrap();
+        let ir = write_qir(2, 2, &gates, &[], &ExprArena::EMPTY).unwrap();
 
         assert!(ir.contains("define void @main() #0 {"));
         assert!(ir.contains("call void @__quantum__qis__h__body(%Qubit* null)"));
@@ -629,7 +655,7 @@ mod tests {
     #[test]
     fn no_measurement_omits_recording_and_irreversible_attr() {
         let gates = vec![GateInstruction::H(0)];
-        let ir = write_qir(1, 0, &gates, &[]).unwrap();
+        let ir = write_qir(1, 0, &gates, &[], &ExprArena::EMPTY).unwrap();
         assert!(!ir.contains("record_output"));
         assert!(!ir.contains("attributes #1"));
         assert!(!ir.contains("mz__body"));

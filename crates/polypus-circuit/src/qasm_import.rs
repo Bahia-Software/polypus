@@ -52,16 +52,14 @@ use crate::custom_gate::{
     BodyOp, CustomGate, DefinitionError, GateDefinition, MAX_GATE_EXPANSION, MAX_GATE_NESTING,
 };
 use crate::error::CircuitError;
+// Bounds parser recursion so untrusted input like `((((…))))` or `----…-1`
+// cannot overflow the stack. Legitimate `qelib1.inc` angle expressions
+// (`pi/2`, `-pi/4`, `(1+2)*pi`, …) nest only a handful of levels.
+use crate::expr::MAX_EXPR_DEPTH;
 use crate::expr::{Constant, EvalError, Formal, FormalExpr, Function, Node};
 use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
-
-/// Maximum nesting depth of a constant angle expression. Bounds parser
-/// recursion so untrusted input like `((((…))))` or `----…-1` cannot overflow
-/// the stack. Legitimate `qelib1.inc` angle expressions (`pi/2`, `-pi/4`,
-/// `(1+2)*pi`, …) nest only a handful of levels, so this is generous.
-const MAX_EXPR_DEPTH: usize = 64;
 
 /// Upper bound on the *total* number of declared qubits (and, separately, of
 /// declared classical bits). Guards against a hostile `qreg q[4000000000];`
@@ -1610,6 +1608,7 @@ impl Parser<'_> {
             // `MeasureAll`, so the builder's cache is rebuilt from `gates` on the
             // first push into the imported circuit.
             measured: Default::default(),
+            exprs: Default::default(),
         }
     }
 }
@@ -1669,7 +1668,14 @@ mod tests {
             // Descending operands, so an exporter that re-sorted them shows.
             let qubits: Vec<usize> = (0..gate.qubits).rev().collect();
             let instruction = (gate.build)(&params, &qubits);
-            let qasm = crate::qasm::write_qasm2(gate.qubits, 0, &[instruction], &[]).unwrap();
+            let qasm = crate::qasm::write_qasm2(
+                gate.qubits,
+                0,
+                &[instruction],
+                &[],
+                &crate::expr::ExprArena::EMPTY,
+            )
+            .unwrap();
             let statement = qasm.lines().last().unwrap();
 
             let operands: Vec<String> = qubits.iter().map(|q| format!("q[{q}]")).collect();
@@ -1680,7 +1686,7 @@ mod tests {
                     .iter()
                     .map(|p| match p {
                         GateParam::Fixed(v) => format!("{v:.12}"),
-                        GateParam::Param(_) => unreachable!(),
+                        GateParam::Param(_) | GateParam::Expr(_) => unreachable!(),
                     })
                     .collect();
                 format!("({})", values.join(","))

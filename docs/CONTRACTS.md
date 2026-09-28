@@ -223,16 +223,38 @@ Corollaries:
   at parse time (`CircuitError::Parse`), the QASM and QIR exporters refuse to
   serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
   No producer may emit, and no consumer may accept, a non-finite parameter.
+- **Angle expressions exist only before binding.** An angle may be an
+  expression of the circuit's free parameters (`GateParam::Expr`, stored in
+  its circuit by `ParameterizedCircuit::add_expr`; a bare parameter stays
+  `Param` and a constant expression becomes `Fixed`). `assign_parameters`
+  evaluates every expression, so the OpenQASM 2.0 and QIR exporters see them
+  only through `to_qasm2_with_params` / `to_qir_with_params`, which evaluate
+  them with the given values, and the simulator only receives bound circuits
+  (an expression left in a hand-assembled `ConcreteCircuit` is
+  `SimError::UnboundExpression`). Evaluation performs exactly the written
+  operations, in source order, without reassociation. The rule above applies
+  to what an expression takes in and to its final value: a non-finite number
+  in the expression, a non-finite value bound to a parameter it uses, or a
+  non-finite result is `NonFiniteParam`, and a division by zero is
+  `CircuitError::DivisionByZero`. An infinite intermediate whose result is
+  finite (`1/exp(x)` for a large `x`) is accepted. An expression id means
+  something only in the circuit that issued it; any other circuit rejects it
+  (`CircuitError::UnknownExpression`).
 
 **Enforcing test:** parametric round-trip tests over the whole vocabulary in
 `crates/polypus-circuit/tests/contracts.rs` (export → import → export per gate
 and for a circuit using every instruction kind — an exhaustive match fails the
 build when a new variant is not covered — plus canonical statement → import →
-export byte identity per gate, and `cu1`/`cp` spelling preservation); the
-table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; and the
+export byte identity per gate, `cu1`/`cp` spelling preservation, and every
+angled gate exported with expressions as with their values); the
+table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; the
 QIR-vs-simulator unitary-equivalence test in
 `crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
-for every gate and compares it with the native gate up to global phase.
+for every gate and compares it with the native gate up to global phase; and,
+for expressions, `crates/polypus-circuit/tests/expressions.rs` (binding
+semantics, the non-finite and division-by-zero rules, ids foreign to a
+circuit, bounds) and `unbound_expression_is_rejected` in
+`crates/polypus-sim/tests/gate_matrices.rs`.
 
 ---
 

@@ -26,6 +26,7 @@ fn angle(p: &GateParam) -> Result<f64, SimError> {
         GateParam::Fixed(v) if v.is_finite() => Ok(*v),
         GateParam::Fixed(_) => Err(SimError::NonFiniteAmplitude),
         GateParam::Param(i) => Err(SimError::UnboundParameter { index: *i }),
+        GateParam::Expr(_) => Err(SimError::UnboundExpression),
     }
 }
 
@@ -390,7 +391,8 @@ impl Statevector {
     ///
     /// # Errors
     ///
-    /// [`SimError::UnboundParameter`] if an angle is still a free parameter, or
+    /// [`SimError::UnboundParameter`] / [`SimError::UnboundExpression`] if an
+    /// angle is still a free parameter or an expression of them, or
     /// [`SimError::NonFiniteAmplitude`] if an angle is `NaN`/infinity.
     pub fn apply(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
         // Reject an out-of-range qubit operand before it reaches a kernel. The

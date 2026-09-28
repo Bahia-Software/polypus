@@ -285,6 +285,53 @@ fn unbound_parameter_is_rejected() {
     assert_eq!(err, polypus_sim::SimError::UnboundParameter { index: 0 });
 }
 
+/// An angle that is still an expression of free parameters (only possible in
+/// a hand-assembled circuit) is rejected like an unbound parameter, on the
+/// single-gate path and on the fused diagonal-run path alike; once bound it is
+/// the fixed angle it evaluates to.
+#[test]
+fn unbound_expression_is_rejected() {
+    use polypus_circuit::{ConcreteCircuit, ParamExpr, ParameterizedCircuit};
+    use polypus_sim::{SimError, Simulator, StatevectorSimulator};
+
+    let mut pc = ParameterizedCircuit::new(1);
+    let angle = pc.add_expr(2.0 * ParamExpr::param(0)).unwrap();
+
+    let mut sv = Statevector::new(1).unwrap();
+    assert_eq!(
+        sv.apply(&G::Rx {
+            qubit: 0,
+            theta: angle
+        }),
+        Err(SimError::UnboundExpression)
+    );
+    let hand_assembled = ConcreteCircuit {
+        num_qubits: 1,
+        gates: vec![
+            G::Rz {
+                qubit: 0,
+                theta: Fixed(0.1),
+            },
+            G::Rz {
+                qubit: 0,
+                theta: angle,
+            },
+        ],
+    };
+    assert_eq!(
+        StatevectorSimulator::new().run(&hand_assembled),
+        Err(SimError::UnboundExpression)
+    );
+
+    let bound = pc.rx(0, angle).assign_parameters(&[0.35]).unwrap();
+    let fixed = ParameterizedCircuit::new(1)
+        .rx(0, 0.7)
+        .assign_parameters(&[])
+        .unwrap();
+    let sim = StatevectorSimulator::new();
+    assert_eq!(sim.run(&bound).unwrap(), sim.run(&fixed).unwrap());
+}
+
 #[test]
 fn non_finite_angle_is_rejected() {
     let mut sv = Statevector::new(1).unwrap();

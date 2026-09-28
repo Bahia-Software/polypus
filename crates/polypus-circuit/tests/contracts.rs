@@ -10,7 +10,10 @@
 //!   already-measured qubit is rejected by the builder, the QASM importer and
 //!   the QIR exporter (the simulator half lives in the `polypus-sim` tests).
 
-use polypus_circuit::{CircuitError, GateInstruction, GateParam, Param, ParameterizedCircuit};
+use polypus_circuit::{
+    CircuitError, GateInstruction, GateParam, Param, ParamExpr, ParameterizedCircuit,
+};
+use std::collections::BTreeSet;
 
 // ─────────────────────────── C-2 · round-trip ─────────────────────────────
 
@@ -353,6 +356,161 @@ fn c2_export_is_a_fixed_point_on_the_fuzz_corpus() {
         checked += 1;
     }
     assert!(checked >= 7, "corpus not found in {}", dir.display());
+}
+
+/// One instruction of every kind that takes angles (calls of declared gates
+/// aside), with angle `k` computed by `angle(qc, k)`.
+fn angled_vocabulary(
+    mut angle: impl FnMut(&mut ParameterizedCircuit, usize) -> GateParam,
+) -> ParameterizedCircuit {
+    use GateInstruction as G;
+    let mut qc = ParameterizedCircuit::new(3);
+    let t: Vec<GateParam> = (0..28).map(|k| angle(&mut qc, k)).collect();
+    let gates = [
+        G::Rx {
+            qubit: 0,
+            theta: t[0],
+        },
+        G::Ry {
+            qubit: 1,
+            theta: t[1],
+        },
+        G::Rz {
+            qubit: 2,
+            theta: t[2],
+        },
+        G::Rzz {
+            q0: 0,
+            q1: 2,
+            theta: t[3],
+        },
+        G::Rxx {
+            q0: 1,
+            q1: 2,
+            theta: t[4],
+        },
+        G::Cp {
+            q0: 0,
+            q1: 1,
+            theta: t[5],
+        },
+        G::U {
+            qubit: 0,
+            theta: t[6],
+            phi: t[7],
+            lam: t[8],
+        },
+        G::Crx {
+            control: 1,
+            target: 0,
+            theta: t[9],
+        },
+        G::Cry {
+            control: 2,
+            target: 1,
+            theta: t[10],
+        },
+        G::Crz {
+            control: 0,
+            target: 2,
+            theta: t[11],
+        },
+        G::Cu1 {
+            q0: 2,
+            q1: 1,
+            theta: t[12],
+        },
+        G::Cu3 {
+            control: 1,
+            target: 0,
+            theta: t[13],
+            phi: t[14],
+            lam: t[15],
+        },
+        G::Cu {
+            control: 0,
+            target: 2,
+            theta: t[16],
+            phi: t[17],
+            lam: t[18],
+            gamma: t[19],
+        },
+        G::U0 {
+            qubit: 1,
+            gamma: t[20],
+        },
+        G::P {
+            qubit: 2,
+            lam: t[21],
+        },
+        G::U1 {
+            qubit: 0,
+            lam: t[22],
+        },
+        G::U2 {
+            qubit: 1,
+            phi: t[23],
+            lam: t[24],
+        },
+        G::UGate {
+            qubit: 2,
+            theta: t[25],
+            phi: t[26],
+            lam: t[27],
+        },
+    ];
+    for gate in gates {
+        qc.try_push(gate).unwrap();
+    }
+    qc.measure(0, 0)
+}
+
+/// Angle expressions reach the exporters through every kind of angled gate
+/// alike: with parameter values, the OpenQASM 2.0 and QIR exports of a circuit
+/// whose angles are expressions are those of the same circuit with the
+/// evaluated angles, and binding produces that circuit.
+#[test]
+fn c2_every_angled_gate_exports_expressions_by_value() {
+    let values = [0.3, -0.7];
+    // Angle k is (k+1)/10 · x_{k mod 2} − 1/2, as an expression and as the
+    // same floating-point operations done here.
+    let coefficient = |k: usize| (k as f64 + 1.0) * 0.1;
+    let with_expressions = angled_vocabulary(|qc, k| {
+        qc.add_expr(coefficient(k) * ParamExpr::param(k % 2) - 0.5)
+            .unwrap()
+    });
+    let fixed = angled_vocabulary(|_, k| GateParam::Fixed(coefficient(k) * values[k % 2] - 0.5));
+
+    // Every kind that takes angles, in `instruction_kind`'s numbering (calls
+    // of declared gates have their own tests).
+    let kinds: BTreeSet<usize> = with_expressions
+        .gates
+        .iter()
+        .map(instruction_kind)
+        .collect();
+    let angled = BTreeSet::from([
+        9, 10, 11, 15, 16, 17, 18, 26, 27, 28, 29, 30, 31, 36, 42, 43, 44, 45,
+    ]);
+    assert!(angled.is_subset(&kinds), "missing: {:?}", &angled - &kinds);
+
+    assert_eq!(with_expressions.num_params, 2);
+    assert_eq!(
+        with_expressions.assign_parameters(&values).unwrap().gates,
+        fixed.gates
+    );
+    let qasm = with_expressions.to_qasm2_with_params(&values).unwrap();
+    assert_eq!(qasm, fixed.to_qasm2_with_params(&[]).unwrap());
+    assert_eq!(
+        ParameterizedCircuit::from_qasm2(&qasm)
+            .unwrap()
+            .to_qasm2_with_params(&[])
+            .unwrap(),
+        qasm
+    );
+    assert_eq!(
+        with_expressions.to_qir_with_params(&values).unwrap(),
+        fixed.to_qir_with_params(&[]).unwrap()
+    );
 }
 
 /// `cu1` and `cp` are the same operator but distinct instructions: each keeps

@@ -20,7 +20,7 @@
 //! expansion is always bounded (`qasm_import` is an untrusted input surface).
 
 use crate::error::CircuitError;
-use crate::expr::{EvalError, FormalExpr};
+use crate::expr::{EvalError, ExprArena, FormalExpr};
 use crate::gate::{GateInstruction, GateParam};
 use crate::qasm_import::BuiltinGate;
 use std::sync::Arc;
@@ -320,21 +320,42 @@ impl CustomGate {
     /// # Errors
     ///
     /// [`CircuitError::ParamIndexOutOfBounds`] / [`CircuitError::NonFiniteParam`]
-    /// if a call parameter cannot be resolved, and
-    /// [`CircuitError::NonFiniteParam`] if an angle of the body evaluates to a
-    /// non-finite value (including a division by zero) for these arguments.
+    /// if a call parameter cannot be resolved,
+    /// [`CircuitError::UnknownExpression`] if one is an expression (only its
+    /// circuit can evaluate it: bind the circuit first), and
+    /// [`CircuitError::NonFiniteParam`] or [`CircuitError::DivisionByZero`] if
+    /// an angle of the body is not a usable value for these arguments.
     pub fn expand(&self, params: &[f64]) -> Result<Vec<GateInstruction>, CircuitError> {
+        self.expand_with(params, &ExprArena::EMPTY, &mut Vec::new())
+    }
+
+    /// [`Self::expand`] for a call in a circuit whose expressions are
+    /// `exprs`; `stack` is the expressions' scratch space.
+    pub(crate) fn expand_with(
+        &self,
+        params: &[f64],
+        exprs: &ExprArena,
+        stack: &mut Vec<f64>,
+    ) -> Result<Vec<GateInstruction>, CircuitError> {
         let args = self
             .params
             .iter()
-            .map(|p| p.resolve(params))
+            .map(|p| p.resolve(params, exprs, stack))
             .collect::<Result<Vec<f64>, _>>()?;
         // Not pre-sized with `expansion_size`: that also counts the nested
         // calls, so it can far exceed the number of instructions produced.
         let mut out = Vec::new();
         self.definition
-            .instantiate(&args, &self.qubits, &mut |g| out.push(g), &mut Vec::new())
-            .map_err(|_| CircuitError::NonFiniteParam)?;
+            .instantiate(&args, &self.qubits, &mut |g| out.push(g), stack)
+            .map_err(body_error)?;
         Ok(out)
+    }
+}
+
+/// The error a call reports when an angle of its body is not usable.
+fn body_error(e: EvalError) -> CircuitError {
+    match e {
+        EvalError::DivisionByZero { .. } => CircuitError::DivisionByZero,
+        _ => CircuitError::NonFiniteParam,
     }
 }

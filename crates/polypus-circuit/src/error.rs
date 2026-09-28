@@ -20,6 +20,24 @@ pub enum CircuitError {
     /// `Param`), matching the native simulator's reference behaviour
     /// (contract C-2).
     NonFiniteParam,
+    /// A parameter expression divided by zero while it was evaluated (at
+    /// binding time, or when exporting with parameter values). Division by
+    /// zero is an error of its own, never an infinite angle.
+    DivisionByZero,
+    /// A gate refers to an expression ([`GateParam::Expr`](crate::GateParam::Expr))
+    /// that is not stored in this circuit: an [`ExprId`](crate::ExprId) is
+    /// only meaningful in the circuit that issued it
+    /// ([`ParameterizedCircuit::add_expr`](crate::ParameterizedCircuit::add_expr))
+    /// and its clones. Also reported by exports of a
+    /// [`ConcreteCircuit`](crate::ConcreteCircuit), which holds no expressions.
+    UnknownExpression,
+    /// A parameter expression cannot be stored in a circuit: it is larger or
+    /// nests deeper than a circuit allows (see
+    /// [`ParameterizedCircuit::add_expr`](crate::ParameterizedCircuit::add_expr)).
+    InvalidExpression {
+        /// Human-readable description of the problem.
+        reason: String,
+    },
     /// A gate addresses a qubit index `>= num_qubits`.
     QubitOutOfRange { qubit: usize, num_qubits: usize },
     /// A two-qubit gate was given the same qubit twice.
@@ -63,6 +81,16 @@ impl fmt::Display for CircuitError {
                 f,
                 "gate parameter resolved to a non-finite value (NaN or infinity)"
             ),
+            CircuitError::DivisionByZero => {
+                write!(f, "division by zero in parameter expression")
+            }
+            CircuitError::UnknownExpression => write!(
+                f,
+                "gate refers to an expression that is not part of this circuit (an ExprId belongs to the circuit that returned it from add_expr)"
+            ),
+            CircuitError::InvalidExpression { reason } => {
+                write!(f, "invalid parameter expression: {reason}")
+            }
             CircuitError::QubitOutOfRange { qubit, num_qubits } => write!(
                 f,
                 "qubit index {qubit} out of range for circuit with {num_qubits} qubits"

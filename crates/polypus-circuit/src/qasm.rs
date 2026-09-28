@@ -12,6 +12,7 @@
 
 use crate::custom_gate::GateDefinition;
 use crate::error::CircuitError;
+use crate::expr::ExprArena;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -61,13 +62,15 @@ fn declared_gates(gates: &[GateInstruction]) -> Result<Vec<&GateDefinition>, Cir
 
 /// Serialize a gate sequence to a complete OpenQASM 2.0 program.
 ///
-/// `params` supplies values for any unresolved [`GateParam::Param`]; pass an
-/// empty slice for fully concrete circuits.
+/// `params` supplies values for any unresolved [`GateParam::Param`], and
+/// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
+/// them; pass an empty slice and arena for fully concrete circuits.
 pub(crate) fn write_qasm2(
     num_qubits: usize,
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<String, CircuitError> {
     let mut out = String::new();
     out.push_str("OPENQASM 2.0;\n");
@@ -86,8 +89,10 @@ pub(crate) fn write_qasm2(
         let _ = writeln!(out, "creg c[{num_clbits}];");
     }
 
-    let angle =
-        |p: &GateParam| -> Result<String, CircuitError> { Ok(fmt_angle(p.resolve(params)?)) };
+    let mut stack = Vec::new();
+    let mut angle = |p: &GateParam| -> Result<String, CircuitError> {
+        Ok(fmt_angle(p.resolve(params, exprs, &mut stack)?))
+    };
 
     for gate in gates {
         match gate {
@@ -286,7 +291,7 @@ pub(crate) fn write_qasm2(
                     let angles = call
                         .params()
                         .iter()
-                        .map(angle)
+                        .map(&mut angle)
                         .collect::<Result<Vec<_>, _>>()?;
                     let _ = writeln!(
                         out,
