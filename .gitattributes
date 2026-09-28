@@ -3,5 +3,5 @@
 # .github/workflows/sync-tutorials.yml regenerates real outputs against the
 # just-released package before publishing to polypus-tutorials. New clones
 # need `nbstripout --install` once (pulled in via requirements-dev.txt).
-tutorials/*.ipynb filter=nbstripout
-tutorials/*.ipynb diff=ipynb
+tutorials/**/*.ipynb filter=nbstripout
+tutorials/**/*.ipynb diff=ipynb
