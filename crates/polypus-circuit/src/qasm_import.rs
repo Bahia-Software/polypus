@@ -49,10 +49,10 @@
 
 use crate::circuit::ParameterizedCircuit;
 use crate::custom_gate::{
-    AddOp, BodyOp, CustomGate, DefinitionError, EvalError, Expr, Func, GateDefinition, MulOp,
-    MAX_GATE_EXPANSION, MAX_GATE_NESTING,
+    BodyOp, CustomGate, DefinitionError, GateDefinition, MAX_GATE_EXPANSION, MAX_GATE_NESTING,
 };
 use crate::error::CircuitError;
+use crate::expr::{Constant, EvalError, Formal, FormalExpr, Function, Node};
 use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -574,7 +574,7 @@ fn unsupported_gate(name: &str, line: usize) -> CircuitError {
 /// an argument (Qiskit rejects these too): in a body, a parameter named `pi`
 /// would otherwise silently mean the constant.
 fn is_expression_keyword(name: &str) -> bool {
-    name == "pi" || Func::from_name(name).is_some()
+    name == "pi" || Function::from_qasm2_name(name).is_some()
 }
 
 // ─────────────────────────────── Parser ──────────────────────────────────
@@ -593,6 +593,43 @@ struct ArgIndices {
     /// `true` when the argument was a bare register name (participates in
     /// broadcasting), `false` for `name[i]`.
     is_register: bool,
+}
+
+/// One parsed angle expression: its nodes in postfix order, and the source
+/// line of each division, so a constant expression that divides by zero is
+/// reported where the division is.
+struct ParsedExpr {
+    nodes: Vec<Node<Formal>>,
+    div_lines: Vec<(usize, usize)>,
+}
+
+impl ParsedExpr {
+    fn push(&mut self, node: Node<Formal>) {
+        self.nodes.push(node);
+    }
+
+    fn push_div(&mut self, line: usize) {
+        self.div_lines.push((self.nodes.len(), line));
+        self.nodes.push(Node::Div);
+    }
+
+    /// Evaluate a constant (top-level) expression that starts on `line` as an
+    /// angle. A division by zero is reported on the division's own line.
+    fn eval_constant(self, line: usize, stack: &mut Vec<f64>) -> Result<f64, CircuitError> {
+        let div_lines = self.div_lines;
+        FormalExpr::from_nodes(self.nodes)
+            .eval_angle(&[], stack)
+            .map_err(|e| {
+                let line = match e {
+                    EvalError::DivisionByZero { at } => div_lines
+                        .iter()
+                        .find(|&&(position, _)| position == at)
+                        .map_or(line, |&(_, line)| line),
+                    _ => line,
+                };
+                err(line, e.to_string())
+            })
+    }
 }
 
 struct Parser<'src> {
@@ -956,7 +993,7 @@ impl Parser<'_> {
 
     /// An optional parenthesised parameter list, `(e1, e2, …)`: each expression
     /// with the line it starts on. Empty when there is no list (or `()`).
-    fn param_exprs(&mut self) -> Result<Vec<(Expr, usize)>, CircuitError> {
+    fn param_exprs(&mut self) -> Result<Vec<(ParsedExpr, usize)>, CircuitError> {
         let mut exprs = Vec::new();
         if self.peek() != Some(&Tok::LParen) {
             return Ok(exprs);
@@ -968,7 +1005,12 @@ impl Parser<'_> {
         }
         loop {
             let line = self.line();
-            exprs.push((self.expr(0)?, line));
+            let mut expr = ParsedExpr {
+                nodes: Vec::new(),
+                div_lines: Vec::new(),
+            };
+            self.expr(0, &mut expr)?;
+            exprs.push((expr, line));
             match self.next("',' or ')'")? {
                 (Tok::Comma, _) => continue,
                 (Tok::RParen, _) => return Ok(exprs),
@@ -986,12 +1028,9 @@ impl Parser<'_> {
     fn gate_stmt(&mut self, name: String, line: usize) -> Result<(), CircuitError> {
         // Optional parameter list: constant expressions, evaluated here.
         let mut params = Vec::new();
+        let mut stack = Vec::new();
         for (expr, line) in self.param_exprs()? {
-            let value = expr.eval_angle(&[]).map_err(|e| match e {
-                EvalError::DivisionByZero { line } => err(line, e.to_string()),
-                EvalError::NonFinite => err(line, e.to_string()),
-            })?;
-            params.push(value);
+            params.push(expr.eval_constant(line, &mut stack)?);
         }
 
         // Argument list.
@@ -1268,7 +1307,11 @@ impl Parser<'_> {
         } else {
             return Err(unsupported_gate(&op, line));
         };
-        let params: Vec<Expr> = self.param_exprs()?.into_iter().map(|(e, _)| e).collect();
+        let params: Vec<FormalExpr> = self
+            .param_exprs()?
+            .into_iter()
+            .map(|(e, _)| FormalExpr::from_nodes(e.nodes))
+            .collect();
         let args = self.body_args(gate, qubits)?;
         let expected = match &callee {
             Callee::Declared(definition) => (definition.num_params(), definition.num_qubits()),
@@ -1397,6 +1440,9 @@ impl Parser<'_> {
     //   power  := primary ('^' factor)?          (right-associative)
     //   primary:= real | int | 'pi' | fn '(' expr ')' | '(' expr ')'
     //
+    // Each rule appends its nodes to `out` in postfix order, which is the
+    // order they are evaluated in: left to right, as written.
+    //
     // `depth` bounds the recursion so untrusted input like `(((…)))` or
     // `----…-1` cannot overflow the stack; it is incremented only when
     // descending into a nested sub-expression (parenthesis, function argument,
@@ -1414,107 +1460,107 @@ impl Parser<'_> {
         }
     }
 
-    fn expr(&mut self, depth: usize) -> Result<Expr, CircuitError> {
+    fn expr(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
-        let first = self.term(depth)?;
-        let mut rest = Vec::new();
+        self.term(depth, out)?;
         loop {
             let op = match self.peek() {
-                Some(Tok::Plus) => AddOp::Add,
-                Some(Tok::Minus) => AddOp::Sub,
-                _ => break,
+                Some(Tok::Plus) => Node::Add,
+                Some(Tok::Minus) => Node::Sub,
+                _ => return Ok(()),
             };
             self.pos += 1;
-            rest.push((op, self.term(depth)?));
+            self.term(depth, out)?;
+            out.push(op);
         }
-        Ok(if rest.is_empty() {
-            first
-        } else {
-            Expr::Sum(Box::new(first), rest)
-        })
     }
 
-    fn term(&mut self, depth: usize) -> Result<Expr, CircuitError> {
+    fn term(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
-        let first = self.factor(depth)?;
-        let mut rest = Vec::new();
+        self.factor(depth, out)?;
         loop {
-            let op = match self.peek() {
-                Some(Tok::Star) => MulOp::Mul,
-                Some(Tok::Slash) => MulOp::Div { line: self.line() },
-                _ => break,
+            let divide = match self.peek() {
+                Some(Tok::Star) => false,
+                Some(Tok::Slash) => true,
+                _ => return Ok(()),
             };
+            let line = self.line();
             self.pos += 1;
-            rest.push((op, self.factor(depth)?));
+            self.factor(depth, out)?;
+            if divide {
+                out.push_div(line);
+            } else {
+                out.push(Node::Mul);
+            }
         }
-        Ok(if rest.is_empty() {
-            first
-        } else {
-            Expr::Product(Box::new(first), rest)
-        })
     }
 
-    fn factor(&mut self, depth: usize) -> Result<Expr, CircuitError> {
+    fn factor(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
         match self.peek() {
             Some(Tok::Minus) => {
                 self.pos += 1;
-                Ok(Expr::Neg(Box::new(self.factor(depth + 1)?)))
+                self.factor(depth + 1, out)?;
+                out.push(Node::Neg);
+                Ok(())
             }
             Some(Tok::Plus) => {
                 self.pos += 1;
-                self.factor(depth + 1)
+                self.factor(depth + 1, out)
             }
-            _ => self.power(depth),
+            _ => self.power(depth, out),
         }
     }
 
-    fn power(&mut self, depth: usize) -> Result<Expr, CircuitError> {
+    fn power(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
-        let base = self.primary(depth)?;
+        self.primary(depth, out)?;
         if self.peek() == Some(&Tok::Caret) {
             self.pos += 1;
-            let exponent = self.factor(depth + 1)?;
-            Ok(Expr::Pow(Box::new(base), Box::new(exponent)))
-        } else {
-            Ok(base)
+            self.factor(depth + 1, out)?;
+            out.push(Node::Pow);
         }
+        Ok(())
     }
 
-    fn primary(&mut self, depth: usize) -> Result<Expr, CircuitError> {
+    fn primary(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
         match self.next("an expression")? {
-            (Tok::Real(v), _) => Ok(Expr::Num(v)),
-            (Tok::Int(v), _) => Ok(Expr::Num(v as f64)),
+            (Tok::Real(v), _) => out.push(Node::Num(v)),
+            (Tok::Int(v), _) => out.push(Node::Num(v as f64)),
             (Tok::LParen, _) => {
-                let e = self.expr(depth + 1)?;
+                self.expr(depth + 1, out)?;
                 self.expect(Tok::RParen)?;
-                Ok(e)
             }
             (Tok::Ident(name), line) => {
                 if name == "pi" {
-                    return Ok(Expr::Num(std::f64::consts::PI));
+                    out.push(Node::Const(Constant::Pi));
+                    return Ok(());
                 }
                 // Inside a gate body: one of the gate's formal parameters.
                 if let Some(index) = self.param_scope.iter().position(|p| *p == name) {
-                    return Ok(Expr::Param(index));
+                    out.push(Node::Ref(Formal(index)));
+                    return Ok(());
                 }
-                let Some(f) = Func::from_name(&name) else {
+                let Some(f) = Function::from_qasm2_name(&name) else {
                     return Err(err(
                         line,
                         format!("unknown identifier '{name}' in expression"),
                     ));
                 };
                 self.expect(Tok::LParen)?;
-                let e = self.expr(depth + 1)?;
+                self.expr(depth + 1, out)?;
                 self.expect(Tok::RParen)?;
-                Ok(Expr::Func(f, Box::new(e)))
+                out.push(Node::Call(f));
             }
-            (other, line) => Err(err(
-                line,
-                format!("expected an expression, found {}", other.describe()),
-            )),
+            (other, line) => {
+                return Err(err(
+                    line,
+                    format!("expected an expression, found {}", other.describe()),
+                ))
+            }
         }
+        Ok(())
     }
 
     // ── Final assembly ───────────────────────────────────────────────────

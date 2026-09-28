@@ -39,6 +39,7 @@
 mod circuit;
 mod custom_gate;
 mod error;
+mod expr;
 mod gate;
 mod qasm;
 mod qasm_import;
