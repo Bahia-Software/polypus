@@ -270,6 +270,48 @@ jobs:
       - name: Run Python tests
         run: pytest tests/python
 
+  # Execute every tutorial notebook headless against this PR's own build, so a
+  # broken notebook (a stale API call, a typo introduced while editing) fails
+  # the PR instead of only surfacing later, when sync-tutorials.yml executes
+  # the same notebooks at release time against the just-published wheel.
+  # Mirrors that workflow's execution step (nbconvert --execute), but against
+  # the branch's own build on every push/PR instead of only at release.
+  tutorials:
+    name: tutorials (execute notebooks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Headless: no display available on the runner.
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip maturin
+      # Same pattern as the python-tests job: build the full wheel (extension
+      # + bundled polypus_python) and install it, which also pulls in the
+      # runtime deps declared in pyproject.toml (qiskit, qiskit-aer).
+      - name: Build & install polypus-quantum (extension + bundled polypus_python)
+        run: |
+          maturin build --release --out dist
+          pip install dist/polypus_quantum-*.whl
+      # matplotlib/pylatexenc are needed only by the tutorials' drawing
+      # cells (qasm2.loads(...).draw("mpl")), not by the package itself.
+      - name: Install notebook execution dependencies
+        run: pip install nbconvert ipykernel matplotlib pylatexenc
+      - name: Register the python3 Jupyter kernel
+        run: python -m ipykernel install --user --name python3 --display-name "Python 3"
+      - name: Execute every tutorial notebook
+        run: |
+          find tutorials -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
+            echo "Executing $nb"
+            jupyter nbconvert --to notebook --execute --inplace "$nb"
+          done
+
   # Fuzz the untrusted OpenQASM 2.0 import surface on a short time budget, as a
   # regression guard for the DoS vectors closed in polypus-circuit (unbounded
   # expression recursion, oversized register declarations, non-finite angles).
