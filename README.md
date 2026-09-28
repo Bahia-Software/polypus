@@ -79,7 +79,7 @@ import polypus
 
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
 result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-print(result.counts[0])      # first (here, only) QPU, e.g. {'00': 512, '11': 488}
+print(result.counts[0])  # first (here, only) QPU, e.g. {'00': 512, '11': 488}
 print(result.merged_counts)  # total over every QPU — the one to read with n_qpus > 1
 ```
 
@@ -173,7 +173,7 @@ When `infrastructure="cunqa"`, two optional kwargs size the SLURM allocation for
 result = polypus.run_quantum_circuit(
     qc, shots=NUM_SHOTS, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4
 )
-print(len(result.counts))    # 10 — one counts dict per QPU
+print(len(result.counts))  # 10 — one counts dict per QPU
 print(result.merged_counts)  # their total, over all NUM_SHOTS shots
 ```
 
