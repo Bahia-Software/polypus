@@ -1,0 +1,13 @@
+OPENQASM 3.0;
+include "stdgates.inc";
+input float[64] _x_0_;
+input float[64] _x_1_;
+qubit _qubit0;
+qubit _qubit1;
+h _qubit0;
+h _qubit1;
+p(2*_x_0_) _qubit0;
+p(2*_x_1_) _qubit1;
+cx _qubit0, _qubit1;
+p((-pi + _x_0_)*(-pi + _x_1_)*2) _qubit1;
+cx _qubit0, _qubit1;
