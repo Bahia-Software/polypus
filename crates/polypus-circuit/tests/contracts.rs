@@ -335,16 +335,22 @@ fn c2_every_gate_statement_reemits_byte_identically() {
 
 /// The fuzz target's round-trip property (`fuzz/fuzz_targets/from_qasm2.rs`),
 /// on its seed corpus — so it runs in every test build, not only under
-/// `cargo fuzz`: whatever imports, exports to a fixed point.
+/// `cargo fuzz`: whatever imports, exports to a fixed point. Mirrors the fuzz
+/// target byte-for-byte: corpus entries are raw fuzzer bytes, not necessarily
+/// valid UTF-8 (decoded lossily, same as the target) or even valid QASM (most
+/// of a libFuzzer corpus is inputs that failed to parse but were still kept
+/// for coverage — the target itself skips those rather than asserting on them).
 #[test]
 fn c2_export_is_a_fixed_point_on_the_fuzz_corpus() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/from_qasm2");
     let mut checked = 0;
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
-        let src = std::fs::read_to_string(&path).unwrap();
-        let circuit = ParameterizedCircuit::from_qasm2(&src)
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let data = std::fs::read(&path).unwrap();
+        let src = String::from_utf8_lossy(&data);
+        let Ok(circuit) = ParameterizedCircuit::from_qasm2(&src) else {
+            continue;
+        };
         let exported = circuit.to_qasm2_with_params(&[]).unwrap();
         let again = ParameterizedCircuit::from_qasm2(&exported)
             .and_then(|c| c.to_qasm2_with_params(&[]))
