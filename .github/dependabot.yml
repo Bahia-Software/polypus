@@ -20,12 +20,13 @@ updates:
 
   # The workspace and the two templates each commit a Cargo.lock, which CI
   # builds with `--locked`, so none of them picks up new upstream releases on
-  # its own. The templates are outside the workspace (see the root Cargo.toml
-  # `exclude`), so each directory is listed. `fuzz/` is outside it too, but its
-  # Cargo.lock is gitignored (fuzz/.gitignore), so there Dependabot has no pin to
-  # refresh: it can only raise a requirement in fuzz/Cargo.toml (e.g.
-  # libfuzzer-sys) once a release falls outside it. The `cargo` group is applied
-  # per directory: at most one combined PR per directory each week.
+  # its own. The templates are separate workspaces (each Cargo.toml has its own
+  # empty `[workspace]` table), so each directory is listed. `fuzz/` is outside
+  # the workspace too (the root Cargo.toml `exclude`s it), but its Cargo.lock is
+  # gitignored (fuzz/.gitignore), so there Dependabot has no pin to refresh: it
+  # can only raise a requirement in fuzz/Cargo.toml (e.g. libfuzzer-sys) once a
+  # release falls outside it. The `cargo` group is applied per directory: at
+  # most one combined PR per directory each week.
   - package-ecosystem: cargo
     directories:
       - /

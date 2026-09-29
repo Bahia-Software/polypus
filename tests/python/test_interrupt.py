@@ -314,9 +314,9 @@ def test_qml_training_responds_to_sigint_promptly():
     _assert_responds_to_sigint_promptly(
         _QML_CHILD,
         failure_hint=(
-            "qml.train (QmlOracle) — the main-thread check_signals after the "
-            "worker join is likely missing or the GIL is not released around "
-            "the optimizer"
+            "qml.train (QmlOracle) — the Planner's between-wave interrupt "
+            "guard (SignalInterrupt) is likely not attached to the run token, "
+            "or the GIL is not released around the optimizer"
         ),
     )
 
