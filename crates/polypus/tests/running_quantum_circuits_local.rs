@@ -85,7 +85,7 @@ fn infrastructure_from_str_unknown_is_typed_error() {
 // The native (pure-Rust) statevector backend is used so this runs without a live
 // Python runtime or Qiskit; the planner re-acquires the GIL only for its
 // between-wave `check_signals`, so the interpreter is initialised with
-// `prepare_freethreaded_python()` (the same pattern the qmio tests use).
+// `Python::initialize()` (the same pattern the qmio tests use).
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn native_bell_circuit() -> BoundCircuit {
@@ -113,7 +113,7 @@ fn native_params(shots: u32, id: &str) -> RunParams {
 /// driving the real `Scheduler`/`RunCircuitFlow` path, and return the per-replica
 /// counts exactly as the edge receives them.
 fn distributed_replicas(shots: u32, n_qpus: u32, id: &str) -> Vec<HashMap<String, u64>> {
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,
@@ -191,7 +191,7 @@ fn distribute_rejects_empty_circuits() {
     // below, the `run_quantum_circuit` edge only ever passes one circuit, so this
     // guards the planner's `tasks.len() != 1` check directly for the zero case
     // (issue #162 — this guard already handled zero correctly but was untested).
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,
@@ -224,7 +224,7 @@ fn distribute_rejects_multiple_circuits() {
     // is a typed error (surfaced as a ValueError at the FFI edge), never a silent
     // truncation. The `run_quantum_circuit` edge only ever passes one circuit, so
     // this guards the planner directly.
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
     let resources = Resources::new(
         backend,

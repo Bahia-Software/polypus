@@ -372,8 +372,8 @@ mod tests {
             let file = CString::new(format!("{name}.py")).expect("no interior NUL");
             let module_name = CString::new(name).expect("no interior NUL");
 
-            pyo3::prepare_freethreaded_python();
-            Python::with_gil(|py| {
+            pyo3::Python::initialize();
+            Python::attach(|py| {
                 let code = cr#"
 call_count = 0
 
@@ -397,7 +397,7 @@ class Bound:
 
         /// `n` fresh `Template` instances to serve as the oracle's training circuits.
         fn training_circuits(&self, n: usize) -> Vec<Py<PyAny>> {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let cls = self
                     .module
                     .bind(py)
@@ -416,7 +416,7 @@ class Bound:
 
         /// Total `assign_parameters` calls so far — i.e. `BoundCircuit`s built.
         fn assign_calls(&self) -> usize {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 self.module
                     .bind(py)
                     .getattr("call_count")

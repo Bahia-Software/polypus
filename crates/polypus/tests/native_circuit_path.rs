@@ -3,7 +3,7 @@
 //! The decisive property verified here: binding a native circuit template
 //! (`CircuitSource::Native`) NEVER touches Python. These tests run in a plain
 //! `cargo test` binary where no Python interpreter has been initialised —
-//! if `bind` (or QASM generation) acquired the GIL, `Python::with_gil` would
+//! if `bind` (or QASM generation) acquired the GIL, `Python::attach` would
 //! panic ("the Python interpreter is not initialized"). Passing tests are
 //! therefore proof of GIL-freedom, not just a convention.
 

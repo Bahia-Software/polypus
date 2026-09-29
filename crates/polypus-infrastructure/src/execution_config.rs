@@ -170,7 +170,7 @@ impl Clone for BackendConfig {
                 sim_method: sim_method.clone(),
                 noise_model: noise_model
                     .as_ref()
-                    .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+                    .map(|nm| Python::attach(|py| nm.clone_ref(py))),
             },
             BackendConfig::LocalNative { fusion } => BackendConfig::LocalNative { fusion: *fusion },
             BackendConfig::Cunqa {

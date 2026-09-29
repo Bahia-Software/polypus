@@ -19,7 +19,7 @@ polypus-orchestration = { workspace = true }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
 polypus-circuit = { workspace = true }
-pyo3 = { version = "0.25" }
+pyo3 = { version = "0.29" }
 log = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = "1"

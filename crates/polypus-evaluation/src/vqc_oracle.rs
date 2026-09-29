@@ -170,7 +170,7 @@ mod tests {
     ///
     /// With `fail = true` the call errors out before returning any counts, which
     /// is also before the Planner's between-wave `check_signals` reaches
-    /// `Python::with_gil` — that is what lets the chunking/short-circuit tests
+    /// `Python::attach` — that is what lets the chunking/short-circuit tests
     /// below run against a bare interpreter.
     struct MockBackend {
         batch_size: usize,
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn first_wave_is_sized_by_max_concurrency_and_a_failure_short_circuits() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let backend = Arc::new(MockBackend::new(3, true));
         let oracle = oracle(Arc::clone(&backend));
 
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_recorded_failure_short_circuits_later_batches_without_touching_the_backend() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let backend = Arc::new(MockBackend::new(3, true));
         let oracle = oracle(Arc::clone(&backend));
 
@@ -345,7 +345,7 @@ mod tests {
     fn multiple_successful_chunks_preserve_candidate_order() {
         // The Planner still touches the GIL once per wave for its signal check, so
         // the interpreter must be initialised even though the reduction is native.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
 
         let backend = Arc::new(MockBackend::new(3, false));
         let oracle = oracle(Arc::clone(&backend));

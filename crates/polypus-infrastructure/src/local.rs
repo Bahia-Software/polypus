@@ -39,7 +39,7 @@ impl QuantumBackend for LocalBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched (Aer transpiles them) and
             // every native circuit travels to Python as OpenQASM 2.0.
@@ -160,7 +160,7 @@ impl QuantumBackend for LocalBackend {
         let cores = std::thread::available_parallelism()
             .map(|c| c.get())
             .unwrap_or(1);
-        let widest = Python::with_gil(|py| -> Result<usize, InfrastructureError> {
+        let widest = Python::attach(|py| -> Result<usize, InfrastructureError> {
             let mut widest = 0usize;
             for task in tasks {
                 if let Some(n) = circuit_qubits_checked(task.circuit, py)? {
@@ -251,7 +251,7 @@ mod tests {
     /// signature (the `Qiskit` arm is exercised end-to-end by the Python suite).
     #[test]
     fn widest_qubits_picks_the_largest_circuit() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let small = ParameterizedCircuit::new(2)
             .h(0)
             .measure_all()
@@ -266,7 +266,7 @@ mod tests {
             BoundCircuit::Native(small),
             BoundCircuit::Qasm2(big.to_qasm2()),
         ];
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert_eq!(widest_qubits(&batch, py), 7);
             assert_eq!(widest_qubits(&[], py), 0);
         });
@@ -284,7 +284,7 @@ mod tests {
     /// default (purely additive).
     #[test]
     fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let wide = BoundCircuit::Native(
             ParameterizedCircuit::new(30)
                 .assign_parameters(&[])
@@ -319,7 +319,7 @@ mod tests {
     /// single-batch contract of `tests/python/test_qml_concurrency.py`).
     #[test]
     fn capabilities_for_keeps_a_single_wave_at_low_qubits() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let small =
             BoundCircuit::Native(ParameterizedCircuit::new(2).assign_parameters(&[]).unwrap());
         let tasks: Vec<CircuitTask> = (0..64)
@@ -347,8 +347,8 @@ mod tests {
     /// uninterruptible wave.
     #[test]
     fn capabilities_for_wave_splits_a_high_qubit_qiskit_batch() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             // A lightweight stand-in for a wide Qiskit circuit: any object exposing
             // `num_qubits`. `types.SimpleNamespace(num_qubits=30)` avoids a qiskit
             // dependency in this unit test while exercising the getattr path.
@@ -391,8 +391,8 @@ mod tests {
     /// whose `num_qubits` property raises `KeyboardInterrupt`.
     #[test]
     fn capabilities_for_propagates_keyboard_interrupt_from_qiskit_width_read() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             // A stand-in whose `num_qubits` getattr raises KeyboardInterrupt, exactly
             // as CPython would for a pending Ctrl+C mid-bytecode.
             let module = PyModule::from_code(

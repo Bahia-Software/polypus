@@ -10,21 +10,18 @@
 # Recent cargo-deny versions default vulnerabilities to "deny" and unmaintained
 # crates to "warn", so no explicit severity keys are needed here.
 ignore = [
-    # PyCFunction::new_closure lacked a Sync bound in pyo3 <0.29. The
-    # workspace never calls new_closure (verified: no occurrences under
-    # crates/), so the advisory does not apply. Remove this entry when the
-    # pyo3 >=0.29 migration lands.
-    { id = "RUSTSEC-2026-0177", reason = "PyCFunction::new_closure is not used in this workspace" },
-    # Out-of-bounds read in `nth`/`nth_back` on PyList/PyTuple iterators
-    # (also reachable via `skip`/`step_by`). No such calls exist on pyo3
-    # iterators in this workspace. Remove when the pyo3 >=0.26 upgrade lands.
-    { id = "RUSTSEC-2026-0176", reason = "nth/nth_back (and skip/step_by) are never called on PyList/PyTuple iterators here" },
-    # ttf-parser is unmaintained (author states no further fixes will land;
-    # no safe upgrade exists). Pulled in transitively via
-    # ab_glyph <- plotters, and used only to parse two fixed, trusted,
-    # embedded DejaVu font files — never untrusted/external font input.
-    # Revisit if ab_glyph migrates to a maintained parser (e.g. skrifa).
-    { id = "RUSTSEC-2026-0192", reason = "unmaintained but only parses trusted, embedded DejaVu fonts, never untrusted input; no safe upgrade available" },
+    # ttf-parser is unmaintained (advisory marks no patched version; the
+    # suggested replacement is skrifa). It arrives only through
+    # polypus-physics' optional `plotters` feature:
+    # plotters 0.3.7 -> ab_glyph 0.2.32 -> owned_ttf_parser 0.25 -> ttf-parser.
+    # Re-verified 2026-09-28: those are the latest releases of plotters and
+    # ab_glyph, and both still depend on ttf-parser, so no upgrade removes it.
+    # Exposure is limited to parsing the two DejaVu fonts embedded with
+    # `include_bytes!` in polypus-physics/src/fonts.rs, never external input,
+    # and no other workspace crate depends on polypus-physics, so it is absent
+    # from the Python extension. Revisit when ab_glyph or plotters moves to a
+    # maintained parser.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, no patched version; only parses trusted fonts embedded in polypus-physics (optional plotters feature); latest plotters/ab_glyph still depend on it" },
 ]
 
 [licenses]

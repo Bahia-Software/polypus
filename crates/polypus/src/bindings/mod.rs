@@ -48,11 +48,30 @@ use uuid::Uuid;
 /// guard optionally attached to the run's `CancelToken`. This is the guard the edge
 /// attaches. A pending signal is boxed into `BackendError::External` and re-raised
 /// verbatim at the FFI edge (contract C-1), preserving its `KeyboardInterrupt` class.
+///
+/// `poll` runs while the thread is detached (the run is inside `py.detach`), so
+/// attaching here is a fresh attach, not a reuse of the caller's: `Python::attach`
+/// could panic, or attach to a finalizing interpreter, if the interpreter were
+/// shutting down (on any Python version). It attaches with
+/// [`attach_or`](crate::infrastructure::attach_or) instead, and an unreachable
+/// interpreter aborts the run as `BackendError::Aborted` — the edge's
+/// `KeyboardInterrupt`, the same class a Ctrl+C gets — since its result could
+/// never be handed back to Python (docs/ENGINEERING.md §3 and §9).
 struct SignalInterrupt;
 
 impl crate::infrastructure::Interrupt for SignalInterrupt {
     fn poll(&self) -> Result<(), crate::infrastructure::BackendError> {
-        Python::with_gil(|py| py.check_signals()).map_err(crate::infrastructure::seam_error)
+        crate::infrastructure::attach_or(
+            || {
+                Err(crate::infrastructure::BackendError::Aborted(
+                    "the Python interpreter is no longer available (shutting down)".to_string(),
+                ))
+            },
+            |py| {
+                py.check_signals()
+                    .map_err(crate::infrastructure::seam_error)
+            },
+        )
     }
 }
 
@@ -86,11 +105,11 @@ pub struct RunResult {
     /// Measurement counts: always a `list[dict]`, one per QPU replica (or per
     /// `qml.predict` row). See the type docs.
     #[pyo3(get)]
-    pub counts: PyObject,
+    pub counts: Py<PyAny>,
     /// The key-by-key sum of every dict in `counts` (a `dict`), or `None` for
     /// `qml.predict`, whose entries are distinct circuits.
     #[pyo3(get)]
-    pub merged_counts: PyObject,
+    pub merged_counts: Py<PyAny>,
     /// Run identifier used for logging, temp files and SLURM job names.
     #[pyo3(get)]
     pub id: String,
@@ -215,7 +234,7 @@ fn outcome_to_train_result(
     outcome: OptimizationOutcome,
     seed: u64,
     id: String,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     Py::new(
         py,
         TrainResult {
@@ -313,7 +332,7 @@ fn finish_optimization(
     seed: u64,
     id: String,
     start: Instant,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(OracleError::Evaluation(boxed)) => {
@@ -919,7 +938,7 @@ pub fn run_quantum_circuit<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<HashMap<String, String>>,
-) -> PyResult<pyo3::PyObject> {
+) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
     // large and high-volume, so it stays at `debug` rather than the default log.
@@ -1013,31 +1032,31 @@ pub fn run_quantum_circuit<'py>(
     // shots across replicas, conserving the total per C-3, and returns one counts
     // map per replica); otherwise the backend's default atomic-wave planner runs
     // the circuit as-is, as its single replica.
-    let counts_result =
-        qc.py()
-            .allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
-                let backend = Infrastructure::create_backend(&config)
-                    .map_err(InfrastructureError::Backend)?;
-                let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
-                    None
-                } else {
-                    Some(Arc::new(ShotDistributingPlanner::new(n_qpus)))
-                };
-                let resources = Resources::new(backend, planner, Arc::new(config.run_params()))?;
-                let scheduler = Scheduler::ephemeral(resources);
-                // A Ctrl+C during the run aborts it at the next wave boundary: the
-                // token carries the `check_signals`-backed interrupt guard the
-                // pyo3-free planner calls between waves.
-                let out = scheduler.run_cancellable(
-                    RunCircuitFlow {
-                        circuits: vec![bound_qc],
-                        shots,
-                    },
-                    &interruptible_token(),
-                );
-                scheduler.close();
-                out
-            });
+    let counts_result = qc
+        .py()
+        .detach(move || -> Result<Vec<Counts>, InfrastructureError> {
+            let backend =
+                Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
+            let planner: Option<Arc<dyn Planner>> = if n_qpus == 1 {
+                None
+            } else {
+                Some(Arc::new(ShotDistributingPlanner::new(n_qpus)))
+            };
+            let resources = Resources::new(backend, planner, Arc::new(config.run_params()))?;
+            let scheduler = Scheduler::ephemeral(resources);
+            // A Ctrl+C during the run aborts it at the next wave boundary: the
+            // token carries the `check_signals`-backed interrupt guard the
+            // pyo3-free planner calls between waves.
+            let out = scheduler.run_cancellable(
+                RunCircuitFlow {
+                    circuits: vec![bound_qc],
+                    shots,
+                },
+                &interruptible_token(),
+            );
+            scheduler.close();
+            out
+        });
     let counts_vec = counts_result.map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     // Completion counterpart of the start record above. There is no
     // iterations/convergence notion on this path (those are `TrainResult`
@@ -1047,7 +1066,7 @@ pub fn run_quantum_circuit<'py>(
     // `counts` is a `list[dict]` with one map per replica, and `merged_counts` is
     // their key-by-key sum as a single `dict`. Keys are sorted in both.
     let merged = merge_counts(&counts_vec);
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let counts = counts_to_pylist(py, &counts_vec)?.into_any().unbind();
         let merged_counts = counts_to_pydict(py, &merged)?.into_any().unbind();
         Py::new(
@@ -1122,7 +1141,7 @@ pub fn train<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<HashMap<String, String>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
@@ -1235,7 +1254,7 @@ pub fn train<'py>(
     let token = interruptible_token();
     let result = method
         .py()
-        .allow_threads(|| scheduler.run_cancellable(flow, &token));
+        .detach(|| scheduler.run_cancellable(flow, &token));
     scheduler.close();
     finish_optimization(method.py(), result, effective_seed, effective_id, start)
 }
@@ -1383,7 +1402,7 @@ pub fn qml_train<'py>(
     seed: Option<u64>,
     options: Option<HashMap<String, String>>,
     y_train: Option<Bound<'py, PyAny>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
@@ -1516,7 +1535,7 @@ pub fn qml_train<'py>(
     // `check_signals`-backed interrupt guard — which the pyo3-free planner calls
     // between waves — keeps Ctrl+C prompt.
     let token = interruptible_token();
-    let result = py.allow_threads(|| scheduler.run_cancellable(flow, &token));
+    let result = py.detach(|| scheduler.run_cancellable(flow, &token));
     scheduler.close();
     finish_optimization(py, result, effective_seed, effective_id, start)
 }
@@ -1559,7 +1578,7 @@ pub fn qml_predict<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
@@ -1644,7 +1663,7 @@ pub fn qml_predict<'py>(
     // One run, GIL released. The default planner (never the shot-distributing one)
     // sends the rows in waves of the backend's concurrency; Ctrl+C is honoured
     // between waves.
-    let counts_result = py.allow_threads(move || -> Result<Vec<Counts>, InfrastructureError> {
+    let counts_result = py.detach(move || -> Result<Vec<Counts>, InfrastructureError> {
         let backend =
             Infrastructure::create_backend(&config).map_err(InfrastructureError::Backend)?;
         let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
@@ -1740,6 +1759,137 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set in the child process started by [`run_in_fresh_process`].
+    const FRESH_PROCESS_ENV: &str = "POLYPUS_FRESH_PROCESS_CHILD";
+
+    /// Run the test `name` alone in a fresh copy of this test binary, one that
+    /// never initializes the interpreter (other tests here call
+    /// `Python::initialize()`, which cannot be undone). Mirrors the helper in
+    /// `polypus_infrastructure::attach`, which is test-only and so not visible
+    /// from this crate.
+    fn run_in_fresh_process(name: &str) {
+        let exe = std::env::current_exe().expect("the test binary path is available");
+        let output = std::process::Command::new(exe)
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env(FRESH_PROCESS_ENV, "1")
+            .output()
+            .expect("the test binary can be re-executed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must actually run the test, not filter it out:\n{stdout}"
+        );
+    }
+
+    /// Without an interpreter, both signal-polling hooks that run while
+    /// detached cancel instead of panicking: the planner's guard aborts the run
+    /// as `BackendError::Aborted` (the edge's `KeyboardInterrupt`) and the
+    /// `statevector` hook asks the gate loop to stop, with no pending
+    /// exception. "Not initialized" is also how a shutting-down interpreter
+    /// looks to PyO3 (CPython clears its `initialized` flag right after marking
+    /// itself finalizing), but a real shutdown cannot be reproduced from a Rust
+    /// test.
+    #[test]
+    fn signal_polling_cancels_when_the_interpreter_is_unavailable() {
+        if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
+            run_in_fresh_process(
+                "bindings::tests::signal_polling_cancels_when_the_interpreter_is_unavailable",
+            );
+            return;
+        }
+        use crate::infrastructure::{BackendError, Interrupt};
+        let polled = SignalInterrupt.poll();
+        assert!(
+            matches!(&polled, Err(BackendError::Aborted(msg)) if msg.contains("no longer available")),
+            "an unreachable interpreter must abort the run, got {polled:?}"
+        );
+
+        let mut pending = None;
+        assert!(
+            circuit::poll_for_cancellation(&mut pending),
+            "an unreachable interpreter must cancel the simulation"
+        );
+        assert!(
+            pending.is_none(),
+            "no exception can be recorded without an interpreter"
+        );
+    }
+
+    /// `statevector`'s detached simulation really goes through
+    /// `poll_for_cancellation`: with no interpreter the first checkpoint
+    /// cancels the run, with no pending exception, instead of panicking.
+    ///
+    /// Timing-independent in the same way as `polypus-sim`'s
+    /// `tests/cancellation.rs`: the circuit ends in an `Rx(NaN)`, so
+    /// `Cancelled` proves the loop stopped early and `NonFiniteAmplitude`
+    /// would prove it never hit a checkpoint. The size (14 qubits, 60 000
+    /// barrier-separated rotations) outlives the 25ms checkpoint interval by a
+    /// wide margin in both profiles; the run is never completed.
+    #[test]
+    fn statevector_simulation_cancels_when_the_interpreter_is_unavailable() {
+        if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
+            run_in_fresh_process(
+                "bindings::tests::statevector_simulation_cancels_when_the_interpreter_is_unavailable",
+            );
+            return;
+        }
+        use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
+        const N: usize = 14;
+        let mut gates = Vec::new();
+        for i in 0..60_000 {
+            gates.push(G::Rx {
+                qubit: i % N,
+                theta: Fixed(0.1),
+            });
+            gates.push(G::Barrier(Vec::new()));
+        }
+        gates.push(G::Rx {
+            qubit: 0,
+            theta: Fixed(f64::NAN),
+        });
+        let circuit = ConcreteCircuit {
+            num_qubits: N,
+            gates,
+        };
+
+        let mut pending = None;
+        let outcome = circuit::simulate_cancellable(&circuit, true, &mut pending);
+        assert!(
+            matches!(outcome, Err(polypus_sim::SimError::Cancelled)),
+            "an unreachable interpreter must cancel the simulation mid-run, got {:?}",
+            outcome.map(|_| "a completed run")
+        );
+        assert!(
+            pending.is_none(),
+            "no exception can be recorded without an interpreter"
+        );
+    }
+
+    /// A cancelled `statevector` re-raises the pending signal's own exception,
+    /// and raises `KeyboardInterrupt` — the class the planner's guard gets for
+    /// the same event — when the interpreter became unreachable.
+    #[test]
+    fn statevector_cancellation_raises_keyboard_interrupt() {
+        Python::initialize();
+        Python::attach(|py| {
+            let unreachable = circuit::cancellation_error(None);
+            assert!(unreachable.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py));
+
+            let signal = pyo3::exceptions::PyKeyboardInterrupt::new_err("Ctrl+C");
+            let signal_value = signal.value(py).clone();
+            let raised = circuit::cancellation_error(Some(signal));
+            assert!(
+                raised.value(py).is(&signal_value),
+                "the pending exception must be re-raised verbatim"
+            );
+        });
+    }
     use pyo3::types::PyString;
     use std::collections::HashMap;
 
@@ -1798,8 +1948,8 @@ mod tests {
     /// explicit seed round-trips into the manifest and reproduces the counts.
     #[test]
     fn native_seed_round_trips_and_reproduces_counts() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qasm = uniform3_qasm();
             let (s1, c1) = native_run(py, &qasm, Some(42));
             let (s2, c2) = native_run(py, &qasm, Some(42));
@@ -1814,8 +1964,8 @@ mod tests {
     /// differ across calls.
     #[test]
     fn native_omitted_seed_is_entropy_and_differs() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qasm = uniform3_qasm();
             let (s1, c1) = native_run(py, &qasm, None);
             let (s2, c2) = native_run(py, &qasm, None);
@@ -1831,8 +1981,8 @@ mod tests {
     /// The manifest carries the full run metadata for logging/replay.
     #[test]
     fn native_manifest_reports_run_metadata() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qc = PyString::new(py, &uniform3_qasm()).into_any();
             let result = run_quantum_circuit(
                 qc,
@@ -1879,8 +2029,8 @@ mod tests {
     /// uniqueness while the `run_1_local_` prefix stays stable for debugging.
     #[test]
     fn auto_generated_id_is_unique_per_call() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qasm = uniform3_qasm();
             let id_of = || {
                 let qc = PyString::new(py, &qasm).into_any();
@@ -1958,8 +2108,8 @@ mod tests {
     /// it, unlike the native, Aer, and CUNQA simulated backends.
     #[test]
     fn seed_rejected_for_qmio_hardware() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qasm = uniform3_qasm();
             let qc = pyo3::types::PyString::new(py, &qasm).into_any();
             let result = run_quantum_circuit(
@@ -2149,12 +2299,12 @@ mod tests {
     /// already runs gate-by-gate — are accepted unchanged.
     #[test]
     fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
             let err =
                 build_backend_config(infra, backend, "automatic", None, 1, 2, Some(true), None)
                     .expect_err("fusion=True on a non-fusing backend must be rejected");
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
                 assert!(
                     err.to_string().contains("fusion=True applies only to"),
@@ -2183,8 +2333,8 @@ mod tests {
             None,
         )
         .expect_err("an unknown local backend must be rejected");
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("unknown local backend"));
         });
@@ -2195,8 +2345,8 @@ mod tests {
         // The native simulator is noiseless by construction, so a noise_model
         // must be an error rather than silently ignored. Any Python object will
         // do — the check is `Option::is_some`, not a Qiskit type check.
-        pyo3::prepare_freethreaded_python();
-        let noise_model = Python::with_gil(|py| py.None());
+        pyo3::Python::initialize();
+        let noise_model = Python::attach(|py| py.None());
         let err = build_backend_config(
             "local",
             "polypus",
@@ -2208,7 +2358,7 @@ mod tests {
             None,
         )
         .expect_err("a noise model on the native backend must be rejected");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(
                 err.to_string().contains("noise_model"),
@@ -2219,8 +2369,8 @@ mod tests {
 
     #[test]
     fn build_backend_config_keeps_a_noise_model_for_aer() {
-        pyo3::prepare_freethreaded_python();
-        let noise_model = Python::with_gil(|py| py.None());
+        pyo3::Python::initialize();
+        let noise_model = Python::attach(|py| py.None());
         let config = build_backend_config(
             "local",
             "aer",
@@ -2261,8 +2411,8 @@ mod tests {
     fn build_backend_config_rejects_an_unknown_infrastructure() {
         let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, None, None)
             .expect_err("an unknown infrastructure must be rejected");
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("unknown infrastructure"));
         });
@@ -2311,7 +2461,7 @@ mod tests {
     /// rejected rather than silently dropped.
     #[test]
     fn build_backend_config_rejects_options_on_a_typed_builtin() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let opts = HashMap::from([("command".to_string(), "x".to_string())]);
         for infra in ["local", "cunqa"] {
             let err = build_backend_config(
@@ -2325,7 +2475,7 @@ mod tests {
                 Some(opts.clone()),
             )
             .expect_err("options on a typed built-in must be rejected");
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
                 assert!(
                     err.to_string().contains("does not accept 'options'"),
@@ -2349,8 +2499,8 @@ mod tests {
 
     #[test]
     fn extract_bound_circuit_reads_a_qasm_string() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qasm = uniform3_qasm();
             let bound = extract_bound_circuit(&PyString::new(py, &qasm).into_any())
                 .expect("a str is an OpenQASM 2.0 program");
@@ -2366,8 +2516,8 @@ mod tests {
         // The classification is "not a polypus.Circuit and not a str", so any
         // other object lands on the Qiskit arm — which is exactly why the
         // native/qmio guards downstream can reject it without importing Qiskit.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let bound = extract_bound_circuit(py.None().bind(py))
                 .expect("a non-Circuit, non-str object is assumed to be a Qiskit circuit");
             // A Qiskit circuit rides through the pyo3-free enum's `Foreign` hatch.
@@ -2377,8 +2527,8 @@ mod tests {
 
     #[test]
     fn extract_bound_circuit_reads_a_fully_bound_native_circuit() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let circuit = Py::new(
                 py,
                 Circuit {
@@ -2398,8 +2548,8 @@ mod tests {
     fn extract_bound_circuit_rejects_a_native_circuit_with_free_parameters() {
         // An unbound `polypus.Circuit` cannot be executed directly; it must be a
         // clear ValueError pointing at `train`, not a panic inside binding.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let circuit = Py::new(
                 py,
                 Circuit {
@@ -2444,8 +2594,8 @@ mod tests {
 
     #[test]
     fn extract_labels_keeps_all_integer_labels_as_classes() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             assert_eq!(
                 labels_of(py, c"[0, 2, -1, True]").expect("integers are labels"),
                 [0, 2, -1, 1].map(Label::Class),
@@ -2461,8 +2611,8 @@ mod tests {
 
     #[test]
     fn extract_labels_makes_every_label_a_float_when_any_is_not_an_integer() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             assert_eq!(
                 labels_of(py, c"[0, 1.5, 2]").expect("mixed numbers are labels"),
                 [0.0, 1.5, 2.0].map(Label::Real),
@@ -2478,8 +2628,8 @@ mod tests {
 
     #[test]
     fn extract_labels_rejects_non_numbers_and_nested_rows_naming_the_index() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let (class, msg) = label_error(py, c"[0, 'cat']");
             assert_eq!(class, "TypeError");
             assert!(msg.contains("y_train[1] is a str"), "{msg}");
@@ -2499,8 +2649,8 @@ mod tests {
 
     #[test]
     fn extract_labels_rejects_non_finite_values_naming_the_index() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let (class, msg) = label_error(py, c"[0.5, float('nan')]");
             assert_eq!(class, "ValueError");
             assert!(msg.contains("y_train[1] is NaN"), "{msg}");
@@ -2513,8 +2663,8 @@ mod tests {
 
     #[test]
     fn extract_supervised_objective_accepts_callables_and_the_two_wrappers() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let callable = py
                 .eval(c"lambda bitstring, label: 0.0", None, None)
                 .expect("a lambda evaluates");
@@ -2547,8 +2697,8 @@ mod tests {
 
     #[test]
     fn extract_supervised_objective_rejects_observables_that_cannot_read_labels() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let qubo = Py::new(
                 py,
                 Qubo {
@@ -2584,8 +2734,8 @@ mod tests {
     fn extract_cost_observable_rejects_a_sample_cost_without_labels() {
         // Without labels (polypus.train, or qml.train without y_train) a SampleCost
         // gets a TypeError that says why, not the generic message.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let sample = Py::new(
                 py,
                 SampleCost {

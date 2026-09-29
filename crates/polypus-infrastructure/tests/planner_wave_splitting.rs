@@ -107,7 +107,7 @@ fn execute_splits_high_qubit_native_batch_into_memory_capped_waves() {
 /// Local: same split, cap taken from the real `LocalBackend::capabilities_for`.
 #[test]
 fn execute_splits_high_qubit_local_batch_into_memory_capped_waves() {
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let local = LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
     let wide = wide_native();
     let tasks = wide_batch(&wide);
@@ -154,7 +154,7 @@ fn execute_checks_between_native_waves_not_only_at_the_end() {
 /// Local: same between-wave boundary, cap from the real `LocalBackend`.
 #[test]
 fn execute_checks_between_local_waves_not_only_at_the_end() {
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let local = LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
     let wide = wide_native();
     let tasks = wide_batch(&wide);

@@ -176,7 +176,7 @@ impl Scheduler {
     /// launching — it never interrupts a wave mid-flight.
     ///
     /// Monomorphic (`F: Flow`, never `dyn Flow`) so the flow keeps its own
-    /// associated `Output`/`Error`. The GIL boundary (`allow_threads`) is the
+    /// associated `Output`/`Error`. The GIL boundary (`detach`) is the
     /// caller's responsibility (`polypus`), never the scheduler's (ENGINEERING §3).
     pub fn run_cancellable<F: Flow>(
         &self,

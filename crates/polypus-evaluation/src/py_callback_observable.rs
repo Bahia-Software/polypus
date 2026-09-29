@@ -92,7 +92,7 @@ impl CostObservable for PyCallbackObservable {
         //    exception is boxed verbatim so the entry point re-raises its
         //    original type across the FFI.
         if !missing.is_empty() {
-            let computed: Vec<(&str, f64)> = Python::with_gil(|py| {
+            let computed: Vec<(&str, f64)> = Python::attach(|py| {
                 let f = self.cost_fn.bind(py);
                 missing
                     .iter()
@@ -147,8 +147,8 @@ mod tests {
         // A Python-callback reducer can never be pushed to a remote reduce-at-source
         // worker (plan §7.1): it must run in this process under the GIL. Pin that
         // classification so a future Planner never treats it as `Portable`.
-        pyo3::prepare_freethreaded_python();
-        let obs = Python::with_gil(|py| PyCallbackObservable::new(py.None(), false));
+        pyo3::Python::initialize();
+        let obs = Python::attach(|py| PyCallbackObservable::new(py.None(), false));
         assert_eq!(obs.locality(), ReducerLocality::Local);
     }
 }

@@ -268,9 +268,9 @@ mod tests {
     /// Assert `err` crosses the FFI as an instance of the Python class `E`, that
     /// it is catchable as `polypus.PolypusError`, and that its message survives.
     fn assert_maps_to<E: PyTypeInfo>(err: InfraBackendError, expected_message: &str) {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = backend_error_to_pyerr(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<E>(py),
                 "wrong exception class for: {py_err}"
@@ -337,9 +337,9 @@ mod tests {
         // source, so it surfaces as a native `KeyboardInterrupt` — NOT a `polypus.*`
         // class — exactly like `InfrastructureError::Cancelled` does. Assert directly
         // rather than via `assert_maps_to`, which requires `PolypusError` catchability.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = backend_error_to_pyerr(InfraBackendError::Aborted("Ctrl+C".to_string()));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyKeyboardInterrupt>(py),
                 "an aborted backend call must surface as KeyboardInterrupt: {py_err}"
@@ -376,10 +376,10 @@ mod tests {
     fn provider_errors_stay_catchable_as_backend_error() {
         // The hierarchy is what lets `except polypus.BackendError` catch every
         // backend-layer failure regardless of which provider raised it.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let cunqa = backend_error_to_pyerr(InfraBackendError::Cunqa("x".to_string()));
         let native = backend_error_to_pyerr(InfraBackendError::UnsupportedCircuit("y".to_string()));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(cunqa.is_instance_of::<BackendError>(py));
             assert!(native.is_instance_of::<BackendError>(py));
         });
@@ -390,7 +390,7 @@ mod tests {
 mod evaluation_mapping_tests {
     // Relocated from polypus-evaluation's error.rs when EvaluationError moved to
     // its own crate: the FFI mapping now lives here (`evaluation_error_to_pyerr`).
-    // `prepare_freethreaded_python()` + `is_instance_of` need a bare CPython
+    // `Python::initialize()` + `is_instance_of` need a bare CPython
     // interpreter and no installed package (ENGINEERING §3).
     use super::*;
     use crate::evaluation::EvaluationError as EvalErr;
@@ -403,8 +403,8 @@ mod evaluation_mapping_tests {
 
     #[test]
     fn runtime_variant_maps_to_typed_evaluation_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let err = evaluation_error_to_pyerr(EvalErr::Runtime("worker panicked".to_string()));
             assert!(
                 err.value(py).is_instance_of::<EvaluationError>(),
@@ -420,8 +420,8 @@ mod evaluation_mapping_tests {
 
     #[test]
     fn conversion_variant_maps_to_typed_evaluation_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let err = evaluation_error_to_pyerr(EvalErr::Conversion("not list[float]".to_string()));
             assert!(err.value(py).is_instance_of::<EvaluationError>());
             assert!(
@@ -434,8 +434,8 @@ mod evaluation_mapping_tests {
 
     #[test]
     fn counts_conversion_failure_maps_to_typed_evaluation_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let msg = "failed to convert the backend results into a Python list[dict]: OOM";
             let err = evaluation_error_to_pyerr(EvalErr::Conversion(msg.to_string()));
             assert!(err.value(py).is_instance_of::<EvaluationError>());
@@ -452,9 +452,9 @@ mod evaluation_mapping_tests {
     /// Assert `err` crosses the FFI as `polypus.EvaluationError`, stays catchable
     /// as `PolypusError`, and keeps its message.
     fn assert_maps_to_evaluation_error(err: EvalErr, expected_message: &str) {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = evaluation_error_to_pyerr(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<EvaluationError>(py),
                 "wrong exception class for: {py_err}"
@@ -540,11 +540,11 @@ mod evaluation_mapping_tests {
     fn backend_variant_delegates_to_the_backend_mapping() {
         // `EvaluationError::Backend` must not retype the wrapped failure: a CUNQA
         // error surfacing through an oracle is still a `polypus.CunqaError`.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = evaluation_error_to_pyerr(EvalErr::Backend(BackendError::Cunqa(
             "qraise failed".to_string(),
         )));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<CunqaError>(py));
             assert!(
                 !py_err.is_instance_of::<EvaluationError>(py),
@@ -568,11 +568,11 @@ mod evaluation_mapping_tests {
         // Twin of the `infrastructure_error_to_pyerr` fix: a Python exception
         // boxed by a callback observable must re-raise with its original class,
         // not be flattened into `polypus.EvaluationError`.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = evaluation_error_to_pyerr(EvalErr::Observable(ObservableError::External(
             Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
         )));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyZeroDivisionError>(py),
                 "the callback's original class must survive the FFI: {py_err}"
@@ -616,9 +616,9 @@ mod infrastructure_mapping_tests {
     /// native Python targets are asserted inline, because asserting
     /// `PolypusError`-catchability on them would be a false check.
     fn assert_maps_to<E: PyTypeInfo>(err: InfraErr, expected_message: &str) {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(err);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<E>(py),
                 "wrong exception class for: {py_err}"
@@ -638,11 +638,11 @@ mod infrastructure_mapping_tests {
     fn backend_variant_delegates_to_the_backend_mapping() {
         // `InfrastructureError::Backend` must not retype the wrapped failure: a
         // CUNQA error surfacing through the planner is still a `polypus.CunqaError`.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::Backend(InfraBackendError::Cunqa(
             "qraise failed".to_string(),
         )));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(py_err.is_instance_of::<CunqaError>(py));
             assert!(
                 !py_err.is_instance_of::<EvaluationError>(py),
@@ -668,11 +668,11 @@ mod infrastructure_mapping_tests {
         // discarded into a generic `polypus.EvaluationError`. `PyZeroDivisionError`
         // is deliberately outside the `polypus.*` hierarchy so the check is
         // unambiguous.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::Observable(ObsErr::External(
             Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
         )));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyZeroDivisionError>(py),
                 "a callback's ZeroDivisionError must re-raise with its original class: {py_err}"
@@ -690,11 +690,11 @@ mod infrastructure_mapping_tests {
         // A `check_signals` SIGINT (or any planner-raised Python exception) now
         // arrives as `Backend(BackendError::External(boxed PyErr))`; its boxed
         // original class must re-raise verbatim across the FFI.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::Backend(InfraBackendError::External(
             Box::new(PyRuntimeError::new_err("planner boom")),
         )));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyRuntimeError>(py),
                 "a planner Python exception must re-raise with its original class: {py_err}"
@@ -711,9 +711,9 @@ mod infrastructure_mapping_tests {
     fn cancelled_maps_to_keyboard_interrupt() {
         // A cooperative cancel between waves surfaces as the same class a SIGINT
         // would: a native `KeyboardInterrupt`, not a `polypus.*` class.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::Cancelled);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyKeyboardInterrupt>(py),
                 "a cooperative cancel must surface as KeyboardInterrupt: {py_err}"
@@ -730,11 +730,11 @@ mod infrastructure_mapping_tests {
     fn incompatible_planner_maps_to_value_error() {
         // A configuration mismatch checked up front surfaces as a native
         // `ValueError`, message preserved.
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::IncompatiblePlanner(
             "shot distribution unsupported".to_string(),
         ));
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyValueError>(py),
                 "an incompatible planner must surface as ValueError: {py_err}"
