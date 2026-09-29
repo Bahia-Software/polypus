@@ -6,7 +6,8 @@ and archived on Zenodo with a DOI.
 > **Status:** the GitHub → Zenodo integration is **already enabled** for
 > `Bahia-Software/polypus`, and the citation metadata is prepared in
 > [`CITATION.cff`](../CITATION.cff) and [`.zenodo.json`](../.zenodo.json).
-> What remains for the first DOI is small — see [What's left](#whats-left).
+> The first DOI was minted from the `v0.7.1` release; every release since
+> reuses the same concept DOI automatically — see [Release steps](#release-steps).
 
 ## Why Zenodo had to be enabled first (already done)
 
@@ -29,12 +30,12 @@ ordering later.)
 Keep the two in sync: the author list and ORCIDs are identical in both today,
 and any future change must be applied to both.
 
-## What's left
+## Release steps
 
-1. **Release date — set.** `CITATION.cff` has `date-released: 2026-09-23`. If the
-   release actually happens on another day, update it. (If releasing a version
-   other than `0.7.1`, also bump `version:` here and in `Cargo.toml` /
-   `Cargo.lock`.) Validate:
+1. **Bump the version and release date.** Set `version:` and `date-released:`
+   in `CITATION.cff` to match the workspace `Cargo.toml` version and the day
+   the release actually happens (also update `Cargo.toml` / `Cargo.lock` if the
+   version itself is changing). Validate:
    ```bash
    pipx run cffconvert --validate -i CITATION.cff   # "valid according to schema 1.2.0"
    ```
@@ -44,26 +45,17 @@ and any future change must be applied to both.
      wheels + sdist, publishes to PyPI (Trusted Publishing), then runs the
      clean-install verification;
    - fires the Zenodo webhook → Zenodo archives the release, reads `.zenodo.json`,
-     and **mints the DOI**.
-3. **Substitute the concept DOI.** In Zenodo you get two DOIs: a **concept DOI**
-   (constant, always resolves to the latest version) and a **version DOI** (this
-   `vX.Y.Z`). Use the **concept DOI**. Then:
-   - in `CITATION.cff`, uncomment the `identifiers:` block and set the concept
-     DOI (`10.5281/zenodo.XXXXXXX`);
-   - in the **README** (Credits + BibTeX `doi` + the DOI badge), fill the concept
-     DOI. Per team decision this README update is a **separate PR**, done only
-     once the DOI exists.
-   These commits land *after* the archived snapshot, which is fine — the DOI
-   resolves to the archived release; the repo just starts displaying it.
+     and mints a version DOI under the existing concept DOI (below) —
+     no manual step needed.
 
-## Pending decisions
+## Resolved (kept for context)
 
-- **DOI** — **set**: the Zenodo concept DOI is `10.5281/zenodo.22913065`
-  (constant across versions), wired into `CITATION.cff` (`identifiers`) and the
-  README badge + BibTeX. Future releases reuse the same concept DOI.
-- **Version to archive** — **decided: `0.7.1`.** `0.7.0` is already on PyPI, so
-  the first DOI is cut from a fresh `0.7.1` GitHub Release (the workspace version,
-  `Cargo.lock`, `CITATION.cff` and the README are already bumped to `0.7.1`).
+- **DOI** — the Zenodo concept DOI is `10.5281/zenodo.22913065` (constant
+  across versions), wired into `CITATION.cff` (`identifiers`) and the README
+  badge + BibTeX. Every release reuses this same concept DOI; there is nothing
+  to substitute per release.
+- **First version archived** — `0.7.0` was already on PyPI without a DOI, so
+  the first Zenodo archive/DOI was cut from the `v0.7.1` GitHub Release.
 
 _Author list, order, ORCIDs, affiliations and the license are **final** (6
 authors, all affiliated to Bahía Software S.L.U., + CESGA as an entity),

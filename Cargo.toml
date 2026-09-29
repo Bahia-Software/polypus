@@ -38,7 +38,7 @@ resolver = "2"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 # MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
 # (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
@@ -53,18 +53,18 @@ license = "EUPL-1.2"
 repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
-polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.1" }
-polypus-backend    = { path = "crates/polypus-backend", version = "0.7.1" }
-polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.7.1" }
-polypus-physics    = { path = "crates/polypus-physics", version = "0.7.1" }
-polypus-sim        = { path = "crates/polypus-sim", version = "0.7.1" }
-polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.1" }
-polypus-observable = { path = "crates/polypus-observable", version = "0.7.1" }
-polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.7.1" }
-polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.7.1" }
-polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.7.1" }
-polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.1" }
-polypus-logger     = { path = "crates/polypus-logger", version = "0.7.1" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.2" }
+polypus-backend    = { path = "crates/polypus-backend", version = "0.7.2" }
+polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.7.2" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.7.2" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.7.2" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.2" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.7.2" }
+polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.7.2" }
+polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.7.2" }
+polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.7.2" }
+polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.2" }
+polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
 
 # Shared external dependencies pinned once for the whole workspace.
 # `log` is the logging facade every crate emits through; the concrete sink lives
