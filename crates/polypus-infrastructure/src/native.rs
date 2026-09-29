@@ -813,8 +813,8 @@ mod tests {
 
         // Include a Qiskit variant: the native backend cannot read it, so despite
         // standing in for an arbitrarily wide circuit it contributes nothing.
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let batch = vec![
                 BoundCircuit::Native(small),
                 BoundCircuit::Qasm2(big.to_qasm2()),

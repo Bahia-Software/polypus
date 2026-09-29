@@ -11,6 +11,8 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use crate::infrastructure::attach_or;
+
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
 fn to_py_err(e: CircuitError) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -21,7 +23,7 @@ fn to_py_err(e: CircuitError) -> PyErr {
 /// ```python
 /// qc = polypus.Circuit(2).rx(0, polypus.Param(0)).rzz(0, 1, polypus.Param(1))
 /// ```
-#[pyclass(module = "polypus", frozen)]
+#[pyclass(module = "polypus", frozen, skip_from_py_object)]
 #[derive(Clone, Copy)]
 pub struct Param {
     /// Index into the parameter vector bound at execution time.
@@ -60,8 +62,10 @@ impl From<AngleArg> for GateParam {
     }
 }
 
-impl<'py> FromPyObject<'py> for AngleArg {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+impl<'a, 'py> FromPyObject<'a, 'py> for AngleArg {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         if let Ok(p) = ob.extract::<PyRef<'_, Param>>() {
             return Ok(AngleArg::Param(p.index));
         }
@@ -179,9 +183,13 @@ pub fn statevector<'py>(
     // periodically (throttled on its side to ≥25ms apart *and* to a small
     // fraction of the run, so the frequency is decoupled from gate cost and a
     // fast circuit never pays for it). Reacquiring the GIL from inside
-    // `allow_threads` is safe and re-entrant — the same `Python::with_gil`
-    // guarantee `cunqa.rs` relies on to acquire the GIL from a `Drop` (§9) —
-    // and `check_signals()` here is what turns a pending SIGINT into a
+    // `detach` is a *fresh* attach, not a reuse: `detach` resets the thread's
+    // attachment, so `Python::attach` here would panic if the interpreter were
+    // finalizing (e.g. a daemon thread at shutdown, Python ≥ 3.13), across the
+    // FFI boundary. The hook therefore attaches with `attach_or` (§9) and, when
+    // the interpreter cannot be reached, reports a cancellation: the run's
+    // result could never be handed back to Python anyway, so it stops at once.
+    // `check_signals()` is what turns a pending SIGINT into a
     // `KeyboardInterrupt` *mid-run*, since releasing the GIL does not by itself
     // process signals (§3).
     //
@@ -191,20 +199,12 @@ pub fn statevector<'py>(
     // the same reason: a generic trait boundary must not downgrade the real
     // exception. No `Arc<Mutex<...>>` is needed, though: `statevector` is
     // single-shot, and the hook runs on this very thread (the simulation is
-    // inline in `allow_threads`, not on a worker), so a `&mut` local is enough.
+    // inline in `detach`, not on a worker), so a `&mut` local is enough.
     // That is also why `check_signals()` is effective at all: it is a no-op off
     // the main thread, and this closure runs on whichever thread called us.
     let mut pending: Option<PyErr> = None;
-    let outcome = qc.py().allow_threads(|| {
-        let mut cancelled = || {
-            Python::with_gil(|py| match py.check_signals() {
-                Ok(()) => false,
-                Err(err) => {
-                    pending = Some(err);
-                    true
-                }
-            })
-        };
+    let outcome = qc.py().detach(|| {
+        let mut cancelled = || poll_for_cancellation(&mut pending);
         StatevectorSimulator {
             fusion,
             ..StatevectorSimulator::new()
@@ -221,10 +221,10 @@ pub fn statevector<'py>(
         Err(SimError::Cancelled) => {
             return match pending {
                 Some(err) => Err(err),
-                // Unreachable today — the only hook installed above records a
-                // `PyErr` before it returns `true`. Handled rather than
-                // `unwrap()`ed (§9) so a future cancellation source still
-                // surfaces a typed error instead of a `PanicException`.
+                // The hook cancelled without a pending exception: the
+                // interpreter became unavailable mid-run (finalizing). Still a
+                // typed error rather than an `unwrap()` (§9), in case the
+                // thread ever gets back to Python.
                 None => Err(PyValueError::new_err(SimError::Cancelled.to_string())),
             };
         }
@@ -238,6 +238,23 @@ pub fn statevector<'py>(
     // buffer moves into the array instead of being copied: `sv` is owned here
     // and dropped immediately after.
     Ok(sv.into_amplitudes().into_pyarray(qc.py()))
+}
+
+/// Body of the `statevector` cancellation hook, run while detached: `true`
+/// cancels the simulation. A pending signal is stashed in `pending` so the real
+/// exception can be re-raised; an interpreter that cannot be attached to
+/// (finalizing) cancels too, without a pending exception.
+pub(super) fn poll_for_cancellation(pending: &mut Option<PyErr>) -> bool {
+    attach_or(
+        || true,
+        |py| match py.check_signals() {
+            Ok(()) => false,
+            Err(err) => {
+                *pending = Some(err);
+                true
+            }
+        },
+    )
 }
 
 #[pymethods]

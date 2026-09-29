@@ -45,17 +45,20 @@ polypus-infrastructure = { workspace = true }
 polypus-orchestration = { workspace = true }
 polypus-evaluation = { workspace = true }
 polypus-logger = { workspace = true }
-# Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
-# are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).
-# The bump needs no source changes and clears neither of the pyo3 advisories
-# ignored in `deny.toml`; those still want >=0.26 / >=0.29.
-pyo3 = { version = "0.25", features = ["num-complex"] }
+# Must be >= 0.29: that release carries the fixes for RUSTSEC-2026-0176
+# (out-of-bounds read in PyList/PyTuple iterator `nth`/`skip`) and
+# RUSTSEC-2026-0177 (`PyCFunction::new_closure` without a `Sync` bound), so
+# `deny.toml` needs no ignore for either. Keep the same minor as
+# polypus-infrastructure and polypus-evaluation (one pyo3 in the graph), and
+# bump it together with `numpy` below.
+pyo3 = { version = "0.29", features = ["num-complex"] }
 # Zero-copy handover of the `2^n` statevector amplitudes to Python as a
-# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`). Must
-# stay >= 0.25: rust-numpy 0.24.0 still carries the deprecated
-# `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc ICE on current
-# stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
-numpy = "0.25"
+# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`).
+# rust-numpy releases are pinned 1:1 to a pyo3 minor, so this must track the
+# pyo3 minor above. Never go back below 0.25: rust-numpy 0.24.0 still carries
+# the deprecated `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc
+# ICE on current stable (1.96) and so breaks `cargo doc -D warnings` in CI.
+numpy = "0.29"
 log = { workspace = true }
 uuid = { workspace = true }
 # Only for `rayon::current_num_threads()` in the calibration warning message

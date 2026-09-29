@@ -1158,8 +1158,8 @@ mod tests {
         // Constructing a Qiskit-variant bound circuit needs a Python object, so
         // initialise the interpreter for this test only (the GIL-free paths in
         // native.rs and native_circuit_path.rs are unaffected).
-        pyo3::prepare_freethreaded_python();
-        let circuit = pyo3::Python::with_gil(|py| crate::QiskitCircuit::into_bound(py.None()));
+        pyo3::Python::initialize();
+        let circuit = pyo3::Python::attach(|py| crate::QiskitCircuit::into_bound(py.None()));
         let err = backend(QmioProgramFormat::OpenQasm)
             .serialize_program(&circuit)
             .unwrap_err();

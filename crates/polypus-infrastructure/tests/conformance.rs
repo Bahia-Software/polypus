@@ -50,8 +50,8 @@ use polypus_infrastructure::{LocalBackend, NativeStatevectorBackend};
 /// backend can actually run. Keeps a seal-less CI from failing on the Aer battery.
 fn aer_available() -> bool {
     use pyo3::prelude::*;
-    pyo3::prepare_freethreaded_python();
-    Python::with_gil(|py| py.import("qiskit_aer").is_ok() && py.import("polypus_python").is_ok())
+    pyo3::Python::initialize();
+    Python::attach(|py| py.import("qiskit_aer").is_ok() && py.import("polypus_python").is_ok())
 }
 
 /// Assert a named check has the expected status, with the report in the message.
@@ -176,7 +176,7 @@ fn local_aer_backend_conformance() {
 fn cunqa_backend_conformance_is_environment_gated() {
     use polypus_infrastructure::{BackendConfig, ExecutionConfig, Infrastructure, OptLevel};
     // CUNQA construction crosses the seal (Python), so the interpreter must be up.
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
 
     let cfg = ExecutionConfig {
         id: "conformance-cunqa".to_string(),

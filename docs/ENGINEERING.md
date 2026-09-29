@@ -90,9 +90,13 @@ boundary stays out-of-process and explicit; see
   performance property of the project and must not regress.
 - **Never** hold the GIL while waiting (`block_on`, join) on workers that
   themselves need to acquire it: release it first with
-  `Python::with_gil(|py| py.allow_threads(...))`. Ignoring this deadlocks
-  (documented in `crates/polypus-evaluation/src/qml_oracle.rs`).
-- **Releasing the GIL does not by itself process signals.** `allow_threads`
+  `Python::attach(|py| py.detach(...))`. Ignoring this deadlocks: the waiting
+  thread holds the GIL that every worker is blocked trying to acquire. This is
+  why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
+  `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
+  below it (the Aer and CUNQA backends, Python cost callbacks) attach on their
+  own, on whichever thread evaluates them.
+- **Releasing the GIL does not by itself process signals.** `detach`
   lets other Python threads run, but a pending SIGINT (Ctrl+C) is turned into a
   `KeyboardInterrupt` only when the **main thread** runs Python bytecode or when
   `PyErr_CheckSignals` is called explicitly. Long-running Rust work is otherwise
@@ -108,7 +112,7 @@ boundary stays out-of-process and explicit; see
     `polypus-backend` crate, so between waves it calls a small injected guard, the
     `Interrupt` trait, carried (optionally) on the `CancelToken`
     (`CancelToken::poll_interrupt`). The one implementation that actually calls
-    `Python::with_gil(|py| py.check_signals())` is `SignalInterrupt` in
+    `Python::attach(|py| py.check_signals())` is `SignalInterrupt` in
     `crates/polypus/src/bindings/mod.rs` (the edge); `train`, `qml.train` and
     `run_quantum_circuit` build a guarded token with it and drive the run through
     `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less token
@@ -196,9 +200,13 @@ boundary stays out-of-process and explicit; see
   loop takes an `Option<&mut dyn FnMut() -> bool>` and polls it periodically;
   `true` abandons the run with `SimError::Cancelled`. It knows nothing about
   *why* — a signal, a deadline, a cancel button all look the same to it. Only
-  `statevector` fills that hook with `Python::with_gil(|py| py.check_signals())`
-  (re-entrant from inside `allow_threads`, the same guarantee `cunqa.rs`'s
-  `Drop` relies on — see §9). Two rules make it work:
+  `statevector` fills that hook with a `py.check_signals()` call. The hook runs
+  inside `detach`, and `detach` resets the thread's attachment, so attaching
+  there is a *fresh* attach, not a reuse: `Python::attach` would panic if the
+  interpreter were finalizing. It attaches through `attach_or` instead and
+  treats an unreachable interpreter as a cancellation, as does the planner's
+  between-wave guard (`SignalInterrupt`, which aborts the run as
+  `BackendError::Aborted`) — see §9. Two rules make it work:
   - **Throttle inside the pure crate, not at the Python boundary.** The hook is
     called at most once per ~25ms of wall clock (with the clock itself read once
     per ~64k amplitude updates), so its frequency is decoupled from gate cost —
@@ -374,6 +382,17 @@ where the failure is "unlikely". A Python exception raised by the
 `polypus_python` seam is carried verbatim and re-raised with its original type,
 so contract C-1's `ValueError`/`TypeError` failure modes are preserved.
 
+Argument-conversion errors are PyO3's, not ours. When a `#[pyfunction]` /
+`#[pymethods]` argument fails to convert, the caller gets the conversion's own
+exception (for an angle, `TypeError: angle must be a number or polypus.Param`),
+and since PyO3 0.29 the argument is named in an exception note
+(`__notes__ == ["while processing 'theta'"]`) rather than in the message
+(PyO3 ≤ 0.25 raised `argument 'theta': …`). Notes need Python ≥ 3.11, so on
+3.9/3.10 the argument name is not reported at all. This is accepted, not a
+contract; `test_argument_conversion_error_format` in
+`tests/python/test_native_circuit.py` pins it so the next PyO3 bump cannot
+change it silently.
+
 **`Drop` must be panic-free.** No `Drop` impl may panic under any circumstance:
 a panic while another panic is already unwinding aborts the whole process,
 defeating the RAII guarantee (for `CunqaBackend` this would leak the SLURM
@@ -383,9 +402,20 @@ propagates the error. Because a per-instance flag is worthless once the instance
 is gone, the failure is *also* recorded in process-wide state that a higher
 layer can inspect (the `backend_cleanup_failures()` counter, exposed to Python).
 Acquiring the GIL inside a `Drop` is allowed only when it is explicitly safe
-against re-entrancy (PyO3 0.24's `Python::with_gil` is re-entrant) and cannot
-propagate a panic through the in-progress unwind; keep the fallible operation
-behind a `Result`-returning helper so the `Drop` body only logs and counts.
+against re-entrancy and cannot propagate a panic through the in-progress unwind.
+Attaching reuses an existing attachment only when the thread is *already*
+attached — never inside `detach`, which resets it — and `Python::attach`
+**panics** when the interpreter cannot be attached to: while it is finalizing
+(detected on Python ≥ 3.13), during a GC traversal, or before it is
+initialized. So a `Drop`, and any callback that runs while detached, attaches
+through the shared helpers in `crates/polypus-infrastructure/src/attach.rs`:
+`attach_or` for callbacks, choosing explicitly what an unreachable interpreter
+means, and `attach_for_cleanup` for cleanup, which also formats a Python
+exception while still attached. That last part matters because formatting a
+`PyErr` attaches again, so a `PyErr` that is logged after the attached closure
+returns reintroduces the panic. `CunqaBackend` is the reference use. Keep the
+fallible operation behind a `Result`-returning helper so the `Drop` body only
+logs and counts.
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over

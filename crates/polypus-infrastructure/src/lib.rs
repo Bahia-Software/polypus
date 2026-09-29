@@ -15,13 +15,16 @@
 //! - the Qiskit boundary ([`QiskitCircuit`], [`to_py_object`]) — where PyO3
 //!   re-enters after the clean contract — and the construction-time
 //!   [`ExecutionConfig`]/[`BackendConfig`];
-//! - the process-wide backend-cleanup failure counter exposed to Python.
+//! - the process-wide backend-cleanup failure counter exposed to Python;
+//! - [`attach_or`] / [`attach_for_cleanup`], for attaching to the interpreter
+//!   from `Drop` or from callbacks that run while detached (see [`attach`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 
+pub mod attach;
 pub mod circuit;
 pub mod cunqa;
 pub mod error;
@@ -43,6 +46,7 @@ pub use polypus_backend::{
 };
 
 // --- this crate's own additions ---
+pub use attach::{attach_for_cleanup, attach_or, CleanupError};
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::CunqaBackend;
 pub use execution_config::{BackendConfig, ExecutionConfig};
@@ -151,7 +155,7 @@ impl Infrastructure {
                 sim_method.clone(),
                 noise_model
                     .as_ref()
-                    .map(|nm| Python::with_gil(|py| nm.clone_ref(py))),
+                    .map(|nm| Python::attach(|py| nm.clone_ref(py))),
             ))),
             BackendConfig::Cunqa {
                 backend,

@@ -10,6 +10,7 @@ works end-to-end through the same entry points as Qiskit circuits:
 """
 
 import math
+import sys
 
 import pytest
 
@@ -124,6 +125,22 @@ class TestCircuitConstruction:
 
         with pytest.raises(TypeError):
             polypus.Circuit(1).rx(0, "not-an-angle")
+
+    def test_argument_conversion_error_format(self):
+        # Pins PyO3's argument-conversion error format (docs/ENGINEERING.md §9)
+        # so a PyO3 bump cannot change it silently. Since PyO3 0.29 the message
+        # is the conversion's own, and the argument is named in a note, which
+        # only Python >= 3.11 supports; PyO3 <= 0.25 prefixed the message with
+        # "argument 'theta': " instead, on every Python version.
+        import polypus
+
+        with pytest.raises(TypeError) as excinfo:
+            polypus.Circuit(1).rx(0, "not-an-angle")
+        assert str(excinfo.value) == "angle must be a number or polypus.Param"
+        if sys.version_info >= (3, 11):
+            assert excinfo.value.__notes__ == ["while processing 'theta'"]
+        else:
+            assert not hasattr(excinfo.value, "__notes__")
 
     def test_param_repr_and_index(self):
         import polypus

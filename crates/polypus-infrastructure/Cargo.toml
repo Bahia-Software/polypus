@@ -26,7 +26,7 @@ polypus-observable = { workspace = true }
 # `PyErr` verbatim in `BackendError::Seam`. This crate never defines the
 # extension module, so it does not enable `pyo3/extension-module`; the top-level
 # `polypus` cdylib turns that on, and feature unification applies it here too.
-pyo3 = { version = "0.25" }
+pyo3 = { version = "0.29" }
 rand = { workspace = true }
 # Across-circuit population parallelism in the native statevector backend.
 rayon = "1"

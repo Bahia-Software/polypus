@@ -71,10 +71,10 @@ impl PyVarianceOracle {
 
 impl VarianceOracle for PyVarianceOracle {
     fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
-        Python::with_gil(|py| self.call(py, theta, param_index))
+        Python::attach(|py| self.call(py, theta, param_index))
     }
 
     fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
-        Python::with_gil(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
+        Python::attach(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
     }
 }

@@ -139,7 +139,7 @@ impl SupervisedObjective for PyLabelledCost {
         // One GIL section for all of them. A Python exception is kept as is, so
         // the entry point re-raises its original type.
         if !missing.is_empty() {
-            let computed: Vec<f64> = Python::with_gil(|py| {
+            let computed: Vec<f64> = Python::attach(|py| {
                 let f = self.cost_fn.bind(py);
                 missing
                     .iter()
@@ -209,7 +209,7 @@ impl SupervisedObjective for PySampleCost {
         counts: &[Counts],
         labels: &[Label],
     ) -> Result<Vec<f64>, EvaluationError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let g = self.cost_fn.bind(py);
             counts
                 .iter()
@@ -284,7 +284,7 @@ def raises(*_args):
     type Call<T> = (T, f64, String);
 
     /// Every recorded call, in order.
-    fn calls<'py, T: FromPyObject<'py>>(module: &Bound<'py, PyModule>) -> Vec<Call<T>> {
+    fn calls<'py, T: FromPyObjectOwned<'py>>(module: &Bound<'py, PyModule>) -> Vec<Call<T>> {
         module
             .getattr("calls")
             .expect("the recorder list exists")
@@ -307,8 +307,8 @@ def raises(*_args):
 
     #[test]
     fn labelled_cost_calls_python_once_per_unique_label_and_bitstring() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let cost = PyLabelledCost::new(callback(&module, "per_shot"), false);
             let batch = [
@@ -325,7 +325,7 @@ def raises(*_args):
             ];
 
             let scores = py
-                .allow_threads(|| cost.score_batch(&batch, &labels))
+                .detach(|| cost.score_batch(&batch, &labels))
                 .expect("a healthy batch scores");
 
             // Two labels times three bitstrings: six calls, not one per occurrence.
@@ -369,8 +369,8 @@ def raises(*_args):
 
     #[test]
     fn labelled_cost_hands_python_int_classes_and_float_targets() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let cost = PyLabelledCost::new(callback(&module, "per_shot"), false);
             let batch = [counts(&[("1", 4)]), counts(&[("1", 4)])];
@@ -393,8 +393,8 @@ def raises(*_args):
 
     #[test]
     fn cached_labelled_cost_reuses_pairs_seen_in_earlier_batches() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let cost = PyLabelledCost::new(callback(&module, "correct"), true);
             let labels = [Label::Class(0), Label::Class(1)];
@@ -430,8 +430,8 @@ def raises(*_args):
 
     #[test]
     fn labelled_cost_scores_an_empty_sample_as_zero() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let cost = PyLabelledCost::new(callback(&module, "per_shot"), false);
             let scores = cost
@@ -444,8 +444,8 @@ def raises(*_args):
 
     #[test]
     fn sample_cost_sees_its_whole_distribution_sorted_and_its_label() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let cost = PySampleCost::new(callback(&module, "whole_sample"));
             // Inserted out of order; the dict passed to Python is still sorted.
@@ -456,7 +456,7 @@ def raises(*_args):
             let labels = [Label::Class(2), Label::Class(1)];
 
             let scores = py
-                .allow_threads(|| cost.score_batch(&batch, &labels))
+                .detach(|| cost.score_batch(&batch, &labels))
                 .expect("a healthy batch scores");
 
             let recorded: Vec<Call<Vec<(String, u64)>>> = calls(&module);
@@ -486,8 +486,8 @@ def raises(*_args):
 
     #[test]
     fn a_raising_objective_is_carried_as_the_original_python_exception() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let module = recorders(py);
             let batch = [counts(&[("0", 1)])];
             let labels = [Label::Class(0)];

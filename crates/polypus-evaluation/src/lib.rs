@@ -118,7 +118,7 @@ pub(crate) fn assign_parameters_qiskit(
     circuit: &Py<PyAny>,
     params: &[f64],
 ) -> Result<Py<PyAny>, EvaluationError> {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let qc = circuit
             .clone_ref(py)
             .into_pyobject(py)

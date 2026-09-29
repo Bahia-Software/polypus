@@ -1,3 +1,4 @@
+use crate::attach::attach_for_cleanup;
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
@@ -40,7 +41,7 @@ impl QuantumBackend for CunqaBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched and every native circuit
             // travels to Python as OpenQASM 2.0.
@@ -159,7 +160,7 @@ impl CunqaBackend {
         // Capture the family handle in the release closure; it is the only thing
         // `drop_qpus` needs, and keeping it here (rather than as a struct field)
         // keeps the release operation self-contained and injectable.
-        let release: ReleaseFn = Box::new(move || drop_qpus(&family));
+        let release = release_via(family, drop_qpus);
         Ok(CunqaBackend {
             closed: AtomicBool::new(false),
             backend,
@@ -194,7 +195,7 @@ fn raise_qpus(
     id: &str,
     cores_per_qpu: u32,
 ) -> Result<Py<PyAny>, BackendError> {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let kwargs = PyDict::new(py);
         let conv = |e: PyErr| BackendError::Conversion(e.to_string());
         kwargs.set_item("n", n_qpus).map_err(conv)?;
@@ -220,27 +221,33 @@ fn raise_qpus(
     })
 }
 
-/// Release the QPU allocation identified by `family` through the
-/// `polypus_python` seam.
+/// Build the release operation `new` installs: `op` run attached to the
+/// interpreter, with `state` (the CUNQA family handle) as its argument.
 ///
-/// Panic-free: every failure is returned as a [`BackendError`] so the caller
-/// ([`CunqaBackend::close`], reached from `Drop`) can log-and-continue.
-/// Acquiring the GIL here is safe from within `Drop`: the extension module is
-/// only dropped while the interpreter is alive, and PyO3 0.24's
-/// [`Python::with_gil`] is re-entrant, so this cannot deadlock or propagate a
-/// panic through an in-progress unwind.
-fn drop_qpus(family: &Py<PyAny>) -> Result<(), BackendError> {
-    Python::with_gil(|py| {
-        let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
-        let kwargs = PyDict::new(py);
-        kwargs
-            .set_item("family", family.clone_ref(py))
-            .map_err(|e| BackendError::Conversion(e.to_string()))?;
-        module
-            .call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))
-            .map_err(crate::seam_error)?;
-        Ok(())
+/// Attaching happens here, through [`attach_for_cleanup`], and nowhere else on
+/// the release path: `op` receives the `Python` token instead of attaching on
+/// its own. That is what keeps [`CunqaBackend::close`] — and so `Drop` —
+/// panic-free at interpreter shutdown, and it is also why no error that comes
+/// out of here holds a `PyErr` (whose `Display` would attach again when `close`
+/// logs it). The tests build their releaser with this same function.
+fn release_via<T: Send + Sync + 'static>(
+    state: T,
+    op: fn(Python<'_>, &T) -> PyResult<()>,
+) -> ReleaseFn {
+    Box::new(move || {
+        attach_for_cleanup(|py| op(py, &state)).map_err(|e| BackendError::Cunqa(e.to_string()))
     })
+}
+
+/// Release the QPU allocation identified by `family` through the
+/// `polypus_python` seam. Called only through [`release_via`], which attaches
+/// and turns any exception into an owned message.
+fn drop_qpus(py: Python<'_>, family: &Py<PyAny>) -> PyResult<()> {
+    let module = PyModule::import(py, "polypus_python")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("family", family.clone_ref(py))?;
+    module.call_method("disconnect_from_infrastructure", ("cunqa",), Some(&kwargs))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,6 +311,64 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "release must run exactly once across close/close/drop"
+        );
+    }
+
+    /// Set by [`recording_op`] if the release operation body ever runs.
+    static OP_RAN: AtomicBool = AtomicBool::new(false);
+
+    fn recording_op(_py: Python<'_>, _state: &()) -> PyResult<()> {
+        OP_RAN.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// A backend whose interpreter is unavailable when it is dropped — even
+    /// while another panic unwinds — records a cleanup failure instead of
+    /// panicking. The releaser is built by [`release_via`], the same function
+    /// `CunqaBackend::new` wires `drop_qpus` through, so this covers the real
+    /// path: `Drop` → `close` → `release_via` → `attach_for_cleanup` → logged,
+    /// counted error. Only the `release_via(family, drop_qpus)` call in `new`
+    /// is not executed, as it needs a live CUNQA family handle.
+    ///
+    /// The unavailable state exercised is "not initialized", the only one a
+    /// Rust test can produce deterministically. It already made `with_gil`
+    /// panic in PyO3 0.25; the state that motivated `attach_for_cleanup` —
+    /// "finalizing", which makes `Python::attach` panic since PyO3 0.26 on
+    /// Python ≥ 3.13 — takes the same `try_attach` branch but cannot be
+    /// reproduced here. The test runs in a fresh process because other tests
+    /// in this binary initialize the interpreter, which cannot be undone.
+    #[test]
+    fn drop_without_interpreter_records_a_failure_instead_of_panicking() {
+        if !crate::attach::is_fresh_process() {
+            crate::attach::run_in_fresh_process(
+                "cunqa::tests::drop_without_interpreter_records_a_failure_instead_of_panicking",
+            );
+            return;
+        }
+        let err = release_via((), recording_op)()
+            .expect_err("the release cannot succeed without an interpreter");
+        assert!(
+            matches!(&err, BackendError::Cunqa(msg) if msg.contains("unavailable")),
+            "an unavailable interpreter must surface as a CUNQA release failure, got {err:?}"
+        );
+
+        let before = cleanup_failure_count();
+        let result = std::panic::catch_unwind(|| {
+            let _backend = CunqaBackend::with_releaser(release_via((), recording_op));
+            // Drop runs while THIS panic unwinds out of the closure.
+            panic!("forced unwind with a live CunqaBackend");
+        });
+        assert!(
+            result.is_err(),
+            "the forced panic must propagate — a double panic would have aborted the process"
+        );
+        assert!(
+            cleanup_failure_count() > before,
+            "the failed release must be recorded in the process-wide counter"
+        );
+        assert!(
+            !OP_RAN.load(Ordering::SeqCst),
+            "the release body must not run without an interpreter"
         );
     }
 }

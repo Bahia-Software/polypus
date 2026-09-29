@@ -124,11 +124,11 @@ pub(crate) fn warn_if_using_default_threshold(py: Python<'_>) -> PyResult<()> {
 /// `polypus.init_logger()` to be visible.
 #[pyfunction]
 #[pyo3(signature = (force = false))]
-pub fn calibrate_parallel_threshold(py: Python<'_>, force: bool) -> PyResult<PyObject> {
+pub fn calibrate_parallel_threshold(py: Python<'_>, force: bool) -> PyResult<Py<PyAny>> {
     // Pure-Rust CPU work (rayon timing loops): release the GIL for it, mirroring
     // the other bindings so it cannot stall other Python threads
     // (docs/ENGINEERING.md §3).
-    let outcome = py.allow_threads(|| polypus_sim::calibrate_and_cache(force));
+    let outcome = py.detach(|| polypus_sim::calibrate_and_cache(force));
 
     let dict = PyDict::new(py);
     dict.set_item("threshold", outcome.threshold)?;

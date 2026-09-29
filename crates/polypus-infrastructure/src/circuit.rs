@@ -65,7 +65,7 @@ impl ForeignCircuit for QiskitCircuit {
         // negligible next to one Aer/CUNQA submission (a GIL crossing plus circuit
         // execution, tens of microseconds and up). See the `#[ignore]`d
         // `bench_foreign_duplicate_overhead` in this file. Left as-is deliberately.
-        Box::new(QiskitCircuit(Python::with_gil(|py| self.0.clone_ref(py))))
+        Box::new(QiskitCircuit(Python::attach(|py| self.0.clone_ref(py))))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -130,8 +130,8 @@ mod tests {
 
     #[test]
     fn qiskit_wrapper_round_trips_through_foreign() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let bound = QiskitCircuit::into_bound(py.None());
             assert!(bound.is_foreign());
             // Recoverable as a Qiskit object via the downcast helper.
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn to_py_object_serialises_native_and_qasm_without_the_gil_payload() {
-        pyo3::prepare_freethreaded_python();
+        pyo3::Python::initialize();
         let native = BoundCircuit::Native(
             ParameterizedCircuit::new(1)
                 .x(0)
@@ -152,7 +152,7 @@ mod tests {
                 .unwrap(),
         );
         let qasm = BoundCircuit::Qasm2("OPENQASM 2.0;\nqreg q[1];\n".to_string());
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Native → a QASM `str`.
             let obj = to_py_object(&native, py).unwrap();
             assert!(obj
@@ -194,8 +194,8 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
             let obj: Py<PyAny> = py.None();
             const N: usize = 200_000;
 
