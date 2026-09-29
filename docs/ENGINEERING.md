@@ -386,9 +386,10 @@ boundary stays out-of-process and explicit; see
 Contract C-2 owns the gate vocabulary and the byte-identical round-trip.
 Additionally:
 
-- Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the verbatim
-  `gate` declarations of any declared gate it calls) and must remain accepted
-  by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs it directly as long as
+- Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the `gate`
+  declarations of any declared gate it calls: verbatim for one imported from
+  OpenQASM 2.0, printed from its definition for one imported from OpenQASM 3)
+  and must remain accepted by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs it directly as long as
   every instruction is in Aer's basis; `ch`, `u0`, `rccx`, `rc3x`, `c3x`,
   `c3sqrtx`, `c4x` and every declared gate are not, so such a circuit must be
   transpiled first (`qiskit.transpile(qc, AerSimulator())`) — Aer never unrolls
@@ -399,6 +400,15 @@ Additionally:
   `qreg`/`creg` declarations flattened into one index space, constant
   parameter expressions (e.g. `pi/2`) evaluated. Nothing is decomposed or
   re-spelled otherwise (C-2): `p`, `u1`, `u2`, `u`, `u3` all stay as written.
+- Exported OpenQASM 3 is the canonical form of the profile (contract C-10)
+  and must remain accepted by Qiskit's `qasm3.loads` (`qiskit-qasm3-import`,
+  a test-only dependency); `from_qasm3` accepts `qiskit.qasm3.dumps` output.
+  Both are tested for the pinned versions in `requirements-dev.txt`, not
+  promised for others. Canonicalizations on import: `U` → `u`, `CX` → `cx`,
+  `phase` → `p`, `cphase` → `cp`; registers flattened; constant expressions
+  evaluated. Qiskit's exporter drops the global phase of the circuit and of
+  every gate definition it writes (`sxdg` becomes `s; h; s`), so amplitudes
+  match the original Qiskit circuit only up to that dropped phase.
 - Parse errors carry the **1-based line number** (`CircuitError::Parse` on
   the Rust side, `ValueError` once across the Python boundary).
 
