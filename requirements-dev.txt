@@ -12,6 +12,10 @@ qiskit>=2.0
 # suite directly; declare it here too, not only transitively via the
 # polypus_python package (packages/polypus_python/pyproject.toml).
 qiskit-aer>=0.17
+# `qiskit.qasm3.loads` needs it; only the OpenQASM 3 interoperability tests
+# (tests/python/test_qasm3_interop.py) use it. Pinned: those tests state the
+# versions they support (Qiskit 2.5.2 with this importer).
+qiskit-qasm3-import==0.6.0
 
 # Testing
 pytest>=8.0
