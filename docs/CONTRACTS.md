@@ -187,8 +187,9 @@ of them (`CustomGate::with_arguments`); such a call is checked through its whole
 body, nested declarations included, whenever its parameters are bound —
 binding and the exports that take parameter values report `NonFiniteParam` or
 `DivisionByZero` there — just as a call with fixed angles is checked when it is
-created. The exporter re-emits the declaration verbatim (only
-CRLF normalised to LF) plus the call — never the expanded body — so a backend
+created. The exporter re-emits the declaration verbatim (only line
+endings normalised: every run of carriage returns before a line feed dropped,
+so CRLF becomes LF) plus the call — never the expanded body — so a backend
 that parses the export builds the same program as from the original file.
 Canonical form: the declarations the circuit reaches (directly or through
 other declarations) are emitted right after the include, in source order;

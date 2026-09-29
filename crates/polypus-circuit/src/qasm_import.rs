@@ -566,6 +566,33 @@ fn unsupported_gate(name: &str, line: usize) -> CircuitError {
     err(line, format!("unsupported gate '{name}': {reason}"))
 }
 
+/// A declaration's source text with its line endings normalised: every run
+/// of carriage returns before a line feed is dropped, so CRLF (and CR CR LF,
+/// …) becomes LF, and a carriage return anywhere else is kept. Normalising
+/// twice changes nothing, which keeps the export a fixed point: a single
+/// `replace("\r\n", "\n")` turns `\r\r\n` into `\r\n`, so each import and
+/// export dropped one more carriage return.
+pub(crate) fn normalize_line_endings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut returns = 0;
+    for c in text.chars() {
+        match c {
+            '\r' => returns += 1,
+            '\n' => {
+                returns = 0;
+                out.push('\n');
+            }
+            other => {
+                out.extend(std::iter::repeat_n('\r', returns));
+                returns = 0;
+                out.push(other);
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\r', returns));
+    out
+}
+
 /// Whether `name` is a keyword of the OpenQASM 2.0 expression grammar — `pi`
 /// or one of its unary functions — rather than an identifier. A gate
 /// declaration may not use one as the name of the gate, of a parameter or of
@@ -1226,7 +1253,7 @@ impl Parser<'_> {
 
         // Just past the closing `}` (a one-byte token).
         let end = self.starts[self.pos - 1] + 1;
-        let declaration = self.src[start..end].replace("\r\n", "\n");
+        let declaration = normalize_line_endings(&self.src[start..end]);
         let ordinal = self.gate_defs.len();
         let definition = GateDefinition::new(
             name.clone(),
@@ -1641,6 +1668,24 @@ mod tests {
             "U" => "u",
             "CX" => "cx",
             other => other,
+        }
+    }
+
+    #[test]
+    fn line_endings_are_normalised_once_and_for_all() {
+        let cases = [
+            ("a\r\nb", "a\nb"),
+            ("a\r\r\nb", "a\nb"),
+            ("\r\n\r\r\n", "\n\n"),
+            ("a\rb", "a\rb"),
+            ("a\r\r)", "a\r\r)"),
+            ("x\r\ry\r\n", "x\r\ry\n"),
+            ("a\r", "a\r"),
+        ];
+        for (text, want) in cases {
+            let once = normalize_line_endings(text);
+            assert_eq!(once, want, "{text:?}");
+            assert_eq!(normalize_line_endings(&once), once, "{text:?}");
         }
     }
 

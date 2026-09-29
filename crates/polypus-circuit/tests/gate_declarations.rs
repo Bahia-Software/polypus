@@ -132,6 +132,22 @@ fn declaration_text_is_verbatim_with_crlf_normalised() {
     assert_eq!(parse(&out).gates, imported.gates);
 }
 
+/// Carriage returns before a line break inside a declaration, however many,
+/// are dropped at once, so the export is a fixed point (the `from_qasm2` fuzz
+/// target found `\r\r\n` losing one carriage return per round trip). A lone
+/// carriage return is kept.
+#[test]
+fn runs_of_carriage_returns_before_a_line_break_reach_a_fixed_point() {
+    let src =
+        format!("{HEADER}gate g(t) a {{ rz(t\r\r\r\n\n\r\r) a; }}\nqreg q[1];\ng(0.5) q[0];\n");
+    let out = parse(&src).to_qasm2_with_params(&[]).unwrap();
+    assert!(
+        out.contains("gate g(t) a { rz(t\n\n\r\r) a; }\n"),
+        "{out:?}"
+    );
+    assert_eq!(parse(&out).to_qasm2_with_params(&[]).unwrap(), out);
+}
+
 // ───────────────────────────── Expansion ──────────────────────────────────
 
 /// Expansion (the lowering the simulator and QIR use) binds the formal
