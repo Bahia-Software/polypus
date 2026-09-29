@@ -67,6 +67,28 @@ pub enum CircuitError {
         /// Qubits the declaration takes, and qubits given.
         qubits: (u32, u32),
     },
+    /// A declared gate cannot be written in the target dialect: its body uses
+    /// something the dialect lacks (for example a barrier in an OpenQASM 3
+    /// gate body, or `arcsin` in OpenQASM 2.0). Export fails rather than change
+    /// the gate.
+    GateNotExpressible {
+        /// The declared gate.
+        name: String,
+        /// What the dialect cannot express. A boxed `str` keeps the error as
+        /// small as it was (see `GateSignature`).
+        reason: Box<str>,
+    },
+    /// An OpenQASM 3 export would exceed one of the importer's budgets (its
+    /// source size, inputs, declarations, register size, instructions,
+    /// expression nodes, or the expansion of declared-gate calls), so it could
+    /// not be read back.
+    ExportLimit {
+        /// The importer's budget, by the name its errors give it
+        /// (`MAX_INSTRUCTIONS`).
+        limit: &'static str,
+        /// Its value.
+        max: usize,
+    },
     /// The circuit calls two different gates declared under the same name
     /// (only possible when combining calls from separately imported programs),
     /// which one OpenQASM 2.0 program cannot declare.
@@ -127,6 +149,13 @@ impl fmt::Display for CircuitError {
                 f,
                 "gate '{name}' takes {} angle(s) and {} qubit(s), got {} and {}",
                 params.0, qubits.0, params.1, qubits.1
+            ),
+            CircuitError::GateNotExpressible { name, reason } => {
+                write!(f, "declared gate '{name}' {reason}")
+            }
+            CircuitError::ExportLimit { limit, max } => write!(
+                f,
+                "the export would exceed the OpenQASM 3 importer's {limit} ({max}), so it could not be read back"
             ),
             CircuitError::ConflictingGateDefinitions { name } => write!(
                 f,

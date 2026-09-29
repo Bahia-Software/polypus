@@ -1,20 +1,28 @@
 //! OpenQASM 2.0 serialization.
 //!
-//! Emits the standard header (`OPENQASM 2.0; include "qelib1.inc";`), one
-//! `qreg`/`creg` declaration pair, and one statement per instruction using the
-//! standard `qelib1.inc` gate names. Angle values are written with 12 decimal
-//! places.
+//! Emits the standard header (`OPENQASM 2.0; include "qelib1.inc";`), the
+//! declarations of the gates the circuit calls, one `qreg`/`creg`
+//! declaration pair, and one statement per instruction using the standard
+//! `qelib1.inc` gate names. Angle values are written with 12 decimal places.
+//!
+//! A declaration imported from OpenQASM 2.0 is re-emitted as it was written.
+//! One imported from OpenQASM 3 is printed from its definition, on one line
+//! (`gate name(a,b) x,y { h x; cx x,y; }`), with `log` written as `ln` and
+//! `**` as `^`; its names are renamed where OpenQASM 2.0 cannot take them
+//! (see [`crate::naming`]), and one it cannot express (a body using
+//! `arcsin`, `arccos` or `arctan`) is an error naming the gate.
 //!
 //! Note: `rzz`/`rxx` are part of Qiskit's `qelib1.inc` (and accepted by
 //! `QuantumCircuit.from_qasm_str`). Strict parsers limited to the original
 //! paper version of `qelib1.inc` may need Qiskit's
 //! `qasm2.LEGACY_CUSTOM_INSTRUCTIONS` to recognise them.
 
-use crate::custom_gate::GateDefinition;
+use crate::custom_gate::{BodyOp, GateDefinition};
 use crate::error::CircuitError;
-use crate::expr::ExprArena;
+use crate::expr::{print, Dialect, ExprArena};
 use crate::gate::{GateInstruction, GateParam};
-use std::collections::HashMap;
+use crate::naming::DefinitionNames;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 /// Format an angle with 12 decimal places (≥ 10 required for round-tripping
@@ -23,26 +31,21 @@ fn fmt_angle(value: f64) -> String {
     format!("{value:.12}")
 }
 
-/// Every gate declaration `gates` needs: the definitions of the declared gates
-/// it calls and, transitively, of the declared gates their bodies call — each
-/// once, in source order (a body only calls gates declared before it, so this
-/// order also puts every declaration before its first use). Declarations no
-/// instruction reaches are not re-emitted.
+/// The OpenQASM 2.0 declarations `roots` need: their definitions and,
+/// transitively, those of the declared gates their bodies call — each once,
+/// in source order (a body only calls gates declared before it, so this
+/// order also puts every declaration before its first use).
 ///
 /// # Errors
 ///
 /// [`CircuitError::ConflictingGateDefinitions`] if two *different* definitions
 /// share a name (only possible when combining calls from separately imported
 /// programs): one OpenQASM 2.0 program cannot declare both.
-fn declared_gates(gates: &[GateInstruction]) -> Result<Vec<&GateDefinition>, CircuitError> {
+fn declared_gates<'c>(
+    roots: impl Iterator<Item = &'c GateDefinition>,
+) -> Result<Vec<&'c GateDefinition>, CircuitError> {
     let mut found: HashMap<&str, &GateDefinition> = HashMap::new();
-    let mut pending: Vec<&GateDefinition> = gates
-        .iter()
-        .filter_map(|g| match g {
-            GateInstruction::Custom(call) => Some(call.definition()),
-            _ => None,
-        })
-        .collect();
+    let mut pending: Vec<&GateDefinition> = roots.collect();
     while let Some(definition) = pending.pop() {
         if let Some(&seen) = found.get(definition.name()) {
             if !std::ptr::eq(seen, definition) && seen != definition {
@@ -58,6 +61,148 @@ fn declared_gates(gates: &[GateInstruction]) -> Result<Vec<&GateDefinition>, Cir
     let mut ordered: Vec<&GateDefinition> = found.into_values().collect();
     ordered.sort_by(|a, b| a.ordinal().cmp(&b.ordinal()).then(a.name().cmp(b.name())));
     Ok(ordered)
+}
+
+/// The declarations an export writes, and the names it calls them by.
+struct Declarations<'c> {
+    /// Imported from OpenQASM 2.0: re-emitted verbatim, under their names.
+    verbatim: Vec<&'c GateDefinition>,
+    /// Imported from OpenQASM 3: printed from their definitions, callees
+    /// first, in order of first use.
+    printed: Vec<&'c GateDefinition>,
+    names: DefinitionNames,
+}
+
+impl<'c> Declarations<'c> {
+    /// The declarations the calls in `gates` need. With none imported from
+    /// OpenQASM 3 (a declaration only calls gates of its own program), this
+    /// is exactly the verbatim path; otherwise the verbatim declarations keep
+    /// their names and the printed ones avoid them, the registers `q` and
+    /// `c`, and the reserved words and `qelib1.inc` gates.
+    fn new(gates: &'c [GateInstruction]) -> Result<Self, CircuitError> {
+        // One pass over the instructions, allocating nothing without calls.
+        let (mut qasm2, mut qasm3) = (Vec::new(), Vec::new());
+        for gate in gates {
+            if let GateInstruction::Custom(call) = gate {
+                let definition = call.definition();
+                match definition.dialect() {
+                    Dialect::Qasm2 => qasm2.push(definition),
+                    Dialect::Qasm3 => qasm3.push(definition),
+                }
+            }
+        }
+        let verbatim = declared_gates(qasm2.into_iter())?;
+        let printed = printed_order(qasm3.into_iter());
+        let mut names = DefinitionNames::default();
+        if !printed.is_empty() {
+            let mut taken: HashSet<String> =
+                verbatim.iter().map(|d| d.name().to_string()).collect();
+            taken.extend(["q".to_string(), "c".to_string()]);
+            names.name_gates(&printed, Dialect::Qasm2, &mut taken);
+            names.name_formals(&printed, Dialect::Qasm2, &mut taken);
+        }
+        Ok(Declarations {
+            verbatim,
+            printed,
+            names,
+        })
+    }
+
+    fn write(&self, out: &mut String) -> Result<(), CircuitError> {
+        for definition in &self.verbatim {
+            out.push_str(definition.declaration());
+            out.push('\n');
+        }
+        for definition in &self.printed {
+            write_definition(out, definition, &self.names)?;
+        }
+        Ok(())
+    }
+}
+
+/// `roots` and the definitions they call, transitively: each once, callees
+/// first, in order of first use. Nesting is bounded by `MAX_GATE_NESTING`, so
+/// the recursion is shallow.
+fn printed_order<'c>(roots: impl Iterator<Item = &'c GateDefinition>) -> Vec<&'c GateDefinition> {
+    fn visit<'c>(
+        definition: &'c GateDefinition,
+        seen: &mut HashSet<*const GateDefinition>,
+        order: &mut Vec<&'c GateDefinition>,
+    ) {
+        if seen.insert(definition) {
+            for callee in definition.callees() {
+                visit(callee, seen, order);
+            }
+            order.push(definition);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    for root in roots {
+        visit(root, &mut seen, &mut order);
+    }
+    order
+}
+
+/// `definition` as one OpenQASM 2.0 line: `gate name(a,b) x,y { h x; }`.
+fn write_definition(
+    out: &mut String,
+    definition: &GateDefinition,
+    names: &DefinitionNames,
+) -> Result<(), CircuitError> {
+    let unexpressible = |reason: String| CircuitError::GateNotExpressible {
+        name: definition.name().to_string(),
+        reason: reason.into(),
+    };
+    let (formal_params, formal_qubits) = names.formals(definition);
+    let operands = |qubits: &[usize]| {
+        qubits
+            .iter()
+            .map(|&q| formal_qubits.get(q).map(String::as_str))
+            .collect::<Option<Vec<&str>>>()
+            .map(|operands| operands.join(","))
+            .ok_or_else(|| unexpressible("a statement names a qubit it does not declare".into()))
+    };
+    let _ = write!(out, "gate {}", names.gate(definition));
+    if !formal_params.is_empty() {
+        let _ = write!(out, "({})", formal_params.join(","));
+    }
+    let _ = write!(out, " {} {{", formal_qubits.join(","));
+    for op in definition.body() {
+        let (callee, exprs, qubits) = match op {
+            BodyOp::Builtin {
+                gate,
+                params,
+                qubits,
+            } => (gate.exported_name(), params, qubits),
+            BodyOp::Call {
+                definition: callee,
+                params,
+                qubits,
+            } => (names.gate(callee), params, qubits),
+            BodyOp::Barrier(qubits) => {
+                let _ = write!(out, " barrier {};", operands(qubits)?);
+                continue;
+            }
+        };
+        out.push(' ');
+        out.push_str(callee);
+        if !exprs.is_empty() {
+            out.push('(');
+            for (i, expr) in exprs.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                print(expr.nodes(), Dialect::Qasm2, formal_params, out).map_err(|e| {
+                    unexpressible(format!("cannot be written in OpenQASM 2.0: {e}"))
+                })?;
+            }
+            out.push(')');
+        }
+        let _ = write!(out, " {};", operands(qubits)?);
+    }
+    out.push_str(" }\n");
+    Ok(())
 }
 
 /// Serialize a gate sequence to a complete OpenQASM 2.0 program.
@@ -76,12 +221,9 @@ pub(crate) fn write_qasm2(
     out.push_str("OPENQASM 2.0;\n");
     out.push_str("include \"qelib1.inc\";\n");
     // The declarations of the gates the circuit calls (and of the gates those
-    // call), verbatim and in their source order, before the registers — where
-    // Qiskit's exporter puts them too.
-    for definition in declared_gates(gates)? {
-        out.push_str(definition.declaration());
-        out.push('\n');
-    }
+    // call), before the registers — where Qiskit's exporter puts them too.
+    let declarations = Declarations::new(gates)?;
+    declarations.write(&mut out)?;
     if num_qubits > 0 {
         let _ = writeln!(out, "qreg q[{num_qubits}];");
     }
@@ -297,17 +439,12 @@ pub(crate) fn write_qasm2(
                 if call.has_free_angles() {
                     call.check_body(&values)?;
                 }
+                let name = declarations.names.gate(call.definition());
                 if values.is_empty() {
-                    let _ = writeln!(out, "{} {};", call.name(), operands.join(","));
+                    let _ = writeln!(out, "{name} {};", operands.join(","));
                 } else {
                     let angles: Vec<String> = values.iter().map(|&v| fmt_angle(v)).collect();
-                    let _ = writeln!(
-                        out,
-                        "{}({}) {};",
-                        call.name(),
-                        angles.join(","),
-                        operands.join(",")
-                    );
+                    let _ = writeln!(out, "{name}({}) {};", angles.join(","), operands.join(","));
                 }
             }
             GateInstruction::Barrier(qubits) => {
