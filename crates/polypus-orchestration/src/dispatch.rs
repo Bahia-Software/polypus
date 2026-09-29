@@ -11,7 +11,7 @@
 //! converts back into a `PyErr`.
 //!
 //! This crate is deliberately Python-free — the GIL is released by the caller
-//! (`py.allow_threads(|| dispatch_optimizer(...))`) and re-acquired only inside
+//! (`py.detach(|| dispatch_optimizer(...))`) and re-acquired only inside
 //! the oracle. So a real oracle failure reaches here **type-erased** as a
 //! [`BoxedError`] held in the [`OracleErrorSlot`]: the concrete error (today an
 //! `EvaluationError` carrying a `PyErr`) is boxed by the oracle and recovered by

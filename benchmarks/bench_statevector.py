@@ -13,7 +13,7 @@ Two paths are measured, because only one of them installs a hook:
 
 1. `polypus.statevector` — the hooked path. Per gate it pays a counter
    decrement, occasionally an `Instant::now()`, and at most once per ~25ms a
-   `Python::with_gil` + `PyErr_CheckSignals`.
+   `Python::attach` + `PyErr_CheckSignals`.
 2. `polypus.run_quantum_circuit` on the native backend — the *unhooked* path
    (`Simulator::run`, hook `None`), where the whole cost is one `Option` test
    per gate. Included so a regression there cannot hide.

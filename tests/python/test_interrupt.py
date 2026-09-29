@@ -50,13 +50,14 @@ post-run boundary, which is all a run dominated by ``Statevector::new``'s
 ``2^n`` allocation can offer. See ``docs/ENGINEERING.md`` §3.
 
 Why both entry points: `train`'s `VqcOracle` and `qml.train`'s `QmlOracle`
-share `run_and_evaluate`, but reach it through different paths — a native,
-GIL-free simulation loop for `train`, and Tokio `spawn_blocking` workers
-(`allow_threads` around a `block_on`, needed to avoid the deadlock documented
-in `qml_oracle.rs`) for `qml.train`. Only the calling (main) thread can have a
-pending SIGINT turned into `KeyboardInterrupt` (`PyErr_CheckSignals` is a
-no-op off the main thread), so `qml.train` additionally checks signals once on
-the main thread after its workers join. Both paths need their own proof.
+both evaluate through the Planner, which each entry point runs inside `detach`,
+but on different backends — the GIL-free native statevector simulator for
+`train`, and the Qiskit/Aer backend for `qml.train`, which attaches to the
+interpreter again for every wave (see ``docs/ENGINEERING.md`` §3). Only the
+calling (main) thread can have a pending SIGINT turned into
+`KeyboardInterrupt` (`PyErr_CheckSignals` is a no-op off the main thread); in
+both cases that is the thread running the Planner, whose between-wave
+interrupt guard is what honors it. Both paths need their own proof.
 
 Why a subprocess rather than an in-process background thread:
 
@@ -553,7 +554,7 @@ def test_run_quantum_circuit_releases_gil_for_other_threads():
 # above).
 #
 # Measured on the reference machine: ratio 0.97 with the GIL released, 0.05 with
-# `allow_threads` reverted (the residual comes from the interpreter's switch
+# `detach` reverted (the residual comes from the interpreter's switch
 # interval at each of the `_SV_REPEATS` call boundaries, so it shrinks as the
 # per-call simulation grows — hence few, long calls rather than many short ones).
 # `_MIN_GIL_RELEASE_RATIO` (0.2) sits ~4x above the regressed value.

@@ -18,6 +18,6 @@ too-many-arguments-threshold = 20
 
 # Set this to your true Minimum Supported Rust Version so clippy won't suggest
 # APIs newer than you support. Pick the highest floor required by your deps
-# (pyo3 0.24, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you
+# (pyo3 0.29, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you
 # actually build and test against:
 # msrv = "1.74"

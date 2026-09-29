@@ -83,7 +83,7 @@ impl Flow for RunCircuitFlow {
 /// `build` consumes the factory (`self`) — a flow builds its oracle exactly once —
 /// and [`TrainFlow`] is generic over the concrete factory (never `dyn`), so the
 /// flow keeps the factory's auto-derived thread markers and the `polypus` edge can
-/// move it across `py.allow_threads` without this crate ever naming `pyo3`.
+/// move it across `py.detach` without this crate ever naming `pyo3`.
 pub trait OracleFactory {
     /// Assemble the oracle from the run context. Called once, inside
     /// [`Flow::run`] — after the [`Scheduler`](crate::Scheduler) has created the

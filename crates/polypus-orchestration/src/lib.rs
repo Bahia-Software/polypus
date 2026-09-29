@@ -20,7 +20,7 @@
 //!   with the scheduler while its domain detail does not.
 //!
 //! The crate is deliberately **Python-free**: the GIL is released by the caller
-//! (`polypus`, via `py.allow_threads`) and a real oracle failure reaches here as a
+//! (`polypus`, via `py.detach`) and a real oracle failure reaches here as a
 //! [`BoxedError`] that the edge downcasts and re-raises verbatim (plan §10.1), so
 //! nothing here names `pyo3` or `PyErr`.
 

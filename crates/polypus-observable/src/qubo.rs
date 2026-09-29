@@ -210,7 +210,7 @@ impl CostObservable for QuboObservable {
         counts: &[HashMap<String, u64>],
     ) -> Result<Vec<f64>, ObservableError> {
         // Embarrassingly parallel over candidates; `collect` short-circuits on
-        // the first error. The optimizer already runs under `allow_threads`, so
+        // the first error. The optimizer already runs under `detach`, so
         // this whole path holds no GIL.
         counts.par_iter().map(|c| self.expectation_one(c)).collect()
     }
