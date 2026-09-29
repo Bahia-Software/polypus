@@ -56,7 +56,7 @@ use crate::error::CircuitError;
 // cannot overflow the stack. Legitimate `qelib1.inc` angle expressions
 // (`pi/2`, `-pi/4`, `(1+2)*pi`, …) nest only a handful of levels.
 use crate::expr::MAX_EXPR_DEPTH;
-use crate::expr::{Constant, EvalError, Formal, FormalExpr, Function, Node};
+use crate::expr::{Constant, Dialect, EvalError, Formal, FormalExpr, Function, Node};
 use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -66,10 +66,10 @@ use std::sync::{Arc, OnceLock};
 /// materialising a multi-gigabyte index vector during argument expansion. One
 /// million bits is far beyond any simulable circuit (the statevector backend
 /// caps out around 30 qubits) yet cheap to reject.
-const MAX_REGISTER_BITS: usize = 1_000_000;
+pub(crate) const MAX_REGISTER_BITS: usize = 1_000_000;
 
 /// Shorthand for building a [`CircuitError::Parse`].
-fn err(line: usize, message: impl Into<String>) -> CircuitError {
+pub(crate) fn err(line: usize, message: impl Into<String>) -> CircuitError {
     CircuitError::Parse {
         line,
         message: message.into(),
@@ -336,6 +336,20 @@ impl std::fmt::Debug for BuiltinGate {
     }
 }
 
+impl BuiltinGate {
+    /// The name the OpenQASM 2.0 exporter writes the gate's instruction
+    /// with: its own spelling, except the language builtins `U` and `CX`,
+    /// which it writes as `u` and `cx` (as Qiskit names them). The unit tests
+    /// check every row against the exporter.
+    pub(crate) fn exported_name(&self) -> &'static str {
+        match self.name {
+            "U" => "u",
+            "CX" => "cx",
+            other => other,
+        }
+    }
+}
+
 const fn builtin(
     name: &'static str,
     params: usize,
@@ -512,7 +526,7 @@ pub(crate) fn builtin_gate(name: &str) -> Option<&'static BuiltinGate> {
 
 /// Check a gate application's parameter and argument counts against the
 /// gate's `(parameters, qubits)` signature.
-fn check_signature(
+pub(crate) fn check_signature(
     name: &str,
     (want_params, want_qubits): (usize, usize),
     (got_params, got_qubits): (usize, usize),
@@ -613,11 +627,85 @@ struct Reg {
 
 /// One resolved gate/measure argument: either a single (global) bit index or
 /// a whole register expanded to its indices.
-struct ArgIndices {
-    indices: Vec<usize>,
+pub(crate) struct ArgIndices {
+    pub(crate) indices: Vec<usize>,
     /// `true` when the argument was a bare register name (participates in
     /// broadcasting), `false` for `name[i]`.
-    is_register: bool,
+    pub(crate) is_register: bool,
+}
+
+/// Register broadcasting, shared with the OpenQASM 3 importer (see
+/// `Parser::broadcast`).
+pub(crate) fn broadcast(args: &[ArgIndices], line: usize) -> Result<Vec<Vec<usize>>, CircuitError> {
+    Parser::broadcast(args, line)
+}
+
+/// The distinct-qubits check, shared with the OpenQASM 3 importer (see
+/// `Parser::check_distinct`).
+pub(crate) fn check_distinct(qubits: &[usize], line: usize) -> Result<(), CircuitError> {
+    Parser::check_distinct(qubits, line)
+}
+
+/// The terminal-measurement check (contract C-4) of an importer about to
+/// append `gate`, given the qubits already `measured`: a unitary on one of
+/// them is rejected with the offending line.
+pub(crate) fn check_terminal(
+    measured: &BTreeSet<usize>,
+    gate: &GateInstruction,
+    line: usize,
+) -> Result<(), CircuitError> {
+    // The first measured operand in operand order, for any arity.
+    let violated = gate
+        .acts_on()
+        .qubits()
+        .iter()
+        .copied()
+        .find(|q| measured.contains(q));
+    match violated {
+        Some(q) => Err(err(
+            line,
+            format!(
+                "gate acts on qubit {q} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The importers' canonicalisation of an instruction stream over `n` qubits:
+///
+/// - A maximal run `measure q[0]->c[0]; … measure q[n-1]->c[n-1];`
+///   covering every qubit collapses to [`GateInstruction::MeasureAll`]
+///   (matches both this crate's `measure q -> c;` and Qiskit's expanded
+///   per-qubit form).
+/// - A barrier listing every qubit in order becomes the whole-register
+///   barrier.
+///
+/// Both rewrites are semantically identity; they exist so that
+/// export → import → export is byte-stable.
+pub(crate) fn normalize(input: &[GateInstruction], n: usize) -> Vec<GateInstruction> {
+    let all: Vec<usize> = (0..n).collect();
+    let mut gates = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if n > 0 && i + n <= input.len() {
+            let full_measure_run =
+                (0..n).all(|k| input[i + k] == GateInstruction::Measure { qubit: k, cbit: k });
+            if full_measure_run {
+                gates.push(GateInstruction::MeasureAll);
+                i += n;
+                continue;
+            }
+        }
+        match &input[i] {
+            GateInstruction::Barrier(v) if *v == all => {
+                gates.push(GateInstruction::Barrier(Vec::new()))
+            }
+            other => gates.push(other.clone()),
+        }
+        i += 1;
+    }
+    gates
 }
 
 /// One parsed angle expression: its nodes in postfix order, and the source
@@ -689,7 +777,7 @@ struct Parser<'src> {
 /// by zero is rejected at parse time like everywhere else, contract C-2).
 /// Bounds the parse time of hostile input that calls a large declaration many
 /// times; real programs stay orders of magnitude below it.
-const MAX_VALIDATED_EXPANSION: usize = 20_000_000;
+pub(crate) const MAX_VALIDATED_EXPANSION: usize = 20_000_000;
 
 /// Parse a complete OpenQASM 2.0 program into a (fully concrete)
 /// [`ParameterizedCircuit`]. Entry point used by
@@ -1261,6 +1349,7 @@ impl Parser<'_> {
             qubit_names,
             body,
             declaration,
+            Dialect::Qasm2,
             ordinal,
         )
         .map_err(|e| match e {
@@ -1434,21 +1523,7 @@ impl Parser<'_> {
     /// is rejected with the offending line, rather than silently accepted. This
     /// is the single push point for every statement handler.
     fn push_validated(&mut self, gate: GateInstruction, line: usize) -> Result<(), CircuitError> {
-        // The first measured operand in operand order, for any arity.
-        let violated = gate
-            .acts_on()
-            .qubits()
-            .iter()
-            .copied()
-            .find(|q| self.measured.contains(q));
-        if let Some(q) = violated {
-            return Err(err(
-                line,
-                format!(
-                    "gate acts on qubit {q} after it was measured; Polypus circuits use terminal measurement (contract C-4)"
-                ),
-            ));
-        }
+        check_terminal(&self.measured, &gate, line)?;
         if let GateInstruction::Measure { qubit, .. } = &gate {
             self.measured.insert(*qubit);
         }
@@ -1590,40 +1665,10 @@ impl Parser<'_> {
 
     // ── Final assembly ───────────────────────────────────────────────────
 
-    /// Normalise the instruction stream and build the circuit:
-    ///
-    /// - A maximal run `measure q[0]->c[0]; … measure q[n-1]->c[n-1];`
-    ///   covering every qubit collapses to [`GateInstruction::MeasureAll`]
-    ///   (matches both this crate's `measure q -> c;` and Qiskit's expanded
-    ///   per-qubit form).
-    /// - A barrier listing every qubit in order becomes the whole-register
-    ///   barrier.
-    ///
-    /// Both rewrites are semantically identity; they exist so that
-    /// export → import → export is byte-stable.
+    /// Normalise the instruction stream ([`normalize`]) and build the circuit.
     fn finish(self) -> ParameterizedCircuit {
         let n = self.num_qubits;
-        let all: Vec<usize> = (0..n).collect();
-        let mut gates = Vec::with_capacity(self.gates.len());
-        let mut i = 0;
-        while i < self.gates.len() {
-            if n > 0 && i + n <= self.gates.len() {
-                let full_measure_run = (0..n)
-                    .all(|k| self.gates[i + k] == GateInstruction::Measure { qubit: k, cbit: k });
-                if full_measure_run {
-                    gates.push(GateInstruction::MeasureAll);
-                    i += n;
-                    continue;
-                }
-            }
-            match &self.gates[i] {
-                GateInstruction::Barrier(v) if *v == all => {
-                    gates.push(GateInstruction::Barrier(Vec::new()))
-                }
-                other => gates.push(other.clone()),
-            }
-            i += 1;
-        }
+        let gates = normalize(&self.gates, n);
 
         // OpenQASM 2.0 has no free parameters: always fully concrete.
         ParameterizedCircuit {
@@ -1659,18 +1704,6 @@ mod tests {
         }
     }
 
-    /// The spellings the importer canonicalises instead of preserving: the
-    /// language builtins `U` and `CX`, which Qiskit itself names `u` and `cx`.
-    /// Every other built-in must be re-emitted under exactly the name it was
-    /// parsed from, or a benchmark file would reach Aer as a different program.
-    fn canonical_spelling(name: &str) -> &str {
-        match name {
-            "U" => "u",
-            "CX" => "cx",
-            other => other,
-        }
-    }
-
     #[test]
     fn line_endings_are_normalised_once_and_for_all() {
         let cases = [
@@ -1703,8 +1736,11 @@ mod tests {
     }
 
     /// Table ↔ exporter agreement, row by row: the instruction a row builds is
-    /// exported under the row's own spelling (modulo `canonical_spelling`),
-    /// with the row's parameter and operand counts, in operand order.
+    /// exported under the row's own spelling (modulo the canonical `u` and
+    /// `cx` of [`BuiltinGate::exported_name`]), with the row's parameter and
+    /// operand counts, in operand order. Every other built-in must be
+    /// re-emitted under exactly the name it was parsed from, or a benchmark
+    /// file would reach Aer as a different program.
     #[test]
     fn every_builtin_is_exported_under_its_own_name() {
         for gate in BUILTIN_GATES {
@@ -1737,7 +1773,8 @@ mod tests {
                     .collect();
                 format!("({})", values.join(","))
             };
-            let head = canonical_spelling(gate.name);
+            let head = gate.exported_name();
+            assert!(head == gate.name || matches!(gate.name, "U" | "CX"));
             assert_eq!(
                 statement,
                 format!("{head}{angles} {};", operands.join(",")),

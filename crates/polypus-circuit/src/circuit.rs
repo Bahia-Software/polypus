@@ -160,6 +160,58 @@ impl ParameterizedCircuit {
         qasm_import::parse_qasm2(source)
     }
 
+    /// Import a program in the OpenQASM 3 profile (the inverse of
+    /// [`to_qasm3`](Self::to_qasm3)).
+    ///
+    /// **OpenQASM 3 profile with Qiskit phase conventions.** The profile is
+    /// the straight-line part of OpenQASM 3 that carries a parameterised,
+    /// terminal-measurement circuit: `include "stdgates.inc";` (provided
+    /// internally; no file is ever read), `qubit` and `bit` registers,
+    /// `input float[64]` parameters, calls of `U`, of the `stdgates.inc`
+    /// gates and of gates declared with `gate` blocks, `barrier`, and
+    /// measurements assigned to bits. Angles are expressions of the inputs
+    /// and the constants `pi`, `tau` and `euler` with `+ - * / **`, unary
+    /// minus and `sin cos tan arcsin arccos arctan exp log sqrt`, evaluated
+    /// in binary64 exactly as written. Everything else — control flow,
+    /// `reset`, other classical types and computation, subroutines, gate
+    /// modifiers, `gphase`, timing, pulses, arrays, physical qubits,
+    /// annotations — is rejected with the construct and its line. So is a
+    /// division of two integer expressions (`1/2`), which OpenQASM 3 types as
+    /// integer division: write `1.0/2`.
+    ///
+    /// `U`, `u2` and `u3` are read with **Qiskit's** matrices (Polypus's `u`,
+    /// `u2` and `u3`), which differ from the OpenQASM 3 specification's by the
+    /// global phases `e^{-iθ/2}` (`U`) and `e^{i(φ+λ)/2}` (`u2`, `u3`).
+    /// Amplitudes, as [`polypus_sim`](https://docs.rs/polypus-sim)'s
+    /// statevector reports them, may therefore differ from those of a reader
+    /// that follows the specification by these global factors; probabilities,
+    /// counts and expectation values do not. This is sound only because the
+    /// profile rejects gate modifiers and `gphase`, under which a global phase
+    /// would become observable. Every other `stdgates.inc` gate follows the
+    /// specification exactly. That Polypus reads Qiskit's `qasm3.dumps`
+    /// output as Qiskit does is tested for the Qiskit versions and circuits
+    /// the test suite lists, not guaranteed in general.
+    ///
+    /// The inputs are the circuit's free parameters, in declaration order
+    /// (unused ones included), under their names
+    /// ([`param_names`](Self::param_names)). The builtin `U` becomes `u`, `CX`
+    /// becomes `cx`, `phase` becomes `p` and `cphase` becomes `cp`; every
+    /// other gate keeps its name, and a declared gate stays a declared gate
+    /// ([`GateInstruction::Custom`]) whatever its name. Registers are
+    /// flattened in declaration order.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::Parse`], with a 1-based line number, for malformed
+    /// input, a construct outside the profile, a gate that is neither built in
+    /// nor declared, a gate after a measurement of one of its qubits (contract
+    /// C-4), or an input beyond the importer's budgets (source size, token
+    /// length, inputs, declarations, expression size and depth, register size,
+    /// instructions, declared-gate nesting and expansion).
+    pub fn from_qasm3(source: &str) -> Result<Self, CircuitError> {
+        crate::qasm3_import::parse_qasm3(source)
+    }
+
     // ── Expressions ──────────────────────────────────────────────────────
 
     /// Store the angle expression `expr` in this circuit and return the angle
@@ -740,7 +792,12 @@ impl ParameterizedCircuit {
     }
 
     /// Bind `params` and serialize to OpenQASM 2.0 in one step.
-    /// Equivalent to `self.assign_parameters(params)?.to_qasm2()`.
+    /// Equivalent to `self.assign_parameters(params)?.try_to_qasm2()`.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`assign_parameters`](Self::assign_parameters) and of
+    /// [`ConcreteCircuit::try_to_qasm2`].
     pub fn to_qasm2_with_params(&self, params: &[f64]) -> Result<String, CircuitError> {
         if params.len() != self.num_params {
             return Err(CircuitError::WrongNumberOfParams {
@@ -755,6 +812,49 @@ impl ParameterizedCircuit {
             params,
             &self.exprs,
         )
+    }
+
+    /// Serialize to a program in the OpenQASM 3 profile with Qiskit phase
+    /// conventions (see [`from_qasm3`](Self::from_qasm3)), free parameters
+    /// included: each is an `input float[64]` under its name
+    /// ([`param_names`](Self::param_names)), and angles are written as the
+    /// expressions they are.
+    ///
+    /// The output is canonical: `to_qasm3(from_qasm3(to_qasm3(c)))` is
+    /// byte-identical to `to_qasm3(c)`. Every instruction keeps its name,
+    /// except that `u` is written as the builtin `U`; the Polypus instructions
+    /// `stdgates.inc` lacks (`rzz`, `rxx`, `sxdg`, `csx`, `cu1`, `cu3`, `u0`,
+    /// `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x`) are written as calls of gates
+    /// the output defines, whose bodies reproduce their matrices exactly under
+    /// the profile's (Qiskit's) phase conventions. Declared gates are printed
+    /// from their definitions. A gate or register name that OpenQASM 3 does
+    /// not accept, or that would clash, is renamed deterministically; a
+    /// parameter's name never changes. Numbers are written as the shortest
+    /// decimal that reads back as the same `f64`.
+    ///
+    /// `U`, `u2` and `u3` mean Qiskit's matrices, which differ from the
+    /// OpenQASM 3 specification's by global phases: a reader that follows the
+    /// specification computes the same probabilities, counts and expectation
+    /// values, but amplitudes that may differ by those global factors (see
+    /// [`from_qasm3`](Self::from_qasm3)).
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::GateNotExpressible`] for a declared gate OpenQASM 3
+    /// cannot express (an OpenQASM 2.0 body with a barrier, or a number too
+    /// large for binary64); [`CircuitError::ExportLimit`] if the program would
+    /// exceed the importer's source-size limit, so it could not be read back;
+    /// the errors of [`assign_parameters`](Self::assign_parameters) for a
+    /// hand-assembled circuit whose angles cannot be written.
+    pub fn to_qasm3(&self) -> Result<String, CircuitError> {
+        crate::qasm3::write_qasm3(self, None)
+    }
+
+    /// Bind `params` and serialize the bound circuit to the OpenQASM 3
+    /// profile, with no inputs. Equivalent to exporting
+    /// `self.assign_parameters(params)?` with [`to_qasm3`](Self::to_qasm3).
+    pub fn to_qasm3_with_params(&self, params: &[f64]) -> Result<String, CircuitError> {
+        crate::qasm3::write_qasm3(self, Some(params))
     }
 
     /// Bind `params` and serialize to a QIR Base Profile LLVM IR module in one
@@ -821,27 +921,42 @@ impl ConcreteCircuit {
     ///
     /// # Panics
     ///
-    /// Panics if a gate parameter cannot be resolved: an unbound
-    /// [`GateParam::Param`] or [`GateParam::Expr`], or a [`GateParam::Fixed`]
-    /// holding a non-finite value (`NaN` or infinity). None can happen for
-    /// circuits produced by [`ParameterizedCircuit::assign_parameters`] (which
-    /// rejects non-finite values at binding time); all are only possible when
-    /// the `gates` field was assembled manually. Also panics if the circuit
-    /// calls two different declared gates under one name
-    /// ([`CircuitError::ConflictingGateDefinitions`]), which only happens when
-    /// calls from different imported programs are combined in one circuit. For
-    /// a fallible export, use
-    /// [`ParameterizedCircuit::to_qasm2_with_params`](crate::ParameterizedCircuit::to_qasm2_with_params).
+    /// Panics where [`try_to_qasm2`](Self::try_to_qasm2) returns an error:
+    /// if the circuit calls a gate declared in OpenQASM 3 whose body OpenQASM
+    /// 2.0 cannot express ([`CircuitError::GateNotExpressible`]), or two
+    /// different gates declared in OpenQASM 2.0 under one name
+    /// ([`CircuitError::ConflictingGateDefinitions`], only possible when calls
+    /// from different imported programs are combined in one circuit), or if a
+    /// gate parameter cannot be resolved: an unbound [`GateParam::Param`] or
+    /// [`GateParam::Expr`], or a [`GateParam::Fixed`] holding a non-finite
+    /// value (`NaN` or infinity). The last cannot happen for circuits produced
+    /// by [`ParameterizedCircuit::assign_parameters`] (which rejects
+    /// non-finite values at binding time); it is only possible when the
+    /// `gates` field was assembled manually.
     pub fn to_qasm2(&self) -> String {
+        self.try_to_qasm2().expect(
+            "ConcreteCircuit contains an unbound Param or Expr, a non-finite fixed angle, two different declared gates under one name, or a declared gate OpenQASM 2.0 cannot express; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params, or try_to_qasm2",
+        )
+    }
+
+    /// Serialize to OpenQASM 2.0, or report why the circuit cannot be
+    /// written in it.
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::GateNotExpressible`] for a declared gate imported
+    /// from OpenQASM 3 whose body uses `arcsin`, `arccos` or `arctan`, which
+    /// OpenQASM 2.0 lacks; [`CircuitError::ConflictingGateDefinitions`] if the
+    /// circuit calls two different gates declared in OpenQASM 2.0 under one
+    /// name; and, for a hand-assembled `gates` field only, the errors of an
+    /// unbound or non-finite angle.
+    pub fn try_to_qasm2(&self) -> Result<String, CircuitError> {
         qasm::write_qasm2(
             self.num_qubits,
             self.num_clbits(),
             &self.gates,
             &[],
             &ExprArena::EMPTY,
-        )
-        .expect(
-            "ConcreteCircuit contains an unbound Param or Expr, a non-finite fixed angle, or two different declared gates under one name; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params",
         )
     }
 
@@ -910,7 +1025,7 @@ fn default_param_name(index: usize, taken: &BTreeSet<&str>) -> String {
 }
 
 /// Shared classical-register sizing logic.
-fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
+pub(crate) fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
     let mut n = 0;
     for gate in gates {
         if matches!(gate, GateInstruction::MeasureAll) {

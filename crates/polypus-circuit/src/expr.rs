@@ -294,6 +294,8 @@ pub(crate) fn depth<R>(nodes: &[Node<R>]) -> Result<usize, EvalError> {
     };
     for node in nodes {
         let entry = match node {
+            // Written with a leading minus, like a negation.
+            Node::Num(v) if v.is_sign_negative() => (Class::Neg, 1),
             Node::Num(_) | Node::Const(_) | Node::Ref(_) => (Class::Atom, 0),
             Node::Neg => {
                 let operand = stack.pop().ok_or(EvalError::Malformed)?;
@@ -330,6 +332,239 @@ pub(crate) fn depth<R>(nodes: &[Node<R>]) -> Result<usize, EvalError> {
     }
 }
 
+// ───────────────────────────── Printing ───────────────────────────────────
+
+/// The OpenQASM dialect an expression is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dialect {
+    Qasm2,
+    Qasm3,
+}
+
+/// Why an expression cannot be written in a dialect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unprintable {
+    /// The dialect has no such function (`arcsin` in OpenQASM 2.0); its
+    /// OpenQASM 3 name.
+    Function(&'static str),
+    /// A number that is not finite: an OpenQASM 2.0 literal too large for
+    /// binary64, which no dialect can spell.
+    NonFinite,
+    /// A reference with no name, or a malformed sequence. The constructors
+    /// never build one.
+    Malformed,
+}
+
+impl fmt::Display for Unprintable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unprintable::Function(name) => write!(f, "it uses the function '{name}'"),
+            Unprintable::NonFinite => write!(f, "it contains a number too large for binary64"),
+            Unprintable::Malformed => write!(f, "malformed parameter expression"),
+        }
+    }
+}
+
+impl Function {
+    /// The function's name in `dialect`, or `None` if the dialect lacks it.
+    pub(crate) fn name(self, dialect: Dialect) -> Option<&'static str> {
+        Some(match (self, dialect) {
+            (Function::Sin, _) => "sin",
+            (Function::Cos, _) => "cos",
+            (Function::Tan, _) => "tan",
+            (Function::Exp, _) => "exp",
+            (Function::Sqrt, _) => "sqrt",
+            (Function::Ln, Dialect::Qasm2) => "ln",
+            (Function::Ln, Dialect::Qasm3) => "log",
+            (Function::Arcsin, Dialect::Qasm3) => "arcsin",
+            (Function::Arccos, Dialect::Qasm3) => "arccos",
+            (Function::Arctan, Dialect::Qasm3) => "arctan",
+            (Function::Arcsin | Function::Arccos | Function::Arctan, Dialect::Qasm2) => {
+                return None
+            }
+        })
+    }
+}
+
+/// The canonical text of a finite number: the shortest decimal that reads
+/// back as exactly `value`, always with a decimal point (so it is a real
+/// literal in both dialects), in positional form when `1e-5 <= |value| <
+/// 1e16` and in scientific form (`1.5e-7`, `1.0e16`) otherwise. Negative zero
+/// keeps its sign.
+pub(crate) fn fmt_number(value: f64) -> String {
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    let magnitude = value.abs();
+    if magnitude == 0.0 {
+        return format!("{sign}0.0");
+    }
+    // `{:e}` prints the shortest digits that round-trip, as `d[.ddd]e<exp>`.
+    let scientific = format!("{magnitude:e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    if (-5..16).contains(&exponent) {
+        if exponent < 0 {
+            let zeros = "0".repeat((-exponent - 1) as usize);
+            format!("{sign}0.{zeros}{digits}")
+        } else {
+            let integer_len = exponent as usize + 1;
+            if digits.len() > integer_len {
+                let (integer, fraction) = digits.split_at(integer_len);
+                format!("{sign}{integer}.{fraction}")
+            } else {
+                let zeros = "0".repeat(integer_len - digits.len());
+                format!("{sign}{digits}{zeros}.0")
+            }
+        }
+    } else {
+        let (first, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() { "0" } else { rest };
+        format!("{sign}{first}.{rest}e{exponent}")
+    }
+}
+
+/// How many nodes an importer reads back from `nodes` as [`print`] writes
+/// them: a negative number is written with a leading minus, which reads back
+/// as the negation of its magnitude.
+pub(crate) fn printed_len<R>(nodes: &[Node<R>]) -> usize {
+    let negative = nodes
+        .iter()
+        .filter(|node| matches!(node, Node::Num(v) if v.is_sign_negative()))
+        .count();
+    nodes.len() + negative
+}
+
+/// A kind of reference that indexes a list of names.
+pub(crate) trait Reference: Copy {
+    fn index(self) -> usize;
+}
+
+impl Reference for Formal {
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl Reference for Input {
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// Write `nodes` as `dialect` source text into `out`, with the fewest
+/// parentheses that keep the expression as it is (see [`needs_parens`]), each
+/// reference by its name in `names`. The walk is iterative, so no depth of
+/// expression can exhaust the stack.
+pub(crate) fn print<R: Reference, S: AsRef<str>>(
+    nodes: &[Node<R>],
+    dialect: Dialect,
+    names: &[S],
+    out: &mut String,
+) -> Result<(), Unprintable> {
+    const NONE: usize = usize::MAX;
+    // The operand(s) of every node, found by replaying the postfix sequence.
+    let mut operands = vec![(NONE, NONE); nodes.len()];
+    let mut pending = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        match node {
+            Node::Num(_) | Node::Const(_) | Node::Ref(_) => {}
+            Node::Neg | Node::Call(_) => {
+                operands[i].0 = pending.pop().ok_or(Unprintable::Malformed)?;
+            }
+            Node::Add | Node::Sub | Node::Mul | Node::Div | Node::Pow => {
+                let rhs = pending.pop().ok_or(Unprintable::Malformed)?;
+                let lhs = pending.pop().ok_or(Unprintable::Malformed)?;
+                operands[i] = (lhs, rhs);
+            }
+        }
+        pending.push(i);
+    }
+    let root = match pending.as_slice() {
+        [root] => *root,
+        _ => return Err(Unprintable::Malformed),
+    };
+    let class = |i: usize| match nodes[i] {
+        Node::Num(v) if v.is_sign_negative() => Class::Neg,
+        Node::Num(_) | Node::Const(_) | Node::Ref(_) | Node::Call(_) => Class::Atom,
+        Node::Neg => Class::Neg,
+        Node::Pow => Class::Pow,
+        Node::Mul | Node::Div => Class::Mul,
+        Node::Add | Node::Sub => Class::Add,
+    };
+
+    enum Work {
+        Node(usize),
+        Text(&'static str),
+    }
+    let mut work = vec![Work::Node(root)];
+    let operand = |work: &mut Vec<Work>, child: usize, position: Position| {
+        if needs_parens(position, class(child)) {
+            work.push(Work::Text(")"));
+            work.push(Work::Node(child));
+            work.push(Work::Text("("));
+        } else {
+            work.push(Work::Node(child));
+        }
+    };
+    while let Some(item) = work.pop() {
+        let i = match item {
+            Work::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+            Work::Node(i) => i,
+        };
+        let (lhs, rhs) = operands[i];
+        match nodes[i] {
+            Node::Num(v) if !v.is_finite() => return Err(Unprintable::NonFinite),
+            Node::Num(v) => out.push_str(&fmt_number(v)),
+            Node::Const(c) => match (c, dialect) {
+                (Constant::Pi, _) => out.push_str("pi"),
+                (Constant::Tau, Dialect::Qasm3) => out.push_str("tau"),
+                (Constant::Euler, Dialect::Qasm3) => out.push_str("euler"),
+                // OpenQASM 2.0 has no name for them: their exact value.
+                (Constant::Tau | Constant::Euler, Dialect::Qasm2) => {
+                    out.push_str(&fmt_number(c.value()))
+                }
+            },
+            Node::Ref(r) => {
+                let name = names.get(r.index()).ok_or(Unprintable::Malformed)?;
+                out.push_str(name.as_ref());
+            }
+            Node::Neg => {
+                out.push('-');
+                operand(&mut work, lhs, Position::NegOperand);
+            }
+            Node::Call(f) => {
+                let name = f
+                    .name(dialect)
+                    .ok_or(Unprintable::Function(f.name(Dialect::Qasm3).unwrap_or("?")))?;
+                out.push_str(name);
+                out.push('(');
+                work.push(Work::Text(")"));
+                work.push(Work::Node(lhs));
+            }
+            Node::Add | Node::Sub | Node::Mul | Node::Div | Node::Pow => {
+                let (op, left, right) = match nodes[i] {
+                    Node::Add => (" + ", Position::AddLeft, Position::AddRight),
+                    Node::Sub => (" - ", Position::AddLeft, Position::AddRight),
+                    Node::Mul => ("*", Position::MulLeft, Position::MulRight),
+                    Node::Div => ("/", Position::MulLeft, Position::MulRight),
+                    _ => (
+                        if dialect == Dialect::Qasm2 { "^" } else { "**" },
+                        Position::PowBase,
+                        Position::PowExponent,
+                    ),
+                };
+                operand(&mut work, rhs, right);
+                work.push(Work::Text(op));
+                operand(&mut work, lhs, left);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ───────────────────────── Gate-body expressions ──────────────────────────
 
 /// An expression over a declared gate's formal parameters: one angle of a
@@ -343,6 +578,10 @@ impl FormalExpr {
     /// An expression the parser has built node by node, in postfix order.
     pub(crate) fn from_nodes(nodes: Vec<Node<Formal>>) -> Self {
         FormalExpr { nodes }
+    }
+
+    pub(crate) fn nodes(&self) -> &[Node<Formal>] {
+        &self.nodes
     }
 
     /// Evaluate with `args` bound to the formal parameters, rejecting a
@@ -426,6 +665,11 @@ impl ParamExpr {
 
     pub(crate) fn nodes(&self) -> &[Node<Input>] {
         &self.nodes
+    }
+
+    /// An expression a parser has built node by node, in postfix order.
+    pub(crate) fn from_nodes(nodes: Vec<Node<Input>>) -> Self {
+        ParamExpr { nodes }
     }
 }
 
