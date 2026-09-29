@@ -12,8 +12,8 @@ description       = "Pure-Rust particle-physics simulation layer for Polypus: cl
 name = "polypus_physics"
 
 [dependencies]
-rand    = { version = "0.8", features = ["std_rng"] }
-ndarray = "0.16"
+rand    = { version = "0.9", features = ["std_rng"] }
+ndarray = "0.17"
 serde   = { version = "1.0", features = ["derive"], optional = true }
 # Logging *facade* only (no sink): Monte Carlo run diagnostics are emitted
 # through `log::*!` and stay no-ops until the app layer installs a logger. This

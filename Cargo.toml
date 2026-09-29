@@ -73,7 +73,7 @@ log                = "0.4"
 # UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
 uuid               = { version = "1", features = ["v4"] }
 # RNG shared by `polypus` and `polypus-optimizers`; keep default features.
-rand               = "0.8"
+rand               = "0.9"
 # The subprocess bridge's wire protocol: length-prefixed JSON over the worker's
 # stdin/stdout (see `polypus-subprocess-backend`). `serde`/`serde_json` are
 # pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
@@ -81,7 +81,7 @@ rand               = "0.8"
 # audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
-nix                = { version = "0.29", features = ["signal", "process"] }
+nix                = { version = "0.31", features = ["signal", "process"] }
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #
