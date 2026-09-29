@@ -241,11 +241,21 @@ boundary stays out-of-process and explicit; see
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
-- The Rust test suite is **Python-runtime-free by design** — it proves
-  GIL-freedom. Python is needed only at build/link time for PyO3; Qiskit and
-  Aer are required only by the Python test suite (`tests/python/`). CI encodes
-  this split (`.github/workflows/ci.yml`); don't add a Rust test that needs a
-  live Python runtime.
+- The Rust test suite needs **no installed Python package**: Qiskit, Aer,
+  `polypus_python` and `cunqa` are required only by the Python test suite
+  (`tests/python/`), and CI's Rust job installs none of them
+  (`.github/workflows/ci.yml`). The pure crates' tests (circuit, sim, physics,
+  optimizers, observable, backend, …) don't touch Python at all; that is what
+  proves GIL-freedom. The PyO3-touching crates (`polypus-infrastructure`,
+  `polypus-evaluation`, `polypus`) may start a **bare** embedded interpreter
+  with `Python::initialize()` when the behaviour under test exists only at the
+  FFI edge: exception classes, `Python` tokens, attach and detach, a Python
+  callback built in-test. A test that must run with *no* interpreter (e.g.
+  what happens when it is unavailable) runs in a fresh child process, since
+  initialization cannot be undone (`run_in_fresh_process` in
+  `polypus-infrastructure/src/attach.rs`). A test that would need a package
+  belongs in `tests/python/`, or must skip cleanly when the package is absent,
+  as `polypus-infrastructure/tests/conformance.rs` does.
 
 ## 4. Numerical and quantum correctness
 
@@ -426,7 +436,10 @@ exception while still attached (with a fixed fallback if even that fails, as
 again, so a `PyErr` that is logged after the attached closure returns
 reintroduces the panic. `CunqaBackend` is the reference use: its release
 operation receives the `Python` token, and `close` is the one place that
-attaches, so a release operation cannot bypass the helper. Keep the fallible
+attaches. An `attach` inside the release operation then reuses that
+attachment without re-checking the interpreter, as long as it stays on the
+same thread and outside a `detach`; detaching inside it would make the next
+attach a fresh one, with the same hazards as above. Keep the fallible
 operation behind a `Result`-returning helper so the `Drop` body only logs and
 counts.
 

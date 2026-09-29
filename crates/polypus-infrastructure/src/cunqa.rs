@@ -13,9 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// It receives the `Python` token rather than attaching itself: attaching
 /// happens in exactly one place, [`CunqaBackend::close`], through
-/// [`attach_for_cleanup`]. So no release operation can bypass that helper — an
-/// `attach` written inside one would reuse the attachment it was handed, which
-/// cannot panic — and no error it raises can leave `close` as a `PyErr`.
+/// [`attach_for_cleanup`], and no error a release operation raises can leave
+/// `close` as a `PyErr`. An `attach` written inside a release operation reuses
+/// the attachment it was handed, without re-checking the interpreter's state,
+/// as long as it runs on the same thread and outside a `detach`. A release
+/// operation that detaches (`py.detach(|| Python::attach(..))`) makes that inner
+/// attach a fresh one again, which can panic or hang at shutdown; don't.
 type ReleaseFn = Box<dyn Fn(Python<'_>) -> PyResult<()> + Send + Sync>;
 
 /// CunqaBackend: runs quantum circuits on the CUNQA distributed QPU platform.
