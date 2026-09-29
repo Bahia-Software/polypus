@@ -707,6 +707,28 @@ fn c2_every_stdgates_statement_reemits_byte_identically() {
     }
 }
 
+/// The OpenQASM 3 fuzz target's round-trip property
+/// (`fuzz/fuzz_targets/from_qasm3.rs`) on its seed corpus: whatever imports,
+/// exports to a fixed point.
+#[test]
+fn c2_qasm3_export_is_a_fixed_point_on_the_fuzz_corpus() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/from_qasm3");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let src = std::fs::read_to_string(&path).unwrap();
+        let circuit = ParameterizedCircuit::from_qasm3(&src)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let exported = circuit.to_qasm3().unwrap();
+        let again = ParameterizedCircuit::from_qasm3(&exported)
+            .and_then(|c| c.to_qasm3())
+            .unwrap_or_else(|e| panic!("{}: re-import failed: {e}", path.display()));
+        assert_eq!(again, exported, "{}", path.display());
+        checked += 1;
+    }
+    assert!(checked >= 8, "corpus not found in {}", dir.display());
+}
+
 // ───────────────────────── C-4 · terminal measurement ─────────────────────
 
 #[test]
