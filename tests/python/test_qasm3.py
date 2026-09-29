@@ -111,3 +111,21 @@ def test_errors_are_classified_like_openqasm_2_errors():
         with pytest.raises(ValueError) as error:
             polypus.Circuit.from_qasm3(HEADER + body)
         assert coverage.classify_polypus_error(str(error.value)) == construct, body
+
+
+@pytest.mark.integration
+def test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking():
+    """The Aer backend receives native circuits as OpenQASM 2.0: a gate declared
+    in OpenQASM 3 whose body uses a function OpenQASM 2.0 lacks is a typed
+    error, and the native backend, which expands the gate itself, runs it."""
+    qc = polypus.Circuit.from_qasm3(
+        HEADER
+        + "gate g(t) a { rx(arcsin(t)) a; }\nqubit[1] q;\nbit[1] c;\n"
+        + "g(0.5) q[0];\nc = measure q;\n"
+    )
+    with pytest.raises(polypus.NativeCircuitError, match="arcsin"):
+        polypus.run_quantum_circuit(qc, shots=10, infrastructure="local")
+    result = polypus.run_quantum_circuit(
+        qc, shots=10, infrastructure="local", backend="polypus"
+    )
+    assert sum(result.counts[0].values()) == 10
