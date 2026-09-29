@@ -8,10 +8,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The QPU-release operation, boxed so it can capture the CUNQA family handle
-/// obtained at construction and — crucially — so the panic-safety of `Drop` can
-/// be exercised in tests by injecting a failing closure that never touches the
-/// Python interpreter (see [`CunqaBackend::with_releaser`]).
-type ReleaseFn = Box<dyn Fn() -> Result<(), BackendError> + Send + Sync>;
+/// obtained at construction, and injectable so the panic-safety of `Drop` can be
+/// tested (see [`CunqaBackend::with_releaser`]).
+///
+/// It receives the `Python` token rather than attaching itself: attaching
+/// happens in exactly one place, [`CunqaBackend::close`], through
+/// [`attach_for_cleanup`]. So no release operation can bypass that helper — an
+/// `attach` written inside one would reuse the attachment it was handed, which
+/// cannot panic — and no error it raises can leave `close` as a `PyErr`.
+type ReleaseFn = Box<dyn Fn(Python<'_>) -> PyResult<()> + Send + Sync>;
 
 /// CunqaBackend: runs quantum circuits on the CUNQA distributed QPU platform.
 pub struct CunqaBackend {
@@ -31,7 +36,7 @@ pub struct CunqaBackend {
     transpiler: Box<dyn Transpiler>,
     /// Releases the QPU allocation on `close`/`Drop`. Captured at construction
     /// (holding the family handle) so `Drop` needs nothing but this field, and
-    /// so panic-safety is testable without a Python interpreter.
+    /// so panic-safety is testable with an injected operation.
     release: ReleaseFn,
 }
 
@@ -114,12 +119,14 @@ impl QuantumBackend for CunqaBackend {
             return;
         }
         log::info!("Dropping QPUs");
-        // Panic-free by construction: `release` returns a `Result`, so a failure
-        // is logged and recorded in the process-wide counter instead of
-        // propagated. This is what makes `Drop` safe even mid-unwind, and it is
-        // reached identically from the explicit `close()` calls in the
-        // orchestration algorithms.
-        match (self.release)() {
+        // Panic-free by construction: `attach_for_cleanup` never panics (an
+        // unreachable interpreter, e.g. at shutdown, is an error), and it turns
+        // any Python exception into an owned message while still attached, so
+        // logging `e` below cannot attach again. A failure is logged and
+        // recorded in the process-wide counter instead of propagated. This is
+        // what makes `Drop` safe even mid-unwind, and it is reached identically
+        // from the explicit `close()` calls in the orchestration algorithms.
+        match attach_for_cleanup(|py| (self.release)(py)) {
             Ok(()) => log::info!("QPUs dropped successfully"),
             Err(e) => {
                 log::error!("CUNQA QPU release failed: {e}");
@@ -160,7 +167,7 @@ impl CunqaBackend {
         // Capture the family handle in the release closure; it is the only thing
         // `drop_qpus` needs, and keeping it here (rather than as a struct field)
         // keeps the release operation self-contained and injectable.
-        let release = release_via(family, drop_qpus);
+        let release: ReleaseFn = Box::new(move |py| drop_qpus(py, &family));
         Ok(CunqaBackend {
             closed: AtomicBool::new(false),
             backend,
@@ -173,7 +180,8 @@ impl CunqaBackend {
 
     /// Construct a backend with an injected release operation, bypassing the
     /// real CUNQA allocation. Test-only hook that lets the `Drop` panic-safety
-    /// test force a cleanup failure without a Python interpreter or SLURM.
+    /// tests force a cleanup failure without SLURM or the `polypus_python`
+    /// seam.
     #[cfg(test)]
     fn with_releaser(release: ReleaseFn) -> Self {
         CunqaBackend {
@@ -221,27 +229,9 @@ fn raise_qpus(
     })
 }
 
-/// Build the release operation `new` installs: `op` run attached to the
-/// interpreter, with `state` (the CUNQA family handle) as its argument.
-///
-/// Attaching happens here, through [`attach_for_cleanup`], and nowhere else on
-/// the release path: `op` receives the `Python` token instead of attaching on
-/// its own. That is what keeps [`CunqaBackend::close`] — and so `Drop` —
-/// panic-free at interpreter shutdown, and it is also why no error that comes
-/// out of here holds a `PyErr` (whose `Display` would attach again when `close`
-/// logs it). The tests build their releaser with this same function.
-fn release_via<T: Send + Sync + 'static>(
-    state: T,
-    op: fn(Python<'_>, &T) -> PyResult<()>,
-) -> ReleaseFn {
-    Box::new(move || {
-        attach_for_cleanup(|py| op(py, &state)).map_err(|e| BackendError::Cunqa(e.to_string()))
-    })
-}
-
 /// Release the QPU allocation identified by `family` through the
-/// `polypus_python` seam. Called only through [`release_via`], which attaches
-/// and turns any exception into an owned message.
+/// `polypus_python` seam. Installed as the backend's [`ReleaseFn`], so it runs
+/// only from [`CunqaBackend::close`], already attached.
 fn drop_qpus(py: Python<'_>, family: &Py<PyAny>) -> PyResult<()> {
     let module = PyModule::import(py, "polypus_python")?;
     let kwargs = PyDict::new(py);
@@ -254,26 +244,29 @@ fn drop_qpus(py: Python<'_>, family: &Py<PyAny>) -> PyResult<()> {
 mod tests {
     use super::*;
     use crate::cleanup_failure_count;
+    use pyo3::exceptions::PyValueError;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 
     /// Failure-injection test (issue acceptance criterion 2): a `CunqaBackend`
-    /// whose release always fails is dropped *while another panic is already
-    /// unwinding*. A panic in `Drop` mid-unwind would abort the process; this
-    /// test proves it does not, and that the failure is recorded.
+    /// whose release raises a Python exception is dropped *while another panic
+    /// is already unwinding*. A panic in `Drop` mid-unwind would abort the
+    /// process; this test proves it does not, and that the failure is recorded.
     ///
-    /// No Python interpreter is involved — the injected releaser is pure Rust —
-    /// so this honours ENGINEERING.md §3 (Python-runtime-free Rust test suite).
+    /// The release operation receives a `Python` token, so this needs a bare
+    /// interpreter (no package imported), like the other tests in this crate
+    /// that call `Python::initialize()`.
     #[test]
     fn drop_during_unwind_is_panic_free_and_records_failure() {
+        Python::initialize();
         let attempts = Arc::new(AtomicUsize::new(0));
         let before = cleanup_failure_count();
         let attempts_in = Arc::clone(&attempts);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _backend = CunqaBackend::with_releaser(Box::new(move || {
+            let _backend = CunqaBackend::with_releaser(Box::new(move |_py| {
                 attempts_in.fetch_add(1, Ordering::SeqCst);
-                Err(BackendError::Cunqa("injected release failure".to_string()))
+                Err(PyValueError::new_err("injected release failure"))
             }));
             // Drop runs while THIS panic unwinds out of the closure.
             panic!("forced unwind with a live CunqaBackend");
@@ -298,9 +291,10 @@ mod tests {
     /// called explicitly (orchestration path) or via `Drop`.
     #[test]
     fn close_is_idempotent_across_explicit_close_and_drop() {
+        Python::initialize();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_in = Arc::clone(&calls);
-        let backend = CunqaBackend::with_releaser(Box::new(move || {
+        let backend = CunqaBackend::with_releaser(Box::new(move |_py| {
             calls_in.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }));
@@ -314,29 +308,23 @@ mod tests {
         );
     }
 
-    /// Set by [`recording_op`] if the release operation body ever runs.
-    static OP_RAN: AtomicBool = AtomicBool::new(false);
+    /// Set if the release operation of the test below ever runs.
+    static RELEASE_RAN: AtomicBool = AtomicBool::new(false);
 
-    fn recording_op(_py: Python<'_>, _state: &()) -> PyResult<()> {
-        OP_RAN.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// A backend whose interpreter is unavailable when it is dropped — even
+    /// A backend dropped when the interpreter cannot be attached to — even
     /// while another panic unwinds — records a cleanup failure instead of
-    /// panicking. The releaser is built by [`release_via`], the same function
-    /// `CunqaBackend::new` wires `drop_qpus` through, so this covers the real
-    /// path: `Drop` → `close` → `release_via` → `attach_for_cleanup` → logged,
-    /// counted error. Only the `release_via(family, drop_qpus)` call in `new`
-    /// is not executed, as it needs a live CUNQA family handle.
+    /// panicking, and never runs its release operation. This covers the one
+    /// place the release path attaches (`close`, through `attach_for_cleanup`):
+    /// a release operation, `new`'s included, only receives a `Python` token and
+    /// cannot attach on its own.
     ///
     /// The unavailable state exercised is "not initialized", the only one a
-    /// Rust test can produce deterministically. It already made `with_gil`
-    /// panic in PyO3 0.25; the state that motivated `attach_for_cleanup` —
-    /// "finalizing", which makes `Python::attach` panic since PyO3 0.26 on
-    /// Python ≥ 3.13 — takes the same `try_attach` branch but cannot be
-    /// reproduced here. The test runs in a fresh process because other tests
-    /// in this binary initialize the interpreter, which cannot be undone.
+    /// Rust test can produce deterministically. It is also how a shutting-down
+    /// interpreter looks to PyO3 on every Python version (CPython clears its
+    /// `initialized` flag right after marking itself finalizing), but a real
+    /// shutdown cannot be reproduced here. The test runs in a fresh process
+    /// because other tests in this binary initialize the interpreter, which
+    /// cannot be undone.
     #[test]
     fn drop_without_interpreter_records_a_failure_instead_of_panicking() {
         if !crate::attach::is_fresh_process() {
@@ -345,16 +333,12 @@ mod tests {
             );
             return;
         }
-        let err = release_via((), recording_op)()
-            .expect_err("the release cannot succeed without an interpreter");
-        assert!(
-            matches!(&err, BackendError::Cunqa(msg) if msg.contains("unavailable")),
-            "an unavailable interpreter must surface as a CUNQA release failure, got {err:?}"
-        );
-
         let before = cleanup_failure_count();
         let result = std::panic::catch_unwind(|| {
-            let _backend = CunqaBackend::with_releaser(release_via((), recording_op));
+            let _backend = CunqaBackend::with_releaser(Box::new(|_py| {
+                RELEASE_RAN.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
             // Drop runs while THIS panic unwinds out of the closure.
             panic!("forced unwind with a live CunqaBackend");
         });
@@ -367,8 +351,8 @@ mod tests {
             "the failed release must be recorded in the process-wide counter"
         );
         assert!(
-            !OP_RAN.load(Ordering::SeqCst),
-            "the release body must not run without an interpreter"
+            !RELEASE_RAN.load(Ordering::SeqCst),
+            "the release operation must not run without an interpreter"
         );
     }
 }

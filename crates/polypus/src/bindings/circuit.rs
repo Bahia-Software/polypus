@@ -5,9 +5,11 @@
 //! `polypus.train` exactly like a Qiskit `QuantumCircuit`.
 
 use numpy::{IntoPyArray, PyArray1};
-use polypus_circuit::{CircuitError, GateInstruction, GateParam, ParameterizedCircuit};
-use polypus_sim::{SimError, Simulator, StatevectorSimulator};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use polypus_circuit::{
+    CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
+};
+use polypus_sim::{SimError, Simulator, Statevector, StatevectorSimulator};
+use pyo3::exceptions::{PyKeyboardInterrupt, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -184,11 +186,12 @@ pub fn statevector<'py>(
     // fraction of the run, so the frequency is decoupled from gate cost and a
     // fast circuit never pays for it). Reacquiring the GIL from inside
     // `detach` is a *fresh* attach, not a reuse: `detach` resets the thread's
-    // attachment, so `Python::attach` here would panic if the interpreter were
-    // finalizing (e.g. a daemon thread at shutdown, Python ≥ 3.13), across the
-    // FFI boundary. The hook therefore attaches with `attach_or` (§9) and, when
-    // the interpreter cannot be reached, reports a cancellation: the run's
-    // result could never be handed back to Python anyway, so it stops at once.
+    // attachment, so `Python::attach` here could panic, or attach to a
+    // finalizing interpreter, if the interpreter were shutting down (e.g. a
+    // daemon thread at exit, on any Python version). The hook therefore
+    // attaches with `attach_or` (§9, see `poll_for_cancellation`) and, when the
+    // interpreter cannot be reached, reports a cancellation: the run's result
+    // could never be handed back to Python anyway, so it stops at once.
     // `check_signals()` is what turns a pending SIGINT into a
     // `KeyboardInterrupt` *mid-run*, since releasing the GIL does not by itself
     // process signals (§3).
@@ -203,14 +206,9 @@ pub fn statevector<'py>(
     // That is also why `check_signals()` is effective at all: it is a no-op off
     // the main thread, and this closure runs on whichever thread called us.
     let mut pending: Option<PyErr> = None;
-    let outcome = qc.py().detach(|| {
-        let mut cancelled = || poll_for_cancellation(&mut pending);
-        StatevectorSimulator {
-            fusion,
-            ..StatevectorSimulator::new()
-        }
-        .run_cancellable(&concrete, Some(&mut cancelled))
-    });
+    let outcome = qc
+        .py()
+        .detach(|| simulate_cancellable(&concrete, fusion, &mut pending));
     let sv = match outcome {
         Ok(sv) => sv,
         // Propagate the *real* pending exception verbatim. Mapping this through
@@ -218,16 +216,7 @@ pub fn statevector<'py>(
         // silently downgrade a `KeyboardInterrupt` into a bogus `ValueError`
         // (and `check_signals()` cannot be re-run to recover it: raising it
         // cleared the pending flag).
-        Err(SimError::Cancelled) => {
-            return match pending {
-                Some(err) => Err(err),
-                // The hook cancelled without a pending exception: the
-                // interpreter became unavailable mid-run (finalizing). Still a
-                // typed error rather than an `unwrap()` (§9), in case the
-                // thread ever gets back to Python.
-                None => Err(PyValueError::new_err(SimError::Cancelled.to_string())),
-            };
-        }
+        Err(SimError::Cancelled) => return Err(cancellation_error(pending)),
         Err(e) => return Err(PyValueError::new_err(e.to_string())),
     };
     // A signal that arrived after the last checkpoint (or during the `2^n`
@@ -240,10 +229,40 @@ pub fn statevector<'py>(
     Ok(sv.into_amplitudes().into_pyarray(qc.py()))
 }
 
+/// The part of `statevector` that runs detached: simulate `circuit`, polling
+/// [`poll_for_cancellation`] at the simulator's checkpoints. A pending signal
+/// is stashed in `pending`. Pure Rust apart from that hook, so it can be tested
+/// without an interpreter.
+pub(super) fn simulate_cancellable(
+    circuit: &ConcreteCircuit,
+    fusion: bool,
+    pending: &mut Option<PyErr>,
+) -> Result<Statevector, SimError> {
+    let mut cancelled = || poll_for_cancellation(pending);
+    StatevectorSimulator {
+        fusion,
+        ..StatevectorSimulator::new()
+    }
+    .run_cancellable(circuit, Some(&mut cancelled))
+}
+
+/// The exception a cancelled `statevector` raises: the pending signal's own
+/// (a Ctrl+C stays a `KeyboardInterrupt`), or, when the hook cancelled because
+/// the interpreter became unreachable (shutdown), a `KeyboardInterrupt` too.
+/// That matches what the planner's guard raises for the same event
+/// (`BackendError::Aborted`): it is an abort, not an invalid input.
+pub(super) fn cancellation_error(pending: Option<PyErr>) -> PyErr {
+    pending.unwrap_or_else(|| {
+        PyKeyboardInterrupt::new_err(
+            "the simulation was aborted: the Python interpreter is no longer available",
+        )
+    })
+}
+
 /// Body of the `statevector` cancellation hook, run while detached: `true`
 /// cancels the simulation. A pending signal is stashed in `pending` so the real
 /// exception can be re-raised; an interpreter that cannot be attached to
-/// (finalizing) cancels too, without a pending exception.
+/// (shutting down) cancels too, without a pending exception.
 pub(super) fn poll_for_cancellation(pending: &mut Option<PyErr>) -> bool {
     attach_or(
         || true,

@@ -112,8 +112,11 @@ boundary stays out-of-process and explicit; see
     `polypus-backend` crate, so between waves it calls a small injected guard, the
     `Interrupt` trait, carried (optionally) on the `CancelToken`
     (`CancelToken::poll_interrupt`). The one implementation that actually calls
-    `Python::attach(|py| py.check_signals())` is `SignalInterrupt` in
-    `crates/polypus/src/bindings/mod.rs` (the edge); `train`, `qml.train` and
+    `py.check_signals()` is `SignalInterrupt` in
+    `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
+    detached, so it attaches through `attach_or` rather than `Python::attach`
+    and aborts the run (`BackendError::Aborted`, raised as `KeyboardInterrupt`)
+    when the interpreter cannot be reached — see below and §9. `train`, `qml.train` and
     `run_quantum_circuit` build a guarded token with it and drive the run through
     `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less token
     (`Scheduler::run`) and the check is a no-op — which is why `run` is documented
@@ -202,11 +205,13 @@ boundary stays out-of-process and explicit; see
   *why* — a signal, a deadline, a cancel button all look the same to it. Only
   `statevector` fills that hook with a `py.check_signals()` call. The hook runs
   inside `detach`, and `detach` resets the thread's attachment, so attaching
-  there is a *fresh* attach, not a reuse: `Python::attach` would panic if the
-  interpreter were finalizing. It attaches through `attach_or` instead and
-  treats an unreachable interpreter as a cancellation, as does the planner's
-  between-wave guard (`SignalInterrupt`, which aborts the run as
-  `BackendError::Aborted`) — see §9. Two rules make it work:
+  there is a *fresh* attach, not a reuse: `Python::attach` could panic, or
+  attach to a finalizing interpreter, if the interpreter were shutting down. It
+  attaches through `attach_or` instead and treats an unreachable interpreter as
+  a cancellation, raised as `KeyboardInterrupt` — the same class the planner's
+  between-wave guard (`SignalInterrupt`) gets for the same event, since in both
+  cases the run is aborted rather than given invalid input — see §9. Two rules
+  make it work:
   - **Throttle inside the pure crate, not at the Python boundary.** The hook is
     called at most once per ~25ms of wall clock (with the clock itself read once
     per ~64k amplitude updates), so its frequency is decoupled from gate cost —
@@ -404,18 +409,26 @@ layer can inspect (the `backend_cleanup_failures()` counter, exposed to Python).
 Acquiring the GIL inside a `Drop` is allowed only when it is explicitly safe
 against re-entrancy and cannot propagate a panic through the in-progress unwind.
 Attaching reuses an existing attachment only when the thread is *already*
-attached — never inside `detach`, which resets it — and `Python::attach`
-**panics** when the interpreter cannot be attached to: while it is finalizing
-(detected on Python ≥ 3.13), during a GC traversal, or before it is
-initialized. So a `Drop`, and any callback that runs while detached, attaches
+attached — never inside `detach`, which resets it. A fresh `Python::attach`
+**panics** during a GC traversal and before the interpreter is initialized, and
+once the interpreter has started shutting down it either panics or attaches to
+the finalizing interpreter, which can hang the thread. This happens on every
+Python version: CPython clears its `initialized` flag right after marking itself
+finalizing, so to PyO3 a shutting-down interpreter looks uninitialized, and
+`Python::try_attach` reports it as unavailable. The only gap left is a
+check-then-attach race, which PyO3 documents as best effort. So a `Drop`, and
+any callback that runs while detached, attaches
 through the shared helpers in `crates/polypus-infrastructure/src/attach.rs`:
 `attach_or` for callbacks, choosing explicitly what an unreachable interpreter
 means, and `attach_for_cleanup` for cleanup, which also formats a Python
-exception while still attached. That last part matters because formatting a
-`PyErr` attaches again, so a `PyErr` that is logged after the attached closure
-returns reintroduces the panic. `CunqaBackend` is the reference use. Keep the
-fallible operation behind a `Result`-returning helper so the `Drop` body only
-logs and counts.
+exception while still attached (with a fixed fallback if even that fails, as
+`to_string()` would panic). That matters because formatting a `PyErr` attaches
+again, so a `PyErr` that is logged after the attached closure returns
+reintroduces the panic. `CunqaBackend` is the reference use: its release
+operation receives the `Python` token, and `close` is the one place that
+attaches, so a release operation cannot bypass the helper. Keep the fallible
+operation behind a `Result`-returning helper so the `Drop` body only logs and
+counts.
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over

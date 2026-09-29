@@ -1,10 +1,17 @@
 //! Attaching to the Python interpreter from code that may run when it is not
 //! available.
 //!
-//! [`Python::attach`] panics when the calling thread cannot attach: while the
-//! interpreter is finalizing (detected on Python ≥ 3.13), during a GC traversal,
-//! or before it is initialized. That is fine in straight-line code running inside
-//! a Python call, but not in two places this workspace has:
+//! [`Python::attach`] is unsafe to rely on when the calling thread may not be
+//! able to attach: during a GC traversal and before the interpreter is
+//! initialized it panics, and once the interpreter has started shutting down it
+//! either panics or attaches to a finalizing interpreter, which can hang the
+//! thread. Shutdown looks like "not initialized" to PyO3 on every Python
+//! version, because CPython clears its `initialized` flag right after marking
+//! itself finalizing. `attach` panics there only if the process has not yet
+//! made a fresh (non-reused) attach, since PyO3 checks initialization once.
+//! Otherwise it goes ahead and attaches to the finalizing interpreter. That is
+//! fine in straight-line code running inside a Python call, but not in two
+//! places this workspace has:
 //!
 //! - **cleanup reached from `Drop`**, which can run at interpreter shutdown, where
 //!   a panic aborts the process if another panic is already unwinding;
@@ -12,15 +19,18 @@
 //!   [`Python::detach`]), such as a signal-polling hook: `detach` resets the
 //!   thread's attachment, so an `attach` in there is a *fresh* attach and gets
 //!   the same checks, even though the surrounding Python call is still running.
-//!   A daemon thread doing this at shutdown would panic across the FFI boundary.
+//!   A daemon thread doing this at shutdown could panic across the FFI boundary,
+//!   or hang.
 //!
 //! Such code attaches through [`attach_or`] (or [`attach_for_cleanup`]) instead,
 //! choosing explicitly what happens when the interpreter cannot be reached.
 //! Attaching is re-entrant only when the thread is *already* attached: then the
 //! existing attachment is reused and none of the checks can fail.
 //!
-//! Detection is best effort on PyO3's side: on Python < 3.13 a finalizing
-//! interpreter is not detected, so these helpers cannot catch that case there.
+//! [`Python::try_attach`], which these helpers use, reports all of those states
+//! as unavailable on every supported Python version. The one gap is a
+//! check-then-attach race (shutdown starting between PyO3's check and the
+//! attach itself), which PyO3 documents as best effort.
 
 use std::fmt;
 
@@ -76,8 +86,22 @@ pub fn attach_for_cleanup(
 ) -> Result<(), CleanupError> {
     attach_or(
         || Err(CleanupError::InterpreterUnavailable),
-        |py| f(py).map_err(|e| CleanupError::Failed(e.to_string())),
+        |py| f(py).map_err(|e| CleanupError::Failed(describe(&e))),
     )
+}
+
+/// Format `err` for a log line without panicking. `ToString::to_string` panics
+/// when a `Display` impl returns an error, and a `PyErr`'s can (it fails when
+/// the exception type's qualified name cannot be read, e.g. under memory
+/// pressure). On the `Drop` path that panic could abort the process, so a
+/// failed format falls back to a fixed message instead.
+fn describe(err: &impl fmt::Display) -> String {
+    use fmt::Write;
+    let mut out = String::new();
+    match write!(out, "{err}") {
+        Ok(()) => out,
+        Err(fmt::Error) => "<unformattable Python exception>".to_string(),
+    }
 }
 
 /// Run the test `name` (its path relative to the crate root) alone in a fresh
@@ -144,11 +168,28 @@ mod tests {
         );
     }
 
+    /// An error whose `Display` fails is described with the fixed fallback
+    /// instead of panicking the way `to_string()` would. A real `PyErr` whose
+    /// formatting fails cannot be produced reliably (on Python ≥ 3.11 PyO3 reads
+    /// the type's qualified name straight from the type object), so a stand-in
+    /// `Display` exercises the same branch.
+    #[test]
+    fn describe_falls_back_when_display_fails() {
+        struct Unformattable;
+        impl fmt::Display for Unformattable {
+            fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+        assert_eq!(describe(&Unformattable), "<unformattable Python exception>");
+        assert_eq!(describe(&"release refused"), "release refused");
+    }
+
     /// Without an interpreter neither helper panics nor runs its closure; each
     /// takes its "unavailable" branch. "Not initialized" is the only unavailable
-    /// state a test can produce deterministically ("finalizing" cannot be
-    /// reproduced from a Rust test), so this runs in a fresh process that never
-    /// initializes Python.
+    /// state a test can produce deterministically. It is also how a shutting-down
+    /// interpreter looks to PyO3, but a real shutdown cannot be reproduced from a
+    /// Rust test. The test runs in a fresh process that never initializes Python.
     #[test]
     fn helpers_take_the_unavailable_branch_without_an_interpreter() {
         if !is_fresh_process() {

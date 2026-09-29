@@ -51,7 +51,8 @@ use uuid::Uuid;
 ///
 /// `poll` runs while the thread is detached (the run is inside `py.detach`), so
 /// attaching here is a fresh attach, not a reuse of the caller's: `Python::attach`
-/// would panic if the interpreter were finalizing. It attaches with
+/// could panic, or attach to a finalizing interpreter, if the interpreter were
+/// shutting down (on any Python version). It attaches with
 /// [`attach_or`](crate::infrastructure::attach_or) instead, and an unreachable
 /// interpreter aborts the run as `BackendError::Aborted` — the edge's
 /// `KeyboardInterrupt`, the same class a Ctrl+C gets — since its result could
@@ -63,7 +64,7 @@ impl crate::infrastructure::Interrupt for SignalInterrupt {
         crate::infrastructure::attach_or(
             || {
                 Err(crate::infrastructure::BackendError::Aborted(
-                    "the Python interpreter is no longer available (finalizing)".to_string(),
+                    "the Python interpreter is no longer available (shutting down)".to_string(),
                 ))
             },
             |py| {
@@ -1790,9 +1791,10 @@ mod tests {
     /// detached cancel instead of panicking: the planner's guard aborts the run
     /// as `BackendError::Aborted` (the edge's `KeyboardInterrupt`) and the
     /// `statevector` hook asks the gate loop to stop, with no pending
-    /// exception. "Not initialized" stands in for "finalizing", the state that
-    /// matters in production but cannot be reproduced from a Rust test; both
-    /// take the same `try_attach` branch.
+    /// exception. "Not initialized" is also how a shutting-down interpreter
+    /// looks to PyO3 (CPython clears its `initialized` flag right after marking
+    /// itself finalizing), but a real shutdown cannot be reproduced from a Rust
+    /// test.
     #[test]
     fn signal_polling_cancels_when_the_interpreter_is_unavailable() {
         if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
@@ -1804,7 +1806,7 @@ mod tests {
         use crate::infrastructure::{BackendError, Interrupt};
         let polled = SignalInterrupt.poll();
         assert!(
-            matches!(&polled, Err(BackendError::Aborted(msg)) if msg.contains("finalizing")),
+            matches!(&polled, Err(BackendError::Aborted(msg)) if msg.contains("no longer available")),
             "an unreachable interpreter must abort the run, got {polled:?}"
         );
 
@@ -1817,6 +1819,76 @@ mod tests {
             pending.is_none(),
             "no exception can be recorded without an interpreter"
         );
+    }
+
+    /// `statevector`'s detached simulation really goes through
+    /// `poll_for_cancellation`: with no interpreter the first checkpoint
+    /// cancels the run, with no pending exception, instead of panicking.
+    ///
+    /// Timing-independent in the same way as `polypus-sim`'s
+    /// `tests/cancellation.rs`: the circuit ends in an `Rx(NaN)`, so
+    /// `Cancelled` proves the loop stopped early and `NonFiniteAmplitude`
+    /// would prove it never hit a checkpoint. The size (14 qubits, 60 000
+    /// barrier-separated rotations) outlives the 25ms checkpoint interval by a
+    /// wide margin in both profiles; the run is never completed.
+    #[test]
+    fn statevector_simulation_cancels_when_the_interpreter_is_unavailable() {
+        if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
+            run_in_fresh_process(
+                "bindings::tests::statevector_simulation_cancels_when_the_interpreter_is_unavailable",
+            );
+            return;
+        }
+        use polypus_circuit::{ConcreteCircuit, GateInstruction as G, GateParam::Fixed};
+        const N: usize = 14;
+        let mut gates = Vec::new();
+        for i in 0..60_000 {
+            gates.push(G::Rx {
+                qubit: i % N,
+                theta: Fixed(0.1),
+            });
+            gates.push(G::Barrier(Vec::new()));
+        }
+        gates.push(G::Rx {
+            qubit: 0,
+            theta: Fixed(f64::NAN),
+        });
+        let circuit = ConcreteCircuit {
+            num_qubits: N,
+            gates,
+        };
+
+        let mut pending = None;
+        let outcome = circuit::simulate_cancellable(&circuit, true, &mut pending);
+        assert!(
+            matches!(outcome, Err(polypus_sim::SimError::Cancelled)),
+            "an unreachable interpreter must cancel the simulation mid-run, got {:?}",
+            outcome.map(|_| "a completed run")
+        );
+        assert!(
+            pending.is_none(),
+            "no exception can be recorded without an interpreter"
+        );
+    }
+
+    /// A cancelled `statevector` re-raises the pending signal's own exception,
+    /// and raises `KeyboardInterrupt` — the class the planner's guard gets for
+    /// the same event — when the interpreter became unreachable.
+    #[test]
+    fn statevector_cancellation_raises_keyboard_interrupt() {
+        Python::initialize();
+        Python::attach(|py| {
+            let unreachable = circuit::cancellation_error(None);
+            assert!(unreachable.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py));
+
+            let signal = pyo3::exceptions::PyKeyboardInterrupt::new_err("Ctrl+C");
+            let signal_value = signal.value(py).clone();
+            let raised = circuit::cancellation_error(Some(signal));
+            assert!(
+                raised.value(py).is(&signal_value),
+                "the pending exception must be re-raised verbatim"
+            );
+        });
     }
     use pyo3::types::PyString;
     use std::collections::HashMap;
