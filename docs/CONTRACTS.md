@@ -764,8 +764,11 @@ names renamed by the same scheme for OpenQASM 2.0's `[a-z][A-Za-z0-9_]*`
 (avoiding its keywords, the `qelib1.inc` gates, `q`, `c` and the names of
 OpenQASM 2.0 declarations, which keep theirs). A body using `arcsin`, `arccos`
 or `arctan` is `GateNotExpressible`, naming the gate (`ConcreteCircuit::to_qasm2`
-panics there; `try_to_qasm2` returns the error). OpenQASM 2.0 declarations are
-re-emitted verbatim as before (C-2).
+panics there; `try_to_qasm2` returns the error). The backends that submit
+OpenQASM 2.0 — Aer and CUNQA (through `polypus_python`), QMIO, the subprocess
+bridge — report such a circuit as unsupported (`polypus.NativeCircuitError` in
+Python), never a panic; the native backend expands the gate and runs it.
+OpenQASM 2.0 declarations are re-emitted verbatim as before (C-2).
 
 **Budgets** (each a `Parse` error on import; the export stays within them):
 
@@ -796,4 +799,10 @@ the declared factors, `CX`, every exported definition, cross-dialect),
 2.5.2 in both directions: pinned fixtures and a generated set, explicit
 parameter mapping, statevectors with the predicted phase only, counts and bit
 order), and the `from_qasm3` fuzz target in CI (import, export, re-import,
-fixed point, binding).
+fixed point, binding). The backends' refusal of a circuit OpenQASM 2.0 cannot
+express: `to_py_object_rejects_a_circuit_openqasm2_cannot_express`
+(`polypus-infrastructure`), `rejects_a_circuit_openqasm2_cannot_express`
+(QMIO), `a_circuit_openqasm2_cannot_express_is_rejected_without_a_worker`
+(`polypus-subprocess-backend`), and
+`test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking`
+in `tests/python/test_qasm3.py`.

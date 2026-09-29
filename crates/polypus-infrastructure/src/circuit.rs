@@ -92,7 +92,9 @@ pub fn as_qiskit(circuit: &BoundCircuit) -> Option<&Py<PyAny>> {
 /// A [`Foreign`](BoundCircuit::Foreign) payload that is **not** a
 /// [`QiskitCircuit`] is a circuit representation the Python backends cannot submit,
 /// so it is rejected as [`BackendError::UnsupportedCircuit`] rather than silently
-/// mishandled.
+/// mishandled. So is a native circuit that OpenQASM 2.0 cannot express (a gate
+/// declared in OpenQASM 3 whose body uses `arcsin`, say), which would otherwise
+/// panic in the export.
 pub fn to_py_object(circuit: &BoundCircuit, py: Python<'_>) -> Result<Py<PyAny>, BackendError> {
     let conv = |e: PyErr| BackendError::Conversion(e.to_string());
     match circuit {
@@ -115,7 +117,12 @@ pub fn to_py_object(circuit: &BoundCircuit, py: Python<'_>) -> Result<Py<PyAny>,
         // Native circuits reach a Python backend (Aer/CUNQA) as OpenQASM 2.0,
         // exactly like the `Qasm2` variant; the conversion is pure Rust.
         BoundCircuit::Native(circuit) => Ok(circuit
-            .to_qasm2()
+            .try_to_qasm2()
+            .map_err(|e| {
+                BackendError::UnsupportedCircuit(format!(
+                    "the Aer/CUNQA backends run circuits as OpenQASM 2.0, and this one cannot be written in it: {e}"
+                ))
+            })?
             .into_pyobject(py)
             .map_err(|e| conv(e.into()))?
             .into_any()
@@ -170,6 +177,26 @@ mod tests {
             let obj = to_py_object(&QiskitCircuit::into_bound(py.None()), py).unwrap();
             assert!(obj.bind(py).is_none());
         });
+    }
+
+    #[test]
+    fn to_py_object_rejects_a_circuit_openqasm2_cannot_express() {
+        pyo3::prepare_freethreaded_python();
+        let circuit = ParameterizedCircuit::from_qasm3(
+            "OPENQASM 3.0;\ninclude \"stdgates.inc\";\ngate g(t) a { rx(arcsin(t)) a; }\nqubit[1] q;\ng(0.5) q[0];\n",
+        )
+        .unwrap()
+        .assign_parameters(&[])
+        .unwrap();
+        Python::with_gil(
+            |py| match to_py_object(&BoundCircuit::Native(circuit), py) {
+                Err(BackendError::UnsupportedCircuit(message)) => {
+                    assert!(message.contains("declared gate 'g'"), "{message}");
+                    assert!(message.contains("arcsin"), "{message}");
+                }
+                other => panic!("expected UnsupportedCircuit, got {other:?}"),
+            },
+        );
     }
 
     /// Perf evidence (issue #191 review, point 7): the `Foreign` variant's
