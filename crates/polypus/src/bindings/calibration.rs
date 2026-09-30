@@ -3,7 +3,9 @@
 //! `polypus.calibrate_parallel_threshold(force=False)` measures the qubit count
 //! at which the native statevector simulator's gate kernels should switch to the
 //! rayon parallel path on *this* machine, caches it on disk keyed by the rayon
-//! thread count, and returns what it decided. It mirrors `polypus.init_logger`:
+//! thread count *and* a CPU fingerprint (so nodes sharing one `$HOME` keep
+//! separate entries; see `polypus_sim::calibration`), and returns what it
+//! decided. It mirrors `polypus.init_logger`:
 //! a one-shot, process-level setup call, meant to run once — the first line of a
 //! SLURM script, or inside `install.sh` — **before** any circuits are simulated,
 //! because the per-process resolver reads the cache once and memoises it.
@@ -106,13 +108,19 @@ pub(crate) fn warn_if_using_default_threshold(py: Python<'_>) -> PyResult<()> {
 
 /// Calibrate (or reuse) the gate-parallelism threshold for this machine.
 ///
-/// With `force=False` (default) a cache already valid for the current hardware
-/// (same rayon thread count) is reused unchanged and nothing is measured; with
-/// `force=True` the crossover is re-measured and the cache overwritten.
+/// With `force=False` (default) a cache entry already valid for the current
+/// hardware (same CPU fingerprint *and* rayon thread count) is reused unchanged
+/// and nothing is measured; with `force=True` the crossover is re-measured and
+/// that one entry replaced — entries for other thread counts or other nodes are
+/// preserved. The write is atomic and lock-protected, so concurrent calls (e.g.
+/// several ranks or nodes on a shared `$HOME`) never tear the file. Unlike the
+/// import-time auto-calibration, this explicit call runs on every rank it is
+/// invoked on, secondary SLURM/OpenMPI ranks included.
 ///
 /// Returns a `dict` describing the outcome:
 /// * `threshold` (int) — qubit count at/above which gates go parallel;
-/// * `num_threads` (int) — rayon threads detected (the cache key);
+/// * `num_threads` (int) — rayon threads detected (one half of the cache key,
+///   alongside the CPU fingerprint, which is not returned);
 /// * `duration_secs` (float) — measurement time (`0.0` when reused);
 /// * `reused_cache` (bool) — whether a valid cache was reused as-is;
 /// * `cache_path` (str | None) — where the cache lives / would live;

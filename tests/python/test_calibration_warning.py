@@ -78,13 +78,14 @@ def _seed_old_schema_cache(cache_home) -> None:
     ``{threshold, num_threads}``).
 
     Since commit ea6562a (``feat(sim): key the gate-parallel calibration cache by
-    thread count``) the on-disk cache is a ``schema:2`` thread-count → threshold
-    map, and ``read_cache_from`` treats any other schema as **absent** — no
-    migration, worst case one recalibration. So this file does not model a
-    "different hardware" cache (``FallbackReason::HardwareChanged`` is unreachable
-    under thread-count keying); it models a cache the current build cannot read,
-    which resolves to the ``NotCalibrated`` fallback, exactly as an empty cache
-    dir does."""
+    thread count``) the on-disk cache is a map (``schema:3`` since issue #214,
+    which qualified the thread-count key with a CPU fingerprint), and
+    ``read_cache_from`` treats any other schema as **absent** — no migration,
+    worst case one recalibration. So this file does not model a "different
+    hardware" cache (``FallbackReason::HardwareChanged`` is unreachable under
+    per-key lookup); it models a cache the current build cannot read, which
+    resolves to the ``NotCalibrated`` fallback, exactly as an empty cache dir
+    does."""
     d = cache_home / "polypus"
     d.mkdir(parents=True, exist_ok=True)
     (d / "parallel_threshold.json").write_text(
@@ -93,9 +94,15 @@ def _seed_old_schema_cache(cache_home) -> None:
 
 
 def _seed_foreign_thread_count_cache(cache_home) -> None:
-    """Write a current-schema (``schema:2``) cache holding a calibrated entry for a
-    thread count that cannot match this machine (``999999``), so the map is
-    populated but has no entry for the current thread count.
+    """Write a current-schema (``schema:3``) cache holding a calibrated entry for a
+    key that cannot match this machine (thread count ``999999`` on a made-up CPU
+    fingerprint), so the map is populated but has no entry for the current key.
+
+    The schema must be the current one: an older schema is treated as absent
+    (``NotCalibrated``), which would silently turn this into the empty-cache test.
+    The key follows the ``"{threads}|{model}|{cache size}|{sockets}"`` shape of
+    ``cache_key`` in ``calibration.rs``, so it is a well-formed foreign entry —
+    another node on a shared ``$HOME`` — not just an unparseable one.
 
     This is the routine "size-uncalibrated" case a shared SLURM node hits when a
     job runs at a ``--cpus-per-task`` allotment not yet calibrated: the machine is
@@ -104,7 +111,9 @@ def _seed_foreign_thread_count_cache(cache_home) -> None:
     deliberately, **no** Python ``UserWarning``."""
     d = cache_home / "polypus"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "parallel_threshold.json").write_text('{"schema":2,"entries":{"999999":14}}')
+    (d / "parallel_threshold.json").write_text(
+        '{"schema":3,"entries":{"999999|Foreign CPU @ 1.00GHz|1 KB|1":14}}'
+    )
 
 
 def test_statevector_does_not_warn_when_uncalibrated(tmp_path):
