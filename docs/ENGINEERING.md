@@ -291,6 +291,15 @@ boundary stays out-of-process and explicit; see
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting
   results, unseeded RNG, parallelism that changes reduction order, etc.
+- **Angle expressions** (`polypus_circuit::expr`) are evaluated exactly as
+  written: the same floating-point operations in source order, with no
+  reassociation and no folding of constant subexpressions (only an expression
+  without free parameters is evaluated at once, to a fixed angle; contract
+  C-2). The evaluation order is therefore deterministic; the elementary
+  functions (`sin`, `exp`, …) are the platform's, so their last bit may differ
+  between platforms. Expressions are stored flat (postfix) and never walked
+  recursively, so their depth cannot overflow the stack; construction bounds
+  their size and their nesting as written.
 - In numeric tests, compare with a tolerance (epsilon), not exact float
   equality — **except** the QASM round-trip, which is byte-identical
   (contract C-2).

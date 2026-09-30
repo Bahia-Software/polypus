@@ -20,9 +20,9 @@
 //! expansion is always bounded (`qasm_import` is an untrusted input surface).
 
 use crate::error::CircuitError;
+use crate::expr::{EvalError, ExprArena, FormalExpr};
 use crate::gate::{GateInstruction, GateParam};
 use crate::qasm_import::BuiltinGate;
-use std::fmt;
 use std::sync::Arc;
 
 /// Deepest nesting of gate calls inside gate bodies. Declared gates can only
@@ -37,160 +37,6 @@ pub(crate) const MAX_GATE_NESTING: usize = 64;
 /// exponentially long walk that produces nothing.
 pub(crate) const MAX_GATE_EXPANSION: usize = 1_000_000;
 
-// ───────────────────────────── Expressions ──────────────────────────────
-
-/// A unary function of the OpenQASM 2.0 expression grammar.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Func {
-    Sin,
-    Cos,
-    Tan,
-    Exp,
-    Ln,
-    Sqrt,
-}
-
-impl Func {
-    pub(crate) fn from_name(name: &str) -> Option<Func> {
-        Some(match name {
-            "sin" => Func::Sin,
-            "cos" => Func::Cos,
-            "tan" => Func::Tan,
-            "exp" => Func::Exp,
-            "ln" => Func::Ln,
-            "sqrt" => Func::Sqrt,
-            _ => return None,
-        })
-    }
-
-    fn apply(self, v: f64) -> f64 {
-        match self {
-            Func::Sin => v.sin(),
-            Func::Cos => v.cos(),
-            Func::Tan => v.tan(),
-            Func::Exp => v.exp(),
-            Func::Ln => v.ln(),
-            Func::Sqrt => v.sqrt(),
-        }
-    }
-}
-
-/// `+` / `-` between the terms of a [`Expr::Sum`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum AddOp {
-    Add,
-    Sub,
-}
-
-/// `*` / `/` between the factors of a [`Expr::Product`]; a division keeps its
-/// source line for the division-by-zero error.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum MulOp {
-    Mul,
-    Div { line: usize },
-}
-
-/// A parameter expression, as parsed. Top-level expressions are constant and
-/// evaluated immediately; inside a gate body they may name the gate's formal
-/// parameters ([`Expr::Param`]) and are evaluated at each call site.
-///
-/// Evaluation performs exactly the floating-point operations the source
-/// spells, in the same order (left to right within a sum or a product), so a
-/// constant expression evaluates bit-for-bit as it always has. Sums and
-/// products are flat, not nested binary nodes: an arbitrarily long `a+b+c+…`
-/// is evaluated by a loop, never by recursion as deep as the chain is long,
-/// and every other form of nesting is bounded by the parser's depth limit.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Expr {
-    Num(f64),
-    /// The gate's formal parameter at this position.
-    Param(usize),
-    Neg(Box<Expr>),
-    /// `first (± term)*`.
-    Sum(Box<Expr>, Vec<(AddOp, Expr)>),
-    /// `first (*|/ factor)*`.
-    Product(Box<Expr>, Vec<(MulOp, Expr)>),
-    /// `base ^ exponent`.
-    Pow(Box<Expr>, Box<Expr>),
-    Func(Func, Box<Expr>),
-}
-
-/// Why an expression could not be evaluated to a usable angle.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum EvalError {
-    /// A division by zero, at this source line.
-    DivisionByZero { line: usize },
-    /// The value is `NaN` or infinite (e.g. `ln(0)`), not a valid angle.
-    NonFinite,
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EvalError::DivisionByZero { .. } => {
-                write!(f, "division by zero in parameter expression")
-            }
-            EvalError::NonFinite => write!(
-                f,
-                "parameter expression evaluated to a non-finite value (NaN or infinity)"
-            ),
-        }
-    }
-}
-
-impl Expr {
-    /// Evaluate with `args` bound to the formal parameters. The recursion is
-    /// bounded by the parser's expression-depth limit.
-    pub(crate) fn eval(&self, args: &[f64]) -> Result<f64, EvalError> {
-        Ok(match self {
-            Expr::Num(v) => *v,
-            // In range: the parser only builds `Param(i)` for a declared name.
-            Expr::Param(i) => args[*i],
-            Expr::Neg(e) => -e.eval(args)?,
-            Expr::Sum(first, rest) => {
-                let mut v = first.eval(args)?;
-                for (op, term) in rest {
-                    let t = term.eval(args)?;
-                    match op {
-                        AddOp::Add => v += t,
-                        AddOp::Sub => v -= t,
-                    }
-                }
-                v
-            }
-            Expr::Product(first, rest) => {
-                let mut v = first.eval(args)?;
-                for (op, factor) in rest {
-                    let f = factor.eval(args)?;
-                    match op {
-                        MulOp::Mul => v *= f,
-                        MulOp::Div { line } => {
-                            if f == 0.0 {
-                                return Err(EvalError::DivisionByZero { line: *line });
-                            }
-                            v /= f;
-                        }
-                    }
-                }
-                v
-            }
-            Expr::Pow(base, exponent) => base.eval(args)?.powf(exponent.eval(args)?),
-            Expr::Func(f, e) => f.apply(e.eval(args)?),
-        })
-    }
-
-    /// [`Self::eval`], rejecting a non-finite result: the value must be a
-    /// usable angle (contract C-2).
-    pub(crate) fn eval_angle(&self, args: &[f64]) -> Result<f64, EvalError> {
-        let value = self.eval(args)?;
-        if value.is_finite() {
-            Ok(value)
-        } else {
-            Err(EvalError::NonFinite)
-        }
-    }
-}
-
 // ───────────────────────────── Definitions ──────────────────────────────
 
 /// One statement of a gate body, over the gate's formal arguments (qubits by
@@ -200,13 +46,13 @@ pub(crate) enum BodyOp {
     /// A built-in (`qelib1.inc`) gate.
     Builtin {
         gate: &'static BuiltinGate,
-        params: Vec<Expr>,
+        params: Vec<FormalExpr>,
         qubits: Vec<usize>,
     },
     /// A gate declared earlier in the same program.
     Call {
         definition: Arc<GateDefinition>,
-        params: Vec<Expr>,
+        params: Vec<FormalExpr>,
         qubits: Vec<usize>,
     },
     /// `barrier` over some of the formal qubits.
@@ -335,11 +181,16 @@ impl GateDefinition {
     /// [`Self::instantiate`] without building any instruction, so the importer
     /// can validate every call cheaply.
     pub(crate) fn validate(&self, args: &[f64]) -> Result<(), EvalError> {
+        self.validate_with(args, &mut Vec::new())
+    }
+
+    /// [`Self::validate`], with `stack` as the expressions' scratch space.
+    fn validate_with(&self, args: &[f64], stack: &mut Vec<f64>) -> Result<(), EvalError> {
         for op in &self.body {
             match op {
                 BodyOp::Builtin { params, .. } => {
                     for e in params {
-                        e.eval_angle(args)?;
+                        e.eval_angle(args, stack)?;
                     }
                 }
                 BodyOp::Call {
@@ -347,9 +198,9 @@ impl GateDefinition {
                 } => {
                     let values = params
                         .iter()
-                        .map(|e| e.eval_angle(args))
+                        .map(|e| e.eval_angle(args, stack))
                         .collect::<Result<Vec<_>, _>>()?;
-                    definition.validate(&values)?;
+                    definition.validate_with(&values, stack)?;
                 }
                 BodyOp::Barrier(_) => {}
             }
@@ -359,12 +210,14 @@ impl GateDefinition {
 
     /// Instantiate the body for one call: `args` bound to the formal
     /// parameters, `qubits` to the formal qubits. Every built-in instruction of
-    /// the (fully) expanded body is handed to `sink`, in order.
+    /// the (fully) expanded body is handed to `sink`, in order. `stack` is the
+    /// expressions' scratch space.
     pub(crate) fn instantiate(
         &self,
         args: &[f64],
         qubits: &[usize],
         sink: &mut impl FnMut(GateInstruction),
+        stack: &mut Vec<f64>,
     ) -> Result<(), EvalError> {
         let actual =
             |formal: &[usize]| -> Vec<usize> { formal.iter().map(|&i| qubits[i]).collect() };
@@ -377,7 +230,7 @@ impl GateDefinition {
                 } => {
                     let values = params
                         .iter()
-                        .map(|e| e.eval_angle(args).map(GateParam::Fixed))
+                        .map(|e| e.eval_angle(args, stack).map(GateParam::Fixed))
                         .collect::<Result<Vec<_>, _>>()?;
                     sink((gate.build)(&values, &actual(formal)));
                 }
@@ -388,9 +241,9 @@ impl GateDefinition {
                 } => {
                     let values = params
                         .iter()
-                        .map(|e| e.eval_angle(args))
+                        .map(|e| e.eval_angle(args, stack))
                         .collect::<Result<Vec<_>, _>>()?;
-                    definition.instantiate(&values, &actual(formal), sink)?;
+                    definition.instantiate(&values, &actual(formal), sink, stack)?;
                 }
                 BodyOp::Barrier(formal) => sink(GateInstruction::Barrier(actual(formal))),
             }
@@ -448,6 +301,62 @@ impl CustomGate {
         &self.qubits
     }
 
+    /// A call of the same declared gate with other arguments: `params` for
+    /// its angles — fixed values, free parameters, or expressions stored in
+    /// the circuit the call is pushed onto — and `qubits` for its qubits.
+    ///
+    /// A call whose angles are all fixed is checked now, through its whole
+    /// body, as the importer checks a call. A call with free parameters is
+    /// checked through its whole body whenever they are bound: by
+    /// [`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters)
+    /// and by the exports that take parameter values.
+    ///
+    /// ```
+    /// use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
+    ///
+    /// let src = "OPENQASM 2.0;\ngate g(t) a { rz(t/2) a; }\nqreg q[1];\ng(0) q[0];\n";
+    /// let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
+    /// let GateInstruction::Custom(call) = &imported.gates[0] else { unreachable!() };
+    ///
+    /// let mut qc = ParameterizedCircuit::new(2);
+    /// qc.try_push(GateInstruction::Custom(call.with_arguments(vec![Param(0)], vec![1]).unwrap()))
+    ///     .unwrap();
+    /// assert_eq!(qc.num_params, 1);
+    /// assert!(qc.to_qasm2_with_params(&[0.5]).unwrap().contains("g(0.500000000000) q[1];"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::GateSignature`] if the numbers of angles or qubits
+    /// differ from the declaration's; for fixed angles,
+    /// [`CircuitError::NonFiniteParam`] or [`CircuitError::DivisionByZero`]
+    /// if an angle, or an angle of the body, is not usable. Qubit indices and
+    /// expressions are checked when the call is pushed onto a circuit.
+    pub fn with_arguments(
+        &self,
+        params: Vec<GateParam>,
+        qubits: Vec<usize>,
+    ) -> Result<CustomGate, CircuitError> {
+        let definition = &self.definition;
+        if params.len() != definition.num_params() || qubits.len() != definition.num_qubits() {
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            return Err(CircuitError::GateSignature {
+                name: definition.name().to_string(),
+                params: (count(definition.num_params()), count(params.len())),
+                qubits: (count(definition.num_qubits()), count(qubits.len())),
+            });
+        }
+        let call = CustomGate {
+            definition: Arc::clone(definition),
+            params,
+            qubits,
+        };
+        if !call.has_free_angles() {
+            call.check_bound()?;
+        }
+        Ok(call)
+    }
+
     /// The same call with its parameters replaced (binding).
     pub(crate) fn with_params(&self, params: Vec<GateParam>) -> Self {
         CustomGate {
@@ -455,6 +364,49 @@ impl CustomGate {
             params,
             qubits: self.qubits.clone(),
         }
+    }
+
+    /// The call with its angles replaced by `resolve(angle)`, checked through
+    /// its body for them (binding a call with free angles).
+    pub(crate) fn bind(
+        &self,
+        resolve: impl FnMut(&GateParam) -> Result<GateParam, CircuitError>,
+    ) -> Result<CustomGate, CircuitError> {
+        let bound = self.with_params(self.params.iter().map(resolve).collect::<Result<_, _>>()?);
+        bound.check_bound()?;
+        Ok(bound)
+    }
+
+    /// Whether an angle is a free parameter or an expression: the call has
+    /// not been checked through its body yet.
+    pub(crate) fn has_free_angles(&self) -> bool {
+        self.params
+            .iter()
+            .any(|p| !matches!(p, GateParam::Fixed(_)))
+    }
+
+    /// Check a call whose angles are fixed through its whole body.
+    pub(crate) fn check_bound(&self) -> Result<(), CircuitError> {
+        let values = self
+            .params
+            .iter()
+            .map(|p| match *p {
+                GateParam::Fixed(v) if v.is_finite() => Ok(v),
+                GateParam::Fixed(_) => Err(CircuitError::NonFiniteParam),
+                GateParam::Param(index) => Err(CircuitError::ParamIndexOutOfBounds {
+                    index,
+                    num_params: 0,
+                }),
+                GateParam::Expr(_) => Err(CircuitError::UnknownExpression),
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+        self.check_body(&values)
+    }
+
+    /// Check that every angle of the body is usable when the call's angles
+    /// are `values`.
+    pub(crate) fn check_body(&self, values: &[f64]) -> Result<(), CircuitError> {
+        self.definition.validate(values).map_err(body_error)
     }
 
     /// Expand the call into built-in instructions — through every nested
@@ -467,21 +419,42 @@ impl CustomGate {
     /// # Errors
     ///
     /// [`CircuitError::ParamIndexOutOfBounds`] / [`CircuitError::NonFiniteParam`]
-    /// if a call parameter cannot be resolved, and
-    /// [`CircuitError::NonFiniteParam`] if an angle of the body evaluates to a
-    /// non-finite value (including a division by zero) for these arguments.
+    /// if a call parameter cannot be resolved,
+    /// [`CircuitError::UnknownExpression`] if one is an expression (only its
+    /// circuit can evaluate it: bind the circuit first), and
+    /// [`CircuitError::NonFiniteParam`] or [`CircuitError::DivisionByZero`] if
+    /// an angle of the body is not a usable value for these arguments.
     pub fn expand(&self, params: &[f64]) -> Result<Vec<GateInstruction>, CircuitError> {
+        self.expand_with(params, &ExprArena::EMPTY, &mut Vec::new())
+    }
+
+    /// [`Self::expand`] for a call in a circuit whose expressions are
+    /// `exprs`; `stack` is the expressions' scratch space.
+    pub(crate) fn expand_with(
+        &self,
+        params: &[f64],
+        exprs: &ExprArena,
+        stack: &mut Vec<f64>,
+    ) -> Result<Vec<GateInstruction>, CircuitError> {
         let args = self
             .params
             .iter()
-            .map(|p| p.resolve(params))
+            .map(|p| p.resolve(params, exprs, stack))
             .collect::<Result<Vec<f64>, _>>()?;
         // Not pre-sized with `expansion_size`: that also counts the nested
         // calls, so it can far exceed the number of instructions produced.
         let mut out = Vec::new();
         self.definition
-            .instantiate(&args, &self.qubits, &mut |g| out.push(g))
-            .map_err(|_| CircuitError::NonFiniteParam)?;
+            .instantiate(&args, &self.qubits, &mut |g| out.push(g), stack)
+            .map_err(body_error)?;
         Ok(out)
+    }
+}
+
+/// The error a call reports when an angle of its body is not usable.
+fn body_error(e: EvalError) -> CircuitError {
+    match e {
+        EvalError::DivisionByZero { .. } => CircuitError::DivisionByZero,
+        _ => CircuitError::NonFiniteParam,
     }
 }

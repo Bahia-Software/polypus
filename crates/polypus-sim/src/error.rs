@@ -23,6 +23,12 @@ pub enum SimError {
         /// The offending parameter index.
         index: usize,
     },
+    /// A gate angle is still an expression of free parameters
+    /// ([`GateParam::Expr`](polypus_circuit::GateParam::Expr)). Only the
+    /// circuit that holds the expression can evaluate it, and `assign_parameters`
+    /// always does; like an unbound parameter, this can only happen for a
+    /// manually assembled circuit.
+    UnboundExpression,
     /// A gate angle resolved to a non-finite value (`NaN` or infinity), which
     /// would corrupt the statevector.
     NonFiniteAmplitude,
@@ -66,6 +72,10 @@ impl fmt::Display for SimError {
             SimError::UnboundParameter { index } => write!(
                 f,
                 "circuit contains an unbound free parameter (index {index}); bind all parameters before simulating"
+            ),
+            SimError::UnboundExpression => write!(
+                f,
+                "circuit contains an unbound parameter expression; bind all parameters before simulating"
             ),
             SimError::NonFiniteAmplitude => {
                 write!(f, "a gate angle resolved to a non-finite value (NaN or infinity)")

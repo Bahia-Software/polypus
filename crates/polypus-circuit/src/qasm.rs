@@ -12,6 +12,7 @@
 
 use crate::custom_gate::GateDefinition;
 use crate::error::CircuitError;
+use crate::expr::ExprArena;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -61,13 +62,15 @@ fn declared_gates(gates: &[GateInstruction]) -> Result<Vec<&GateDefinition>, Cir
 
 /// Serialize a gate sequence to a complete OpenQASM 2.0 program.
 ///
-/// `params` supplies values for any unresolved [`GateParam::Param`]; pass an
-/// empty slice for fully concrete circuits.
+/// `params` supplies values for any unresolved [`GateParam::Param`], and
+/// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
+/// them; pass an empty slice and arena for fully concrete circuits.
 pub(crate) fn write_qasm2(
     num_qubits: usize,
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<String, CircuitError> {
     let mut out = String::new();
     out.push_str("OPENQASM 2.0;\n");
@@ -86,8 +89,12 @@ pub(crate) fn write_qasm2(
         let _ = writeln!(out, "creg c[{num_clbits}];");
     }
 
-    let angle =
-        |p: &GateParam| -> Result<String, CircuitError> { Ok(fmt_angle(p.resolve(params)?)) };
+    let mut stack = Vec::new();
+    let mut angle = |p: &GateParam| -> Result<String, CircuitError> {
+        Ok(fmt_angle(p.resolve(params, exprs, &mut stack)?))
+    };
+    // Calls of declared gates resolve their angles apart: `angle` holds `stack`.
+    let mut call_stack = Vec::new();
 
     for gate in gates {
         match gate {
@@ -280,14 +287,20 @@ pub(crate) fn write_qasm2(
             GateInstruction::Custom(call) => {
                 let operands: Vec<String> =
                     call.qubits().iter().map(|q| format!("q[{q}]")).collect();
-                if call.params().is_empty() {
+                let values = call
+                    .params()
+                    .iter()
+                    .map(|p| p.resolve(params, exprs, &mut call_stack))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                // A call with free angles is checked through its body for the
+                // values it is exported with.
+                if call.has_free_angles() {
+                    call.check_body(&values)?;
+                }
+                if values.is_empty() {
                     let _ = writeln!(out, "{} {};", call.name(), operands.join(","));
                 } else {
-                    let angles = call
-                        .params()
-                        .iter()
-                        .map(angle)
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let angles: Vec<String> = values.iter().map(|&v| fmt_angle(v)).collect();
                     let _ = writeln!(
                         out,
                         "{}({}) {};",

@@ -39,6 +39,7 @@
 mod circuit;
 mod custom_gate;
 mod error;
+pub mod expr;
 mod gate;
 mod qasm;
 mod qasm_import;
@@ -48,6 +49,7 @@ pub mod templates;
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
 pub use custom_gate::{CustomGate, GateDefinition};
 pub use error::CircuitError;
+pub use expr::{ExprId, ParamExpr};
 pub use gate::{qubit_index_violation, terminal_measurement_violation, GateInstruction, GateParam};
 // Variant re-exports so call sites can write `Param(0)` / `Fixed(0.5)` directly.
 pub use gate::GateParam::{Fixed, Param};

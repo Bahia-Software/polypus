@@ -2,13 +2,15 @@
 
 use crate::custom_gate::CustomGate;
 use crate::error::CircuitError;
+use crate::expr::{ExprArena, ExprId};
 use std::collections::BTreeSet;
 
 /// An angle argument of a rotation gate.
 ///
-/// Either a concrete value ([`Fixed`](GateParam::Fixed)) or a reference to the
-/// free parameter at a given index ([`Param`](GateParam::Param)), to be bound
-/// later via [`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters).
+/// A concrete value ([`Fixed`](GateParam::Fixed)), a reference to the free
+/// parameter at a given index ([`Param`](GateParam::Param)), or an expression
+/// of free parameters ([`Expr`](GateParam::Expr)). Free parameters are bound
+/// later, via [`ParameterizedCircuit::assign_parameters`](crate::ParameterizedCircuit::assign_parameters).
 ///
 /// `GateParam` implements `From<f64>`, so builder methods accept plain floats:
 ///
@@ -25,6 +27,10 @@ pub enum GateParam {
     Fixed(f64),
     /// A reference to the free parameter at this index.
     Param(usize),
+    /// An expression of free parameters, stored in the circuit that returned
+    /// this id from [`ParameterizedCircuit::add_expr`](crate::ParameterizedCircuit::add_expr).
+    /// Binding evaluates it; it means nothing outside that circuit.
+    Expr(ExprId),
 }
 
 impl From<f64> for GateParam {
@@ -34,19 +40,56 @@ impl From<f64> for GateParam {
 }
 
 impl GateParam {
-    /// Resolve to a concrete value, looking up `Param` indices in `params`.
+    /// Resolve to a concrete value, looking up `Param` indices in `params` and
+    /// evaluating an `Expr` stored in `exprs` (`stack` is its scratch space).
     ///
-    /// Rejects a non-finite result — whether from a `Fixed` angle or from a
-    /// caller-supplied value bound to a `Param` — with
+    /// Rejects a non-finite result — whether from a `Fixed` angle, from a
+    /// caller-supplied value bound to a `Param`, or from an expression — with
     /// [`CircuitError::NonFiniteParam`], since `NaN`/infinity is not a valid
     /// rotation angle (mirrors the simulator, contract C-2).
-    pub(crate) fn resolve(&self, params: &[f64]) -> Result<f64, CircuitError> {
+    ///
+    /// Binding runs this for every angle of every candidate, so only a finite
+    /// `Fixed` or `Param` value is resolved inline; expressions and errors
+    /// take [`Self::resolve_slow`], out of line, and a `Fixed` or `Param`
+    /// angle costs what it did before expressions existed.
+    #[inline]
+    pub(crate) fn resolve(
+        &self,
+        params: &[f64],
+        exprs: &ExprArena,
+        stack: &mut Vec<f64>,
+    ) -> Result<f64, CircuitError> {
+        let value = match *self {
+            GateParam::Fixed(v) => v,
+            GateParam::Param(i) => match params.get(i) {
+                Some(&v) => v,
+                None => return self.resolve_slow(params, exprs, stack),
+            },
+            GateParam::Expr(_) => return self.resolve_slow(params, exprs, stack),
+        };
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            self.resolve_slow(params, exprs, stack)
+        }
+    }
+
+    /// [`Self::resolve`] off its fast path: expressions, and every error.
+    #[cold]
+    #[inline(never)]
+    fn resolve_slow(
+        &self,
+        params: &[f64],
+        exprs: &ExprArena,
+        stack: &mut Vec<f64>,
+    ) -> Result<f64, CircuitError> {
         let value = match *self {
             GateParam::Fixed(v) => v,
             GateParam::Param(i) => *params.get(i).ok_or(CircuitError::ParamIndexOutOfBounds {
                 index: i,
                 num_params: params.len(),
             })?,
+            GateParam::Expr(id) => return exprs.evaluate(id, params, stack),
         };
         if value.is_finite() {
             Ok(value)
@@ -944,6 +987,29 @@ pub fn qubit_index_violation(gates: &[GateInstruction], num_qubits: usize) -> Op
 mod tests {
     use super::*;
 
+    /// Resolve a parameter of a circuit that holds no expressions.
+    fn resolve(param: &GateParam, params: &[f64]) -> Result<f64, CircuitError> {
+        param.resolve(params, &ExprArena::EMPTY, &mut Vec::new())
+    }
+
+    /// `Fixed` and `Param` are still one tag and one word: adding `Expr` did
+    /// not grow the angle, nor any instruction that holds angles.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn gate_param_is_still_two_words() {
+        assert_eq!(std::mem::size_of::<GateParam>(), 16);
+        assert_eq!(std::mem::align_of::<GateParam>(), 8);
+    }
+
+    /// Binding returns a `Result` with this error for every angle it resolves;
+    /// at 56 bytes it made binding circuits without expressions measurably
+    /// slower than at the 48 it had before expressions existed.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn circuit_error_stays_six_words() {
+        assert_eq!(std::mem::size_of::<CircuitError>(), 48);
+    }
+
     #[test]
     fn test_param_eval_integration() {
         let param_fixed = GateParam::Fixed(1.5);
@@ -960,12 +1026,12 @@ mod tests {
         };
 
         let fixed_result = match fixed_instruction {
-            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            GateInstruction::Rx { theta, .. } => resolve(&theta, &external_values),
             _ => panic!("Expected Rx"),
         };
 
         let variable_result = match variable_instruction {
-            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            GateInstruction::Rx { theta, .. } => resolve(&theta, &external_values),
             _ => panic!("Expected Rx"),
         };
 
@@ -977,9 +1043,9 @@ mod tests {
     fn test_param_multiple_index() {
         let params = vec![10.0, 20.0, 30.0];
 
-        assert_eq!(GateParam::Param(0).resolve(&params).unwrap(), 10.0);
-        assert_eq!(GateParam::Param(1).resolve(&params).unwrap(), 20.0);
-        assert_eq!(GateParam::Param(2).resolve(&params).unwrap(), 30.0);
+        assert_eq!(resolve(&GateParam::Param(0), &params).unwrap(), 10.0);
+        assert_eq!(resolve(&GateParam::Param(1), &params).unwrap(), 20.0);
+        assert_eq!(resolve(&GateParam::Param(2), &params).unwrap(), 30.0);
     }
 
     #[test]
@@ -993,7 +1059,7 @@ mod tests {
         };
 
         let variable_result = match variable_instruction {
-            GateInstruction::Rx { theta, .. } => theta.resolve(&external_values),
+            GateInstruction::Rx { theta, .. } => resolve(&theta, &external_values),
             _ => panic!("Expected Rx"),
         };
 
@@ -1011,7 +1077,7 @@ mod tests {
         let param = GateParam::Param(0);
         let params = vec![];
 
-        let result = param.resolve(&params);
+        let result = resolve(&param, &params);
 
         assert!(result.is_err());
     }
@@ -1021,7 +1087,7 @@ mod tests {
         let param = GateParam::Param(0);
         let params = vec![42.3];
 
-        let _ = param.resolve(&params);
+        let _ = resolve(&param, &params);
 
         assert_eq!(params, vec![42.3]);
     }
@@ -1030,22 +1096,22 @@ mod tests {
     fn test_resolve_special_values() {
         // A `Fixed` non-finite angle is rejected directly.
         assert_eq!(
-            GateParam::Fixed(f64::NAN).resolve(&[]),
+            resolve(&GateParam::Fixed(f64::NAN), &[]),
             Err(CircuitError::NonFiniteParam)
         );
         assert_eq!(
-            GateParam::Fixed(f64::INFINITY).resolve(&[]),
+            resolve(&GateParam::Fixed(f64::INFINITY), &[]),
             Err(CircuitError::NonFiniteParam)
         );
 
         // A caller-supplied non-finite value bound to a `Param` is also rejected.
         let params = vec![f64::INFINITY, f64::NAN];
         assert_eq!(
-            GateParam::Param(0).resolve(&params),
+            resolve(&GateParam::Param(0), &params),
             Err(CircuitError::NonFiniteParam)
         );
         assert_eq!(
-            GateParam::Param(1).resolve(&params),
+            resolve(&GateParam::Param(1), &params),
             Err(CircuitError::NonFiniteParam)
         );
     }
@@ -1222,7 +1288,7 @@ mod tests {
         let mapped = u
             .try_map_params(|p| -> Result<GateParam, CircuitError> {
                 seen.push(*p);
-                Ok(GateParam::Fixed(p.resolve(&[10.0, 20.0])?))
+                Ok(GateParam::Fixed(resolve(p, &[10.0, 20.0])?))
             })
             .unwrap();
         assert_eq!(
@@ -1258,7 +1324,7 @@ mod tests {
             theta: GateParam::Param(3),
         };
         assert_eq!(
-            rzz.try_map_params(|p| p.resolve(&[]).map(GateParam::Fixed)),
+            rzz.try_map_params(|p| resolve(p, &[]).map(GateParam::Fixed)),
             Err(CircuitError::ParamIndexOutOfBounds {
                 index: 3,
                 num_params: 0
