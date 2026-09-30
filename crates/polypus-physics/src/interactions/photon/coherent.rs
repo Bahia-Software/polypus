@@ -34,9 +34,9 @@ pub fn differential_cross_section(cos_theta: f64) -> f64 {
 fn sample_cos_theta(rng: &mut impl Rng) -> f64 {
     let d_max = differential_cross_section(1.0);
     loop {
-        let cos_theta: f64 = rng.gen_range(-1.0..=1.0); // Random number in [-1, 1]
+        let cos_theta: f64 = rng.random_range(-1.0..=1.0); // Random number in [-1, 1]
         let p = differential_cross_section(cos_theta) / d_max;
-        let u: f64 = rng.gen_range(0.0..1.0);
+        let u: f64 = rng.random_range(0.0..1.0);
         if u <= p {
             return cos_theta;
         }
@@ -54,7 +54,7 @@ pub fn sample(
     rng: &mut impl Rng,
 ) -> (ParticleState, f64, Vec<ParticleState>) {
     let cos_theta = sample_cos_theta(rng);
-    let phi: f64 = rng.gen_range(0.0..(2.0 * PI));
+    let phi: f64 = rng.random_range(0.0..(2.0 * PI));
     let new_dir = rotate_direction(state.momentum.direction, cos_theta, phi);
 
     let new_state = ParticleState {

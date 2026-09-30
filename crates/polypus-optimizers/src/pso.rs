@@ -74,7 +74,7 @@ impl AlgorithmPSO {
         // half-open interval [lb, ub); reject an empty or unbounded interval
         // before any RNG draw or oracle call. `lb >= ub` covers the empty case;
         // the finiteness checks reject `NaN` (which fails every comparison) and
-        // an infinite bound (which would make `gen_range` draw from an unbounded
+        // an infinite bound (which would make `random_range` draw from an unbounded
         // interval — a panic in the `Uniform` sampler, either for the position
         // draw or for the derived infinite `vel_range` velocity draw).
         if !lb.is_finite() || !ub.is_finite() || lb >= ub {
@@ -87,7 +87,7 @@ impl AlgorithmPSO {
         let mut positions = Array2::<f64>::zeros((popsize, dims));
         for mut row in positions.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(lb..ub);
+                *e = rng.random_range(lb..ub);
             }
         }
 
@@ -95,7 +95,7 @@ impl AlgorithmPSO {
         let mut velocities = Array2::<f64>::zeros((popsize, dims));
         for mut row in velocities.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(-vel_range..vel_range);
+                *e = rng.random_range(-vel_range..vel_range);
             }
         }
 
@@ -123,8 +123,8 @@ impl AlgorithmPSO {
 
             for i in 0..popsize {
                 for d in 0..dims {
-                    let r1: f64 = rng.gen();
-                    let r2: f64 = rng.gen();
+                    let r1: f64 = rng.random();
+                    let r2: f64 = rng.random();
                     let new_vel = inertia_weight * velocities[[i, d]]
                         + cognitive_weight
                             * r1

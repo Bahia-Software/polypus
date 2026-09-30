@@ -84,9 +84,17 @@ impl ExecutionConfig {
 /// Used as the default when no explicit seed is supplied, so an omitted seed
 /// produces genuine (independent) shot noise across runs rather than repeating a
 /// value derived from the run [`id`](ExecutionConfig::id).
+///
+/// # Panics
+///
+/// If the OS entropy source is unavailable. This is treated as an
+/// unrecoverable invariant — the same behaviour `rand` 0.8's infallible
+/// `OsRng::next_u64` had internally; rand 0.9 only makes the failure explicit.
 pub fn random_seed() -> u64 {
-    use rand::RngCore;
-    rand::rngs::OsRng.next_u64()
+    use rand::TryRngCore;
+    rand::rngs::OsRng
+        .try_next_u64()
+        .expect("OS entropy source unavailable: cannot draw a default seed")
 }
 
 /// Provider-specific configuration.

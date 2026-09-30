@@ -186,14 +186,14 @@ impl AlgorithmQNG {
         // θ is drawn from the half-open interval [lb, ub); reject an empty or
         // unbounded interval before the sampler sees it. `lb >= ub` covers the
         // empty case; the finiteness checks reject `NaN` (which fails every
-        // comparison) and an infinite bound (which would make `gen_range` draw
+        // comparison) and an infinite bound (which would make `random_range` draw
         // from an unbounded interval — a panic in the `Uniform` sampler).
         if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
 
         // Initialise θ uniformly in [lb, ub)
-        let mut theta: Vec<f64> = (0..dims).map(|_| rng.gen_range(lb..ub)).collect();
+        let mut theta: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;

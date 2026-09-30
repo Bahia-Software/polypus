@@ -6,7 +6,7 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
 use ndarray::{Array1, Array2};
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::IndexedRandom, Rng};
 use std::f64::consts::PI;
 
 /// Differential Evolution optimizer.
@@ -94,7 +94,7 @@ impl AlgorithmDifferentialEvolution {
         let mut pop = Array2::<f64>::zeros((popsize, dims));
         for mut row in pop.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(0.0..2.0 * PI);
+                *e = rng.random_range(0.0..2.0 * PI);
             }
         }
 
@@ -124,7 +124,7 @@ impl AlgorithmDifferentialEvolution {
                 let c3 = pop.row(sel[2]).to_owned();
                 let mut mutant = &c1 + 0.8 * (&c2 - &c3);
                 mutant.mapv_inplace(|x| x.rem_euclid(2.0 * PI));
-                let cross: Array1<bool> = Array1::from_shape_fn(dims, |_| rng.gen_bool(0.7));
+                let cross: Array1<bool> = Array1::from_shape_fn(dims, |_| rng.random_bool(0.7));
                 let trial = cross
                     .iter()
                     .zip(mutant.iter())

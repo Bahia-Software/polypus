@@ -9,7 +9,7 @@ use rand::Rng;
 /// `mean_free_path_m` is `λ`. `ξ` is drawn from `[ε, 1)` (excluding 0) so that
 /// `ln(ξ)` is finite.
 pub fn sample_step_length(mean_free_path_m: f64, rng: &mut impl Rng) -> f64 {
-    let xi: f64 = rng.gen_range(f64::EPSILON..1.0);
+    let xi: f64 = rng.random_range(f64::EPSILON..1.0);
     -mean_free_path_m * xi.ln()
 }
 
