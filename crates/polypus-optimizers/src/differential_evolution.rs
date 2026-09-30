@@ -40,7 +40,7 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// `patience`, so a larger value makes the optimizer more patient (runs
     /// longer before giving up). The Python `DE` binding defaults it to 20.
     pub patience: u32,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }

@@ -35,7 +35,7 @@ pub struct AlgorithmQNGArgs {
     pub variance_oracle: Box<dyn VarianceOracle>,
     /// Tikhonov regularisation added to each QFIM element to avoid near-zero division.
     pub tikhonov_reg: f64,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }

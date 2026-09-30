@@ -31,7 +31,7 @@ pub struct AlgorithmPSOArgs {
     pub cognitive_weight: f64,
     pub social_weight: f64,
     pub tolerance: f64,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }
