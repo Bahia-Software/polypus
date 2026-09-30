@@ -13,7 +13,7 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::infrastructure::attach_or;
+use crate::infrastructure::{attach_or, check_statevector_fits};
 
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
 fn to_py_err(e: CircuitError) -> PyErr {
@@ -153,6 +153,15 @@ fn push(mut slf: PyRefMut<'_, Circuit>, gate: GateInstruction) -> PyResult<PyRef
 /// and nothing bounds the gate count, which is why the run has to stay
 /// interruptible (see above) rather than relying on being short.
 ///
+/// **Memory budget.** Below the ceiling, the `16 · 2^n`-byte statevector is also
+/// checked against the same memory budget the native backend applies (issue
+/// #215): `POLYPUS_MEM_BUDGET` when set, else the detected RAM/cgroup limit minus
+/// a safety reserve. One that does not fit raises
+/// `polypus.InsufficientMemoryError` (a `polypus.PolypusError`) before anything
+/// is allocated, instead of the process being killed by the out-of-memory killer.
+/// With no limit detected (macOS, Windows) nothing is refused. The ceiling's
+/// `ValueError` is checked first and is unchanged.
+///
 /// **`fusion`** (default `true`) controls [`polypus_sim::StatevectorSimulator::fusion`]:
 /// whether consecutive gates may be fused into fewer buffer passes before
 /// applying them. Fusion only changes performance, never the result (up to
@@ -178,6 +187,12 @@ pub fn statevector<'py>(
     // Binding stays on this side of the release: it is O(gates), allocates
     // nothing of size `2^n`, and reads the circuit through the `PyRef`.
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
+    // Refuse a statevector the memory budget cannot hold before allocating it
+    // (issue #215). Above the ceiling the simulator's `ValueError` stays the error.
+    if concrete.num_qubits <= polypus_sim::MAX_QUBITS {
+        check_statevector_fits(concrete.num_qubits)
+            .map_err(|e| crate::exceptions::insufficient_memory_to_pyerr(&e))?;
+    }
     // The simulation is the expensive, pure-Rust part: release the GIL for it
     // so it cannot stall every other Python thread (docs/ENGINEERING.md §3).
     //

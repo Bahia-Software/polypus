@@ -38,6 +38,7 @@
   - [From Rust](#from-rust)
   - [QASM 2.0 Import](#qasm-20-import)
   - [Performance Notes](#performance-notes)
+  - [Memory Budget](#memory-budget)
 - [Project Architecture](#project-architecture)
 - [Documentation](#documentation)
 - [Citing Polypus](#citing-polypus)
@@ -458,9 +459,47 @@ Round-trip guarantee (verified by tests): for any circuit produced by this libra
 ### Performance Notes
 
 - **Parameter binding**: ~3x faster than Qiskit's `assign_parameters` and, crucially, **GIL-free** — concurrent evaluation threads bind candidates truly in parallel (see `benchmarks/bench_native_vs_qiskit.py`).
-- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call with `max_parallel_experiments=0`, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released. Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each wave's concurrency at `n_qpus` via their `QuantumBackend::capabilities` (`BackendCapabilities::max_concurrency`), which the `Planner` enforces.
+- **Batched simulation**: the local backend submits each evaluation batch (e.g. a whole DE population) in a *single* `AerSimulator.run` call, so Aer's C++ engine runs the experiments in parallel across cores with the GIL released (`max_parallel_experiments` is bounded by the [memory budget](#memory-budget)). Measured ~1.4–2.1x end-to-end training speedup vs per-circuit submission, growing with circuit size (see `benchmarks/bench_batching.py`). Distributed backends cap each wave's concurrency at `n_qpus` via their `QuantumBackend::capabilities` (`BackendCapabilities::max_concurrency`), which the `Planner` enforces.
 - Native circuits shine brightest with backends that consume OpenQASM directly (e.g. CUNQA), where the Qiskit re-parse disappears entirely.
 - **Automatic gate-parallel calibration**: the native (`backend="polypus"`) statevector simulator switches its gate kernels to the parallel path at a machine-specific qubit count. The first `import polypus` on a machine measures that crossover once (well under a second) and caches it under `$XDG_CACHE_HOME/polypus/` (or `~/.cache/polypus/`); every later import reuses the cache with no measurement. Entries are keyed by CPU fingerprint and thread count, so the nodes of a cluster sharing one `$HOME` keep separate entries, and concurrent writers are serialised by a lock with atomic writes. In a multi-process SLURM/OpenMPI job only rank 0 auto-calibrates at import (`SLURM_PROCID` or `OMPI_COMM_WORLD_RANK` set to anything but `0` skips it); on a heterogeneous allocation, calibrate every node explicitly once, e.g. `srun --ntasks-per-node=1 python -c "import polypus; polypus.calibrate_parallel_threshold()"`. This runs on the *real* runtime hardware, so `pip install polypus-quantum` wheel users get a tuned threshold with no manual step. It fails safe — a read-only cache dir (containers/CI) falls back to the default threshold without error, and correctness is never affected. Set `POLYPUS_NO_AUTOCALIBRATE=1` to skip it entirely (CI, containers, reproducibility runs); you can also tune it explicitly at any time with `polypus.calibrate_parallel_threshold()`.
+
+### Memory Budget
+
+A dense `n`-qubit statevector needs `16 · 2^n` bytes (1 GiB at 26 qubits, 16 GiB at 30). The local simulators (native `backend="polypus"`, Aer, and `polypus.statevector`) size their work against one **memory budget**, which they use in two ways:
+
+- **Throttling**: how many circuits of a batch are simulated at once is capped so that their statevectors fit in the budget. This never changes the counts, only the speed.
+- **Controlled refusal**: a circuit that cannot fit even on its own is refused **before anything is allocated**, with `polypus.InsufficientMemoryError`, instead of being started and killed by the Linux out-of-memory killer (no Python exception, no partial results). The native backend and Aer with `sim_method="statevector"` refuse on the `16 · 2^n` model; for the other Aer methods (`automatic`, `density_matrix`, …) the budget is passed to Aer as `max_memory_mb`, and Aer checks it against the method it actually picks. A large Clifford circuit that Aer runs on its stabilizer method therefore keeps working.
+
+**Setting it.** `POLYPUS_MEM_BUDGET` takes a positive byte count with an optional `K`/`M`/`G`/`T` suffix, **base 1024** in every spelling and case-insensitive (`32G`, `32GiB`, `32GB` and `32g` are all 32 GiB; `512M`; `1048576`), the same convention as SLURM's `--mem`:
+
+```bash
+export POLYPUS_MEM_BUDGET=32G   # e.g. the job's --mem, minus what else runs in it
+```
+
+An invalid value (`abc`, `1.5G`, `0`) is not silently dropped: it is reported once per process as a warning in the Polypus log (visible once a logger is installed with `polypus.init_logger`), and the default below is used instead.
+
+**The default.** When the variable is unset or invalid, the budget is the smaller of the RAM available when the process starts (`MemAvailable`) and the process's cgroup memory limit (cgroup v2 `memory.max` of its cgroup and every ancestor, or cgroup v1 `memory.limit_in_bytes`), minus a safety reserve of 10 % of that limit, at least 512 MiB and at most half of it. When nothing can be detected (macOS, Windows), the budget is a fixed 16 GiB. Because that is a guess, it only throttles: nothing is ever refused against it.
+
+> [!WARNING]
+> **On a shared machine with no cgroup limit** (a login node, a workstation several people use), the default is whatever RAM happened to be free when your process started, so a single run may take most of it. Set `POLYPUS_MEM_BUDGET` to your fair share there.
+
+**Several processes in one cgroup** (the MPI ranks of one SLURM job step, say) each see the *whole* cgroup limit, so each would budget for all of it. Set `POLYPUS_MEM_BUDGET` per process, e.g. the job's memory divided by the ranks per node.
+
+**When a circuit is refused.** The `InsufficientMemoryError` message gives the qubit count, the memory required, the budget and where it came from. It is a `polypus.BackendError`, so `except polypus.PolypusError` catches it. If more memory really is available (the detection is conservative, or you accept the risk), force the run with a larger explicit budget, which always takes precedence:
+
+```python
+import polypus
+
+qc = polypus.Circuit(30).h(0).measure_all()
+try:
+    polypus.run_quantum_circuit(
+        qc, shots=100, infrastructure="local", backend="polypus"
+    )
+except polypus.InsufficientMemoryError as exc:
+    print(exc)  # ... set POLYPUS_MEM_BUDGET (e.g. POLYPUS_MEM_BUDGET=64G) to override
+```
+
+**Limits of the detection.** It reads `memory.max` / `memory.limit_in_bytes` only: a cgroup v2 `memory.high` soft limit and the cgroup's swap allowance are ignored. It does not subtract `memory.current`, which includes reclaimable page cache. And `MemAvailable` is read once, when the process first needs the budget, so memory freed or taken by other processes afterwards is not seen; an explicit `POLYPUS_MEM_BUDGET` is re-read on every run.
 
 ## Project Architecture
 

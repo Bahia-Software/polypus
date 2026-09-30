@@ -14,7 +14,8 @@
 //!   provider/Python failure type-erased in [`BackendError::External`].
 //! - [`BackendCapabilities`], [`CircuitTask`], [`Counts`], the
 //!   [`Transpiler`]/[`OptLevel`]/[`TranspileOptions`] seam, the statevector memory
-//!   budget ([`max_statevector_concurrency`]), and the [`Planner`].
+//!   budget ([`max_statevector_concurrency`] to throttle, [`check_statevector_fits`]
+//!   to refuse what cannot fit), and the [`Planner`].
 //!
 //! What deliberately does **not** live here: the concrete Polypus backends
 //! (native/Aer/CUNQA/QMIO), the `Infrastructure` factory and the Qiskit/ZeroMQ
@@ -37,7 +38,10 @@ pub mod transpiler;
 
 pub use circuit::{BoundCircuit, ForeignCircuit};
 pub use error::{BackendError, InfrastructureError};
-pub use mem_budget::max_statevector_concurrency;
+pub use mem_budget::{
+    check_statevector_fits, max_statevector_concurrency, BudgetSource, InsufficientMemory,
+    MemBudget,
+};
 pub use params::RunParams;
 pub use planner::{
     merge_counts, BackendCapabilities, CancelToken, CircuitTask, Counts, Interrupt, Planner,
@@ -71,16 +75,32 @@ pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler}
 /// memory-heavy batch. When a split *is* needed, the reported cap is the ordinary
 /// thread-and-budget bound `max_statevector_concurrency(widest, cores)`.
 pub fn wave_concurrency(widest_qubits: usize, cores: usize, batch_len: usize) -> usize {
+    wave_concurrency_for(
+        mem_budget::active_budget().bytes,
+        widest_qubits,
+        cores,
+        batch_len,
+    )
+}
+
+/// Pure arithmetic behind [`wave_concurrency`] for an explicit `budget_bytes`, so
+/// the rule is testable independently of the host's detected memory.
+fn wave_concurrency_for(
+    budget_bytes: u64,
+    widest_qubits: usize,
+    cores: usize,
+    batch_len: usize,
+) -> usize {
     // Pure memory limit: how many `widest_qubits` statevectors the budget holds,
     // independent of the core count (pass `usize::MAX` as the thread bound).
-    let budget_concurrency = max_statevector_concurrency(widest_qubits, usize::MAX);
+    let budget_concurrency = mem_budget::concurrency_for(budget_bytes, widest_qubits, usize::MAX);
     if budget_concurrency >= batch_len {
         // The whole batch fits under the budget at once — one wave.
         usize::MAX
     } else {
         // The batch cannot all be held at once: expose the real cap so those
         // windows become interruptible planner waves.
-        max_statevector_concurrency(widest_qubits, cores)
+        mem_budget::concurrency_for(budget_bytes, widest_qubits, cores)
     }
 }
 
@@ -349,27 +369,36 @@ mod wave_concurrency_tests {
     use super::*;
 
     // These pin the wave-sizing rule shared by native/local `capabilities_for`,
-    // deterministically — the core count is an explicit parameter. They assume the
-    // default 16 GiB budget (`POLYPUS_MEM_BUDGET` unset).
+    // deterministically — the core count and the budget (16 GiB, the historical
+    // default these cases were written against) are explicit parameters, so the
+    // host's detected memory and `POLYPUS_MEM_BUDGET` cannot change the outcome.
+    use crate::mem_budget::DEFAULT_MEM_BUDGET_BYTES as BUDGET;
 
     #[test]
     fn single_core_high_qubit_batch_reports_a_finite_cap_not_unbounded() {
-        assert_eq!(wave_concurrency(30, 1, 4), 1);
-        assert_eq!(wave_concurrency(30, 32, 4), 1);
+        assert_eq!(wave_concurrency_for(BUDGET, 30, 1, 4), 1);
+        assert_eq!(wave_concurrency_for(BUDGET, 30, 32, 4), 1);
     }
 
     #[test]
     fn a_batch_that_fits_the_budget_stays_a_single_wave_on_any_core_count() {
-        assert_eq!(wave_concurrency(2, 1, 200), usize::MAX);
-        assert_eq!(wave_concurrency(2, 32, 200), usize::MAX);
-        assert_eq!(wave_concurrency(30, 1, 1), usize::MAX);
-        assert_eq!(wave_concurrency(30, 32, 1), usize::MAX);
+        assert_eq!(wave_concurrency_for(BUDGET, 2, 1, 200), usize::MAX);
+        assert_eq!(wave_concurrency_for(BUDGET, 2, 32, 200), usize::MAX);
+        assert_eq!(wave_concurrency_for(BUDGET, 30, 1, 1), usize::MAX);
+        assert_eq!(wave_concurrency_for(BUDGET, 30, 32, 1), usize::MAX);
     }
 
     #[test]
     fn split_reports_the_thread_and_budget_bound() {
-        assert_eq!(wave_concurrency(30, 8, 4), 1);
-        assert_eq!(wave_concurrency(28, 8, 10), 4);
-        assert_eq!(wave_concurrency(28, 2, 10), 2);
+        assert_eq!(wave_concurrency_for(BUDGET, 30, 8, 4), 1);
+        assert_eq!(wave_concurrency_for(BUDGET, 28, 8, 10), 4);
+        assert_eq!(wave_concurrency_for(BUDGET, 28, 2, 10), 2);
+    }
+
+    #[test]
+    fn a_larger_budget_keeps_a_high_qubit_batch_in_one_wave() {
+        // 128 GiB holds 32 four-GiB (28-qubit) vectors: a 10-circuit batch fits.
+        assert_eq!(wave_concurrency_for(8 * BUDGET, 28, 8, 10), usize::MAX);
+        assert_eq!(wave_concurrency_for(8 * BUDGET, 28, 8, 40), 8);
     }
 }
