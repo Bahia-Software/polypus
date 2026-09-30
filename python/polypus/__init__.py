@@ -36,12 +36,27 @@ def _autocalibrate_parallel_threshold() -> None:
 
     Opt out with ``POLYPUS_NO_AUTOCALIBRATE=1`` (CI, containers, reproducibility
     runs that must pin the static default threshold).
+
+    Skipped on secondary ranks of a multi-process job: when ``SLURM_PROCID`` or
+    ``OMPI_COMM_WORLD_RANK`` is set to anything other than ``0``, import does not
+    calibrate. Otherwise every rank of a large ``srun``/``mpirun`` would measure
+    at once — contending for the CPUs being timed (skewing the measurement) and
+    for the shared cache file. Rank 0 (or no launcher at all) still calibrates.
+    This only affects the *implicit* import-time path: an explicit
+    ``polypus.calibrate_parallel_threshold()`` runs on any rank. To calibrate
+    every node of a heterogeneous allocation, call it explicitly once per node,
+    e.g. ``srun --ntasks-per-node=1 python -c "import polypus;
+    polypus.calibrate_parallel_threshold()"``.
     """
     import os
 
     optout = os.environ.get("POLYPUS_NO_AUTOCALIBRATE", "").strip().lower()
     if optout in ("1", "true", "yes", "on"):
         return
+    for rank_var in ("SLURM_PROCID", "OMPI_COMM_WORLD_RANK"):
+        rank = os.environ.get(rank_var, "").strip().lower()
+        if rank not in ("", "0"):
+            return
     try:
         polypus.calibrate_parallel_threshold(force=False)  # noqa: F405
     except Exception:
