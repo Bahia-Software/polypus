@@ -38,8 +38,8 @@ impl DivergentBeam {
     /// `(0, 0, -source_to_surface_distance_m)`.
     pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
         let half_field = self.field_side_m / 2.0;
-        let x0 = rng.gen_range(-half_field..=half_field);
-        let y0 = rng.gen_range(-half_field..=half_field);
+        let x0 = rng.random_range(-half_field..=half_field);
+        let y0 = rng.random_range(-half_field..=half_field);
         let z0 = 0.0;
 
         let dx = x0;
@@ -79,8 +79,8 @@ pub struct ParallelBeam {
 
 impl ParallelBeam {
     pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
-        let x0 = rng.gen_range(-self.half_width_x_m..=self.half_width_x_m);
-        let y0 = rng.gen_range(-self.half_width_y_m..=self.half_width_y_m);
+        let x0 = rng.random_range(-self.half_width_x_m..=self.half_width_x_m);
+        let y0 = rng.random_range(-self.half_width_y_m..=self.half_width_y_m);
         ParticleState {
             position: Position([x0, y0, self.z0_m]),
             momentum: FourMomentum {

@@ -26,7 +26,7 @@
 //! ## Determinism
 //!
 //! Every optimizer accepts an optional `seed`. With `None` (the default used
-//! by the Polypus Python bindings) it draws from [`rand::thread_rng`], exactly
+//! by the Polypus Python bindings) it draws from [`rand::rng`], exactly
 //! as before. With `Some(seed)` the run is fully reproducible, which is what
 //! the unit tests rely on.
 //!

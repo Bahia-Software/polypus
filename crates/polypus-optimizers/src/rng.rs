@@ -1,13 +1,13 @@
 //! Injectable RNG source for the optimizers.
 //!
-//! The default (`None` seed) uses [`rand::thread_rng`], preserving the exact
+//! The default (`None` seed) uses [`rand::rng`], preserving the exact
 //! non-deterministic behaviour of the original optimizers. Passing a seed
 //! selects a reproducible [`StdRng`] instead. Both variants delegate every
 //! [`RngCore`] method to the wrapped generator, so the algorithm bodies consume
 //! the RNG identically regardless of the source — only the construction differs.
 
 use rand::rngs::{StdRng, ThreadRng};
-use rand::{thread_rng, RngCore, SeedableRng};
+use rand::{rng, RngCore, SeedableRng};
 
 /// RNG used by the optimizers, chosen at run start from an optional seed.
 pub(crate) enum OptRng {
@@ -21,12 +21,12 @@ pub(crate) enum OptRng {
 }
 
 impl OptRng {
-    /// Build the RNG: `None` → [`rand::thread_rng`]; `Some(seed)` → seeded
+    /// Build the RNG: `None` → [`rand::rng`]; `Some(seed)` → seeded
     /// [`StdRng`].
     pub(crate) fn from_seed(seed: Option<u64>) -> Self {
         match seed {
             Some(s) => OptRng::Seeded(Box::new(StdRng::seed_from_u64(s))),
-            None => OptRng::Thread(thread_rng()),
+            None => OptRng::Thread(rng()),
         }
     }
 }
@@ -65,14 +65,6 @@ impl RngCore for OptRng {
         match self {
             OptRng::Thread(r) => r.fill_bytes(dest),
             OptRng::Seeded(r) => r.fill_bytes(dest),
-        }
-    }
-
-    #[inline]
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        match self {
-            OptRng::Thread(r) => r.try_fill_bytes(dest),
-            OptRng::Seeded(r) => r.try_fill_bytes(dest),
         }
     }
 }

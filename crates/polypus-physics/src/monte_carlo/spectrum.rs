@@ -130,7 +130,7 @@ impl UniformSpectrum {
 
 impl EnergySpectrum for UniformSpectrum {
     fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
-        rng.gen_range(self.min_energy_mev..self.max_energy_mev)
+        rng.random_range(self.min_energy_mev..self.max_energy_mev)
     }
 
     fn min_energy_mev(&self) -> f64 {
@@ -230,8 +230,8 @@ impl EnergySpectrum for KramersSpectrum {
         // termination only and is essentially never reached.
         const MAX_TRIES: u32 = 10_000;
         for _ in 0..MAX_TRIES {
-            let candidate = rng.gen_range(self.min_energy_mev..self.max_energy_mev);
-            let accept: f64 = rng.gen_range(0.0..1.0);
+            let candidate = rng.random_range(self.min_energy_mev..self.max_energy_mev);
+            let accept: f64 = rng.random_range(0.0..1.0);
             if accept * bound <= self.pdf(candidate) {
                 return candidate;
             }
@@ -358,7 +358,7 @@ impl TabulatedSpectrum {
 
 impl EnergySpectrum for TabulatedSpectrum {
     fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
-        let u: f64 = rng.gen_range(0.0..1.0);
+        let u: f64 = rng.random_range(0.0..1.0);
         // First bin whose cumulative probability reaches `u`.
         let idx = self.cdf.partition_point(|&c| c < u).min(self.cdf.len() - 1);
         self.energies_mev[idx]
