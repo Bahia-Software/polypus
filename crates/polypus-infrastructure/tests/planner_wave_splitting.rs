@@ -10,8 +10,10 @@
 //! cap decision is taken by the real backend (`WaveSpy::capabilities_for` delegates
 //! to it), but the circuits are never simulated: a `WaveSpy` intercepts
 //! `run_circuits`, records each wave's size and returns dummy valid counts — so a
-//! 30-qubit circuit (16 GiB statevector ⇒ cap 1 under the default budget) never
-//! allocates `2^30` amplitudes.
+//! 40-qubit circuit (16 TiB statevector ⇒ cap 1 under any budget the host can
+//! detect or a user can set; issue #215 made the default host-dependent, so a
+//! 30-qubit circuit vs. a fixed 16 GiB no longer pins the outcome) never
+//! allocates `2^40` amplitudes.
 
 use std::sync::Mutex;
 
@@ -66,21 +68,21 @@ fn params() -> RunParams {
     }
 }
 
-/// Four 30-qubit tasks, referencing one zero-gate circuit (never simulated).
+/// Four 40-qubit tasks, referencing one zero-gate circuit (never simulated).
 fn wide_batch(circuit: &BoundCircuit) -> Vec<CircuitTask<'_>> {
     (0..4).map(|_| CircuitTask { circuit, shots: 8 }).collect()
 }
 
 fn wide_native() -> BoundCircuit {
     BoundCircuit::Native(
-        ParameterizedCircuit::new(30)
+        ParameterizedCircuit::new(40)
             .assign_parameters(&[])
             .unwrap(),
     )
 }
 
 /// Native: a high-qubit batch is split into several waves respecting the
-/// memory-derived cap (cap 1 under the 16 GiB default ⇒ four single-circuit waves).
+/// memory-derived cap (cap 1 for a 16 TiB statevector ⇒ four single-circuit waves).
 #[test]
 fn execute_splits_high_qubit_native_batch_into_memory_capped_waves() {
     let native = NativeStatevectorBackend::new(0);

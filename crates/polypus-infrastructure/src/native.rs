@@ -12,8 +12,9 @@ use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
     max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask,
-    InfrastructureError, QuantumBackend, RunParams,
+    InfrastructureError, MemBudget, QuantumBackend, RunParams,
 };
+use polypus_backend::mem_budget::{active_budget, check_fits};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
 use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
 use rayon::prelude::*;
@@ -158,6 +159,32 @@ impl NativeStatevectorBackend {
         Ok(format_counts(concrete.as_ref(), raw))
     }
 
+    /// Refuse, before anything is allocated, a circuit whose statevector cannot
+    /// fit in the memory budget (issue #215): a run that would otherwise be killed
+    /// by the OOM-killer fails with [`BackendError::InsufficientMemory`] instead.
+    ///
+    /// A width above the simulator's qubit ceiling is left to the simulator, so
+    /// such a circuit keeps failing with the ceiling error it always did.
+    fn check_memory(&self, num_qubits: usize) -> Result<(), BackendError> {
+        self.check_memory_against(num_qubits, active_budget())
+    }
+
+    /// [`check_memory`](Self::check_memory) against an explicit `budget`, so the
+    /// decision is testable without touching the process environment.
+    fn check_memory_against(
+        &self,
+        num_qubits: usize,
+        budget: MemBudget,
+    ) -> Result<(), BackendError> {
+        if num_qubits > self.simulator.max_qubits {
+            return Ok(());
+        }
+        check_fits(num_qubits, budget).map_err(|e| {
+            log::error!("native backend refused a circuit: {e}");
+            BackendError::from(e)
+        })
+    }
+
     /// Run `qcs` while holding at most `cap` statevectors in memory at once.
     ///
     /// This is a pure resource bound: the per-circuit seed is reserved as one
@@ -294,9 +321,11 @@ impl QuantumBackend for NativeStatevectorBackend {
         // the real cost of a population batch is the concurrent statevectors
         // (`2^n * 16` bytes each), not the cheap `BoundCircuit` list, so cap how
         // many run at once by the batch's widest circuit. This is a pure resource
-        // bound — counts are unchanged (see `run_batch_with_cap`).
-        let cap =
-            max_statevector_concurrency(representative_qubits(qcs), rayon::current_num_threads());
+        // bound — counts are unchanged (see `run_batch_with_cap`). A widest circuit
+        // that cannot fit even alone is refused before any window starts.
+        let widest = representative_qubits(qcs);
+        self.check_memory(widest)?;
+        let cap = max_statevector_concurrency(widest, rayon::current_num_threads());
         self.run_batch_with_cap(qcs, config, cap)
     }
 
@@ -365,6 +394,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         // Evolve the shared circuit exactly once; the statevector is reused for
         // every batch's sampling.
         let concrete = self.concrete_circuit(qc, &opts)?;
+        self.check_memory(concrete.num_qubits)?;
         let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
@@ -730,20 +760,85 @@ mod tests {
         }
     }
 
+    /// Issue #215: a circuit whose statevector does not fit in a *known* budget is
+    /// refused with `InsufficientMemory` (never started), a fallback budget never
+    /// refuses, and a width above the qubit ceiling is left to the simulator's own
+    /// ceiling error. The budget is passed explicitly, so this is independent of
+    /// the host and of `POLYPUS_MEM_BUDGET`.
+    #[test]
+    fn check_memory_refuses_only_what_a_known_budget_cannot_hold() {
+        use polypus_backend::BudgetSource;
+        let backend = NativeStatevectorBackend::new(0);
+        let one_mib = |source| MemBudget {
+            bytes: 1 << 20,
+            source,
+        };
+        for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+            let err = backend
+                .check_memory_against(20, one_mib(source))
+                .unwrap_err();
+            assert!(
+                matches!(&err, BackendError::InsufficientMemory(e)
+                    if e.num_qubits == 20 && e.required_bytes == 16 << 20 && e.source == source),
+                "expected InsufficientMemory, got {err:?}"
+            );
+            // 16 qubits = 1 MiB: fits exactly.
+            assert!(backend.check_memory_against(16, one_mib(source)).is_ok());
+            // Above the ceiling: the simulator's TooManyQubits stays the error.
+            assert!(backend
+                .check_memory_against(polypus_sim::MAX_QUBITS + 1, one_mib(source))
+                .is_ok());
+        }
+        assert!(backend
+            .check_memory_against(30, one_mib(BudgetSource::Fallback))
+            .is_ok());
+    }
+
+    /// The ceiling error is still what a circuit above `MAX_QUBITS` gets from
+    /// `run_circuits` (the memory check does not pre-empt it).
+    #[test]
+    fn run_circuits_above_the_ceiling_keeps_the_ceiling_error() {
+        let backend = NativeStatevectorBackend::new(0);
+        let too_wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(polypus_sim::MAX_QUBITS + 1)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let err = backend
+            .run_circuits(
+                &[too_wide],
+                &RunParams {
+                    id: "ceiling".to_string(),
+                    shots: 8,
+                    seed: Some(1),
+                    opt_level: OptLevel::default(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, BackendError::NativeCircuit(m) if m.contains("qubits")),
+            "expected the ceiling error, got {err:?}"
+        );
+    }
+
     /// Issue #147: a high-qubit batch that cannot fit in the memory budget is
     /// reported with the memory cap `run_circuits` enforces internally, so the
-    /// planner can split it into memory-safe waves. A 30-qubit statevector is
-    /// 16 GiB, so under the default 16 GiB budget only one fits at a time, and a
+    /// planner can split it into memory-safe waves. A 40-qubit statevector is
+    /// 16 TiB — beyond any budget this test can meet, detected or explicit (issue
+    /// #215 made the default host-dependent, so the historical 30 qubits vs. a
+    /// fixed 16 GiB no longer pins the outcome) — so only one fits at a time, and a
     /// 4-circuit batch cannot be held at once ⇒ cap 1 — **regardless of the host
     /// core count** (this is the single-core regression from issue #147, so the
-    /// test deliberately does not guard on the thread count). The circuit is
-    /// zero-gate and never simulated, so this costs nothing. Crucially the
+    /// test deliberately does not guard on the thread count). The arithmetic for an
+    /// explicit budget is pinned by `polypus-backend`'s `wave_concurrency_tests`.
+    /// The circuit is zero-gate and never simulated, so this costs nothing. Crucially the
     /// batch-agnostic `capabilities()` is left at its unbounded default, proving
     /// the change is purely additive.
     #[test]
     fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
         let wide = BoundCircuit::Native(
-            ParameterizedCircuit::new(30)
+            ParameterizedCircuit::new(40)
                 .assign_parameters(&[])
                 .unwrap(),
         );
@@ -758,7 +853,7 @@ mod tests {
         let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
         assert_eq!(
             cap, 1,
-            "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
+            "a 40-qubit statevector (16 TiB) admits one at a time under any budget"
         );
         assert!(
             cap < tasks.len(),

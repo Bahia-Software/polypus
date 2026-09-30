@@ -93,6 +93,89 @@ def test_seam_failure_is_never_a_panic_exception(monkeypatch):
         pytest.fail("expected the mocked seam failure to raise")
 
 
+# The exact kwargs the Rust local backend sends to `run_qcs` (C-1 table). Recorded
+# in a fresh child so `POLYPUS_MEM_BUDGET` can be set without mutating this
+# process's environment while Rust threads may read it.
+_RECORD_LOCAL_KWARGS = """
+import json
+import polypus
+import polypus_python
+
+seen = {}
+
+def record(infrastructure, **kwargs):
+    seen["infrastructure"] = infrastructure
+    seen.update({k: v for k, v in kwargs.items() if k != "qcs"})
+    seen["keys"] = sorted(kwargs)
+    return [{"0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+polypus_python.run_qcs = record
+polypus.run_quantum_circuit(
+    polypus.Circuit(1).h(0).measure_all(), shots=10, infrastructure="local",
+    backend="aer", seed=3)
+print(json.dumps(seen))
+"""
+
+_LOCAL_REQUIRED_KWARGS = {
+    "id",
+    "backend",
+    "qcs",
+    "shots",
+    "sim_method",
+    "max_parallel_experiments",
+    "seed",
+}
+
+
+def _local_kwargs(budget, tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env.pop("POLYPUS_MEM_BUDGET", None)
+    if budget is not None:
+        env["POLYPUS_MEM_BUDGET"] = budget
+    env["XDG_CACHE_HOME"] = str(tmp_path)
+    env["POLYPUS_NO_AUTOCALIBRATE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", _RECORD_LOCAL_KWARGS],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_local_run_qcs_kwargs_carry_max_memory_mb_for_a_known_budget(tmp_path):
+    # C-1: with a known budget the local backend adds `max_memory_mb` (the budget
+    # in MiB) to the frozen kwarg set, and nothing else.
+    seen = _local_kwargs("100M", tmp_path)
+    assert seen["infrastructure"] == "local"
+    assert set(seen["keys"]) == _LOCAL_REQUIRED_KWARGS | {"max_memory_mb"}
+    assert seen["max_memory_mb"] == 100
+
+
+def test_local_run_qcs_kwargs_follow_the_budget_source_when_unset(tmp_path):
+    # Unset budget: detected (Linux: /proc/meminfo) => `max_memory_mb` is sent;
+    # nothing detectable (macOS/Windows) => the 16 GiB fallback is a guess and is
+    # never imposed on Aer, so the kwarg is absent. (A Linux host always detects,
+    # so there the Fallback => absent mapping itself is pinned by the Rust unit
+    # test `aer_max_memory_mb_is_the_known_budget_in_mib_and_never_zero`.)
+    import os
+
+    seen = _local_kwargs(None, tmp_path)
+    detectable = os.path.exists("/proc/meminfo")
+    if detectable:
+        assert set(seen["keys"]) == _LOCAL_REQUIRED_KWARGS | {"max_memory_mb"}
+        assert seen["max_memory_mb"] >= 1
+    else:
+        assert set(seen["keys"]) == _LOCAL_REQUIRED_KWARGS
+
+
 def _install_fake_cunqa(monkeypatch, dropped):
     """Register a minimal fake ``cunqa`` package in ``sys.modules`` so the CUNQA
     seam imports without a real install or SLURM. ``qdrop`` records the family

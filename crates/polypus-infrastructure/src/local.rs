@@ -1,9 +1,10 @@
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
-    max_statevector_concurrency, BackendCapabilities, BoundCircuit, CircuitTask,
-    InfrastructureError, QuantumBackend, RunParams,
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, BudgetSource, CircuitTask,
+    InfrastructureError, MemBudget, QuantumBackend, RunParams,
 };
+use polypus_backend::mem_budget::{active_budget, check_fits};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -40,6 +41,19 @@ impl QuantumBackend for LocalBackend {
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         Python::attach(|py| {
+            // Refuse up front a batch whose widest statevector cannot fit in the
+            // memory budget (issue #215), before anything is converted or handed
+            // to Aer — see `statevector_memory_is_known`. The other methods are
+            // bounded by Aer itself through `max_memory_mb` below.
+            let widest = widest_qubits(qcs, py);
+            let budget = active_budget();
+            if statevector_memory_is_known(&self.sim_method) {
+                check_fits(widest, budget).map_err(|e| {
+                    log::error!("local (Aer) backend refused a circuit: {e}");
+                    BackendError::from(e)
+                })?;
+            }
+
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched (Aer transpiles them) and
             // every native circuit travels to Python as OpenQASM 2.0.
@@ -88,11 +102,23 @@ impl QuantumBackend for LocalBackend {
             let cores = std::thread::available_parallelism()
                 .map(|c| c.get())
                 .unwrap_or(1);
-            let max_parallel_experiments =
-                max_statevector_concurrency(widest_qubits(qcs, py), cores);
+            let max_parallel_experiments = max_statevector_concurrency(widest, cores);
             kwargs
                 .set_item("max_parallel_experiments", max_parallel_experiments)
                 .map_err(conv)?;
+            // Hand a *known* budget to Aer's own per-experiment memory validation
+            // (issue #215), for every method: it covers what the dense model above
+            // cannot — `automatic` picking a statevector for a non-Clifford circuit,
+            // `density_matrix`'s `4^n` — while a Clifford circuit that Aer runs on
+            // `stabilizer` still fits. Aer's refusal comes back as an unsuccessful
+            // experiment, which the Python side raises as
+            // `polypus.InsufficientMemoryError`. Omitted for the fallback budget,
+            // so Aer keeps its own default (the host's RAM).
+            if let Some(max_memory_mb) = aer_max_memory_mb(budget) {
+                kwargs
+                    .set_item("max_memory_mb", max_memory_mb)
+                    .map_err(conv)?;
+            }
             if let Some(nm) = &self.noise_model {
                 kwargs
                     .set_item("noise_model", nm.clone_ref(py))
@@ -173,6 +199,40 @@ impl QuantumBackend for LocalBackend {
             max_concurrency: crate::wave_concurrency(widest, cores, tasks.len()),
             supports_shot_distribution: true,
         })
+    }
+}
+
+/// Whether Aer's memory for `sim_method` is the dense `16 · 2^n`-byte
+/// statevector the budget models, so that a circuit which does not fit can be
+/// refused up front, in Rust (issue #215).
+///
+/// Only `"statevector"` qualifies. `"automatic"` (the default) lets Aer pick the
+/// method per circuit — `stabilizer` for a Clifford circuit, whose memory is
+/// polynomial in `n` — so refusing on `2^n` there would reject large circuits
+/// that run fine today; `matrix_product_state`, `stabilizer` and
+/// `extended_stabilizer` are not dense, and `density_matrix` needs `16 · 4^n`,
+/// which this `2^n` model would underestimate. Those methods are not left
+/// unguarded: the same budget reaches Aer as `max_memory_mb`
+/// ([`aer_max_memory_mb`]), whose own per-experiment validation knows the method
+/// it chose, and its refusal surfaces as the same
+/// `polypus.InsufficientMemoryError`. The budget also throttles their concurrency.
+fn statevector_memory_is_known(sim_method: &str) -> bool {
+    sim_method == "statevector"
+}
+
+/// The `max_memory_mb` to hand Aer for `budget` (issue #215): the budget in whole
+/// MiB, at least 1, or `None` for a [`BudgetSource::Fallback`] budget, which is a
+/// guess and must not become a hard limit. Never `Some(0)`: Aer reads 0 as
+/// "no limit".
+///
+/// Aer applies the limit **per experiment**, not across the experiments it runs
+/// in parallel; that matches the budget, whose concurrency throttle
+/// (`max_parallel_experiments`) already keeps `concurrency · size ≤ budget`.
+fn aer_max_memory_mb(budget: MemBudget) -> Option<u64> {
+    const MIB: u64 = 1024 * 1024;
+    match budget.source {
+        BudgetSource::Fallback => None,
+        BudgetSource::Explicit | BudgetSource::Detected => Some((budget.bytes / MIB).max(1)),
     }
 }
 
@@ -272,10 +332,60 @@ mod tests {
         });
     }
 
+    /// Issue #215: the known budget reaches Aer in whole MiB with a floor of 1,
+    /// because Aer reads `max_memory_mb=0` as "no limit"; the `Fallback` budget is
+    /// a guess and is never imposed (`None`: the kwarg is not sent).
+    #[test]
+    fn aer_max_memory_mb_is_the_known_budget_in_mib_and_never_zero() {
+        const MIB: u64 = 1024 * 1024;
+        for source in [BudgetSource::Explicit, BudgetSource::Detected] {
+            let mb = |bytes| aer_max_memory_mb(MemBudget { bytes, source });
+            // Aer reads 0 as "no limit": a sub-MiB budget must floor to 1, not 0.
+            assert_eq!(mb(0), Some(1));
+            assert_eq!(mb(1), Some(1));
+            assert_eq!(mb(MIB - 1), Some(1));
+            assert_eq!(mb(MIB), Some(1));
+            assert_eq!(mb(100 * MIB), Some(100));
+            assert_eq!(mb(100 * MIB + MIB - 1), Some(100)); // rounded down
+            assert_eq!(mb(32 * 1024 * MIB), Some(32768));
+        }
+        // The blind fallback is never imposed on Aer.
+        assert_eq!(
+            aer_max_memory_mb(MemBudget {
+                bytes: 16 * 1024 * MIB,
+                source: BudgetSource::Fallback,
+            }),
+            None
+        );
+    }
+
+    /// Issue #215: only the dense `statevector` method is refused up front, in
+    /// Rust, on the `16 · 2^n` model. The methods whose memory is not that (Aer's
+    /// `automatic` default may pick `stabilizer`; `density_matrix` is `16 · 4^n`)
+    /// are not refused here: Aer refuses them itself against the same budget,
+    /// passed as `max_memory_mb` (see `aer_max_memory_mb`).
+    #[test]
+    fn only_the_statevector_method_is_refused_on_the_dense_model() {
+        assert!(statevector_memory_is_known("statevector"));
+        for method in [
+            "automatic",
+            "stabilizer",
+            "extended_stabilizer",
+            "matrix_product_state",
+            "density_matrix",
+            "unitary",
+            "superop",
+            "",
+        ] {
+            assert!(!statevector_memory_is_known(method), "{method}");
+        }
+    }
+
     /// Issue #147: a high-qubit batch that cannot fit in the memory budget is
     /// reported with the memory cap `run_circuits` hands Aer as
     /// `max_parallel_experiments`, so the planner can split it into memory-safe
-    /// waves. A 30-qubit statevector is 16 GiB, so under the default 16 GiB budget
+    /// waves. A 40-qubit statevector is 16 TiB — beyond any budget this test can
+    /// meet, detected or explicit (issue #215 made the default host-dependent) — so
     /// only one fits at a time, and a 4-circuit batch cannot be held at once ⇒
     /// cap 1 — **regardless of the host core count** (the single-core regression
     /// from issue #147, so the test deliberately does not guard on the core
@@ -286,7 +396,7 @@ mod tests {
     fn capabilities_for_exposes_the_memory_cap_leaving_capabilities_unchanged() {
         pyo3::Python::initialize();
         let wide = BoundCircuit::Native(
-            ParameterizedCircuit::new(30)
+            ParameterizedCircuit::new(40)
                 .assign_parameters(&[])
                 .unwrap(),
         );
@@ -302,7 +412,7 @@ mod tests {
         let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
         assert_eq!(
             cap, 1,
-            "a 30-qubit statevector (16 GiB) admits one at a time under the 16 GiB default"
+            "a 40-qubit statevector (16 TiB) admits one at a time under any budget"
         );
         assert!(
             cap < tasks.len(),
@@ -341,8 +451,8 @@ mod tests {
     /// ansatz on `backend="aer"`, the common QML case) must still be wave-split —
     /// `capabilities_for` reads the Qiskit `num_qubits` through the GIL, just like
     /// `run_circuits`. Every task is a `Qiskit` variant whose object exposes
-    /// `num_qubits == 30`, so the 64-circuit batch cannot fit the 16 GiB budget and
-    /// is capped to 1 (not left unbounded). This guards against the regression from
+    /// `num_qubits == 40` (16 TiB per statevector), so the 64-circuit batch cannot
+    /// fit any budget and is capped to 1 (not left unbounded). This guards against the regression from
     /// `588a138`, which stopped reading Qiskit widths and made this batch one
     /// uninterruptible wave.
     #[test]
@@ -350,10 +460,10 @@ mod tests {
         pyo3::Python::initialize();
         Python::attach(|py| {
             // A lightweight stand-in for a wide Qiskit circuit: any object exposing
-            // `num_qubits`. `types.SimpleNamespace(num_qubits=30)` avoids a qiskit
+            // `num_qubits`. `types.SimpleNamespace(num_qubits=40)` avoids a qiskit
             // dependency in this unit test while exercising the getattr path.
             let kwargs = pyo3::types::PyDict::new(py);
-            kwargs.set_item("num_qubits", 30usize).unwrap();
+            kwargs.set_item("num_qubits", 40usize).unwrap();
             let wide_obj: Py<PyAny> = py
                 .import("types")
                 .unwrap()
@@ -378,7 +488,7 @@ mod tests {
             assert_eq!(
                 backend.capabilities_for(&tasks).unwrap().max_concurrency,
                 1,
-                "a 30-qubit Qiskit population must be wave-split (its widths ARE read)"
+                "a 40-qubit Qiskit population must be wave-split (its widths ARE read)"
             );
         });
     }

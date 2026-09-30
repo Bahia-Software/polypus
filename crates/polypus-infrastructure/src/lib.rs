@@ -37,12 +37,13 @@ pub mod transpiler;
 
 // --- re-export the pyo3-free contract so downstream import paths are unchanged ---
 pub use polypus_backend::{
-    create_registered_backend, is_registered, max_statevector_concurrency, merge_counts,
-    register_backend, registered_names, validate_run_results, wave_concurrency,
+    check_statevector_fits, create_registered_backend, is_registered, max_statevector_concurrency,
+    merge_counts, register_backend, registered_names, validate_run_results, wave_concurrency,
     BackendBuildContext, BackendCapabilities, BackendError, BackendFactory, BoundCircuit,
-    CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler, InfrastructureError,
-    Interrupt, OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams,
-    SequentialPlanner, ShotDistributingPlanner, TranspileOptions, Transpiler,
+    BudgetSource, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
+    InfrastructureError, InsufficientMemory, Interrupt, MemBudget, OptLevel, Planner,
+    PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
+    TranspileOptions, Transpiler,
 };
 
 // --- this crate's own additions ---
