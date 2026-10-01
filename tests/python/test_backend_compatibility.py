@@ -130,9 +130,11 @@ class TestNativeCircuits:
         report = _report(qc)
         assert report["polypus"] == []
         assert len(report["aer"]) == 1 and "'ch'" in report["aer"][0]
-        # Aer's own message differs from the report's, so check the gate name.
-        with pytest.raises(polypus.BackendError, match="ch"):
+        # Aer's own message differs from the report's and across Aer versions,
+        # so check the class Aer raised rather than its wording.
+        with pytest.raises(polypus.BackendError) as info:
             _run(qc, "aer")
+        assert type(info.value.__cause__).__name__ == "AerError"
         assert sum(_run(qc, "polypus").counts[0].values()) == 32
 
 

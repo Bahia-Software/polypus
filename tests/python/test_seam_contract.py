@@ -124,23 +124,23 @@ def _qiskit_errors():
     from qiskit.qasm2 import QASM2ParseError
 
     errors = [
-        ("qiskit.exceptions.QiskitError", QiskitError("no counts")),
-        ("qiskit.qasm2.exceptions.QASM2ParseError", QASM2ParseError("bad line")),
-        (f"{__name__}.UserQiskitError", UserQiskitError("subclassed")),
+        QiskitError("no counts"),
+        QASM2ParseError("bad line"),
+        UserQiskitError("subclassed"),
     ]
     try:
         from qiskit_aer import AerError
     except ImportError:
         pass
     else:
-        errors.append(("qiskit_aer.aererror.AerError", AerError("aer failed")))
+        errors.append(AerError("aer failed"))
     return errors
 
 
 @pytest.mark.parametrize(
-    "qualname,error", _qiskit_errors(), ids=lambda v: v if isinstance(v, str) else None
+    "error", _qiskit_errors(), ids=lambda error: type(error).__name__
 )
-def test_seam_qiskit_error_becomes_backend_error(monkeypatch, qualname, error):
+def test_seam_qiskit_error_becomes_backend_error(monkeypatch, error):
     import polypus
 
     with pytest.raises(polypus.BackendError) as info:
@@ -148,8 +148,10 @@ def test_seam_qiskit_error_becomes_backend_error(monkeypatch, qualname, error):
     exc = info.value
     assert isinstance(exc, polypus.PolypusError)
     assert type(exc) is polypus.BackendError
-    # The Qiskit class and its message survive, and the original is chained so
-    # its traceback is not lost.
+    # The Qiskit class (its fully qualified name, read from the class because
+    # the module layout is Qiskit's and may move) and its message survive, and
+    # the original is chained so its traceback is not lost.
+    qualname = f"{type(error).__module__}.{type(error).__qualname__}"
     assert qualname in str(exc)
     assert str(error) in str(exc)
     assert exc.__cause__ is error
@@ -190,8 +192,9 @@ def test_real_aer_error_reaches_the_caller_as_polypus_error():
     with pytest.raises(polypus.PolypusError) as info:
         polypus.run_quantum_circuit(qc, shots=10, infrastructure="local", backend="aer")
     assert type(info.value) is polypus.BackendError
-    assert "AerError" in str(info.value) and "ch" in str(info.value)
+    assert "AerError" in str(info.value)
     assert type(info.value.__cause__).__name__ == "AerError"
+    assert str(info.value.__cause__) in str(info.value)
 
 
 def test_real_qasm_parse_error_reaches_the_caller_as_polypus_error():
