@@ -3,8 +3,8 @@
 //! See [`polypus_infrastructure::error`] for the crate-wide granularity
 //! decision. This enum wraps a [`BackendError`] (the underlying execution
 //! failure), a [`CircuitError`] (native parameter binding) or a raw [`PyErr`]
-//! (a Python callback/conversion), all reachable while an optimizer drives an
-//! oracle across the FFI.
+//! (a Python callback/conversion, or a Qiskit binding call), all reachable while
+//! an optimizer drives an oracle across the FFI.
 
 use std::fmt;
 
@@ -37,6 +37,15 @@ pub enum EvaluationError {
     /// A Python callback or conversion on the evaluation path raised. Carried
     /// verbatim so the original exception type is preserved across the FFI.
     Python(PyErr),
+    /// Qiskit raised while binding a Qiskit circuit's parameters (the only
+    /// Qiskit call on the evaluation path). Kept apart from [`Python`](Self::Python),
+    /// which also carries the user's callback exceptions, so that the FFI edge
+    /// can raise a Qiskit exception as `polypus.EvaluationError` (contract C-1,
+    /// issue #218) while a callback's exception still re-raises verbatim. The
+    /// edge applies the same rule as on the execution seam: only an exception
+    /// whose class comes from Qiskit is wrapped; a `ValueError`/`TypeError`
+    /// raised there keeps its class.
+    Qiskit(PyErr),
     /// A Rust-originated infrastructure failure on the QML evaluation path
     /// (Tokio runtime construction, or a worker task panic surfaced as a
     /// `JoinError`). Never a Python exception, so unlike `Python` it must not be
@@ -84,6 +93,7 @@ impl fmt::Display for EvaluationError {
             EvaluationError::Binding(err) => write!(f, "circuit binding failed: {err}"),
             EvaluationError::Observable(err) => write!(f, "expectation evaluation failed: {err}"),
             EvaluationError::Python(err) => write!(f, "Python evaluation error: {err}"),
+            EvaluationError::Qiskit(err) => write!(f, "Qiskit parameter binding failed: {err}"),
             EvaluationError::Runtime(m) => write!(f, "QML evaluation runtime error: {m}"),
             EvaluationError::Conversion(m) => {
                 write!(f, "data conversion across the Python boundary failed: {m}")
@@ -151,7 +161,8 @@ impl From<InfrastructureError> for EvaluationError {
 // the typed `polypus.*` exception hierarchy is the `polypus` FFI edge's job
 // (`polypus::exceptions::evaluation_error_to_pyerr`), which owns those
 // `#[pyclass]` types. The `Python`/`Observable(External)` variants still carry a
-// `PyErr` verbatim so the edge can re-raise the original exception unchanged.
+// `PyErr` verbatim so the edge can re-raise the original exception unchanged;
+// `Qiskit` carries one too, for the edge to wrap when Qiskit raised it.
 
 #[cfg(test)]
 mod tests {

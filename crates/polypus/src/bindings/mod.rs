@@ -6,6 +6,7 @@ use pyo3::PyResult;
 
 pub mod calibration;
 pub mod circuit;
+mod compatibility;
 pub mod de;
 pub mod logging;
 pub mod observable;
@@ -14,6 +15,7 @@ pub mod qng;
 
 use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
+use compatibility::backend_compatibility;
 use de::DE;
 use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo, SampleCost};
@@ -587,6 +589,12 @@ fn build_qmio_registered(
     ))
 }
 
+/// Why `run_quantum_circuit(..., backend="polypus")` rejects a Qiskit
+/// `QuantumCircuit`; `backend_compatibility` reports the same text.
+const NATIVE_REJECTS_QISKIT: &str =
+    "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
+     pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"";
+
 /// Whether `backend` selects the pure-Rust native statevector simulator, which
 /// (unlike Aer) cannot consume a Qiskit `QuantumCircuit`.
 fn is_native_backend(backend: &str) -> bool {
@@ -951,8 +959,7 @@ pub fn run_quantum_circuit<'py>(
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) && bound_qc.is_foreign() {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "the native 'polypus' backend cannot execute a Qiskit QuantumCircuit; \
-             pass a polypus.Circuit or an OpenQASM 2.0 string, or use backend=\"aer\"",
+            NATIVE_REJECTS_QISKIT,
         ));
     }
     // The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
@@ -1262,14 +1269,21 @@ pub fn train<'py>(
 /// Compose `feature_map` with `ansatz` into the QML circuit template, adding a
 /// terminal `measure_all` when there are no classical bits (Aer needs them to
 /// return counts).
+///
+/// A Qiskit exception from these calls (an ansatz wider than the feature map,
+/// a parameter-name clash) is raised as `polypus.EvaluationError`, chaining the
+/// original (issue #218); nothing has run on a backend yet.
 fn compose_qml_template<'py>(
     feature_map: &Bound<'py, PyAny>,
     ansatz: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let composed = feature_map.call_method1("compose", (ansatz,))?;
+    let qiskit = crate::exceptions::qiskit_error_to_evaluation_error;
+    let composed = feature_map
+        .call_method1("compose", (ansatz,))
+        .map_err(qiskit)?;
     let num_clbits: usize = composed.getattr("num_clbits")?.extract()?;
     if num_clbits == 0 {
-        composed.call_method0("measure_all")?;
+        composed.call_method0("measure_all").map_err(qiskit)?;
     }
     Ok(composed)
 }
@@ -1279,7 +1293,9 @@ fn compose_qml_template<'py>(
 ///
 /// A row whose length differs from `len(feature_map.parameters)` is a
 /// `ValueError` naming `rows_name` and the 0-based row (contract C-8); zipping
-/// would otherwise drop extra features or leave some unbound.
+/// would otherwise drop extra features or leave some unbound. A Qiskit exception
+/// from binding a row (a value Qiskit rejects, such as a complex number) is
+/// raised as `polypus.EvaluationError`, chaining the original (issue #218).
 fn bind_feature_rows<'py>(
     template: &Bound<'py, PyAny>,
     feature_map: &Bound<'py, PyAny>,
@@ -1308,7 +1324,8 @@ fn bind_feature_rows<'py>(
         }
         circuits.push(
             template
-                .call_method("assign_parameters", (&param_dict,), Some(&kwargs_assign))?
+                .call_method("assign_parameters", (&param_dict,), Some(&kwargs_assign))
+                .map_err(crate::exceptions::qiskit_error_to_evaluation_error)?
                 .unbind(),
         );
     }
@@ -1624,7 +1641,9 @@ pub fn qml_predict<'py>(
         .map(|row| {
             let circuit = row
                 .bind(py)
-                .call_method("assign_parameters", (params.clone(),), Some(&kwargs_assign))?
+                .call_method("assign_parameters", (params.clone(),), Some(&kwargs_assign))
+                // Qiskit rejecting the weights (issue #218): `polypus.EvaluationError`.
+                .map_err(crate::exceptions::qiskit_error_to_evaluation_error)?
                 .unbind();
             Ok(crate::infrastructure::QiskitCircuit::into_bound(circuit))
         })
@@ -1728,6 +1747,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_logger, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_parallel_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(backend_cleanup_failures, m)?)?;
+    m.add_function(wrap_pyfunction!(backend_compatibility, m)?)?;
 
     // qml submodule — exposes polypus.qml.train()
     let py = m.py();

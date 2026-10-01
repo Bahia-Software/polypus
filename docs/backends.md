@@ -132,7 +132,9 @@ Never panic across the boundary — return a `BackendError`:
   This is how a provider error crosses the contract without `polypus-backend` naming
   it. Box whatever `std::error::Error + Send + Sync` you like; the Polypus FFI edge
   recovers it (Polypus's own Python backends box a `PyErr` here and re-raise it
-  verbatim). A Rust host embedding Polypus downcasts it back to your type.
+  verbatim — except an exception raised by Qiskit, which becomes a
+  `polypus.BackendError` chaining the original as `__cause__`; contract C-1, issue
+  #218). A Rust host embedding Polypus downcasts it back to your type.
 
 ### Capabilities and wave sizing
 
@@ -513,8 +515,10 @@ consequences the battery makes concrete:
   crash/hang is *retryable* only when the backend is isolated (subprocess/wire); an
   in-process seal cannot offer that, by construction.
 - **Clean provider error → `External`.** An Aer failure (the battery rigs one with a
-  bogus `sim_method`) surfaces as a Python exception, boxed into `External` and
-  re-raised verbatim at the FFI edge. This check passes.
+  bogus `sim_method`) surfaces as a Python exception, boxed into `External`. This
+  check passes. At the FFI edge a Qiskit/Aer exception is raised as
+  `polypus.BackendError` with the original as `__cause__`, and any other exception
+  verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
 
 Findings, **documented not fixed** (they live in `local.rs` / the seal — outside this
 phase's module scope):
@@ -542,6 +546,57 @@ phase's module scope):
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
 row is by analysis: it shares the seal-delegation profile above, including LOCAL-1's
 empty-batch behaviour.
+
+**Circuits without measurements (issue #218, fixed for Local).** Aer returns no counts
+for a circuit with no `measure` instruction, so the Local backend used to fail with
+`QiskitError: No counts for experiment` where the native backend returned the
+full-register read-out contract C-3 specifies. The seal now adds that read-out itself
+(on a copy, into a register of its own), so both backends return the same
+`num_qubits`-wide keys whatever classical registers the circuit declares. The CUNQA
+path is **not verified**: whether CUNQA's QPUs return counts for such a circuit, and in
+which key format, cannot be checked without a CUNQA install, so it forwards the circuit
+unchanged.
+
+### Which built-in backend can run a circuit: `polypus.backend_compatibility`
+
+The native backend runs terminal-measurement circuits only (contract C-4,
+[ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
+mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer, in
+turn, rejects instructions outside its basis (`ch`, `u0`, `rccx`, declared
+gates, …) unless the circuit is transpiled first. `polypus.backend_compatibility`
+reports this before a run, for a `polypus.Circuit`, an OpenQASM 2.0 string or a Qiskit
+`QuantumCircuit`:
+
+```python
+import polypus
+
+qasm = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[1];
+creg c[1];
+x q[0];
+reset q[0];
+measure q[0] -> c[0];
+"""
+report = polypus.backend_compatibility(qasm)
+# {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+backend = "polypus" if not report["polypus"] else "aer"
+result = polypus.run_quantum_circuit(
+    qasm, shots=1000, infrastructure="local", backend=backend
+)
+```
+
+Each value lists the reasons that backend would reject the circuit; an empty list
+means it accepts it. The native entry is decided by the backend's own first step
+(`NativeStatevectorBackend::check_circuit`: the OpenQASM importer, or the Qiskit-circuit
+guard) and quotes the message a run would raise; for a Qiskit circuit it also lists the
+dynamic features found in it. The Aer entry parses with the parser the Aer path uses and
+compares the instructions with Aer's target for its default simulation method. A
+`polypus.Circuit` with free parameters gets the same reason in both entries. The check is
+**structural**: it runs and connects to nothing, and does not check resources (the qubit
+ceiling, memory), so an accepted circuit can still fail for lack of them. Enforced by
+`tests/python/test_backend_compatibility.py`, which runs every circuit it classifies to
+confirm the verdict.
 
 ### QMIO — native wire backend
 

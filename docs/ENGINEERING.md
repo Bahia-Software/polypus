@@ -404,7 +404,18 @@ In the `polypus` crate this means every path reachable from a `#[pyfunction]` /
 crate's `QmioError`) mapped to the `polypus::exceptions` Python hierarchy — even
 where the failure is "unlikely". A Python exception raised by the
 `polypus_python` seam is carried verbatim and re-raised with its original type,
-so contract C-1's `ValueError`/`TypeError` failure modes are preserved.
+so contract C-1's `ValueError`/`TypeError` failure modes are preserved —
+**except an exception raised by Qiskit** (issue #218): one whose class, or any
+class in its MRO, is defined in a `qiskit*` module is raised as
+`polypus.BackendError`, with the Qiskit class's qualified name and message as
+its message and the original chained as `__cause__`. A Qiskit failure while
+composing or binding the user's Qiskit circuits before any backend runs
+(`qml.train`, `qml.predict`, the oracles' parameter binding) follows the same
+rule but becomes `polypus.EvaluationError`. In both cases a Qiskit class that is
+also a `ValueError`, `TypeError` or `KeyboardInterrupt` keeps its class, and an
+exception raised by a user callback is never retyped. The rule lives in one
+helper, `polypus::exceptions::wrap_qiskit_error`, and detection reads class
+names only, so Qiskit is never imported for it.
 
 Argument-conversion errors are PyO3's, not ours. When a `#[pyfunction]` /
 `#[pymethods]` argument fails to convert, the caller gets the conversion's own

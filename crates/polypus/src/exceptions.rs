@@ -26,13 +26,17 @@
 //! exception is carried type-erased in
 //! [`BackendError::External`](crate::infrastructure::BackendError::External) and
 //! `external_to_pyerr` re-raises the original Python exception verbatim. The
-//! classes below are raised for the Rust-originated runtime failures that
-//! previously *panicked*.
+//! one exception is an exception raised by Qiskit (issue #218): it becomes a
+//! `BackendError` chaining the original as `__cause__` — or an
+//! `EvaluationError` when Qiskit fails while preparing or binding a Qiskit
+//! circuit before any backend runs — so a Qiskit failure is catchable as
+//! `PolypusError` like any other (see `wrap_qiskit_error`). The classes below
+//! are raised for the Rust-originated runtime failures that previously
+//! *panicked*.
 
 use crate::infrastructure::BackendError as InfraBackendError;
-use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyValueError};
-use pyo3::PyErr;
+use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyTypeError, PyValueError};
+use pyo3::{create_exception, intern, PyErr};
 
 create_exception!(
     polypus,
@@ -82,7 +86,9 @@ create_exception!(
 /// Contract C-1's documented failure modes are preserved: a seam exception boxed
 /// in [`External`](InfraBackendError::External) re-raises the original Python
 /// exception verbatim (keeping its `ValueError`/`TypeError` type, via
-/// `external_to_pyerr`), and an unknown infrastructure is a `ValueError`.
+/// `external_to_pyerr`) unless Qiskit raised it, which makes it a
+/// `polypus.BackendError` (`qiskit_error_to_pyerr`); an unknown infrastructure
+/// is a `ValueError`.
 pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
     match err {
         InfraBackendError::UnknownInfrastructure { name } => PyValueError::new_err(format!(
@@ -127,14 +133,17 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
 ///
 /// A Polypus Python backend boxes a `PyErr` here (a `polypus_python` seam
 /// exception, or a `KeyboardInterrupt` from `check_signals` / a Qiskit width
-/// read); the QMIO backend boxes its own `QmioError`; anything else is a
-/// third-party provider error. This is the FFI-edge counterpart of the old
-/// `BackendError::Seam`/`BackendError::Qmio` variants, preserving contract C-1's
-/// verbatim re-raise now that the boxing is generic and pyo3-free.
+/// read), which re-raises verbatim unless Qiskit raised it
+/// ([`qiskit_error_to_pyerr`]); the QMIO backend boxes its own `QmioError`;
+/// anything else is a third-party provider error. This is the FFI-edge
+/// counterpart of the old `BackendError::Seam`/`BackendError::Qmio` variants,
+/// preserving contract C-1's verbatim re-raise now that the boxing is generic
+/// and pyo3-free.
 fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
-    // A boxed Python exception re-raises verbatim, keeping its original class.
+    // A boxed Python exception re-raises verbatim, keeping its original class —
+    // unless Qiskit raised it (issue #218), which joins the polypus hierarchy.
     let boxed = match boxed.downcast::<PyErr>() {
-        Ok(py_err) => return *py_err,
+        Ok(py_err) => return qiskit_error_to_pyerr(*py_err),
         Err(other) => other,
     };
     // The QMIO backend boxes its own error; surface it as the typed class.
@@ -145,6 +154,99 @@ fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
     };
     // Any other provider error: the typed backend base class, message preserved.
     BackendError::new_err(boxed.to_string())
+}
+
+/// Whether `module` (a class's `__module__`) belongs to a Qiskit package:
+/// `qiskit` itself or a `qiskit_*` distribution such as `qiskit_aer`.
+fn is_qiskit_module(module: &str) -> bool {
+    let root = module.split('.').next().unwrap_or(module);
+    root == "qiskit" || root.starts_with("qiskit_")
+}
+
+/// Whether `err` was raised by Qiskit: its class, or any class in its MRO, is
+/// defined in a `qiskit*` module (`qiskit.exceptions.QiskitError`,
+/// `qiskit_aer.AerError`, `qiskit.qasm2.QASM2ParseError`, a user subclass of
+/// any of them, …).
+///
+/// Decided from the class names alone, so Qiskit is never imported: a backend
+/// that does not use it (QMIO, a subprocess provider) never needs it installed.
+/// This is the one definition of "a Qiskit exception"; every point where one
+/// can cross into Python goes through [`wrap_qiskit_error`]
+/// ([`qiskit_error_to_pyerr`] or [`qiskit_error_to_evaluation_error`]).
+pub(crate) fn is_qiskit_exception(py: pyo3::Python<'_>, err: &PyErr) -> bool {
+    use pyo3::types::{PyAnyMethods, PyTupleMethods, PyTypeMethods};
+    err.get_type(py).mro().iter().any(|class| {
+        class
+            .getattr(intern!(py, "__module__"))
+            .and_then(|module| module.extract::<String>())
+            .is_ok_and(|module| is_qiskit_module(&module))
+    })
+}
+
+/// The `module.qualname: message` text of a Qiskit exception, as it appears in
+/// the `polypus.*` exception that wraps it (and in
+/// `polypus.backend_compatibility`'s Aer reasons, which quote the same
+/// failure).
+pub(crate) fn describe_python_error(py: pyo3::Python<'_>, err: &PyErr) -> String {
+    use pyo3::types::{PyAnyMethods, PyTypeMethods};
+    let class = err
+        .get_type(py)
+        .fully_qualified_name()
+        .map_or_else(|_| "<unknown exception>".to_string(), |n| n.to_string());
+    let message = err
+        .value(py)
+        .str()
+        .map_or_else(|_| "<unprintable message>".to_string(), |m| m.to_string());
+    format!("{class}: {message}")
+}
+
+/// Contract C-1 as amended by issue #218, on the execution seam: an exception
+/// raised by Qiskit reaches the caller as `polypus.BackendError` (see
+/// [`wrap_qiskit_error`] for the rule); any other exception is returned
+/// unchanged.
+pub(crate) fn qiskit_error_to_pyerr(err: PyErr) -> PyErr {
+    wrap_qiskit_error::<BackendError>(err)
+}
+
+/// The same rule as [`qiskit_error_to_pyerr`] for a Qiskit failure while
+/// preparing or binding a Qiskit circuit for an optimizer, before any backend
+/// runs (`qml.train`/`qml.predict` composing and binding their circuits, the
+/// oracles' `assign_parameters`): it becomes `polypus.EvaluationError`.
+pub(crate) fn qiskit_error_to_evaluation_error(err: PyErr) -> PyErr {
+    wrap_qiskit_error::<EvaluationError>(err)
+}
+
+/// Raise an exception Qiskit raised as the `polypus.*` class `E`, with the
+/// Qiskit class's qualified name and its message as the message
+/// ([`describe_python_error`]) and the original chained as `__cause__`, so its
+/// traceback is kept. Any other exception is returned unchanged.
+///
+/// A Qiskit class that is also a `ValueError`, `TypeError` or
+/// `KeyboardInterrupt` is returned unchanged too: those are C-1's typed failure
+/// modes (and a cancellation), and a caller catching them must keep catching
+/// them.
+///
+/// Needs the interpreter; when it cannot be reached (it is finalizing), the
+/// exception is returned unchanged rather than attaching unsafely (ENGINEERING
+/// §9).
+fn wrap_qiskit_error<E: pyo3::PyTypeInfo>(err: PyErr) -> PyErr {
+    let wrapper = crate::infrastructure::attach_or(
+        || None,
+        |py| {
+            let preserved = err.is_instance_of::<PyValueError>(py)
+                || err.is_instance_of::<PyTypeError>(py)
+                || err.is_instance_of::<PyKeyboardInterrupt>(py);
+            (!preserved && is_qiskit_exception(py, &err))
+                .then(|| PyErr::new::<E, _>(describe_python_error(py, &err)))
+        },
+    );
+    match wrapper {
+        Some(wrapper) => {
+            crate::infrastructure::attach_or(|| (), |py| wrapper.set_cause(py, Some(err)));
+            wrapper
+        }
+        None => err,
+    }
 }
 
 /// Map a native cost-observable
@@ -181,7 +283,9 @@ fn observable_error_to_pyerr(err: polypus_observable::ObservableError) -> PyErr 
 /// The FFI edge's counterpart to [`backend_error_to_pyerr`]:
 /// `polypus-evaluation` implements no `From<_> for PyErr`, so this is where an
 /// oracle failure becomes an exception. `Python`/callback-boxed variants re-raise
-/// their original Python exception verbatim; a wrapped `Backend` failure keeps its
+/// their original Python exception verbatim; a `Qiskit` binding failure becomes
+/// `polypus.EvaluationError` when Qiskit raised it
+/// ([`qiskit_error_to_evaluation_error`]); a wrapped `Backend` failure keeps its
 /// own class (delegates to [`backend_error_to_pyerr`]); everything else surfaces
 /// as `polypus.EvaluationError`.
 pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError) -> PyErr {
@@ -192,6 +296,9 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
         EvalErr::Observable(obs_err) => observable_error_to_pyerr(obs_err),
         // Preserve the original Python exception type raised by the callback.
         EvalErr::Python(py_err) => py_err,
+        // Qiskit's own binding call: a Qiskit exception joins the hierarchy as
+        // `polypus.EvaluationError` (issue #218); anything else stays verbatim.
+        EvalErr::Qiskit(py_err) => qiskit_error_to_evaluation_error(py_err),
         // Rust-side failures: surface as the typed polypus.EvaluationError, not
         // PyO3's generic RuntimeError / the TypeError extract() would emit.
         EvalErr::Runtime(m) => EvaluationError::new_err(m),
@@ -370,6 +477,148 @@ mod tests {
             InfraBackendError::External(Box::new(Provider("device offline"))),
             "provider failure: device offline",
         );
+    }
+
+    /// Instantiate `class` from a bare-interpreter stand-in for Qiskit's
+    /// exceptions (no package needed, ENGINEERING §3): the classes only claim a
+    /// `qiskit*` `__module__`, which is all `is_qiskit_exception` reads.
+    pub(super) fn fake_error(py: Python<'_>, class: &str, message: &str) -> PyErr {
+        let module = pyo3::types::PyModule::from_code(
+            py,
+            c"class QiskitError(Exception): pass\n\
+              QiskitError.__module__ = 'qiskit.exceptions'\n\
+              class AerError(QiskitError): pass\n\
+              AerError.__module__ = 'qiskit_aer.aererror'\n\
+              class UserError(QiskitError): pass\n\
+              UserError.__module__ = 'user_code'\n\
+              class QiskitValueError(QiskitError, ValueError): pass\n\
+              class QiskitKeyboardInterrupt(QiskitError, KeyboardInterrupt): pass\n\
+              class NotQiskit(Exception): pass\n\
+              NotQiskit.__module__ = 'qiskitlike'\n",
+            c"fake_qiskit.py",
+            c"fake_qiskit",
+        )
+        .expect("the stand-in module compiles");
+        let value = module
+            .getattr(class)
+            .and_then(|c| c.call1((message,)))
+            .expect("the stand-in class instantiates");
+        PyErr::from_value(value)
+    }
+
+    #[test]
+    fn qiskit_modules_are_recognised_by_their_root_package() {
+        for module in ["qiskit", "qiskit.exceptions", "qiskit.qasm2.exceptions"] {
+            assert!(is_qiskit_module(module), "{module}");
+        }
+        for module in ["qiskit_aer", "qiskit_aer.aererror", "qiskit_ibm_runtime.x"] {
+            assert!(is_qiskit_module(module), "{module}");
+        }
+        for module in [
+            "builtins",
+            "qiskitlike",
+            "my_qiskit",
+            "polypus",
+            "user.qiskit",
+        ] {
+            assert!(!is_qiskit_module(module), "{module}");
+        }
+    }
+
+    #[test]
+    fn qiskit_exception_is_detected_through_the_mro() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for class in ["QiskitError", "AerError", "UserError", "QiskitValueError"] {
+                assert!(
+                    is_qiskit_exception(py, &fake_error(py, class, "x")),
+                    "{class}"
+                );
+            }
+            assert!(!is_qiskit_exception(py, &fake_error(py, "NotQiskit", "x")));
+            let runtime = pyo3::exceptions::PyRuntimeError::new_err("x");
+            assert!(!is_qiskit_exception(py, &runtime));
+        });
+    }
+
+    #[test]
+    fn external_qiskit_error_maps_to_backend_error_with_its_cause() {
+        pyo3::Python::initialize();
+        for (class, qualified) in [
+            ("QiskitError", "qiskit.exceptions.QiskitError"),
+            ("AerError", "qiskit_aer.aererror.AerError"),
+            // Defined outside qiskit: only its MRO makes it a Qiskit error.
+            ("UserError", "user_code.UserError"),
+        ] {
+            let original = Python::attach(|py| fake_error(py, class, "no counts"));
+            let original_value = Python::attach(|py| original.value(py).clone().unbind());
+            let expected = format!("{qualified}: no counts");
+            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(original)));
+            Python::attach(|py| {
+                assert!(
+                    py_err.get_type(py).is(py.get_type::<BackendError>()),
+                    "exactly polypus.BackendError, not a subclass: {py_err}"
+                );
+                assert!(py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+                assert!(
+                    py_err.to_string().contains(&expected),
+                    "the Qiskit class and message must survive: {py_err}"
+                );
+                let cause = py_err.cause(py).expect("the Qiskit original is chained");
+                assert!(
+                    cause.value(py).is(original_value.bind(py)),
+                    "__cause__ must be the original exception object"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn qiskit_error_that_is_also_a_c1_type_is_preserved() {
+        pyo3::Python::initialize();
+        let value_error = Python::attach(|py| fake_error(py, "QiskitValueError", "bad kwarg"));
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(value_error)));
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<PyValueError>(py), "{py_err}");
+            assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+        });
+        let interrupt = Python::attach(|py| fake_error(py, "QiskitKeyboardInterrupt", "stop"));
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(interrupt)));
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<PyKeyboardInterrupt>(py), "{py_err}");
+            assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+        });
+    }
+
+    #[test]
+    fn non_qiskit_python_errors_are_reraised_verbatim() {
+        // C-1: anything Qiskit did not raise keeps its class — the seam's own
+        // `ValueError`/`TypeError`, a `RuntimeError`, or a class whose module
+        // merely looks like Qiskit's.
+        pyo3::Python::initialize();
+        let cases: [(PyErr, &str); 4] = [
+            (
+                pyo3::exceptions::PyRuntimeError::new_err("boom"),
+                "RuntimeError",
+            ),
+            (PyTypeError::new_err("bad kwarg"), "TypeError"),
+            (
+                PyValueError::new_err("unknown infrastructure"),
+                "ValueError",
+            ),
+            (
+                Python::attach(|py| fake_error(py, "NotQiskit", "x")),
+                "NotQiskit",
+            ),
+        ];
+        for (err, class) in cases {
+            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(err)));
+            Python::attach(|py| {
+                assert_eq!(py_err.get_type(py).name().unwrap().to_string(), class);
+                assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+                assert!(py_err.cause(py).is_none(), "nothing is chained: {py_err}");
+            });
+        }
     }
 
     #[test]
@@ -561,6 +810,74 @@ mod evaluation_mapping_tests {
             EvalErr::Observable(ObservableError::Invalid("coupling i == j".to_string())),
             "coupling i == j",
         );
+    }
+
+    #[test]
+    fn qiskit_binding_error_maps_to_evaluation_error_with_its_cause() {
+        // Issue #218: Qiskit failing to bind a circuit's parameters is an
+        // evaluation failure — no backend ran — so it becomes exactly
+        // `polypus.EvaluationError`, with the Qiskit class in the message and
+        // the original chained.
+        pyo3::Python::initialize();
+        let original = Python::attach(|py| super::tests::fake_error(py, "QiskitError", "bad"));
+        let original_value = Python::attach(|py| original.value(py).clone().unbind());
+        let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(original));
+        Python::attach(|py| {
+            assert!(
+                py_err.get_type(py).is(py.get_type::<EvaluationError>()),
+                "exactly polypus.EvaluationError: {py_err}"
+            );
+            assert!(py_err.is_instance_of::<PolypusError>(py));
+            assert!(
+                py_err
+                    .to_string()
+                    .contains("qiskit.exceptions.QiskitError: bad"),
+                "{py_err}"
+            );
+            let cause = py_err.cause(py).expect("the Qiskit original is chained");
+            assert!(cause.value(py).is(original_value.bind(py)));
+        });
+    }
+
+    #[test]
+    fn qiskit_variant_keeps_non_qiskit_and_c1_typed_errors() {
+        // Same preservation rule as the seam: a `ValueError` raised by the binding
+        // call (Qiskit's "Mismatching number of values") or a Qiskit class that is
+        // also a `TypeError`-like C-1 type keeps its class.
+        pyo3::Python::initialize();
+        let cases: [(PyErr, &str); 3] = [
+            (PyValueError::new_err("Mismatching number"), "ValueError"),
+            (PyTypeError::new_err("Cannot assign object"), "TypeError"),
+            (
+                Python::attach(|py| super::tests::fake_error(py, "QiskitValueError", "x")),
+                "QiskitValueError",
+            ),
+        ];
+        for (err, class) in cases {
+            let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(err));
+            Python::attach(|py| {
+                assert_eq!(py_err.get_type(py).name().unwrap().to_string(), class);
+                assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+            });
+        }
+    }
+
+    #[test]
+    fn python_variant_stays_verbatim_even_for_a_qiskit_class() {
+        // A user callback can raise anything, Qiskit classes included; the
+        // `Python` variant carries callbacks and is never retyped.
+        pyo3::Python::initialize();
+        let py_err = evaluation_error_to_pyerr(EvalErr::Python(Python::attach(|py| {
+            super::tests::fake_error(py, "QiskitError", "from a callback")
+        })));
+        Python::attach(|py| {
+            assert_eq!(
+                py_err.get_type(py).name().unwrap().to_string(),
+                "QiskitError"
+            );
+            assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+            assert!(py_err.cause(py).is_none());
+        });
     }
 
     #[test]

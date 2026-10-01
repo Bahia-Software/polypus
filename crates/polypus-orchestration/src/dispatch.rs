@@ -87,7 +87,9 @@ pub enum OracleError {
 /// A type-erased oracle failure. The concrete error — in practice an
 /// `EvaluationError` carrying a `PyErr` — is boxed by the oracle so this crate
 /// never names `pyo3`; the `polypus` edge downcasts it back to re-raise the
-/// original Python exception verbatim (plan §10.1).
+/// original Python exception with its class preserved (plan §10.1), except as
+/// contract C-1 provides for failures of the circuit SDK behind the Python
+/// backends.
 pub type BoxedError = Box<dyn Error + Send + 'static>;
 
 /// Thread-safe holder for the first error an oracle hits during `optimize`.

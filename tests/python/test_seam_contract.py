@@ -23,6 +23,7 @@ below locks in the fix without needing a real ``cunqa`` install or SLURM.
 """
 
 import pytest
+from qiskit.exceptions import QiskitError
 
 
 def _native_qc():
@@ -91,6 +92,126 @@ def test_seam_failure_is_never_a_panic_exception(monkeypatch):
         assert isinstance(exc, RuntimeError)
     else:
         pytest.fail("expected the mocked seam failure to raise")
+
+
+# ── Qiskit exceptions join the polypus hierarchy (#218) ──────────────────────
+#
+# A seam exception whose class comes from a ``qiskit*`` module (anywhere in its
+# MRO) reaches the caller as ``polypus.BackendError`` with the original chained
+# as ``__cause__``; every other exception keeps being re-raised verbatim, and so
+# does a Qiskit class that is also a ``ValueError``/``TypeError``/
+# ``KeyboardInterrupt`` (C-1's typed failure modes win).
+
+
+def _raise_from_seam(monkeypatch, exc):
+    import polypus
+    import polypus_python
+
+    def failing(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(polypus_python, "run_qcs", failing)
+    polypus.run_quantum_circuit(
+        _native_qc(), shots=10, infrastructure="local", backend="aer"
+    )
+
+
+class UserQiskitError(QiskitError):
+    """Defined outside qiskit: only its MRO says it is a Qiskit error."""
+
+
+def _qiskit_errors():
+    from qiskit.qasm2 import QASM2ParseError
+
+    errors = [
+        QiskitError("no counts"),
+        QASM2ParseError("bad line"),
+        UserQiskitError("subclassed"),
+    ]
+    try:
+        from qiskit_aer import AerError
+    except ImportError:
+        pass
+    else:
+        errors.append(AerError("aer failed"))
+    return errors
+
+
+@pytest.mark.parametrize(
+    "error", _qiskit_errors(), ids=lambda error: type(error).__name__
+)
+def test_seam_qiskit_error_becomes_backend_error(monkeypatch, error):
+    import polypus
+
+    with pytest.raises(polypus.BackendError) as info:
+        _raise_from_seam(monkeypatch, error)
+    exc = info.value
+    assert isinstance(exc, polypus.PolypusError)
+    assert type(exc) is polypus.BackendError
+    # The Qiskit class (its fully qualified name, read from the class because
+    # the module layout is Qiskit's and may move) and its message survive, and
+    # the original is chained so its traceback is not lost.
+    qualname = f"{type(error).__module__}.{type(error).__qualname__}"
+    assert qualname in str(exc)
+    assert str(error) in str(exc)
+    assert exc.__cause__ is error
+
+
+@pytest.mark.parametrize(
+    "exc_type", [RuntimeError, TypeError, ValueError, ZeroDivisionError, KeyError]
+)
+def test_seam_non_qiskit_error_is_reraised_verbatim(monkeypatch, exc_type):
+    import polypus
+
+    error = exc_type("not from qiskit")
+    with pytest.raises(exc_type) as info:
+        _raise_from_seam(monkeypatch, error)
+    assert info.value is error
+    assert not isinstance(info.value, polypus.PolypusError)
+
+
+@pytest.mark.parametrize("builtin", [ValueError, TypeError, KeyboardInterrupt])
+def test_seam_qiskit_error_that_is_also_a_c1_type_is_preserved(monkeypatch, builtin):
+    import polypus
+
+    both = type("QiskitAnd" + builtin.__name__, (QiskitError, builtin), {})
+    error = both("typed failure")
+    with pytest.raises(builtin) as info:
+        _raise_from_seam(monkeypatch, error)
+    assert info.value is error
+    assert not isinstance(info.value, polypus.PolypusError)
+
+
+def test_real_aer_error_reaches_the_caller_as_polypus_error():
+    """No monkeypatch: ``ch`` is outside Aer's basis (ENGINEERING §7), so Aer
+    itself raises ``AerError('unknown instruction: ch')``."""
+    import polypus
+
+    pytest.importorskip("qiskit_aer")
+    qc = polypus.Circuit(2).x(0).ch(0, 1).measure_all()
+    with pytest.raises(polypus.PolypusError) as info:
+        polypus.run_quantum_circuit(qc, shots=10, infrastructure="local", backend="aer")
+    assert type(info.value) is polypus.BackendError
+    assert "AerError" in str(info.value)
+    assert type(info.value.__cause__).__name__ == "AerError"
+    assert str(info.value.__cause__) in str(info.value)
+
+
+def test_real_qasm_parse_error_reaches_the_caller_as_polypus_error():
+    """No monkeypatch: the Aer path parses QASM with Qiskit, whose
+    ``QASM2ParseError`` used to escape the polypus hierarchy."""
+    import polypus
+    from qiskit.qasm2 import QASM2ParseError
+
+    with pytest.raises(polypus.BackendError) as info:
+        polypus.run_quantum_circuit(
+            "OPENQASM 2.0;\nqreg q[1];\nfoo q[0];\n",
+            shots=10,
+            infrastructure="local",
+            backend="aer",
+        )
+    assert "QASM2ParseError" in str(info.value)
+    assert isinstance(info.value.__cause__, QASM2ParseError)
 
 
 def _install_fake_cunqa(monkeypatch, dropped):
