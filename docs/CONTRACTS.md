@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (open — see C-3) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, open — see C-3) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
@@ -316,7 +316,7 @@ circuit, bounds), the calls-with-free-parameters tests in
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
   such a circuit). The CUNQA path is not verified.
 
-  *(Known break, open: for a circuit **with** measurements, `num_clbits` is not
+  *(Known break, open (#251): for a circuit **with** measurements, `num_clbits` is not
   the same on every backend when a classical register is declared wider than
   the highest bit written. Aer uses the declared width (`creg c[3]; measure
   q[0] -> c[1];` gives `"010"`); the native backend uses `max(cbit) + 1`

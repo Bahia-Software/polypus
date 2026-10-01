@@ -547,7 +547,7 @@ class TestUnmeasuredCircuitsReadTheFullRegister:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "C-3 known break, open (<ISSUE-PENDIENTE>): for a measured circuit "
+            "C-3 known break, open (#251): for a measured circuit "
             "whose creg is wider than its highest written bit, Aer keys are as "
             "wide as the declared clbits ('010') and native keys as max(cbit)+1 "
             "('10'), because polypus-circuit does not keep declared registers"
