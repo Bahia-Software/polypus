@@ -562,7 +562,7 @@ unchanged.
 The native backend runs terminal-measurement circuits only (contract C-4,
 [ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
 mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer, in
-turn, rejects instructions outside its basis (`ch`, `u0`, `rccx`, `c3x`, declared
+turn, rejects instructions outside its basis (`ch`, `u0`, `rccx`, declared
 gates, …) unless the circuit is transpiled first. `polypus.backend_compatibility`
 reports this before a run, for a `polypus.Circuit`, an OpenQASM 2.0 string or a Qiskit
 `QuantumCircuit`:
