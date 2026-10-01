@@ -21,8 +21,10 @@
 //!
 //! The crate is deliberately **Python-free**: the GIL is released by the caller
 //! (`polypus`, via `py.detach`) and a real oracle failure reaches here as a
-//! [`BoxedError`] that the edge downcasts and re-raises verbatim (plan §10.1), so
-//! nothing here names `pyo3` or `PyErr`.
+//! [`BoxedError`] that the edge downcasts and re-raises with its original class
+//! (plan §10.1; the edge's one exception, for failures of the circuit SDK behind
+//! the Python backends, is contract C-1's), so nothing here names `pyo3` or
+//! `PyErr`.
 
 pub mod dispatch;
 pub mod flow;

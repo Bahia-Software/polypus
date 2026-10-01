@@ -27,6 +27,7 @@
   - [CUNQA](#cunqa)
 - [Usage](#usage)
   - [Running a Quantum Circuit](#running-a-quantum-circuit)
+  - [Choosing a Local Backend](#choosing-a-local-backend)
   - [Distributing Shots Across Multiple QPUs](#distributing-shots-across-multiple-qpus)
   - [Training Variational Circuits](#training-variational-circuits)
     - [Differential Evolution](#differential-evolution)
@@ -152,6 +153,22 @@ result = polypus.run_quantum_circuit(
     qc, shots=NUM_SHOTS, infrastructure=INFRASTRUCTURE, n_qpus=1
 )
 ```
+
+### Choosing a Local Backend
+
+With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and `backend="polypus"` runs the native Rust statevector simulator. The native backend runs terminal-measurement circuits only: it rejects `reset`, a gate after a measurement and `if` (see [ADR 0001](docs/adr/0001-terminal-measurements.md)), and it cannot run a Qiskit `QuantumCircuit`. Aer runs all of those, but rejects gates outside its basis (such as `ch` or a declared `gate`) unless the circuit is transpiled first. Check before switching with `polypus.backend_compatibility`, which returns, per backend, the reasons it would reject the circuit (an empty list means it runs):
+
+```python
+# qc: a polypus.Circuit, an OpenQASM 2.0 str or a Qiskit QuantumCircuit
+report = polypus.backend_compatibility(qc)
+# e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+backend = "polypus" if not report["polypus"] else "aer"
+result = polypus.run_quantum_circuit(
+    qc, shots=NUM_SHOTS, infrastructure="local", backend=backend
+)
+```
+
+The check is structural and runs nothing; it does not check resources such as memory. A circuit without measurements is read out on all its qubits by both backends. A Qiskit or Aer failure during a run is raised as `polypus.BackendError` (catchable as `polypus.PolypusError`), with the original Qiskit exception as its `__cause__`. A Qiskit failure while `train`, `qml.train` or `qml.predict` prepares or binds your Qiskit circuits (for example an ansatz wider than the feature map) is raised the same way as `polypus.EvaluationError`; an exception your own `expectation_function` raises always reaches you unchanged. See [`docs/backends.md`](docs/backends.md) for details.
 
 ### Distributing Shots Across Multiple QPUs
 

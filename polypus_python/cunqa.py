@@ -63,6 +63,15 @@ class Cunqa(Infraestructure):
     def run_qcs(self, **args) -> object:
 
         family_id = args["family_id"]
+        # UNVERIFIED (issue #218): contract C-3 reads a circuit without
+        # measurements out on the full quantum register, and the local Aer path
+        # adds that read-out itself (`local._with_full_readout`) because Aer
+        # returns no counts for such a circuit. Whether CUNQA's QPUs return
+        # counts for it, and in which key format, cannot be checked without a
+        # CUNQA install, so this path forwards the circuit unchanged rather than
+        # guess; `local._with_full_readout` is the helper to reuse once it is
+        # known.
+        #
         # Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
         # currently consume QuantumCircuit objects, so parse here.
         qcs = [

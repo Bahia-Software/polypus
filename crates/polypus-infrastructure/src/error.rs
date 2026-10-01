@@ -5,7 +5,7 @@
 //!
 //! A Python exception from the `polypus_python` seam is carried verbatim in
 //! [`BackendError::External`] (boxed `PyErr`) — the edge downcasts and re-raises
-//! it — rather than in a PyO3-typed variant this crate cannot host without pulling
+//! it, as `polypus.BackendError` if Qiskit raised it (contract C-1) — rather than in a PyO3-typed variant this crate cannot host without pulling
 //! PyO3 into the contract. The feature-gated QMIO backend likewise boxes its own
 //! `QmioError` into [`BackendError::External`].
 
