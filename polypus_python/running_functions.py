@@ -16,8 +16,47 @@ if _cunqa_path and _cunqa_path not in sys.path:
     sys.path.append(_cunqa_path)
 
 
+# Contract C-9, mirrored from `validate_id` in crates/polypus/src/bindings/mod.rs:
+# same charset, same length bound, same order of checks and same messages.
+_ID_MAX_LEN = 64
+# Spelled out rather than `str.isalnum()`, which also accepts non-ASCII letters
+# and digits (e.g. "ñ", "١").
+_ID_ALLOWED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+)
+
+
+def validate_id(id):
+    """Validate a run ``id`` before it names a file or reaches CUNQA/SLURM.
+
+    Same policy as the Rust entry points (contract C-9): non-empty, only ASCII
+    letters, ASCII digits, ``.``, ``_`` and ``-``, and at most 64 characters,
+    checked in that order. The charset is checked before the length so a
+    non-ASCII id gets the specific "invalid character" message.
+
+    Raises:
+        TypeError: ``id`` is not a ``str``.
+        ValueError: ``id`` violates the policy above.
+    """
+    if not isinstance(id, str):
+        raise TypeError(f"id must be a str, got {type(id).__name__}")
+    if not id:
+        raise ValueError("id must not be empty")
+    for c in id:
+        if c not in _ID_ALLOWED_CHARS:
+            raise ValueError(
+                f"id contains invalid character {c!r}; only ASCII letters, "
+                f"digits, '.', '_' and '-' are allowed (got {id!r})"
+            )
+    if len(id) > _ID_MAX_LEN:
+        raise ValueError(
+            f"id must be at most {_ID_MAX_LEN} characters, got {len(id)} ({id!r})"
+        )
+
+
 def get_logger(id):
     """Get or create the module logger that logs only to a file."""
+    validate_id(id)
     logger = logging.getLogger("polypus_python")
     if not logger.hasHandlers():
         # Log file will be in the temp directory next to this file
@@ -33,6 +72,7 @@ def get_logger(id):
 
 
 def log_message(id, message, level="error"):
+    validate_id(id)
     logger = get_logger(id)
     if level == "debug":
         logger.debug(message)
@@ -50,6 +90,9 @@ def log_message(id, message, level="error"):
 
 def _load_configuration(id):
     """Load the configuration json file"""
+    # Validated upfront so the `log_message` calls in the handlers below can
+    # never raise on `id` and mask the original exception.
+    validate_id(id)
 
     # Get the path to the configuration file
     config_file = "configuration_backend.json"
@@ -84,6 +127,7 @@ def _load_configuration(id):
 
 def _get_temp_directory(id):
     """Get the temporary directory for storing serialized files."""
+    validate_id(id)
     try:
         temp_dir = os.path.join(os.getcwd(), "temp")
     except Exception as e:
@@ -95,6 +139,7 @@ def _get_temp_directory(id):
 
 def _deserialize_quantum_circuit(id):
     """Deserialize a quantum circuit from a QPY file, handling possible errors."""
+    validate_id(id)
 
     # Temporary directory for the serialized file
     temp_dir = _get_temp_directory(id)
@@ -128,6 +173,7 @@ def test_connection():
 
 def serialize_quantum_circuit(id, qc):
     """Serialize the quantum circuit using Qiskit qpy, handling possible errors."""
+    validate_id(id)
 
     # Temporary directory for the serialized file
     temp_dir = _get_temp_directory(id)
@@ -162,6 +208,10 @@ def serialize_quantum_circuit(id, qc):
 
 
 def run_qcs_in_qpu(id, qcs, shots):
+    # `id` travels to CUNQA/SLURM as the `family` name (contract C-9); validate
+    # it before the optional import so a bad id is a ValueError, not an
+    # ImportError, and so the `log_message` below cannot raise on it.
+    validate_id(id)
 
     # counts = []
     # for i in range(len(qcs)):
@@ -199,6 +249,8 @@ def run_qcs_in_qpu(id, qcs, shots):
 
 
 def run_qc_in_qpu(id, qc, shots):
+    # As in `run_qcs_in_qpu`: `id` becomes the CUNQA `family` (contract C-9).
+    validate_id(id)
     # CUNQA is an optional dependency; import it only when this path runs.
     from cunqa.qjob import gather
     from cunqa.qutils import get_QPUs
