@@ -1,22 +1,26 @@
 """
 Hygiene of the ``polypus_python.running_functions`` helpers (issue #219).
 
-These helpers used to write ``<cwd>/temp/polypus_python_<id>.log``, forced the
-``polypus_python`` logger to DEBUG on every call (overriding the host
-application's logging setup), and interpolated ``id`` into file paths without
-validation. Now:
+These helpers used to write ``<cwd>/temp/circuit_<id>.qpy`` and
+``<cwd>/temp/polypus_python_<id>.log``, forced the ``polypus_python`` logger to
+DEBUG on every call (overriding the host application's logging setup), and
+interpolated ``id`` into those paths without validation. Now:
 
 - ``id`` is validated with the same policy as the Rust entry points (contract
   C-9, Python mirror): parity is checked against the very lists
   ``test_id_validation.py`` runs through ``train``/``qml.train``;
 - the logger carries only a ``NullHandler`` unless ``POLYPUS_LOG_DIR`` opts in to
-  a log file.
+  a log file;
+- serialized circuits go to a private per-user directory under the system temp
+  dir (or an explicit ``directory=``), written atomically.
 
 No test writes to the real system temp dir: ``tempfile.tempdir`` is redirected
 into ``tmp_path`` for every test.
 """
 
 import logging
+import os
+import stat
 import sys
 import tempfile
 
@@ -72,6 +76,31 @@ def cwd(tmp_path, monkeypatch):
     cwd.mkdir()
     monkeypatch.chdir(cwd)
     return cwd
+
+
+@pytest.fixture
+def bell():
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure_all()
+    return qc
+
+
+def _default_dir(system_tmp):
+    owner = os.getuid() if hasattr(os, "getuid") else rf.getpass.getuser()
+    return system_tmp / f"polypus-{owner}"
+
+
+def _symlink_circuit_outside(tmp_path, qc):
+    """A ``shared`` dir whose ``circuit_run1.qpy`` symlinks to a file outside it."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    outside = tmp_path / "outside.qpy"
+    rf.serialize_quantum_circuit("run1", qc, directory=tmp_path)
+    os.replace(tmp_path / "circuit_run1.qpy", outside)
+    (shared / "circuit_run1.qpy").symlink_to(outside)
+    return shared, outside
 
 
 def _file_handlers(logger):
@@ -155,12 +184,13 @@ class TestInvalidIdTouchesNothing:
 
 
 class TestLoggingDefault:
-    def test_host_level_kept_and_nothing_written(self, cwd):
+    def test_host_level_kept_and_nothing_written(self, cwd, bell):
         logger = logging.getLogger(LOGGER_NAME)
         logger.setLevel(logging.WARNING)
 
         rf.log_message("run1", "hello", "error")
         rf.log_message("run1", "hello", "debug")
+        assert rf.serialize_quantum_circuit("run1", bell) is True
 
         assert not (cwd / "temp").exists()
         assert list(cwd.iterdir()) == []
@@ -230,3 +260,157 @@ class TestLoggingOptIn:
 
         assert _file_handlers(logger) == []
         assert logger.level == logging.WARNING
+
+
+class TestTempFiles:
+    def test_default_round_trip(self, cwd, system_tmp, bell):
+        assert rf.serialize_quantum_circuit("run1", bell) is True
+        assert rf._deserialize_quantum_circuit("run1") == bell
+
+        default_dir = _default_dir(system_tmp)
+        assert [p.name for p in default_dir.iterdir()] == ["circuit_run1.qpy"]
+        if hasattr(os, "getuid"):
+            assert stat.S_IMODE(default_dir.stat().st_mode) == 0o700
+        assert list(cwd.iterdir()) == []
+
+    def test_overwrite_replaces_previous_circuit(self, system_tmp, bell):
+        rf.serialize_quantum_circuit("run1", QuantumCircuit(1))
+        rf.serialize_quantum_circuit("run1", bell)
+        assert rf._deserialize_quantum_circuit("run1") == bell
+        assert len(list(_default_dir(system_tmp).iterdir())) == 1
+
+    def test_explicit_directory_round_trip(self, tmp_path, cwd, system_tmp, bell):
+        shared = tmp_path / "shared" / "nested"
+        assert rf.serialize_quantum_circuit("run1", bell, directory=shared) is True
+        assert rf._deserialize_quantum_circuit("run1", directory=str(shared)) == bell
+
+        assert [p.name for p in shared.iterdir()] == ["circuit_run1.qpy"]
+        assert list(system_tmp.iterdir()) == []
+        assert list(cwd.iterdir()) == []
+
+    def test_explicit_directory_permissions_untouched(self, tmp_path, bell):
+        shared = tmp_path / "shared"
+        shared.mkdir(mode=0o755)
+        shared.chmod(0o755)
+        rf.serialize_quantum_circuit("run1", bell, directory=shared)
+        assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+
+    def test_failed_write_leaves_no_partial_file(self, system_tmp):
+        with pytest.raises(TypeError):
+            rf.serialize_quantum_circuit("run1", object())
+        assert list(_default_dir(system_tmp).iterdir()) == []
+
+    def test_circuit_file_symlinked_outside_is_refused(self, tmp_path, bell):
+        shared, _ = _symlink_circuit_outside(tmp_path, bell)
+
+        with pytest.raises(PermissionError, match="outside"):
+            rf._deserialize_quantum_circuit("run1", directory=shared)
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda shared: rf.serialize_quantum_circuit(
+                "run1", QuantumCircuit(1), directory=shared
+            ),
+            lambda shared: rf._deserialize_quantum_circuit("run1", directory=shared),
+        ],
+        ids=["serialize", "deserialize"],
+    )
+    def test_containment_failure_is_logged_before_any_write(
+        self, tmp_path, bell, caplog, call
+    ):
+        shared, outside = _symlink_circuit_outside(tmp_path, bell)
+        before = outside.read_bytes()
+
+        with pytest.raises(PermissionError, match="outside"):
+            call(shared)
+
+        # Refused before writing: no partial `.tmp`, the symlink untouched and
+        # its target unchanged (`os.replace` would have clobbered the link).
+        assert [p.name for p in shared.iterdir()] == ["circuit_run1.qpy"]
+        assert (shared / "circuit_run1.qpy").is_symlink()
+        assert outside.read_bytes() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "outside.qpy",
+            "shared",
+            "system-tmp",
+        ]
+        errors = [
+            r
+            for r in caplog.records
+            if r.name == LOGGER_NAME and r.levelno == logging.ERROR
+        ]
+        assert any("Error constructing QPY filename" in r.getMessage() for r in errors)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX file modes")
+class TestCircuitFileMode:
+    """The `.qpy` is owner-only (`0o600`), even under a fully permissive umask.
+
+    A stricter umask can only narrow the mode further, so the permissive case is
+    the one that proves the file does not just inherit the process's umask.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _permissive_umask(self):
+        previous = os.umask(0)
+        yield
+        os.umask(previous)
+
+    def test_default_directory(self, system_tmp, bell):
+        rf.serialize_quantum_circuit("run1", bell)
+        qpy = _default_dir(system_tmp) / "circuit_run1.qpy"
+        assert stat.S_IMODE(qpy.stat().st_mode) == 0o600
+
+    def test_explicit_directory(self, tmp_path, bell):
+        shared = tmp_path / "shared"
+        rf.serialize_quantum_circuit("run1", bell, directory=shared)
+        qpy = shared / "circuit_run1.qpy"
+        assert stat.S_IMODE(qpy.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership checks")
+class TestUnsafeDefaultDirectory:
+    def test_loose_permissions_are_tightened(self, system_tmp, bell):
+        default_dir = _default_dir(system_tmp)
+        default_dir.mkdir()
+        default_dir.chmod(0o777)
+        rf.serialize_quantum_circuit("run1", bell)
+        assert stat.S_IMODE(default_dir.stat().st_mode) == 0o700
+
+    def test_symlink_refused(self, tmp_path, system_tmp, bell):
+        target = tmp_path / "attacker"
+        target.mkdir(mode=0o700)
+        _default_dir(system_tmp).symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(PermissionError, match="symbolic link"):
+            rf.serialize_quantum_circuit("run1", bell)
+        assert list(target.iterdir()) == []
+
+    def test_dangling_symlink_refused(self, tmp_path, system_tmp, bell):
+        _default_dir(system_tmp).symlink_to(tmp_path / "missing")
+        with pytest.raises(PermissionError, match="symbolic link"):
+            rf.serialize_quantum_circuit("run1", bell)
+
+    def test_regular_file_refused(self, system_tmp, bell):
+        _default_dir(system_tmp).write_text("")
+        with pytest.raises(PermissionError, match="not a directory"):
+            rf.serialize_quantum_circuit("run1", bell)
+
+    def test_foreign_owner_refused(self, system_tmp, bell, monkeypatch):
+        default_dir = _default_dir(system_tmp)
+        default_dir.mkdir(mode=0o700)
+        real_lstat = os.lstat
+
+        def foreign_lstat(path, *args, **kwargs):
+            st = real_lstat(path, *args, **kwargs)
+            if os.fspath(path) != str(default_dir):
+                return st
+            fields = list(st)
+            fields[stat.ST_UID] = os.getuid() + 1
+            return os.stat_result(fields)
+
+        monkeypatch.setattr(os, "lstat", foreign_lstat)
+        with pytest.raises(PermissionError, match="owned by uid"):
+            rf.serialize_quantum_circuit("run1", bell)
+        assert list(default_dir.iterdir()) == []

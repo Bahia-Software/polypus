@@ -1,7 +1,11 @@
+import contextlib
+import getpass
 import json
 import logging
 import os
+import stat
 import sys
+import tempfile
 import time
 import warnings
 
@@ -177,26 +181,94 @@ def _load_configuration(id):
     return config
 
 
-def _get_temp_directory(id):
-    """Get the temporary directory for storing serialized files."""
+def _default_temp_directory():
+    """Return the private per-user directory under the system temp dir.
+
+    ``<tempfile.gettempdir()>/polypus-<uid>`` (the user name where there is no
+    uid), created ``0o700``. An existing entry is accepted only if it is a real
+    directory (not a symlink) owned by the current user; one that is ours but
+    group/world-accessible is tightened back to ``0o700``. Anything else raises
+    ``PermissionError`` rather than being reused.
+    """
+    has_uid = hasattr(os, "getuid")
+    owner = os.getuid() if has_uid else getpass.getuser()
+    path = os.path.join(tempfile.gettempdir(), f"polypus-{owner}")
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except FileExistsError:
+        # A non-directory (or dangling symlink) is in the way; the checks below
+        # turn it into a clear PermissionError.
+        pass
+
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        raise PermissionError(
+            f"refusing to use temp directory {path}: it is a symbolic link"
+        )
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(
+            f"refusing to use temp directory {path}: it is not a directory"
+        )
+    if has_uid:
+        if st.st_uid != os.getuid():
+            raise PermissionError(
+                f"refusing to use temp directory {path}: it is owned by uid "
+                f"{st.st_uid}, not by the current user (uid {os.getuid()})"
+            )
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            os.chmod(path, 0o700)
+    return path
+
+
+def _get_temp_directory(id, directory=None):
+    """Get the directory for storing serialized files.
+
+    With ``directory=None`` this is the private per-user directory under the
+    system temp dir (see `_default_temp_directory`), which is usually local to
+    the node. To hand a circuit to another node, pass ``directory`` pointing to
+    a shared filesystem; it is used as given and created if missing, without
+    touching its permissions.
+    """
     validate_id(id)
     try:
-        temp_dir = os.path.join(os.getcwd(), "temp")
+        if directory is None:
+            return _default_temp_directory()
+        os.makedirs(directory, exist_ok=True)
+        return os.fspath(directory)
     except Exception as e:
         log_message(id, f"Error constructing temp directory path: {e}", "error")
         raise
-    os.makedirs(temp_dir, exist_ok=True)  # Ensure the folder exists
-    return temp_dir
 
 
-def _deserialize_quantum_circuit(id):
-    """Deserialize a quantum circuit from a QPY file, handling possible errors."""
+def _circuit_file(id, directory):
+    """Return ``(temp_dir, path)`` of the QPY file paired with ``id``.
+
+    Both `serialize_quantum_circuit` and `_deserialize_quantum_circuit` resolve
+    the file through here, so the ``id -> circuit_<id>.qpy`` pairing lives in
+    one place. As defense in depth on top of `validate_id`, the resolved path
+    must stay inside the resolved base directory.
+    """
+    temp_dir = _get_temp_directory(id, directory)
+    filename = os.path.join(temp_dir, f"circuit_{id}.qpy")
+    base = os.path.realpath(temp_dir)
+    resolved = os.path.realpath(filename)
+    if os.path.dirname(resolved) != base:
+        raise PermissionError(
+            f"refusing to use {filename}: it resolves to {resolved}, outside {base}"
+        )
+    return temp_dir, filename
+
+
+def _deserialize_quantum_circuit(id, *, directory=None):
+    """Deserialize a quantum circuit from a QPY file, handling possible errors.
+
+    Reads ``circuit_<id>.qpy`` from the directory `serialize_quantum_circuit`
+    writes to for the same ``id`` and ``directory`` (see `_get_temp_directory`).
+    """
     validate_id(id)
 
-    # Temporary directory for the serialized file
-    temp_dir = _get_temp_directory(id)
     try:
-        filename = os.path.join(temp_dir, f"circuit_{id}.qpy")
+        _, filename = _circuit_file(id, directory)
     except Exception as e:
         log_message(id, f"Error constructing QPY filename: {e}", "error")
         raise
@@ -223,21 +295,44 @@ def test_connection():
     print("Testing connection to the QASM simulator backend...")
 
 
-def serialize_quantum_circuit(id, qc):
-    """Serialize the quantum circuit using Qiskit qpy, handling possible errors."""
+def serialize_quantum_circuit(id, qc, *, directory=None):
+    """Serialize the quantum circuit using Qiskit qpy, handling possible errors.
+
+    Writes ``circuit_<id>.qpy`` to the private per-user directory under the
+    system temp dir, or to ``directory`` when given (see `_get_temp_directory`:
+    the default is usually node-local, so pass a shared ``directory`` to read
+    the circuit back on another node). The file is written to a temporary name
+    in the same directory and then atomically renamed, so a concurrent reader
+    never sees a partial file. The containment check of `_circuit_file` runs
+    before anything is written. Returns ``True``.
+
+    The file is created with mode ``0o600`` (as ``tempfile`` does): it is
+    readable only by the owning user. A permissive umask never widens that; a
+    stricter one can only narrow it further. With ``directory`` pointing to a
+    directory shared by several users, the other users will not be able to read
+    it.
+    """
     validate_id(id)
 
-    # Temporary directory for the serialized file
-    temp_dir = _get_temp_directory(id)
-    temp_file = os.path.join(temp_dir, f"circuit_{id}.qpy")
+    try:
+        temp_dir, temp_file = _circuit_file(id, directory)
+    except Exception as e:
+        log_message(id, f"Error constructing QPY filename: {e}", "error")
+        raise
+    partial = None
 
     try:
-        with open(temp_file, "wb") as f:
+        with tempfile.NamedTemporaryFile(
+            dir=temp_dir, suffix=".tmp", delete=False
+        ) as f:
+            partial = f.name
             # Serialize the quantum circuit to a file
             dump(qc, f)
-            log_message(
-                id, f"Quantum circuit serialized successfully to {temp_file}.", "info"
-            )
+        os.replace(partial, temp_file)
+        partial = None
+        log_message(
+            id, f"Quantum circuit serialized successfully to {temp_file}.", "info"
+        )
     except QpyError as e:
         log_message(id, f"QPY serialization error: {e}", "error")
         raise
@@ -255,6 +350,10 @@ def serialize_quantum_circuit(id, qc):
     except Exception as e:
         log_message(id, f"Unexpected error during serialization: {e}", "error")
         raise
+    finally:
+        if partial is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(partial)
 
     return True
 
