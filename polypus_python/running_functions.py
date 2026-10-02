@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 
 from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
 from qiskit.qpy import dump, load
@@ -24,6 +25,8 @@ _ID_MAX_LEN = 64
 _ID_ALLOWED_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
 )
+
+_LOGGER_NAME = "polypus_python"
 
 
 def validate_id(id):
@@ -54,19 +57,68 @@ def validate_id(id):
         )
 
 
+def _install_null_handler():
+    """Give the library logger a NullHandler, once.
+
+    Standard library etiquette: without it, records would fall through to
+    `logging.lastResort` and print to stderr when the host configured nothing.
+    Checked rather than added blindly so a module reload stays idempotent.
+    """
+    logger = logging.getLogger(_LOGGER_NAME)
+    if not any(type(h) is logging.NullHandler for h in logger.handlers):
+        logger.addHandler(logging.NullHandler())
+
+
+_install_null_handler()
+
+
 def get_logger(id):
-    """Get or create the module logger that logs only to a file."""
+    """Return the ``polypus_python`` logger, optionally logging to a file.
+
+    By default the logger only carries a ``NullHandler``: its level is left to
+    the host application and records propagate to the host's handlers as usual.
+
+    Writing to a file is opt-in via the ``POLYPUS_LOG_DIR`` environment
+    variable (read on every call; set and non-empty, as on the Rust side). The
+    directory is created if needed, a ``FileHandler`` writes to
+    ``<POLYPUS_LOG_DIR>/polypus_python_<id>.log`` and only then is the logger
+    level set to DEBUG. The first ``id`` wins: once a file handler is attached,
+    later calls with another ``id`` reuse it rather than adding a second one,
+    so messages never fan out across files. If the directory or the file
+    cannot be created, a ``UserWarning`` is emitted and logging continues
+    without the file.
+
+    Raises:
+        TypeError, ValueError: ``id`` fails `validate_id` (contract C-9).
+    """
     validate_id(id)
-    logger = logging.getLogger("polypus_python")
-    if not logger.hasHandlers():
-        # Log file will be in the temp directory next to this file
-        log_dir = os.path.join(os.getcwd(), "temp")
+    logger = logging.getLogger(_LOGGER_NAME)
+    log_dir = os.environ.get("POLYPUS_LOG_DIR")
+    if not log_dir:
+        return logger
+
+    log_file = os.path.abspath(os.path.join(log_dir, f"polypus_python_{id}.log"))
+    file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
+    if any(h.baseFilename == log_file for h in file_handlers) or any(
+        getattr(h, "_polypus_owned", False) for h in file_handlers
+    ):
+        return logger
+
+    try:
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"polypus_python_{id}.log")
         file_handler = logging.FileHandler(log_file)
-        formatter = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    except OSError as e:
+        warnings.warn(
+            f"polypus_python: cannot log to {log_file} (POLYPUS_LOG_DIR): {e}; "
+            "continuing without a log file",
+            UserWarning,
+            stacklevel=2,
+        )
+        return logger
+    file_handler._polypus_owned = True
+    formatter = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
     logger.setLevel(logging.DEBUG)
     return logger
 

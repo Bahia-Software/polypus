@@ -1,11 +1,16 @@
 """
 Hygiene of the ``polypus_python.running_functions`` helpers (issue #219).
 
-These helpers interpolated ``id`` into file paths (``circuit_<id>.qpy``,
-``polypus_python_<id>.log``) and the CUNQA family name without validation. Now
-``id`` is validated with the same policy as the Rust entry points (contract C-9,
-Python mirror): parity is checked against the very lists
-``test_id_validation.py`` runs through ``train``/``qml.train``.
+These helpers used to write ``<cwd>/temp/polypus_python_<id>.log``, forced the
+``polypus_python`` logger to DEBUG on every call (overriding the host
+application's logging setup), and interpolated ``id`` into file paths without
+validation. Now:
+
+- ``id`` is validated with the same policy as the Rust entry points (contract
+  C-9, Python mirror): parity is checked against the very lists
+  ``test_id_validation.py`` runs through ``train``/``qml.train``;
+- the logger carries only a ``NullHandler`` unless ``POLYPUS_LOG_DIR`` opts in to
+  a log file.
 
 No test writes to the real system temp dir: ``tempfile.tempdir`` is redirected
 into ``tmp_path`` for every test.
@@ -67,6 +72,10 @@ def cwd(tmp_path, monkeypatch):
     cwd.mkdir()
     monkeypatch.chdir(cwd)
     return cwd
+
+
+def _file_handlers(logger):
+    return [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
 
 
 # Every helper that validates `id`, called with everything else pinned.
@@ -143,3 +152,81 @@ class TestInvalidIdTouchesNothing:
         monkeypatch.setitem(sys.modules, "cunqa", None)
         with pytest.raises(ValueError, match="invalid character '/'"):
             rf.run_qc_in_qpu("../x", QuantumCircuit(1), 10)
+
+
+class TestLoggingDefault:
+    def test_host_level_kept_and_nothing_written(self, cwd):
+        logger = logging.getLogger(LOGGER_NAME)
+        logger.setLevel(logging.WARNING)
+
+        rf.log_message("run1", "hello", "error")
+        rf.log_message("run1", "hello", "debug")
+
+        assert not (cwd / "temp").exists()
+        assert list(cwd.iterdir()) == []
+        assert logger.level == logging.WARNING
+        assert logger.handlers
+        assert all(type(h) is logging.NullHandler for h in logger.handlers)
+
+    def test_get_logger_returns_library_logger(self):
+        assert rf.get_logger("run1") is logging.getLogger(LOGGER_NAME)
+
+    def test_null_handler_installed_once(self):
+        logger = logging.getLogger(LOGGER_NAME)
+        rf._install_null_handler()
+        rf._install_null_handler()
+        assert sum(type(h) is logging.NullHandler for h in logger.handlers) == 1
+
+
+class TestLoggingOptIn:
+    def test_log_file_created_with_message(self, tmp_path, monkeypatch):
+        log_dir = tmp_path / "logs" / "nested"
+        monkeypatch.setenv("POLYPUS_LOG_DIR", str(log_dir))
+
+        rf.log_message("run1", "hello file", "info")
+        rf.log_message("run1", "debug line", "debug")
+        for handler in _file_handlers(logging.getLogger(LOGGER_NAME)):
+            handler.flush()
+
+        content = (log_dir / "polypus_python_run1.log").read_text()
+        assert "[INFO] hello file" in content
+        # Opting in is the one case where the level is raised to DEBUG.
+        assert "[DEBUG] debug line" in content
+        assert logging.getLogger(LOGGER_NAME).level == logging.DEBUG
+
+    def test_empty_value_is_not_an_opt_in(self, cwd, monkeypatch):
+        monkeypatch.setenv("POLYPUS_LOG_DIR", "")
+        rf.log_message("run1", "hello", "error")
+        assert _file_handlers(logging.getLogger(LOGGER_NAME)) == []
+        assert list(cwd.iterdir()) == []
+
+    def test_no_duplicate_handlers_and_first_id_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path))
+        logger = logging.getLogger(LOGGER_NAME)
+
+        for _ in range(3):
+            rf.log_message("run1", "again", "error")
+        rf.log_message("run2", "other id", "error")
+        for handler in _file_handlers(logger):
+            handler.flush()
+
+        [handler] = _file_handlers(logger)
+        assert handler.baseFilename == str(tmp_path / "polypus_python_run1.log")
+        assert not (tmp_path / "polypus_python_run2.log").exists()
+        content = (tmp_path / "polypus_python_run1.log").read_text()
+        assert content.count("again") == 3
+        assert "other id" in content
+
+    def test_unwritable_dir_warns_and_continues(self, tmp_path, monkeypatch):
+        # A path below a regular file cannot be created, even when running as root.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("")
+        monkeypatch.setenv("POLYPUS_LOG_DIR", str(blocker / "logs"))
+        logger = logging.getLogger(LOGGER_NAME)
+        logger.setLevel(logging.WARNING)
+
+        with pytest.warns(UserWarning, match="POLYPUS_LOG_DIR"):
+            rf.log_message("run1", "still fine", "error")
+
+        assert _file_handlers(logger) == []
+        assert logger.level == logging.WARNING
