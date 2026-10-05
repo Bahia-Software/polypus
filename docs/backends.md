@@ -265,6 +265,8 @@ backend against that protocol (like QMIO) is preferable.
 ### Using it from Python
 
 ```python
+import json
+
 import polypus
 
 polypus.run_quantum_circuit(
@@ -272,8 +274,10 @@ polypus.run_quantum_circuit(
     shots=1024,
     infrastructure="subprocess",
     options={
-        # Required: the worker command (argv, split on whitespace).
-        "command": "python3 /path/to/my_worker.py",
+        # Required: the worker command. A JSON array of strings (argv) when the
+        # value starts with "[" -- the only form that can carry a space inside an
+        # argument; otherwise it is split on whitespace (no quotes, no escapes).
+        "command": json.dumps(["python3", "/path/to/my worker.py"]),
         # Optional:
         "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
         "arm_pdeathsig": "true",  # orphan guard (Linux); default true
@@ -285,6 +289,20 @@ polypus.run_quantum_circuit(
 The `options` dict is the same one every entry point (`run_quantum_circuit`,
 `train`, `qml.train`) now accepts, and is how any registered backend receives its
 configuration.
+
+**The `command` option has two forms.** Option values are plain strings, so the
+argv list travels as JSON text:
+
+- **JSON array** — if the value, after leading whitespace, starts with `[`, it must
+  be a JSON array of strings (`json.dumps([...])` in Python), e.g.
+  `["python3", "/path with spaces/worker.py"]`. Use this whenever the interpreter or
+  any argument contains whitespace. A value that starts with `[` but is not a valid
+  non-empty array of strings (malformed JSON, a non-string element, `[]`, an empty
+  `argv[0]`) is rejected with a `BackendError` — it is never silently split on
+  spaces instead.
+- **Plain string** — anything else is split on whitespace into argv. There is **no
+  quote or escape handling**: `python3 "a b.py"` yields the arguments `"a` and `b.py"`.
+  Fine for simple paths; switch to the array form for anything else.
 
 ### Writing the worker
 

@@ -613,16 +613,49 @@ impl SubprocessBackend {
 
     /// Build a [`SubprocessBackend`] from a registry [`BackendBuildContext`].
     ///
-    /// Options read: `command` (required, argv split on whitespace),
-    /// `recv_timeout_ms` (default [`DEFAULT_RECV_TIMEOUT_MS`]; a present-but-malformed
-    /// value is an error, not a fallback), `arm_pdeathsig` (default true; false
-    /// spellings, case-insensitive: `false`/`0`/`no`/`off`), `cwd` (optional).
+    /// Options read: `command` (required; a JSON array of strings such as
+    /// `["python3", "/path with spaces/worker.py"]` when the value starts with `[`,
+    /// otherwise split on whitespace — no quotes or escapes, so use the array form
+    /// for any argument containing a space), `recv_timeout_ms` (default
+    /// [`DEFAULT_RECV_TIMEOUT_MS`]; a present-but-malformed value is an error, not a
+    /// fallback), `arm_pdeathsig` (default true; false spellings, case-insensitive:
+    /// `false`/`0`/`no`/`off`), `cwd` (optional).
     pub fn from_context(
         ctx: &BackendBuildContext,
     ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
         let config = config_from_context(ctx)?;
         let backend = SubprocessBackend::spawn(config)?;
         Ok(Arc::new(backend))
+    }
+}
+
+/// Parse the `command` option into an argv.
+///
+/// A value that (after leading whitespace) starts with `[` is a JSON array of strings —
+/// the only way to pass an argument containing whitespace. Anything else is split on
+/// whitespace, without quotes or escapes. A value starting with `[` that is not a valid
+/// non-empty string array is an error, never a silent fall-back to the whitespace split.
+fn parse_command(raw: &str) -> Result<Vec<String>, BackendError> {
+    let empty = || {
+        BackendError::Conversion("the 'subprocess' backend's 'command' option is empty".to_string())
+    };
+    let command: Vec<String> = if raw.trim_start().starts_with('[') {
+        serde_json::from_str(raw).map_err(|e| {
+            BackendError::Conversion(format!(
+                "the 'subprocess' backend's 'command' option starts with '[' so it must be a \
+                 JSON array of strings (e.g. [\"python3\", \"worker.py\"]): {e}"
+            ))
+        })?
+    } else {
+        raw.split_whitespace().map(str::to_string).collect()
+    };
+    match command.first() {
+        None => Err(empty()),
+        Some(program) if program.is_empty() => Err(BackendError::Conversion(
+            "the 'subprocess' backend's 'command' option has an empty program (argv[0])"
+                .to_string(),
+        )),
+        Some(_) => Ok(command),
     }
 }
 
@@ -637,12 +670,7 @@ fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, Ba
             "the 'subprocess' backend requires a 'command' option (the worker argv)".to_string(),
         )
     })?;
-    let command: Vec<String> = command_str.split_whitespace().map(str::to_string).collect();
-    if command.is_empty() {
-        return Err(BackendError::Conversion(
-            "the 'subprocess' backend's 'command' option is empty".to_string(),
-        ));
-    }
+    let command = parse_command(command_str)?;
     // A malformed value is a configuration mistake — surface it, don't silently
     // fall back to the default (which only an *absent* key uses).
     let recv_timeout_ms = match ctx.option("recv_timeout_ms") {
@@ -840,6 +868,60 @@ mod tests {
             Err(BackendError::Conversion(m)) => assert!(m.contains("command")),
             other => panic!("expected a Conversion error naming 'command', got {other:?}"),
         }
+    }
+
+    fn command_of(value: &str) -> Result<Vec<String>, BackendError> {
+        config_from_context(&ctx(&[("command", value)])).map(|cfg| cfg.command)
+    }
+
+    fn assert_conversion_error(value: &str) {
+        match command_of(value) {
+            Err(BackendError::Conversion(m)) => {
+                assert!(m.contains("command"), "message should name 'command': {m}")
+            }
+            other => panic!("expected a Conversion error for {value:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_array_command_keeps_arguments_with_spaces_intact() {
+        let cmd = command_of(r#"["python3", "/path with spaces/worker.py", "--flag value"]"#)
+            .expect("a valid JSON array is accepted");
+        assert_eq!(
+            cmd,
+            ["python3", "/path with spaces/worker.py", "--flag value"]
+        );
+        // Leading whitespace before the '[' still selects the JSON form.
+        let cmd = command_of("  \n[\"python3\", \"w.py\"]").unwrap();
+        assert_eq!(cmd, ["python3", "w.py"]);
+    }
+
+    #[test]
+    fn invalid_json_command_is_an_error_never_a_whitespace_split() {
+        assert_conversion_error("[]");
+        assert_conversion_error(r#"[""]"#);
+        assert_conversion_error(r#"["", "w.py"]"#);
+        assert_conversion_error(r#"["python3", 3]"#);
+        assert_conversion_error(r#"["python3", null]"#);
+        assert_conversion_error(r#"["python3", "w.py""#); // truncated
+        assert_conversion_error(r#"["python3", "w.py"] trailing"#);
+        // Python-style quoting is not JSON; it must not be split on spaces instead.
+        assert_conversion_error("['python3', 'w.py']");
+    }
+
+    #[test]
+    fn plain_command_is_still_split_on_whitespace() {
+        assert_eq!(
+            command_of("  python3   /path/worker.py --flag ").unwrap(),
+            ["python3", "/path/worker.py", "--flag"]
+        );
+        // No quote handling: the quotes stay in the tokens, which is why the JSON
+        // array form exists.
+        assert_eq!(
+            command_of(r#"python3 "a b.py""#).unwrap(),
+            ["python3", "\"a", "b.py\""]
+        );
+        assert_conversion_error("   ");
     }
 
     #[test]
