@@ -12,6 +12,6 @@ description       = "Pure-Rust variational optimizers for Polypus (Differential 
 name = "polypus_optimizers"
 
 [dependencies]
-ndarray = "0.16"
+ndarray = "0.17"
 rand    = { workspace = true }
 log     = { workspace = true }

@@ -73,16 +73,16 @@ fn native_qubo_matches_naive_reference() {
     let num_vars = 6;
 
     // Random dense linear + a few random quadratic terms.
-    let linear: Vec<f64> = (0..num_vars).map(|_| rng.gen_range(-2.0..2.0)).collect();
+    let linear: Vec<f64> = (0..num_vars).map(|_| rng.random_range(-2.0..2.0)).collect();
     let mut quadratic = Vec::new();
     for i in 0..num_vars {
         for j in (i + 1)..num_vars {
-            if rng.gen_bool(0.5) {
-                quadratic.push((i, j, rng.gen_range(-1.5..1.5)));
+            if rng.random_bool(0.5) {
+                quadratic.push((i, j, rng.random_range(-1.5..1.5)));
             }
         }
     }
-    let constant = rng.gen_range(-1.0..1.0);
+    let constant = rng.random_range(-1.0..1.0);
     let scale = -1.0;
 
     let sparse_linear: Vec<(usize, f64)> = linear.iter().copied().enumerate().collect();
@@ -99,11 +99,11 @@ fn native_qubo_matches_naive_reference() {
     let mut batch: Vec<HashMap<String, u64>> = Vec::new();
     for _ in 0..32 {
         let mut c = HashMap::new();
-        for _ in 0..rng.gen_range(1..12) {
+        for _ in 0..rng.random_range(1..12) {
             let key: String = (0..num_vars)
-                .map(|_| if rng.gen_bool(0.5) { '1' } else { '0' })
+                .map(|_| if rng.random_bool(0.5) { '1' } else { '0' })
                 .collect();
-            *c.entry(key).or_insert(0) += rng.gen_range(1..50);
+            *c.entry(key).or_insert(0) += rng.random_range(1..50);
         }
         batch.push(c);
     }

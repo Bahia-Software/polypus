@@ -90,9 +90,9 @@ fn sample_cos_theta(energy_mev: f64, rng: &mut impl Rng) -> f64 {
     // dσ/dΩ is maximal in the forward direction (no energy loss).
     let d_max = differential_cross_section(energy_mev, 1.0);
     loop {
-        let cos_theta: f64 = rng.gen_range(-1.0..=1.0);
+        let cos_theta: f64 = rng.random_range(-1.0..=1.0);
         let p = differential_cross_section(energy_mev, cos_theta) / d_max;
-        let u: f64 = rng.gen_range(0.0..1.0);
+        let u: f64 = rng.random_range(0.0..1.0);
         if u <= p {
             return cos_theta;
         }
@@ -146,7 +146,7 @@ pub fn sample(
 ) -> (ParticleState, f64, Vec<ParticleState>) {
     let e = state.momentum.energy_mev;
     let cos_theta = sample_cos_theta(e, rng);
-    let phi: f64 = rng.gen_range(0.0..(2.0 * PI));
+    let phi: f64 = rng.random_range(0.0..(2.0 * PI));
     let e_prime = scattered_energy(e, cos_theta);
     let new_dir = rotate_direction(state.momentum.direction, cos_theta, phi);
 
@@ -217,7 +217,7 @@ mod tests {
         let dir = [0.0, 0.0, 1.0];
         for _ in 0..1000 {
             let cos_theta = sample_cos_theta(1.0, &mut rng);
-            let phi: f64 = rng.gen_range(0.0..(2.0 * PI));
+            let phi: f64 = rng.random_range(0.0..(2.0 * PI));
             let r = rotate_direction(dir, cos_theta, phi);
             let mag = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
             assert!((mag - 1.0).abs() < 1e-9);
