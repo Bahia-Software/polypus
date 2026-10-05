@@ -28,7 +28,7 @@ Rules of the road:
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
-| C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
+| C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -695,4 +695,41 @@ the temp-file and log-stream naming applies to every infrastructure.
 `run_quantum_circuit` is not covered: it generates its own `id` internally and
 takes no such kwarg.
 
-**Enforcing test:** `tests/python/test_id_validation.py`.
+### Python mirror
+
+The `polypus_python` helpers in `polypus_python/running_functions.py` also turn
+an `id` into file names (`circuit_<id>.qpy`, `polypus_python_<id>.log`) and, in
+`run_qc_in_qpu`/`run_qcs_in_qpu`, into the CUNQA `family` name. They are
+public and can be called without going through `train`/`qml.train`, so they
+validate `id` themselves with `validate_id`, a Python mirror of the Rust check.
+The policy is **identical**: same charset (ASCII letters, ASCII digits, `.`,
+`_`, `-`, checked character by character, never with `str.isalnum()` or a
+`$`-anchored regex), same 64-character bound and same order of checks (empty,
+then charset, then length), with the same `ValueError` messages (the offending
+character and the id are shown with Python's `repr`). A non-`str` `id` raises
+`TypeError`.
+
+It runs as the first statement of `get_logger`, `log_message`,
+`_get_temp_directory`, `serialize_quantum_circuit`,
+`_deserialize_quantum_circuit`, `run_qc_in_qpu` and `run_qcs_in_qpu` (and of
+`_load_configuration`), before any filesystem access, any optional `cunqa`
+import and any `try` block, so a rejected `id` touches nothing and the
+`log_message` calls in the error handlers can never raise on `id` and mask the
+original exception.
+
+The 64-character bound applies to every one of these functions, including
+`run_qc_in_qpu`/`run_qcs_in_qpu`, where `id` is the CUNQA family name. Rust
+names the families it raises with the *effective* id (prefix + `_` + 36-char
+UUID, up to 101 characters), passing it only to `connect_to_infrastructure` /
+`run_qcs` (C-1), which do not go through `running_functions`. Today no caller in
+the repository passes an effective id to any of these functions, so
+`run_qc_in_qpu`/`run_qcs_in_qpu` accept only ids of at most 64 characters: they
+cannot attach to a polypus-raised family whose prefix is longer than 27
+characters. Anyone who later uses them to look up a family raised by polypus
+must keep the original prefix short enough for the effective id to fit (at most
+27 characters) or relax this policy through an explicit contract change.
+
+**Enforcing tests:** `tests/python/test_id_validation.py` (Rust entry points);
+`tests/python/test_python_helpers_hygiene.py` (Python mirror: it reuses
+the same `VALID_IDS`/`INVALID_IDS` lists, so the two sides cannot drift without
+a test failing).
