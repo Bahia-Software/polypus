@@ -3,7 +3,12 @@ from .connectivity import (
     disconnect_from_infrastructure,
     run_qcs,
 )
-from .qaoa_utils import build_qaoa_circuit, expectation_value, expectation_values
+from .qaoa_utils import (
+    build_qaoa_circuit,
+    expectation_value,
+    expectation_values,
+    qaoa_params_to_dict,
+)
 from .running_functions import (
     run_qc_in_qpu,
     run_qcs_in_qpu,
