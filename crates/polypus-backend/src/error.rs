@@ -16,9 +16,12 @@
 //! boundary type-erased in [`BackendError::External`], a
 //! `Box<dyn std::error::Error + Send + Sync>`. The Polypus FFI edge
 //! (`polypus::exceptions`) downcasts it back to the original `PyErr` and
-//! re-raises it verbatim, exactly as the old `Seam` variant did — the difference
-//! is that the boxing is generic, so a third-party backend boxes *its own* error
-//! type here without this crate ever naming it. Mapping either enum to a Python
+//! re-raises it with its original class, as the old `Seam` variant did — except
+//! an exception the edge identifies as raised by the circuit SDK behind the
+//! Python backends, which it raises as `polypus.BackendError` chaining the
+//! original (contract C-1, issue #218). The difference from `Seam` is that the
+//! boxing is generic, so a third-party backend boxes *its own* error type here
+//! without this crate ever naming it. Mapping either enum to a Python
 //! exception stays the sole responsibility of the FFI edge.
 
 use std::error::Error;
@@ -103,8 +106,10 @@ pub enum BackendError {
     /// Any provider-specific failure, type-erased.
     ///
     /// The Polypus Python backends box a `PyErr` here so the FFI edge can
-    /// downcast and re-raise the original Python exception verbatim (keeping its
-    /// `ValueError`/`TypeError`/`KeyboardInterrupt` class); the QMIO backend
+    /// downcast and re-raise the original Python exception (keeping its
+    /// `ValueError`/`TypeError`/`KeyboardInterrupt` class; an exception of the
+    /// circuit SDK behind those backends is raised as `polypus.BackendError`
+    /// with the original as its cause — contract C-1); the QMIO backend
     /// boxes its own `QmioError`; a third-party backend boxes whatever error type
     /// it likes. This is what keeps `polypus-backend` free of any provider or
     /// PyO3 coupling in its error surface.

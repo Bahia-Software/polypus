@@ -111,9 +111,11 @@ impl CircuitSource {
 
 /// Bind `params` to a copy of a Qiskit `circuit` and return the bound circuit.
 ///
-/// Any Python error (constructing the kwargs, calling `assign_parameters`) is
-/// returned as [`EvaluationError::Python`] — carried verbatim so the caller can
-/// re-raise it with its original type across the FFI.
+/// A failure of Qiskit's `assign_parameters` call itself is
+/// [`EvaluationError::Qiskit`], which the FFI edge raises as
+/// `polypus.EvaluationError` when Qiskit's own exception class raised it (issue
+/// #218). A failure converting the arguments is [`EvaluationError::Python`],
+/// carried verbatim.
 pub(crate) fn assign_parameters_qiskit(
     circuit: &Py<PyAny>,
     params: &[f64],
@@ -128,7 +130,7 @@ pub(crate) fn assign_parameters_qiskit(
             .map_err(EvaluationError::Python)?;
         Ok(qc
             .call_method("assign_parameters", (params.to_vec(),), Some(&kwargs))
-            .map_err(EvaluationError::Python)?
+            .map_err(EvaluationError::Qiskit)?
             .unbind())
     })
 }
@@ -150,3 +152,49 @@ pub(crate) fn assign_parameters_qiskit(
 /// To add a new evaluation strategy (e.g. noisy readout mitigation, hardware
 /// native gates, …) implement this trait without touching any algorithm.
 pub use polypus_optimizers::EvaluationOracle;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-in circuit whose `assign_parameters` raises `RuntimeError`, run in a
+    /// bare interpreter (no Qiskit needed, ENGINEERING §3).
+    fn failing_circuit(py: Python<'_>) -> Py<PyAny> {
+        pyo3::types::PyModule::from_code(
+            py,
+            c"class Circuit:\n    def assign_parameters(self, *args, **kwargs):\n        raise RuntimeError('binding refused')\n",
+            c"stand_in.py",
+            c"stand_in",
+        )
+        .and_then(|module| module.getattr("Circuit")?.call0())
+        .expect("the stand-in circuit instantiates")
+        .unbind()
+    }
+
+    #[test]
+    fn a_failing_binding_call_is_the_qiskit_variant() {
+        // Issue #218: Qiskit's `assign_parameters` failing is told apart from a
+        // user callback (`Python`), so the FFI edge can wrap a Qiskit exception
+        // without retyping a callback's. The exception itself is kept as raised.
+        pyo3::Python::initialize();
+        let circuit = Python::attach(failing_circuit);
+        match assign_parameters_qiskit(&circuit, &[0.5]) {
+            Err(EvaluationError::Qiskit(err)) => Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+                assert!(err.to_string().contains("binding refused"));
+            }),
+            other => panic!("expected EvaluationError::Qiskit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qiskit_variant_display_names_the_binding() {
+        pyo3::Python::initialize();
+        let err = EvaluationError::Qiskit(pyo3::exceptions::PyRuntimeError::new_err("nope"));
+        let message = err.to_string();
+        assert!(
+            message.contains("Qiskit parameter binding failed") && message.contains("nope"),
+            "{message}"
+        );
+    }
+}

@@ -66,6 +66,20 @@ impl NativeStatevectorBackend {
         }
     }
 
+    /// Check, without simulating anything, that this backend can execute
+    /// `circuit`: the step [`run_circuits`](QuantumBackend::run_circuits) takes
+    /// first, with the error it would fail with — an OpenQASM 2.0 program the
+    /// importer rejects (`reset`, `if`, a gate after a measurement, a syntax
+    /// error; contract C-4) is [`BackendError::NativeCircuit`], a Qiskit circuit
+    /// is [`BackendError::UnsupportedCircuit`]. GIL-free and side-effect free:
+    /// unlike execution, it writes no log record for a rejected circuit.
+    ///
+    /// Structural only: the qubit ceiling and the memory budget, which depend on
+    /// the host, are not checked.
+    pub fn check_circuit(circuit: &BoundCircuit) -> Result<(), BackendError> {
+        native_source(circuit).map(|_| ())
+    }
+
     /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
     /// default, matching [`StatevectorSimulator::default`]). Backs
     /// [`BackendConfig::LocalNative`](crate::BackendConfig::LocalNative)'s
@@ -94,28 +108,14 @@ impl NativeStatevectorBackend {
         circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
     ) -> Result<Cow<'a, ConcreteCircuit>, BackendError> {
-        // Obtain a ConcreteCircuit without touching Python, borrowing the
-        // source directly for the Native variant.
-        let source: Cow<'a, ConcreteCircuit> = match circuit {
-            BoundCircuit::Native(cc) => Cow::Borrowed(cc),
-            BoundCircuit::Qasm2(qasm) => Cow::Owned(
-                ParameterizedCircuit::from_qasm2(qasm)
-                    .and_then(|pc| pc.assign_parameters(&[]))
-                    .map_err(|e| {
-                        log::error!("native backend could not parse OpenQASM 2.0: {e}");
-                        BackendError::NativeCircuit(format!(
-                            "native backend could not parse OpenQASM 2.0: {e}"
-                        ))
-                    })?,
-            ),
-            BoundCircuit::Foreign(_) => {
-                return Err(BackendError::UnsupportedCircuit(
-                    "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
-                     pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
-                        .to_string(),
-                ))
+        // The pre-check (`check_circuit`) shares `native_source` but must stay
+        // silent: a rejection is only an error when it stops a run, so it is
+        // logged here, on the execution path.
+        let source = native_source(circuit).inspect_err(|e| {
+            if let BackendError::NativeCircuit(message) = e {
+                log::error!("{message}");
             }
-        };
+        })?;
 
         // Transpile the native circuit (GIL-free) before simulating. When the
         // transpiler is a guaranteed no-op, keep the borrow and skip the
@@ -283,6 +283,32 @@ impl NativeStatevectorBackend {
     }
 }
 
+/// The [`ConcreteCircuit`] a [`BoundCircuit`] stands for, obtained without
+/// touching Python: a `Native` circuit is borrowed, a `Qasm2` program is parsed
+/// by the OpenQASM importer, and a Qiskit `Foreign` circuit is rejected. Shared
+/// by execution ([`NativeStatevectorBackend::concrete_circuit`]) and the
+/// structural pre-check ([`NativeStatevectorBackend::check_circuit`]), so both
+/// accept and reject exactly the same circuits with the same message. It logs
+/// nothing: execution logs a rejection, the pre-check does not.
+fn native_source(circuit: &BoundCircuit) -> Result<Cow<'_, ConcreteCircuit>, BackendError> {
+    match circuit {
+        BoundCircuit::Native(cc) => Ok(Cow::Borrowed(cc)),
+        BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
+            .and_then(|pc| pc.assign_parameters(&[]))
+            .map(Cow::Owned)
+            .map_err(|e| {
+                BackendError::NativeCircuit(format!(
+                    "native backend could not parse OpenQASM 2.0: {e}"
+                ))
+            }),
+        BoundCircuit::Foreign(_) => Err(BackendError::UnsupportedCircuit(
+            "the native statevector backend cannot execute a Qiskit QuantumCircuit; \
+             pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
+                .to_string(),
+        )),
+    }
+}
+
 /// The widest circuit in a batch, used to size the memory budget (plan §4.5):
 /// the native backend budgets for its largest statevector. Each circuit's width
 /// comes from the shared, GIL-free [`BoundCircuit::native_qubit_width`] — `Native`
@@ -300,7 +326,13 @@ fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
 /// qubit indexing with the highest classical bit on the left. The width is the
 /// classical-register size, or the qubit count for a measurement-free circuit
-/// (a full-register read-out).
+/// (a full-register read-out, contract C-3).
+///
+/// `num_clbits()` is 0 exactly when the circuit has no `Measure`/`MeasureAll`
+/// instruction: it is derived from those instructions, never from declared
+/// registers (a [`ConcreteCircuit`] does not keep an OpenQASM `creg` it never
+/// writes). So a `creg` declared but unmeasured does not change the width —
+/// pinned by `unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs`.
 fn format_counts(concrete: &ConcreteCircuit, raw: HashMap<usize, u64>) -> HashMap<String, u64> {
     let width = match concrete.num_clbits() {
         0 => concrete.num_qubits,
@@ -1030,6 +1062,122 @@ mod tests {
         assert!(out[1].is_empty() && out[2].is_empty());
         let total: u64 = out.iter().flat_map(|m| m.values()).sum();
         assert_eq!(total, 1);
+    }
+
+    /// Regression (issue #218, C-3): a circuit with no measurement instruction
+    /// is read out on the full quantum register, `num_qubits` wide, whatever
+    /// classical registers it declares — narrower, as wide or wider than the
+    /// quantum one — on both the batch and the shot-distributed paths.
+    #[test]
+    fn unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs() {
+        let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n";
+        let cfg = config_with(OptLevel::default());
+        for cregs in [
+            "",
+            "creg c[1];\n",
+            "creg c[3];\n",
+            "creg c[5];\n",
+            "creg a[2];\ncreg b[4];\n",
+        ] {
+            let qasm = format!("{header}{cregs}x q[0];\nx q[2];\n");
+            let circuit = BoundCircuit::Qasm2(qasm);
+            let backend = NativeStatevectorBackend::new(3);
+            let batch = backend
+                .run_circuits(std::slice::from_ref(&circuit), &cfg.run_params())
+                .unwrap();
+            assert_eq!(
+                batch,
+                vec![HashMap::from([("101".to_string(), 500)])],
+                "{cregs:?}"
+            );
+            let distributed = backend
+                .run_shots_distributed(&circuit, &[7, 5], &cfg.run_params())
+                .unwrap();
+            assert_eq!(
+                distributed,
+                vec![
+                    HashMap::from([("101".to_string(), 7)]),
+                    HashMap::from([("101".to_string(), 5)]),
+                ],
+                "{cregs:?}"
+            );
+        }
+    }
+
+    /// `format_counts` itself: the width follows the measurement instructions,
+    /// so the same raw state formats `num_qubits` wide without them and
+    /// `num_clbits` wide with them.
+    #[test]
+    fn format_counts_width_follows_measurement_instructions() {
+        let unmeasured = ParameterizedCircuit::new(3)
+            .x(0)
+            .assign_parameters(&[])
+            .unwrap();
+        let raw = HashMap::from([(1usize, 4u64)]);
+        assert_eq!(
+            format_counts(&unmeasured, raw.clone()),
+            HashMap::from([("001".to_string(), 4)])
+        );
+        let measured = ParameterizedCircuit::new(3)
+            .x(0)
+            .measure(0, 4)
+            .assign_parameters(&[])
+            .unwrap();
+        assert_eq!(
+            format_counts(&measured, raw),
+            HashMap::from([("00001".to_string(), 4)])
+        );
+    }
+
+    /// `check_circuit` accepts and rejects exactly what execution does, with the
+    /// same error, and simulates nothing.
+    #[test]
+    fn check_circuit_matches_execution() {
+        let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\n";
+        let cfg = config_with(OptLevel::default());
+        let backend = NativeStatevectorBackend::new(0);
+        let cases = [
+            (format!("{header}h q[0];\nmeasure q -> c;\n"), None),
+            (
+                format!("{header}reset q[0];\n"),
+                Some("'reset' is not supported"),
+            ),
+            (
+                format!("{header}measure q[0] -> c[0];\nx q[0];\n"),
+                Some("after it was measured"),
+            ),
+            (
+                format!("{header}if(c==1) x q[0];\n"),
+                Some("'if' statements are not supported"),
+            ),
+            (
+                "not openqasm".to_string(),
+                Some("could not parse OpenQASM 2.0"),
+            ),
+        ];
+        for (qasm, rejection) in cases {
+            let circuit = BoundCircuit::Qasm2(qasm);
+            let checked = NativeStatevectorBackend::check_circuit(&circuit);
+            let run = backend.run_circuits(std::slice::from_ref(&circuit), &cfg.run_params());
+            match rejection {
+                None => {
+                    assert!(checked.is_ok());
+                    assert!(run.is_ok());
+                }
+                Some(fragment) => {
+                    let checked = checked.expect_err("rejected by the check").to_string();
+                    let run = run.expect_err("rejected by execution").to_string();
+                    assert!(checked.contains(fragment), "{checked}");
+                    assert_eq!(checked, run);
+                }
+            }
+        }
+        pyo3::Python::initialize();
+        let foreign = pyo3::Python::attach(|py| crate::QiskitCircuit::into_bound(py.None()));
+        assert!(matches!(
+            NativeStatevectorBackend::check_circuit(&foreign),
+            Err(BackendError::UnsupportedCircuit(_))
+        ));
     }
 
     #[test]

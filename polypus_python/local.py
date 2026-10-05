@@ -1,4 +1,5 @@
-from qiskit import QuantumCircuit
+from qiskit import ClassicalRegister, QuantumCircuit
+from qiskit.result import marginal_distribution
 from qiskit_aer import AerSimulator
 
 from .infrastructure import Infraestructure
@@ -59,6 +60,47 @@ def _ensure_quantum_circuits(qcs):
     ]
 
 
+def _has_measurement(qc):
+    """Whether ``qc`` contains a ``measure`` anywhere, control-flow bodies
+    included. Scanned from the end: measurements are terminal in the common
+    case, so a measured circuit is usually recognised after a few steps."""
+    for instruction in reversed(qc.data):
+        operation = instruction.operation
+        if operation.name == "measure":
+            return True
+        if any(_has_measurement(block) for block in getattr(operation, "blocks", ())):
+            return True
+    return False
+
+
+def _with_full_readout(qc):
+    """Return the circuit Aer should run for ``qc`` and the classical bits to
+    read its counts from (``None``: every bit, as Qiskit reports them).
+
+    Contract C-3: a circuit with **no measurement instruction** is read out on
+    the full quantum register, like the native backend does, whatever classical
+    registers it declares. Aer returns no counts at all for such a circuit, so
+    a copy measures every qubit into a register of its own, and only that
+    register's bits make up the key: ``num_qubits`` wide, qubit 0 rightmost.
+    ``measure_all`` is not used because it adds its register next to the
+    declared ones, widening the key to ``num_qubits + num_clbits``. The
+    caller's circuit is never modified.
+    """
+    if _has_measurement(qc):
+        return qc, None
+    taken = {creg.name for creg in qc.cregs}
+    name = "meas"
+    suffix = 0
+    while name in taken:
+        suffix += 1
+        name = f"meas{suffix}"
+    readout = ClassicalRegister(qc.num_qubits, name)
+    measured = qc.copy()
+    measured.add_register(readout)
+    measured.measure(measured.qubits, readout)
+    return measured, [measured.find_bit(bit).index for bit in readout]
+
+
 class Local(Infraestructure):
     """Local AerSimulator backend.
 
@@ -76,7 +118,10 @@ class Local(Infraestructure):
         pass
 
     def run_qcs(self, **args) -> object:
-        qcs = _ensure_quantum_circuits(args["qcs"])
+        prepared = [
+            _with_full_readout(qc) for qc in _ensure_quantum_circuits(args["qcs"])
+        ]
+        qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")
         noise_model = args.get("noise_model", None)
@@ -122,7 +167,12 @@ class Local(Infraestructure):
         # Qiskit space-separates the keys per ClassicalRegister ("0 1 0") when a
         # circuit declares several; contract C-3 wants one flat bitstring. The
         # groups are already in clbit order, so dropping the spaces is enough.
-        return [
-            {key.replace(" ", ""): count for key, count in result.get_counts(i).items()}
-            for i in range(len(qcs))
-        ]
+        # A full read-out keeps only the bits of the register it added.
+        counts = []
+        for i, (_, readout) in enumerate(prepared):
+            raw = result.get_counts(i)
+            if readout is None:
+                counts.append({key.replace(" ", ""): n for key, n in raw.items()})
+            else:
+                counts.append(dict(marginal_distribution(raw, readout)))
+        return counts

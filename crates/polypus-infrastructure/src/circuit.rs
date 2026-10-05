@@ -19,10 +19,12 @@ use pyo3::prelude::*;
 /// [`BackendError::External`] variant, so it crosses the backend contract
 /// type-erased and the FFI edge (`polypus::exceptions`) can downcast it back and
 /// re-raise the original exception verbatim (preserving its
-/// `ValueError`/`TypeError`/`KeyboardInterrupt` class — contract C-1).
+/// `ValueError`/`TypeError`/`KeyboardInterrupt` class — contract C-1). The edge
+/// raises a Qiskit exception as `polypus.BackendError` instead, chaining the
+/// original (issue #218); the box carries it unchanged either way.
 ///
 /// This replaces the pre-extraction `BackendError::Seam(PyErr)` variant: the same
-/// verbatim re-raise, but the boxing keeps PyO3 out of `polypus-backend`.
+/// downcast-and-re-raise, but the boxing keeps PyO3 out of `polypus-backend`.
 pub fn seam_error(err: PyErr) -> BackendError {
     BackendError::External(Box::new(err))
 }

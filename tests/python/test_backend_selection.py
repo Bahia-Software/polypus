@@ -443,6 +443,122 @@ class TestLastMeasurementWins:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Circuits without measurements read the full register on every backend (#218)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_QASM_HEADER = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
+
+# (body, expected counts key). No circuit here contains a `measure`, so C-3's
+# full-register read-out applies: the key is `num_qubits` wide, qubit 0
+# rightmost, whatever classical registers are declared.
+_UNMEASURED = {
+    "no_creg": ("qreg q[2];\nx q[0];\n", "01"),
+    "creg_as_wide_as_qreg": ("qreg q[2];\ncreg c[2];\nx q[0];\n", "01"),
+    "creg_wider_than_qreg": ("qreg q[2];\ncreg c[3];\nx q[0];\n", "01"),
+    "creg_narrower_than_qreg": ("qreg q[3];\ncreg c[1];\nx q[0];\nx q[2];\n", "101"),
+    # A register already named like Qiskit's `measure_all` one must not collide
+    # with the register the Aer path adds.
+    "creg_named_meas": ("qreg q[2];\ncreg meas[2];\nx q[1];\n", "10"),
+    "two_qregs": ("qreg a[1];\nqreg b[2];\ncreg c[1];\nx b[1];\n", "100"),
+}
+
+
+# Measured, with a `creg` wider than the highest bit it writes (c[1] of c[3]).
+_WIDER_CREG_MEASURED = (
+    _QASM_HEADER + "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n"
+)
+
+
+@pytest.mark.integration
+class TestUnmeasuredCircuitsReadTheFullRegister:
+    """Aer used to raise ``QiskitError: No counts for experiment`` for a
+    circuit without measurements, while the native backend returned the
+    full-register read-out that C-3 specifies. Both now return the same."""
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_key_is_num_qubits_wide(self, backend, case):
+        import polypus
+
+        body, key = _UNMEASURED[case]
+        result = polypus.run_quantum_circuit(
+            _QASM_HEADER + body, shots=200, infrastructure="local", backend=backend
+        )
+        assert result.counts == [{key: 200}]
+
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_aer_and_native_agree(self, case):
+        body, _ = _UNMEASURED[case]
+        aer, native = _run_both(_QASM_HEADER + body, shots=64)
+        assert aer == native
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_superposition_keys_and_shots(self, backend):
+        import polypus
+
+        qasm = _QASM_HEADER + "qreg q[2];\ncreg c[3];\nh q[0];\nx q[1];\n"
+        result = polypus.run_quantum_circuit(
+            qasm, shots=500, infrastructure="local", backend=backend, seed=3
+        )
+        (counts,) = result.counts
+        assert set(counts) == {"10", "11"}
+        assert sum(counts.values()) == 500
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_native_circuit_without_measurements(self, backend):
+        import polypus
+
+        qc = polypus.Circuit(3).x(0).x(1)
+        result = polypus.run_quantum_circuit(
+            qc, shots=100, infrastructure="local", backend=backend, n_qpus=3
+        )
+        assert result.counts == [{"011": 34}, {"011": 33}, {"011": 33}]
+
+    def test_aer_qiskit_circuit_is_not_mutated(self):
+        import polypus
+        from qiskit import ClassicalRegister, QuantumCircuit
+
+        qc = QuantumCircuit(2)
+        qc.add_register(ClassicalRegister(3, "c"))
+        qc.x(0)
+        before = (len(qc.data), [reg.name for reg in qc.cregs], qc.num_clbits)
+        result = polypus.run_quantum_circuit(
+            qc, shots=50, infrastructure="local", backend="aer"
+        )
+        assert result.counts == [{"01": 50}]
+        assert (len(qc.data), [reg.name for reg in qc.cregs], qc.num_clbits) == before
+
+    def test_aer_reads_a_measured_circuit_at_its_declared_clbit_width(self):
+        """Documents what Aer does today, NOT a contract guarantee: Qiskit makes
+        the key as wide as the classical bits the circuit declares (``creg
+        c[3]`` gives 3 characters), even when fewer are written. The full
+        read-out above applies only to circuits with no measurement at all, so
+        this circuit is left to Qiskit. The native backend does not keep
+        declared registers and answers ``'10'`` instead; see
+        ``test_measured_circuit_with_a_wider_creg_has_the_same_keys`` (an open
+        C-3 known break)."""
+        import polypus
+
+        result = polypus.run_quantum_circuit(
+            _WIDER_CREG_MEASURED, shots=20, infrastructure="local", backend="aer"
+        )
+        assert result.counts == [{"010": 20}]
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "C-3 known break, open (#251): for a measured circuit "
+            "whose creg is wider than its highest written bit, Aer keys are as "
+            "wide as the declared clbits ('010') and native keys as max(cbit)+1 "
+            "('10'), because polypus-circuit does not keep declared registers"
+        ),
+    )
+    def test_measured_circuit_with_a_wider_creg_has_the_same_keys(self):
+        aer, native = _run_both(_WIDER_CREG_MEASURED, shots=20)
+        assert aer == native
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # train() with the native backend
 # ─────────────────────────────────────────────────────────────────────────────
 

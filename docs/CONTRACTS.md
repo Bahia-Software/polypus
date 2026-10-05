@@ -20,9 +20,9 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, open — see C-3) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
@@ -125,7 +125,29 @@ The Rust orchestration layer now returns a typed `Result` on every path:
 - A Python exception raised *by the seam function itself* (the three failure
   modes above, or any runtime error inside `run_qcs`) is **re-raised verbatim**,
   preserving its original type — so the `ValueError`/`TypeError` guarantees
-  above hold unchanged.
+  above hold unchanged — **except an exception raised by Qiskit** (issue #218):
+  one whose class, or any class in its MRO, is defined in a `qiskit*` module
+  (`qiskit.exceptions.QiskitError`, `qiskit_aer.AerError`,
+  `qiskit.qasm2.QASM2ParseError`, …) is raised as `polypus.BackendError`, whose
+  message starts with the Qiskit class's qualified name followed by its message,
+  with the original exception chained as `__cause__` (its traceback is kept).
+  Detection reads class names only, so Qiskit is never imported for it. A Qiskit
+  class that is also a `ValueError`, `TypeError` or `KeyboardInterrupt` is still
+  re-raised verbatim: the typed failure modes above, and cancellation, win.
+  The rule lives in one helper, `polypus::exceptions::wrap_qiskit_error`
+  (`qiskit_error_to_pyerr` on this seam).
+- The same rule covers the Qiskit calls Polypus makes on the user's Qiskit
+  circuits **outside** this seam, before any backend runs: `qml.train` /
+  `qml.predict` composing `feature_map` with `ansatz` and binding each row and
+  the weights, and the VQC/QML oracles binding candidate parameters
+  (`assign_parameters_qiskit`, which reports a failure of that call as
+  `EvaluationError::Qiskit`). There a Qiskit exception is raised as
+  **`polypus.EvaluationError`** (`qiskit_error_to_evaluation_error`) — no backend
+  is involved yet — again with `module.Class: message` and `__cause__`, and with
+  `ValueError`/`TypeError`/`KeyboardInterrupt` kept as they are. An exception
+  raised by the user's `expectation_function` (or variance callback) is **never**
+  retyped, even when its class is a Qiskit one: it travels in
+  `EvaluationError::Python` and re-raises verbatim.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
@@ -169,7 +191,25 @@ about *which kwarg* the Python side reads.
 **Enforcing test:** `tests/python/test_seam_contract.py` — runs in CI without
 SLURM by monkeypatching the `polypus_python` seam (`run_qcs`) to force a
 failure, asserting it surfaces as a typed Python exception (never a
-`PanicException`) with the C-1 type preserved.
+`PanicException`) with the C-1 type preserved. For Qiskit exceptions (issue
+#218): `test_seam_qiskit_error_becomes_backend_error` (`QiskitError`,
+`QASM2ParseError`, `AerError`, a user subclass; class name, message and
+`__cause__`), `test_seam_non_qiskit_error_is_reraised_verbatim`,
+`test_seam_qiskit_error_that_is_also_a_c1_type_is_preserved`, and, without
+monkeypatching, `test_real_aer_error_reaches_the_caller_as_polypus_error` and
+`test_real_qasm_parse_error_reaches_the_caller_as_polypus_error`; plus the
+`qiskit_*` / `non_qiskit_python_errors_are_reraised_verbatim` unit tests in
+`crates/polypus/src/exceptions.rs`. Outside the seam:
+`tests/python/test_qml_error_propagation.py` (`qml.train`/`qml.predict` composing
+and binding, both oracles' binding, all real Qiskit failures; the guards
+`test_qiskit_class_raised_by_a_user_callback_stays_verbatim` and
+`test_qiskit_value_and_type_errors_keep_their_class`), the
+`qiskit_binding_error_maps_to_evaluation_error_with_its_cause`,
+`qiskit_variant_keeps_non_qiskit_and_c1_typed_errors` and
+`python_variant_stays_verbatim_even_for_a_qiskit_class` unit tests in
+`crates/polypus/src/exceptions.rs`, and
+`a_failing_binding_call_is_the_qiskit_variant` in
+`crates/polypus-evaluation/src/lib.rs`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
@@ -313,7 +353,22 @@ circuit, bounds), the calls-with-free-parameters tests in
 ## C-3 · Measurement counts format
 
 - Keys are **bitstrings** of width `num_clbits` (or `num_qubits` when the
-  circuit has no measurements — full-register read-out convention).
+  circuit has no measurements — full-register read-out convention). "No
+  measurements" means **no `measure` instruction** (`Measure`/`MeasureAll`
+  natively): classical registers that are declared but never written do not
+  count, and do not change the width. This holds on the Aer and the native
+  backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
+  such a circuit). The CUNQA path is not verified.
+
+  *(Known break, open (#251): for a circuit **with** measurements, `num_clbits` is not
+  the same on every backend when a classical register is declared wider than
+  the highest bit written. Aer uses the declared width (`creg c[3]; measure
+  q[0] -> c[1];` gives `"010"`); the native backend uses `max(cbit) + 1`
+  (`"10"`), because `polypus-circuit` does not keep the size of a declared
+  register. Which width C-3 mandates is not decided yet. Pinned as a strict
+  `xfail` by `test_measured_circuit_with_a_wider_creg_has_the_same_keys` in
+  `tests/python/test_backend_selection.py`, which starts failing once the two
+  agree.)*
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -373,7 +428,13 @@ classical registers (Aer vs native parity) in
 in the `c3_*` tests of `crates/polypus-sim/tests/contracts.rs` (simulator
 semantics, incl. `MeasureAll` ordering against explicit `Measure`s) and
 `TestLastMeasurementWins` in `tests/python/test_backend_selection.py` (native
-vs. Aer, byte-identical counts; issue #205).
+vs. Aer, byte-identical counts; issue #205); the full-register read-out of a
+circuit without measurements, whatever `creg`s it declares, in
+`TestUnmeasuredCircuitsReadTheFullRegister` in
+`tests/python/test_backend_selection.py` (Aer and native, same keys) and
+`unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs` /
+`format_counts_width_follows_measurement_instructions` in
+`crates/polypus-infrastructure/src/native.rs` (issue #218).
 
 ---
 
@@ -628,6 +689,10 @@ rejected too, all before anything runs.
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
+A Qiskit failure while composing the circuits or binding a row (an ansatz wider
+than the feature map, a feature value Qiskit rejects) is raised as
+`polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
+#218).
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
 with nothing executed), `tests/python/test_qml_supervised.py` (each sample's

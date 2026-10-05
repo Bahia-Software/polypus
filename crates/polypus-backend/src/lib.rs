@@ -120,8 +120,10 @@ pub trait QuantumBackend: Send + Sync {
     ///
     /// A failure is returned as a [`BackendError`] (never a panic): a provider or
     /// Python exception is carried type-erased in [`BackendError::External`] so the
-    /// FFI edge can re-raise it verbatim, and a backend that stopped responding
-    /// mid-call is [`BackendError::Unresponsive`].
+    /// FFI edge can re-raise it with its original class (except an exception of
+    /// the circuit SDK behind the Python backends, which contract C-1 maps into
+    /// the `polypus` hierarchy), and a backend that stopped responding mid-call
+    /// is [`BackendError::Unresponsive`].
     fn run_circuits(
         &self,
         qcs: &[BoundCircuit],
