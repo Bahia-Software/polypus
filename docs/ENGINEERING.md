@@ -327,10 +327,15 @@ boundary stays out-of-process and explicit; see
   `Command::pre_exec` is an `unsafe fn` in std with no safe equivalent, and
   `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed in the child,
   between fork and exec — which is exactly what `pre_exec` is for. The block's body
-  is itself safe: it calls `nix`'s audited `set_pdeathsig` wrapper (a single
-  async-signal-safe `prctl(2)`), not hand-written FFI, and carries the mandated
-  `// SAFETY:` comment. Everything else the bridge needs from POSIX — notably
-  `kill` for out-of-band cancellation — goes through `nix`'s safe wrappers with no
+  is itself safe: it calls `nix`'s audited `set_pdeathsig` and `getppid` wrappers
+  (async-signal-safe `prctl(2)` / `getppid(2)`) and captures only a `Copy` pid, with
+  no allocation, locks or logging between fork and exec. It is not hand-written FFI
+  and carries the mandated `// SAFETY:` comment. The `getppid` check makes the child
+  exit before `exec` rather than run as an orphan if the parent died before the
+  signal was armed. The kernel binds the signal to the *forking thread*, so the fork
+  happens on a dedicated long-lived spawner thread (`Worker::spawn_detached`) that
+  outlives the worker. Everything else the bridge needs from POSIX — notably `kill`
+  for out-of-band cancellation — goes through `nix`'s safe wrappers with no
   `unsafe`. Do not add a second `unsafe` block to this crate without the same
   sign-off.
 - Let the compiler prove `Send`/`Sync`; never force them with `unsafe impl`.
