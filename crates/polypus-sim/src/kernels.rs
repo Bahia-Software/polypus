@@ -31,8 +31,9 @@
 //!   `ZZ`/`RZ` evolution, a QFT phase column). Tiling — rather than a single
 //!   loop with the op loop inside it — is what makes that pay off; see
 //!   [`DIAGONAL_TILE`];
-//! - **controlled 1-qubit** ([`apply_controlled_1q`]): the 2×2 is applied to a
-//!   pair only when the control bit (identical across the pair) is set;
+//! - **controlled 1-qubit** ([`apply_controlled_1q`]): the 2×2 is applied only
+//!   to the pairs whose control bit is set, enumerated directly over the
+//!   `2^(n-2)` sub-states of the other qubits;
 //! - **dense 2-qubit** ([`apply_2q`]): a full 4×4 matrix over groups of four.
 //!
 //! When the `parallel` feature is on and `parallel` is `true`, the dense
@@ -272,8 +273,11 @@ pub(crate) fn apply_diagonal_run(data: &mut [C64], ops: &[DiagonalOp], parallel:
 }
 
 /// Controlled single-qubit gate: apply `m` to the `(i0, i1)` pair on target `t`
-/// only when control bit `c` is set. `c` is identical across the pair, so the
-/// decision is made once per pair. Used for `Cx`.
+/// for every sub-state whose control bit `c` is set. Only those pairs are
+/// enumerated: `g ∈ [0, 2^(n-2))` ranges over the other `n - 2` qubits and
+/// [`two_qubit_indices`] inserts both fixed bits, so `i0` has `c` set and `t`
+/// clear and `i1` has both set — no iteration is spent on a pair the control
+/// would discard. Used for `Cx` and the other controlled 1-qubit gates.
 pub(crate) fn apply_controlled_1q(
     data: &mut [C64],
     n: usize,
@@ -283,23 +287,25 @@ pub(crate) fn apply_controlled_1q(
     parallel: bool,
 ) {
     debug_assert!(c < n && t < n && c != t);
-    let half = 1usize << (n - 1);
-    let low = (1usize << t) - 1;
-    let bit = 1usize << t;
-    let cbit = 1usize << c;
+    let quarter = 1usize << (n - 2);
 
     #[cfg(feature = "parallel")]
     if parallel {
         use rayon::prelude::*;
         let base = data.as_mut_ptr() as usize;
-        (0..half).into_par_iter().for_each(|g| {
-            let i0 = (g & low) | ((g & !low) << 1);
-            if i0 & cbit == 0 {
-                return;
-            }
-            let i1 = i0 | bit;
-            // SAFETY: same disjoint-pairs argument as `apply_1q`; the control
-            // filter only skips pairs, it never widens the touched set.
+        (0..quarter).into_par_iter().for_each(|g| {
+            // Ordered `[00, 01, 10, 11]` by `(bit_c, bit_t)`: the last two are
+            // the control-set pair.
+            let idx = two_qubit_indices(g, t, c);
+            let (i0, i1) = (idx[2], idx[3]);
+            // SAFETY: inserting the two fixed bits maps `[0, 2^(n-2))`
+            // injectively onto the indices with bit `c` set and bit `t` clear,
+            // so g ↦ i0 is injective and i1 = i0 | (1 << t) is the unique partner
+            // of i0. Every i0 has bit `t` clear and every i1 has it set, so no i0
+            // equals another pair's i1; the pairs are therefore pairwise disjoint
+            // (no index belongs to two of them) and no two iterations alias the
+            // same amplitude — no data race. Both indices keep bits ≥ n clear, so
+            // they are < 2^n = data.len(). `base` is the buffer's own pointer.
             unsafe {
                 let p = base as *mut C64;
                 let a = *p.add(i0);
@@ -315,12 +321,9 @@ pub(crate) fn apply_controlled_1q(
     #[cfg(not(feature = "parallel"))]
     let _ = parallel;
 
-    for g in 0..half {
-        let i0 = (g & low) | ((g & !low) << 1);
-        if i0 & cbit == 0 {
-            continue;
-        }
-        let i1 = i0 | bit;
+    for g in 0..quarter {
+        let idx = two_qubit_indices(g, t, c);
+        let (i0, i1) = (idx[2], idx[3]);
         let (na, nb) = combine_1q(m, data[i0], data[i1]);
         data[i0] = na;
         data[i1] = nb;
@@ -514,5 +517,67 @@ mod tests {
         }
         assert_eq!(ops.len(), MAX_FUSED_DIAGONAL_RUN);
         assert_fused_matches_sequential(n, &ops);
+    }
+
+    /// The pre-#216 `apply_controlled_1q` body — every target pair visited over
+    /// `2^(n-1)`, the control filtered inside the loop — kept as the semantic
+    /// reference the direct enumeration must reproduce exactly.
+    fn controlled_1q_filtered(data: &mut [C64], n: usize, c: usize, t: usize, m: &[[C64; 2]; 2]) {
+        let low = (1usize << t) - 1;
+        let bit = 1usize << t;
+        let cbit = 1usize << c;
+        for g in 0..(1usize << (n - 1)) {
+            let i0 = (g & low) | ((g & !low) << 1);
+            if i0 & cbit == 0 {
+                continue;
+            }
+            let i1 = i0 | bit;
+            let (na, nb) = combine_1q(m, data[i0], data[i1]);
+            data[i0] = na;
+            data[i1] = nb;
+        }
+    }
+
+    /// For every `(c, t)` pair on `n` qubits: the sequential path equals the
+    /// filtered reference, and (when compiled in) the parallel path equals the
+    /// sequential one — both bit for bit (docs/ENGINEERING.md §4).
+    fn assert_controlled_1q_matches_reference(n: usize, m: &[[C64; 2]; 2]) {
+        for c in 0..n {
+            for t in (0..n).filter(|&t| t != c) {
+                let mut reference = sample_data(n);
+                controlled_1q_filtered(&mut reference, n, c, t, m);
+
+                let mut sequential = sample_data(n);
+                apply_controlled_1q(&mut sequential, n, c, t, m, false);
+                assert!(
+                    sequential == reference,
+                    "sequential path differs from the filtered reference (n={n}, c={c}, t={t})"
+                );
+
+                if cfg!(feature = "parallel") {
+                    let mut parallel = sample_data(n);
+                    apply_controlled_1q(&mut parallel, n, c, t, m, true);
+                    assert!(
+                        parallel == sequential,
+                        "parallel path differs from the sequential one (n={n}, c={c}, t={t})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_1q_matches_filtered_reference_on_two_qubits() {
+        // n = 2 is the edge of the direct enumeration: a single sub-state g = 0.
+        assert_controlled_1q_matches_reference(2, &gates::x());
+        assert_controlled_1q_matches_reference(2, &gates::u(0.7, 1.1, -0.4));
+    }
+
+    #[test]
+    fn controlled_1q_matches_filtered_reference_on_every_pair() {
+        for n in [3, 5, 7] {
+            assert_controlled_1q_matches_reference(n, &gates::x());
+            assert_controlled_1q_matches_reference(n, &gates::u(0.7, 1.1, -0.4));
+        }
     }
 }
