@@ -99,6 +99,17 @@ def get_logger(id):
     logger = logging.getLogger(_LOGGER_NAME)
     log_dir = os.environ.get("POLYPUS_LOG_DIR")
     if not log_dir:
+        owned_handlers = [
+            h
+            for h in logger.handlers
+            if isinstance(h, logging.FileHandler)
+            and getattr(h, "_polypus_owned", False)
+        ]
+        for handler in owned_handlers:
+            logger.removeHandler(handler)
+            handler.close()
+        if owned_handlers and hasattr(owned_handlers[0], "_polypus_previous_level"):
+            logger.setLevel(owned_handlers[0]._polypus_previous_level)
         return logger
 
     log_file = os.path.abspath(os.path.join(log_dir, f"polypus_python_{id}.log"))
@@ -120,6 +131,7 @@ def get_logger(id):
         )
         return logger
     file_handler._polypus_owned = True
+    file_handler._polypus_previous_level = logger.level
     formatter = logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)

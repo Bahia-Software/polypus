@@ -230,6 +230,43 @@ class TestLoggingOptIn:
         assert _file_handlers(logging.getLogger(LOGGER_NAME)) == []
         assert list(cwd.iterdir()) == []
 
+    def test_unsetting_opt_in_removes_handler_and_restores_level(
+        self, tmp_path, monkeypatch
+    ):
+        logger = logging.getLogger(LOGGER_NAME)
+        logger.setLevel(logging.WARNING)
+        monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path))
+        rf.log_message("run1", "before unset", "error")
+        [handler] = _file_handlers(logger)
+
+        monkeypatch.delenv("POLYPUS_LOG_DIR")
+        rf.log_message("run1", "after unset", "error")
+
+        assert _file_handlers(logger) == []
+        assert handler.stream is None
+        assert logger.level == logging.WARNING
+        content = (tmp_path / "polypus_python_run1.log").read_text()
+        assert "before unset" in content
+        assert "after unset" not in content
+
+    def test_unsetting_opt_in_preserves_unrelated_file_handlers(
+        self, tmp_path, monkeypatch
+    ):
+        logger = logging.getLogger(LOGGER_NAME)
+        external_log = tmp_path / "external.log"
+        external_handler = logging.FileHandler(external_log)
+        logger.addHandler(external_handler)
+        monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path / "opt-in"))
+        rf.log_message("run1", "before unset", "error")
+
+        monkeypatch.delenv("POLYPUS_LOG_DIR")
+        rf.log_message("run1", "after unset", "error")
+
+        assert external_handler in logger.handlers
+        assert external_handler.stream is not None
+        external_handler.flush()
+        assert "after unset" in external_log.read_text()
+
     def test_no_duplicate_handlers_and_first_id_wins(self, tmp_path, monkeypatch):
         monkeypatch.setenv("POLYPUS_LOG_DIR", str(tmp_path))
         logger = logging.getLogger(LOGGER_NAME)
