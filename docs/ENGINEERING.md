@@ -287,6 +287,33 @@ boundary stays out-of-process and explicit; see
   `polypus.Circuit` itself stays unbounded on purpose: it is backend-agnostic
   IR, and CUNQA/QMIO/Aer have their own, different capacities — the ceiling is
   enforced where it applies, not in the IR.
+- **Memory budget (issue #215):** below the ceiling, what bounds a run is the
+  memory actually available. `polypus_backend::mem_budget` resolves one byte
+  budget — a valid `POLYPUS_MEM_BUDGET` (`32G`, `512M`, `1048576`; base 1024; an
+  invalid value is logged once with `log::warn!` and ignored, never dropped
+  silently), else the minimum of `MemAvailable` and the cgroup v2/v1 limit of the
+  process and its ancestors minus a reserve (`clamp(10 %, 512 MiB, 50 %)` of that
+  limit), else a 16 GiB fallback when nothing can be detected — and uses it twice:
+  to **throttle** how many statevectors run at once (`max_statevector_concurrency`,
+  counts unchanged), and to **refuse** up front a single statevector that cannot
+  fit (`check_fits` → `BackendError::InsufficientMemory` →
+  `polypus.InsufficientMemoryError`) instead of letting the OOM-killer end the
+  process. The Rust refusal applies where the memory is the dense `16 · 2^n`
+  model — the native backend, `polypus.statevector`, Aer's `statevector` method.
+  Aer's other methods (`automatic` may pick `stabilizer` for a Clifford circuit;
+  `density_matrix` is `16 · 4^n`) are not refused in Rust, which would reject
+  circuits that run: the local backend passes the budget to Aer as
+  `max_memory_mb` instead, Aer validates against the method it picks, and
+  `polypus_python/local.py` raises its refusal as the same class (contract C-1).
+  The refusal never uses the fallback (it is a guess, not a limit). The
+  detected limit is read once per process (`OnceLock`), the variable on every
+  call. The model is `16 · 2^n` bytes (`BYTES_PER_AMPLITUDE`), which is the native
+  backend's real peak because shot sampling (`Statevector::sample`) needs only
+  `O(shots)` extra memory, not a `2^n` CDF. Its parsers and `resolve_budget` are
+  pure (they take text / values), so tests never touch `/proc` or the environment
+  — `set_var` in a multithreaded test binary is racy and `unsafe` is off-limits
+  (§5). Several processes sharing one cgroup (MPI ranks of a job step) each see
+  the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting

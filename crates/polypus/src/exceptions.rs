@@ -13,11 +13,12 @@
 //! ```text
 //! Exception
 //! └── PolypusError
-//!     ├── BackendError            # execution/orchestration layer
-//!     │   ├── CunqaError          # CUNQA distributed-QPU backend
-//!     │   ├── QmioError           # QMIO real-QPU network path
-//!     │   └── NativeCircuitError  # pure-Rust circuit / simulator path
-//!     └── EvaluationError         # optimizer oracle / expectation evaluation
+//!     ├── BackendError                # execution/orchestration layer
+//!     │   ├── CunqaError              # CUNQA distributed-QPU backend
+//!     │   ├── QmioError               # QMIO real-QPU network path
+//!     │   ├── NativeCircuitError      # pure-Rust circuit / simulator path
+//!     │   └── InsufficientMemoryError # a statevector exceeds the memory budget
+//!     └── EvaluationError             # optimizer oracle / expectation evaluation
 //! ```
 //!
 //! Contract C-1 (see `docs/CONTRACTS.md`) keeps its documented failure modes:
@@ -67,6 +68,15 @@ create_exception!(
     NativeCircuitError,
     BackendError,
     "The native (pure-Rust) circuit or statevector-simulator path failed."
+);
+create_exception!(
+    polypus,
+    InsufficientMemoryError,
+    BackendError,
+    "A statevector would not fit in the memory budget, so the run was refused before \
+     starting instead of being killed by the out-of-memory killer. The budget is \
+     POLYPUS_MEM_BUDGET when set (e.g. POLYPUS_MEM_BUDGET=64G), else the detected \
+     RAM/cgroup limit minus a safety reserve."
 );
 create_exception!(
     polypus,
@@ -120,12 +130,25 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
         InfraBackendError::Aborted(m) => {
             PyKeyboardInterrupt::new_err(format!("the run was aborted: {m}"))
         }
+        // A statevector that cannot fit in a known memory budget (issue #215): its
+        // own `polypus.BackendError` subclass, so it stays catchable as
+        // `PolypusError` (contract C-1) while being distinguishable from a crash.
+        InfraBackendError::InsufficientMemory(e) => insufficient_memory_to_pyerr(&e),
         // The pyo3-free contract carries any provider/Python failure type-erased
         // here; recover its original class so contract C-1 holds (a seam
         // `ValueError`/`TypeError`, a `KeyboardInterrupt`, or a `polypus.QmioError`
         // all re-raise as themselves).
         InfraBackendError::External(boxed) => external_to_pyerr(boxed),
     }
+}
+
+/// The `polypus.InsufficientMemoryError` for a refused statevector, shared by the
+/// backend mapping above and by `polypus.statevector`, which checks the budget
+/// itself before allocating.
+pub(crate) fn insufficient_memory_to_pyerr(
+    err: &crate::infrastructure::InsufficientMemory,
+) -> PyErr {
+    InsufficientMemoryError::new_err(err.to_string())
 }
 
 /// Recover the concrete class of a type-erased
@@ -355,6 +378,10 @@ pub fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()
     m.add("CunqaError", py.get_type::<CunqaError>())?;
     m.add("QmioError", py.get_type::<QmioError>())?;
     m.add("NativeCircuitError", py.get_type::<NativeCircuitError>())?;
+    m.add(
+        "InsufficientMemoryError",
+        py.get_type::<InsufficientMemoryError>(),
+    )?;
     m.add("EvaluationError", py.get_type::<EvaluationError>())?;
     Ok(())
 }
@@ -425,6 +452,23 @@ mod tests {
             InfraBackendError::Cunqa("injected release failure".to_string()),
             "injected release failure",
         );
+    }
+
+    #[test]
+    fn insufficient_memory_maps_to_insufficient_memory_error() {
+        use crate::infrastructure::{BudgetSource, InsufficientMemory};
+        // A `BackendError` subclass: catchable as `polypus.BackendError` and, via
+        // `assert_maps_to`, as `polypus.PolypusError` (contract C-1).
+        let refusal = || {
+            InfraBackendError::InsufficientMemory(InsufficientMemory {
+                num_qubits: 20,
+                required_bytes: 16 << 20,
+                budget_bytes: 1 << 20,
+                source: BudgetSource::Explicit,
+            })
+        };
+        assert_maps_to::<InsufficientMemoryError>(refusal(), "20-qubit statevector");
+        assert_maps_to::<BackendError>(refusal(), "POLYPUS_MEM_BUDGET");
     }
 
     #[test]

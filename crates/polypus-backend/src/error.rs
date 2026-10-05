@@ -29,6 +29,8 @@ use std::fmt;
 
 use polypus_observable::ObservableError;
 
+use crate::mem_budget::InsufficientMemory;
+
 /// Failure of a quantum-execution backend or of backend construction.
 ///
 /// `Clone`/`Eq` are intentionally omitted: [`BackendError::External`] carries a
@@ -89,6 +91,18 @@ pub enum BackendError {
     /// subprocess worker that caught SIGINT and replied "aborted") returns this to
     /// get that consistent classification for free.
     Aborted(String),
+    /// A statevector the backend would have to allocate does not fit in the
+    /// memory budget (issue #215): the run is refused **before** anything starts,
+    /// instead of being killed by the out-of-memory killer with no error and no
+    /// partial results. Only raised against a *known* limit — an explicit
+    /// `POLYPUS_MEM_BUDGET` or the detected RAM/cgroup limit, never the blind
+    /// fallback (see [`check_fits`](crate::mem_budget::check_fits)).
+    ///
+    /// Surfaces as `polypus.InsufficientMemoryError` (a `polypus.BackendError`) at
+    /// the FFI edge. A third-party backend that allocates dense statevectors can
+    /// return it via [`check_statevector_fits`](crate::mem_budget::check_statevector_fits)
+    /// and `?` (there is a `From<InsufficientMemory>`).
+    InsufficientMemory(InsufficientMemory),
     /// Any provider-specific failure, type-erased.
     ///
     /// The Polypus Python backends box a `PyErr` here so the FFI edge can
@@ -118,6 +132,7 @@ impl fmt::Display for BackendError {
             BackendError::Conversion(m) => write!(f, "data conversion failed: {m}"),
             BackendError::Unresponsive(m) => write!(f, "the backend stopped responding: {m}"),
             BackendError::Aborted(m) => write!(f, "the backend call was aborted: {m}"),
+            BackendError::InsufficientMemory(e) => write!(f, "{e}"),
             BackendError::External(err) => write!(f, "{err}"),
         }
     }
@@ -129,6 +144,12 @@ impl std::error::Error for BackendError {
             BackendError::External(err) => Some(err.as_ref()),
             _ => None,
         }
+    }
+}
+
+impl From<InsufficientMemory> for BackendError {
+    fn from(err: InsufficientMemory) -> Self {
+        BackendError::InsufficientMemory(err)
     }
 }
 
@@ -240,6 +261,22 @@ mod tests {
         // The edge recovers the concrete type via `source()`.
         let source = std::error::Error::source(&err).expect("External has a source");
         assert!(source.downcast_ref::<Provider>().is_some());
+    }
+
+    #[test]
+    fn insufficient_memory_converts_and_displays_the_refusal() {
+        use crate::mem_budget::{check_fits, BudgetSource, MemBudget};
+        let refusal = check_fits(
+            20,
+            MemBudget {
+                bytes: 1 << 20,
+                source: BudgetSource::Explicit,
+            },
+        )
+        .unwrap_err();
+        let err: BackendError = refusal.clone().into();
+        assert!(matches!(&err, BackendError::InsufficientMemory(e) if *e == refusal));
+        assert_eq!(err.to_string(), refusal.to_string());
     }
 
     #[test]

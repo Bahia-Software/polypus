@@ -22,6 +22,7 @@ class TestExceptionHierarchy:
             "CunqaError",
             "QmioError",
             "NativeCircuitError",
+            "InsufficientMemoryError",
             "EvaluationError",
         ):
             assert hasattr(polypus, name), f"polypus.{name} is not exported"
@@ -35,6 +36,7 @@ class TestExceptionHierarchy:
         assert issubclass(polypus.CunqaError, polypus.BackendError)
         assert issubclass(polypus.QmioError, polypus.BackendError)
         assert issubclass(polypus.NativeCircuitError, polypus.BackendError)
+        assert issubclass(polypus.InsufficientMemoryError, polypus.BackendError)
         assert issubclass(polypus.EvaluationError, polypus.PolypusError)
 
 

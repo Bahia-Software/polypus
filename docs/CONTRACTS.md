@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, open — see C-3) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -63,8 +63,16 @@ at backend construction), whose charset is constrained by C-9.
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7) |
+| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
 | cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
+
+`max_memory_mb` is sent by the local backend **only when the memory budget is a
+known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
+the reserve) and is omitted for the blind fallback; it is the budget in whole MiB,
+never `0` (which Aer reads as "no limit"). `polypus_python/local.py` consumes it by
+passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
+absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
+lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
 
 `id` / `family_id` are the run id (`RunParams::id`, derived from
 `ExecutionConfig::id`), whose charset is constrained by C-9. `qcs` elements are
@@ -142,10 +150,37 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   `EvaluationError::Python` and re-raises verbatim.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
-  conversion) raises a class from the `polypus` exception hierarchy:
-  `PolypusError` (base) → `BackendError` → {`CunqaError`, `QmioError`,
-  `NativeCircuitError`}, and `PolypusError` → `EvaluationError`. Catching
+  conversion, a statevector that does not fit in the memory budget) raises a
+  class from the `polypus` exception hierarchy: `PolypusError` (base) →
+  `BackendError` → {`CunqaError`, `QmioError`, `NativeCircuitError`,
+  `InsufficientMemoryError`}, and `PolypusError` → `EvaluationError`. Catching
   `polypus.PolypusError` catches them all.
+- **`InsufficientMemoryError`** (issue #215): a circuit that does not fit in the
+  memory budget — `POLYPUS_MEM_BUDGET` when it is valid (e.g. `32G`), else the
+  detected RAM/cgroup limit minus a safety reserve — is refused *before* it runs,
+  on every local path:
+  - the native backend, `polypus.statevector`, and the local/Aer backend with
+    `sim_method="statevector"` refuse in Rust on the `16 · 2^n`-byte statevector
+    model, before anything is converted or allocated;
+  - the local/Aer backend with **any other** `sim_method` (`automatic`, the
+    default; `density_matrix`; `matrix_product_state`; …) passes the budget to Aer
+    as `max_memory_mb` (above), so Aer validates each experiment for the method it
+    actually picks — a large Clifford circuit that `automatic` runs on `stabilizer`
+    still fits, while a non-Clifford one, or a `density_matrix` run (`16 · 4^n`),
+    is refused. `polypus_python/local.py` raises Aer's refusal (an unsuccessful
+    experiment whose `status` contains "insufficient memory") as
+    `polypus.InsufficientMemoryError`, which crosses back through `seam_error` /
+    `external_to_pyerr` verbatim, keeping its class.
+
+  The message names the circuit (qubit count, or its index for Aer), the required
+  and budgeted sizes, where the budget came from, and how to override it with
+  `POLYPUS_MEM_BUDGET`. It is never raised against the blind 16 GiB fallback used
+  when no limit can be detected (macOS, Windows): the Rust check skips it and
+  `max_memory_mb` is not sent. A circuit above `polypus_sim::MAX_QUBITS` keeps its
+  `ValueError` (native `statevector`) / `NativeCircuitError` (native backend),
+  checked first. This replaces the old failure mode, in which such a run was
+  started and the process killed by the out-of-memory killer with no Python
+  exception at all.
 
 `disconnect_from_infrastructure` runs from `CunqaBackend`'s `Drop`, which **must
 never panic**: a release failure is logged (`log::error!`) and recorded in the
@@ -175,6 +210,15 @@ and binding, both oracles' binding, all real Qiskit failures; the guards
 `crates/polypus/src/exceptions.rs`, and
 `a_failing_binding_call_is_the_qiskit_variant` in
 `crates/polypus-evaluation/src/lib.rs`.
+The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
+is pinned by `test_local_run_qcs_kwargs_*` in the same file.
+`InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
+class hierarchy; subprocess runs with `POLYPUS_MEM_BUDGET` set on the native
+backend, `polypus.statevector` and Aer — `statevector`, `automatic` non-Clifford
+and `density_matrix` refused, a 26-qubit Clifford GHZ on `automatic` still run;
+`local.py` consuming `max_memory_mb`; and the "insufficient memory" status text of
+the installed Aer) and by `assert_maps_to` in `crates/polypus/src/exceptions.rs`
+(the Rust → Python class mapping).
 
 ---
 

@@ -128,6 +128,16 @@ Never panic across the boundary — return a `BackendError`:
   consistent classification as Polypus's own backends: the FFI edge raises
   `KeyboardInterrupt`, exactly like a between-wave cooperative cancel. Distinct from
   `Unresponsive` (a failure) — this is the expected end of an interrupted run.
+- `InsufficientMemory(InsufficientMemory)` — **a statevector you would allocate
+  does not fit in the memory budget** (issue #215). Return it *before* starting,
+  so the caller gets `polypus.InsufficientMemoryError` instead of an OOM-killed
+  process: `polypus_backend::check_statevector_fits(num_qubits)?` does the check
+  against the same budget the built-in backends use (`POLYPUS_MEM_BUDGET`, else the
+  detected RAM/cgroup limit minus a reserve) and never refuses when no limit could
+  be detected; `mem_budget::check_fits(n, budget)` takes the budget explicitly.
+  Only meaningful for a dense `16 · 2^n`-byte simulation. *New in 0.8.0 — a
+  breaking addition for exhaustive matches; see
+  [Stability commitment](#stability-commitment).*
 - `External(Box<dyn Error + Send + Sync>)` — **your own error type, type-erased.**
   This is how a provider error crosses the contract without `polypus-backend` naming
   it. Box whatever `std::error::Error + Send + Sync` you like; the Polypus FFI edge
@@ -144,6 +154,22 @@ QMIO reports `1`). Override `capabilities()` only if you have a real cap. If you
 cap depends on the *specific batch* (e.g. a statevector memory budget scaled by the
 widest circuit), override `capabilities_for` instead and leave `capabilities()`
 alone — it is a frozen seam paired against planners up front.
+
+The built-in native and local backends do exactly that with
+`max_statevector_concurrency(widest_qubits, threads)` / `wave_concurrency`, which
+read the **active memory budget**: `POLYPUS_MEM_BUDGET` when valid (a byte count
+with an optional base-1024 `K`/`M`/`G`/`T` suffix — `32G`, `512M`), else the
+detected `MemAvailable`/cgroup limit minus a reserve, else a 16 GiB fallback
+(`mem_budget::active_budget()` reports the value and its `BudgetSource`). The cap
+throttles only; refusing a statevector that cannot fit even alone is
+`check_statevector_fits` (see `InsufficientMemory` above). Who refuses what, among
+the built-in backends: native, `polypus.statevector` and Aer with
+`sim_method="statevector"` refuse in Rust on the `16 · 2^n` model; Aer with any
+other method receives the known budget as `max_memory_mb` and refuses by itself
+for the method it picks (raised as the same `polypus.InsufficientMemoryError`);
+nothing is refused against the fallback. A backend whose memory is not a dense
+statevector should likewise defer to its own validation rather than call
+`check_statevector_fits`.
 
 ### Cancellation
 
@@ -693,7 +719,12 @@ third party can build against it. We treat it accordingly.
   will not. Pin a minor range (`polypus-backend = "0.7"`) and expect to review the
   changelog when the minor moves. We will keep additive changes additive: new trait
   methods ship with defaults (as `cancel` and `wants_cancel_watcher` did) rather than
-  as breaking additions.
+  as breaking additions. **Enum variants are the exception:** `BackendError` is
+  **not** `#[non_exhaustive]`, so a new variant breaks any implementer's or host's
+  *exhaustive* `match` on it and therefore ships only in a **minor** bump, never a
+  patch. `BackendError::InsufficientMemory` (issue #215) is such a change: it is
+  not part of any 0.7.x release and lands in **0.8.0**. Match `BackendError` with a
+  `_` arm if you need to be robust to future variants.
 - **Scope of the contract.** The stability commitment covers the `polypus-backend`
   surface: the `QuantumBackend` trait, its types, and the registry API
   (`register_backend`, `BackendBuildContext`, `BackendFactory`). The **subprocess

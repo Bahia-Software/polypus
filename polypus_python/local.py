@@ -5,6 +5,48 @@ from qiskit_aer import AerSimulator
 from .infrastructure import Infraestructure
 
 
+def _raise_if_out_of_memory(result, max_memory_mb):
+    """Raise ``polypus.InsufficientMemoryError`` if Aer refused an experiment for
+    lack of memory (issue #215).
+
+    Aer validates each experiment against ``max_memory_mb`` (the Polypus memory
+    budget, when the Rust side knows one) for the method it actually picked, and
+    reports a refusal as an unsuccessful experiment whose ``status`` reads
+    "Insufficient memory to run circuit ...". Surfacing it as the typed Polypus
+    class keeps it catchable as ``polypus.PolypusError`` (contract C-1), instead
+    of the generic ``QiskitError`` that ``get_counts`` would raise. Any other
+    failure is left to ``get_counts``, unchanged.
+    """
+    for index, experiment in enumerate(result.results):
+        status = str(getattr(experiment, "status", ""))
+        if not experiment.success and "insufficient memory" in status.lower():
+            # Imported here, not at module level: `polypus` (the extension)
+            # imports this package at runtime, so a top-level import would be
+            # circular.
+            from polypus import InsufficientMemoryError
+
+            if max_memory_mb is not None:
+                where = (
+                    f"the limit is the Polypus memory budget ({max_memory_mb} MiB, "
+                    "POLYPUS_MEM_BUDGET when set, else the detected RAM / cgroup "
+                    "memory limit minus a safety reserve), passed to Aer as "
+                    "max_memory_mb"
+                )
+                hint = (
+                    "Use fewer qubits or a less memory-hungry sim_method, or, if "
+                    "more memory really is available, set POLYPUS_MEM_BUDGET "
+                    "(e.g. POLYPUS_MEM_BUDGET=64G) to override the budget."
+                )
+            else:
+                where = "the limit is Aer's default (the host's memory)"
+                hint = "Use fewer qubits or a less memory-hungry sim_method."
+            raise InsufficientMemoryError(
+                f"not enough memory for circuit {index} on Aer: {status.strip()} "
+                f"({where}). Refused before starting rather than be killed by the "
+                f"out-of-memory killer. {hint}"
+            )
+
+
 def _ensure_quantum_circuits(qcs):
     """Accept both Qiskit ``QuantumCircuit`` objects and OpenQASM 2.0 strings.
 
@@ -92,6 +134,14 @@ class Local(Infraestructure):
         # seeds each experiment deterministically, so this bound never changes the
         # counts — only peak memory and speed.
         max_parallel_experiments = args.get("max_parallel_experiments", 0)
+        # Per-experiment memory limit (MiB) for Aer's own validation (issue #215),
+        # sent by the Rust local backend only when it knows a real memory budget.
+        # Passed through only when present: a direct caller without it keeps Aer's
+        # default (the host's memory), and 0 would mean "no limit" to Aer.
+        max_memory_mb = args.get("max_memory_mb", None)
+        sim_options = {}
+        if max_memory_mb is not None:
+            sim_options["max_memory_mb"] = max_memory_mb
 
         # Submit every circuit in one Aer call so the C++ engine can run the
         # experiments in parallel across cores (GIL released) instead of looping
@@ -100,6 +150,7 @@ class Local(Infraestructure):
             method=sim_method,
             noise_model=noise_model,
             max_parallel_experiments=max_parallel_experiments,
+            **sim_options,
         )
         if seed is not None:
             # Rust resolves `seed` from the full u64 range, but Aer's
@@ -111,6 +162,7 @@ class Local(Infraestructure):
             ).result()
         else:
             result = sim.run(qcs, shots=shots).result()
+        _raise_if_out_of_memory(result, max_memory_mb)
 
         # Qiskit space-separates the keys per ClassicalRegister ("0 1 0") when a
         # circuit declares several; contract C-3 wants one flat bitstring. The
