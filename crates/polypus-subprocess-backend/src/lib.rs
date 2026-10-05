@@ -22,7 +22,13 @@
 //!   to — instead of blocking forever. See `docs/backends.md` for how to size it.
 //! - **Orphan guard.** On Linux the child is armed with `PR_SET_PDEATHSIG` so it
 //!   dies with us; this is Linux-only (documented, with the portable fallback: an
-//!   explicit `close()`/`Drop` that kills the child).
+//!   explicit `close()`/`Drop` that kills the child). The kernel delivers that
+//!   signal when the *thread* that forked the child exits, not when the process
+//!   does (`prctl(2)`), so the worker is forked from a dedicated long-lived spawner
+//!   thread that lives as long as the backend — a short-lived caller thread (a pool
+//!   worker, a Python `threading.Thread`) can then build the backend without
+//!   killing a healthy worker when it ends. After arming the signal the child also
+//!   checks `getppid()`, closing the race where the parent died before `prctl` ran.
 //! - **SLURM resource sharing.** The worker shares the job's `--mem`/cores with the
 //!   Rust process — the usage guide requires explicit `--cpus-per-task`/`--mem`.
 //! - **IPC overhead.** Measured for large payloads by `src/bin/payload_overhead.rs`.
@@ -48,7 +54,7 @@ use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -177,6 +183,36 @@ struct Worker {
     /// Set once the child has been `wait()`ed (reaped), so teardown does not try to
     /// kill/wait an already-reaped child and mistake the benign failure for a fault.
     reaped: bool,
+    /// The thread the child was forked from. It only ends after [`Drop for Worker`](Worker)
+    /// has killed and reaped the child (Rust runs the `Drop` body before dropping any
+    /// field): `PR_SET_PDEATHSIG` fires when this thread exits, and by then there is
+    /// nothing left to kill.
+    spawner: Option<Spawner>,
+}
+
+/// The long-lived thread a [`Worker`]'s child is forked from.
+///
+/// `PR_SET_PDEATHSIG` is tied to the *thread* that created the child: when that thread
+/// exits the kernel sends the signal, even though the process is alive. Forking from
+/// the caller's thread would therefore kill a healthy worker as soon as a short-lived
+/// caller (a thread pool, a Python `threading.Thread`) ended. This thread forks the
+/// child and then parks until the owning [`Worker`] is dropped, so it lives exactly as
+/// long as the backend does.
+struct Spawner {
+    /// Dropping this wakes the parked thread so it can exit.
+    release: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for Spawner {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                log::error!("subprocess worker teardown: spawner thread panicked");
+            }
+        }
+    }
 }
 
 /// Read one length-prefixed frame from `stream`. `Ok(None)` is a clean EOF at a
@@ -199,14 +235,68 @@ fn read_frame(stream: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
 }
 
 impl Worker {
+    /// Fork the worker from a dedicated long-lived [`Spawner`] thread (see there for
+    /// why `PR_SET_PDEATHSIG` needs it) and hand the [`Worker`] back. The spawner
+    /// thread stays parked inside the returned worker until it is dropped; if the
+    /// spawn fails the thread ends and the error is returned.
+    ///
+    /// `expected_parent` is the pid the child must find as its parent once the guard
+    /// is armed; production passes this process's own pid.
+    fn spawn_detached(
+        argv: Vec<String>,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+        arm_pdeathsig: bool,
+        expected_parent: nix::unistd::Pid,
+    ) -> Result<Worker, BridgeError> {
+        let (result_tx, result_rx) = mpsc::channel::<Result<Worker, BridgeError>>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("polypus-subprocess-spawner".to_string())
+            .spawn(move || {
+                let spawned =
+                    Worker::spawn(&argv, cwd.as_deref(), &env, arm_pdeathsig, expected_parent);
+                let parked = spawned.is_ok();
+                if result_tx.send(spawned).is_err() {
+                    return; // the caller gave up; the worker (if any) is dropped here
+                }
+                if parked {
+                    // Park until the owning `Worker` drops its `release` sender; only
+                    // then may this thread (the child's PDEATHSIG anchor) exit.
+                    let _ = release_rx.recv();
+                }
+            })
+            .map_err(|e| BridgeError::Io(format!("starting the worker spawner thread: {e}")))?;
+        let spawner = Spawner {
+            release: Some(release_tx),
+            thread: Some(thread),
+        };
+        match result_rx.recv() {
+            Ok(Ok(mut worker)) => {
+                worker.spawner = Some(spawner);
+                Ok(worker)
+            }
+            // The spawn failed; the thread is already on its way out, `Drop` joins it.
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(BridgeError::Io(
+                "the worker spawner thread ended before reporting a result".to_string(),
+            )),
+        }
+    }
+
     /// Spawn `argv` (argv[0] is the program), wiring stdin/stdout as pipes and
     /// leaving stderr inherited so worker logs reach our stderr. `arm_pdeathsig`
-    /// requests a kernel SIGKILL to the child if this process dies (Linux only).
+    /// requests a kernel SIGKILL to the child when the **spawning thread** exits
+    /// (Linux only) — callers go through [`spawn_detached`](Self::spawn_detached) so
+    /// that thread lives as long as the backend. With the guard armed the child also
+    /// verifies that `getppid()` is `expected_parent` (it may have died before the
+    /// `prctl` took effect) and fails the spawn otherwise.
     fn spawn(
         argv: &[String],
         cwd: Option<&str>,
         env: &[(String, String)],
         arm_pdeathsig: bool,
+        expected_parent: nix::unistd::Pid,
     ) -> Result<Worker, BridgeError> {
         let (program, args) = argv
             .split_first()
@@ -228,6 +318,8 @@ impl Worker {
             // armed only on Linux. Elsewhere the request is honoured as a no-op and
             // logged — the worker will not be auto-killed if this process dies. This
             // is the portable-fallback caveat documented in docs/backends.md.
+            #[cfg(not(target_os = "linux"))]
+            let _ = expected_parent;
             #[cfg(target_os = "linux")]
             {
                 // POLICY EXCEPTION (docs/ENGINEERING.md §5, recorded there as the one
@@ -237,14 +329,29 @@ impl Worker {
                 // `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed here,
                 // in the child between fork and exec. It is not a performance
                 // optimisation. The body itself is safe: it calls `nix`'s audited
-                // `set_pdeathsig` wrapper, not hand-written FFI.
+                // `set_pdeathsig` and `getppid` wrappers, not hand-written FFI.
                 //
                 // SAFETY: `pre_exec` runs in the forked child before `exec`. We call
-                // only the async-signal-safe `prctl(2)` via `nix`; no alloc, no locks.
+                // only the async-signal-safe `prctl(2)` and `getppid(2)` via `nix`
+                // (the closure captures just a `Copy` pid); no alloc, no locks, no
+                // logging, no formatting — errors are bare `from_raw_os_error` values.
                 unsafe {
-                    cmd.pre_exec(|| {
+                    cmd.pre_exec(move || {
                         nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)
-                            .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
+                            .map_err(|errno| io::Error::from_raw_os_error(errno as i32))?;
+                        // Race guard (`prctl(2)`): if the parent died before the signal
+                        // was armed, we were reparented and nothing will ever fire it.
+                        // Exit before `exec` rather than run as an unguarded orphan. With
+                        // the spawner thread this only happens if the whole process died
+                        // mid-spawn, so no parent is left to read the error; ESRCH (which
+                        // no other step here yields) is the sentinel a live parent maps
+                        // to an explicit `BridgeError`.
+                        if nix::unistd::getppid() != expected_parent {
+                            return Err(io::Error::from_raw_os_error(
+                                nix::errno::Errno::ESRCH as i32,
+                            ));
+                        }
+                        Ok(())
                     });
                 }
             }
@@ -255,9 +362,17 @@ impl Worker {
                  not be auto-killed if this process dies unexpectedly"
             );
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| BridgeError::Io(format!("spawning worker: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            if arm_pdeathsig && e.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) {
+                BridgeError::Io(
+                    "the parent process changed before PR_SET_PDEATHSIG was armed; \
+                     worker not launched (it would have been an unguarded orphan)"
+                        .to_string(),
+                )
+            } else {
+                BridgeError::Io(format!("spawning worker: {e}"))
+            }
+        })?;
         let stdin = child.stdin.take().expect("stdin piped");
         let mut stdout = child.stdout.take().expect("stdout piped");
         let (tx, rx) = mpsc::channel::<FromWorker>();
@@ -291,6 +406,7 @@ impl Worker {
             reader: Some(reader),
             dead: false,
             reaped: false,
+            spawner: None,
         })
     }
 
@@ -411,9 +527,10 @@ pub struct SubprocessConfig {
     /// Read timeout: how long to wait for a reply before declaring the worker
     /// unresponsive.
     pub recv_timeout: Duration,
-    /// Arm the `PR_SET_PDEATHSIG` orphan guard (Linux only; ignored elsewhere at
-    /// runtime — the guard is set via `prctl`, a no-op path on non-Linux is not
-    /// compiled here since Polypus targets Linux/CESGA).
+    /// Arm the `PR_SET_PDEATHSIG` orphan guard (Linux only; ignored, with a logged
+    /// warning, elsewhere). The kernel fires it when the *thread* that forked the
+    /// worker exits, so the worker is forked from a dedicated thread that lives as
+    /// long as the backend — building the backend from a short-lived thread is safe.
     pub arm_pdeathsig: bool,
 }
 
@@ -445,12 +562,27 @@ pub struct SubprocessBackend {
 
 impl SubprocessBackend {
     /// Spawn the worker and complete the protocol handshake.
+    ///
+    /// The worker is forked from a dedicated spawner thread owned by the backend, not
+    /// from the calling thread, so the caller may be a short-lived thread (see
+    /// [`SubprocessConfig::arm_pdeathsig`]).
     pub fn spawn(config: SubprocessConfig) -> Result<SubprocessBackend, BridgeError> {
-        let mut worker = Worker::spawn(
-            &config.command,
-            config.cwd.as_deref(),
-            &config.env,
+        SubprocessBackend::spawn_expecting_parent(config, nix::unistd::getpid())
+    }
+
+    /// [`spawn`](Self::spawn) with the parent pid the worker must observe injected, so
+    /// the `getppid()` race guard is testable without a real race. Production passes
+    /// this process's own pid.
+    fn spawn_expecting_parent(
+        config: SubprocessConfig,
+        expected_parent: nix::unistd::Pid,
+    ) -> Result<SubprocessBackend, BridgeError> {
+        let mut worker = Worker::spawn_detached(
+            config.command.clone(),
+            config.cwd.clone(),
+            config.env.clone(),
             config.arm_pdeathsig,
+            expected_parent,
         )?;
         let pid = worker.pid();
         // Handshake, bounded by the read timeout so a worker that never answers at
@@ -753,5 +885,64 @@ mod tests {
                 .arm_pdeathsig,
             "an absent arm_pdeathsig defaults to armed"
         );
+    }
+
+    /// A config whose child never needs to run (the spawn is refused or fails first).
+    fn trivial_config(command: &[&str], arm_pdeathsig: bool) -> SubprocessConfig {
+        SubprocessConfig {
+            command: command.iter().map(|s| s.to_string()).collect(),
+            recv_timeout: Duration::from_secs(5),
+            arm_pdeathsig,
+            ..SubprocessConfig::default()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_fails_explicitly_when_the_parent_is_not_the_expected_pid() {
+        // The child's `getppid()` is this process; claiming a different expected
+        // parent simulates "the parent died and we were reparented before PDEATHSIG
+        // was armed". The program never runs (`pre_exec` refuses first), so any
+        // command will do. Repeated to flush out any ordering flakiness.
+        let real = nix::unistd::getpid();
+        let wrong = nix::unistd::Pid::from_raw(real.as_raw() + 1);
+        for _ in 0..5 {
+            match SubprocessBackend::spawn_expecting_parent(trivial_config(&["true"], true), wrong)
+            {
+                Err(BridgeError::Io(m)) => assert!(
+                    m.contains("parent process changed") && m.contains("PR_SET_PDEATHSIG"),
+                    "expected the explicit parent-changed message, got: {m}"
+                ),
+                Err(other) => panic!("expected BridgeError::Io(parent changed), got {other:?}"),
+                Ok(_) => panic!("a worker must not be launched under a mismatched parent"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_check_is_part_of_arming_the_guard_only() {
+        // With the guard disarmed there is no `pre_exec` and so no parent check: the
+        // same wrong pid must not produce the parent-changed error. (`true` exits
+        // without a handshake, so the spawn still fails — for a different reason.)
+        let wrong = nix::unistd::Pid::from_raw(nix::unistd::getpid().as_raw() + 1);
+        match SubprocessBackend::spawn_expecting_parent(trivial_config(&["true"], false), wrong) {
+            Err(BridgeError::Io(m)) => {
+                assert!(!m.contains("parent process changed"), "unexpected: {m}")
+            }
+            Err(_) => {}
+            Ok(_) => panic!("`true` cannot complete a handshake"),
+        }
+    }
+
+    #[test]
+    fn spawn_failure_in_the_spawner_thread_surfaces_as_an_error() {
+        // A missing program fails inside the spawner thread; the error must come back
+        // through the channel (no hang, no panic) and the thread must end.
+        match SubprocessBackend::spawn(trivial_config(&["/nonexistent/polypus-worker"], true)) {
+            Err(BridgeError::Io(m)) => assert!(m.contains("spawning worker"), "got: {m}"),
+            Err(other) => panic!("expected BridgeError::Io, got {other:?}"),
+            Ok(_) => panic!("a nonexistent program cannot spawn"),
+        }
     }
 }

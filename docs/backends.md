@@ -335,11 +335,34 @@ an infinite block.
 
 The worker is spawned with `PR_SET_PDEATHSIG` armed, so the kernel kills it if the
 Rust process dies — no orphaned workers. **This is Linux-only** (`prctl(2)`). It is
-sufficient for CESGA (all Linux). On a non-Linux host the guard is simply not in
-effect; the portable fallback is the bridge's own teardown — `close()` and the
-`Worker`'s `Drop` kill and reap the child — which covers a clean exit but not a hard
-crash of the parent. If you run this off Linux and need crash-proof orphan cleanup,
-wrap the run in your platform's job-object / process-group equivalent.
+sufficient for CESGA (all Linux).
+
+**The signal is bound to a thread, not to the process.** `prctl(2)` delivers
+`PR_SET_PDEATHSIG` when the *thread that created the child* terminates, not when the
+whole process does. Forking the worker from whichever thread called the constructor
+would therefore kill a healthy worker the moment that thread ended — a thread-pool
+task or a Python `threading.Thread` that builds the backend and returns. The bridge
+avoids this by forking the worker from its own dedicated, long-lived thread
+(`polypus-subprocess-spawner`), which stays parked for as long as the backend lives
+and is released when the backend is dropped (after the worker has been killed and
+reaped). You can therefore build a backend from any thread, however short-lived.
+
+**Parent already dead.** The kernel only arms the signal from the moment of the
+`prctl` call; if the parent died just before it, the child has been reparented and
+nothing will ever fire. After arming, the child therefore compares `getppid()` with
+the pid it expects (the Rust process) and exits before `exec` instead of running as
+an unguarded orphan. Because the worker is forked from the spawner thread — which
+cannot end while it is inside the spawn — this race only occurs if the *whole
+process* dies during the spawn, and then there is no parent left to see anything. If
+a parent that is still alive does observe a mismatch, the spawn fails with an
+explicit error ("the parent process changed before PR_SET_PDEATHSIG was armed;
+worker not launched"); that is the secondary, diagnostic effect, not the main one.
+
+On a non-Linux host the guard is simply not in effect; the portable fallback is the
+bridge's own teardown — `close()` and the `Worker`'s `Drop` kill and reap the child —
+which covers a clean exit but not a hard crash of the parent. If you run this off
+Linux and need crash-proof orphan cleanup, wrap the run in your platform's
+job-object / process-group equivalent.
 
 ### Running under SLURM
 
