@@ -25,7 +25,8 @@
 //! an *unknown infrastructure* still surfaces as `ValueError` and a *bad kwarg*
 //! at the `polypus_python` seam still surfaces as `TypeError`, because a seam
 //! exception is carried type-erased in
-//! [`BackendError::External`](crate::infrastructure::BackendError::External) and
+//! [`BackendError::External`](crate::infrastructure::BackendError::External), as a
+//! [`DisplaySafePyErr`](crate::infrastructure::DisplaySafePyErr), and
 //! `external_to_pyerr` re-raises the original Python exception verbatim. The
 //! one exception is an exception raised by Qiskit (issue #218): it becomes a
 //! `BackendError` chaining the original as `__cause__` — or an
@@ -36,6 +37,7 @@
 //! *panicked*.
 
 use crate::infrastructure::BackendError as InfraBackendError;
+use crate::infrastructure::DisplaySafePyErr;
 use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyTypeError, PyValueError};
 use pyo3::{create_exception, intern, PyErr};
 
@@ -154,19 +156,25 @@ pub(crate) fn insufficient_memory_to_pyerr(
 /// Recover the concrete class of a type-erased
 /// [`BackendError::External`](InfraBackendError::External) payload.
 ///
-/// A Polypus Python backend boxes a `PyErr` here (a `polypus_python` seam
-/// exception, or a `KeyboardInterrupt` from `check_signals` / a Qiskit width
-/// read), which re-raises verbatim unless Qiskit raised it
-/// ([`qiskit_error_to_pyerr`]); the QMIO backend boxes its own `QmioError`;
-/// anything else is a third-party provider error. This is the FFI-edge
+/// A Polypus Python backend boxes a [`DisplaySafePyErr`] here (a
+/// `polypus_python` seam exception, or a `KeyboardInterrupt` from
+/// `check_signals` / a Qiskit width read), whose original exception re-raises
+/// verbatim unless Qiskit raised it ([`qiskit_error_to_pyerr`]); the QMIO backend
+/// boxes its own `QmioError`; anything else is a third-party provider error.
+///
+/// Only that carrier is recovered. A bare `PyErr` boxed here is treated like any
+/// other provider error (`polypus.BackendError` with its message): the pyo3-free
+/// layers may format the box while detached, which a bare `PyErr` cannot survive
+/// at interpreter shutdown, so boxing one is a bug that tests must catch rather
+/// than a path the edge quietly keeps working. This is the FFI-edge
 /// counterpart of the old `BackendError::Seam`/`BackendError::Qmio` variants,
 /// preserving contract C-1's verbatim re-raise now that the boxing is generic
 /// and pyo3-free.
 fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
     // A boxed Python exception re-raises verbatim, keeping its original class —
     // unless Qiskit raised it (issue #218), which joins the polypus hierarchy.
-    let boxed = match boxed.downcast::<PyErr>() {
-        Ok(py_err) => return qiskit_error_to_pyerr(*py_err),
+    let boxed = match boxed.downcast::<DisplaySafePyErr>() {
+        Ok(py_err) => return qiskit_error_to_pyerr(py_err.into_inner()),
         Err(other) => other,
     };
     // The QMIO backend boxes its own error; surface it as the typed class.
@@ -276,10 +284,11 @@ fn wrap_qiskit_error<E: pyo3::PyTypeInfo>(err: PyErr) -> PyErr {
 /// [`ObservableError`](polypus_observable::ObservableError) to the `PyErr` it
 /// should surface as.
 ///
-/// A callback observable boxes its own `PyErr` into the
-/// [`External`](polypus_observable::ObservableError::External) variant; recover
-/// it so the *original* Python exception type re-raises verbatim across the FFI
-/// instead of being flattened into a `polypus.EvaluationError`. Every other
+/// A callback observable boxes its own exception, as a [`DisplaySafePyErr`], into
+/// the [`External`](polypus_observable::ObservableError::External) variant;
+/// recover it so the *original* Python exception type re-raises verbatim across
+/// the FFI instead of being flattened into a `polypus.EvaluationError`. As in
+/// `external_to_pyerr`, a bare boxed `PyErr` is not recovered. Every other
 /// variant is a native evaluation failure (bad bitstring, invalid construction)
 /// and surfaces as the typed `polypus.EvaluationError`.
 ///
@@ -288,10 +297,10 @@ fn wrap_qiskit_error<E: pyo3::PyTypeInfo>(err: PyErr) -> PyErr {
 fn observable_error_to_pyerr(err: polypus_observable::ObservableError) -> PyErr {
     use polypus_observable::ObservableError as ObsErr;
     match err {
-        // A callback observable boxes its `PyErr` here; recover it so the
+        // A callback observable boxes its exception here; recover it so the
         // original Python exception type re-raises verbatim across the FFI.
-        ObsErr::External(boxed) => match boxed.downcast::<PyErr>() {
-            Ok(py_err) => *py_err,
+        ObsErr::External(boxed) => match boxed.downcast::<DisplaySafePyErr>() {
+            Ok(py_err) => py_err.into_inner(),
             Err(other) => EvaluationError::new_err(other.to_string()),
         },
         // Native evaluation failures (bad bitstring, invalid construction) map
@@ -318,10 +327,10 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
         EvalErr::Binding(circuit_err) => EvaluationError::new_err(circuit_err.to_string()),
         EvalErr::Observable(obs_err) => observable_error_to_pyerr(obs_err),
         // Preserve the original Python exception type raised by the callback.
-        EvalErr::Python(py_err) => py_err,
+        EvalErr::Python(py_err) => py_err.into_inner(),
         // Qiskit's own binding call: a Qiskit exception joins the hierarchy as
         // `polypus.EvaluationError` (issue #218); anything else stays verbatim.
-        EvalErr::Qiskit(py_err) => qiskit_error_to_evaluation_error(py_err),
+        EvalErr::Qiskit(py_err) => qiskit_error_to_evaluation_error(py_err.into_inner()),
         // Rust-side failures: surface as the typed polypus.EvaluationError, not
         // PyO3's generic RuntimeError / the TypeError extract() would emit.
         EvalErr::Runtime(m) => EvaluationError::new_err(m),
@@ -628,7 +637,9 @@ mod tests {
             let original = Python::attach(|py| fake_error(py, class, "no counts"));
             let original_value = Python::attach(|py| original.value(py).clone().unbind());
             let expected = format!("{qualified}: no counts");
-            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(original)));
+            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+                DisplaySafePyErr::from(original),
+            )));
             Python::attach(|py| {
                 assert!(
                     py_err.get_type(py).is(py.get_type::<BackendError>()),
@@ -652,13 +663,17 @@ mod tests {
     fn qiskit_error_that_is_also_a_c1_type_is_preserved() {
         pyo3::Python::initialize();
         let value_error = Python::attach(|py| fake_error(py, "QiskitValueError", "bad kwarg"));
-        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(value_error)));
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+            DisplaySafePyErr::from(value_error),
+        )));
         Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyValueError>(py), "{py_err}");
             assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
         });
         let interrupt = Python::attach(|py| fake_error(py, "QiskitKeyboardInterrupt", "stop"));
-        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(interrupt)));
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+            DisplaySafePyErr::from(interrupt),
+        )));
         Python::attach(|py| {
             assert!(py_err.is_instance_of::<PyKeyboardInterrupt>(py), "{py_err}");
             assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
@@ -687,13 +702,48 @@ mod tests {
             ),
         ];
         for (err, class) in cases {
-            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(err)));
+            let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+                DisplaySafePyErr::from(err),
+            )));
             Python::attach(|py| {
                 assert_eq!(py_err.get_type(py).name().unwrap().to_string(), class);
                 assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
                 assert!(py_err.cause(py).is_none(), "nothing is chained: {py_err}");
             });
         }
+    }
+
+    #[test]
+    fn display_safe_py_err_reraises_the_original_exception() {
+        // The carrier is unwrapped at the edge: the very exception object boxed by
+        // the backend is what Python receives, with its class, not a copy.
+        pyo3::Python::initialize();
+        let original = PyTypeError::new_err("bad kwarg");
+        let original_value = Python::attach(|py| original.value(py).clone().unbind());
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+            DisplaySafePyErr::from(original),
+        )));
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<PyTypeError>(py), "{py_err}");
+            assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+            assert!(py_err.value(py).is(original_value.bind(py)));
+        });
+    }
+
+    #[test]
+    fn bare_py_err_in_external_is_not_reraised_verbatim() {
+        // Only the attach-safe carrier is recovered (ENGINEERING §9): a bare
+        // `PyErr` boxed by mistake becomes a plain provider error, so its C-1
+        // class is lost and the C-1 tests catch the mistake instead of it
+        // passing silently.
+        assert_maps_to::<BackendError>(
+            InfraBackendError::External(Box::new(PyValueError::new_err("bad kwarg"))),
+            "ValueError: bad kwarg",
+        );
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+            PyValueError::new_err("bad kwarg"),
+        )));
+        Python::attach(|py| assert!(!py_err.is_instance_of::<PyValueError>(py)));
     }
 
     #[test]
@@ -896,7 +946,7 @@ mod evaluation_mapping_tests {
         pyo3::Python::initialize();
         let original = Python::attach(|py| super::tests::fake_error(py, "QiskitError", "bad"));
         let original_value = Python::attach(|py| original.value(py).clone().unbind());
-        let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(original));
+        let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(original.into()));
         Python::attach(|py| {
             assert!(
                 py_err.get_type(py).is(py.get_type::<EvaluationError>()),
@@ -929,7 +979,7 @@ mod evaluation_mapping_tests {
             ),
         ];
         for (err, class) in cases {
-            let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(err));
+            let py_err = evaluation_error_to_pyerr(EvalErr::Qiskit(err.into()));
             Python::attach(|py| {
                 assert_eq!(py_err.get_type(py).name().unwrap().to_string(), class);
                 assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
@@ -942,9 +992,10 @@ mod evaluation_mapping_tests {
         // A user callback can raise anything, Qiskit classes included; the
         // `Python` variant carries callbacks and is never retyped.
         pyo3::Python::initialize();
-        let py_err = evaluation_error_to_pyerr(EvalErr::Python(Python::attach(|py| {
-            super::tests::fake_error(py, "QiskitError", "from a callback")
-        })));
+        let py_err = evaluation_error_to_pyerr(EvalErr::Python(
+            Python::attach(|py| super::tests::fake_error(py, "QiskitError", "from a callback"))
+                .into(),
+        ));
         Python::attach(|py| {
             assert_eq!(
                 py_err.get_type(py).name().unwrap().to_string(),
@@ -961,9 +1012,10 @@ mod evaluation_mapping_tests {
         // boxed by a callback observable must re-raise with its original class,
         // not be flattened into `polypus.EvaluationError`.
         pyo3::Python::initialize();
-        let py_err = evaluation_error_to_pyerr(EvalErr::Observable(ObservableError::External(
-            Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
-        )));
+        let py_err =
+            evaluation_error_to_pyerr(EvalErr::Observable(ObservableError::External(Box::new(
+                DisplaySafePyErr::from(PyZeroDivisionError::new_err("callback divided by zero")),
+            ))));
         Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyZeroDivisionError>(py),
@@ -975,6 +1027,18 @@ mod evaluation_mapping_tests {
             );
             assert!(py_err.to_string().contains("callback divided by zero"));
         });
+    }
+
+    #[test]
+    fn bare_py_err_in_observable_external_is_not_reraised_verbatim() {
+        // Same rule as `External` on the backend side: only a boxed
+        // `DisplaySafePyErr` keeps its class; a bare `PyErr` is flattened.
+        assert_maps_to_evaluation_error(
+            EvalErr::Observable(ObservableError::External(Box::new(
+                PyZeroDivisionError::new_err("callback divided by zero"),
+            ))),
+            "ZeroDivisionError: callback divided by zero",
+        );
     }
 }
 
@@ -1061,9 +1125,10 @@ mod infrastructure_mapping_tests {
         // is deliberately outside the `polypus.*` hierarchy so the check is
         // unambiguous.
         pyo3::Python::initialize();
-        let py_err = infrastructure_error_to_pyerr(InfraErr::Observable(ObsErr::External(
-            Box::new(PyZeroDivisionError::new_err("callback divided by zero")),
-        )));
+        let py_err =
+            infrastructure_error_to_pyerr(InfraErr::Observable(ObsErr::External(Box::new(
+                DisplaySafePyErr::from(PyZeroDivisionError::new_err("callback divided by zero")),
+            ))));
         Python::attach(|py| {
             assert!(
                 py_err.is_instance_of::<PyZeroDivisionError>(py),
@@ -1080,11 +1145,13 @@ mod infrastructure_mapping_tests {
     #[test]
     fn external_backend_error_reraises_verbatim() {
         // A `check_signals` SIGINT (or any planner-raised Python exception) now
-        // arrives as `Backend(BackendError::External(boxed PyErr))`; its boxed
-        // original class must re-raise verbatim across the FFI.
+        // arrives as `Backend(BackendError::External(boxed DisplaySafePyErr))`; its
+        // boxed original class must re-raise verbatim across the FFI.
         pyo3::Python::initialize();
         let py_err = infrastructure_error_to_pyerr(InfraErr::Backend(InfraBackendError::External(
-            Box::new(PyRuntimeError::new_err("planner boom")),
+            Box::new(DisplaySafePyErr::from(PyRuntimeError::new_err(
+                "planner boom",
+            ))),
         )));
         Python::attach(|py| {
             assert!(

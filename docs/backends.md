@@ -141,10 +141,15 @@ Never panic across the boundary — return a `BackendError`:
 - `External(Box<dyn Error + Send + Sync>)` — **your own error type, type-erased.**
   This is how a provider error crosses the contract without `polypus-backend` naming
   it. Box whatever `std::error::Error + Send + Sync` you like; the Polypus FFI edge
-  recovers it (Polypus's own Python backends box a `PyErr` here and re-raise it
-  verbatim — except an exception raised by Qiskit, which becomes a
-  `polypus.BackendError` chaining the original as `__cause__`; contract C-1, issue
-  #218). A Rust host embedding Polypus downcasts it back to your type.
+  recovers it (Polypus's own Python backends box a Python exception here as a
+  `polypus_infrastructure::DisplaySafePyErr` — via `seam_error` — and the edge
+  re-raises the original verbatim, except an exception raised by Qiskit, which
+  becomes a `polypus.BackendError` chaining the original as `__cause__`; contract
+  C-1, issue #218). Box a Python exception only as `DisplaySafePyErr`, never as a
+  bare `PyErr`: the box may be formatted while the thread is detached, where a
+  bare `PyErr` can panic at interpreter shutdown, and the edge does not recover a
+  bare one (it becomes a plain `polypus.BackendError`). A Rust host embedding
+  Polypus downcasts it back to your type.
 
 ### Capabilities and wave sizing
 

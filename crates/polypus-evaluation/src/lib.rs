@@ -124,13 +124,13 @@ pub(crate) fn assign_parameters_qiskit(
         let qc = circuit
             .clone_ref(py)
             .into_pyobject(py)
-            .map_err(|e| EvaluationError::Python(e.into()))?;
+            .map_err(|e| EvaluationError::Python(PyErr::from(e).into()))?;
         let kwargs = [("inplace", false)]
             .into_py_dict(py)
-            .map_err(EvaluationError::Python)?;
+            .map_err(|e| EvaluationError::Python(e.into()))?;
         Ok(qc
             .call_method("assign_parameters", (params.to_vec(),), Some(&kwargs))
-            .map_err(EvaluationError::Qiskit)?
+            .map_err(|e| EvaluationError::Qiskit(e.into()))?
             .unbind())
     })
 }
@@ -180,7 +180,9 @@ mod tests {
         let circuit = Python::attach(failing_circuit);
         match assign_parameters_qiskit(&circuit, &[0.5]) {
             Err(EvaluationError::Qiskit(err)) => Python::attach(|py| {
-                assert!(err.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+                assert!(err
+                    .as_py_err()
+                    .is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
                 assert!(err.to_string().contains("binding refused"));
             }),
             other => panic!("expected EvaluationError::Qiskit, got {other:?}"),
@@ -190,7 +192,7 @@ mod tests {
     #[test]
     fn qiskit_variant_display_names_the_binding() {
         pyo3::Python::initialize();
-        let err = EvaluationError::Qiskit(pyo3::exceptions::PyRuntimeError::new_err("nope"));
+        let err = EvaluationError::Qiskit(pyo3::exceptions::PyRuntimeError::new_err("nope").into());
         let message = err.to_string();
         assert!(
             message.contains("Qiskit parameter binding failed") && message.contains("nope"),

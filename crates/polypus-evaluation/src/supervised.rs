@@ -149,7 +149,7 @@ impl SupervisedObjective for PyLabelledCost {
                     })
                     .collect::<PyResult<Vec<f64>>>()
             })
-            .map_err(EvaluationError::Python)?;
+            .map_err(|e| EvaluationError::Python(e.into()))?;
 
             if let Some(cache) = &self.cache {
                 let mut memo = cache.write().unwrap_or_else(|p| p.into_inner());
@@ -225,7 +225,7 @@ impl SupervisedObjective for PySampleCost {
                 })
                 .collect::<PyResult<Vec<f64>>>()
         })
-        .map_err(EvaluationError::Python)
+        .map_err(|e| EvaluationError::Python(e.into()))
     }
 }
 
@@ -498,7 +498,9 @@ def raises(*_args):
             for objective in objectives {
                 match objective.score_batch(&batch, &labels) {
                     Err(EvaluationError::Python(err)) => {
-                        assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                        assert!(err
+                            .as_py_err()
+                            .is_instance_of::<pyo3::exceptions::PyValueError>(py));
                         assert!(err.to_string().contains("user objective blew up"));
                     }
                     other => panic!("expected the verbatim ValueError, got {other:?}"),

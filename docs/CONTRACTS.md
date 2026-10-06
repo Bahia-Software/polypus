@@ -148,6 +148,19 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   raised by the user's `expectation_function` (or variance callback) is **never**
   retyped, even when its class is a Qiskit one: it travels in
   `EvaluationError::Python` and re-raises verbatim.
+- **How the exception travels.** Between the seam and the FFI edge it crosses
+  pyo3-free layers (the planner, `OracleErrorSlot`) that may format it while the
+  thread is detached, so it is carried as
+  `polypus_infrastructure::DisplaySafePyErr`, never as a bare `PyErr`:
+  `seam_error` boxes it into `BackendError::External`, a callback observable
+  into `ObservableError::External`, and `EvaluationError::Python` / `Qiskit`
+  hold one. Its `Display`/`Debug` never panic, even once the interpreter is
+  unavailable (ENGINEERING.md §9). The edge (`external_to_pyerr`,
+  `observable_error_to_pyerr`, `evaluation_error_to_pyerr`) downcasts only to
+  that carrier and re-raises the original `PyErr` it holds, so the class rules
+  above apply to the original exception; a bare `PyErr` in an `External` box is
+  not recovered and surfaces as `polypus.BackendError` (or
+  `polypus.EvaluationError` from an observable) with its message.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
@@ -210,6 +223,17 @@ and binding, both oracles' binding, all real Qiskit failures; the guards
 `crates/polypus/src/exceptions.rs`, and
 `a_failing_binding_call_is_the_qiskit_variant` in
 `crates/polypus-evaluation/src/lib.rs`.
+The `DisplaySafePyErr` carrier: `display_safe_py_err_reraises_the_original_exception`,
+`bare_py_err_in_external_is_not_reraised_verbatim` and
+`bare_py_err_in_observable_external_is_not_reraised_verbatim` in
+`crates/polypus/src/exceptions.rs`;
+`display_safe_py_err_formats_like_the_py_err_and_round_trips` and
+`display_safe_py_err_formats_without_an_interpreter` in
+`crates/polypus-infrastructure/src/attach.rs`;
+`python_carrying_errors_format_without_an_interpreter` in
+`crates/polypus-evaluation/src/error.rs`; and
+`a_raising_callback_is_boxed_as_a_display_safe_py_err` in
+`crates/polypus-evaluation/src/py_callback_observable.rs`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the

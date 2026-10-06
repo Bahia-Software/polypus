@@ -533,8 +533,9 @@ mod tests {
             match err {
                 InfrastructureError::Backend(BackendError::External(boxed)) => {
                     let py_err = boxed
-                        .downcast_ref::<PyErr>()
-                        .expect("the boxed error must be the original PyErr");
+                        .downcast_ref::<crate::DisplaySafePyErr>()
+                        .expect("the boxed error must carry the original PyErr")
+                        .as_py_err();
                     assert!(
                         py_err.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py),
                         "expected the KeyboardInterrupt to be carried verbatim"

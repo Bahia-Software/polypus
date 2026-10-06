@@ -27,6 +27,10 @@
 //! Attaching is re-entrant only when the thread is *already* attached: then the
 //! existing attachment is reused and none of the checks can fail.
 //!
+//! Formatting a bare [`PyErr`] is such an attach too, so a Python exception that
+//! travels through code that may format it while detached is carried as a
+//! [`DisplaySafePyErr`], whose `Display` and `Debug` go through [`attach_or`].
+//!
 //! [`Python::try_attach`], which these helpers use, reports all of those states
 //! as unavailable on every supported Python version. The one gap is a
 //! check-then-attach race (shutdown starting between PyO3's check and the
@@ -41,9 +45,11 @@ use pyo3::prelude::*;
 /// initialized). Never panics on its own account.
 ///
 /// When `f` returns an error that holds a [`PyErr`], remember that formatting a
-/// `PyErr` (its `Display`) attaches again with [`Python::attach`]. If that error
-/// may be formatted after this call returns, possibly while detached or at
-/// shutdown, use [`attach_for_cleanup`] (or format the error inside `f`).
+/// bare `PyErr` (its `Display` or `Debug`) attaches again with
+/// [`Python::attach`]. If that error may be formatted after this call returns,
+/// possibly while detached or at shutdown, carry the exception as a
+/// [`DisplaySafePyErr`], use [`attach_for_cleanup`], or format the error inside
+/// `f`.
 pub fn attach_or<R>(
     unavailable: impl FnOnce() -> R,
     f: impl for<'py> FnOnce(Python<'py>) -> R,
@@ -89,6 +95,75 @@ pub fn attach_for_cleanup(
         |py| f(py).map_err(|e| CleanupError::Failed(describe(&e))),
     )
 }
+
+/// A Python exception that can be formatted at any time, for carrying a
+/// [`PyErr`] through code that may format it while detached or at shutdown.
+///
+/// A bare `PyErr`'s `Display` and `Debug` attach with [`Python::attach`], which
+/// panics when the interpreter is unavailable (see the [module docs](self)).
+/// That is reachable from a `#[pyfunction]`: the pyo3-free layers log errors
+/// with `{e}` while the thread is detached (the planner, `OracleErrorSlot`), and
+/// a run still in flight on a daemon thread at interpreter shutdown would panic
+/// there. Here both attach through [`attach_or`]: with the interpreter available
+/// the text is exactly the `PyErr`'s (`"ValueError: msg"`), and without it a
+/// fixed fallback, [`DisplaySafePyErr::UNAVAILABLE`]. A failed format falls back
+/// too, as in [`attach_for_cleanup`], so `to_string()` cannot panic either.
+///
+/// Every error that boxes a Python exception into a type-erased or pyo3-free
+/// error (`BackendError::External`, `ObservableError::External`, the evaluation
+/// errors) carries it as this type, and the FFI edge downcasts to it to re-raise
+/// the original exception (contract C-1).
+pub struct DisplaySafePyErr(PyErr);
+
+impl DisplaySafePyErr {
+    /// What `Display` and `Debug` write when the interpreter cannot be attached to.
+    pub const UNAVAILABLE: &'static str = "<Python exception; interpreter unavailable>";
+
+    /// Borrow the original exception.
+    pub fn as_py_err(&self) -> &PyErr {
+        &self.0
+    }
+
+    /// The original exception, to re-raise it.
+    pub fn into_inner(self) -> PyErr {
+        self.0
+    }
+}
+
+impl From<PyErr> for DisplaySafePyErr {
+    fn from(err: PyErr) -> Self {
+        DisplaySafePyErr(err)
+    }
+}
+
+impl fmt::Display for DisplaySafePyErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Formatting inside the closure reuses its attachment, so the `PyErr`'s
+        // own `Python::attach` cannot fail there.
+        let text = attach_or(|| Self::UNAVAILABLE.to_string(), |_py| describe(&self.0));
+        f.write_str(&text)
+    }
+}
+
+impl fmt::Debug for DisplaySafePyErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Keep `{:#?}` pretty-printing the `PyErr`, as it would unwrapped.
+        let alternate = f.alternate();
+        let text = attach_or(
+            || Self::UNAVAILABLE.to_string(),
+            |_py| {
+                if alternate {
+                    describe(&format_args!("{:#?}", self.0))
+                } else {
+                    describe(&format_args!("{:?}", self.0))
+                }
+            },
+        );
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for DisplaySafePyErr {}
 
 /// Format `err` for a log line without panicking. `ToString::to_string` panics
 /// when a `Display` impl returns an error, and a `PyErr`'s can (it fails when
@@ -213,5 +288,56 @@ mod tests {
         });
         assert_eq!(result, Err(CleanupError::InterpreterUnavailable));
         assert!(!ran, "no closure may run without an interpreter");
+    }
+
+    /// With a live interpreter the wrapper formats exactly as the `PyErr` it
+    /// holds, and unwrapping it gives back the original exception, class kept.
+    #[test]
+    fn display_safe_py_err_formats_like_the_py_err_and_round_trips() {
+        Python::initialize();
+        let err = DisplaySafePyErr::from(PyValueError::new_err("bad kwarg"));
+        let expected_debug = format!("{:?}", err.as_py_err());
+        assert_eq!(err.to_string(), "ValueError: bad kwarg");
+        assert_eq!(err.to_string(), err.as_py_err().to_string());
+        assert_eq!(format!("{err:?}"), expected_debug);
+        assert_eq!(format!("{err:#?}"), format!("{:#?}", err.as_py_err()));
+        assert!(expected_debug.contains("ValueError"), "{expected_debug}");
+        let original = err.into_inner();
+        Python::attach(|py| assert!(original.is_instance_of::<PyValueError>(py)));
+    }
+
+    /// Without an interpreter the wrapper, and the errors that box it on the way
+    /// to the FFI edge, format to the fixed fallback instead of panicking:
+    /// `BackendError::External` and the `Box<dyn Error + Send>` that
+    /// `OracleErrorSlot::record` logs with `{err}` while detached. A bare `PyErr`
+    /// panics here (its `Display` calls `Python::attach`); `PyValueError::new_err`
+    /// is lazy, so building one needs no interpreter. Runs in a fresh process
+    /// that never initializes Python.
+    #[test]
+    fn display_safe_py_err_formats_without_an_interpreter() {
+        if !is_fresh_process() {
+            run_in_fresh_process(
+                "attach::tests::display_safe_py_err_formats_without_an_interpreter",
+            );
+            return;
+        }
+        let fallback = DisplaySafePyErr::UNAVAILABLE;
+        let wrapped = || DisplaySafePyErr::from(PyValueError::new_err("bad kwarg"));
+        let err = wrapped();
+        assert_eq!(err.to_string(), fallback);
+        assert_eq!(format!("{err:?}"), fallback);
+
+        let backend = crate::BackendError::External(Box::new(wrapped()));
+        assert_eq!(backend.to_string(), fallback);
+        assert!(format!("{backend:?}").contains(fallback));
+
+        let infra = crate::InfrastructureError::Backend(crate::seam_error(PyValueError::new_err(
+            "bad kwarg",
+        )));
+        assert!(infra.to_string().contains(fallback), "{infra}");
+        assert!(format!("{infra:?}").contains(fallback));
+
+        let slot_payload: Box<dyn std::error::Error + Send> = Box::new(backend);
+        assert_eq!(format!("{slot_payload}"), fallback);
     }
 }

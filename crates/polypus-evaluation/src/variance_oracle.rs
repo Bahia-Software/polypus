@@ -55,9 +55,9 @@ impl PyVarianceOracle {
             .variance_function
             .bind(py)
             .call1((theta.to_vec(), param_index as u32))
-            .map_err(EvaluationError::Python)?
+            .map_err(|e| EvaluationError::Python(e.into()))?
             .extract()
-            .map_err(EvaluationError::Python)?;
+            .map_err(|e: PyErr| EvaluationError::Python(e.into()))?;
         // A QFIM diagonal element must be finite and non-negative — zero is fine
         // (Tikhonov regularisation keeps the QNG division well-posed). Reject a
         // NaN/infinite/negative value here so it cannot silently corrupt the

@@ -125,9 +125,10 @@ boundary stays out-of-process and explicit; see
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception. The interrupt travels type-erased through the pyo3-free
-  layers, boxed in `BackendError::External`, and the edge downcasts it back and
-  re-raises it verbatim (`external_to_pyerr`); a callback exception rides in
-  `EvaluationError::Python` / `ObservableError::External` the same way. It is
+  layers, boxed in `BackendError::External` as a `DisplaySafePyErr` (§9), and
+  the edge downcasts it back and re-raises it verbatim (`external_to_pyerr`); a
+  callback exception rides in `EvaluationError::Python` /
+  `ObservableError::External` the same way. It is
   never swallowed into a panic by an `.expect()` (that would surface as an opaque
   `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
 - **How many waves that boundary produces is backend- *and* batch-dependent
@@ -484,9 +485,11 @@ through the shared helpers in `crates/polypus-infrastructure/src/attach.rs`:
 `attach_or` for callbacks, choosing explicitly what an unreachable interpreter
 means, and `attach_for_cleanup` for cleanup, which also formats a Python
 exception while still attached (with a fixed fallback if even that fails, as
-`to_string()` would panic). That matters because formatting a `PyErr` attaches
-again, so a `PyErr` that is logged after the attached closure returns
-reintroduces the panic. `CunqaBackend` is the reference use: its release
+`to_string()` would panic). That matters because formatting a bare `PyErr`
+(`Display`, `Debug`, `to_string()`) attaches again with `Python::attach`, so a
+bare `PyErr` that is formatted after the attached closure returns, while
+detached or at shutdown, reintroduces the panic (see the next paragraph).
+`CunqaBackend` is the reference use: its release
 operation receives the `Python` token, and `close` is the one place that
 attaches. An `attach` inside the release operation then reuses that
 attachment without re-checking the interpreter, as long as it stays on the
@@ -494,6 +497,26 @@ same thread and outside a `detach`; detaching inside it would make the next
 attach a fresh one, with the same hazards as above. Keep the fallible
 operation behind a `Result`-returning helper so the `Drop` body only logs and
 counts.
+
+**An error that may hold a `PyErr` is formatted only if its `Display` is
+attach-safe.** The pyo3-free layers log errors with `{e}` while the thread is
+detached (the planner's cancellation path, `OracleErrorSlot::record`; the whole
+scheduler runs inside `py.detach`), and a run still in flight on a daemon thread
+when the interpreter shuts down would panic there if the error held a bare
+`PyErr`. So a Python exception that travels through code that may format it
+while detached is never carried as a bare `PyErr`: it is carried as
+`polypus_infrastructure::DisplaySafePyErr` (in `attach.rs`), whose `Display`
+and `Debug` attach through `attach_or`. With the interpreter available its text
+is the `PyErr`'s; without it, a fixed fallback (`DisplaySafePyErr::UNAVAILABLE`).
+It is the only authorized carrier: `seam_error` boxes it into
+`BackendError::External`, a callback observable into
+`ObservableError::External`, and `EvaluationError::Python` / `Qiskit` hold one.
+The FFI edge (`polypus::exceptions`) downcasts only to it and re-raises the
+original `PyErr` (`into_inner`); a bare `PyErr` boxed by mistake is mapped like
+any other provider error, losing its class, so a C-1 test that exercises that
+path fails instead of passing silently. Formatting a bare `PyErr` remains fine
+where the thread is known to be attached, inside an `attach` closure (as the
+backends' `log::error!` calls next to `seam_error` do).
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over

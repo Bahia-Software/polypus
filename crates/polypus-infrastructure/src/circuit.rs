@@ -23,10 +23,15 @@ use pyo3::prelude::*;
 /// raises a Qiskit exception as `polypus.BackendError` instead, chaining the
 /// original (issue #218); the box carries it unchanged either way.
 ///
+/// The exception is boxed as a [`DisplaySafePyErr`](crate::DisplaySafePyErr), the
+/// one type the edge downcasts to: the pyo3-free planner and `OracleErrorSlot`
+/// log this error with `{e}` while detached, where formatting a bare `PyErr`
+/// could panic at interpreter shutdown.
+///
 /// This replaces the pre-extraction `BackendError::Seam(PyErr)` variant: the same
 /// downcast-and-re-raise, but the boxing keeps PyO3 out of `polypus-backend`.
 pub fn seam_error(err: PyErr) -> BackendError {
-    BackendError::External(Box::new(err))
+    BackendError::External(Box::new(crate::DisplaySafePyErr::from(err)))
 }
 
 /// A bound Qiskit `QuantumCircuit`, wrapped so it can travel inside
