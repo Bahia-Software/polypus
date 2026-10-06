@@ -47,6 +47,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The `>=` bounds in the requirements files are the oldest versions we
+    # support, not pins: raising them to the latest release would drop
+    # Python 3.9 (requires-python = ">=3.9", tested in CI), since those
+    # releases require >=3.10. Only touch a requirement once a release falls
+    # outside its range (e.g. maturin<2.0).
+    versioning-strategy: increase-if-necessary
     groups:
       pip:
         patterns:
