@@ -523,6 +523,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn entropy_error_maps_to_the_backend_error_base_class_not_a_panic() {
+        // A failed OS-entropy read while drawing a default seed (issue #249) reaches
+        // the edge boxed in `External` and must raise a catchable
+        // `polypus.BackendError` (contract C-1/C-7), not a `PanicException` —
+        // which derives from `BaseException` and escapes `except Exception:`.
+        let entropy_failure = || {
+            InfraBackendError::from(crate::infrastructure::EntropyError::new(
+                std::io::Error::other("getrandom: device not available"),
+            ))
+        };
+        assert_maps_to::<BackendError>(entropy_failure(), "OS entropy source unavailable");
+        let py_err = backend_error_to_pyerr(entropy_failure());
+        Python::attach(|py| {
+            assert!(
+                py_err.is_instance_of::<pyo3::exceptions::PyException>(py),
+                "must be catchable as Exception: {py_err}"
+            );
+            assert!(
+                !py_err.is_instance_of::<pyo3::panic::PanicException>(py),
+                "must not cross as a PanicException: {py_err}"
+            );
+            assert!(
+                py_err
+                    .to_string()
+                    .contains("getrandom: device not available"),
+                "the underlying cause must reach Python: {py_err}"
+            );
+        });
+    }
+
     /// Instantiate `class` from a bare-interpreter stand-in for Qiskit's
     /// exceptions (no package needed, ENGINEERING §3): the classes only claim a
     /// `qiskit*` `__module__`, which is all `is_qiskit_exception` reads.

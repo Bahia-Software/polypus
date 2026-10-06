@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
+use rand::TryRngCore;
 
 use polypus_backend::{OptLevel, RunParams};
+
+use crate::error::EntropyError;
 
 /// **Construction-time** execution configuration: everything the
 /// [`Infrastructure`](crate::Infrastructure) factory needs to *build* a backend,
@@ -85,16 +88,23 @@ impl ExecutionConfig {
 /// produces genuine (independent) shot noise across runs rather than repeating a
 /// value derived from the run [`id`](ExecutionConfig::id).
 ///
-/// # Panics
+/// # Errors
 ///
-/// If the OS entropy source is unavailable. This is treated as an
-/// unrecoverable invariant — the same behaviour `rand` 0.8's infallible
-/// `OsRng::next_u64` had internally; rand 0.9 only makes the failure explicit.
-pub fn random_seed() -> u64 {
-    use rand::TryRngCore;
-    rand::rngs::OsRng
-        .try_next_u64()
-        .expect("OS entropy source unavailable: cannot draw a default seed")
+/// [`EntropyError`] if the OS entropy source is unavailable. Unlikely, but this
+/// is reachable from every Python entry point that defaults its seed, so it is
+/// returned rather than panicked on (`ENGINEERING.md` §9).
+pub fn random_seed() -> Result<u64, EntropyError> {
+    random_seed_from(&mut rand::rngs::OsRng)
+}
+
+/// Draw a seed from `rng`: the body of [`random_seed`], with the entropy source
+/// injectable so its failure path can be tested.
+pub(crate) fn random_seed_from<R>(rng: &mut R) -> Result<u64, EntropyError>
+where
+    R: TryRngCore,
+    R::Error: std::error::Error + Send + Sync + 'static,
+{
+    rng.try_next_u64().map_err(EntropyError::new)
 }
 
 /// Provider-specific configuration.
@@ -215,4 +225,97 @@ pub enum QmioProgramFormat {
     /// Assembled QIR LLVM bitcode (`ConcreteCircuit::to_qir_bitcode`, needs
     /// `llvm-as` on `PATH`); travels as Python `bytes`.
     QirBitcode,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BackendError;
+
+    /// The RNG failure a broken entropy source reports.
+    #[derive(Debug)]
+    struct NoEntropy;
+    impl std::fmt::Display for NoEntropy {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "getrandom: device not available")
+        }
+    }
+    impl std::error::Error for NoEntropy {}
+
+    /// An entropy source that always fails, like `OsRng` without a working
+    /// `getrandom`.
+    struct BrokenRng;
+    impl TryRngCore for BrokenRng {
+        type Error = NoEntropy;
+        fn try_next_u32(&mut self) -> Result<u32, NoEntropy> {
+            Err(NoEntropy)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, NoEntropy> {
+            Err(NoEntropy)
+        }
+        fn try_fill_bytes(&mut self, _dst: &mut [u8]) -> Result<(), NoEntropy> {
+            Err(NoEntropy)
+        }
+    }
+
+    /// A healthy, deterministic entropy source.
+    struct ConstRng(u64);
+    impl TryRngCore for ConstRng {
+        type Error = NoEntropy;
+        fn try_next_u32(&mut self) -> Result<u32, NoEntropy> {
+            Ok(self.0 as u32)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, NoEntropy> {
+            Ok(self.0)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), NoEntropy> {
+            dst.fill(0);
+            Ok(())
+        }
+    }
+
+    fn broken_draw() -> EntropyError {
+        random_seed_from(&mut BrokenRng).expect_err("a failing entropy source must be an Err")
+    }
+
+    #[test]
+    fn failing_entropy_source_is_an_error_not_a_panic() {
+        let err = broken_draw();
+        let message = err.to_string();
+        assert!(
+            message.contains("OS entropy source unavailable"),
+            "message must say what failed: {message}"
+        );
+        assert!(
+            message.contains("getrandom: device not available"),
+            "message must quote the underlying cause: {message}"
+        );
+        let source = std::error::Error::source(&err).expect("the cause is kept as source()");
+        assert!(source.downcast_ref::<NoEntropy>().is_some());
+    }
+
+    #[test]
+    fn healthy_entropy_source_yields_its_value() {
+        assert_eq!(random_seed_from(&mut ConstRng(42)).unwrap(), 42);
+    }
+
+    #[test]
+    fn os_entropy_draws_independent_seeds() {
+        assert_ne!(random_seed().unwrap(), random_seed().unwrap());
+    }
+
+    #[test]
+    fn entropy_error_crosses_the_contract_as_external() {
+        let err = BackendError::from(broken_draw());
+        let BackendError::External(boxed) = &err else {
+            panic!("expected BackendError::External, got {err:?}");
+        };
+        assert!(
+            boxed.downcast_ref::<EntropyError>().is_some(),
+            "the edge must be able to recover the EntropyError"
+        );
+        // ...and through the standard `source()` chain.
+        let source = std::error::Error::source(&err).expect("External exposes its payload");
+        assert!(source.downcast_ref::<EntropyError>().is_some());
+    }
 }
