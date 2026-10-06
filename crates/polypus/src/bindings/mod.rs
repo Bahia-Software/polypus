@@ -29,8 +29,8 @@ use crate::evaluation::{
 };
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    merge_counts, BackendConfig, BoundCircuit, Counts, ExecutionConfig, Infrastructure,
-    InfrastructureError, OptLevel, Planner, ShotDistributingPlanner,
+    merge_counts, BackendConfig, BoundCircuit, Counts, EntropyError, ExecutionConfig,
+    Infrastructure, InfrastructureError, OptLevel, Planner, ShotDistributingPlanner,
 };
 use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
@@ -256,10 +256,32 @@ fn outcome_to_train_result(
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
 /// `seed` field pinned on the `DE`/`PSO`/`QNG` instance; otherwise a fresh
-/// OS-entropy value. The chosen value both drives the optimizer and is reported
-/// back in the [`TrainResult`], so the run can be replayed.
-fn resolve_optimizer_seed(kwarg_seed: Option<u64>, method_seed: Option<u64>) -> u64 {
-    kwarg_seed.or(method_seed).unwrap_or_else(random_seed)
+/// OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
+/// value both drives the optimizer and is reported back in the [`TrainResult`],
+/// so the run can be replayed.
+fn resolve_optimizer_seed(
+    kwarg_seed: Option<u64>,
+    method_seed: Option<u64>,
+    draw: impl FnOnce() -> Result<u64, EntropyError>,
+) -> PyResult<u64> {
+    seed_or_entropy(kwarg_seed.or(method_seed), draw)
+}
+
+/// `seed` if given, else a fresh OS-entropy value from `draw` (`random_seed` in
+/// production) — the default-seed rule every entry point shares (contract C-7).
+/// `draw` is only called when `seed` is `None`, so an explicit seed never touches
+/// the OS entropy source. A failed draw raises `polypus.BackendError`, never a
+/// panic (C-1).
+fn seed_or_entropy(
+    seed: Option<u64>,
+    draw: impl FnOnce() -> Result<u64, EntropyError>,
+) -> PyResult<u64> {
+    match seed {
+        Some(seed) => Ok(seed),
+        None => draw().map_err(|e| {
+            crate::exceptions::backend_error_to_pyerr(crate::infrastructure::BackendError::from(e))
+        }),
+    }
 }
 
 /// Suffix `base` with a UUID v4 so concurrent calls never share an
@@ -985,7 +1007,7 @@ pub fn run_quantum_circuit<'py>(
         }
         None
     } else {
-        Some(seed.unwrap_or_else(random_seed))
+        Some(seed_or_entropy(seed, random_seed)?)
     };
 
     // Append a UUID v4 so two concurrent calls with identical `n_qpus`/
@@ -1159,7 +1181,7 @@ pub fn train<'py>(
     // optimizer regardless of backend — and it is also threaded into
     // `ExecutionConfig::seed` so the native backend's shot sampling becomes
     // deterministic too, making a native-backend training run fully reproducible.
-    let effective_seed = resolve_optimizer_seed(seed, method_seed(&method));
+    let effective_seed = resolve_optimizer_seed(seed, method_seed(&method), random_seed)?;
     // Native circuits know their parameter count — catch a mismatch with the
     // requested optimisation dimensions before any QPU work starts.
     let circuit_source = extract_circuit_source(&qc);
@@ -1428,7 +1450,7 @@ pub fn qml_train<'py>(
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
     // below); this seed governs the optimizer's RNG and, since it's threaded
     // into ExecutionConfig::seed below, Aer's shot sampling too.
-    let effective_seed = resolve_optimizer_seed(seed, method_seed(&method));
+    let effective_seed = resolve_optimizer_seed(seed, method_seed(&method), random_seed)?;
     // QML composes Qiskit feature maps and ansätze, so it is inherently a
     // Qiskit path; the native statevector backend cannot consume a Qiskit
     // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
@@ -1650,7 +1672,7 @@ pub fn qml_predict<'py>(
         .collect::<PyResult<_>>()?;
 
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
-    let effective_seed = seed.unwrap_or_else(random_seed);
+    let effective_seed = seed_or_entropy(seed, random_seed)?;
     let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure));
     let backend_config = build_backend_config(
         &infrastructure,
@@ -2156,14 +2178,85 @@ mod tests {
     #[test]
     fn resolve_optimizer_seed_follows_precedence() {
         // Explicit kwarg wins over the optimizer field...
-        assert_eq!(resolve_optimizer_seed(Some(7), Some(9)), 7);
+        assert_eq!(
+            resolve_optimizer_seed(Some(7), Some(9), random_seed).unwrap(),
+            7
+        );
         // ...the optimizer field is the fallback...
-        assert_eq!(resolve_optimizer_seed(None, Some(9)), 9);
+        assert_eq!(
+            resolve_optimizer_seed(None, Some(9), random_seed).unwrap(),
+            9
+        );
         // ...and with neither set, a fresh entropy seed is drawn each time.
         assert_ne!(
-            resolve_optimizer_seed(None, None),
-            resolve_optimizer_seed(None, None)
+            resolve_optimizer_seed(None, None, random_seed).unwrap(),
+            resolve_optimizer_seed(None, None, random_seed).unwrap()
         );
+    }
+
+    /// An entropy source that cannot be read, as `random_seed` reports it.
+    fn failing_draw() -> Result<u64, EntropyError> {
+        Err(EntropyError::new(std::io::Error::other(
+            "getrandom: device not available",
+        )))
+    }
+
+    /// A draw that must never happen: an explicit seed must not touch OS entropy.
+    fn forbidden_draw() -> Result<u64, EntropyError> {
+        panic!("an explicit seed must not draw from the OS entropy source")
+    }
+
+    /// Assert `err` is the `polypus.BackendError` a failed entropy draw raises
+    /// (contract C-1/C-7): catchable as `Exception`, never a `PanicException`.
+    fn assert_entropy_failure(err: &PyErr) {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            assert!(
+                err.is_instance_of::<crate::exceptions::BackendError>(py),
+                "wrong exception class: {err}"
+            );
+            assert!(
+                !err.is_instance_of::<pyo3::panic::PanicException>(py),
+                "an entropy failure must not cross as a PanicException: {err}"
+            );
+            assert!(
+                err.to_string().contains("OS entropy source unavailable"),
+                "message lost: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn seed_or_entropy_uses_an_explicit_seed_without_drawing() {
+        assert_eq!(seed_or_entropy(Some(11), forbidden_draw).unwrap(), 11);
+    }
+
+    #[test]
+    fn seed_or_entropy_returns_the_drawn_value() {
+        assert_eq!(seed_or_entropy(None, || Ok(31)).unwrap(), 31);
+    }
+
+    #[test]
+    fn seed_or_entropy_raises_backend_error_when_the_draw_fails() {
+        let err = seed_or_entropy(None, failing_draw).expect_err("a failed draw must be an Err");
+        assert_entropy_failure(&err);
+    }
+
+    #[test]
+    fn resolve_optimizer_seed_propagates_a_failed_draw() {
+        // Either explicit seed short-circuits the draw...
+        assert_eq!(
+            resolve_optimizer_seed(Some(7), None, forbidden_draw).unwrap(),
+            7
+        );
+        assert_eq!(
+            resolve_optimizer_seed(None, Some(9), forbidden_draw).unwrap(),
+            9
+        );
+        // ...and with neither, the entropy failure surfaces as an error, not a panic.
+        let err = resolve_optimizer_seed(None, None, failing_draw)
+            .expect_err("a failed draw must be an Err");
+        assert_entropy_failure(&err);
     }
 
     /// The seed the binding resolves must actually make the optimizer
@@ -2192,7 +2285,7 @@ mod tests {
         }
 
         let run = |kwarg: Option<u64>, field: Option<u64>| {
-            let seed = resolve_optimizer_seed(kwarg, field);
+            let seed = resolve_optimizer_seed(kwarg, field, random_seed).unwrap();
             AlgorithmDifferentialEvolution
                 .optimize(AlgorithmDifferentialEvolutionArgs {
                     oracle: Box::new(Quadratic),

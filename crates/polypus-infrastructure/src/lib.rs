@@ -50,6 +50,7 @@ pub use polypus_backend::{
 pub use attach::{attach_for_cleanup, attach_or, CleanupError};
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::CunqaBackend;
+pub use error::EntropyError;
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
 pub use native::NativeStatevectorBackend;
@@ -174,13 +175,18 @@ impl Infrastructure {
             // The Python-facing layer resolves a concrete seed whenever the
             // native backend runs; the entropy fallback here only guards a
             // directly-built config that left `seed` unset (e.g. tests), so
-            // an omitted seed still yields independent noise, never a panic.
-            BackendConfig::LocalNative { fusion } => Ok(Arc::new(
-                NativeStatevectorBackend::new(
-                    config.seed.unwrap_or_else(execution_config::random_seed),
-                )
-                .with_fusion(*fusion),
-            )),
+            // an omitted seed still yields independent noise. An unreadable OS
+            // entropy source is an `Err` (`EntropyError` boxed in
+            // `BackendError::External`), never a panic.
+            BackendConfig::LocalNative { fusion } => {
+                let seed = match config.seed {
+                    Some(seed) => seed,
+                    None => execution_config::random_seed()?,
+                };
+                Ok(Arc::new(
+                    NativeStatevectorBackend::new(seed).with_fusion(*fusion),
+                ))
+            }
             // A registry-dispatched backend (QMIO, the subprocess bridge, or a
             // third party's own). The typed construction fields are gone; the factory
             // reads its configuration from the pyo3-free `BackendBuildContext`. A
