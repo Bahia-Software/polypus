@@ -2,17 +2,18 @@
 //!
 //! See [`polypus_infrastructure::error`] for the crate-wide granularity
 //! decision. This enum wraps a [`BackendError`] (the underlying execution
-//! failure), a [`CircuitError`] (native parameter binding) or a raw [`PyErr`]
+//! failure), a [`CircuitError`] (native parameter binding) or a Python exception
 //! (a Python callback/conversion, or a Qiskit binding call), all reachable while
-//! an optimizer drives an oracle across the FFI.
+//! an optimizer drives an oracle across the FFI. A Python exception is carried as
+//! a [`DisplaySafePyErr`], never a bare `PyErr`: the pyo3-free `OracleErrorSlot`
+//! logs this error with `{e}` while the thread is detached, where formatting a
+//! bare `PyErr` could panic at interpreter shutdown.
 
 use std::fmt;
 
 use polypus_circuit::CircuitError;
+use polypus_infrastructure::{BackendError, DisplaySafePyErr, InfrastructureError};
 use polypus_observable::ObservableError;
-use pyo3::PyErr;
-
-use polypus_infrastructure::{BackendError, InfrastructureError};
 
 /// A failure encountered while evaluating a candidate parameter vector.
 ///
@@ -24,7 +25,8 @@ use polypus_infrastructure::{BackendError, InfrastructureError};
 /// surfaces it after `optimize` returns.
 ///
 /// `Clone`/`Eq` are omitted: the [`EvaluationError::Python`] variant carries a
-/// [`PyErr`].
+/// Python exception. `Display` and the derived `Debug` never panic, even without
+/// an interpreter: the `Python`/`Qiskit` payloads are [`DisplaySafePyErr`]s.
 #[derive(Debug)]
 pub enum EvaluationError {
     /// The underlying execution backend failed.
@@ -36,7 +38,7 @@ pub enum EvaluationError {
     Observable(ObservableError),
     /// A Python callback or conversion on the evaluation path raised. Carried
     /// verbatim so the original exception type is preserved across the FFI.
-    Python(PyErr),
+    Python(DisplaySafePyErr),
     /// Qiskit raised while binding a Qiskit circuit's parameters (the only
     /// Qiskit call on the evaluation path). Kept apart from [`Python`](Self::Python),
     /// which also carries the user's callback exceptions, so that the FFI edge
@@ -45,7 +47,7 @@ pub enum EvaluationError {
     /// edge applies the same rule as on the execution seam: only an exception
     /// whose class comes from Qiskit is wrapped; a `ValueError`/`TypeError`
     /// raised there keeps its class.
-    Qiskit(PyErr),
+    Qiskit(DisplaySafePyErr),
     /// A Rust-originated infrastructure failure on the QML evaluation path
     /// (Tokio runtime construction, or a worker task panic surfaced as a
     /// `JoinError`). Never a Python exception, so unlike `Python` it must not be
@@ -140,7 +142,7 @@ impl From<InfrastructureError> for EvaluationError {
     fn from(err: InfrastructureError) -> Self {
         match err {
             // A backend failure (including a between-wave interrupt, which now
-            // arrives as `Backend(BackendError::External(boxed PyErr))`) and an
+            // arrives as `Backend(BackendError::External(boxed DisplaySafePyErr))`) and an
             // observable failure map straight through, exactly as the former
             // `run_and_evaluate` returned them.
             InfrastructureError::Backend(e) => EvaluationError::Backend(e),
@@ -148,7 +150,7 @@ impl From<InfrastructureError> for EvaluationError {
             // A cooperative cancel surfaces as a KeyboardInterrupt, the same class
             // a SIGINT would (unreachable while nothing sets the token).
             InfrastructureError::Cancelled => EvaluationError::Python(
-                pyo3::exceptions::PyKeyboardInterrupt::new_err("the run was cancelled"),
+                pyo3::exceptions::PyKeyboardInterrupt::new_err("the run was cancelled").into(),
             ),
             // A planner/backend mismatch is a construction-time check, not reached
             // through the oracle; surface it as the typed evaluation error.
@@ -160,13 +162,14 @@ impl From<InfrastructureError> for EvaluationError {
 // `EvaluationError` deliberately implements no `From<_> for PyErr`: mapping it to
 // the typed `polypus.*` exception hierarchy is the `polypus` FFI edge's job
 // (`polypus::exceptions::evaluation_error_to_pyerr`), which owns those
-// `#[pyclass]` types. The `Python`/`Observable(External)` variants still carry a
-// `PyErr` verbatim so the edge can re-raise the original exception unchanged;
-// `Qiskit` carries one too, for the edge to wrap when Qiskit raised it.
+// `#[pyclass]` types. The `Python`/`Observable(External)` variants still carry the
+// original exception (as a `DisplaySafePyErr`) so the edge can re-raise it
+// unchanged; `Qiskit` carries one too, for the edge to wrap when Qiskit raised it.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::exceptions::{PyRuntimeError, PyValueError};
 
     // The FFI mapping of these variants to the typed `polypus.*` exception
     // classes now lives at the `polypus` edge (`exceptions::evaluation_error_to_pyerr`)
@@ -220,5 +223,86 @@ mod tests {
             msg.contains("9 labels") && msg.contains("10 training samples"),
             "both counts must be named: {msg}"
         );
+    }
+
+    /// With a live interpreter the Python-carrying variants show the original
+    /// exception's class and message, as before the `DisplaySafePyErr` carrier.
+    #[test]
+    fn python_variants_display_the_original_exception() {
+        pyo3::Python::initialize();
+        let python = EvaluationError::Python(PyValueError::new_err("bad row").into());
+        assert_eq!(
+            python.to_string(),
+            "Python evaluation error: ValueError: bad row"
+        );
+        let qiskit = EvaluationError::Qiskit(PyRuntimeError::new_err("nope").into());
+        assert_eq!(
+            qiskit.to_string(),
+            "Qiskit parameter binding failed: RuntimeError: nope"
+        );
+    }
+
+    /// Without an interpreter every variant that can hold a Python exception
+    /// formats (`Display` and `Debug`) to the fixed fallback instead of panicking,
+    /// including through the `Box<dyn Error + Send>` that `OracleErrorSlot::record`
+    /// logs while the thread is detached. With a bare `PyErr` inside, each of these
+    /// panics: its `Display`/`Debug` call `Python::attach`. Runs in a fresh process
+    /// that never initializes Python (a lazily built `PyErr` needs none).
+    #[test]
+    fn python_carrying_errors_format_without_an_interpreter() {
+        if !is_fresh_process() {
+            run_in_fresh_process(
+                "error::tests::python_carrying_errors_format_without_an_interpreter",
+            );
+            return;
+        }
+        let fallback = DisplaySafePyErr::UNAVAILABLE;
+        let py_err = || DisplaySafePyErr::from(PyValueError::new_err("bad row"));
+        let errors = [
+            EvaluationError::Python(py_err()),
+            EvaluationError::Qiskit(py_err()),
+            EvaluationError::Backend(BackendError::External(Box::new(py_err()))),
+            EvaluationError::Observable(ObservableError::External(Box::new(py_err()))),
+            EvaluationError::from(InfrastructureError::Cancelled),
+        ];
+        for err in errors {
+            assert!(err.to_string().contains(fallback), "{err}");
+            assert!(format!("{err:?}").contains(fallback), "{err:?}");
+            let slot_payload: Box<dyn std::error::Error + Send> = Box::new(err);
+            assert!(format!("{slot_payload}").contains(fallback));
+        }
+        let observable = ObservableError::External(Box::new(py_err()));
+        assert_eq!(observable.to_string(), fallback);
+        assert!(format!("{observable:?}").contains(fallback));
+    }
+
+    /// Run the test `name` alone in a fresh copy of this test binary, in which
+    /// Python is never initialized, and fail if it fails there. A local copy of
+    /// `polypus-infrastructure`'s test-only helper, which is not public.
+    fn run_in_fresh_process(name: &str) {
+        let exe = std::env::current_exe().expect("the test binary path is available");
+        let output = std::process::Command::new(exe)
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env(FRESH_PROCESS_ENV, "1")
+            .output()
+            .expect("the test binary can be re-executed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must actually run the test, not filter it out:\n{stdout}"
+        );
+    }
+
+    /// Set in the child process started by [`run_in_fresh_process`].
+    const FRESH_PROCESS_ENV: &str = "POLYPUS_FRESH_PROCESS_CHILD";
+
+    /// Whether this process is a child started by [`run_in_fresh_process`].
+    fn is_fresh_process() -> bool {
+        std::env::var_os(FRESH_PROCESS_ENV).is_some()
     }
 }

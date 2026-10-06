@@ -17,7 +17,9 @@
 //!   [`ExecutionConfig`]/[`BackendConfig`];
 //! - the process-wide backend-cleanup failure counter exposed to Python;
 //! - [`attach_or`] / [`attach_for_cleanup`], for attaching to the interpreter
-//!   from `Drop` or from callbacks that run while detached (see [`attach`]).
+//!   from `Drop` or from callbacks that run while detached, and
+//!   [`DisplaySafePyErr`], the carrier for a Python exception that may be
+//!   formatted while detached (see [`attach`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,7 +49,7 @@ pub use polypus_backend::{
 };
 
 // --- this crate's own additions ---
-pub use attach::{attach_for_cleanup, attach_or, CleanupError};
+pub use attach::{attach_for_cleanup, attach_or, CleanupError, DisplaySafePyErr};
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::CunqaBackend;
 pub use execution_config::{BackendConfig, ExecutionConfig};

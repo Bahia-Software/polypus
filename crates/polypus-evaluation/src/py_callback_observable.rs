@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
+use polypus_infrastructure::DisplaySafePyErr;
 use polypus_observable::{CostObservable, ObservableError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -90,7 +91,8 @@ impl CostObservable for PyCallbackObservable {
 
         // 3) One GIL section: evaluate each missing key exactly once. A Python
         //    exception is boxed verbatim so the entry point re-raises its
-        //    original type across the FFI.
+        //    original type across the FFI, as a `DisplaySafePyErr` so that
+        //    formatting the error while detached cannot panic.
         if !missing.is_empty() {
             let computed: Vec<(&str, f64)> = Python::attach(|py| {
                 let f = self.cost_fn.bind(py);
@@ -102,7 +104,7 @@ impl CostObservable for PyCallbackObservable {
                     })
                     .collect::<PyResult<Vec<_>>>()
             })
-            .map_err(|e| ObservableError::External(Box::new(e)))?;
+            .map_err(|e| ObservableError::External(Box::new(DisplaySafePyErr::from(e))))?;
 
             if let Some(cache) = &self.cache {
                 let mut guard = cache.write().unwrap_or_else(|p| p.into_inner());
@@ -150,5 +152,40 @@ mod tests {
         pyo3::Python::initialize();
         let obs = Python::attach(|py| PyCallbackObservable::new(py.None(), false));
         assert_eq!(obs.locality(), ReducerLocality::Local);
+    }
+
+    #[test]
+    fn a_raising_callback_is_boxed_as_a_display_safe_py_err() {
+        // The FFI edge re-raises only a boxed `DisplaySafePyErr` verbatim (contract
+        // C-1), and only that carrier is safe to format while detached, so the
+        // callback's exception must be boxed as one, its class kept.
+        pyo3::Python::initialize();
+        let obs = Python::attach(|py| {
+            let cost_fn = PyModule::from_code(
+                py,
+                c"def cost(bitstring):\n    raise ZeroDivisionError('cost divided by zero')\n",
+                c"stand_in.py",
+                c"stand_in",
+            )
+            .and_then(|module| module.getattr("cost"))
+            .expect("the stand-in callback compiles")
+            .unbind();
+            PyCallbackObservable::new(cost_fn, false)
+        });
+        let counts = [HashMap::from([("01".to_string(), 3)])];
+        match obs.expectation_batch(&counts) {
+            Err(ObservableError::External(boxed)) => {
+                let err = boxed
+                    .downcast_ref::<DisplaySafePyErr>()
+                    .expect("the callback's exception is boxed as a DisplaySafePyErr");
+                Python::attach(|py| {
+                    assert!(err
+                        .as_py_err()
+                        .is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py));
+                });
+                assert_eq!(err.to_string(), "ZeroDivisionError: cost divided by zero");
+            }
+            other => panic!("expected ObservableError::External, got {other:?}"),
+        }
     }
 }
