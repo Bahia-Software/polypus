@@ -8,3 +8,5 @@ Cargo.lock
 # files (*.qasm), not the thousands of hash-named entries a run produces.
 corpus/from_qasm2/*
 !corpus/from_qasm2/*.qasm
+corpus/from_qasm3/*
+!corpus/from_qasm3/*.qasm

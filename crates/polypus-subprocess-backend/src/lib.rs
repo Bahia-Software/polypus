@@ -713,7 +713,11 @@ pub fn register() {
 fn to_wire_circuit(bc: &BoundCircuit) -> Result<Circuit, BackendError> {
     match bc {
         BoundCircuit::Native(cc) => Ok(Circuit {
-            qasm: cc.to_qasm2(),
+            qasm: cc.try_to_qasm2().map_err(|e| {
+                BackendError::UnsupportedCircuit(format!(
+                    "the subprocess bridge sends circuits as OpenQASM 2.0, and this one cannot be written in it: {e}"
+                ))
+            })?,
             n_qubits: cc.num_qubits as u32,
         }),
         BoundCircuit::Qasm2(qasm) => Ok(Circuit {
@@ -846,6 +850,22 @@ mod tests {
         }
         let err = to_wire_circuit(&BoundCircuit::Foreign(Box::new(F))).unwrap_err();
         assert!(matches!(err, BackendError::UnsupportedCircuit(_)));
+    }
+
+    #[test]
+    fn a_circuit_openqasm2_cannot_express_is_rejected_without_a_worker() {
+        let circuit = polypus_circuit::ParameterizedCircuit::from_qasm3(
+            "OPENQASM 3.0;\ninclude \"stdgates.inc\";\ngate g(t) a { rx(arcsin(t)) a; }\nqubit[1] q;\ng(0.5) q[0];\n",
+        )
+        .unwrap()
+        .assign_parameters(&[])
+        .unwrap();
+        match to_wire_circuit(&BoundCircuit::Native(circuit)) {
+            Err(BackendError::UnsupportedCircuit(message)) => {
+                assert!(message.contains("arcsin"), "{message}")
+            }
+            other => panic!("expected UnsupportedCircuit, got {other:?}"),
+        }
     }
 
     fn ctx(options: &[(&str, &str)]) -> BackendBuildContext {

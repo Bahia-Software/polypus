@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use example_rust_backend::{register, TemplateBackend, BACKEND_NAME};
-use polypus_backend::{is_registered, QuantumBackend};
+use polypus_backend::{
+    is_registered, BackendError, BoundCircuit, OptLevel, QuantumBackend, RunParams,
+};
 use polypus_backend_conformance::{Conformance, Fault};
 
 /// Build a backend at `endpoint`, boxed for the battery's factory closures.
@@ -51,4 +53,27 @@ fn the_native_template_passes_the_conformance_battery() {
 fn it_registers_under_its_name() {
     register();
     assert!(is_registered(BACKEND_NAME));
+}
+
+#[test]
+fn a_circuit_openqasm2_cannot_express_is_unsupported() {
+    let circuit = polypus_circuit::ParameterizedCircuit::from_qasm3(
+        "OPENQASM 3.0;\ninclude \"stdgates.inc\";\ngate g(t) a { rx(arcsin(t)) a; }\nqubit[1] q;\ng(0.5) q[0];\n",
+    )
+    .unwrap()
+    .assign_parameters(&[])
+    .unwrap();
+    let params = RunParams {
+        id: "qasm2-unsupported".to_string(),
+        shots: 16,
+        seed: None,
+        opt_level: OptLevel::default(),
+    };
+    let backend = TemplateBackend::connect("sim://loopback").unwrap();
+    match backend.run_circuits(&[BoundCircuit::Native(circuit)], &params) {
+        Err(BackendError::UnsupportedCircuit(message)) => {
+            assert!(message.contains("arcsin"), "{message}")
+        }
+        other => panic!("expected UnsupportedCircuit, got {other:?}"),
+    }
 }

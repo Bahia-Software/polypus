@@ -164,7 +164,9 @@ enum ProgramPayload {
 pub enum QmioError {
     /// A Qiskit `QuantumCircuit` reached the GIL-free QMIO path.
     UnsupportedCircuit,
-    /// An OpenQASM 2.0 program could not be parsed back into a circuit.
+    /// An OpenQASM 2.0 program could not be parsed back into a circuit, or a
+    /// circuit could not be written as one (a gate declared in OpenQASM 3 that
+    /// OpenQASM 2.0 cannot express).
     Circuit(String),
     /// QIR bitcode assembly failed (typically `llvm-as` missing from `PATH`).
     QirBitcode(String),
@@ -381,7 +383,9 @@ impl QmioBackend {
     /// compiler (header and body both `OPENQASM 2.0`).
     fn qasm_text(&self, circuit: &BoundCircuit) -> Result<String, QmioError> {
         match circuit {
-            BoundCircuit::Native(cc) => Ok(cc.to_qasm2()),
+            BoundCircuit::Native(cc) => cc
+                .try_to_qasm2()
+                .map_err(|e| QmioError::Circuit(e.to_string())),
             BoundCircuit::Qasm2(s) => Ok(s.clone()),
             BoundCircuit::Foreign(_) => Err(QmioError::UnsupportedCircuit),
         }
@@ -1164,6 +1168,22 @@ mod tests {
             .serialize_program(&circuit)
             .unwrap_err();
         assert!(matches!(err, QmioError::UnsupportedCircuit));
+    }
+
+    #[test]
+    fn rejects_a_circuit_openqasm2_cannot_express() {
+        let circuit = ParameterizedCircuit::from_qasm3(
+            "OPENQASM 3.0;\ninclude \"stdgates.inc\";\ngate g(t) a { rx(arcsin(t)) a; }\nqubit[1] q;\ng(0.5) q[0];\n",
+        )
+        .unwrap()
+        .assign_parameters(&[])
+        .unwrap();
+        match backend(QmioProgramFormat::OpenQasm).serialize_program(&BoundCircuit::Native(circuit))
+        {
+            Err(QmioError::Circuit(message)) => assert!(message.contains("arcsin"), "{message}"),
+            Ok(_) => panic!("the circuit cannot be written in OpenQASM 2.0"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
     }
 
     #[test]
