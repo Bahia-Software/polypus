@@ -5,7 +5,7 @@ use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::check_oracle_len;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Quantum Natural Gradient optimizer.
 pub struct AlgorithmQNG;

@@ -15,7 +15,7 @@ use crate::medium::compound::PhotonChannel;
 use crate::medium::Medium;
 use crate::particle::photon::Photon;
 use crate::particle::ParticleState;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Photon interaction model over an arbitrary [`Medium`].
 ///

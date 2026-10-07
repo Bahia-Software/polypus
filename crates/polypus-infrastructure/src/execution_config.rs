@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use rand::TryRngCore;
+use rand::TryRng;
 
 use polypus_backend::{OptLevel, RunParams};
 
@@ -94,14 +94,14 @@ impl ExecutionConfig {
 /// is reachable from every Python entry point that defaults its seed, so it is
 /// returned rather than panicked on (`ENGINEERING.md` §9).
 pub fn random_seed() -> Result<u64, EntropyError> {
-    random_seed_from(&mut rand::rngs::OsRng)
+    random_seed_from(&mut rand::rngs::SysRng)
 }
 
 /// Draw a seed from `rng`: the body of [`random_seed`], with the entropy source
 /// injectable so its failure path can be tested.
 pub(crate) fn random_seed_from<R>(rng: &mut R) -> Result<u64, EntropyError>
 where
-    R: TryRngCore,
+    R: TryRng,
     R::Error: std::error::Error + Send + Sync + 'static,
 {
     rng.try_next_u64().map_err(EntropyError::new)
@@ -242,10 +242,10 @@ mod tests {
     }
     impl std::error::Error for NoEntropy {}
 
-    /// An entropy source that always fails, like `OsRng` without a working
+    /// An entropy source that always fails, like `SysRng` without a working
     /// `getrandom`.
     struct BrokenRng;
-    impl TryRngCore for BrokenRng {
+    impl TryRng for BrokenRng {
         type Error = NoEntropy;
         fn try_next_u32(&mut self) -> Result<u32, NoEntropy> {
             Err(NoEntropy)
@@ -260,7 +260,7 @@ mod tests {
 
     /// A healthy, deterministic entropy source.
     struct ConstRng(u64);
-    impl TryRngCore for ConstRng {
+    impl TryRng for ConstRng {
         type Error = NoEntropy;
         fn try_next_u32(&mut self) -> Result<u32, NoEntropy> {
             Ok(self.0 as u32)

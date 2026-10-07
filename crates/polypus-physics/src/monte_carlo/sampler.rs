@@ -1,6 +1,6 @@
 //! Step-length sampling and position advancement helpers.
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Sample a step length from the exponential distribution
 /// `d = −λ · ln(ξ)`, with `ξ ~ Uniform(0, 1)` and `λ = 1/Σ_tot` the mean free

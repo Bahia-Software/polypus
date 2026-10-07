@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use polypus_observable::{CostObservable, ObservableError, QuboObservable};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// A reference observable: a boxed `Fn(&str) -> f64` cost, aggregated the same
 /// way the historical Python `expectation_values` did (count-weighted mean).

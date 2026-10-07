@@ -18,7 +18,7 @@
 use super::compton::rotate_direction;
 use crate::constants::CLASSICAL_ELECTRON_RADIUS_M as R_E;
 use crate::particle::{FourMomentum, ParticleState, Position};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::f64::consts::PI;
 
 /// Differential cross-section `dσ/dΩ` (m²/steradian) at scattering-angle

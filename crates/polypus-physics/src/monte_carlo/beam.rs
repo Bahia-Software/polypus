@@ -3,7 +3,7 @@
 //!
 //! All lengths are in **metres**
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::particle::{FourMomentum, ParticleState, Position};
 
@@ -19,7 +19,7 @@ pub struct DivergentBeam {
     pub energy_source: Box<dyn EnergySpectrum>,
 }
 
-use rand::RngCore;
+use rand::Rng;
 
 /// A source of a primary particle's full initial state (position,
 /// direction, and energy), sampled once per Monte Carlo history.
@@ -28,7 +28,7 @@ use rand::RngCore;
 /// same contract already used by [`super::spectrum::EnergySpectrum`].
 pub trait BeamSource: Send + Sync + std::fmt::Debug {
     /// Sample one primary's full initial state.
-    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState;
+    fn sample_state(&self, rng: &mut dyn Rng) -> ParticleState;
 }
 
 impl DivergentBeam {
@@ -36,7 +36,7 @@ impl DivergentBeam {
     /// within the field on the surface, and the direction it would have if
     /// it had actually travelled there from the point source at
     /// `(0, 0, -source_to_surface_distance_m)`.
-    pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
+    pub fn sample(&self, rng: &mut dyn Rng) -> ParticleState {
         let half_field = self.field_side_m / 2.0;
         let x0 = rng.random_range(-half_field..=half_field);
         let y0 = rng.random_range(-half_field..=half_field);
@@ -59,7 +59,7 @@ impl DivergentBeam {
 }
 
 impl BeamSource for DivergentBeam {
-    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState {
+    fn sample_state(&self, rng: &mut dyn Rng) -> ParticleState {
         self.sample(rng)
     }
 }
@@ -78,7 +78,7 @@ pub struct ParallelBeam {
 }
 
 impl ParallelBeam {
-    pub fn sample(&self, rng: &mut dyn RngCore) -> ParticleState {
+    pub fn sample(&self, rng: &mut dyn Rng) -> ParticleState {
         let x0 = rng.random_range(-self.half_width_x_m..=self.half_width_x_m);
         let y0 = rng.random_range(-self.half_width_y_m..=self.half_width_y_m);
         ParticleState {
@@ -93,7 +93,7 @@ impl ParallelBeam {
 }
 
 impl BeamSource for ParallelBeam {
-    fn sample_state(&self, rng: &mut dyn RngCore) -> ParticleState {
+    fn sample_state(&self, rng: &mut dyn Rng) -> ParticleState {
         self.sample(rng)
     }
 }

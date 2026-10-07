@@ -28,12 +28,12 @@
 
 use crate::error::PhysicsError;
 use rand::Rng;
-use rand::RngCore;
+use rand::RngExt;
 
 /// A probability distribution over primary-particle energies (MeV).
 ///
 /// Object-safe: `Box<dyn EnergySpectrum>` and `&dyn EnergySpectrum` are usable.
-/// The RNG is passed as `&mut dyn RngCore` (rather than a generic `impl Rng`)
+/// The RNG is passed as `&mut dyn Rng` (rather than a generic `impl Rng`)
 /// precisely to keep the trait object-safe.
 ///
 /// # Adding a new spectrum
@@ -47,7 +47,7 @@ pub trait EnergySpectrum: Send + Sync + std::fmt::Debug {
     ///
     /// The returned value is guaranteed to lie in
     /// `[min_energy_mev, max_energy_mev]`.
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64;
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64;
 
     /// Lowest energy the distribution can return (MeV).
     fn min_energy_mev(&self) -> f64;
@@ -83,7 +83,7 @@ impl Monoenergetic {
 }
 
 impl EnergySpectrum for Monoenergetic {
-    fn sample_energy_mev(&self, _rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, _rng: &mut dyn Rng) -> f64 {
         self.energy_mev
     }
 
@@ -129,7 +129,7 @@ impl UniformSpectrum {
 }
 
 impl EnergySpectrum for UniformSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         rng.random_range(self.min_energy_mev..self.max_energy_mev)
     }
 
@@ -221,7 +221,7 @@ impl KramersSpectrum {
 }
 
 impl EnergySpectrum for KramersSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         // The pdf is monotonically decreasing, so its supremum on the support
         // is at E_min.
         let bound = self.pdf(self.min_energy_mev);
@@ -357,7 +357,7 @@ impl TabulatedSpectrum {
 }
 
 impl EnergySpectrum for TabulatedSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         let u: f64 = rng.random_range(0.0..1.0);
         // First bin whose cumulative probability reaches `u`.
         let idx = self.cdf.partition_point(|&c| c < u).min(self.cdf.len() - 1);
