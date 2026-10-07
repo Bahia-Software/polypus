@@ -39,6 +39,14 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      # uuid 1.27 declares rust-version 1.89, above our MSRV, so it breaks the
+      # `msrv` CI job (checked with --locked). Interim: the workspace now uses
+      # the MSRV-aware resolver (`resolver = "3"`), but Dependabot is not known
+      # to honour it (dependabot-core#5423). Drop this ignore once the MSRV is
+      # raised or a Dependabot PR confirms the resolver is respected (#276).
+      - dependency-name: "uuid"
+        versions: [">=1.27"]
 
   # From `/`, Dependabot reads pyproject.toml plus every root-level *.txt whose
   # name contains "requirements", so requirements-dev.txt and
