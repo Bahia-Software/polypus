@@ -361,12 +361,17 @@ measure q[1] -> c[0];
 """
 
 
-def _run_both(circuit, shots):
+def _run_both(circuit, shots, n_qpus=1):
     import polypus
 
     return tuple(
         polypus.run_quantum_circuit(
-            circuit, shots=shots, infrastructure="local", backend=b, seed=11
+            circuit,
+            shots=shots,
+            infrastructure="local",
+            backend=b,
+            seed=11,
+            n_qpus=n_qpus,
         ).counts
         for b in ("aer", "polypus")
     )
@@ -468,6 +473,30 @@ _WIDER_CREG_MEASURED = (
     _QASM_HEADER + "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n"
 )
 
+# (body, expected counts key). Every circuit here is measured and declares more
+# classical bits than it writes, so C-3 keys it at the declared width: the sum
+# of all its `creg`s, unwritten bits reading 0 (issue #251).
+_WIDER_CREG_MEASURED_CASES = {
+    "write_c1_of_c3": (
+        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+        "010",
+    ),
+    "write_c0_of_c3": (
+        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[0];\n",
+        "001",
+    ),
+    # The last register is never written; the width is still 2 + 3.
+    "two_cregs_last_unwritten": (
+        "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
+        "00010",
+    ),
+    # A full per-qubit measurement the importer collapses to `MeasureAll`.
+    "measure_all_shape_into_c4": (
+        "qreg q[2];\ncreg c[4];\nx q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        "0010",
+    ),
+}
+
 
 @pytest.mark.integration
 class TestUnmeasuredCircuitsReadTheFullRegister:
@@ -529,14 +558,13 @@ class TestUnmeasuredCircuitsReadTheFullRegister:
         assert (len(qc.data), [reg.name for reg in qc.cregs], qc.num_clbits) == before
 
     def test_aer_reads_a_measured_circuit_at_its_declared_clbit_width(self):
-        """Documents what Aer does today, NOT a contract guarantee: Qiskit makes
-        the key as wide as the classical bits the circuit declares (``creg
-        c[3]`` gives 3 characters), even when fewer are written. The full
-        read-out above applies only to circuits with no measurement at all, so
-        this circuit is left to Qiskit. The native backend does not keep
-        declared registers and answers ``'10'`` instead; see
-        ``test_measured_circuit_with_a_wider_creg_has_the_same_keys`` (an open
-        C-3 known break)."""
+        """Qiskit makes the key as wide as the classical bits the circuit
+        declares (``creg c[3]`` gives 3 characters), even when fewer are
+        written. The full read-out above applies only to circuits with no
+        measurement at all, so this circuit is left to Qiskit. C-3 adopts that
+        declared width (issue #251), and the native backend now answers
+        ``'010'`` too; see
+        ``test_measured_circuit_with_a_wider_creg_has_the_same_keys``."""
         import polypus
 
         result = polypus.run_quantum_circuit(
@@ -544,18 +572,66 @@ class TestUnmeasuredCircuitsReadTheFullRegister:
         )
         assert result.counts == [{"010": 20}]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "C-3 known break, open (#251): for a measured circuit "
-            "whose creg is wider than its highest written bit, Aer keys are as "
-            "wide as the declared clbits ('010') and native keys as max(cbit)+1 "
-            "('10'), because polypus-circuit does not keep declared registers"
-        ),
-    )
     def test_measured_circuit_with_a_wider_creg_has_the_same_keys(self):
         aer, native = _run_both(_WIDER_CREG_MEASURED, shots=20)
         assert aer == native
+
+
+@pytest.mark.integration
+class TestMeasuredCircuitsUseTheDeclaredClbitWidth:
+    """A measured OpenQASM program whose ``creg``s are wider than the bits it
+    writes is keyed at the declared width — the sum of its ``creg``s — on Aer
+    and on the native backend alike, one QPU or several (C-3, issue #251). The
+    native backend used ``max(cbit) + 1`` instead."""
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_key_is_the_declared_width(self, case, backend, n_qpus):
+        import polypus
+
+        body, key = _WIDER_CREG_MEASURED_CASES[case]
+        result = polypus.run_quantum_circuit(
+            _QASM_HEADER + body,
+            shots=20,
+            infrastructure="local",
+            backend=backend,
+            n_qpus=n_qpus,
+        )
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_aer_and_native_agree(self, case, n_qpus):
+        body, _ = _WIDER_CREG_MEASURED_CASES[case]
+        aer, native = _run_both(_QASM_HEADER + body, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_builder_circuit_keeps_its_implicit_width(self, backend, n_qpus):
+        """A ``polypus.Circuit`` declares no registers: its width is still
+        ``max(cbit) + 1``."""
+        import polypus
+
+        qc = polypus.Circuit(2).x(0).measure(0, 1)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
+        )
+        assert result.counts == [{"10": 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_imported_circuit_loses_the_declared_width(self, backend):
+        """Known limit, the same on both backends: ``Circuit.from_qasm2`` keeps
+        only the implicit register once its parameters are bound, so the run
+        sees ``max(cbit) + 1`` (Aer receives the re-exported QASM)."""
+        import polypus
+
+        qc = polypus.Circuit.from_qasm2(_WIDER_CREG_MEASURED)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend
+        )
+        assert result.counts == [{"10": 20}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
