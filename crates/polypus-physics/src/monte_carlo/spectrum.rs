@@ -390,6 +390,44 @@ mod tests {
         assert_eq!(spec.max_energy_mev(), 0.1);
     }
 
+    /// Pins the absolute seeded output of the non-trivial spectra (Kramers'
+    /// rejection sampler and the tabulated inverse CDF). The other seeded tests
+    /// only check bounds or compare two runs, so a `rand` bump that changed the
+    /// `StdRng` stream or `random_range` would pass them silently. Values
+    /// captured with rand 0.9.4, compared by bits.
+    #[test]
+    fn non_trivial_spectra_seeded_stream_is_pinned() {
+        let kramers = KramersSpectrum::from_kvp(100.0, 10.0).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let energies: [u64; 3] =
+            std::array::from_fn(|_| kramers.sample_energy_mev(&mut rng).to_bits());
+        assert_eq!(
+            energies,
+            [
+                4578699985104795690,
+                4581944995894436828,
+                4577571572644783066
+            ]
+        );
+
+        let tabulated =
+            TabulatedSpectrum::new(vec![0.02, 0.04, 0.06, 0.08], vec![1.0, 3.0, 2.0, 0.5]).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let energies: [u64; 6] =
+            std::array::from_fn(|_| tabulated.sample_energy_mev(&mut rng).to_bits());
+        assert_eq!(
+            energies,
+            [
+                4585925428558828667,
+                4585925428558828667,
+                4588807732320345784,
+                4585925428558828667,
+                4581421828931458171,
+                4585925428558828667
+            ]
+        );
+    }
+
     #[test]
     fn monoenergetic_rejects_non_positive() {
         assert!(matches!(

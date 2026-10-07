@@ -125,6 +125,28 @@ mod tests {
         }
     }
 
+    /// Pins the absolute seeded output of the inclusive `f64` range draw
+    /// (`random_range(a..=b)`) behind the field position. The other seeded
+    /// tests only check bounds, so a `rand` bump that changed the `StdRng`
+    /// stream or the inclusive-range sampler would pass them silently. Values
+    /// captured with rand 0.9.4, compared by bits.
+    #[test]
+    fn position_seeded_stream_is_pinned() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let positions: [[u64; 2]; 3] = std::array::from_fn(|_| {
+            let [x, y, _] = beam().sample(&mut rng).position.0;
+            [x.to_bits(), y.to_bits()]
+        });
+        assert_eq!(
+            positions,
+            [
+                [4568270144115499936, 4571575903482300544],
+                [4579020299152618536, 13799950052959900840],
+                [13810243685127499696, 13799428062678453556]
+            ]
+        );
+    }
+
     #[test]
     fn direction_is_unit_vector() {
         let mut rng = StdRng::seed_from_u64(2);

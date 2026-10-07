@@ -94,4 +94,77 @@ mod tests {
         let value = with_seeded_rng(Some(7), |_| 99u32);
         assert_eq!(value, 99);
     }
+
+    /// Pins the absolute seeded output of every sampling method the optimizers
+    /// draw from in `src/` (DE, PSO, QNG). The determinism tests above only
+    /// compare one run against another, so a `rand` bump that changed the
+    /// `StdRng` stream or a sampling algorithm would pass them silently; this
+    /// one fails instead. Values captured with rand 0.9.4; `f64`s are compared
+    /// by bits, with no tolerance.
+    #[test]
+    fn seeded_stream_is_pinned() {
+        use rand::seq::IndexedRandom;
+        use rand::Rng;
+
+        let raw: [u64; 3] =
+            with_seeded_rng(Some(42), |rng| std::array::from_fn(|_| rng.next_u64()));
+        assert_eq!(
+            raw,
+            [
+                9713269763989775522,
+                10011513049433592189,
+                11740708795755607249
+            ]
+        );
+
+        // PSO: `random::<f64>()` for the r1/r2 weights.
+        let unit: [u64; 3] = with_seeded_rng(Some(42), |rng| {
+            std::array::from_fn(|_| rng.random::<f64>().to_bits())
+        });
+        assert_eq!(
+            unit,
+            [
+                4602918027047224548,
+                4603063653651445162,
+                4603907987511953958
+            ]
+        );
+
+        // DE/PSO/QNG: `random_range` over an `f64` interval for initialisation.
+        let ranged: [u64; 3] = with_seeded_rng(Some(42), |rng| {
+            std::array::from_fn(|_| rng.random_range(-1.5..2.5f64).to_bits())
+        });
+        assert_eq!(
+            ranged,
+            [
+                4603635650670957456,
+                4604218157087839912,
+                4607388955664946252
+            ]
+        );
+
+        let indices: [usize; 3] = with_seeded_rng(Some(42), |rng| {
+            std::array::from_fn(|_| rng.random_range(0..10usize))
+        });
+        assert_eq!(indices, [1, 5, 2]);
+
+        // DE: `random_bool(0.7)` for the crossover mask.
+        let flips: [bool; 16] = with_seeded_rng(Some(42), |rng| {
+            std::array::from_fn(|_| rng.random_bool(0.7))
+        });
+        assert_eq!(
+            flips,
+            [
+                true, true, true, true, true, true, false, false, true, true, false, true, true,
+                true, true, true
+            ]
+        );
+
+        // DE: three distinct donors chosen from the other population members.
+        let ids: Vec<usize> = (0..10).collect();
+        let donors: Vec<usize> = with_seeded_rng(Some(42), |rng| {
+            ids.choose_multiple(rng, 3).cloned().collect()
+        });
+        assert_eq!(donors, [1, 4, 2]);
+    }
 }
