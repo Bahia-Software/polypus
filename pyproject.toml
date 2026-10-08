@@ -16,9 +16,11 @@ license = "EUPL-1.2"
 license-files = ["LICENSE"]
 authors = [
     { name = "Diego Beltrán Fernández Prada", email = "diego.fernandez@bahiasoftware.es" },
-    { name = "Víctor Soñora Pombo" },
+    { name = "Víctor Sóñora Pombo" },
     { name = "Sergio Figueiras Gómez" },
     { name = "Miguel Boubeta Martínez" },
+    { name = "Kevin Pérez González" },
+    { name = "Uxía Sendón Caamaño" },
     { name = "Galicia Supercomputing Center (CESGA)" },
 ]
 keywords = ["quantum", "quantum-computing", "vqc", "qml", "qaoa", "qiskit", "simulator", "optimization"]

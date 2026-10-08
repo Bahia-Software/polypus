@@ -47,7 +47,7 @@ edition = "2021"
 # (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
 # workspace's own code needs far less. Bump deliberately when a dep requires it.
 rust-version = "1.85"
-authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
+authors = ["Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es>", "Víctor Sóñora Pombo", "Sergio Figueiras Gómez", "Miguel Boubeta Martínez", "Kevin Pérez González", "Uxía Sendón Caamaño", "Galicia Supercomputing Center (CESGA)"]
 # SPDX identifier (required by cargo-deny and crates.io). The full licence
 # text, including the "or subsequent versions approved by the European
 # Commission" clause, lives in the LICENSE file at the repo root.

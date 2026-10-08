@@ -3,8 +3,8 @@
 #   - Actualizar `version` y `date-released` a la nueva release.
 #   - `identifiers` usa el DOI DE CONCEPTO (apunta siempre a la última versión),
 #     no el DOI de una versión concreta; no hace falta cambiarlo entre releases.
-#   - Mantener esta lista de autores en sync con la sección "Credits" y el
-#     bloque BibTeX del README, y con `.zenodo.json`.
+#   - Mantener esta lista de autores en sync con el
+#     bloque BibTeX del README, `.zenodo.json`, `pyproject.toml` y `Cargo.toml`.
 # -----------------------------------------------------------------------------
 
 cff-version: 1.2.0
