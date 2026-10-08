@@ -1013,6 +1013,9 @@ OpenQASM 2.0 declarations are re-emitted verbatim as before (C-2).
 | Statements one declaration expands to (`MAX_GATE_EXPANSION`) | 1 000 000 |
 | Statements all calls of declared gates expand to (`MAX_VALIDATED_EXPANSION`) | 20 000 000 |
 
+Rationale, evidence and alternatives considered: see
+`docs/adr/0004-openqasm3-profile-and-angle-expressions.md`.
+
 **Enforcing test:** `crates/polypus-circuit/tests/qasm3.rs` (every accepted
 and rejected construct with its line and message, the budgets on both sides,
 the canonical layout, numbers and parentheses, renaming and collisions — a
