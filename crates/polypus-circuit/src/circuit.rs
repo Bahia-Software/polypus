@@ -62,8 +62,9 @@ pub struct ParameterizedCircuit {
     /// [`param_names`](Self::param_names).
     pub(crate) param_names: Vec<String>,
     /// The total size of the classical registers the OpenQASM program this
-    /// circuit was imported from declares (the sum of its `creg`s); `None` when
-    /// it declares none or the circuit was built, not imported. Import
+    /// circuit was imported from declares (the sum of its `creg`s, or of its
+    /// `bit` registers in OpenQASM 3); `None` when it declares none or the
+    /// circuit was built, not imported. Import
     /// metadata, never part of the circuit's identity; read through the hidden
     /// `declared_clbits` getter.
     pub(crate) declared_clbits: Option<usize>,
@@ -745,8 +746,9 @@ impl ParameterizedCircuit {
     }
 
     /// The number of classical bits declared by the OpenQASM program this
-    /// circuit was imported from (the sum of its `creg` sizes), or `None` when
-    /// it declares no `creg` or the circuit was built rather than imported.
+    /// circuit was imported from (the sum of its `creg` sizes, or of its `bit`
+    /// register sizes in OpenQASM 3), or `None` when it declares none or the
+    /// circuit was built rather than imported.
     ///
     /// Not part of the public API: the native backend reads it so that a
     /// measured program's counts are keyed at the declared width, as on Aer
