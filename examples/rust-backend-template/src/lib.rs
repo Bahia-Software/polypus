@@ -80,9 +80,16 @@ impl TemplateBackend {
         seed: Option<u64>,
     ) -> Result<Counts, BackendError> {
         // Serialise to your wire format. A provider-native `Foreign` object cannot
-        // cross a wire, so reject it up front — do NOT panic.
+        // cross a wire, and some native circuits cannot be written in OpenQASM 2.0
+        // (a gate declared in OpenQASM 3 with `arcsin` in its body): reject both up
+        // front — do NOT panic, so never `to_qasm2`.
         let program = match qc {
-            BoundCircuit::Native(cc) => cc.to_qasm2(),
+            BoundCircuit::Native(cc) => cc.try_to_qasm2().map_err(|e| {
+                BackendError::UnsupportedCircuit(format!(
+                    "example-rust-qpu speaks OpenQASM 2.0 over the wire, and this circuit \
+                     cannot be written in it: {e}"
+                ))
+            })?,
             BoundCircuit::Qasm2(qasm) => qasm.clone(),
             BoundCircuit::Foreign(_) => {
                 return Err(BackendError::UnsupportedCircuit(

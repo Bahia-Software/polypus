@@ -6,7 +6,7 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
 use ndarray::{Array1, Array2};
-use rand::{seq::IndexedRandom, Rng};
+use rand::{seq::IndexedRandom, Rng, RngExt};
 use std::f64::consts::PI;
 
 /// Differential Evolution optimizer.
@@ -118,7 +118,7 @@ impl AlgorithmDifferentialEvolution {
             let mut trials: Vec<Array1<f64>> = Vec::with_capacity(popsize);
             for i in 0..popsize {
                 let ids: Vec<usize> = (0..popsize).filter(|&j| j != i).collect();
-                let sel: Vec<usize> = ids.choose_multiple(rng, 3).cloned().collect();
+                let sel: Vec<usize> = ids.sample(rng, 3).cloned().collect();
                 let c1 = pop.row(sel[0]).to_owned();
                 let c2 = pop.row(sel[1]).to_owned();
                 let c3 = pop.row(sel[2]).to_owned();

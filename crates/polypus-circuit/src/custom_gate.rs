@@ -1,26 +1,28 @@
-//! Gates declared in the source program: OpenQASM 2.0 `gate` blocks.
+//! Gates declared in the source program: `gate` blocks of OpenQASM 2.0 or 3.
 //!
 //! A declaration `gate name(params) qargs { body }` becomes a
 //! [`GateDefinition`]: a template over its formal parameters and qubit
 //! arguments, plus the verbatim text of the declaration. A call of the gate is
 //! **one** instruction, [`GateInstruction::Custom`](crate::GateInstruction::Custom),
 //! holding its definition — the circuit never contains the expanded body, so
-//! the OpenQASM exporter re-emits the declaration and the call exactly as the
-//! source had them, and a backend that parses the export (Qiskit, then Aer)
-//! builds the same program as from the original file.
+//! the OpenQASM 2.0 exporter re-emits an OpenQASM 2.0 declaration and its
+//! calls exactly as the source had them, and a backend that parses the export
+//! (Qiskit, then Aer) builds the same program as from the original file. The
+//! other exports print a definition from its body (see `crate::qasm3` and
+//! `crate::qasm`).
 //!
 //! Expanding a call into built-in instructions ([`CustomGate::expand`]) is a
 //! *lowering* step, used only where a backend needs built-in gates: the native
 //! simulator and the QIR exporter.
 //!
-//! Declarations come only from the importer, which validates them once:
+//! Declarations come only from the importers, which validate them once:
 //! recursion is impossible (a body may only call gates declared *before* it),
 //! nesting is capped at [`MAX_GATE_NESTING`] levels and a single declaration's
 //! full expansion may visit at most [`MAX_GATE_EXPANSION`] body statements, so
-//! expansion is always bounded (`qasm_import` is an untrusted input surface).
+//! expansion is always bounded (the importers are an untrusted input surface).
 
 use crate::error::CircuitError;
-use crate::expr::{EvalError, ExprArena, FormalExpr};
+use crate::expr::{Dialect, EvalError, ExprArena, FormalExpr};
 use crate::gate::{GateInstruction, GateParam};
 use crate::qasm_import::BuiltinGate;
 use std::sync::Arc;
@@ -43,7 +45,8 @@ pub(crate) const MAX_GATE_EXPANSION: usize = 1_000_000;
 /// position in the declaration's qubit list).
 #[derive(Debug, PartialEq)]
 pub(crate) enum BodyOp {
-    /// A built-in (`qelib1.inc`) gate.
+    /// A built-in gate: a row of the vocabulary both importers share
+    /// (`qelib1.inc`, and `stdgates.inc` and `U` in OpenQASM 3).
     Builtin {
         gate: &'static BuiltinGate,
         params: Vec<FormalExpr>,
@@ -59,10 +62,10 @@ pub(crate) enum BodyOp {
     Barrier(Vec<usize>),
 }
 
-/// A gate declared with an OpenQASM 2.0 `gate` block: a template over its
-/// formal parameters and qubit arguments, and the declaration's source text.
+/// A gate declared with a `gate` block: a template over its formal
+/// parameters and qubit arguments, and the declaration's source text.
 ///
-/// Only the QASM importer creates definitions, after validating them (see the
+/// Only the QASM importers create definitions, after validating them (see the
 /// module docs); calls hold them through an [`Arc`], so a definition is shared
 /// by all its calls and by every clone of the circuit.
 #[derive(Debug, PartialEq)]
@@ -72,8 +75,12 @@ pub struct GateDefinition {
     qubit_names: Vec<String>,
     body: Vec<BodyOp>,
     /// The declaration, from `gate` to the closing `}`, as written (line
-    /// endings normalised to `\n`). The exporter emits it unchanged.
+    /// endings normalised to `\n`).
     declaration: String,
+    /// The dialect `declaration` is written in. Only the OpenQASM 2.0
+    /// exporter re-emits the text, and only of an OpenQASM 2.0 declaration;
+    /// every other export prints the definition from its body.
+    dialect: Dialect,
     /// Position among the declarations of its source program, so the exporter
     /// can emit declarations in their original order.
     ordinal: usize,
@@ -103,6 +110,7 @@ impl GateDefinition {
         qubit_names: Vec<String>,
         body: Vec<BodyOp>,
         declaration: String,
+        dialect: Dialect,
         ordinal: usize,
     ) -> Result<Self, DefinitionError> {
         let mut expansion_size = 0usize;
@@ -133,6 +141,7 @@ impl GateDefinition {
             qubit_names,
             body,
             declaration,
+            dialect,
             ordinal,
             expansion_size,
             depth,
@@ -154,10 +163,32 @@ impl GateDefinition {
         self.qubit_names.len()
     }
 
-    /// The declaration's OpenQASM 2.0 source text, re-emitted as is by the
-    /// exporter.
+    /// The declaration's source text, as written in the program it was
+    /// imported from (OpenQASM 2.0 or 3). The OpenQASM 2.0 exporter re-emits
+    /// the text of an OpenQASM 2.0 declaration as is; every other export
+    /// prints the definition for its target.
     pub fn declaration(&self) -> &str {
         &self.declaration
+    }
+
+    /// The dialect [`Self::declaration`] is written in.
+    pub(crate) fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    /// The formal parameters' names, in order.
+    pub(crate) fn param_names(&self) -> &[String] {
+        &self.param_names
+    }
+
+    /// The formal qubit arguments' names, in order.
+    pub(crate) fn qubit_names(&self) -> &[String] {
+        &self.qubit_names
+    }
+
+    /// The body's statements.
+    pub(crate) fn body(&self) -> &[BodyOp] {
+        &self.body
     }
 
     pub(crate) fn ordinal(&self) -> usize {

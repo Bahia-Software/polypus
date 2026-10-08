@@ -80,7 +80,8 @@ impl<'a, 'py> FromPyObject<'a, 'py> for AngleArg {
     }
 }
 
-/// Native Rust quantum circuit with OpenQASM 2.0 export.
+/// Native Rust quantum circuit with OpenQASM 2.0 and OpenQASM 3 import and
+/// export.
 ///
 /// Construction and parameter binding run in pure Rust (no GIL), which makes
 /// per-candidate binding during training parallelisable in ways a Qiskit
@@ -327,6 +328,64 @@ impl Circuit {
         Ok(Circuit {
             inner: ParameterizedCircuit::from_qasm2(source).map_err(to_py_err)?,
         })
+    }
+
+    /// Import a program in the **OpenQASM 3 profile with Qiskit phase
+    /// conventions** (inverse of [`to_qasm3`](Circuit::to_qasm3)).
+    ///
+    /// The profile is the straight-line part of OpenQASM 3 that carries a
+    /// parameterised, terminal-measurement circuit: `include "stdgates.inc";`
+    /// (provided internally; no file is ever read), `qubit` and `bit`
+    /// registers, `input float[64]` parameters, calls of `U`, of the
+    /// `stdgates.inc` gates and of gates declared with `gate` blocks,
+    /// `barrier`, and measurements assigned to bits. Angles are expressions of
+    /// the inputs and the constants `pi`, `tau` and `euler`, evaluated in
+    /// binary64 exactly as written. Anything else — control flow, `reset`,
+    /// classical computation, subroutines, gate modifiers, `gphase`, timing,
+    /// arrays, physical qubits — raises `ValueError` naming the construct and
+    /// its line, as does a division of two integers (`1/2`, integer division
+    /// in OpenQASM 3: write `1.0/2`).
+    ///
+    /// Each `input` is a free parameter, in declaration order (unused ones
+    /// included) and under its name ([`param_names`](Circuit::param_names)):
+    /// bind values in that order. `U` becomes `u`, `CX` becomes `cx`, `phase`
+    /// becomes `p` and `cphase` becomes `cp`; every other gate keeps its name,
+    /// and a declared gate stays a declared gate whatever its name.
+    ///
+    /// **Phase convention.** `U`, `u2` and `u3` are read with Qiskit's
+    /// matrices, which differ from the OpenQASM 3 specification's by the
+    /// global phases e^{-iθ/2} (`U`) and e^{i(φ+λ)/2} (`u2`, `u3`).
+    /// Statevector amplitudes may therefore differ from those of a reader that
+    /// follows the specification by these factors; probabilities, counts and
+    /// expectation values do not. Every other `stdgates.inc` gate follows the
+    /// specification. That Polypus reads Qiskit's `qasm3.dumps` output as
+    /// Qiskit does is tested for the Qiskit versions the test suite pins, not
+    /// guaranteed in general.
+    ///
+    /// ```python
+    /// qc = polypus.Circuit.from_qasm3(qiskit.qasm3.dumps(qiskit_circuit))
+    /// qc.param_names          # Qiskit's (mangled) input names, in order
+    /// ```
+    #[staticmethod]
+    fn from_qasm3(py: Python<'_>, source: &str) -> PyResult<Self> {
+        // Pure Rust, bounded by the importer's budgets but not instant on a
+        // large program: do not hold the GIL (docs/ENGINEERING.md §3).
+        let inner = py
+            .detach(|| ParameterizedCircuit::from_qasm3(source))
+            .map_err(to_py_err)?;
+        Ok(Circuit { inner })
+    }
+
+    /// The name of each free parameter, in index order (`num_params` names).
+    ///
+    /// Parameters imported from OpenQASM 3 keep their `input` names; every
+    /// other one is `theta_<index>` (or, if that is taken, the first free
+    /// `theta_<index>_<k>`), including indices no gate uses. The names belong
+    /// to the circuit: they survive copies and the OpenQASM 3 round trip, and
+    /// `to_qasm3` writes them as the program's inputs.
+    #[getter]
+    fn param_names(&self) -> Vec<String> {
+        self.inner.param_names()
     }
 
     /// Number of qubits in the quantum register.
@@ -795,12 +854,46 @@ impl Circuit {
     /// Serialize to OpenQASM 2.0.
     ///
     /// For a parameterised circuit, pass `params` (one value per free
-    /// parameter). For a fully fixed circuit, call with no arguments.
+    /// parameter). For a fully fixed circuit, call with no arguments. A gate
+    /// declared in OpenQASM 3 is written from its definition, renamed where
+    /// OpenQASM 2.0 cannot take its name; one whose body uses `arcsin`,
+    /// `arccos` or `arctan`, which OpenQASM 2.0 lacks, raises `ValueError`.
     #[pyo3(signature = (params=None))]
     fn to_qasm2(&self, params: Option<Vec<f64>>) -> PyResult<String> {
         self.inner
             .to_qasm2_with_params(&params.unwrap_or_default())
             .map_err(to_py_err)
+    }
+
+    /// Serialize to the **OpenQASM 3 profile with Qiskit phase conventions**
+    /// (see [`from_qasm3`](Circuit::from_qasm3)).
+    ///
+    /// Without `params`, each free parameter is an `input float[64]` under its
+    /// name ([`param_names`](Circuit::param_names)) and angles are written as
+    /// the expressions they are. With `params` (one value per free parameter),
+    /// the circuit is bound first and the program has no inputs.
+    ///
+    /// The output is canonical: importing it and exporting again gives the
+    /// same text. `u` is written as the builtin `U` (with Qiskit's matrix, see
+    /// the phase convention of `from_qasm3`); instructions `stdgates.inc`
+    /// lacks (`rzz`, `rxx`, `sxdg`, `csx`, `cu1`, `cu3`, `u0`, `rccx`,
+    /// `rc3x`, `c3x`, `c3sqrtx`, `c4x`) are calls of gates the output defines
+    /// with the same matrices. Raises `ValueError` for a declared gate
+    /// OpenQASM 3 cannot express (an OpenQASM 2.0 body with a barrier) or a
+    /// program beyond what `from_qasm3` reads back (its size limits).
+    ///
+    /// ```python
+    /// text = polypus.Circuit(1).rx(0, polypus.Param(0)).to_qasm3()
+    /// qiskit.qasm3.loads(text)   # needs qiskit-qasm3-import
+    /// ```
+    #[pyo3(signature = (params=None))]
+    fn to_qasm3(&self, py: Python<'_>, params: Option<Vec<f64>>) -> PyResult<String> {
+        let circuit = &self.inner;
+        py.detach(|| match &params {
+            None => circuit.to_qasm3(),
+            Some(values) => circuit.to_qasm3_with_params(values),
+        })
+        .map_err(to_py_err)
     }
 
     /// Serialize to a QIR Base Profile LLVM IR module (text `.ll`).

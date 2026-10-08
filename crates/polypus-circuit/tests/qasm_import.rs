@@ -769,3 +769,82 @@ fn imported_circuit_is_a_first_class_citizen() {
     assert!(out.contains("rz(0.500000000000) q[1];"));
     assert!(out.ends_with("measure q -> c;\n"));
 }
+
+// ─────────────────────── Declared classical width ─────────────────────────
+
+const HEADER: &str = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
+
+/// The importer records the classical bits a program declares: one `creg`'s
+/// size, the sum of several, and `None` when there is no `creg` at all —
+/// whatever the measurements write.
+#[test]
+fn declared_clbits_is_the_sum_of_the_cregs() {
+    let cases = [
+        ("qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[1];\n", Some(3)),
+        ("qreg q[2];\ncreg c[3];\nx q[0];\n", Some(3)),
+        (
+            "qreg q[2];\ncreg a[2];\ncreg b[3];\nmeasure q[1] -> a[1];\n",
+            Some(5),
+        ),
+        // Collapsed by the importer to `MeasureAll` (two clbits written).
+        (
+            "qreg q[2];\ncreg c[4];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            Some(4),
+        ),
+        ("qreg q[2];\nx q[0];\n", None),
+    ];
+    for (body, declared) in cases {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{HEADER}{body}")).unwrap();
+        assert_eq!(qc.declared_clbits(), declared, "{body:?}");
+    }
+}
+
+/// A circuit from the builder has an implicit classical register: no declared
+/// width, measured or not.
+#[test]
+fn builder_circuits_declare_no_clbits() {
+    assert_eq!(ParameterizedCircuit::new(3).declared_clbits(), None);
+    assert_eq!(
+        ParameterizedCircuit::new(3)
+            .x(0)
+            .measure(0, 4)
+            .declared_clbits(),
+        None
+    );
+}
+
+/// Recording the declared width changes no export: the classical register is
+/// still sized by the measurements (`creg c[3]` written up to `c[1]` exports
+/// `creg c[2]`), and a program without measurements declares none.
+#[test]
+fn declared_clbits_does_not_change_the_export() {
+    let src = format!("{HEADER}qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n");
+    let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
+    assert_eq!(qc.declared_clbits(), Some(3));
+    assert_eq!(
+        qc.to_qasm2_with_params(&[]).unwrap(),
+        format!("{HEADER}qreg q[2];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[1];\n")
+    );
+    assert_eq!(
+        qc.to_qasm2_with_params(&[]).unwrap(),
+        qc.assign_parameters(&[]).unwrap().to_qasm2()
+    );
+}
+
+/// `==` ignores the declared width (import metadata, like the `measured`
+/// cache), while `clone` and builder methods keep it.
+#[test]
+fn declared_clbits_is_ignored_by_eq_and_kept_by_clone() {
+    let body = "x q[0];\nmeasure q[0] -> c[1];\n";
+    let narrow =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[2];\n{body}"))
+            .unwrap();
+    let wide = ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[7];\n{body}"))
+        .unwrap();
+    assert_eq!(narrow.declared_clbits(), Some(2));
+    assert_eq!(wide.declared_clbits(), Some(7));
+    assert_eq!(narrow, wide);
+
+    assert_eq!(wide.clone().declared_clbits(), Some(7));
+    assert_eq!(wide.h(1).declared_clbits(), Some(7));
+}

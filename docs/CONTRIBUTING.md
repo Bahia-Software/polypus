@@ -24,7 +24,14 @@ then `maturin develop --release --features extension-module`.
 
 **Toolchain:** the Minimum Supported Rust Version is declared as
 `rust-version` in the workspace `Cargo.toml` — that field is the single place
-it lives (Cargo enforces it and Clippy picks it up automatically).
+it lives (Cargo enforces it and Clippy picks it up automatically). The
+workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
+avoids dependency releases that need a newer Rust than `rust-version`; the
+`msrv` CI job still builds with `--locked` and catches anything that slips
+through. Dependabot is not known to honour that resolver, so
+`.github/dependabot.yml` carries an interim `ignore` for `uuid`; remove it when
+the MSRV is raised or once a Dependabot PR confirms the resolver is respected
+(#276).
 
 ## Running the checks
 

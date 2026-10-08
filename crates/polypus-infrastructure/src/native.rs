@@ -102,12 +102,13 @@ impl NativeStatevectorBackend {
     /// returned as-is, skipping the trait-dispatch clone entirely (the default
     /// hot path). Only the `Qasm2` variant (which must be parsed into a local)
     /// and a non-identity transpiler (which must produce a new circuit) force
-    /// an owned result.
+    /// an owned result. The declared classical width travels alongside, so both
+    /// paths key their counts identically (contract C-3).
     fn concrete_circuit<'a>(
         &self,
         circuit: &'a BoundCircuit,
         opts: &TranspileOptions,
-    ) -> Result<Cow<'a, ConcreteCircuit>, BackendError> {
+    ) -> Result<NativeSource<'a>, BackendError> {
         // The pre-check (`check_circuit`) shares `native_source` but must stay
         // silent: a rejection is only an error when it stops a run, so it is
         // logged here, on the execution path.
@@ -123,7 +124,10 @@ impl NativeStatevectorBackend {
         if self.transpiler.is_identity() {
             Ok(source)
         } else {
-            Ok(Cow::Owned(self.transpiler.transpile(source.as_ref(), opts)))
+            Ok(NativeSource {
+                circuit: Cow::Owned(self.transpiler.transpile(&source.circuit, opts)),
+                declared_clbits: source.declared_clbits,
+            })
         }
     }
 
@@ -140,7 +144,7 @@ impl NativeStatevectorBackend {
         opts: &TranspileOptions,
         parallel_threshold: usize,
     ) -> Result<HashMap<String, u64>, BackendError> {
-        let concrete = self.concrete_circuit(circuit, opts)?;
+        let source = self.concrete_circuit(circuit, opts)?;
         // Simulate with the gate-parallel threshold the caller picked: `run_circuits` raises it to
         // `usize::MAX` (gate kernels off) for a population batch whose across-circuit `par_iter`
         // already owns the cores, and keeps the default for a lone circuit. Gate-parallel is
@@ -151,12 +155,12 @@ impl NativeStatevectorBackend {
             fusion: self.simulator.fusion,
         };
         let raw = simulator
-            .run_and_sample(concrete.as_ref(), shots as usize, seed)
+            .run_and_sample(&source.circuit, shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
                 BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
             })?;
-        Ok(format_counts(concrete.as_ref(), raw))
+        Ok(format_counts(&source.circuit, source.declared_clbits, raw))
     }
 
     /// Refuse, before anything is allocated, a circuit whose statevector cannot
@@ -283,19 +287,36 @@ impl NativeStatevectorBackend {
     }
 }
 
+/// What the native backend runs for one [`BoundCircuit`]: the circuit, and the
+/// classical width its OpenQASM program declares (the sum of its `creg`s),
+/// which a [`ConcreteCircuit`] cannot carry. `None` for a `Native` circuit,
+/// whose classical register is implicit. See [`format_counts`].
+struct NativeSource<'a> {
+    circuit: Cow<'a, ConcreteCircuit>,
+    declared_clbits: Option<usize>,
+}
+
 /// The [`ConcreteCircuit`] a [`BoundCircuit`] stands for, obtained without
 /// touching Python: a `Native` circuit is borrowed, a `Qasm2` program is parsed
-/// by the OpenQASM importer, and a Qiskit `Foreign` circuit is rejected. Shared
-/// by execution ([`NativeStatevectorBackend::concrete_circuit`]) and the
-/// structural pre-check ([`NativeStatevectorBackend::check_circuit`]), so both
-/// accept and reject exactly the same circuits with the same message. It logs
-/// nothing: execution logs a rejection, the pre-check does not.
-fn native_source(circuit: &BoundCircuit) -> Result<Cow<'_, ConcreteCircuit>, BackendError> {
+/// by the OpenQASM importer (keeping the classical width it declares), and a
+/// Qiskit `Foreign` circuit is rejected. Shared by execution
+/// ([`NativeStatevectorBackend::concrete_circuit`]) and the structural
+/// pre-check ([`NativeStatevectorBackend::check_circuit`]), so both accept and
+/// reject exactly the same circuits with the same message. It logs nothing:
+/// execution logs a rejection, the pre-check does not.
+fn native_source(circuit: &BoundCircuit) -> Result<NativeSource<'_>, BackendError> {
     match circuit {
-        BoundCircuit::Native(cc) => Ok(Cow::Borrowed(cc)),
+        BoundCircuit::Native(cc) => Ok(NativeSource {
+            circuit: Cow::Borrowed(cc),
+            declared_clbits: None,
+        }),
         BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
-            .and_then(|pc| pc.assign_parameters(&[]))
-            .map(Cow::Owned)
+            .and_then(|pc| {
+                Ok(NativeSource {
+                    circuit: Cow::Owned(pc.assign_parameters(&[])?),
+                    declared_clbits: pc.declared_clbits(),
+                })
+            })
             .map_err(|e| {
                 BackendError::NativeCircuit(format!(
                     "native backend could not parse OpenQASM 2.0: {e}"
@@ -324,19 +345,26 @@ fn representative_qubits(qcs: &[BoundCircuit]) -> usize {
 }
 
 /// Format raw basis-state counts as Aer-compatible bitstrings: little-endian
-/// qubit indexing with the highest classical bit on the left. The width is the
-/// classical-register size, or the qubit count for a measurement-free circuit
-/// (a full-register read-out, contract C-3).
+/// qubit indexing with the highest classical bit on the left (contract C-3).
+///
+/// The width is the qubit count for a measurement-free circuit (a
+/// full-register read-out). Otherwise it is the classical bits the OpenQASM
+/// program declared (`declared_clbits`, the sum of its `creg`s), as on Aer,
+/// or the implicit register size `num_clbits()` for a circuit without declared
+/// registers — whichever is larger; the bits no measurement writes read 0.
 ///
 /// `num_clbits()` is 0 exactly when the circuit has no `Measure`/`MeasureAll`
 /// instruction: it is derived from those instructions, never from declared
-/// registers (a [`ConcreteCircuit`] does not keep an OpenQASM `creg` it never
-/// writes). So a `creg` declared but unmeasured does not change the width —
+/// registers. So a `creg` declared but unmeasured does not change the width —
 /// pinned by `unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs`.
-fn format_counts(concrete: &ConcreteCircuit, raw: HashMap<usize, u64>) -> HashMap<String, u64> {
+fn format_counts(
+    concrete: &ConcreteCircuit,
+    declared_clbits: Option<usize>,
+    raw: HashMap<usize, u64>,
+) -> HashMap<String, u64> {
     let width = match concrete.num_clbits() {
         0 => concrete.num_qubits,
-        c => c,
+        c => declared_clbits.map_or(c, |declared| declared.max(c)),
     };
     raw.into_iter()
         .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
@@ -425,9 +453,10 @@ impl QuantumBackend for NativeStatevectorBackend {
         };
         // Evolve the shared circuit exactly once; the statevector is reused for
         // every batch's sampling.
-        let concrete = self.concrete_circuit(qc, &opts)?;
+        let source = self.concrete_circuit(qc, &opts)?;
+        let concrete = source.circuit.as_ref();
         self.check_memory(concrete.num_qubits)?;
-        let sv = self.simulator.run(concrete.as_ref()).map_err(|e| {
+        let sv = self.simulator.run(concrete).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
         })?;
@@ -442,8 +471,8 @@ impl QuantumBackend for NativeStatevectorBackend {
             .enumerate()
             .map(|(i, &shots)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                let raw = sample_projected(concrete.as_ref(), &sv, shots as usize, seed);
-                Ok(format_counts(concrete.as_ref(), raw))
+                let raw = sample_projected(concrete, &sv, shots as usize, seed);
+                Ok(format_counts(concrete, source.declared_clbits, raw))
             })
             .collect()
     }
@@ -1115,7 +1144,7 @@ mod tests {
             .unwrap();
         let raw = HashMap::from([(1usize, 4u64)]);
         assert_eq!(
-            format_counts(&unmeasured, raw.clone()),
+            format_counts(&unmeasured, None, raw.clone()),
             HashMap::from([("001".to_string(), 4)])
         );
         let measured = ParameterizedCircuit::new(3)
@@ -1124,9 +1153,143 @@ mod tests {
             .assign_parameters(&[])
             .unwrap();
         assert_eq!(
-            format_counts(&measured, raw),
+            format_counts(&measured, None, raw),
             HashMap::from([("00001".to_string(), 4)])
         );
+    }
+
+    /// Regression (issue #251, C-3): a measured circuit's width is the declared
+    /// classical width when there is one and it is larger than `num_clbits`;
+    /// an equal one changes nothing, and a measurement-free circuit stays
+    /// `num_qubits` wide whatever it declares.
+    #[test]
+    fn format_counts_width_follows_the_declared_clbits() {
+        let raw = HashMap::from([(1usize, 4u64)]);
+        let measured = ParameterizedCircuit::new(3)
+            .x(0)
+            .measure(0, 4)
+            .assign_parameters(&[])
+            .unwrap();
+        assert_eq!(
+            format_counts(&measured, Some(7), raw.clone()),
+            HashMap::from([("0000001".to_string(), 4)])
+        );
+        assert_eq!(
+            format_counts(&measured, Some(5), raw.clone()),
+            HashMap::from([("00001".to_string(), 4)])
+        );
+        let unmeasured = ParameterizedCircuit::new(3)
+            .x(0)
+            .assign_parameters(&[])
+            .unwrap();
+        assert_eq!(
+            format_counts(&unmeasured, Some(7), raw),
+            HashMap::from([("001".to_string(), 4)])
+        );
+    }
+
+    /// Regression (issue #251, C-3): an OpenQASM program with measurements is
+    /// keyed at the classical width it declares (the sum of its `creg`s), as on
+    /// Aer, not at `max(cbit) + 1` — on the batch and the shot-distributed
+    /// paths alike, including a program the importer collapses to `MeasureAll`.
+    #[test]
+    fn measured_qasm_is_keyed_at_its_declared_clbit_width() {
+        let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
+        let cfg = config_with(OptLevel::default());
+        let cases = [
+            (
+                "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+                "010",
+            ),
+            (
+                "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[0];\n",
+                "001",
+            ),
+            (
+                "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
+                "00010",
+            ),
+            (
+                "qreg q[2];\ncreg c[4];\nx q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+                "0010",
+            ),
+        ];
+        for (body, key) in cases {
+            let qasm = format!("{header}{body}");
+            let circuit = BoundCircuit::Qasm2(qasm);
+            let backend = NativeStatevectorBackend::new(5);
+            let batch = backend
+                .run_circuits(std::slice::from_ref(&circuit), &cfg.run_params())
+                .unwrap();
+            assert_eq!(
+                batch,
+                vec![HashMap::from([(key.to_string(), 500)])],
+                "{body:?}"
+            );
+            let distributed = backend
+                .run_shots_distributed(&circuit, &[7, 5], &cfg.run_params())
+                .unwrap();
+            assert_eq!(
+                distributed,
+                vec![
+                    HashMap::from([(key.to_string(), 7)]),
+                    HashMap::from([(key.to_string(), 5)]),
+                ],
+                "{body:?}"
+            );
+        }
+        // The last case really is the collapsed `MeasureAll` shape.
+        let collapsed =
+            ParameterizedCircuit::from_qasm2(&format!("{header}{}", cases[3].0)).unwrap();
+        assert_eq!(collapsed.gates.last(), Some(&GateInstruction::MeasureAll));
+    }
+
+    /// A `Native` circuit has no declared registers: its counts keep the
+    /// implicit `max(cbit) + 1` width on both paths (issue #251 changes only
+    /// OpenQASM input).
+    #[test]
+    fn native_circuit_keeps_the_implicit_clbit_width() {
+        let cfg = config_with(OptLevel::default());
+        let circuit = BoundCircuit::Native(
+            ParameterizedCircuit::new(2)
+                .x(0)
+                .measure(0, 1)
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let backend = NativeStatevectorBackend::new(5);
+        let batch = backend
+            .run_circuits(std::slice::from_ref(&circuit), &cfg.run_params())
+            .unwrap();
+        assert_eq!(batch, vec![HashMap::from([("10".to_string(), 500)])]);
+        let distributed = backend
+            .run_shots_distributed(&circuit, &[7, 5], &cfg.run_params())
+            .unwrap();
+        assert_eq!(
+            distributed,
+            vec![
+                HashMap::from([("10".to_string(), 7)]),
+                HashMap::from([("10".to_string(), 5)]),
+            ]
+        );
+    }
+
+    /// A non-identity transpiler rebuilds the circuit; the declared width must
+    /// survive it, so the injected strategy cannot change the keys.
+    #[test]
+    fn declared_clbit_width_survives_a_transpiler() {
+        let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n";
+        let circuit = BoundCircuit::Qasm2(qasm.to_string());
+        let cfg = config_with(OptLevel::default());
+        let backend = NativeStatevectorBackend::with_transpiler(5, Box::new(BarrierTranspiler));
+        let batch = backend
+            .run_circuits(std::slice::from_ref(&circuit), &cfg.run_params())
+            .unwrap();
+        assert_eq!(batch, vec![HashMap::from([("010".to_string(), 500)])]);
+        let distributed = backend
+            .run_shots_distributed(&circuit, &[3], &cfg.run_params())
+            .unwrap();
+        assert_eq!(distributed, vec![HashMap::from([("010".to_string(), 3)])]);
     }
 
     /// `check_circuit` accepts and rejects exactly what execution does, with the

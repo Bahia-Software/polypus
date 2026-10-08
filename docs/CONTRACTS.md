@@ -22,13 +22,14 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, open — see C-3) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
+| C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
 
 ⏳ contracts are specified but not yet mechanically enforced; treat them as
 review-enforced until the test lands. Each known break has a public issue
@@ -260,7 +261,9 @@ barrier  measure  measure_all
 
 This is all of Qiskit's `qelib1.inc`. Gates outside it (`ryy`, `rzx`, `ecr`,
 `iswap`, `xx_plus_yy`, `mcx`, …) reach Polypus the way Qiskit's exporter writes
-them — declared with `gate` blocks — and are handled as declared gates.
+them — declared with `gate` blocks — and are handled as declared gates. The
+OpenQASM 3 profile (C-10) reads and writes the same vocabulary: `stdgates.inc`
+names a subset of it, and the rest is written through gate definitions.
 
 **One instruction per statement, re-emitted under the same name.** The
 importer never decomposes: a `ccx` statement is one `Ccx` instruction and is
@@ -268,9 +271,14 @@ exported as `ccx` again, with its operands in the same order, so a benchmark
 file reaches a backend (e.g. Aer, through the exporter) as the same program —
 same gate count, same depth, same instruction names. The only spelling changes
 are the language builtins `U` → `u` and `CX` → `cx`, which Qiskit names `u`
-and `cx` itself, so no Qiskit consumer can tell them apart. Decomposition is
-allowed at exactly three *lowering* boundaries, all confined to their module and
-invisible to `to_qasm2`: the native simulator, for gates without a dedicated
+and `cx` itself, so no Qiskit consumer can tell them apart; the OpenQASM 3
+profile also reads `phase` as `p` and `cphase` as `cp`, and writes `u` as the
+builtin `U` (C-10). An instruction `stdgates.inc` lacks is written in OpenQASM
+3 as a call of a gate the output defines with the same matrix, under the
+instruction's name, and reads back as that declared gate (a declared gate is
+never recognised as a built-in). Decomposition is allowed at exactly three
+*lowering* boundaries, all confined to their module and invisible to the
+OpenQASM exporters: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
 exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
 declared gates); the QIR exporter, for gates without a base-profile
@@ -292,21 +300,24 @@ imported circuit match the source program (and what Qiskit computes for it).
 Only the QIR lowering drops it (there is no identity intrinsic); the simulator
 applies it as the identity. As a unitary it is subject to C-4.
 
-**Declared gates.** An OpenQASM 2.0 `gate` declaration is kept as a
-definition (a template over its formal arguments, plus its source text) and
-each call of it is *one* instruction, `GateInstruction::Custom`, a unitary on
-all its qubits for C-4. A call's angles may be free parameters or expressions
+**Declared gates.** A `gate` declaration, in OpenQASM 2.0 or in the
+OpenQASM 3 profile, is kept as a definition (a template over its formal
+arguments, plus its source text) and each call of it is *one* instruction,
+`GateInstruction::Custom`, a unitary on all its qubits for C-4. A call's angles may be free parameters or expressions
 of them (`CustomGate::with_arguments`); such a call is checked through its whole
 body, nested declarations included, whenever its parameters are bound —
 binding and the exports that take parameter values report `NonFiniteParam` or
 `DivisionByZero` there — just as a call with fixed angles is checked when it is
-created. The exporter re-emits the declaration verbatim (only line
-endings normalised: every run of carriage returns before a line feed dropped,
-so CRLF becomes LF) plus the call — never the expanded body — so a backend
-that parses the export builds the same program as from the original file.
-Canonical form: the declarations the circuit reaches (directly or through
-other declarations) are emitted right after the include, in source order;
-unreachable declarations are not re-emitted. Expansion into built-in
+created. The OpenQASM 2.0 exporter re-emits an OpenQASM 2.0 declaration
+verbatim (only line endings normalised: every run of carriage returns before a
+line feed dropped, so CRLF becomes LF) plus the call — never the expanded body —
+so a backend that parses the export builds the same program as from the
+original file; every other export prints a definition from its body (C-10).
+Canonical OpenQASM 2.0 form: the declarations the circuit reaches (directly or
+through other declarations) are emitted right after the include — first those
+imported from OpenQASM 2.0, in source order, then those imported from
+OpenQASM 3, printed, callees first in order of first use; unreachable
+declarations are not re-emitted. Expansion into built-in
 instructions is a lowering step of the simulator, the QIR exporter and the Aer
 path only.
 Redeclaring a gate, or declaring one with a `qelib1.inc` name (always provided),
@@ -314,11 +325,14 @@ is rejected; so is recursion (a body may only call earlier declarations), and
 so is naming a gate, parameter or argument `pi`, `sin`, `cos`, `tan`, `exp`,
 `ln` or `sqrt` (keywords of the expression grammar, not identifiers).
 
-**Invariant:** the four consumers/producers of this vocabulary — the OpenQASM
-2.0 exporter (`qasm.rs`), the OpenQASM importer (`qasm_import.rs`), the native
-simulator (`polypus-sim`) and the QIR exporter (`qir.rs`) — must all support
-the **full set**, with **identical unitary semantics** (the native simulator is
-the reference; QIR decompositions may differ only by a global phase).
+**Invariant:** the consumers/producers of this vocabulary — the OpenQASM 2.0
+exporter (`qasm.rs`) and importer (`qasm_import.rs`), the OpenQASM 3 exporter
+(`qasm3.rs`) and importer (`qasm3_import.rs`, whose vocabulary is
+`stdgates.inc`'s), the native simulator (`polypus-sim`) and the QIR exporter
+(`qir.rs`) — must all support the **full set**, with **identical unitary
+semantics** (the native simulator is the reference; QIR decompositions may
+differ only by a global phase; the OpenQASM 3 definitions may not differ at
+all, under the profile's Qiskit phase conventions).
 
 Corollaries:
 
@@ -331,15 +345,21 @@ Corollaries:
   reproduces the same instruction sequence and parameters as `c`. Conversely,
   a single gate statement already in canonical form (a `q` register, 12-decimal
   angles, canonical spelling) is re-emitted byte-identically:
-  `to_qasm2(from_qasm2(s)) == s`.
-- Adding a gate is a **five-place change** plus a row in the equivalence test —
-  the OpenQASM exporter (`qasm.rs`), the importer (`qasm_import.rs`), the native
-  simulator (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
-  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method).
-  A PR adding it in fewer places must be rejected.
+  `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
+  fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
+  for its own canonical form (C-10).
+- Adding a gate is a **six-place change** plus a row in the equivalence test —
+  the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
+  (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
+  `stdgates.inc` name, or a definition in its `HELPER_PROGRAM` whose matrix
+  `crates/polypus-sim/tests/qasm3_semantics.rs` checks), the native simulator
+  (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
+  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method);
+  the OpenQASM 3 importer too, if `stdgates.inc` names the gate. A PR adding it
+  in fewer places must be rejected.
 - **Non-finite parameters are rejected uniformly.** A `NaN` or infinite angle
   is never a valid parameter value: circuit construction and parameter binding
-  reject it (`CircuitError::NonFiniteParam`), the OpenQASM importer rejects it
+  reject it (`CircuitError::NonFiniteParam`), the OpenQASM importers reject it
   at parse time (`CircuitError::Parse`), the QASM and QIR exporters refuse to
   serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
   No producer may emit, and no consumer may accept, a non-finite parameter.
@@ -376,13 +396,18 @@ semantics, the non-finite and division-by-zero rules, ids foreign to a
 circuit, bounds), the calls-with-free-parameters tests in
 `crates/polypus-circuit/tests/gate_declarations.rs`, and
 `unbound_expression_is_rejected` in
-`crates/polypus-sim/tests/gate_matrices.rs`; the Aer lowering boundary is
-enforced in Python by `tests/python/test_local_aer_lowering.py` (every
-out-of-basis gate and a declared gate run on Aer with the transpiled
-reference's counts and the native backend's distribution; a circuit in the
-basis is neither copied nor transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer`
-in `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the
-real execution path) and `tests/python/test_backend_compatibility.py`.
+`crates/polypus-sim/tests/gate_matrices.rs`. For OpenQASM 3: the `c2_*qasm3*`
+tests of `crates/polypus-circuit/tests/contracts.rs` (the whole vocabulary,
+gate by gate, `stdgates.inc` statements byte-identical, the fuzz corpus), and
+`crates/polypus-sim/tests/qasm3_semantics.rs` (every definition the export
+writes, against its instruction, as full matrices).
+The Aer lowering boundary is enforced in Python by
+`tests/python/test_local_aer_lowering.py` (every out-of-basis gate and a
+declared gate run on Aer with the transpiled reference's counts and the native
+backend's distribution; a circuit in the basis is neither copied nor
+transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
+`tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
+execution path) and `tests/python/test_backend_compatibility.py`.
 
 ---
 
@@ -395,16 +420,20 @@ real execution path) and `tests/python/test_backend_compatibility.py`.
   count, and do not change the width. This holds on the Aer and the native
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
   such a circuit). The CUNQA path is not verified.
-
-  *(Known break, open (#251): for a circuit **with** measurements, `num_clbits` is not
-  the same on every backend when a classical register is declared wider than
-  the highest bit written. Aer uses the declared width (`creg c[3]; measure
-  q[0] -> c[1];` gives `"010"`); the native backend uses `max(cbit) + 1`
-  (`"10"`), because `polypus-circuit` does not keep the size of a declared
-  register. Which width C-3 mandates is not decided yet. Pinned as a strict
-  `xfail` by `test_measured_circuit_with_a_wider_creg_has_the_same_keys` in
-  `tests/python/test_backend_selection.py`, which starts failing once the two
-  agree.)*
+- For a circuit **with** measurements, `num_clbits` is the circuit's
+  classical width (the key width — not `Circuit.num_clbits` /
+  `ParameterizedCircuit::num_clbits()`, which stay the implicit register
+  sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
+  **declares** (the sum of all its `creg`s), even when fewer are written —
+  `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
+  measurement writes read `0`; for a `polypus.Circuit`, which declares no
+  registers, the implicit width `max(cbit) + 1` (`num_qubits` with
+  `measure_all`). Aer and the native backend agree on both (issue #251; before
+  it the native backend used `max(cbit) + 1` for OpenQASM input too). Known
+  limit, the same on both backends: `polypus.Circuit.from_qasm2(src)` does not
+  carry the declared width past parameter binding, so running the imported
+  circuit uses the implicit width (Aer receives the re-exported QASM, which
+  declares only the bits written). The QMIO and CUNQA paths are not verified.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -470,7 +499,19 @@ circuit without measurements, whatever `creg`s it declares, in
 `tests/python/test_backend_selection.py` (Aer and native, same keys) and
 `unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs` /
 `format_counts_width_follows_measurement_instructions` in
-`crates/polypus-infrastructure/src/native.rs` (issue #218).
+`crates/polypus-infrastructure/src/native.rs` (issue #218); the declared
+classical width of a measured OpenQASM program in
+`test_measured_circuit_with_a_wider_creg_has_the_same_keys` and
+`TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
+`tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
+plus the implicit width of a `polypus.Circuit` and of `Circuit.from_qasm2`),
+`format_counts_width_follows_the_declared_clbits`,
+`measured_qasm_is_keyed_at_its_declared_clbit_width`,
+`native_circuit_keeps_the_implicit_clbit_width` and
+`declared_clbit_width_survives_a_transpiler` in
+`crates/polypus-infrastructure/src/native.rs`, and the `declared_clbits_*` /
+`builder_circuits_declare_no_clbits` tests in
+`crates/polypus-circuit/tests/qasm_import.rs` (issue #251).
 
 ---
 
@@ -823,3 +864,187 @@ must keep the original prefix short enough for the effective id to fit (at most
 `tests/python/test_python_helpers_hygiene.py` (Python mirror: it reuses
 the same `VALID_IDS`/`INVALID_IDS` lists, so the two sides cannot drift without
 a test failing).
+
+---
+
+## C-10 · OpenQASM 3 profile with Qiskit phase conventions
+
+`ParameterizedCircuit::from_qasm3` / `to_qasm3` / `to_qasm3_with_params`
+(Python: `Circuit.from_qasm3`, `Circuit.to_qasm3(params=None)`,
+`Circuit.param_names`) read and write the **OpenQASM 3 profile with Qiskit
+phase conventions** — never "a subset of OpenQASM 3": the straight-line part of
+OpenQASM 3.0 that carries a parameterised, terminal-measurement circuit. Its
+`stdgates.inc` is the one of tag `spec/v3.1.0`
+(`c717508162a0eac892fa32134716fe77a284e835`), whose gate list is that of
+`spec/v3.0.0` (`51c36946c687c8b17000962f6ce735ca1d1c9b3b`) with `pow(1/2)`
+written `pow(0.5)`.
+
+**Accepted.** `OPENQASM 3;` or `OPENQASM 3.0;` (optional, first); `include
+"stdgates.inc";`, provided internally — no file is ever read; `qubit[n]`,
+`qubit`, `bit[n]`, `bit` declarations, flattened in declaration order;
+`input float[64] name;` and `input float name;` (both binary64); calls of `U`,
+of the `stdgates.inc` gates and of earlier `gate` declarations (bodies of gate
+calls only); `barrier`; measurements `c[i] = measure q[j];`, `c = measure q;`,
+`measure q -> c;` (C-4 applies unchanged); angle expressions over the inputs
+(in a body, over the gate's parameters): numbers, `pi`/`π`, `tau`/`τ`,
+`euler`/`ℇ`, `+ - * /`, unary minus, `**` (right-associative, binding tighter
+than unary minus), and `sin cos tan arcsin arccos arctan exp log sqrt`;
+Unicode identifiers; `//` and `/* */` comments.
+
+**Rejected**, each as `CircuitError::Parse` naming the construct and its
+1-based line (a construct both dialects reject is worded as the OpenQASM 2.0
+importer words it, so `benchmarks/qasm_coverage.py` classifies either):
+other versions and includes;
+`if`/`else`, `for`, `while`, `switch`; `reset`; classical types other than
+`bit` and `input float`; `let`; assignments other than measurement;
+`bit c = measure q;`; `const`; `output`; casts; `def`; `extern`; the modifiers
+`ctrl @`, `negctrl @`, `inv @`, `pow @` and `gphase`, in bodies too; `delay`,
+`stretch`, `duration`, `box`; `defcal`, `cal`, `defcalgrammar`; arrays,
+slices, index sets, concatenation; physical qubits (`$0`); annotations and
+pragmas; the functions `mod`, `popcount`, `rotl`, `rotr`, `floor`, `ceiling`,
+`pow` (and `sizeof`, `real`, `imag`); a division whose two operands are both
+integer expressions (`1/2`: integer division in OpenQASM 3 — write `1.0/2`);
+an input named like a `stdgates.inc` gate, included or not (input names are
+kept, and the export always includes it); in a body, a call of a gate its own
+parameter or qubit argument shadows.
+
+**Phase semantics.** `U`, `u2` and `u3` are read and written with Qiskit's
+matrices — Polypus's `u`, `u2`, `u3` — a declared deviation from the
+specification by exactly e^{−iθ/2} (`U`) and e^{+i(φ+λ)/2} (`u2`, `u3`).
+Amplitudes may differ from a specification-normative reader by these global
+factors; probabilities, counts and expectation values do not. This is sound
+only because modifiers and `gphase` are rejected (under them a global phase
+becomes observable); admitting either requires global-phase tracking. Every
+other `stdgates.inc` gate follows the specification exactly. `CX` is read as
+`cx`, as `standard_library.rst` describes it ("an alias for `cx`"), although
+`stdgates.inc` defines it as `ctrl @ U(π, 0, π)`, which under the
+specification's `U` is controlled-(iX). That Polypus reads Qiskit's
+`qasm3.dumps` output as Qiskit does is tested for Qiskit 2.5.2 with
+`qiskit-qasm3-import` 0.6.0, not guaranteed for other versions.
+
+**Spellings.** On import `U` → `u`, `CX` → `cx`, `phase` → `p`, `cphase` →
+`cp`; on export `u` → `U`; no other name changes. A declared gate is never
+recognised as a built-in by its name.
+
+**Parameters.** Inputs are the free parameters, in declaration order, unused
+ones included. Their names are stored in the circuit (`param_names`), are part
+of its equality and survive clone, export and import, Unicode included;
+Qiskit's name mangling (`θ[0]` → `_θ_0_`) is not reversed. A parameter without
+a name is `theta_<index>`, or the first free `theta_<index>_<k>` if a named
+parameter or a declared gate the circuit calls takes that name.
+
+**Numbers.** Angles are evaluated in binary64, exactly the operations written,
+in source order. A constant angle is evaluated at import: a non-finite result
+or a division by zero is a `Parse` error (on the division's line); an angle of
+the inputs is evaluated at binding (`NonFiniteParam`, `DivisionByZero`). Only
+the final value must be finite: `1.0/exp(1000.0)` is `0.0`.
+
+**Canonical form.** What `to_qasm3` writes, and why its output is a fixed
+point: `to_qasm3(from_qasm3(to_qasm3(c)))` is byte-identical to `to_qasm3(c)`
+for every circuit `to_qasm3` accepts.
+
+```text
+OPENQASM 3.0;
+include "stdgates.inc";
+input float[64] <name>;         one per parameter, in index order
+gate <name>(<p>, …) <q>, … {    each definition the circuit needs, once:
+  <statement>;                    callees first, in order of first use
+}
+qubit[<n>] q;                   unless n = 0
+bit[<m>] c;                     unless m = 0
+<statement>;                    one per instruction
+```
+
+- Statements: `name(a, b) q[i], q[j];`; `barrier q;` for every qubit
+  (`barrier;` with none), `barrier q[i], …;` otherwise; `c = measure q;` for a
+  full measurement when the registers have one size, `c[i] = measure q[j];`
+  otherwise. Inside a definition the same, over its formal names, indented two
+  spaces.
+- Numbers: the shortest decimal that reads back as the same binary64, always
+  with a decimal point — positional for 1e-5 ≤ |v| < 1e16 (`0.00001`, `1.0`),
+  scientific otherwise (`1.5e-7`, `1.0e16`); negative zero is `-0.0`.
+- Expressions: `+` and `-` between spaces, `*`, `/`, `**` without; functions
+  by name (`log` for the natural logarithm), constants as `pi`, `tau`,
+  `euler`; the fewest parentheses that keep the expression: `**` binds
+  tightest (right-associative; its exponent may be a negation), then unary
+  minus, then `* /`, then `+ -` (both left-associative). A negative number is
+  written with its minus and counts as a negation.
+- Instructions `stdgates.inc` lacks are calls of these definitions (exact
+  matrices, checked in `polypus-sim`): `rzz(θ)` = `cx; rz(θ); cx`, `rxx(θ)` =
+  `h ⊗ h; cx; rz(θ); cx; h ⊗ h`, `sxdg` = `h; sdg; h`, `csx` =
+  `h; cp(π/2); h` on the target, `cu1` = `cp`, `cu3(θ, φ, λ)` =
+  `cu(θ, φ, λ, 0)`, `u0` = the identity (empty body), and `rccx`, `rc3x`,
+  `c3x`, `c3sqrtx`, `c4x` as their `qelib1.inc` definitions (`qasm3.rs`'s
+  `HELPER_PROGRAM` holds the exact text). Declared gates are printed from
+  their definitions, never copied.
+- Names: an input keeps its name. A gate, register or formal name is kept if it
+  is a valid OpenQASM 3 identifier of at most 4096 bytes, not a keyword,
+  constant, function, `U`, `gphase` or `stdgates.inc` gate, and not taken in its
+  scope (inputs, then gates in order, then registers; a definition's formals
+  avoid all of those). Otherwise it is renamed: characters an identifier cannot
+  hold become `_`; `g` (gate), `p` (parameter), `q` (qubit argument or qubit
+  register) or `c` (bit register) is prefixed if it cannot start one; `_` is
+  appended to a reserved word; it is cut to 4075 bytes; `_1`, `_2`, … is
+  appended until it is free. Names that can be kept are claimed before any is
+  renamed, so the scheme never collides. The registers are `q` and `c`, renamed
+  the same way when taken.
+- Budgets: the export fails with `CircuitError::ExportLimit` rather than write a
+  program the importer would reject (the budgets below, counted as the importer
+  counts them), and with `CircuitError::GateNotExpressible`, naming the gate,
+  for a definition it cannot write: an OpenQASM 2.0 body with a barrier, or one
+  that would nest or expand beyond the importer's limits once its `c4x`-like
+  calls become definition calls.
+
+**OpenQASM 2.0 export of OpenQASM 3 declarations.** `to_qasm2` needs every
+parameter bound. A declaration imported from OpenQASM 3 is printed from its
+definition on one line (`gate name(a,b) x,y { h x; cx x,y; }`), with `log` as
+`ln`, `**` as `^`, `tau` and `euler` as their values, numbers as above, and
+names renamed by the same scheme for OpenQASM 2.0's `[a-z][A-Za-z0-9_]*`
+(avoiding its keywords, the `qelib1.inc` gates, `q`, `c` and the names of
+OpenQASM 2.0 declarations, which keep theirs). A body using `arcsin`, `arccos`
+or `arctan` is `GateNotExpressible`, naming the gate (`ConcreteCircuit::to_qasm2`
+panics there; `try_to_qasm2` returns the error). The backends that submit
+OpenQASM 2.0 — Aer and CUNQA (through `polypus_python`), QMIO, the subprocess
+bridge — report such a circuit as unsupported (`polypus.NativeCircuitError` in
+Python), never a panic; the native backend expands the gate and runs it.
+OpenQASM 2.0 declarations are re-emitted verbatim as before (C-2).
+
+**Budgets** (each a `Parse` error on import; the export stays within them):
+
+| Budget | Value |
+|---|---|
+| Source size (`MAX_SOURCE_BYTES`) | 32 MiB |
+| Identifier, number or string (`MAX_TOKEN_BYTES`) | 4096 bytes |
+| Inputs (`MAX_INPUTS`) | 100 000 |
+| `gate` declarations (`MAX_DECLARATIONS`) | 10 000 |
+| Expression nodes, one expression (`MAX_EXPR_NODES`) | 1 000 000 |
+| Expression nodes, whole program (`MAX_PROGRAM_NODES`) | 4 000 000 |
+| Expression nesting as written (`MAX_EXPR_DEPTH`) | 64 |
+| Qubits, and bits (`MAX_REGISTER_BITS`) | 1 000 000 each |
+| Instructions after broadcasting (`MAX_INSTRUCTIONS`) | 4 000 000 |
+| Declared-gate nesting (`MAX_GATE_NESTING`) | 64 |
+| Statements one declaration expands to (`MAX_GATE_EXPANSION`) | 1 000 000 |
+| Statements all calls of declared gates expand to (`MAX_VALIDATED_EXPANSION`) | 20 000 000 |
+
+Rationale, evidence and alternatives considered: see
+`docs/adr/0004-openqasm3-profile-and-angle-expressions.md`.
+
+**Enforcing test:** `crates/polypus-circuit/tests/qasm3.rs` (every accepted
+and rejected construct with its line and message, the budgets on both sides,
+the canonical layout, numbers and parentheses, renaming and collisions — a
+native and a declared `rzz` included —, cross-dialect export),
+`crates/polypus-circuit/tests/contracts.rs` (`c2_*qasm3*`: the vocabulary's
+fixed point), `crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
+every `stdgates.inc` gate and `U` against the specification, `U`/`u2`/`u3` by
+the declared factors, `CX`, every exported definition, cross-dialect),
+`tests/python/test_qasm3.py` and `tests/python/test_qasm3_interop.py` (Qiskit
+2.5.2 in both directions: pinned fixtures and a generated set, explicit
+parameter mapping, statevectors with the predicted phase only, counts and bit
+order), and the `from_qasm3` fuzz target in CI (import, export, re-import,
+fixed point, binding). The backends' refusal of a circuit OpenQASM 2.0 cannot
+express: `to_py_object_rejects_a_circuit_openqasm2_cannot_express`
+(`polypus-infrastructure`), `rejects_a_circuit_openqasm2_cannot_express`
+(QMIO), `a_circuit_openqasm2_cannot_express_is_rejected_without_a_worker`
+(`polypus-subprocess-backend`), and
+`test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking`
+in `tests/python/test_qasm3.py`.

@@ -331,10 +331,11 @@ jobs:
   # Fuzz the untrusted OpenQASM 2.0 import surface on a short time budget, as a
   # regression guard for the DoS vectors closed in polypus-circuit (unbounded
   # expression recursion, oversized register declarations, non-finite angles).
+  # The OpenQASM 3 importer, and its export round trip, are fuzzed alike.
   # Needs a nightly toolchain and cargo-fuzz; the `fuzz/` crate lives outside
   # the workspace (see the root Cargo.toml `exclude`).
   fuzz:
-    name: fuzz (from_qasm2)
+    name: fuzz (from_qasm2, from_qasm3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -343,7 +344,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      # Seeds from the committed corpus (fuzz/corpus/from_qasm2). A crash or
-      # OOM fails the job; a clean 60s run passes.
-      - name: Run libFuzzer (60s budget)
+      # Seeds from the committed corpora (fuzz/corpus/<target>). A crash or
+      # OOM fails the job; a clean 60s run per target passes.
+      - name: Run libFuzzer on from_qasm2 (60s budget)
         run: cargo fuzz run from_qasm2 -- -max_total_time=60 -rss_limit_mb=2048
+      - name: Run libFuzzer on from_qasm3 (60s budget)
+        run: cargo fuzz run from_qasm3 -- -max_total_time=60 -rss_limit_mb=2048
