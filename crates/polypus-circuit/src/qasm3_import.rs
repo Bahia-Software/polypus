@@ -2060,6 +2060,9 @@ impl<'s> Parser<'s> {
             measured: Default::default(),
             exprs: self.exprs,
             param_names: self.inputs,
+            // `num_cbits` is the running sum of every `bit` register, capped by
+            // `MAX_REGISTER_BITS` in `register_decl`.
+            declared_clbits: (!self.cregs.is_empty()).then_some(self.num_cbits),
         }
     }
 }
