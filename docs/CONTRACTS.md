@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | — |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** circuit whose `creg` is wider than its highest written bit gets keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, open — see C-3) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -269,12 +269,17 @@ file reaches a backend (e.g. Aer, through the exporter) as the same program —
 same gate count, same depth, same instruction names. The only spelling changes
 are the language builtins `U` → `u` and `CX` → `cx`, which Qiskit names `u`
 and `cx` itself, so no Qiskit consumer can tell them apart. Decomposition is
-allowed at exactly two *lowering* boundaries, both confined to their module and
+allowed at exactly three *lowering* boundaries, all confined to their module and
 invisible to `to_qasm2`: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
 exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
-declared gates), and the QIR exporter, for gates without a base-profile
-intrinsic.
+declared gates); the QIR exporter, for gates without a base-profile
+intrinsic; and the Aer path (`polypus_python/local.py`), for what is outside
+Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
+`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs). That one lowers the
+Qiskit circuit just before `AerSimulator.run`, with `qiskit.transpile` and only
+when the circuit holds such an instruction — a circuit already in Aer's basis
+is handed over as it is — and never touches the exported QASM.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
@@ -302,7 +307,8 @@ that parses the export builds the same program as from the original file.
 Canonical form: the declarations the circuit reaches (directly or through
 other declarations) are emitted right after the include, in source order;
 unreachable declarations are not re-emitted. Expansion into built-in
-instructions is a lowering step of the simulator and the QIR exporter only.
+instructions is a lowering step of the simulator, the QIR exporter and the Aer
+path only.
 Redeclaring a gate, or declaring one with a `qelib1.inc` name (always provided),
 is rejected; so is recursion (a body may only call earlier declarations), and
 so is naming a gate, parameter or argument `pi`, `sin`, `cos`, `tan`, `exp`,
@@ -370,7 +376,13 @@ semantics, the non-finite and division-by-zero rules, ids foreign to a
 circuit, bounds), the calls-with-free-parameters tests in
 `crates/polypus-circuit/tests/gate_declarations.rs`, and
 `unbound_expression_is_rejected` in
-`crates/polypus-sim/tests/gate_matrices.rs`.
+`crates/polypus-sim/tests/gate_matrices.rs`; the Aer lowering boundary is
+enforced in Python by `tests/python/test_local_aer_lowering.py` (every
+out-of-basis gate and a declared gate run on Aer with the transpiled
+reference's counts and the native backend's distribution; a circuit in the
+basis is neither copied nor transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer`
+in `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the
+real execution path) and `tests/python/test_backend_compatibility.py`.
 
 ---
 
