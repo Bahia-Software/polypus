@@ -389,11 +389,18 @@ Additionally:
 - Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the `gate`
   declarations of any declared gate it calls: verbatim for one imported from
   OpenQASM 2.0, printed from its definition for one imported from OpenQASM 3)
-  and must remain accepted by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs it directly as long as
-  every instruction is in Aer's basis; `ch`, `u0`, `rccx`, `rc3x`, `c3x`,
-  `c3sqrtx`, `c4x` and every declared gate are not, so such a circuit must be
-  transpiled first (`qiskit.transpile(qc, AerSimulator())`) — Aer never unrolls
-  them by itself.
+  and must remain accepted by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs
+  it directly as long as every instruction is in Aer's basis; `ch`, `u0`,
+  `rccx`, `rc3x`, `c3sqrtx` and every declared gate are not (`c3x` and `c4x`
+  parse as Qiskit's `mcx`, which is) and Aer never unrolls them by itself, so
+  `Local.run_qcs` (`polypus_python/local.py`) lowers a circuit that holds one
+  with `qiskit.transpile(qc, AerSimulator(), optimization_level=0)` just before
+  `AerSimulator.run` — the third lowering boundary of C-2, invisible to the
+  exported QASM. Whether an instruction is "outside the basis" is decided on
+  the names Qiskit parsed (`rc3x` is `rcccx`, `c3sqrtx` is `c3sx`) against the
+  *default* `AerSimulator()` target, control-flow bodies included, never the
+  target of the configured `sim_method` or `noise_model`; a circuit already in
+  the basis is passed to Aer as it is, neither copied nor transpiled.
 - `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
   `gate` declarations included. Canonicalizations performed on import: the
   builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple

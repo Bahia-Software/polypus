@@ -633,11 +633,12 @@ unchanged.
 
 The native backend runs terminal-measurement circuits only (contract C-4,
 [ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
-mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer, in
-turn, rejects instructions outside its basis (`ch`, `u0`, `rccx`, declared
-gates, …) unless the circuit is transpiled first. `polypus.backend_compatibility`
-reports this before a run, for a `polypus.Circuit`, an OpenQASM 2.0 string or a Qiskit
-`QuantumCircuit`:
+mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer does
+not unroll instructions outside its basis (`ch`, `u0`, `rccx`, declared gates, …), but
+the local backend lowers them with `qiskit.transpile` before running, so they are
+not a reason to prefer one backend. `polypus.backend_compatibility`
+reports what each backend rejects before a run, for a `polypus.Circuit`, an OpenQASM
+2.0 string or a Qiskit `QuantumCircuit`:
 
 ```python
 import polypus
@@ -662,8 +663,12 @@ Each value lists the reasons that backend would reject the circuit; an empty lis
 means it accepts it. The native entry is decided by the backend's own first step
 (`NativeStatevectorBackend::check_circuit`: the OpenQASM importer, or the Qiskit-circuit
 guard) and quotes the message a run would raise; for a Qiskit circuit it also lists the
-dynamic features found in it. The Aer entry parses with the parser the Aer path uses and
-compares the instructions with Aer's target for its default simulation method. A
+dynamic features found in it. The Aer entry parses with the parser the Aer path uses (a
+parse failure is its reason; so is Qiskit Aer not being installed) and rejects no
+instruction, because the local backend lowers what is outside Aer's basis before
+running it. For a Qiskit `QuantumCircuit` the instructions are not inspected at all, so
+one that `qiskit.transpile` cannot lower (an opaque instruction without a definition, a
+`box`) is only reported when the run raises `polypus.BackendError`. A
 `polypus.Circuit` with free parameters gets the same reason in both entries. The check is
 **structural**: it runs and connects to nothing, and does not check resources (the qubit
 ceiling, memory), so an accepted circuit can still fail for lack of them. Enforced by

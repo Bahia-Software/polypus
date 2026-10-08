@@ -96,6 +96,17 @@ class TestQasmStrings:
         assert "QASM2ParseError" in report["aer"][0]
         _assert_coherent(INVALID, report)
 
+    def test_missing_qasm_parser_is_a_reason_for_aer(self, monkeypatch):
+        """If Qiskit and Aer import but the parser the Aer path uses is gone,
+        Aer cannot run the circuit and the entry says so, not ``[]``."""
+        from qiskit import QuantumCircuit
+
+        monkeypatch.delattr(QuantumCircuit, "from_qasm_str")
+        report = _report(VALID)
+        assert len(report["aer"]) == 1
+        assert "Qiskit Aer is not available" in report["aer"][0]
+        assert report["polypus"] == []
+
     def test_circuit_without_measurements_is_accepted_by_both(self):
         circuit = H + "qreg q[2];\ncreg c[3];\nx q[0];\n"
         report = _report(circuit)
@@ -121,21 +132,58 @@ class TestNativeCircuits:
             assert len(reasons) == 1 and "unbound parameters" in reasons[0]
         _assert_coherent(qc, report)
 
-    def test_gate_outside_aer_basis_is_reported_for_aer(self):
-        """``ch`` is native vocabulary (C-2) but not in Aer's basis
-        (ENGINEERING §7): Aer rejects it unless it is transpiled first."""
+    @pytest.mark.parametrize(
+        "statement",
+        ["ch q[0],q[1];", "rccx q[0],q[1],q[2];", "u0(1) q[0];"],
+    )
+    def test_gate_outside_aer_basis_is_accepted_by_both(self, statement):
+        """``ch``, ``rccx`` and ``u0`` are native vocabulary (C-2) and not in
+        Aer's basis, but the local backend lowers them before running on Aer
+        (issue #252), so neither backend rejects them and both run them."""
+        import polypus
+
+        src = (
+            H
+            + "qreg q[3];\ncreg c[3];\nx q[0];\nx q[1];\n"
+            + statement
+            + "\nmeasure q -> c;\n"
+        )
+        circuit = polypus.Circuit.from_qasm2(src)
+        for given in (circuit, src):
+            report = _report(given)
+            assert report == {"aer": [], "polypus": []}
+            _assert_coherent(given, report)
+
+    def test_ch_gives_equivalent_counts_on_both_backends(self):
+        """x on the control makes ``ch`` a Hadamard on the target: both
+        backends see the uniform split of the target and a fixed control."""
         import polypus
 
         qc = polypus.Circuit(2).x(0).ch(0, 1).measure_all()
-        report = _report(qc)
-        assert report["polypus"] == []
-        assert len(report["aer"]) == 1 and "'ch'" in report["aer"][0]
-        # Aer's own message differs from the report's and across Aer versions,
-        # so check the class Aer raised rather than its wording.
-        with pytest.raises(polypus.BackendError) as info:
-            _run(qc, "aer")
-        assert type(info.value.__cause__).__name__ == "AerError"
-        assert sum(_run(qc, "polypus").counts[0].values()) == 32
+        assert _report(qc) == {"aer": [], "polypus": []}
+        shots = 400
+        for backend in ("aer", "polypus"):
+            counts = polypus.run_quantum_circuit(
+                qc, shots=shots, infrastructure="local", backend=backend, seed=5
+            ).counts[0]
+            assert set(counts) == {"01", "11"}
+            assert sum(counts.values()) == shots
+            # Binomial(400, 1/2): 5 standard deviations are 5 * sqrt(100) = 50.
+            assert abs(counts["01"] - shots / 2) <= 50
+
+    def test_declared_gate_is_accepted_by_both(self):
+        import polypus
+
+        src = (
+            H
+            + "gate pair a,b { ch a,b; cx b,a; }\n"
+            + "qreg q[2];\ncreg c[2];\nx q[0];\npair q[0],q[1];\nmeasure q -> c;\n"
+        )
+        circuit = polypus.Circuit.from_qasm2(src)
+        for given in (circuit, src):
+            report = _report(given)
+            assert report == {"aer": [], "polypus": []}
+            _assert_coherent(given, report)
 
 
 class TestQiskitCircuits:
@@ -150,6 +198,21 @@ class TestQiskitCircuits:
 
     def test_native_always_rejects_a_quantum_circuit(self):
         qc = self._bell()
+        report = _report(qc)
+        assert report["aer"] == []
+        assert len(report["polypus"]) == 1
+        assert "cannot execute a Qiskit QuantumCircuit" in report["polypus"][0]
+        _assert_coherent(qc, report)
+
+    def test_gate_outside_aer_basis_is_accepted_by_aer(self):
+        """A Qiskit circuit with ``ch`` is lowered by the local backend before
+        Aer runs it, so the Aer entry is empty and the run succeeds."""
+        from qiskit import QuantumCircuit
+
+        qc = QuantumCircuit(2)
+        qc.x(0)
+        qc.ch(0, 1)
+        qc.measure_all()
         report = _report(qc)
         assert report["aer"] == []
         assert len(report["polypus"]) == 1
