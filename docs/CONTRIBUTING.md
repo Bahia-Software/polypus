@@ -121,7 +121,7 @@ security impact, do **not** open a public issue — follow
 ## License
 
 Polypus is licensed under the **European Union Public Licence (EUPL),
-version 1.2** — see the [`LICENSE`](../LICENSE) file and the `license` field in
+version 1.2** — see the [`LICENSE`](../LICENSE) and [`NOTICE`](../NOTICE) files and the `license` field in
 the workspace `Cargo.toml`. By submitting a contribution you agree that it is
 your own work (or you have the right to submit it) and that it is provided
 under the project license.

@@ -49,8 +49,10 @@ edition = "2021"
 rust-version = "1.85"
 authors = ["Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es>", "Víctor Sóñora Pombo", "Sergio Figueiras Gómez", "Miguel Boubeta Martínez", "Kevin Pérez González", "Uxía Sendón Caamaño", "Galicia Supercomputing Center (CESGA)"]
 # SPDX identifier (required by cargo-deny and crates.io). The full licence
-# text, including the "or subsequent versions approved by the European
-# Commission" clause, lives in the LICENSE file at the repo root.
+# text lives in LICENSE; the licence notice (including the "or subsequent
+# versions approved by the European Commission" clause) and third-party data
+# attributions live in NOTICE. Each crate symlinks both so they ship in every
+# published .crate (EUPL-1.2 Art. 5 requires a copy with every distribution).
 license = "EUPL-1.2"
 # Source repository, inherited by each member crate via `repository.workspace = true`.
 repository = "https://github.com/Bahia-Software/polypus"
