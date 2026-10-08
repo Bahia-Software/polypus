@@ -88,7 +88,7 @@ import polypus
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
 result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local", n_qpus=4)
 
-result.counts         # one counts dict per QPU
+result.counts  # one counts dict per QPU
 result.merged_counts  # e.g. {'00': 487, '11': 513}
 ```
 

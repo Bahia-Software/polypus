@@ -28,8 +28,10 @@ Pass `seed=...` for reproducible shot noise on every simulated backend (native, 
 With `n_qpus > 1` the shots are split across QPUs and run concurrently:
 
 ```python
-result = polypus.run_quantum_circuit(qc, shots=10_000, infrastructure="cunqa", n_qpus=10)
-len(result.counts)    # 10, one counts dict per QPU
+result = polypus.run_quantum_circuit(
+    qc, shots=10_000, infrastructure="cunqa", n_qpus=10
+)
+len(result.counts)  # 10, one counts dict per QPU
 result.merged_counts  # the total over all 10 000 shots
 ```
 
@@ -59,7 +61,9 @@ With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and
 report = polypus.backend_compatibility(qc)
 # e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
 backend = "polypus" if not report["polypus"] else "aer"
-result = polypus.run_quantum_circuit(qc, shots=1000, infrastructure="local", backend=backend)
+result = polypus.run_quantum_circuit(
+    qc, shots=1000, infrastructure="local", backend=backend
+)
 ```
 
 A circuit without measurements is read out on all its qubits by both backends.

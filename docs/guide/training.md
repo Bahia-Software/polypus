@@ -4,11 +4,11 @@
 
 ```python
 result = polypus.train(
-    qc,                          # parameterized polypus.Circuit or Qiskit QuantumCircuit
+    qc,  # parameterized polypus.Circuit or Qiskit QuantumCircuit
     polypus.DE(generations=100, population_size=50),
     shots=1024,
     n_qpus=1,
-    dimensions=2,                # number of variational parameters
+    dimensions=2,  # number of variational parameters
     expectation_function=cost,
     infrastructure="local",
     nodes=1,
@@ -63,7 +63,9 @@ The seed can also be pinned on the optimizer (`polypus.DE(..., seed=42)`). The `
 
 ```python
 # f(x) = sum_i linear_i x_i + sum_ij w_ij x_i x_j + constant, x_i in {0, 1}
-cost = polypus.Qubo(4, linear=[(0, 1.0), (1, -2.0)], quadratic=[(0, 1, 3.0)], constant=0.5)
+cost = polypus.Qubo(
+    4, linear=[(0, 1.0), (1, -2.0)], quadratic=[(0, 1, 3.0)], constant=0.5
+)
 cost = polypus.Qubo.from_matrix(Q)  # f(x) = x^T Q x
 
 # f(z) = sum_i h_i z_i + sum_ij J_ij z_i z_j + constant, z_i = 1 - 2 x_i
