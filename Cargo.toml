@@ -34,7 +34,10 @@ members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics",
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
-resolver = "2"
+# Resolver 3 is MSRV-aware: `cargo update` prefers dependency versions whose
+# `rust-version` fits the workspace `rust-version` below, so it does not pick a
+# release that would break the `msrv` CI job (e.g. uuid 1.27 needs rustc 1.89).
+resolver = "3"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
