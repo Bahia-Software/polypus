@@ -28,12 +28,12 @@
 
 use crate::error::PhysicsError;
 use rand::Rng;
-use rand::RngCore;
+use rand::RngExt;
 
 /// A probability distribution over primary-particle energies (MeV).
 ///
 /// Object-safe: `Box<dyn EnergySpectrum>` and `&dyn EnergySpectrum` are usable.
-/// The RNG is passed as `&mut dyn RngCore` (rather than a generic `impl Rng`)
+/// The RNG is passed as `&mut dyn Rng` (rather than a generic `impl Rng`)
 /// precisely to keep the trait object-safe.
 ///
 /// # Adding a new spectrum
@@ -47,7 +47,7 @@ pub trait EnergySpectrum: Send + Sync + std::fmt::Debug {
     ///
     /// The returned value is guaranteed to lie in
     /// `[min_energy_mev, max_energy_mev]`.
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64;
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64;
 
     /// Lowest energy the distribution can return (MeV).
     fn min_energy_mev(&self) -> f64;
@@ -83,7 +83,7 @@ impl Monoenergetic {
 }
 
 impl EnergySpectrum for Monoenergetic {
-    fn sample_energy_mev(&self, _rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, _rng: &mut dyn Rng) -> f64 {
         self.energy_mev
     }
 
@@ -129,7 +129,7 @@ impl UniformSpectrum {
 }
 
 impl EnergySpectrum for UniformSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         rng.random_range(self.min_energy_mev..self.max_energy_mev)
     }
 
@@ -221,7 +221,7 @@ impl KramersSpectrum {
 }
 
 impl EnergySpectrum for KramersSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         // The pdf is monotonically decreasing, so its supremum on the support
         // is at E_min.
         let bound = self.pdf(self.min_energy_mev);
@@ -357,7 +357,7 @@ impl TabulatedSpectrum {
 }
 
 impl EnergySpectrum for TabulatedSpectrum {
-    fn sample_energy_mev(&self, rng: &mut dyn RngCore) -> f64 {
+    fn sample_energy_mev(&self, rng: &mut dyn Rng) -> f64 {
         let u: f64 = rng.random_range(0.0..1.0);
         // First bin whose cumulative probability reaches `u`.
         let idx = self.cdf.partition_point(|&c| c < u).min(self.cdf.len() - 1);
@@ -388,6 +388,44 @@ mod tests {
         }
         assert_eq!(spec.min_energy_mev(), 0.1);
         assert_eq!(spec.max_energy_mev(), 0.1);
+    }
+
+    /// Pins the absolute seeded output of the non-trivial spectra (Kramers'
+    /// rejection sampler and the tabulated inverse CDF). The other seeded tests
+    /// only check bounds or compare two runs, so a `rand` bump that changed the
+    /// `StdRng` stream or `random_range` would pass them silently. Values
+    /// captured with rand 0.9.4, compared by bits.
+    #[test]
+    fn non_trivial_spectra_seeded_stream_is_pinned() {
+        let kramers = KramersSpectrum::from_kvp(100.0, 10.0).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let energies: [u64; 3] =
+            std::array::from_fn(|_| kramers.sample_energy_mev(&mut rng).to_bits());
+        assert_eq!(
+            energies,
+            [
+                4578699985104795690,
+                4581944995894436828,
+                4577571572644783066
+            ]
+        );
+
+        let tabulated =
+            TabulatedSpectrum::new(vec![0.02, 0.04, 0.06, 0.08], vec![1.0, 3.0, 2.0, 0.5]).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let energies: [u64; 6] =
+            std::array::from_fn(|_| tabulated.sample_energy_mev(&mut rng).to_bits());
+        assert_eq!(
+            energies,
+            [
+                4585925428558828667,
+                4585925428558828667,
+                4588807732320345784,
+                4585925428558828667,
+                4581421828931458171,
+                4585925428558828667
+            ]
+        );
     }
 
     #[test]

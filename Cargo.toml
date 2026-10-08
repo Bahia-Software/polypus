@@ -72,8 +72,9 @@ polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
 log                = "0.4"
 # UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
 uuid               = { version = "1", features = ["v4"] }
-# RNG shared by `polypus` and `polypus-optimizers`; keep default features.
-rand               = "0.9"
+# RNG shared by `polypus-infrastructure`, `polypus-optimizers`, `polypus-physics`
+# and the `polypus-observable` tests; keep default features.
+rand               = "0.10"
 # The subprocess bridge's wire protocol: length-prefixed JSON over the worker's
 # stdin/stdout (see `polypus-subprocess-backend`). `serde`/`serde_json` are
 # pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the

@@ -24,7 +24,7 @@
 
 use crate::constants::{CLASSICAL_ELECTRON_RADIUS_M as R_E, ELECTRON_MASS_MEV};
 use crate::particle::{FourMomentum, ParticleState, Position};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::f64::consts::PI;
 
 /// Scattered-photon energy `E'` (MeV) for incident energy `energy_mev` and

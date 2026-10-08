@@ -503,6 +503,31 @@ mod tests {
         assert_eq!(r1.mean_deposit_mev, r2.mean_deposit_mev);
     }
 
+    /// Pins the absolute seeded output of a small transport run (step lengths,
+    /// interaction selection and the Compton/coherent angular samplers). The
+    /// run is sequential, so the result does not depend on any reduction
+    /// order. `same_seed_is_reproducible` only compares two runs, so a `rand`
+    /// bump that changed the seeded stream would pass it silently. A bounded
+    /// cube lets primaries escape, so the mean deposit and the track lengths
+    /// both depend on the stream (in an unbounded medium every primary
+    /// deposits its full energy). Values captured with rand 0.9.4, compared by
+    /// bits.
+    #[test]
+    fn run_seeded_stream_is_pinned() {
+        let eng = engine(100, 42).with_geometry(water_cube());
+        let mut rng = StdRng::seed_from_u64(42);
+        let result = eng.run(Photon::state_along_z(0.1), &mut rng).unwrap();
+        let track_points: usize = result.histories.iter().map(|h| h.track.len()).sum();
+        assert_eq!(
+            [
+                result.mean_deposit_mev.to_bits(),
+                result.variance_deposit_mev2.to_bits()
+            ],
+            [4583218237680116603, 4559443500520194807]
+        );
+        assert_eq!(track_points, 307);
+    }
+
     #[test]
     fn standard_error_is_small() {
         let n = 500;

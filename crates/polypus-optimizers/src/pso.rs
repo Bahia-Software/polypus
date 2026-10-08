@@ -6,7 +6,7 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
 use ndarray::Array2;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Particle Swarm Optimization optimizer.
 pub struct AlgorithmPSO;
