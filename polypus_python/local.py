@@ -1,4 +1,7 @@
-from qiskit import ClassicalRegister, QuantumCircuit
+from functools import lru_cache
+
+from qiskit import ClassicalRegister, QuantumCircuit, transpile
+from qiskit.circuit import CONTROL_FLOW_OP_NAMES
 from qiskit.result import marginal_distribution
 from qiskit_aer import AerSimulator
 
@@ -73,6 +76,63 @@ def _has_measurement(qc):
     return False
 
 
+@lru_cache(maxsize=1)
+def _default_aer():
+    """The default ``AerSimulator()`` and the instruction names its target
+    supports. Built on first use, not at import: the extension imports this
+    package at runtime. The *default* simulator, whatever ``sim_method`` or
+    ``noise_model`` a run asks for: a method-specific basis is smaller (a
+    ``noise_model`` cuts it from 98 to 40 gates), and lowering against it would
+    rewrite circuits Aer runs as they are or turn a method's own refusal into a
+    transpiler error."""
+    simulator = AerSimulator()
+    return simulator, frozenset(simulator.target.operation_names)
+
+
+def _outside_aer_basis(qc, supported):
+    """Whether ``qc`` holds an instruction Aer's target does not support, at any
+    depth (control-flow bodies included). ``barrier`` is a directive Aer always
+    accepts. Judged on the names Qiskit parsed the circuit into (``rc3x`` is
+    ``rcccx``, ``c3x`` and ``c4x`` are ``mcx``, which Aer does run), not on
+    Polypus's.
+
+    The names come from ``count_ops``, which Qiskit computes without building a
+    ``CircuitInstruction`` per instruction; ``qc.data`` is walked only for the
+    control-flow operations Qiskit declares (``CONTROL_FLOW_OP_NAMES``), to look
+    into their bodies. One that is not in Aer's target (today ``box``) is outside
+    the basis already by its name, before any body is looked at."""
+    names = qc.count_ops()
+    if any(name != "barrier" and name not in supported for name in names):
+        return True
+    if CONTROL_FLOW_OP_NAMES.isdisjoint(names):
+        return False
+    return any(
+        _outside_aer_basis(block, supported)
+        for instruction in qc.data
+        if instruction.operation.name in CONTROL_FLOW_OP_NAMES
+        for block in instruction.operation.blocks
+    )
+
+
+def _lower_to_aer_basis(qc):
+    """``qc`` when every instruction is in Aer's basis, else an equivalent copy
+    rewritten into it.
+
+    Aer does not unroll what is outside its basis (``ch``, ``rccx``, ``rcccx``,
+    ``c3sx``, ``u0``, a ``gate`` declared in the OpenQASM source): it raises
+    ``AerError: unknown instruction``. The circuit is lowered here, third
+    lowering boundary of contract C-2, and never earlier, so the exported QASM
+    stays the program the user wrote. A circuit already in the basis is handed
+    over as it is, neither copied nor transpiled, so its counts do not move.
+    ``optimization_level=0`` only rewrites; it neither reorders nor merges
+    gates. ``transpile`` returns a new circuit: the caller's is never modified.
+    """
+    simulator, supported = _default_aer()
+    if not _outside_aer_basis(qc, supported):
+        return qc
+    return transpile(qc, simulator, optimization_level=0)
+
+
 def _with_full_readout(qc):
     """Return the circuit Aer should run for ``qc`` and the classical bits to
     read its counts from (``None``: every bit, as Qiskit reports them).
@@ -118,8 +178,11 @@ class Local(Infraestructure):
         pass
 
     def run_qcs(self, **args) -> object:
+        # Lowering comes first: the read-out register is added to the lowered
+        # circuit, whose qubits and classical bits keep their order.
         prepared = [
-            _with_full_readout(qc) for qc in _ensure_quantum_circuits(args["qcs"])
+            _with_full_readout(_lower_to_aer_basis(qc))
+            for qc in _ensure_quantum_circuits(args["qcs"])
         ]
         qcs = [qc for qc, _ in prepared]
         shots = args["shots"]

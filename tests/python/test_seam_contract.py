@@ -266,14 +266,16 @@ def test_seam_qiskit_error_that_is_also_a_c1_type_is_preserved(monkeypatch, buil
 
 
 def test_real_aer_error_reaches_the_caller_as_polypus_error():
-    """No monkeypatch: ``ch`` is outside Aer's basis (ENGINEERING §7), so Aer
-    itself raises ``AerError('unknown instruction: ch')``."""
+    """No monkeypatch: an invalid ``sim_method`` makes Aer itself raise
+    ``AerError('Invalid simulation method bogus ...')``."""
     import polypus
 
     pytest.importorskip("qiskit_aer")
-    qc = polypus.Circuit(2).x(0).ch(0, 1).measure_all()
+    qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
     with pytest.raises(polypus.PolypusError) as info:
-        polypus.run_quantum_circuit(qc, shots=10, infrastructure="local", backend="aer")
+        polypus.run_quantum_circuit(
+            qc, shots=10, infrastructure="local", backend="aer", sim_method="bogus"
+        )
     assert type(info.value) is polypus.BackendError
     assert "AerError" in str(info.value)
     assert type(info.value.__cause__).__name__ == "AerError"

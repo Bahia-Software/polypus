@@ -385,39 +385,21 @@ def test_bound_parameterised_gates_match_fixed_angle_circuit():
 # The real execution path: polypus.run_quantum_circuit on the local Aer backend
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Gates Aer executes natively. `ch`, `u0` and the multi-qubit qelib1.inc gates
-# (`rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x`) are not in Aer's basis, and the
-# local backend submits circuits to Aer untranspiled, so such a circuit does not
-# run there today (a local-backend limitation, not an import/export one: the
-# transpiled comparison above covers every gate).
-_NOT_IN_AER_BASIS = {"ch", "u0", "rccx", "rc3x", "c3x", "c3sqrtx", "c4x"}
-_AER_NATIVE = [g for g in GATES if g[0] not in _NOT_IN_AER_BASIS]
-
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
-    ("name", "qubits", "n_angles", "qk", "pp"),
-    _AER_NATIVE,
-    ids=[g[0] for g in _AER_NATIVE],
+    ("name", "qubits", "n_angles", "qk", "pp"), GATES, ids=GATE_IDS
 )
 def test_run_quantum_circuit_matches_qiskit_on_aer(name, qubits, n_angles, qk, pp):
     import polypus
-    from qiskit import QuantumCircuit
-    from qiskit_aer import AerSimulator
 
     src = _program(_statement(name, qubits, n_angles), measure=True)
     result = polypus.run_quantum_circuit(
         polypus.Circuit.from_qasm2(src), shots=SHOTS, infrastructure="local", seed=SEED
     )
     polypus_counts = result.counts[0]
-    qiskit_counts = (
-        AerSimulator()
-        .run(QuantumCircuit.from_qasm_str(src), shots=SHOTS, seed_simulator=SEED)
-        .result()
-        .get_counts()
-    )
     assert sum(polypus_counts.values()) == SHOTS
-    assert polypus_counts == qiskit_counts
+    assert polypus_counts == _aer_counts(src)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

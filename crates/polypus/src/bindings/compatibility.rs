@@ -13,8 +13,13 @@
 //! [`NativeStatevectorBackend::check_circuit`] (the OpenQASM importer, the same
 //! call execution makes) and the entry point's Qiskit guard, and reports the
 //! message the run would raise. The Aer one parses with the parser the Aer path
-//! uses (`QuantumCircuit.from_qasm_str`) and compares the instructions with Aer's
-//! own target.
+//! uses (`QuantumCircuit.from_qasm_str`). It does not compare instructions with
+//! Aer's target: the local backend lowers what is outside Aer's basis before
+//! running it (`polypus_python/local.py`, contract C-2), so an instruction
+//! outside the basis is no reason to reject. A Qiskit `QuantumCircuit`'s
+//! instructions are not inspected: one `qiskit.transpile` cannot lower (an
+//! opaque instruction without a definition, a `box`) only shows when the
+//! circuit runs.
 
 use std::collections::HashSet;
 
@@ -42,10 +47,13 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 ///   measurement (C-4), one that does not parse, and any Qiskit
 ///   `QuantumCircuit`, for which the dynamic features found in it are listed
 ///   as well.
-/// - `"aer"` rejects an OpenQASM program Qiskit cannot parse and an
-///   instruction outside Aer's basis (such as `ch` or a declared gate, which
-///   need `qiskit.transpile` first). Aer is checked for its default simulation
-///   method; if Qiskit Aer is not installed, that is the reason.
+/// - `"aer"` rejects an OpenQASM program Qiskit cannot parse; if Qiskit Aer is
+///   not installed, that is the reason. An instruction outside Aer's basis (such
+///   as `ch` or a declared gate) is no reason: the local backend lowers it with
+///   `qiskit.transpile` before running it. For a Qiskit `QuantumCircuit` the
+///   instructions are not inspected, so one `qiskit.transpile` cannot lower (an
+///   opaque instruction without a definition, a `box`) is only reported when the
+///   run raises `polypus.BackendError`.
 /// - A `polypus.Circuit` with free parameters cannot be run by either backend;
 ///   both entries give the same reason.
 ///
@@ -85,7 +93,7 @@ fn reasons(circuit: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Vec<String>)> {
         let qc = quantum_circuit(circuit)?;
         let mut native = vec![super::NATIVE_REJECTS_QISKIT.to_string()];
         native.extend(dynamic_features(qc)?);
-        return Ok((aer_rejections(qc)?, native));
+        return Ok((aer_unavailable(py), native));
     }
     let native = match NativeStatevectorBackend::check_circuit(&bound) {
         Ok(()) => Vec::new(),
@@ -124,14 +132,14 @@ fn quantum_circuit<'a, 'py>(circuit: &'a Bound<'py, PyAny>) -> PyResult<&'a Boun
 /// The Aer reasons for a native or OpenQASM circuit: it reaches Aer as
 /// OpenQASM 2.0 and is parsed there by `QuantumCircuit.from_qasm_str`, so a
 /// parse failure is quoted as the run would raise it (`polypus.BackendError`'s
-/// `module.Class: message`); a parsed circuit is checked like a Qiskit one.
+/// `module.Class: message`). A circuit that parses is accepted.
 fn aer_qasm_rejections(py: Python<'_>, bound: &BoundCircuit) -> PyResult<Vec<String>> {
     let Some(from_qasm_str) = aer_parser(py) else {
         return Ok(vec![aer_missing(py)]);
     };
     let qasm = to_py_object(bound, py).map_err(backend_error_to_pyerr)?;
     match from_qasm_str.call1((qasm,)) {
-        Ok(qc) => aer_rejections(&qc),
+        Ok(_) => Ok(Vec::new()),
         Err(err) => Ok(vec![describe_python_error(py, &err)]),
     }
 }
@@ -145,7 +153,8 @@ fn aer_parser(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
         .ok()
 }
 
-/// The reason given when Aer cannot run anything: it is not installed.
+/// The reason given when Aer cannot run anything: it is not installed, or
+/// `QuantumCircuit.from_qasm_str` is missing from what is.
 fn aer_missing(py: Python<'_>) -> String {
     match PyModule::import(py, "qiskit_aer").and(PyModule::import(py, "qiskit")) {
         Ok(_) => "Qiskit Aer is not available".to_string(),
@@ -156,54 +165,17 @@ fn aer_missing(py: Python<'_>) -> String {
     }
 }
 
-/// Instructions of the Qiskit circuit `qc` that Aer's default target does not
-/// support, one reason each, in order of first appearance (control-flow bodies
-/// included). `barrier` is a directive Aer always accepts.
-fn aer_rejections(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
-    let py = qc.py();
-    let Ok(aer) = PyModule::import(py, "qiskit_aer") else {
-        return Ok(vec![aer_missing(py)]);
-    };
-    let supported: HashSet<String> = aer
-        .getattr("AerSimulator")?
-        .call0()?
-        .getattr("target")?
-        .getattr("operation_names")?
-        .try_iter()?
-        .map(|name| name?.extract::<String>())
-        .collect::<PyResult<_>>()?;
-    let mut unsupported = Vec::new();
-    collect_unsupported(qc, &supported, &mut unsupported)?;
-    Ok(unsupported
-        .into_iter()
-        .map(|name| {
-            format!(
-                "instruction '{name}' is not in Aer's basis: transpile the circuit first \
-                 (qiskit.transpile(qc, AerSimulator()))"
-            )
-        })
-        .collect())
-}
-
-fn collect_unsupported(
-    qc: &Bound<'_, PyAny>,
-    supported: &HashSet<String>,
-    unsupported: &mut Vec<String>,
-) -> PyResult<()> {
-    let py = qc.py();
-    for instruction in qc.getattr(intern!(py, "data"))?.try_iter()? {
-        let operation = instruction?.getattr(intern!(py, "operation"))?;
-        let name: String = operation.getattr(intern!(py, "name"))?.extract()?;
-        if name != "barrier" && !supported.contains(&name) && !unsupported.contains(&name) {
-            unsupported.push(name);
-        }
-        if let Ok(blocks) = operation.getattr(intern!(py, "blocks")) {
-            for block in blocks.try_iter()? {
-                collect_unsupported(&block?, supported, unsupported)?;
-            }
-        }
+/// [`aer_missing`] as a rejection list: empty when Qiskit and Qiskit Aer are
+/// both importable.
+fn aer_unavailable(py: Python<'_>) -> Vec<String> {
+    if PyModule::import(py, "qiskit_aer")
+        .and(PyModule::import(py, "qiskit"))
+        .is_ok()
+    {
+        Vec::new()
+    } else {
+        vec![aer_missing(py)]
     }
-    Ok(())
 }
 
 /// The dynamic-circuit features of the Qiskit circuit `qc` that a Polypus

@@ -158,7 +158,7 @@ result = polypus.run_quantum_circuit(
 
 ### Choosing a Local Backend
 
-With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and `backend="polypus"` runs the native Rust statevector simulator. The native backend runs terminal-measurement circuits only: it rejects `reset`, a gate after a measurement and `if` (see [ADR 0001](docs/adr/0001-terminal-measurements.md)), and it cannot run a Qiskit `QuantumCircuit`. Aer runs all of those, but rejects gates outside its basis (such as `ch` or a declared `gate`) unless the circuit is transpiled first. Check before switching with `polypus.backend_compatibility`, which returns, per backend, the reasons it would reject the circuit (an empty list means it runs):
+With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and `backend="polypus"` runs the native Rust statevector simulator. The native backend runs terminal-measurement circuits only: it rejects `reset`, a gate after a measurement and `if` (see [ADR 0001](docs/adr/0001-terminal-measurements.md)), and it cannot run a Qiskit `QuantumCircuit`. Aer runs all of those; gates outside its basis (such as `ch` or a declared `gate`) are lowered with `qiskit.transpile` by the local backend before Aer runs them. Check before switching with `polypus.backend_compatibility`, which returns, per backend, the reasons it would reject the circuit (an empty list means it runs):
 
 ```python
 # qc: a polypus.Circuit, an OpenQASM 2.0 str or a Qiskit QuantumCircuit
