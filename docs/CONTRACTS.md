@@ -417,10 +417,10 @@ writes, against its instruction, as full matrices).
   registers, the implicit width `max(cbit) + 1` (`num_qubits` with
   `measure_all`). Aer and the native backend agree on both (issue #251; before
   it the native backend used `max(cbit) + 1` for OpenQASM input too). Known
-  limit, the same on both backends: `polypus.Circuit.from_qasm2(src)` does not
-  carry the declared width past parameter binding, so running the imported
-  circuit uses the implicit width (Aer receives the re-exported QASM, which
-  declares only the bits written). The QMIO and CUNQA paths are not verified.
+  limit, the same on both backends: `polypus.Circuit.from_qasm2(src)` and
+  `from_qasm3(src)` do not carry the declared width past parameter binding, so
+  running the imported circuit uses the implicit width (Aer receives the
+  re-exported QASM, which declares only the bits written). The QMIO and CUNQA paths are not verified.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -498,7 +498,9 @@ plus the implicit width of a `polypus.Circuit` and of `Circuit.from_qasm2`),
 `declared_clbit_width_survives_a_transpiler` in
 `crates/polypus-infrastructure/src/native.rs`, and the `declared_clbits_*` /
 `builder_circuits_declare_no_clbits` tests in
-`crates/polypus-circuit/tests/qasm_import.rs` (issue #251).
+`crates/polypus-circuit/tests/qasm_import.rs` and
+`declared_clbits_is_the_sum_of_the_bit_registers` in
+`crates/polypus-circuit/tests/qasm3.rs` (issue #251).
 
 ---
 

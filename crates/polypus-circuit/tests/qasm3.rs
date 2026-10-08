@@ -344,6 +344,28 @@ fn measurements_are_assigned_to_bits() {
     );
 }
 
+/// The importer records the classical bits a program declares (contract C-3),
+/// as for OpenQASM 2.0: the sum of its `bit` registers, a scalar `bit` counting
+/// one, whatever the measurements write; `None` without any.
+#[test]
+fn declared_clbits_is_the_sum_of_the_bit_registers() {
+    let cases = [
+        (program("c[0] = measure q[0];"), Some(3)),
+        (
+            format!("{HEADER}qubit[2] q;\nbit[2] a;\nbit b;\nb = measure q[1];\n"),
+            Some(3),
+        ),
+        (format!("{HEADER}qubit[2] q;\nx q[0];\n"), None),
+    ];
+    for (src, declared) in cases {
+        assert_eq!(import(&src).declared_clbits(), declared, "{src}");
+    }
+    // Import metadata: not part of the circuit's identity.
+    let wide = format!("{HEADER}qubit[1] q;\nbit[4] c;\nc[0] = measure q[0];\n");
+    let narrow = wide.replace("bit[4]", "bit[1]");
+    assert_eq!(import(&wide), import(&narrow));
+}
+
 #[test]
 fn barriers() {
     assert_eq!(
