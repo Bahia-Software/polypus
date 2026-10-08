@@ -1682,6 +1682,9 @@ impl Parser<'_> {
             measured: Default::default(),
             exprs: Default::default(),
             param_names: Vec::new(),
+            // `num_cbits` is the running sum of every `creg`, capped by
+            // `MAX_REGISTER_BITS` in `register_decl`.
+            declared_clbits: (!self.cregs.is_empty()).then_some(self.num_cbits),
         }
     }
 }

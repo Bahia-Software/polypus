@@ -61,6 +61,12 @@ pub struct ParameterizedCircuit {
     /// importer). Every other parameter has a default name; see
     /// [`param_names`](Self::param_names).
     pub(crate) param_names: Vec<String>,
+    /// The total size of the classical registers the OpenQASM program this
+    /// circuit was imported from declares (the sum of its `creg`s); `None` when
+    /// it declares none or the circuit was built, not imported. Import
+    /// metadata, never part of the circuit's identity; read through the hidden
+    /// `declared_clbits` getter.
+    pub(crate) declared_clbits: Option<usize>,
 }
 
 /// Structural equality over the circuit itself. The `measured` cache is derived
@@ -69,7 +75,11 @@ pub struct ParameterizedCircuit {
 /// by where they are stored: two circuits whose gates use equal expressions are
 /// equal even if one of them also stores an expression no gate uses. The
 /// parameters' names ([`ParameterizedCircuit::param_names`]) are part of the
-/// circuit.
+/// circuit. The classical width an OpenQASM import declares is not: like the
+/// `measured` cache it is not part of the circuit's identity (it is import
+/// metadata), so two imports that differ only in the size of a `creg` are
+/// equal, even though the native backend keys their counts at different widths
+/// (contract C-3).
 impl PartialEq for ParameterizedCircuit {
     fn eq(&self, other: &Self) -> bool {
         self.num_qubits == other.num_qubits
@@ -122,6 +132,7 @@ impl ParameterizedCircuit {
             measured: MeasuredQubits::default(),
             exprs: ExprArena::default(),
             param_names: Vec::new(),
+            declared_clbits: None,
         }
     }
 
@@ -148,7 +159,10 @@ impl ParameterizedCircuit {
     /// - Gate declarations are re-emitted right after the include, in source
     ///   order; a declaration no instruction uses is not re-emitted.
     /// - The classical register is implicit (sized by the measurements), so
-    ///   trailing *unmeasured* classical bits are not preserved.
+    ///   trailing *unmeasured* classical bits are not re-exported. The total
+    ///   the program declares is kept only as import metadata, for the native
+    ///   backend to key counts at the declared width (contract C-3); it does
+    ///   not count for `==` and is dropped by binding and by every export.
     ///
     /// # Errors
     ///
@@ -728,6 +742,20 @@ impl ParameterizedCircuit {
     /// instructions (0 when nothing is measured).
     pub fn num_clbits(&self) -> usize {
         num_clbits(self.num_qubits, &self.gates)
+    }
+
+    /// The number of classical bits declared by the OpenQASM program this
+    /// circuit was imported from (the sum of its `creg` sizes), or `None` when
+    /// it declares no `creg` or the circuit was built rather than imported.
+    ///
+    /// Not part of the public API: the native backend reads it so that a
+    /// measured program's counts are keyed at the declared width, as on Aer
+    /// (contract C-3). It is kept by `clone` and by the builder methods,
+    /// ignored by `==`, and dropped by [`assign_parameters`](Self::assign_parameters)
+    /// and by every export.
+    #[doc(hidden)]
+    pub fn declared_clbits(&self) -> Option<usize> {
+        self.declared_clbits
     }
 
     // ── Binding and export ───────────────────────────────────────────────
