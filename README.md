@@ -210,4 +210,4 @@ The same metadata is in [`CITATION.cff`](https://github.com/Bahia-Software/polyp
 
 ## License
 
-Polypus is developed by Bahía Software with the Galicia Supercomputing Center (CESGA) and is licensed under the [European Union Public Licence 1.2](https://github.com/Bahia-Software/polypus/blob/main/LICENSE).
+Polypus is developed by Bahía Software with the Galicia Supercomputing Center (CESGA) and is licensed under the [European Union Public Licence 1.2](https://github.com/Bahia-Software/polypus/blob/main/LICENSE). Bundled third-party data (IAEA EPDL photon interaction files) is not covered by the EUPL; see [NOTICE](https://github.com/Bahia-Software/polypus/blob/main/NOTICE).
