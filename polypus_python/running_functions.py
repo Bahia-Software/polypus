@@ -310,13 +310,13 @@ def serialize_quantum_circuit(id, qc, *, directory=None):
     except QpyError as e:
         log_message(id, f"QPY serialization error: {e}", "error")
         raise
-    except QiskitError as e:
-        log_message(id, f"Qiskit error during serialization: {e}", "error")
-        raise
     except MissingOptionalLibraryError as e:
         log_message(
             id, f"Missing optional library error during serialization: {e}", "error"
         )
+        raise
+    except QiskitError as e:
+        log_message(id, f"Qiskit error during serialization: {e}", "error")
         raise
     except TypeError as e:
         log_message(id, f"Type error during serialization: {e}", "error")
