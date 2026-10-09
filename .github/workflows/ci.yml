@@ -268,7 +268,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install dev dependencies
         run: |
-          python -m pip install --upgrade pip maturin pytest build
+          python -m pip install --upgrade pip maturin pytest
           pip install -r requirements-dev.txt
       # One wheel now carries both the `polypus` extension and the bundled
       # `polypus_python` helpers (the extension imports `polypus_python` at its
