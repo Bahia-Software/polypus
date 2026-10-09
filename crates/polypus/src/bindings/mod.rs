@@ -27,7 +27,7 @@ use crate::evaluation::{
     PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, SupervisedObjective,
     VqcOracleFactory,
 };
-use crate::infrastructure::execution_config::random_seed;
+use crate::infrastructure::execution_config::{random_id_bytes, random_seed};
 use crate::infrastructure::{
     merge_counts, BackendConfig, BoundCircuit, Counts, EntropyError, ExecutionConfig,
     Infrastructure, InfrastructureError, OptLevel, Planner, ShotDistributingPlanner,
@@ -40,7 +40,6 @@ use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use uuid::Uuid;
 
 /// Between-wave interrupt guard backed by CPython's pending-signal check, so a
 /// Ctrl+C (`SIGINT`) aborts a run at the next wave boundary.
@@ -289,8 +288,29 @@ fn seed_or_entropy(
 /// and log streams. Used by `run_quantum_circuit`'s auto-generated id,
 /// `train`'s and `qml_train`'s caller-supplied id (#45 / PR #70, #75): in
 /// every case `base` is kept as a human-readable prefix on the effective id.
-fn unique_id(base: &str) -> String {
-    format!("{}_{}", base, Uuid::new_v4())
+///
+/// A failed OS-entropy read raises `polypus.BackendError`, never a panic (C-1,
+/// C-7) — which is why the UUID is built from [`random_id_bytes`] rather than
+/// drawn by the `uuid` crate itself, which panics on that failure (#264).
+fn unique_id(base: &str) -> PyResult<String> {
+    unique_id_from(base, random_id_bytes)
+}
+
+/// `base` suffixed with a UUID v4 built from the bytes `draw` returns
+/// (`random_id_bytes` in production): the body of [`unique_id`], with the
+/// entropy source injectable so its failure path can be tested.
+fn unique_id_from(
+    base: &str,
+    draw: impl FnOnce() -> Result<[u8; 16], EntropyError>,
+) -> PyResult<String> {
+    let bytes = draw().map_err(|e| {
+        crate::exceptions::backend_error_to_pyerr(crate::infrastructure::BackendError::from(e))
+    })?;
+    Ok(format!(
+        "{}_{}",
+        base,
+        uuid::Builder::from_random_bytes(bytes).into_uuid()
+    ))
 }
 
 /// Announce the start of a training run at the default log level.
@@ -1015,7 +1035,7 @@ pub fn run_quantum_circuit<'py>(
     // temp files and log streams (see ExecutionConfig::id), so a byte-identical
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
-    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure));
+    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1227,7 +1247,7 @@ pub fn train<'py>(
     // temp files or log streams named by ExecutionConfig::id (#75, mirroring
     // run_quantum_circuit). The prefix is kept for debuggability and the
     // effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id);
+    let effective_id = unique_id(&id)?;
     let config = Arc::new(ExecutionConfig {
         id: effective_id.clone(),
         shots,
@@ -1524,7 +1544,7 @@ pub fn qml_train<'py>(
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
     // ExecutionConfig::id. The effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id);
+    let effective_id = unique_id(&id)?;
     let config = Arc::new(ExecutionConfig {
         id: effective_id.clone(),
         shots,
@@ -1673,7 +1693,7 @@ pub fn qml_predict<'py>(
 
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
-    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure));
+    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -2131,8 +2151,8 @@ mod tests {
         // Same base (as with `train(..., id="run1")` twice) ⇒ unique ids that
         // both keep the supplied string as a prefix.
         for base in ["run1", "qml_run", "run_1_local"] {
-            let id1 = unique_id(base);
-            let id2 = unique_id(base);
+            let id1 = unique_id(base).unwrap();
+            let id2 = unique_id(base).unwrap();
             let prefix = format!("{base}_");
             assert!(
                 id1.starts_with(&prefix) && id2.starts_with(&prefix),
@@ -2257,6 +2277,41 @@ mod tests {
         let err = resolve_optimizer_seed(None, None, failing_draw)
             .expect_err("a failed draw must be an Err");
         assert_entropy_failure(&err);
+    }
+
+    /// The run id's UUID is built from exactly the bytes drawn, with the v4
+    /// version and RFC 4122 variant bits set — the id format is unchanged.
+    #[test]
+    fn unique_id_from_builds_a_v4_uuid_from_the_drawn_bytes() {
+        let id = unique_id_from("run1", || Ok(std::array::from_fn(|i| i as u8))).unwrap();
+        assert_eq!(id, "run1_00010203-0405-4607-8809-0a0b0c0d0e0f");
+        let suffix = uuid::Uuid::parse_str(id.strip_prefix("run1_").unwrap()).unwrap();
+        assert_eq!(suffix.get_version(), Some(uuid::Version::Random));
+        assert_eq!(suffix.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    /// Every entry point draws a run id, even with an explicit seed or on
+    /// `qmio`: a failed draw must raise `polypus.BackendError` (catchable as
+    /// `Exception`), never a `PanicException` (#264, contract C-1/C-7).
+    #[test]
+    fn unique_id_from_raises_backend_error_when_the_draw_fails() {
+        let err = unique_id_from("run1", || {
+            Err(EntropyError::for_run_id(std::io::Error::other(
+                "getrandom: device not available",
+            )))
+        })
+        .expect_err("a failed draw must be an Err");
+        assert_entropy_failure(&err);
+        Python::attach(|py| {
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyException>(py),
+                "must be catchable as Exception: {err}"
+            );
+            assert!(
+                err.to_string().contains("run id"),
+                "message must say the run id draw failed: {err}"
+            );
+        });
     }
 
     /// The seed the binding resolves must actually make the optimizer
