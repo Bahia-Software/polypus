@@ -1,0 +1,24 @@
+This file is part of Polypus.
+
+This software is licensed under the European Union Public Licence (EUPL), version 1.2 or – as soon they will be approved by the European Commission – subsequent versions of the EUPL.
+
+You may not use this work except in compliance with the Licence.
+
+You may obtain a copy of the Licence at:
+https://interoperable-europe.ec.europa.eu/sites/default/files/custom-page/attachment/eupl_v1.2_en.pdf
+
+Licensed under the EUPL
+
+---
+
+Third-party data
+
+This project includes third-party evaluated photon interaction data files
+(the `ZA*.txt` files under
+`crates/polypus-physics/src/interactions/photon/endf_data/`), taken from the
+IAEA Nuclear Data Section's Evaluated Photon Data Library (EPDL / EPICS2023,
+ENDF-6 format; release NDS-IAEA-225). These files are distributed by the IAEA
+for free and open use with acknowledgement of the source. They retain their
+original IAEA/NDS provenance and are NOT covered by the EUPL licence above.
+See `crates/polypus-physics/src/interactions/photon/endf_data/PROVENANCE.md`
+for full attribution, references, and usage terms.
