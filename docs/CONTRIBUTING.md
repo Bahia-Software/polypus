@@ -18,9 +18,26 @@ bash install.sh            # guided
 bash install.sh --yes      # non-interactive (CI)
 ```
 
-Manual route: `pip install -r requirements-dev.txt`, then
-`python -m build packages/polypus_python/ && pip install packages/polypus_python/`,
-then `maturin develop --release --features extension-module`.
+Manual route — build the wheel and install it (one wheel carries both the
+`polypus` extension and the bundled `polypus_python` helpers):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```bash
+maturin build --release --out dist
+```
+
+```bash
+pip install --force-reinstall dist/polypus_quantum-*.whl
+```
+
+Do not use `maturin develop` for this: it installs only the compiled extension
+and not `polypus_python`, so `pytest tests/python` fails with
+`ModuleNotFoundError: No module named 'polypus_python'`. `--force-reinstall`
+makes pip replace an already-installed wheel that has the same version after a
+rebuild.
 
 **Toolchain:** the Minimum Supported Rust Version is declared as
 `rust-version` in the workspace `Cargo.toml` — that field is the single place
@@ -45,7 +62,7 @@ cargo test --workspace                     # all crates, no hand-maintained list
                                            #  worker; they skip gracefully if python3 is absent)
 cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
 cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs the extension installed
+pytest tests/python                        # needs the wheel installed (see Setting up), not `maturin develop`
 ```
 
 A green run is a **precondition** for opening a PR, not something to fix
