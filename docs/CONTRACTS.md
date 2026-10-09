@@ -844,11 +844,10 @@ character and the id are shown with Python's `repr`). A non-`str` `id` raises
 
 It runs as the first statement of `get_logger`, `log_message`,
 `_get_temp_directory`, `serialize_quantum_circuit`,
-`_deserialize_quantum_circuit`, `run_qc_in_qpu` and `run_qcs_in_qpu` (and of
-`_load_configuration`), before any filesystem access, any optional `cunqa`
-import and any `try` block, so a rejected `id` touches nothing and the
-`log_message` calls in the error handlers can never raise on `id` and mask the
-original exception.
+`_deserialize_quantum_circuit`, `run_qc_in_qpu` and `run_qcs_in_qpu`, before
+any filesystem access, any optional `cunqa` import and any `try` block, so a
+rejected `id` touches nothing and the `log_message` calls in the error handlers
+can never raise on `id` and mask the original exception.
 
 The 64-character bound applies to every one of these functions, including
 `run_qc_in_qpu`/`run_qcs_in_qpu`, where `id` is the CUNQA family name. Rust

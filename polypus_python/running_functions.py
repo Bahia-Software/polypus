@@ -1,6 +1,5 @@
 import contextlib
 import getpass
-import json
 import logging
 import os
 import stat
@@ -154,43 +153,6 @@ def log_message(id, message, level="error"):
         logger.critical(message)
     else:
         logger.debug(message)
-
-
-def _load_configuration(id):
-    """Load the configuration json file"""
-    # Validated upfront so the `log_message` calls in the handlers below can
-    # never raise on `id` and mask the original exception.
-    validate_id(id)
-
-    # Get the path to the configuration file
-    config_file = "configuration_backend.json"
-
-    try:
-        config_path = os.path.join(os.getcwd(), config_file)
-    except Exception as e:
-        log_message(
-            id,
-            f"Error constructing configuration file path: {e} - {config_path}",
-            "error",
-        )
-        return {"success": False, "error": "PathConstructionError", "message": str(e)}
-
-    # Load the configuration from the JSON file
-    try:
-        with open(config_path, "r") as f:
-            config = json.load(f)
-    except FileNotFoundError as e:
-        log_message(id, f"Configuration file not found: {e}", "error")
-        raise
-    except json.JSONDecodeError as e:
-        log_message(id, f"Error decoding JSON configuration: {e}", "error")
-        raise
-    except Exception as e:
-        log_message(id, f"Unexpected error loading configuration: {e}", "error")
-        raise
-
-    log_message(id, "Configuration loaded successfully.", "info")
-    return config
 
 
 def _default_temp_directory():
