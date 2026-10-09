@@ -30,10 +30,12 @@
 //! # Construction inputs
 //!
 //! A factory receives a [`BackendBuildContext`]: the pyo3-free, provider-agnostic
-//! construction inputs (`id`, `shots`, `n_qpus`, `seed`, `opt_level`) plus a string
+//! construction inputs (`id`, `shots`, `n_qpus`, `seed`, `opt_level`) plus an
 //! `options` bag for whatever provider-specific configuration the backend needs
-//! (an endpoint, a worker command, …). Strings keep the registry — and every
-//! third-party backend that depends on it — free of any provider type coupling.
+//! (an endpoint, a worker command, …). Each value is an [`OptionValue`]: a string or
+//! a list of strings (an argv). Strings keep the registry — and every third-party
+//! backend that depends on it — free of any provider type coupling; the list form
+//! carries values a single string cannot, such as an argument containing spaces.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -41,6 +43,50 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::error::BackendError;
 use crate::transpiler::OptLevel;
 use crate::QuantumBackend;
+
+/// One value of a [`BackendBuildContext`]'s `options` bag: a string, or a list of
+/// strings (e.g. a worker argv whose arguments contain spaces).
+///
+/// A factory reads values through [`BackendBuildContext::option_str`] and
+/// [`BackendBuildContext::option_list`], which reject a value of the other shape
+/// instead of silently ignoring it. The enum is `#[non_exhaustive]` so a further
+/// value shape can be added without another breaking change; code outside this crate
+/// that matches on it needs a wildcard arm.
+///
+/// ```
+/// use polypus_backend::OptionValue;
+///
+/// assert_eq!(OptionValue::from("tcp://qpu:5556"), OptionValue::Str("tcp://qpu:5556".into()));
+/// let argv = OptionValue::from(vec!["python3".to_string(), "/my dir/w.py".to_string()]);
+/// assert!(matches!(argv, OptionValue::List(ref v) if v.len() == 2));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OptionValue {
+    /// A single string value.
+    Str(String),
+    /// A list of string values, kept in order (an empty list is representable; a
+    /// backend that needs a non-empty one rejects it).
+    List(Vec<String>),
+}
+
+impl From<&str> for OptionValue {
+    fn from(value: &str) -> Self {
+        OptionValue::Str(value.to_string())
+    }
+}
+
+impl From<String> for OptionValue {
+    fn from(value: String) -> Self {
+        OptionValue::Str(value)
+    }
+}
+
+impl From<Vec<String>> for OptionValue {
+    fn from(value: Vec<String>) -> Self {
+        OptionValue::List(value)
+    }
+}
 
 /// Provider-agnostic, **pyo3-free** construction inputs handed to a
 /// [`BackendFactory`] when a backend is built by name.
@@ -65,17 +111,55 @@ pub struct BackendBuildContext {
     pub seed: Option<u64>,
     /// Transpiler optimization effort.
     pub opt_level: OptLevel,
-    /// Provider-specific configuration, as string key/value pairs. Documented per
-    /// backend (e.g. the subprocess bridge reads `command`/`recv_timeout_ms`, QMIO
-    /// reads `endpoint`/`program_format`/…). Unknown keys are ignored by design so
-    /// a caller can sweep the same options across backends.
-    pub options: HashMap<String, String>,
+    /// Provider-specific configuration: string keys, each mapped to a string or a
+    /// list of strings ([`OptionValue`]). Documented per backend (e.g. the subprocess
+    /// bridge reads `command`/`recv_timeout_ms`, QMIO reads
+    /// `endpoint`/`program_format`/…). Unknown keys are ignored by design so a caller
+    /// can sweep the same options across backends.
+    pub options: HashMap<String, OptionValue>,
 }
 
 impl BackendBuildContext {
-    /// Read an option by key.
-    pub fn option(&self, key: &str) -> Option<&str> {
-        self.options.get(key).map(String::as_str)
+    /// Read a string option by key.
+    ///
+    /// `Ok(None)` when the key is absent (the only case a factory should fall back to
+    /// its default), `Ok(Some(_))` when it holds a string, and
+    /// [`BackendError::Conversion`] naming the key when it holds a list — a value of
+    /// the wrong shape is a configuration mistake, never a silent default.
+    ///
+    /// ```
+    /// use polypus_backend::{BackendBuildContext, BackendError, OptionValue};
+    ///
+    /// let mut ctx = BackendBuildContext::default();
+    /// assert_eq!(ctx.option_str("endpoint").unwrap(), None);
+    /// ctx.options.insert("endpoint".into(), OptionValue::from("tcp://qpu:5556"));
+    /// assert_eq!(ctx.option_str("endpoint").unwrap(), Some("tcp://qpu:5556"));
+    /// ctx.options.insert("endpoint".into(), OptionValue::from(vec!["a".to_string()]));
+    /// assert!(matches!(ctx.option_str("endpoint"), Err(BackendError::Conversion(_))));
+    /// ```
+    pub fn option_str(&self, key: &str) -> Result<Option<&str>, BackendError> {
+        match self.options.get(key) {
+            None => Ok(None),
+            Some(OptionValue::Str(s)) => Ok(Some(s)),
+            Some(OptionValue::List(_)) => Err(BackendError::Conversion(format!(
+                "option '{key}' must be a string, got a list of strings"
+            ))),
+        }
+    }
+
+    /// Read a list-of-strings option by key.
+    ///
+    /// The mirror of [`option_str`](Self::option_str): `Ok(None)` when the key is
+    /// absent, `Ok(Some(_))` when it holds a list (possibly empty), and
+    /// [`BackendError::Conversion`] naming the key when it holds a string.
+    pub fn option_list(&self, key: &str) -> Result<Option<&[String]>, BackendError> {
+        match self.options.get(key) {
+            None => Ok(None),
+            Some(OptionValue::List(v)) => Ok(Some(v)),
+            Some(OptionValue::Str(_)) => Err(BackendError::Conversion(format!(
+                "option '{key}' must be a list of strings, got a string"
+            ))),
+        }
     }
 }
 
@@ -215,7 +299,7 @@ mod tests {
             opt_level: OptLevel::default(),
             options: options
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), OptionValue::from(*v)))
                 .collect(),
         }
     }
@@ -224,7 +308,7 @@ mod tests {
     fn registers_and_builds_a_backend_by_name() {
         register_backend("echo-test-build", |ctx: &BackendBuildContext| {
             let width = ctx
-                .option("width")
+                .option_str("width")?
                 .and_then(|w| w.parse().ok())
                 .unwrap_or(1);
             Ok(Arc::new(EchoBackend { width }) as Arc<dyn QuantumBackend>)
@@ -282,5 +366,70 @@ mod tests {
             .unwrap();
         // The second registration (width 2) is the one that built.
         assert_eq!(out[0].get("00"), Some(&4));
+    }
+
+    /// A context holding one string option and one list option.
+    fn mixed_ctx() -> BackendBuildContext {
+        let mut ctx = ctx_with(&[("endpoint", "tcp://qpu:1")]);
+        ctx.options.insert(
+            "command".to_string(),
+            OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()]),
+        );
+        ctx.options
+            .insert("empty".to_string(), OptionValue::from(Vec::new()));
+        ctx
+    }
+
+    #[test]
+    fn option_str_reads_absent_string_and_rejects_a_list() {
+        let ctx = mixed_ctx();
+        assert_eq!(ctx.option_str("missing").unwrap(), None);
+        assert_eq!(ctx.option_str("endpoint").unwrap(), Some("tcp://qpu:1"));
+        match ctx.option_str("command") {
+            Err(BackendError::Conversion(m)) => {
+                assert!(m.contains("'command'"), "message should name the key: {m}");
+                assert!(m.contains("must be a string"), "unexpected message: {m}");
+            }
+            other => panic!("a list read as a string must be a Conversion error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn option_list_reads_absent_list_and_rejects_a_string() {
+        let ctx = mixed_ctx();
+        assert_eq!(ctx.option_list("missing").unwrap(), None);
+        assert_eq!(
+            ctx.option_list("command").unwrap(),
+            Some(&["python3".to_string(), "/a b/w.py".to_string()][..])
+        );
+        // An empty list is a list: the accessor returns it, the backend decides.
+        assert_eq!(ctx.option_list("empty").unwrap(), Some(&[][..]));
+        match ctx.option_list("endpoint") {
+            Err(BackendError::Conversion(m)) => {
+                assert!(m.contains("'endpoint'"), "message should name the key: {m}");
+                assert!(
+                    m.contains("must be a list of strings"),
+                    "unexpected message: {m}"
+                );
+            }
+            other => panic!("a string read as a list must be a Conversion error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn option_value_conversions() {
+        assert_eq!(OptionValue::from("a"), OptionValue::Str("a".to_string()));
+        assert_eq!(
+            OptionValue::from("a".to_string()),
+            OptionValue::Str("a".to_string())
+        );
+        assert_eq!(
+            OptionValue::from(vec!["a".to_string()]),
+            OptionValue::List(vec!["a".to_string()])
+        );
+        assert_ne!(
+            OptionValue::from("a"),
+            OptionValue::from(vec!["a".to_string()])
+        );
     }
 }

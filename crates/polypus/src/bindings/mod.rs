@@ -30,7 +30,7 @@ use crate::evaluation::{
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
     merge_counts, BackendConfig, BoundCircuit, Counts, EntropyError, ExecutionConfig,
-    Infrastructure, InfrastructureError, OptLevel, Planner, ShotDistributingPlanner,
+    Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner, ShotDistributingPlanner,
 };
 use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
@@ -440,6 +440,90 @@ fn method_from_pyclass(
     ))
 }
 
+/// The `options` kwarg of the entry points, converted at the FFI edge: a `dict` of
+/// `str` keys, each mapped to a `str` or a `list`/`tuple` of `str`
+/// ([`OptionValue`]). Anything else — an `int`, `bool`, `float`, `None`, a `dict`, a
+/// list holding a non-`str` — is a `TypeError` naming the key (and the position, for
+/// a list element), so a mistyped value never reaches a backend factory.
+///
+/// A local newtype because `FromPyObject` and `OptionValue` are both foreign to this
+/// crate. An empty list is accepted here; whether it is meaningful is the backend's
+/// call (the subprocess bridge rejects an empty `command`).
+pub(crate) struct OptionsArg(HashMap<String, OptionValue>);
+
+impl OptionsArg {
+    /// The converted options, as the backend config carries them.
+    fn into_inner(self) -> HashMap<String, OptionValue> {
+        self.0
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        use pyo3::exceptions::PyTypeError;
+        use pyo3::types::{PyString, PyTuple};
+
+        // For error messages only, so an unreadable name is not itself an error.
+        let type_name = |item: &Bound<'_, PyAny>| {
+            item.get_type()
+                .name()
+                .map_or_else(|_| "an unknown type".to_string(), |name| name.to_string())
+        };
+        let dict = ob.cast::<PyDict>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "options must be a dict of str keys to str or list[str] values, got {}",
+                type_name(&ob)
+            ))
+        })?;
+        let mut options = HashMap::with_capacity(dict.len());
+        // Walk a snapshot of the items, and read each list/tuple by index rather than
+        // through `__iter__`: a subclass's `__iter__` is user code that could mutate
+        // the dict mid-walk, and PyO3's dict iterator panics when that happens.
+        for item in dict.items().iter() {
+            let (key, value) = item.extract::<(Bound<'py, PyAny>, Bound<'py, PyAny>)>()?;
+            let key = match key.cast::<PyString>() {
+                Ok(key) => key.to_str()?.to_owned(),
+                Err(_) => {
+                    return Err(PyTypeError::new_err(format!(
+                        "options keys must be str, got {}",
+                        type_name(&key)
+                    )))
+                }
+            };
+            let value = if let Ok(text) = value.cast::<PyString>() {
+                OptionValue::Str(text.to_str()?.to_owned())
+            } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+                let elements: Vec<Bound<'py, PyAny>> = match value.cast::<PyList>() {
+                    Ok(list) => list.iter().collect(),
+                    Err(_) => value.cast::<PyTuple>()?.iter().collect(),
+                };
+                let mut items = Vec::with_capacity(elements.len());
+                for (idx, item) in elements.into_iter().enumerate() {
+                    match item.cast::<PyString>() {
+                        Ok(text) => items.push(text.to_str()?.to_owned()),
+                        Err(_) => {
+                            return Err(PyTypeError::new_err(format!(
+                                "options['{key}'][{idx}] must be a str, got {}",
+                                type_name(&item)
+                            )))
+                        }
+                    }
+                }
+                OptionValue::List(items)
+            } else {
+                return Err(PyTypeError::new_err(format!(
+                    "options['{key}'] must be a str or a list of str, got {}",
+                    type_name(&value)
+                )));
+            };
+            options.insert(key, value);
+        }
+        Ok(OptionsArg(options))
+    }
+}
+
 /// Map the public `infrastructure` + `backend` strings and provider parameters
 /// into a typed [`BackendConfig`]. Centralising this keeps the string→variant
 /// mapping in one place and guarantees the config matches the selected backend.
@@ -472,7 +556,7 @@ fn build_backend_config(
     nodes: u32,
     cores_per_qpu: u32,
     fusion: Option<bool>,
-    options: Option<HashMap<String, String>>,
+    options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
     // Only the native statevector backend fuses gates. An explicit `Some(true)`
     // anywhere else is an unmeetable request (see the doc above) — reject it
@@ -567,7 +651,7 @@ fn build_backend_config(
 #[cfg(feature = "qmio")]
 fn build_qmio_registered(
     backend: &str,
-    options: Option<HashMap<String, String>>,
+    options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
     // Default endpoint documented by CESGA; overridden by ZMQ_SERVER when set.
     const DEFAULT_QMIO_ENDPOINT: &str = "tcp://10.133.29.226:5556";
@@ -585,11 +669,14 @@ fn build_qmio_registered(
             )))
         }
     };
-    let mut opts: HashMap<String, String> = HashMap::new();
-    opts.insert("endpoint".to_string(), endpoint);
-    opts.insert("program_format".to_string(), program_format.to_string());
-    opts.insert("optimization".to_string(), "0".to_string());
-    opts.insert("res_format".to_string(), "binary_count".to_string());
+    let mut opts: HashMap<String, OptionValue> = HashMap::new();
+    opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
+    opts.insert(
+        "program_format".to_string(),
+        OptionValue::from(program_format),
+    );
+    opts.insert("optimization".to_string(), OptionValue::from("0"));
+    opts.insert("res_format".to_string(), OptionValue::from("binary_count"));
     if let Some(user) = options {
         opts.extend(user);
     }
@@ -604,7 +691,7 @@ fn build_qmio_registered(
 #[cfg(not(feature = "qmio"))]
 fn build_qmio_registered(
     _backend: &str,
-    _options: Option<HashMap<String, String>>,
+    _options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
     Err(pyo3::exceptions::PyValueError::new_err(
         "the 'qmio' infrastructure requires compiling polypus with --features qmio",
@@ -954,6 +1041,12 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// meets it). `fusion=True` on any backend that cannot fuse is rejected with a
 /// `ValueError` rather than silently ignored, so it never looks like it took
 /// effect.
+///
+/// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
+/// registered third-party name): a `dict` whose values are each a `str` or a
+/// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
+/// Any other value type is a `TypeError` naming the key; a non-empty `options` on
+/// `local`/`cunqa`, which would ignore it, is a `ValueError`.
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
@@ -967,7 +1060,7 @@ pub fn run_quantum_circuit<'py>(
     backend: &str,
     seed: Option<u64>,
     fusion: Option<bool>,
-    options: Option<HashMap<String, String>>,
+    options: Option<OptionsArg>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -1024,7 +1117,7 @@ pub fn run_quantum_circuit<'py>(
         nodes,
         cores_per_qpu,
         fusion,
-        options,
+        options.map(OptionsArg::into_inner),
     )?;
     // Only the native statevector backend consults the gate-parallel threshold,
     // so surface the one-time default-visible warning only when this run
@@ -1142,6 +1235,12 @@ pub fn run_quantum_circuit<'py>(
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
 ///
+/// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
+/// registered third-party name): a `dict` whose values are each a `str` or a
+/// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
+/// Any other value type is a `TypeError` naming the key; a non-empty `options` on
+/// `local`/`cunqa`, which would ignore it, is a `ValueError`.
+///
 /// Example:
 ///
 /// ```ignore
@@ -1169,7 +1268,7 @@ pub fn train<'py>(
     backend: &str,
     seed: Option<u64>,
     fusion: Option<bool>,
-    options: Option<HashMap<String, String>>,
+    options: Option<OptionsArg>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1220,7 +1319,7 @@ pub fn train<'py>(
         nodes,
         cores_per_qpu,
         fusion,
-        options,
+        options.map(OptionsArg::into_inner),
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
@@ -1406,6 +1505,12 @@ fn bind_feature_rows<'py>(
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
 ///
+/// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
+/// registered third-party name): a `dict` whose values are each a `str` or a
+/// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
+/// Any other value type is a `TypeError` naming the key; a non-empty `options` on
+/// `local`/`cunqa`, which would ignore it, is a `ValueError`.
+///
 /// Example (supervised binary classifier, parity read-out):
 ///
 /// ```ignore
@@ -1439,7 +1544,7 @@ pub fn qml_train<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
-    options: Option<HashMap<String, String>>,
+    options: Option<OptionsArg>,
     y_train: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
@@ -1518,7 +1623,7 @@ pub fn qml_train<'py>(
         nodes,
         cores_per_qpu,
         None,
-        options,
+        options.map(OptionsArg::into_inner),
     )?;
     // Suffix the caller-supplied `id` with a UUID v4 (see `train` and #75) so
     // concurrent qml.train runs sharing the same `id` never collide on the
@@ -2546,7 +2651,13 @@ mod tests {
                 ))
             },
         );
-        let opts = HashMap::from([("endpoint".to_string(), "tcp://x:1".to_string())]);
+        let opts = HashMap::from([
+            ("endpoint".to_string(), OptionValue::from("tcp://x:1")),
+            (
+                "command".to_string(),
+                OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()]),
+            ),
+        ]);
         let config = build_backend_config(
             "edge-registered-test",
             "aer",
@@ -2562,8 +2673,17 @@ mod tests {
             BackendConfig::Registered { name, options } => {
                 assert_eq!(name, "edge-registered-test");
                 assert_eq!(
-                    options.get("endpoint").map(String::as_str),
-                    Some("tcp://x:1")
+                    options.get("endpoint"),
+                    Some(&OptionValue::from("tcp://x:1"))
+                );
+                // A list value reaches `Registered` intact (argument with a space
+                // included).
+                assert_eq!(
+                    options.get("command"),
+                    Some(&OptionValue::from(vec![
+                        "python3".to_string(),
+                        "/a b/w.py".to_string()
+                    ]))
                 );
             }
             other => panic!("expected BackendConfig::Registered, got {other:?}"),
@@ -2575,8 +2695,17 @@ mod tests {
     #[test]
     fn build_backend_config_rejects_options_on_a_typed_builtin() {
         pyo3::Python::initialize();
-        let opts = HashMap::from([("command".to_string(), "x".to_string())]);
-        for infra in ["local", "cunqa"] {
+        let str_opts = HashMap::from([("command".to_string(), OptionValue::from("x"))]);
+        let list_opts = HashMap::from([(
+            "command".to_string(),
+            OptionValue::from(vec!["x".to_string()]),
+        )]);
+        for (infra, opts) in [
+            ("local", &str_opts),
+            ("cunqa", &str_opts),
+            ("local", &list_opts),
+            ("cunqa", &list_opts),
+        ] {
             let err = build_backend_config(
                 infra,
                 "aer",
@@ -2608,6 +2737,174 @@ mod tests {
             Some(HashMap::new()),
         )
         .is_ok());
+    }
+
+    /// The user's options are merged over the qmio defaults: a user value replaces the
+    /// default for its key, the other defaults stay, and a list value is carried
+    /// through untouched (the factory rejects it later if the key is a string one).
+    #[cfg(feature = "qmio")]
+    #[test]
+    fn build_qmio_registered_merges_user_options_over_the_defaults() {
+        let user = HashMap::from([
+            ("optimization".to_string(), OptionValue::from("2")),
+            (
+                "res_format".to_string(),
+                OptionValue::from(vec!["raw".to_string()]),
+            ),
+            (
+                "custom".to_string(),
+                OptionValue::from(vec!["a b".to_string()]),
+            ),
+        ]);
+        let config = build_qmio_registered("qir", Some(user)).expect("qir is a qmio format");
+        let BackendConfig::Registered { name, options } = config else {
+            panic!("qmio must build a Registered config");
+        };
+        assert_eq!(name, "qmio");
+        // Defaults the user did not override stay.
+        assert!(matches!(options.get("endpoint"), Some(OptionValue::Str(_))));
+        assert_eq!(
+            options.get("program_format"),
+            Some(&OptionValue::from("qir_text"))
+        );
+        // User values win, whatever their shape.
+        assert_eq!(options.get("optimization"), Some(&OptionValue::from("2")));
+        assert_eq!(
+            options.get("res_format"),
+            Some(&OptionValue::from(vec!["raw".to_string()]))
+        );
+        assert_eq!(
+            options.get("custom"),
+            Some(&OptionValue::from(vec!["a b".to_string()]))
+        );
+        assert_eq!(options.len(), 5);
+    }
+
+    /// Convert a Python expression through the `options` kwarg's extractor.
+    fn extract_options(expr: &str) -> PyResult<HashMap<String, OptionValue>> {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let code = std::ffi::CString::new(expr).expect("no NUL in the test expression");
+            py.eval(&code, None, None)?
+                .extract::<OptionsArg>()
+                .map(OptionsArg::into_inner)
+        })
+    }
+
+    #[test]
+    fn options_arg_accepts_str_list_and_tuple_values() {
+        let options = extract_options(
+            "{'endpoint': 'tcp://x:1', 'command': ['python3', '/a b/w.py'], \
+              'argv': ('a', 'b c'), 'empty': []}",
+        )
+        .expect("str, list[str] and tuple[str] values convert");
+        assert_eq!(options.len(), 4);
+        assert_eq!(options["endpoint"], OptionValue::from("tcp://x:1"));
+        assert_eq!(
+            options["command"],
+            OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()])
+        );
+        assert_eq!(
+            options["argv"],
+            OptionValue::from(vec!["a".to_string(), "b c".to_string()])
+        );
+        // An empty list is accepted at the edge; the backend decides on it.
+        assert_eq!(options["empty"], OptionValue::from(Vec::new()));
+    }
+
+    /// A `list`/`tuple` subclass whose `__iter__` mutates the `options` dict must not
+    /// reach Python code while the dict is walked: PyO3's dict iterator panics when
+    /// the dict changes size under it, and a panic must never cross the FFI edge.
+    /// The converter reads the dict through a snapshot of its items and the sequences
+    /// by index, so `__iter__` never runs and the dict is left untouched.
+    #[test]
+    fn options_arg_does_not_run_user_iterators_while_walking_the_dict() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let code = std::ffi::CString::new(
+                "opts = {}\n\
+                 class L(list):\n\
+                 \x20   def __iter__(self):\n\
+                 \x20       opts['injected-by-list'] = 'x'\n\
+                 \x20       return super().__iter__()\n\
+                 class T(tuple):\n\
+                 \x20   def __iter__(self):\n\
+                 \x20       opts['injected-by-tuple'] = 'x'\n\
+                 \x20       return super().__iter__()\n\
+                 opts['a'] = L(['python3', '/a b/w.py'])\n\
+                 opts['b'] = 'y'\n\
+                 opts['c'] = T(('t',))\n",
+            )
+            .expect("no NUL in the test program");
+            py.run(&code, Some(&globals), None)
+                .expect("the test program runs");
+            let opts = globals
+                .get_item("opts")
+                .expect("globals lookup")
+                .expect("the test program defines opts");
+            let options = opts
+                .extract::<OptionsArg>()
+                .map(OptionsArg::into_inner)
+                .expect("list/tuple subclasses of str convert");
+            assert_eq!(
+                options["a"],
+                OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()])
+            );
+            assert_eq!(options["b"], OptionValue::from("y"));
+            assert_eq!(options["c"], OptionValue::from(vec!["t".to_string()]));
+            assert_eq!(options.len(), 3);
+            // The overridden `__iter__` never ran.
+            assert_eq!(opts.len().expect("opts is a dict"), 3, "{opts}");
+        });
+    }
+
+    #[test]
+    fn options_arg_rejects_unsupported_values_with_a_type_error_naming_the_key() {
+        for (expr, needle) in [
+            (
+                "{'k': 1}",
+                "options['k'] must be a str or a list of str, got int",
+            ),
+            (
+                "{'k': True}",
+                "options['k'] must be a str or a list of str, got bool",
+            ),
+            (
+                "{'k': 1.5}",
+                "options['k'] must be a str or a list of str, got float",
+            ),
+            (
+                "{'k': None}",
+                "options['k'] must be a str or a list of str, got NoneType",
+            ),
+            (
+                "{'k': {'a': 'b'}}",
+                "options['k'] must be a str or a list of str, got dict",
+            ),
+            ("{'k': ['a', 1]}", "options['k'][1] must be a str, got int"),
+            ("{'k': [['a']]}", "options['k'][0] must be a str, got list"),
+            (
+                "{'k': ('a', None)}",
+                "options['k'][1] must be a str, got NoneType",
+            ),
+            ("{1: 'a'}", "options keys must be str, got int"),
+            ("['a']", "options must be a dict"),
+        ] {
+            let err = extract_options(expr)
+                .map(|_| ())
+                .expect_err(&format!("{expr} must be rejected"));
+            Python::attach(|py| {
+                assert!(
+                    err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                    "{expr}: expected TypeError, got {err}"
+                );
+            });
+            assert!(
+                err.to_string().contains(needle),
+                "{expr}: message {err} should contain {needle:?}"
+            );
+        }
     }
 
     #[test]
