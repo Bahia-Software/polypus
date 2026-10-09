@@ -4,7 +4,7 @@
 Copy this file, replace `execute_circuits` with a call into your provider's Python
 SDK, and point Polypus at it with:
 
-    infrastructure="subprocess", options={"command": "python3 /path/to/worker.py"}
+    infrastructure="subprocess", options={"command": ["python3", "/path/to/worker.py"]}
 
 Everything else here — the framing, the handshake, the SIGINT-driven abort — is the
 stable contract the Rust bridge (`polypus-subprocess-backend`) speaks, and should be

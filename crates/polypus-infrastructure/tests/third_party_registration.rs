@@ -5,21 +5,26 @@
 //!
 //! The backend here depends only on the pyo3-free contract (`QuantumBackend`,
 //! `BoundCircuit`, …), exactly as a third party's would; `register_backend` +
-//! `Infrastructure::create_backend` do the rest.
+//! `Infrastructure::create_backend` do the rest. Its configuration arrives as typed
+//! options: a string (`width`) and a list of strings (`labels`).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use polypus_infrastructure::{
     register_backend, BackendBuildContext, BackendConfig, BackendError, BoundCircuit, Counts,
-    ExecutionConfig, Infrastructure, OptLevel, QuantumBackend, RunParams,
+    ExecutionConfig, Infrastructure, OptLevel, OptionValue, QuantumBackend, RunParams,
 };
 
 /// A pure-Rust "third-party" backend: returns all shots on the all-zeros bitstring,
-/// with a width taken from a registration option (to prove config reaches it).
+/// with a width taken from a string option (to prove config reaches it).
 struct ExternalQpu {
     width: usize,
 }
+
+/// The `labels` list option as the `acme-qpu` factory read it, kept out of the counts
+/// (whose keys must stay bitstrings) so the test can check the list reached it.
+static CAPTURED_LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 impl QuantumBackend for ExternalQpu {
     fn run_circuits(
@@ -34,7 +39,7 @@ impl QuantumBackend for ExternalQpu {
     }
 }
 
-fn execution_config(name: &str, options: HashMap<String, String>) -> ExecutionConfig {
+fn execution_config(name: &str, options: HashMap<String, OptionValue>) -> ExecutionConfig {
     ExecutionConfig {
         id: "third-party-run".to_string(),
         shots: 256,
@@ -55,15 +60,23 @@ fn a_backend_outside_the_workspace_is_registered_and_built_by_name() {
     //    is edited to do this.
     register_backend("acme-qpu", |ctx: &BackendBuildContext| {
         let width = ctx
-            .option("width")
+            .option_str("width")?
             .and_then(|w| w.parse().ok())
             .unwrap_or(1);
+        let labels = ctx.option_list("labels")?.unwrap_or_default().to_vec();
+        *CAPTURED_LABELS.lock().unwrap() = labels;
         Ok(Arc::new(ExternalQpu { width }) as Arc<dyn QuantumBackend>)
     });
 
     // 2. Polypus's own factory — the same one that builds Local/CUNQA/QMIO — dispatches
     //    it by name through the registry.
-    let options = HashMap::from([("width".to_string(), "4".to_string())]);
+    let options = HashMap::from([
+        ("width".to_string(), OptionValue::from("4")),
+        (
+            "labels".to_string(),
+            OptionValue::from(vec!["label a".to_string(), "label b".to_string()]),
+        ),
+    ]);
     let backend = Infrastructure::create_backend(&execution_config("acme-qpu", options))
         .expect("the registered third-party backend is built by name");
 
@@ -85,6 +98,32 @@ fn a_backend_outside_the_workspace_is_registered_and_built_by_name() {
         Some(&256),
         "width option reached the factory"
     );
+    assert_eq!(out[0].len(), 1, "the counts hold only the bitstring");
+    assert_eq!(
+        *CAPTURED_LABELS.lock().unwrap(),
+        ["label a", "label b"],
+        "list option reached the factory intact"
+    );
+}
+
+#[test]
+fn a_list_where_the_factory_reads_a_string_is_a_build_error() {
+    register_backend("acme-qpu-typed", |ctx: &BackendBuildContext| {
+        let width = ctx
+            .option_str("width")?
+            .and_then(|w| w.parse().ok())
+            .unwrap_or(1);
+        Ok(Arc::new(ExternalQpu { width }) as Arc<dyn QuantumBackend>)
+    });
+    let options = HashMap::from([(
+        "width".to_string(),
+        OptionValue::from(vec!["4".to_string()]),
+    )]);
+    match Infrastructure::create_backend(&execution_config("acme-qpu-typed", options)) {
+        Err(BackendError::Conversion(m)) => assert!(m.contains("'width'"), "{m}"),
+        Err(other) => panic!("expected a Conversion error naming 'width', got {other:?}"),
+        Ok(_) => panic!("a list in a string option must not build"),
+    }
 }
 
 #[test]

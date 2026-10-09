@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use rand::TryRng;
 
-use polypus_backend::{OptLevel, RunParams};
+use polypus_backend::{OptLevel, OptionValue, RunParams};
 
 use crate::error::EntropyError;
 
@@ -155,8 +155,9 @@ pub enum BackendConfig {
     /// third-party backend — and Polypus's own registry-migrated backends (QMIO, the
     /// subprocess bridge) — are dispatched without a dedicated typed variant here.
     ///
-    /// `options` is the provider-specific configuration as string key/value pairs,
-    /// handed to the factory in the [`BackendBuildContext`](polypus_backend::BackendBuildContext).
+    /// `options` is the provider-specific configuration — string keys mapped to a
+    /// string or a list of strings ([`OptionValue`]) — handed to the factory in the
+    /// [`BackendBuildContext`](polypus_backend::BackendBuildContext).
     /// It replaced the former hardcoded `Qmio { … }` variant: QMIO now registers a
     /// factory (`qmio::qmio_factory`) that reads its `endpoint`/`program_format`/…
     /// from here. Only the endpoints that carry a `Py<PyAny>` (Aer's noise model)
@@ -166,7 +167,7 @@ pub enum BackendConfig {
         /// party's own).
         name: String,
         /// Provider-specific configuration, as documented per backend.
-        options: HashMap<String, String>,
+        options: HashMap<String, OptionValue>,
     },
 }
 
@@ -317,5 +318,30 @@ mod tests {
         // ...and through the standard `source()` chain.
         let source = std::error::Error::source(&err).expect("External exposes its payload");
         assert!(source.downcast_ref::<EntropyError>().is_some());
+    }
+
+    #[test]
+    fn cloning_a_registered_config_keeps_string_and_list_options() {
+        let options = HashMap::from([
+            ("endpoint".to_string(), OptionValue::from("tcp://qpu:1")),
+            (
+                "command".to_string(),
+                OptionValue::from(vec!["python3".to_string(), "/a b/w.py".to_string()]),
+            ),
+        ]);
+        let config = BackendConfig::Registered {
+            name: "acme".to_string(),
+            options: options.clone(),
+        };
+        match config.clone() {
+            BackendConfig::Registered {
+                name,
+                options: cloned,
+            } => {
+                assert_eq!(name, "acme");
+                assert_eq!(cloned, options);
+            }
+            other => panic!("a Registered config must clone to Registered, got {other:?}"),
+        }
     }
 }

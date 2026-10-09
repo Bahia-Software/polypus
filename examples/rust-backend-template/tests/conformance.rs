@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use example_rust_backend::{register, TemplateBackend, BACKEND_NAME};
 use polypus_backend::{
-    is_registered, BackendError, BoundCircuit, OptLevel, QuantumBackend, RunParams,
+    is_registered, BackendBuildContext, BackendError, BoundCircuit, OptLevel, OptionValue,
+    QuantumBackend, RunParams,
 };
 use polypus_backend_conformance::{Conformance, Fault};
 
@@ -53,6 +54,23 @@ fn the_native_template_passes_the_conformance_battery() {
 fn it_registers_under_its_name() {
     register();
     assert!(is_registered(BACKEND_NAME));
+}
+
+#[test]
+fn from_context_reads_the_endpoint_as_a_string_option() {
+    // Absent → the loopback default, which builds.
+    assert!(TemplateBackend::from_context(&BackendBuildContext::default()).is_ok());
+    // A list where a string is expected is a configuration error, not the default.
+    let mut ctx = BackendBuildContext::default();
+    ctx.options.insert(
+        "endpoint".to_string(),
+        OptionValue::from(vec!["sim://loopback".to_string()]),
+    );
+    match TemplateBackend::from_context(&ctx) {
+        Err(BackendError::Conversion(m)) => assert!(m.contains("'endpoint'"), "{m}"),
+        Err(other) => panic!("expected a Conversion error naming 'endpoint', got {other:?}"),
+        Ok(_) => panic!("a list endpoint must not build"),
+    }
 }
 
 #[test]
