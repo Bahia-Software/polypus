@@ -33,8 +33,8 @@ with PyO3 Python bindings. The Cargo workspace has eleven crates:
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
 | `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
-Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in
-`packages/polypus_python/pyproject.toml`), **CUNQA** (distributed QPUs over
+Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in the root
+`pyproject.toml`, `[project] dependencies`), **CUNQA** (distributed QPUs over
 SLURM) and **QMIO** (CESGA's real QPU). Formats: OpenQASM 2.0 and QIR (LLVM IR
 `.ll`, plus bitcode `.bc` assembled by the **external** `llvm-as` tool — that
 boundary stays out-of-process and explicit; see
