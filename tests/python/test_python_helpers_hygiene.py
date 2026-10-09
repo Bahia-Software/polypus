@@ -30,6 +30,7 @@ pytest.importorskip("qiskit")
 
 from polypus_python import running_functions as rf
 from qiskit import QuantumCircuit
+from qiskit.exceptions import MissingOptionalLibraryError
 from test_id_validation import INVALID_IDS, VALID_IDS
 
 LOGGER_NAME = "polypus_python"
@@ -336,6 +337,31 @@ class TestTempFiles:
         with pytest.raises(TypeError):
             rf.serialize_quantum_circuit("run1", object())
         assert list(_default_dir(system_tmp).iterdir()) == []
+
+    def test_missing_optional_library_is_logged_specifically(
+        self, system_tmp, bell, caplog, monkeypatch
+    ):
+        # `MissingOptionalLibraryError` subclasses `QiskitError`: its handler
+        # must come first or the generic Qiskit message is logged instead.
+        def dump(qc, f):
+            f.write(b"partial")
+            raise MissingOptionalLibraryError("somelib", "serialize")
+
+        monkeypatch.setattr(rf, "dump", dump)
+
+        with pytest.raises(MissingOptionalLibraryError):
+            rf.serialize_quantum_circuit("run1", bell)
+
+        assert list(_default_dir(system_tmp).iterdir()) == []
+        errors = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == LOGGER_NAME and r.levelno == logging.ERROR
+        ]
+        assert any(
+            "Missing optional library error during serialization" in m for m in errors
+        )
+        assert not any("Qiskit error during serialization" in m for m in errors)
 
     def test_circuit_file_symlinked_outside_is_refused(self, tmp_path, bell):
         shared, _ = _symlink_circuit_outside(tmp_path, bell)
