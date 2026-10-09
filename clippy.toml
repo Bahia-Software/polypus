@@ -16,6 +16,22 @@ avoid-breaking-exported-api = false
 # flagging a genuinely runaway parameter list.
 too-many-arguments-threshold = 20
 
+# `Uuid::new_v4` panics if `getrandom` fails, and a panic must never cross the
+# FFI edge (contract C-1, #264). The root Cargo.toml drops uuid's `v4` feature,
+# but `zeromq` (feature `qmio`) re-enables it, so the call would compile again
+# there; this keeps it out of every build CI lints. `allow-invalid`: in the
+# default build the method does not exist, so the path cannot resolve. It also
+# hides a path that breaks or moves: after bumping `uuid` (held back today by
+# its `ignore` in .github/dependabot.yml), check that a temporary
+# `Uuid::new_v4()` call makes this fail, then remove the call:
+#   cargo clippy -p polypus --features qmio --all-targets -- -D warnings
+# The key exists since clippy 1.88, which started validating these paths; older
+# clippy (e.g. the 1.85 MSRV toolchain) ignores it and validates nothing, so the
+# guard still applies there.
+disallowed-methods = [
+    { path = "uuid::Uuid::new_v4", reason = "panics if getrandom fails (#264); build the UUID from polypus_infrastructure::execution_config::random_id_bytes", allow-invalid = true },
+]
+
 # Set this to your true Minimum Supported Rust Version so clippy won't suggest
 # APIs newer than you support. Pick the highest floor required by your deps
 # (pyo3 0.29, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you

@@ -75,8 +75,10 @@ polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
 # `log` is the logging facade every crate emits through; the concrete sink lives
 # in `polypus-logger`, which additionally enables its `std` feature.
 log                = "0.4"
-# UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
-uuid               = { version = "1", features = ["v4"] }
+# UUID v4 run-id suffix (bindings layer), built from bytes `polypus-infrastructure`
+# draws fallibly: no `v4` feature, so `Uuid::new_v4` (panics if `getrandom` fails,
+# #264) is absent by default; `zeromq` (`qmio`) re-enables it, clippy.toml forbids it.
+uuid               = "1"
 # RNG shared by `polypus-infrastructure`, `polypus-optimizers`, `polypus-physics`
 # and the `polypus-observable` tests; keep default features.
 rand               = "0.10"

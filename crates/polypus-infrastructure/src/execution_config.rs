@@ -107,6 +107,35 @@ where
     rng.try_next_u64().map_err(EntropyError::new)
 }
 
+/// Draw the 16 random bytes of a run id's UUID v4 suffix from OS entropy.
+///
+/// The FFI edge builds the UUID from these bytes rather than letting the `uuid`
+/// crate draw them, which panics when `getrandom` fails (#264). Every run entry
+/// point (`run_quantum_circuit`, `train`, `qml.train`, `qml.predict`) draws a
+/// run id — with or without an explicit seed — so this is the one OS-entropy
+/// read no call can skip.
+///
+/// # Errors
+///
+/// [`EntropyError`] if the OS entropy source is unavailable, returned rather
+/// than panicked on (`ENGINEERING.md` §9).
+pub fn random_id_bytes() -> Result<[u8; 16], EntropyError> {
+    random_id_bytes_from(&mut rand::rngs::SysRng)
+}
+
+/// Fill run-id bytes from `rng`: the body of [`random_id_bytes`], with the
+/// entropy source injectable so its failure path can be tested.
+pub(crate) fn random_id_bytes_from<R>(rng: &mut R) -> Result<[u8; 16], EntropyError>
+where
+    R: TryRng,
+    R::Error: std::error::Error + Send + Sync + 'static,
+{
+    let mut bytes = [0u8; 16];
+    rng.try_fill_bytes(&mut bytes)
+        .map_err(EntropyError::for_run_id)?;
+    Ok(bytes)
+}
+
 /// Provider-specific configuration.
 ///
 /// Each variant declares exactly the fields its backend needs. Supporting a new
@@ -274,6 +303,27 @@ mod tests {
         }
     }
 
+    /// A healthy entropy source with a non-zero, position-dependent pattern
+    /// (byte `i` is `start + i`), so a test can tell its bytes from a zeroed
+    /// buffer.
+    struct CountingRng(u8);
+    impl TryRng for CountingRng {
+        type Error = NoEntropy;
+        fn try_next_u32(&mut self) -> Result<u32, NoEntropy> {
+            unreachable!("random_id_bytes_from must fill bytes, not draw a u32")
+        }
+        fn try_next_u64(&mut self) -> Result<u64, NoEntropy> {
+            unreachable!("random_id_bytes_from must fill bytes, not draw a u64")
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), NoEntropy> {
+            for byte in dst {
+                *byte = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
     fn broken_draw() -> EntropyError {
         random_seed_from(&mut BrokenRng).expect_err("a failing entropy source must be an Err")
     }
@@ -302,6 +352,46 @@ mod tests {
     #[test]
     fn os_entropy_draws_independent_seeds() {
         assert_ne!(random_seed().unwrap(), random_seed().unwrap());
+    }
+
+    #[test]
+    fn default_seed_failure_says_it_was_drawing_a_seed() {
+        let message = broken_draw().to_string();
+        assert!(
+            message.contains("cannot draw a default seed"),
+            "message must say what was being drawn: {message}"
+        );
+    }
+
+    #[test]
+    fn failing_entropy_source_for_a_run_id_is_an_error_not_a_panic() {
+        let err = random_id_bytes_from(&mut BrokenRng)
+            .expect_err("a failing entropy source must be an Err");
+        let message = err.to_string();
+        assert!(
+            message.contains("OS entropy source unavailable: cannot draw a run id"),
+            "message must say what failed and what was being drawn: {message}"
+        );
+        assert!(
+            message.contains("getrandom: device not available"),
+            "message must quote the underlying cause: {message}"
+        );
+        let source = std::error::Error::source(&err).expect("the cause is kept as source()");
+        assert!(source.downcast_ref::<NoEntropy>().is_some());
+    }
+
+    #[test]
+    fn healthy_entropy_source_yields_its_id_bytes() {
+        let expected: [u8; 16] = std::array::from_fn(|i| 0x10 + i as u8);
+        assert_eq!(
+            random_id_bytes_from(&mut CountingRng(0x10)).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn os_entropy_draws_independent_id_bytes() {
+        assert_ne!(random_id_bytes().unwrap(), random_id_bytes().unwrap());
     }
 
     #[test]

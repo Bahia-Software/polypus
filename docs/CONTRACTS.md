@@ -26,7 +26,7 @@ Rules of the road:
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
+| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
@@ -674,14 +674,13 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
   outright, since a QML model is a Qiskit circuit.
-- **OS entropy failure.** If the OS entropy source cannot be read while
-  drawing a default seed (`seed=None` — and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG` instance), the entry point raises
-  `polypus.BackendError` instead of panicking. A call that draws no default
-  seed — an explicit seed, or `run_quantum_circuit` with
-  `infrastructure="qmio"` — is not independent of OS entropy: the run `id`'s
-  UUID v4 suffix is drawn from it too, and that draw still panics (known break,
-  #264).
+- **OS entropy failure.** If the OS entropy source cannot be read, the entry
+  point raises `polypus.BackendError` instead of panicking — whether while
+  drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
+  pinned on the `DE`/`PSO`/`QNG` instance) or while drawing the random bytes of
+  the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
+  with or without an explicit seed and for `infrastructure="qmio"`, which
+  never draws a seed.
 
 ### The run manifest (return shapes)
 
@@ -714,10 +713,14 @@ rejection, and the returned manifest/outcome fields), `tests/python/test_qml_pre
 (the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
-precedence / optimizer determinism, and the default-seed entropy-failure path
-(`seed_or_entropy`, `resolve_optimizer_seed`)), `crates/polypus/src/exceptions.rs`
-(that failure's `polypus.BackendError` mapping) and `crates/polypus-infrastructure/src/native.rs`
-(same-seed reproduces / omitted-seed differs at the backend level). CUNQA's
+precedence / optimizer determinism, the default-seed entropy-failure path
+(`seed_or_entropy`, `resolve_optimizer_seed`), and the run-id entropy-failure
+path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
+(the entropy-failure `polypus.BackendError` mapping),
+`crates/polypus-infrastructure/src/execution_config.rs` (the fallible draws
+`random_seed_from` / `random_id_bytes_from` and their error messages) and
+`crates/polypus-infrastructure/src/native.rs` (same-seed reproduces /
+omitted-seed differs at the backend level). CUNQA's
 `seed` forwarding follows the same shape as Aer's on the Rust side
 (`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) but has no
 dedicated automated test and no verified-working status: per `ENGINEERING.md`
