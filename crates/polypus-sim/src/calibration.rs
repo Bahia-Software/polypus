@@ -134,12 +134,21 @@ const CALIBRATION_SESSIONS: usize = 3;
 /// recalibration per (hardware, thread count).
 const CACHE_SCHEMA: u32 = 3;
 
-/// Longest a writer waits for the cache lock before giving up on it (see
-/// [`acquire_cache_lock`]). The lock only covers a read-merge-write of a few
-/// hundred bytes — never the measurement — so even dozens of queued ranks clear
-/// it in milliseconds; a wait this long means a stale lock (e.g. an NFS lock
-/// server that lost track of a dead client), and a calibration must not hang an
-/// `import polypus` on that.
+/// How long a writer waits for the cache lock **without seeing any progress**
+/// before giving up on it (see [`acquire_cache_lock`]). Progress means the
+/// cache file changed: every holder rewrites it before releasing, so while
+/// writers keep getting through the queue the wait restarts on each write, and
+/// a waiter is never pushed onto the unlocked path just because the queue ahead
+/// of it is long or its `sync_all`s slow (shared storage). Only a lock whose
+/// holder makes no write for this long counts as stale (e.g. an NFS lock server
+/// that lost track of a dead client), and a calibration must not hang an
+/// `import polypus` on that. There is no cap on the total wait.
+///
+/// Known limit: a single critical section that takes longer than this without
+/// touching the file — a `sync_all` blocked for over 5 s on a loaded Lustre/NFS
+/// mount — cannot be told apart from a stale lock, so the waiter writes without
+/// it. The worst case is the same as for any unlocked write: one entry lost and
+/// recalibrated later, never corruption.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pause between non-blocking lock attempts while waiting for [`LOCK_TIMEOUT`].
@@ -575,17 +584,55 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The cache file a lock file guards — the inverse of [`lock_path_for`]: strips
+/// the `.lock` suffix. `None` when the name has no such suffix, in which case
+/// [`acquire_cache_lock`] has nothing to watch for progress and its timeout
+/// counts plain elapsed time.
+fn cache_path_for_lock(lock_path: &Path) -> Option<PathBuf> {
+    if lock_path.extension()? != std::ffi::OsStr::new("lock") {
+        return None;
+    }
+    Some(lock_path.with_file_name(lock_path.file_stem()?))
+}
+
+/// What a lock waiter compares to tell a live holder from a stale lock: the
+/// cache file's modification time and length. Every write replaces the file
+/// through a rename, so each one shows up as a new stamp. `None` when there is
+/// no file to watch, or its metadata cannot be read — then nothing changes and
+/// the waiter falls back to a plain timeout. A file that appears counts as a
+/// change.
+fn progress_stamp(path: Option<&Path>) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path?).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 /// Take an exclusive advisory lock on `lock_path` (flock(2) on Unix, LockFileEx
-/// on Windows, via `fs4`), waiting at most `timeout`. The lock is held for as
-/// long as the returned `File` lives and released when it is dropped (or when
-/// the process dies, so a crashed writer never wedges the cache).
+/// on Windows, via `fs4`), waiting until `timeout` passes **with no progress**.
+/// The lock is held for as long as the returned `File` lives and released when
+/// it is dropped (or when the process dies, so a crashed writer never wedges
+/// the cache).
 ///
 /// `None` means "proceed without the lock": the lock file cannot be opened, the
 /// filesystem does not support locking (some Lustre/NFS mounts return
-/// `ENOLCK`/`ENOSYS`), or `timeout` passed. The caller then still writes — the
-/// rename keeps the file whole, so the worst case is the lost update the lock
-/// exists to prevent (one entry recalibrated later), never corruption, a hang,
-/// or a skipped write that would make every later import recalibrate.
+/// `ENOLCK`/`ENOSYS`), or the lock looks stale. The caller then still writes —
+/// the rename keeps the file whole, so the worst case is the lost update the
+/// lock exists to prevent (one entry recalibrated later), never corruption, a
+/// hang, or a skipped write that would make every later import recalibrate.
+///
+/// **What "stale" means.** Polling `try_lock` is not fair: a waiter can lose
+/// every race to other writers for as long as they keep arriving, and each of
+/// their holds includes a `sync_all` that is slow on shared storage. A plain
+/// "waited `timeout`" deadline would push such a waiter onto the unlocked path
+/// while the lock is perfectly alive, causing the very lost update it exists
+/// to prevent. So the deadline restarts every time the cache file guarded by
+/// `lock_path` ([`cache_path_for_lock`]) changes ([`progress_stamp`]), and only
+/// `timeout` without a single write gives up. A lock file whose name does not
+/// end in `.lock` has no cache to watch and gets the plain deadline. The cache
+/// is only looked at once the first attempt has failed: an uncontended take
+/// costs nothing extra. The known limit — one critical section that stays
+/// silent for longer than `timeout` — is described at [`LOCK_TIMEOUT`]. On NFS
+/// the client's attribute cache can show a write late; if it shows it later
+/// than `timeout`, the waiter behaves as with the plain deadline.
 ///
 /// **Network filesystems — the shared-`$HOME` case this lock exists for.** On
 /// Linux NFS the kernel emulates `flock` with byte-range locks forwarded to the
@@ -617,22 +664,36 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
             return None;
         }
     };
-    let deadline = Instant::now() + timeout;
+    let mut deadline = Instant::now() + timeout;
+    // Both set on the first `WouldBlock`, so an uncontended take never touches
+    // the cache: the file to watch, and its stamp when last looked at.
+    let mut watched: Option<Option<PathBuf>> = None;
+    let mut last_seen: Option<Option<(SystemTime, u64)>> = None;
     loop {
         // Fully qualified: std's inherent `File::try_lock` (Rust 1.89, newer
         // than the MSRV) would otherwise shadow the trait method on new toolchains.
         match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Some(file),
-            Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(LOCK_POLL);
-            }
             Err(fs4::TryLockError::WouldBlock) => {
-                log::warn!(
-                    "timed out after {timeout:?} waiting for calibration cache lock {}; \
-                     writing without it",
-                    lock_path.display()
-                );
-                return None;
+                let watched = watched.get_or_insert_with(|| cache_path_for_lock(lock_path));
+                let stamp = progress_stamp(watched.as_deref());
+                if last_seen
+                    .replace(stamp)
+                    .is_some_and(|before| before != stamp)
+                {
+                    // Someone wrote the cache since the last look: the lock is
+                    // alive, so the wait for a stale one starts over.
+                    deadline = Instant::now() + timeout;
+                }
+                if Instant::now() >= deadline {
+                    log::warn!(
+                        "no progress for {timeout:?} while waiting for calibration cache lock \
+                         {}; treating it as stale and writing without it",
+                        lock_path.display()
+                    );
+                    return None;
+                }
+                std::thread::sleep(LOCK_POLL);
             }
             Err(fs4::TryLockError::Error(e)) => {
                 log::warn!(
@@ -649,7 +710,8 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
 /// Fold `key → threshold` into the cache at `path`, under the cache lock.
 ///
 /// The whole read-merge-write runs while holding the exclusive lock on the
-/// sibling `.lock` file ([`acquire_cache_lock`], waiting at most `lock_timeout`),
+/// sibling `.lock` file ([`acquire_cache_lock`], giving up on it only after
+/// `lock_timeout` in which the cache saw no write at all),
 /// so two processes calibrating at once — two ranks, two nodes on a shared
 /// `$HOME` — serialise: the second one reads a map that already holds the
 /// first one's entry, instead of both reading the old map and the last rename
@@ -1444,6 +1506,215 @@ core id\t\t: 0
                 "parallel_threshold.json.lock".to_owned()
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A holder's rewrite in the lock tests below: a plain write, no temp file
+    /// and no `sync_all`. What those tests time is the waiter seeing progress,
+    /// so the progress must not wait on the disk: one `write_cache_to` slowed by
+    /// a loaded runner's fsync past `lock_timeout` would read as a stale lock.
+    fn rewrite_without_fsync(path: &Path, cached: &CachedCalibration) {
+        let json = serde_json::to_vec(cached).expect("a cache always serialises");
+        std::fs::write(path, json).expect("temp dir is writable");
+    }
+
+    #[test]
+    fn waiter_waits_while_another_writer_keeps_making_progress() {
+        // The regression test for the starved waiter: a live writer holds the
+        // lock far longer than the waiter's timeout, but keeps rewriting the
+        // cache the whole time — standing in for a queue of live writers, each
+        // with a slow `sync_all`, that keep winning the lock ahead of the
+        // waiter. The waiter's timeout means "no progress for this long",
+        // so it must keep waiting and take the real lock. Under a plain elapsed
+        // deadline it would give up after `lock_timeout`, write unlocked, and
+        // the holder's next rewrite — built from its own snapshot — would erase
+        // the waiter's key: the lost update the lock exists to prevent.
+        const WAITER_KEY: &str = "waiter";
+        let lock_timeout = Duration::from_millis(200);
+        let holder_runs_for = 5 * lock_timeout;
+        let rewrite_every = lock_timeout / 5;
+        let dir = temp_dir("starved-waiter");
+        let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("parallel_threshold.json");
+        write_cache_to(&path, &cached(&[("seed", 0)])).expect("temp dir is writable");
+        let holding = std::sync::atomic::AtomicBool::new(false);
+        let released = std::sync::atomic::AtomicBool::new(false);
+        let (holder_keys, waited, released_on_return) = std::thread::scope(|s| {
+            let holder = s.spawn(|| {
+                let lock = acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT)
+                    .expect("uncontended lock");
+                // One snapshot, as a real holder takes: every rewrite below is
+                // built from it, so an entry added behind its back is dropped.
+                let snapshot = read_cache_from(&path).expect("seed parses");
+                holding.store(true, Ordering::SeqCst);
+                let start = Instant::now();
+                let mut keys = Vec::new();
+                while start.elapsed() < holder_runs_for {
+                    std::thread::sleep(rewrite_every);
+                    keys.push(format!("holder-{}", keys.len()));
+                    let mut next = snapshot.clone();
+                    for key in &keys {
+                        next.entries.insert(key.clone(), 1);
+                    }
+                    rewrite_without_fsync(&path, &next);
+                }
+                released.store(true, Ordering::SeqCst);
+                drop(lock);
+                keys
+            });
+            while !holding.load(Ordering::SeqCst) {
+                // A holder that panicked before taking the lock must fail the
+                // test, not leave this loop spinning forever.
+                assert!(
+                    holding.load(Ordering::SeqCst) || !holder.is_finished(),
+                    "holder thread ended without taking the lock"
+                );
+                std::thread::yield_now();
+            }
+            let start = Instant::now();
+            persist_entry(&path, WAITER_KEY.to_owned(), 7, lock_timeout)
+                .expect("temp dir is writable");
+            let waited = start.elapsed();
+            let released_on_return = released.load(Ordering::SeqCst);
+            (
+                holder.join().expect("holder thread"),
+                waited,
+                released_on_return,
+            )
+        });
+        assert!(
+            released_on_return,
+            "the waiter wrote without the lock while a live writer still held it"
+        );
+        assert!(
+            waited > 2 * lock_timeout,
+            "waiter returned after {waited:?}: it never waited past its timeout"
+        );
+        let cache = read_cache_from(&path).expect("final cache parses");
+        assert_eq!(
+            cache.entries.get(WAITER_KEY),
+            Some(&7),
+            "waiter's entry lost"
+        );
+        assert!(!holder_keys.is_empty());
+        for key in &holder_keys {
+            assert!(cache.entries.contains_key(key), "holder's {key} lost");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_goes_stale_a_timeout_after_the_last_progress() {
+        // The boundary of "no progress": a holder writes for a while, then goes
+        // silent while still holding the lock (a wedged writer, or one stuck on a
+        // `sync_all` longer than the timeout — the documented limit). The waiter
+        // must give up, but no sooner than `lock_timeout` after the last write.
+        // The holder notes the instant *before* each write, so it is never later
+        // than the change the waiter can observe: the bound below is exact.
+        let lock_timeout = Duration::from_millis(200);
+        let progress_for = Duration::from_millis(300);
+        let rewrite_every = lock_timeout / 5;
+        let dir = temp_dir("stale-after-progress");
+        let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("parallel_threshold.json");
+        let lock_path = lock_path_for(&path);
+        let holding = std::sync::atomic::AtomicBool::new(false);
+        let waiter_done = std::sync::atomic::AtomicBool::new(false);
+        let (last_write, gave_up_at, took_lock) = std::thread::scope(|s| {
+            let holder = s.spawn(|| {
+                let lock = acquire_cache_lock(&lock_path, LOCK_TIMEOUT).expect("uncontended lock");
+                holding.store(true, Ordering::SeqCst);
+                let start = Instant::now();
+                let mut last_write = start;
+                let mut round = 0;
+                while start.elapsed() < progress_for {
+                    std::thread::sleep(rewrite_every);
+                    round += 1;
+                    let entries: Vec<(String, usize)> =
+                        (0..round).map(|i| (format!("holder-{i}"), i)).collect();
+                    let next = CachedCalibration {
+                        schema: CACHE_SCHEMA,
+                        entries: entries.into_iter().collect(),
+                    };
+                    last_write = Instant::now();
+                    rewrite_without_fsync(&path, &next);
+                }
+                // Silent from here on, still holding the lock.
+                while !waiter_done.load(Ordering::SeqCst) {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                drop(lock);
+                last_write
+            });
+            while !holding.load(Ordering::SeqCst) {
+                // A holder that panicked before taking the lock must fail the
+                // test, not leave this loop spinning forever.
+                assert!(
+                    holding.load(Ordering::SeqCst) || !holder.is_finished(),
+                    "holder thread ended without taking the lock"
+                );
+                std::thread::yield_now();
+            }
+            let took_lock = acquire_cache_lock(&lock_path, lock_timeout).is_some();
+            let gave_up_at = Instant::now();
+            waiter_done.store(true, Ordering::SeqCst);
+            (holder.join().expect("holder thread"), gave_up_at, took_lock)
+        });
+        assert!(
+            !took_lock,
+            "the lock was held throughout: the waiter must give up"
+        );
+        assert!(
+            gave_up_at >= last_write + lock_timeout,
+            "{}, short of its {lock_timeout:?} timeout",
+            match gave_up_at.checked_duration_since(last_write) {
+                Some(after) => format!("gave up {after:?} after the last write"),
+                None => "gave up before the last write".to_owned(),
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_path_for_lock_inverts_lock_path_for() {
+        for cache in [
+            "/home/u/.cache/polypus/parallel_threshold.json",
+            "relative/parallel_threshold.json",
+            "/dir/.hidden",
+            "/dir/no_extension",
+        ] {
+            let cache = Path::new(cache);
+            assert_eq!(
+                cache_path_for_lock(&lock_path_for(cache)).as_deref(),
+                Some(cache)
+            );
+        }
+        // Not a lock file name: nothing to watch.
+        assert_eq!(cache_path_for_lock(Path::new("/dir/cache.json")), None);
+        assert_eq!(cache_path_for_lock(Path::new("/dir/lock")), None);
+        assert_eq!(cache_path_for_lock(Path::new("/dir/.lock")), None);
+    }
+
+    #[test]
+    fn progress_stamp_changes_when_the_cache_appears_or_is_replaced() {
+        let dir = temp_dir("progress-stamp");
+        let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("parallel_threshold.json");
+        assert_eq!(progress_stamp(None), None);
+        assert_eq!(progress_stamp(Some(&path)), None, "no file yet");
+        write_cache_to(&path, &cached(&[(XEON_8, 16)])).expect("temp dir is writable");
+        let first = progress_stamp(Some(&path));
+        assert!(first.is_some(), "a file that appears is a change");
+        assert_eq!(progress_stamp(Some(&path)), first, "stable while untouched");
+        // A different length, so the change shows even where mtime is coarse.
+        write_cache_to(&path, &cached(&[(XEON_8, 16), (EPYC_8, 18)]))
+            .expect("temp dir is writable");
+        let second = progress_stamp(Some(&path));
+        assert!(second.is_some());
+        assert_ne!(second, first, "a rewrite is a change");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
