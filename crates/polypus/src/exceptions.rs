@@ -37,7 +37,7 @@
 //! *panicked*.
 
 use crate::infrastructure::BackendError as InfraBackendError;
-use crate::infrastructure::DisplaySafePyErr;
+use crate::infrastructure::{DisplaySafePyErr, InterpreterUnavailable};
 use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyTypeError, PyValueError};
 use pyo3::{create_exception, intern, PyErr};
 
@@ -177,6 +177,12 @@ fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
         Ok(py_err) => return qiskit_error_to_pyerr(py_err.into_inner()),
         Err(other) => other,
     };
+    // A site reached while detached could not attach (the interpreter is
+    // finalizing, say): the run is aborted, as `Aborted` aborts it.
+    let boxed = match boxed.downcast::<InterpreterUnavailable>() {
+        Ok(unavailable) => return interpreter_unavailable_to_pyerr(*unavailable),
+        Err(other) => other,
+    };
     // The QMIO backend boxes its own error; surface it as the typed class.
     #[cfg(feature = "qmio")]
     let boxed = match boxed.downcast::<polypus_infrastructure::qmio::QmioError>() {
@@ -185,6 +191,14 @@ fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
     };
     // Any other provider error: the typed backend base class, message preserved.
     BackendError::new_err(boxed.to_string())
+}
+
+/// The `KeyboardInterrupt` for a run that stopped because code reached while
+/// detached could not attach to the interpreter
+/// ([`InterpreterUnavailable`]): the class `Aborted` and a Ctrl+C get, since
+/// the run is abandoned either way and was not a Polypus failure.
+fn interpreter_unavailable_to_pyerr(err: InterpreterUnavailable) -> PyErr {
+    PyKeyboardInterrupt::new_err(format!("the run was aborted: {err}"))
 }
 
 /// Whether `module` (a class's `__module__`) belongs to a Qiskit package:
@@ -301,7 +315,10 @@ fn observable_error_to_pyerr(err: polypus_observable::ObservableError) -> PyErr 
         // original Python exception type re-raises verbatim across the FFI.
         ObsErr::External(boxed) => match boxed.downcast::<DisplaySafePyErr>() {
             Ok(py_err) => py_err.into_inner(),
-            Err(other) => EvaluationError::new_err(other.to_string()),
+            Err(other) => match other.downcast::<InterpreterUnavailable>() {
+                Ok(unavailable) => interpreter_unavailable_to_pyerr(*unavailable),
+                Err(other) => EvaluationError::new_err(other.to_string()),
+            },
         },
         // Native evaluation failures (bad bitstring, invalid construction) map
         // to the typed evaluation exception.
@@ -746,6 +763,46 @@ mod tests {
         Python::attach(|py| assert!(!py_err.is_instance_of::<PyValueError>(py)));
     }
 
+    /// Assert `py_err` is the `KeyboardInterrupt` an unreachable interpreter
+    /// aborts a run with: a native class (not `polypus.*`), like
+    /// `BackendError::Aborted`, carrying the `InterpreterUnavailable` text.
+    pub(super) fn assert_aborted_by_unavailable_interpreter(py_err: PyErr) {
+        let expected = format!(
+            "the run was aborted: {}",
+            crate::infrastructure::InterpreterUnavailable
+        );
+        Python::attach(|py| {
+            assert!(
+                py_err.is_instance_of::<PyKeyboardInterrupt>(py),
+                "an unreachable interpreter must abort the run as KeyboardInterrupt: {py_err}"
+            );
+            assert!(!py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+            assert_eq!(py_err.value(py).to_string(), expected);
+        });
+    }
+
+    #[test]
+    fn interpreter_unavailable_in_external_maps_to_keyboard_interrupt() {
+        // Code reached while the run is detached returns this when it cannot
+        // attach (the interpreter is finalizing, say); the run is aborted the way
+        // `Aborted` aborts it, since its result can no longer reach Python.
+        pyo3::Python::initialize();
+        assert_aborted_by_unavailable_interpreter(backend_error_to_pyerr(InfraBackendError::from(
+            crate::infrastructure::InterpreterUnavailable,
+        )));
+        // The new downcast comes after the `DisplaySafePyErr` one, which still
+        // re-raises a seam exception verbatim.
+        let original = PyValueError::new_err("bad kwarg");
+        let original_value = Python::attach(|py| original.value(py).clone().unbind());
+        let py_err = backend_error_to_pyerr(InfraBackendError::External(Box::new(
+            DisplaySafePyErr::from(original),
+        )));
+        Python::attach(|py| {
+            assert!(py_err.is_instance_of::<PyValueError>(py), "{py_err}");
+            assert!(py_err.value(py).is(original_value.bind(py)));
+        });
+    }
+
     #[test]
     fn provider_errors_stay_catchable_as_backend_error() {
         // The hierarchy is what lets `except polypus.BackendError` catch every
@@ -1030,6 +1087,26 @@ mod evaluation_mapping_tests {
     }
 
     #[test]
+    fn interpreter_unavailable_maps_to_keyboard_interrupt_on_the_evaluation_path() {
+        // Both routes an oracle can carry it on: a backend/binding site boxes it
+        // in `BackendError::External`, a callback observable in
+        // `ObservableError::External`.
+        use crate::infrastructure::InterpreterUnavailable;
+        pyo3::Python::initialize();
+        super::tests::assert_aborted_by_unavailable_interpreter(evaluation_error_to_pyerr(
+            EvalErr::Backend(BackendError::from(InterpreterUnavailable)),
+        ));
+        super::tests::assert_aborted_by_unavailable_interpreter(evaluation_error_to_pyerr(
+            EvalErr::Observable(ObservableError::External(Box::new(InterpreterUnavailable))),
+        ));
+        // A callback's own exception still re-raises verbatim past the new arm.
+        let py_err = evaluation_error_to_pyerr(EvalErr::Observable(ObservableError::External(
+            Box::new(DisplaySafePyErr::from(PyValueError::new_err("bad row"))),
+        )));
+        Python::attach(|py| assert!(py_err.is_instance_of::<PyValueError>(py), "{py_err}"));
+    }
+
+    #[test]
     fn bare_py_err_in_observable_external_is_not_reraised_verbatim() {
         // Same rule as `External` on the backend side: only a boxed
         // `DisplaySafePyErr` keeps its class; a bare `PyErr` is flattened.
@@ -1164,6 +1241,20 @@ mod infrastructure_mapping_tests {
             );
             assert!(py_err.to_string().contains("planner boom"));
         });
+    }
+
+    #[test]
+    fn interpreter_unavailable_maps_to_keyboard_interrupt() {
+        // `capabilities_for` returns it as `Backend(..)`; a callback observable
+        // reached by the planner returns it as `Observable(External(..))`.
+        use crate::infrastructure::InterpreterUnavailable;
+        pyo3::Python::initialize();
+        super::tests::assert_aborted_by_unavailable_interpreter(infrastructure_error_to_pyerr(
+            InfraErr::from(InterpreterUnavailable),
+        ));
+        super::tests::assert_aborted_by_unavailable_interpreter(infrastructure_error_to_pyerr(
+            InfraErr::Observable(ObsErr::External(Box::new(InterpreterUnavailable))),
+        ));
     }
 
     #[test]

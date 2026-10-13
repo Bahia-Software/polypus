@@ -1,4 +1,4 @@
-use crate::attach::attach_for_cleanup;
+use crate::attach::{attach_for_cleanup, attach_or, InterpreterUnavailable};
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{record_cleanup_failure, BoundCircuit, QuantumBackend, RunParams};
@@ -49,56 +49,62 @@ impl QuantumBackend for CunqaBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
-        Python::attach(|py| {
-            // Native circuits are transpiled in pure Rust before submission;
-            // Qiskit circuits pass through untouched and every native circuit
-            // travels to Python as OpenQASM 2.0.
-            let opts = TranspileOptions {
-                level: config.opt_level,
-            };
-            let qcs_pylist = PyList::empty(py);
-            for qc in qcs {
-                let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
-                qcs_pylist
-                    .append(crate::to_py_object(&qc, py)?)
-                    .map_err(|e| BackendError::Conversion(e.to_string()))?;
-            }
+        // Called while the run is detached, so this attach is a fresh one: an
+        // unreachable interpreter is a typed error, never a panic or a hang
+        // (docs/ENGINEERING.md §9).
+        attach_or(
+            || Err(InterpreterUnavailable.into()),
+            |py| {
+                // Native circuits are transpiled in pure Rust before submission;
+                // Qiskit circuits pass through untouched and every native circuit
+                // travels to Python as OpenQASM 2.0.
+                let opts = TranspileOptions {
+                    level: config.opt_level,
+                };
+                let qcs_pylist = PyList::empty(py);
+                for qc in qcs {
+                    let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
+                    qcs_pylist
+                        .append(crate::to_py_object(&qc, py)?)
+                        .map_err(|e| BackendError::Conversion(e.to_string()))?;
+                }
 
-            let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
-            let kwargs = PyDict::new(py);
-            let conv = |e: PyErr| BackendError::Conversion(e.to_string());
-            kwargs.set_item("family_id", &config.id).map_err(conv)?;
-            kwargs.set_item("backend", &self.backend).map_err(conv)?;
-            kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
-            kwargs.set_item("shots", config.shots).map_err(conv)?;
-            kwargs
-                .set_item("sim_method", &self.sim_method)
-                .map_err(conv)?;
-            // Forwarded to each QPU's `run(..., seed=...)` on the Python side
-            // (contract C-7); `None` is simply omitted, so CUNQA's own
-            // unseeded default behavior is unchanged. Unlike the identical
-            // arrangement for Aer (`local.rs`), this seam is unverified — see
-            // `polypus_python/cunqa.py` for the caveats.
-            if let Some(seed) = config.seed {
-                kwargs.set_item("seed", seed).map_err(conv)?;
-            }
+                let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
+                let kwargs = PyDict::new(py);
+                let conv = |e: PyErr| BackendError::Conversion(e.to_string());
+                kwargs.set_item("family_id", &config.id).map_err(conv)?;
+                kwargs.set_item("backend", &self.backend).map_err(conv)?;
+                kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
+                kwargs.set_item("shots", config.shots).map_err(conv)?;
+                kwargs
+                    .set_item("sim_method", &self.sim_method)
+                    .map_err(conv)?;
+                // Forwarded to each QPU's `run(..., seed=...)` on the Python side
+                // (contract C-7); `None` is simply omitted, so CUNQA's own
+                // unseeded default behavior is unchanged. Unlike the identical
+                // arrangement for Aer (`local.rs`), this seam is unverified — see
+                // `polypus_python/cunqa.py` for the caveats.
+                if let Some(seed) = config.seed {
+                    kwargs.set_item("seed", seed).map_err(conv)?;
+                }
 
-            let result = module
-                .call_method("run_qcs", ("cunqa",), Some(&kwargs))
-                .map_err(|e| {
-                    // Surface the failure at error level (mirrors the QMIO/local
-                    // error paths) before it crosses the FFI as an exception.
-                    log::error!("CUNQA circuit execution failed: {e}");
-                    crate::seam_error(e)
-                })?;
-            // `run_qcs` returned successfully; a wrong-shaped value is a
-            // Rust-side conversion failure, not a seam exception (contract C-1).
-            result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
-                BackendError::Conversion(format!(
-                    "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
-                ))
-            })
-        })
+                let result = module
+                    .call_method("run_qcs", ("cunqa",), Some(&kwargs))
+                    .map_err(|e| {
+                        // Surface the failure at error level (mirrors the QMIO/local
+                        // error paths) before it crosses the FFI as an exception.
+                        log::error!("CUNQA circuit execution failed: {e}");
+                        crate::seam_error(e)
+                    })?;
+                // `run_qcs` returned successfully; a wrong-shaped value is a
+                // Rust-side conversion failure, not a seam exception (contract C-1).
+                result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
+                    BackendError::Conversion(format!(
+                        "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
+                    ))
+                })
+            },
+        )
     }
 
     fn capabilities(&self) -> super::BackendCapabilities {
@@ -200,36 +206,43 @@ impl CunqaBackend {
 
 /// Raise the SLURM QPU allocation via the `polypus_python` seam, returning the
 /// opaque CUNQA family handle.
+///
+/// Reached while detached (`create_backend` runs inside `detach` for
+/// `run_quantum_circuit` and `qml.predict`), so it attaches with [`attach_or`]:
+/// an unreachable interpreter fails before anything is asked of SLURM.
 fn raise_qpus(
     n_qpus: u32,
     nodes: u32,
     id: &str,
     cores_per_qpu: u32,
 ) -> Result<Py<PyAny>, BackendError> {
-    Python::attach(|py| {
-        let kwargs = PyDict::new(py);
-        let conv = |e: PyErr| BackendError::Conversion(e.to_string());
-        kwargs.set_item("n", n_qpus).map_err(conv)?;
-        kwargs.set_item("t", "10:00:00").map_err(conv)?;
-        kwargs.set_item("n_nodes", nodes).map_err(conv)?;
-        kwargs.set_item("family_name", id).map_err(conv)?;
-        kwargs
-            .set_item("cores_per_qpu", cores_per_qpu)
-            .map_err(conv)?;
+    attach_or(
+        || Err(InterpreterUnavailable.into()),
+        |py| {
+            let kwargs = PyDict::new(py);
+            let conv = |e: PyErr| BackendError::Conversion(e.to_string());
+            kwargs.set_item("n", n_qpus).map_err(conv)?;
+            kwargs.set_item("t", "10:00:00").map_err(conv)?;
+            kwargs.set_item("n_nodes", nodes).map_err(conv)?;
+            kwargs.set_item("family_name", id).map_err(conv)?;
+            kwargs
+                .set_item("cores_per_qpu", cores_per_qpu)
+                .map_err(conv)?;
 
-        let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
-        let connection = module
-            .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
-            .map_err(|e| {
-                log::error!("CUNQA QPU allocation failed: {e}");
-                crate::seam_error(e)
+            let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
+            let connection = module
+                .call_method("connect_to_infrastructure", ("cunqa",), Some(&kwargs))
+                .map_err(|e| {
+                    log::error!("CUNQA QPU allocation failed: {e}");
+                    crate::seam_error(e)
+                })?;
+            let family: Py<PyAny> = connection.extract().map_err(|e| {
+                BackendError::Cunqa(format!("could not extract the CUNQA family handle: {e}"))
             })?;
-        let family: Py<PyAny> = connection.extract().map_err(|e| {
-            BackendError::Cunqa(format!("could not extract the CUNQA family handle: {e}"))
-        })?;
-        log::info!("QPUs raised successfully");
-        Ok(family)
-    })
+            log::info!("QPUs raised successfully");
+            Ok(family)
+        },
+    )
 }
 
 /// Release the QPU allocation identified by `family` through the
@@ -308,6 +321,51 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "release must run exactly once across close/close/drop"
+        );
+    }
+
+    /// Raising the QPUs and running circuits, both reached while the run is
+    /// detached (`create_backend` runs inside `detach` for `run_quantum_circuit`
+    /// and `qml.predict`), fail with a typed `InterpreterUnavailable` when the
+    /// interpreter cannot be attached to: no panic, nothing asked of SLURM, and
+    /// the interpreter is never initialized. Runs in a fresh process that never
+    /// initializes Python; see the drop test below for why that state.
+    #[test]
+    fn seams_fail_typed_without_an_interpreter() {
+        use crate::{InterpreterUnavailable, OptLevel};
+        if !crate::attach::is_fresh_process() {
+            crate::attach::run_in_fresh_process(
+                "cunqa::tests::seams_fail_typed_without_an_interpreter",
+            );
+            return;
+        }
+        let unavailable = |result: Result<(), BackendError>| match result {
+            Err(BackendError::External(boxed)) => boxed.is::<InterpreterUnavailable>(),
+            other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
+        };
+        let raised = CunqaBackend::new(2, 1, "no-interpreter", 1, String::new(), String::new());
+        assert!(unavailable(raised.map(|_backend| ())));
+
+        let backend = CunqaBackend::with_releaser(Box::new(|_py| Ok(())));
+        let circuit = BoundCircuit::Native(
+            polypus_circuit::ParameterizedCircuit::new(1)
+                .x(0)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let params = RunParams {
+            id: "no-interpreter".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: OptLevel::default(),
+        };
+        assert!(unavailable(
+            backend.run_circuits(&[circuit], &params).map(|_counts| ())
+        ));
+        assert!(
+            Python::try_attach(|_py| ()).is_none(),
+            "a seam must never initialize the interpreter"
         );
     }
 

@@ -17,14 +17,13 @@
 //!   [`ExecutionConfig`]/[`BackendConfig`];
 //! - the process-wide backend-cleanup failure counter exposed to Python;
 //! - [`attach_or`] / [`attach_for_cleanup`], for attaching to the interpreter
-//!   from `Drop` or from callbacks that run while detached, and
-//!   [`DisplaySafePyErr`], the carrier for a Python exception that may be
-//!   formatted while detached (see [`attach`]).
+//!   from `Drop` or from code that runs while detached, [`InterpreterUnavailable`],
+//!   the error such code returns when it cannot attach, and [`DisplaySafePyErr`],
+//!   the carrier for a Python exception that may be formatted while detached
+//!   (see [`attach`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-use pyo3::prelude::*;
 
 pub mod attach;
 pub mod circuit;
@@ -49,7 +48,9 @@ pub use polypus_backend::{
 };
 
 // --- this crate's own additions ---
-pub use attach::{attach_for_cleanup, attach_or, CleanupError, DisplaySafePyErr};
+pub use attach::{
+    attach_for_cleanup, attach_or, CleanupError, DisplaySafePyErr, InterpreterUnavailable,
+};
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::CunqaBackend;
 pub use error::EntropyError;
@@ -154,13 +155,23 @@ impl Infrastructure {
                 backend,
                 sim_method,
                 noise_model,
-            } => Ok(Arc::new(LocalBackend::new(
-                backend.clone(),
-                sim_method.clone(),
-                noise_model
-                    .as_ref()
-                    .map(|nm| Python::attach(|py| nm.clone_ref(py))),
-            ))),
+            } => {
+                // This can run while detached (inside `run_quantum_circuit`'s
+                // `detach`), so only a noise model, the one Python object here,
+                // is attached for, and fallibly (docs/ENGINEERING.md §9).
+                let noise_model = match noise_model {
+                    Some(nm) => Some(attach_or(
+                        || Err(InterpreterUnavailable),
+                        |py| Ok(nm.clone_ref(py)),
+                    )?),
+                    None => None,
+                };
+                Ok(Arc::new(LocalBackend::new(
+                    backend.clone(),
+                    sim_method.clone(),
+                    noise_model,
+                )))
+            }
             BackendConfig::Cunqa {
                 backend,
                 sim_method,
@@ -207,5 +218,44 @@ impl Infrastructure {
                 create_registered_backend(name, &ctx)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::Python;
+
+    /// Building an Aer backend with no noise model needs no Python object, so it
+    /// does not attach: it succeeds even when the interpreter cannot be reached
+    /// (it runs inside `detach` for `run_quantum_circuit`). Only a `noise_model`
+    /// is attached for, through `attach_or`. Runs in a fresh process that never
+    /// initializes Python.
+    #[test]
+    fn create_backend_without_a_noise_model_does_not_attach() {
+        if !attach::is_fresh_process() {
+            attach::run_in_fresh_process(
+                "tests::create_backend_without_a_noise_model_does_not_attach",
+            );
+            return;
+        }
+        let config = ExecutionConfig {
+            id: "no-interpreter".to_string(),
+            shots: 8,
+            n_qpus: 1,
+            infrastructure: "local".to_string(),
+            backend_config: BackendConfig::Local {
+                backend: "AerSimulator".to_string(),
+                sim_method: "statevector".to_string(),
+                noise_model: None,
+            },
+            opt_level: OptLevel::default(),
+            seed: Some(1),
+        };
+        assert!(Infrastructure::create_backend(&config).is_ok());
+        assert!(
+            Python::try_attach(|_py| ()).is_none(),
+            "building the backend must not initialize the interpreter"
+        );
     }
 }

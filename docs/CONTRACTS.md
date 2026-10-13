@@ -162,6 +162,15 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   above apply to the original exception; a bare `PyErr` in an `External` box is
   not recovered and surfaces as `polypus.BackendError` (or
   `polypus.EvaluationError` from an observable) with its message.
+- **The interpreter is unavailable.** With the interpreter unavailable (it is
+  finalizing, say, while a run is still going on a daemon thread), the code a
+  run reaches inside `detach` that needs Python (the Aer/CUNQA seam calls, the
+  Qiskit binding, the user's callbacks) returns a typed error,
+  `polypus_infrastructure::InterpreterUnavailable`, that the edge raises as
+  `KeyboardInterrupt` ("the run was aborted: …", the class an interrupted run
+  gets); never a panic. It travels boxed in the same `External` variants and is
+  downcast after `DisplaySafePyErr`, so a seam exception keeps its class
+  (ENGINEERING.md §9).
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
