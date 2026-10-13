@@ -95,7 +95,12 @@ boundary stays out-of-process and explicit; see
   why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
   `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
   below it (the Aer and CUNQA backends, Python cost callbacks) attach on their
-  own, on whichever thread evaluates them.
+  own, on whichever thread evaluates them. Each of those attaches is a *fresh*
+  one (`detach` resets the thread's attachment), so each goes through
+  `attach_or` and turns an unreachable interpreter into the typed
+  `InterpreterUnavailable` error, never a panic or a hang (§9). The one attach
+  that cannot fail this way, `BackendConfig::clone` with a noise model, is never
+  called while detached.
 - **Releasing the GIL does not by itself process signals.** `detach`
   lets other Python threads run, but a pending SIGINT (Ctrl+C) is turned into a
   `KeyboardInterrupt` only when the **main thread** runs Python bytecode or when
@@ -116,11 +121,12 @@ boundary stays out-of-process and explicit; see
     `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
     detached, so it attaches through `attach_or` rather than `Python::attach`
     and aborts the run (`BackendError::Aborted`, raised as `KeyboardInterrupt`)
-    when the interpreter cannot be reached — see below and §9. `train`, `qml.train` and
-    `run_quantum_circuit` build a guarded token with it and drive the run through
-    `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less token
-    (`Scheduler::run`) and the check is a no-op — which is why `run` is documented
-    as **not** interruptible and is never used on a Python-facing path.
+    when the interpreter cannot be reached — see below and §9. `train`,
+    `qml.train` and `run_quantum_circuit` build a guarded token with it and
+    drive the run through `Scheduler::run_cancellable`. A pure-Rust caller uses
+    a guard-less token (`Scheduler::run`) and the check is a no-op — which is
+    why `run` is documented as **not** interruptible and is never used on a
+    Python-facing path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
@@ -497,23 +503,62 @@ Python version: CPython clears its `initialized` flag right after marking itself
 finalizing, so to PyO3 a shutting-down interpreter looks uninitialized, and
 `Python::try_attach` reports it as unavailable. The only gap left is a
 check-then-attach race, which PyO3 documents as best effort. So a `Drop`, and
-any callback that runs while detached, attaches
-through the shared helpers in `crates/polypus-infrastructure/src/attach.rs`:
-`attach_or` for callbacks, choosing explicitly what an unreachable interpreter
-means, and `attach_for_cleanup` for cleanup, which also formats a Python
-exception while still attached (with a fixed fallback if even that fails, as
-`to_string()` would panic). That matters because formatting a bare `PyErr`
-(`Display`, `Debug`, `to_string()`) attaches again with `Python::attach`, so a
-bare `PyErr` that is formatted after the attached closure returns, while
-detached or at shutdown, reintroduces the panic (see the next paragraph).
-`CunqaBackend` is the reference use: its release
-operation receives the `Python` token, and `close` is the one place that
-attaches. An `attach` inside the release operation then reuses that
-attachment without re-checking the interpreter, as long as it stays on the
-same thread and outside a `detach`; detaching inside it would make the next
-attach a fresh one, with the same hazards as above. Keep the fallible
-operation behind a `Result`-returning helper so the `Drop` body only logs and
-counts.
+any code that runs while detached (see "Code reached while detached" below),
+attaches through the shared helpers in
+`crates/polypus-infrastructure/src/attach.rs`: `attach_or` for callbacks,
+choosing explicitly what an unreachable interpreter means, and
+`attach_for_cleanup` for cleanup, which also formats a Python exception while
+still attached (with a fixed fallback if even that fails, as `to_string()` would
+panic). That matters because formatting a bare `PyErr` (`Display`, `Debug`,
+`to_string()`) attaches again with `Python::attach`, so a bare `PyErr` that is
+formatted after the attached closure returns, while detached or at shutdown,
+reintroduces the panic (see the next paragraph). `CunqaBackend` is the reference
+use: its release operation receives the `Python` token, and `close` is the one
+place that attaches. An `attach` inside the release operation then reuses that
+attachment without re-checking the interpreter, as long as it stays on the same
+thread and outside a `detach`; detaching inside it would make the next attach a
+fresh one, with the same hazards as above. Keep the fallible operation behind a
+`Result`-returning helper so the `Drop` body only logs and counts.
+
+**Code reached while detached attaches fallibly.** Everything the scheduler
+reaches inside `py.detach` that needs Python attaches with `attach_or`: the Aer
+and CUNQA `run_circuits`, `LocalBackend::capabilities_for`, CUNQA's `raise_qpus`
+(it fails before anything is asked of SLURM), the noise-model clone in
+`Infrastructure::create_backend` (only when there is a noise model), the Qiskit
+parameter binding, `PyCallbackObservable`, the supervised objectives and
+`PyVarianceOracle`. The `attach_or` "unavailable" branch of each of these sites
+returns `polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an
+error that holds nothing from Python and so can be formatted, logged or dropped
+anywhere. It is boxed in `BackendError::External` (`From` impls exist for
+`BackendError`, `InfrastructureError` and `EvaluationError`) or in
+`ObservableError::External`, never added as a variant: none of those enums is
+`#[non_exhaustive]`, and `BackendError` is the third-party backend contract. A
+site whose signature cannot fail (`VarianceOracle`) records it in the run's
+`OracleErrorSlot` and returns its finite sentinel, as it does for a callback
+error. The FFI edge downcasts it after `DisplaySafePyErr` and raises
+`KeyboardInterrupt` ("the run was aborted: …"), the class
+`BackendError::Aborted` and a Ctrl+C get: the run is abandoned and its result
+could not reach Python anyway (contract C-1, failure modes). A Qiskit circuit is
+held as `Arc<Py<PyAny>>` inside `QiskitCircuit`, so `duplicate()`, which the
+planner calls per wave while detached, shares it without attaching. Dropping a
+`Py` while detached is safe because PyO3 defers the reference-count decrement to
+its reference pool; never enable `pyo3_disable_reference_pool`, which turns that
+drop into an abort. A `Clone` that must attach cannot report failure, so
+`BackendConfig::clone` (which clones a noise model) is called only while
+attached, and nothing reached while detached may start calling it. Likewise
+`OracleErrorSlot::record` formats the error before taking its mutex: formatting
+a `DisplaySafePyErr` attaches, and a thread holding the interpreter may be
+waiting on that mutex in `failed()`.
+
+To test an "unavailable" branch, use a process that never initialized Python
+(`run_in_fresh_process` in `attach.rs`; initialization cannot be undone) when
+the code needs no Python object. When it needs one (a user callback, a Qiskit
+circuit), building it initializes the interpreter, so run the code from inside
+a GC traversal instead, where PyO3 forbids attaching and `try_attach` returns
+`None` deterministically (`test_support::run_while_attaching_is_forbidden` in
+`polypus-evaluation`), and check that it did not call the object.
+`tests/python/test_interpreter_shutdown.py` covers a real interpreter shutdown
+end to end.
 
 **An error that may hold a `PyErr` is formatted only if its `Display` is
 attach-safe.** The pyo3-free layers log errors with `{e}` while the thread is
@@ -525,15 +570,16 @@ while detached is never carried as a bare `PyErr`: it is carried as
 `polypus_infrastructure::DisplaySafePyErr` (in `attach.rs`), whose `Display`
 and `Debug` attach through `attach_or`. With the interpreter available its text
 is the `PyErr`'s; without it, a fixed fallback (`DisplaySafePyErr::UNAVAILABLE`).
-It is the only authorized carrier: `seam_error` boxes it into
+It is the only authorized carrier of a Python exception
+(`InterpreterUnavailable`, above, carries none): `seam_error` boxes it into
 `BackendError::External`, a callback observable into
 `ObservableError::External`, and `EvaluationError::Python` / `Qiskit` hold one.
-The FFI edge (`polypus::exceptions`) downcasts only to it and re-raises the
-original `PyErr` (`into_inner`); a bare `PyErr` boxed by mistake is mapped like
-any other provider error, losing its class, so a C-1 test that exercises that
-path fails instead of passing silently. Formatting a bare `PyErr` remains fine
-where the thread is known to be attached, inside an `attach` closure (as the
-backends' `log::error!` calls next to `seam_error` do).
+The FFI edge (`polypus::exceptions`) downcasts only to it to recover a Python
+exception, and re-raises the original `PyErr` (`into_inner`); a bare `PyErr`
+boxed by mistake is mapped like any other provider error, losing its class, so a
+C-1 test that exercises that path fails instead of passing silently. Formatting
+a bare `PyErr` remains fine where the thread is known to be attached, inside an
+`attach` closure (as the backends' `log::error!` calls next to `seam_error` do).
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over
