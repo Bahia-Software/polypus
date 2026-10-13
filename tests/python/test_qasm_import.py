@@ -42,7 +42,7 @@ class TestQasmImport:
         qasm = polypus.Circuit(1).ry(0, polypus.Param(0)).to_qasm2([math.pi])
         imported = polypus.Circuit.from_qasm2(qasm)
         assert imported.num_params == 0
-        assert f"ry({math.pi:.12f})" in imported.to_qasm2()
+        assert f"ry({math.pi!r})" in imported.to_qasm2()
 
     def test_imports_qiskit_dumps_output(self):
         import polypus
@@ -91,7 +91,7 @@ class TestQasmImport:
         qasm = polypus.Circuit(2).h(0).cx(0, 1).to_qasm2()
         qc = polypus.Circuit.from_qasm2(qasm).rz(1, 0.5).measure_all()
         out = qc.to_qasm2()
-        assert "rz(0.500000000000) q[1];" in out
+        assert "rz(0.5) q[1];" in out
         assert out.endswith("measure q -> c;\n")
 
     def test_parse_error_carries_line_number(self):

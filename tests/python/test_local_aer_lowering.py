@@ -50,8 +50,8 @@ def _program(case, measure=True):
     if measure:
         lines.append(f"creg c[{N_QUBITS}];")
     for q in range(N_QUBITS):
-        lines.append(f"ry({0.3 + 0.4 * q:.12f}) q[{q}];")
-        lines.append(f"rz({0.2 + 0.5 * q:.12f}) q[{q}];")
+        lines.append(f"ry({0.3 + 0.4 * q!r}) q[{q}];")
+        lines.append(f"rz({0.2 + 0.5 * q!r}) q[{q}];")
     lines.append(statement)
     if measure:
         lines.append("measure q -> c;")
