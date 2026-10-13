@@ -25,7 +25,7 @@ Rules of the road:
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `release.yml` `gate` job (tag ↔ Cargo) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
@@ -610,6 +610,7 @@ The workspace `Cargo.toml` version (`[workspace.package].version`) is the
 **single source of truth**. Everything else must equal it exactly:
 
 - a release tag `vX.Y.Z`;
+- the root `version` of `CITATION.cff`;
 - the version of the installed `polypus-quantum` distribution, which maturin
   derives from it at build time;
 - `polypus.__version__`, a `str` the compiled extension sets from
@@ -617,20 +618,29 @@ The workspace `Cargo.toml` version (`[workspace.package].version`) is the
   rather than whatever distribution metadata happens to be installed. It is
   listed in `polypus.__all__`.
 
+The release workflow refuses to publish when the tag and `Cargo.toml` diverge.
+
 *Historical note: tag and Cargo.toml diverged at 0.6.0 (see CHANGELOG). The
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
 **Enforcing checks:**
 
-- Tag ↔ Cargo: the `gate` job of `.github/workflows/release.yml` refuses a tag
-  push whose tag is not exactly `v` + the workspace version, before any wheel is
-  built or published.
-- `polypus.__version__` ↔ Cargo ↔ installed distribution:
+- Tag ↔ `Cargo.toml`: the `gate` job of `.github/workflows/release.yml`, on
+  every tag push (it reads `[workspace.package].version` and refuses a tag
+  other than `v<version>`).
+- `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
+  request and push to `main` (`.github/scripts/hygiene.py`, rule
+  `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
+- `polypus.__version__` ↔ `Cargo.toml` ↔ installed distribution:
   `tests/python/test_version_coherence.py`, in the CI Python suite against the
   installed wheel. Its distribution comparison skips only when no
   `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
   only when the tests run outside the repository.
+
+The release gate requires a green `ci.yml` run for the tagged commit but not a
+green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
+releases.
 
 ---
 

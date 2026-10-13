@@ -52,6 +52,7 @@ python -m mypy.stubtest polypus \
                                            # typing stubs vs the installed extension
                                            # (needs the wheel installed and mypy from
                                            #  requirements-dev.txt, Python >= 3.10)
+python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
 ```
 
 A green run is a **precondition** for opening a PR, not something to fix
@@ -68,6 +69,49 @@ Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,
 `bench_native_vs_qiskit.py`, `bench_batching.py`) and include the numbers in
 the PR description.
+
+## Repository hygiene
+
+`.github/workflows/hygiene.yml` runs `.github/scripts/hygiene.py` (standard
+library only, Python ≥ 3.9) on every pull request and push to `main`. It
+rejects:
+
+- internal notes and local tool configuration that `.gitignore` already
+  excludes, and any file added although a versioned `.gitignore` ignores it;
+- infrastructure data and credentials on added lines: cluster file-system
+  paths, login-node names, private IPv4 addresses, private-key headers and
+  GitHub tokens;
+- notebooks under `tutorials/` with outputs or execution counts;
+- blobs larger than 1 MiB;
+- a `CITATION.cff` version different from `Cargo.toml` (contract C-6);
+- submodules.
+
+Run it before pushing:
+
+```bash
+python .github/scripts/hygiene.py --base origin/main
+```
+
+It analyses **commits** — the net diff between the merge base and `HEAD` —
+not uncommitted changes, so commit first. Renamed files are analysed as new
+files. Exit code 0 means clean, 1 violations, 2 a configuration or execution
+error. The output names the file, line and rule, never the matched text.
+
+A notebook with outputs is fixed with `nbstripout <notebook>`, then commit the
+result; `nbstripout --install` once per clone prevents it.
+
+Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
+`RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
+reason. Forbidden names, notebooks, versions and submodules admit none.
+Changes to the allow list, the script, the workflow or the policy-relevant
+`.gitignore` files need explicit human review.
+
+Maintainers also run private patterns, stored as a repository secret, on each
+push to `main`; pull requests never receive that secret, so a green PR means
+the public rules passed. A post-merge finding cannot undo the publication.
+The check covers the net diff only, not every intermediate commit nor the
+existing history, and does not replace checking your own changes before
+pushing.
 
 ## Lint policy
 
