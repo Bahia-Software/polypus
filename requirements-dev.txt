@@ -24,6 +24,13 @@ pytest>=8.0
 # `ruff check` and `ruff format --check`)
 ruff==0.16.1  # pinned; keep in sync with .github/workflows/ci.yml (see pyproject [tool.ruff.lint])
 
+# Typing stubs check: `python -m mypy.stubtest polypus` verifies the hand-written
+# python/polypus/*.pyi against the compiled extension (docs/CONTRIBUTING.md).
+# Pinned like ruff, so a new mypy release cannot turn CI red without a
+# deliberate bump. mypy 2.x needs Python >= 3.10, so it is skipped on the 3.9
+# floor, where CI does not run stubtest (.github/workflows/ci.yml).
+mypy==2.4.0; python_version >= "3.10"
+
 # Strips outputs from tutorials/*.ipynb on commit (.gitattributes); after
 # installing, run `nbstripout --install` once per clone to register the git
 # filter locally (the filter definition itself is never stored in the repo).

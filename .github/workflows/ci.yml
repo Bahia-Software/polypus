@@ -285,6 +285,21 @@ jobs:
         run: python -m compileall -q examples benchmarks
       - name: Run Python tests
         run: pytest tests/python
+      # The hand-written typing stubs (python/polypus/*.pyi) must match the
+      # compiled extension just installed: stubtest fails on a renamed or
+      # missing parameter, a changed default or a name the stubs do not declare.
+      # mypy comes from requirements-dev.txt, where it is pinned; it needs
+      # Python >= 3.10, so only the latest leg runs this. The stubs use only
+      # `typing`, so they stay valid for 3.9 users.
+      - name: Check typing stubs against the extension (stubtest)
+        if: matrix.python-version == '3.13'
+        env:
+          # Importing polypus would otherwise calibrate the machine (#176).
+          POLYPUS_NO_AUTOCALIBRATE: "1"
+        run: >
+          python -m mypy.stubtest polypus
+          --allowlist tests/python/stubtest_allowlist.txt
+          --mypy-config-file tests/python/stubtest_mypy.ini
 
   # Execute every tutorial notebook headless against this PR's own build, so a
   # broken notebook (a stale API call, a typo introduced while editing) fails

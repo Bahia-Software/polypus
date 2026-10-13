@@ -46,6 +46,12 @@ cargo test --workspace                     # all crates, no hand-maintained list
 cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
 cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
 pytest tests/python                        # needs the extension installed
+python -m mypy.stubtest polypus \
+  --allowlist tests/python/stubtest_allowlist.txt \
+  --mypy-config-file tests/python/stubtest_mypy.ini
+                                           # typing stubs vs the installed extension
+                                           # (needs the wheel installed and mypy from
+                                           #  requirements-dev.txt, Python >= 3.10)
 ```
 
 A green run is a **precondition** for opening a PR, not something to fix
