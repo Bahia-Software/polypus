@@ -25,7 +25,7 @@ Rules of the road:
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
+| C-6 | Version coherence | `release.yml` `gate` job (tag ↔ Cargo) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
@@ -606,19 +606,31 @@ silently-poisoned result.
 
 ## C-6 · Version coherence
 
-The workspace `Cargo.toml` version is the **single source of truth**. A release
-tag `vX.Y.Z` must match it exactly, and the Python package version is derived
-from it at build time. The release workflow refuses to publish when they
-diverge.
+The workspace `Cargo.toml` version (`[workspace.package].version`) is the
+**single source of truth**. Everything else must equal it exactly:
+
+- a release tag `vX.Y.Z`;
+- the version of the installed `polypus-quantum` distribution, which maturin
+  derives from it at build time;
+- `polypus.__version__`, a `str` the compiled extension sets from
+  `CARGO_PKG_VERSION` when it is built, so it names the binary actually loaded
+  rather than whatever distribution metadata happens to be installed. It is
+  listed in `polypus.__all__`.
 
 *Historical note: tag and Cargo.toml diverged at 0.6.0 (see CHANGELOG). The
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
-**Enforcing check:** *not yet present.* There is no `hygiene.yml` (nor a
-version-coherence step in any current workflow); coherence is maintained by
-convention until the release-workflow gate lands with 0.7.0 (see the historical
-note above).
+**Enforcing checks:**
+
+- Tag ↔ Cargo: the `gate` job of `.github/workflows/release.yml` refuses a tag
+  push whose tag is not exactly `v` + the workspace version, before any wheel is
+  built or published.
+- `polypus.__version__` ↔ Cargo ↔ installed distribution:
+  `tests/python/test_version_coherence.py`, in the CI Python suite against the
+  installed wheel. Its distribution comparison skips only when no
+  `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
+  only when the tests run outside the repository.
 
 ---
 
