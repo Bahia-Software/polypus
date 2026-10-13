@@ -165,12 +165,13 @@ The Rust orchestration layer now returns a typed `Result` on every path:
 - **The interpreter is unavailable.** With the interpreter unavailable (it is
   finalizing, say, while a run is still going on a daemon thread), the code a
   run reaches inside `detach` that needs Python (the Aer/CUNQA seam calls, the
-  Qiskit binding, the user's callbacks) returns a typed error,
-  `polypus_infrastructure::InterpreterUnavailable`, that the edge raises as
-  `KeyboardInterrupt` ("the run was aborted: …", the class an interrupted run
-  gets); never a panic. It travels boxed in the same `External` variants and is
-  downcast after `DisplaySafePyErr`, so a seam exception keeps its class
-  (ENGINEERING.md §9).
+  Qiskit binding, the user's callbacks, the between-wave interrupt guard)
+  returns a typed error, `polypus_infrastructure::InterpreterUnavailable`, that
+  the edge raises as `KeyboardInterrupt` ("the run was aborted: …", the class an
+  interrupted run gets); never a panic. It travels boxed in the same `External`
+  variants and is downcast after `DisplaySafePyErr`, so a seam exception keeps
+  its class (ENGINEERING.md §9). `polypus.statevector`, cancelled by its
+  interrupt hook for the same reason, raises the same `KeyboardInterrupt`.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
@@ -259,7 +260,9 @@ shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
 `python_carrying_errors_format_without_an_interpreter` and the
 `*_when_attaching_is_forbidden` tests in `crates/polypus-evaluation/src/`
 (`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
-among them).
+among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
+`statevector_cancellation_raises_keyboard_interrupt` in
+`crates/polypus/src/bindings/mod.rs`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the

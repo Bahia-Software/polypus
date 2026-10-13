@@ -197,7 +197,7 @@ fn external_to_pyerr(boxed: Box<dyn std::error::Error + Send + Sync>) -> PyErr {
 /// detached could not attach to the interpreter
 /// ([`InterpreterUnavailable`]): the class `Aborted` and a Ctrl+C get, since
 /// the run is abandoned either way and was not a Polypus failure.
-fn interpreter_unavailable_to_pyerr(err: InterpreterUnavailable) -> PyErr {
+pub(crate) fn interpreter_unavailable_to_pyerr(err: InterpreterUnavailable) -> PyErr {
     PyKeyboardInterrupt::new_err(format!("the run was aborted: {err}"))
 }
 

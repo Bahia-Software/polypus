@@ -120,13 +120,14 @@ boundary stays out-of-process and explicit; see
     `py.check_signals()` is `SignalInterrupt` in
     `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
     detached, so it attaches through `attach_or` rather than `Python::attach`
-    and aborts the run (`BackendError::Aborted`, raised as `KeyboardInterrupt`)
-    when the interpreter cannot be reached — see below and §9. `train`,
-    `qml.train` and `run_quantum_circuit` build a guarded token with it and
-    drive the run through `Scheduler::run_cancellable`. A pure-Rust caller uses
-    a guard-less token (`Scheduler::run`) and the check is a no-op — which is
-    why `run` is documented as **not** interruptible and is never used on a
-    Python-facing path.
+    and aborts the run with `InterpreterUnavailable` (raised as
+    `KeyboardInterrupt`, like every other site reached while detached) when the
+    interpreter cannot be reached — see below and §9. `train`, `qml.train` and
+    `run_quantum_circuit` build a guarded token with it and drive the run
+    through `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less
+    token (`Scheduler::run`) and the check is a no-op — which is why `run` is
+    documented as **not** interruptible and is never used on a Python-facing
+    path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
@@ -212,13 +213,13 @@ boundary stays out-of-process and explicit; see
   *why* — a signal, a deadline, a cancel button all look the same to it. Only
   `statevector` fills that hook with a `py.check_signals()` call. The hook runs
   inside `detach`, and `detach` resets the thread's attachment, so attaching
-  there is a *fresh* attach, not a reuse: `Python::attach` could panic, or
+  there is a *fresh* attach, not a reuse: `Python::attach` could panic, hang, or
   attach to a finalizing interpreter, if the interpreter were shutting down. It
   attaches through `attach_or` instead and treats an unreachable interpreter as
-  a cancellation, raised as `KeyboardInterrupt` — the same class the planner's
-  between-wave guard (`SignalInterrupt`) gets for the same event, since in both
-  cases the run is aborted rather than given invalid input — see §9. Two rules
-  make it work:
+  a cancellation, raised as the same `KeyboardInterrupt` ("the run was aborted:
+  …", from `InterpreterUnavailable`) that the planner's between-wave guard
+  (`SignalInterrupt`) gets for the same event, since in both cases the run is
+  aborted rather than given invalid input — see §9. Two rules make it work:
   - **Throttle inside the pure crate, not at the Python boundary.** The hook is
     called at most once per ~25ms of wall clock (with the clock itself read once
     per ~64k amplitude updates), so its frequency is decoupled from gate cost —
@@ -525,21 +526,24 @@ reaches inside `py.detach` that needs Python attaches with `attach_or`: the Aer
 and CUNQA `run_circuits`, `LocalBackend::capabilities_for`, CUNQA's `raise_qpus`
 (it fails before anything is asked of SLURM), the noise-model clone in
 `Infrastructure::create_backend` (only when there is a noise model), the Qiskit
-parameter binding, `PyCallbackObservable`, the supervised objectives and
-`PyVarianceOracle`. The `attach_or` "unavailable" branch of each of these sites
-returns `polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an
-error that holds nothing from Python and so can be formatted, logged or dropped
-anywhere. It is boxed in `BackendError::External` (`From` impls exist for
-`BackendError`, `InfrastructureError` and `EvaluationError`) or in
-`ObservableError::External`, never added as a variant: none of those enums is
-`#[non_exhaustive]`, and `BackendError` is the third-party backend contract. A
-site whose signature cannot fail (`VarianceOracle`) records it in the run's
-`OracleErrorSlot` and returns its finite sentinel, as it does for a callback
-error. The FFI edge downcasts it after `DisplaySafePyErr` and raises
-`KeyboardInterrupt` ("the run was aborted: …"), the class
-`BackendError::Aborted` and a Ctrl+C get: the run is abandoned and its result
-could not reach Python anyway (contract C-1, failure modes). A Qiskit circuit is
-held as `Arc<Py<PyAny>>` inside `QiskitCircuit`, so `duplicate()`, which the
+parameter binding, `PyCallbackObservable`, the supervised objectives,
+`PyVarianceOracle` and the planner's between-wave guard (`SignalInterrupt`). The
+`attach_or` "unavailable" branch of each of these sites returns
+`polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an error that
+holds nothing from Python and so can be formatted, logged or dropped anywhere.
+It is boxed in `BackendError::External` (`From` impls exist for `BackendError`,
+`InfrastructureError` and `EvaluationError`) or in `ObservableError::External`,
+never added as a variant: none of those enums is `#[non_exhaustive]`, and
+`BackendError` is the third-party backend contract. A site whose signature
+cannot fail (`VarianceOracle`) records it in the run's `OracleErrorSlot` and
+returns its finite sentinel, as it does for a callback error. The FFI edge
+downcasts it after `DisplaySafePyErr` and raises `KeyboardInterrupt` ("the run
+was aborted: …"), the class `BackendError::Aborted` and a Ctrl+C get: the run is
+abandoned and its result could not reach Python anyway (contract C-1, failure
+modes). Outside the scheduler, `statevector`'s cancellation hook also attaches
+with `attach_or`, but its "unavailable" branch cancels the simulation instead;
+`cancellation_error` then raises the same `KeyboardInterrupt`. A Qiskit circuit
+is held as `Arc<Py<PyAny>>` inside `QiskitCircuit`, so `duplicate()`, which the
 planner calls per wave while detached, shares it without attaching. Dropping a
 `Py` while detached is safe because PyO3 defers the reference-count decrement to
 its reference pool; never enable `pyo3_disable_reference_pool`, which turns that
