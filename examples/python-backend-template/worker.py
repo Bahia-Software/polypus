@@ -10,7 +10,7 @@ contract and is copied verbatim from the template.**
 
 Point Polypus at it with:
 
-    infrastructure="subprocess", options={"command": "python3 /path/to/worker.py"}
+    infrastructure="subprocess", options={"command": ["python3", "/path/to/worker.py"]}
 
 It passes the Polypus conformance battery (see `tests/conformance.rs`).
 

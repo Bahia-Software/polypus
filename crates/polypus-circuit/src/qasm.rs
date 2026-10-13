@@ -3,7 +3,10 @@
 //! Emits the standard header (`OPENQASM 2.0; include "qelib1.inc";`), the
 //! declarations of the gates the circuit calls, one `qreg`/`creg`
 //! declaration pair, and one statement per instruction using the standard
-//! `qelib1.inc` gate names. Angle values are written with 12 decimal places.
+//! `qelib1.inc` gate names. Angle values are written as the shortest decimal
+//! that reads back as the same `f64` ([`crate::expr::fmt_number`]), so an
+//! export loses no precision: `pi/2` is `1.5707963267948966`, which a backend
+//! reads as exactly the angle the circuit holds.
 //!
 //! A declaration imported from OpenQASM 2.0 is re-emitted as it was written.
 //! One imported from OpenQASM 3 is printed from its definition, on one line
@@ -19,17 +22,11 @@
 
 use crate::custom_gate::{BodyOp, GateDefinition};
 use crate::error::CircuitError;
-use crate::expr::{print, Dialect, ExprArena};
+use crate::expr::{fmt_number, print, Dialect, ExprArena};
 use crate::gate::{GateInstruction, GateParam};
 use crate::naming::DefinitionNames;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-
-/// Format an angle with 12 decimal places (≥ 10 required for round-tripping
-/// optimizer outputs without observable precision loss).
-fn fmt_angle(value: f64) -> String {
-    format!("{value:.12}")
-}
 
 /// The OpenQASM 2.0 declarations `roots` need: their definitions and,
 /// transitively, those of the declared gates their bodies call — each once,
@@ -233,7 +230,7 @@ pub(crate) fn write_qasm2(
 
     let mut stack = Vec::new();
     let mut angle = |p: &GateParam| -> Result<String, CircuitError> {
-        Ok(fmt_angle(p.resolve(params, exprs, &mut stack)?))
+        Ok(fmt_number(p.resolve(params, exprs, &mut stack)?))
     };
     // Calls of declared gates resolve their angles apart: `angle` holds `stack`.
     let mut call_stack = Vec::new();
@@ -443,7 +440,7 @@ pub(crate) fn write_qasm2(
                 if values.is_empty() {
                     let _ = writeln!(out, "{name} {};", operands.join(","));
                 } else {
-                    let angles: Vec<String> = values.iter().map(|&v| fmt_angle(v)).collect();
+                    let angles: Vec<String> = values.iter().map(|&v| fmt_number(v)).collect();
                     let _ = writeln!(out, "{name}({}) {};", angles.join(","), operands.join(","));
                 }
             }
@@ -477,12 +474,45 @@ pub(crate) fn write_qasm2(
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_angle;
+    use crate::ParameterizedCircuit;
 
+    /// Every angle is exported as the shortest decimal that reads back as the
+    /// same `f64`, in a form the importer reads: positional, scientific
+    /// outside `1e-5 <= |v| < 1e16`, and negative zero with its sign.
     #[test]
-    fn angles_have_at_least_ten_decimals() {
-        assert_eq!(fmt_angle(0.5), "0.500000000000");
-        assert_eq!(fmt_angle(-1.0), "-1.000000000000");
-        assert_eq!(fmt_angle(std::f64::consts::FRAC_PI_2), "1.570796326795");
+    fn angles_are_exported_at_full_precision() {
+        let cases = [
+            (std::f64::consts::FRAC_PI_2, "1.5707963267948966"),
+            (-std::f64::consts::PI, "-3.141592653589793"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (0.5, "0.5"),
+            (-1.0, "-1.0"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.5e-7, "1.5e-7"),
+            (1e16, "1.0e16"),
+        ];
+        for (value, text) in cases {
+            let statement = format!("rz({text}) q[0];");
+            let source =
+                format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\n{statement}\n");
+            let imported = ParameterizedCircuit::from_qasm2(&source).unwrap();
+            assert_eq!(
+                imported.to_qasm2_with_params(&[]).unwrap(),
+                source,
+                "{value:e}"
+            );
+            let exported = ParameterizedCircuit::new(1)
+                .rz(0, value)
+                .to_qasm2_with_params(&[])
+                .unwrap();
+            assert_eq!(
+                exported.lines().last(),
+                Some(statement.as_str()),
+                "{value:e}"
+            );
+            let back = ParameterizedCircuit::from_qasm2(&exported).unwrap();
+            assert_eq!(back.to_qasm2_with_params(&[]).unwrap(), exported);
+        }
     }
 }

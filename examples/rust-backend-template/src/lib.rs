@@ -65,10 +65,15 @@ impl TemplateBackend {
 
     /// Build from the registry's [`BackendBuildContext`]: read the `endpoint` option
     /// (defaulting to a loopback), plus whatever else your device needs.
+    ///
+    /// Read a string option with `option_str` and a list one (an argv, a list of
+    /// qubits as strings, …) with `option_list`. Both return `Ok(None)` only for an
+    /// absent key; a value of the other shape is a `BackendError::Conversion` — let it
+    /// propagate with `?` rather than defaulting.
     pub fn from_context(
         ctx: &BackendBuildContext,
     ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
-        let endpoint = ctx.option("endpoint").unwrap_or("sim://loopback");
+        let endpoint = ctx.option_str("endpoint")?.unwrap_or("sim://loopback");
         Ok(Arc::new(TemplateBackend::connect(endpoint)?))
     }
 

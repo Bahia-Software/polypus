@@ -353,7 +353,7 @@ impl CustomGate {
     /// qc.try_push(GateInstruction::Custom(call.with_arguments(vec![Param(0)], vec![1]).unwrap()))
     ///     .unwrap();
     /// assert_eq!(qc.num_params, 1);
-    /// assert!(qc.to_qasm2_with_params(&[0.5]).unwrap().contains("g(0.500000000000) q[1];"));
+    /// assert!(qc.to_qasm2_with_params(&[0.5]).unwrap().contains("g(0.5) q[1];"));
     /// ```
     ///
     /// # Errors
