@@ -1,6 +1,6 @@
-//! The `command` option accepts a JSON argv array, so a worker script (or the
-//! interpreter) living under a path with spaces can be launched end to end. The plain
-//! string form is split on whitespace and cannot express such a path.
+//! The `command` option accepts a list of strings (the exact argv), so a worker script
+//! (or the interpreter) living under a path with spaces can be launched end to end.
+//! The plain string form is split on whitespace and cannot express such a path.
 
 mod common;
 
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use polypus_backend::{BackendBuildContext, OptLevel, RunParams};
+use polypus_backend::{BackendBuildContext, OptLevel, OptionValue, RunParams};
 use polypus_subprocess_backend::SubprocessBackend;
 
 /// A scratch directory with a space in its name, removed on drop (also on panic).
@@ -32,26 +32,26 @@ impl Drop for ScratchDir {
     }
 }
 
-fn context(command: String) -> BackendBuildContext {
+fn context(argv: Vec<String>) -> BackendBuildContext {
     BackendBuildContext {
         id: "bridge-argv".to_string(),
         shots: 128,
         n_qpus: 1,
         seed: Some(5),
         opt_level: OptLevel::default(),
-        options: HashMap::from([("command".to_string(), command)]),
+        options: HashMap::from([("command".to_string(), OptionValue::from(argv))]),
     }
 }
 
-/// Build the backend from `command` through the registry path, run one circuit and
-/// check the counts: the end-to-end proof that the argv reached `exec` intact.
-fn assert_worker_answers(command: String) {
+/// Build the backend from the list `argv` through the registry path, run one circuit
+/// and check the counts: the end-to-end proof that the argv reached `exec` intact.
+fn assert_worker_answers(argv: Vec<String>) {
     assert!(
-        command.starts_with('['),
-        "the JSON form is what is under test"
+        argv.iter().any(|arg| arg.contains(' ')),
+        "an argument with a space is what is under test"
     );
-    let backend = SubprocessBackend::from_context(&context(command))
-        .expect("a JSON argv with a spaced path spawns and handshakes");
+    let backend = SubprocessBackend::from_context(&context(argv))
+        .expect("a list argv with a spaced path spawns and handshakes");
     let params = RunParams {
         id: "bridge-argv".to_string(),
         shots: 128,
@@ -68,7 +68,7 @@ fn assert_worker_answers(command: String) {
 }
 
 #[test]
-fn json_argv_launches_a_worker_whose_script_path_has_spaces() {
+fn list_argv_launches_a_worker_whose_script_path_has_spaces() {
     let python = match common::resolve_python() {
         Some(p) => p,
         None => {
@@ -81,13 +81,13 @@ fn json_argv_launches_a_worker_whose_script_path_has_spaces() {
     std::fs::copy(common::worker_script(), &script).expect("copy the worker into the scratch dir");
 
     let argv = vec![python, script.to_string_lossy().into_owned()];
-    assert_worker_answers(serde_json::to_string(&argv).expect("argv serialises to JSON"));
+    assert_worker_answers(argv);
 }
 
 /// The interpreter itself (`argv[0]`) lives under a path with spaces: a symlink to the
 /// resolved Python is created inside the spaced scratch directory.
 #[test]
-fn json_argv_launches_an_interpreter_whose_path_has_spaces() {
+fn list_argv_launches_an_interpreter_whose_path_has_spaces() {
     let python = match common::resolve_python() {
         Some(p) => p,
         None => {
@@ -122,5 +122,5 @@ fn json_argv_launches_an_interpreter_whose_path_has_spaces() {
         interpreter.to_string_lossy().into_owned(),
         script.to_string_lossy().into_owned(),
     ];
-    assert_worker_answers(serde_json::to_string(&argv).expect("argv serialises to JSON"));
+    assert_worker_answers(argv);
 }

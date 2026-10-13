@@ -54,7 +54,7 @@ class TestCircuitConstruction:
 
         qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
         qasm = qc.to_qasm2([math.pi])
-        assert f"ry({math.pi:.12f}) q[0];" in qasm
+        assert f"ry({math.pi!r}) q[0];" in qasm
 
     def test_qiskit_parses_generated_qasm(self):
         import polypus

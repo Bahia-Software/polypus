@@ -11,9 +11,9 @@ use polypus_circuit::ParameterizedCircuit;
 //
 // Whatever it accepts must also round-trip (contract C-2): the export imports
 // again and exporting that is byte-identical — the export is a fixed point,
-// `gate` declarations and calls of declared gates included. (The circuits
-// themselves need not be equal: angles are exported with 12 decimals, and
-// declarations nothing uses are not re-emitted.)
+// `gate` declarations and calls of declared gates included. (The source and
+// the export need not be equal text: numbers are re-written in their shortest
+// round-trip form, and declarations nothing uses are not re-emitted.)
 fuzz_target!(|data: &[u8]| {
     let src = String::from_utf8_lossy(data);
     let Ok(circuit) = ParameterizedCircuit::from_qasm2(&src) else {
