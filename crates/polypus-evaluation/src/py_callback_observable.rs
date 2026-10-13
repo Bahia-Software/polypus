@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-use polypus_infrastructure::DisplaySafePyErr;
+use polypus_infrastructure::{attach_or, DisplaySafePyErr, InterpreterUnavailable};
 use polypus_observable::{CostObservable, ObservableError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
@@ -92,19 +92,24 @@ impl CostObservable for PyCallbackObservable {
         // 3) One GIL section: evaluate each missing key exactly once. A Python
         //    exception is boxed verbatim so the entry point re-raises its
         //    original type across the FFI, as a `DisplaySafePyErr` so that
-        //    formatting the error while detached cannot panic.
+        //    formatting the error while detached cannot panic. This runs while
+        //    the run is detached, so the attach is fallible: an unreachable
+        //    interpreter is `InterpreterUnavailable` (docs/ENGINEERING.md §9).
         if !missing.is_empty() {
-            let computed: Vec<(&str, f64)> = Python::attach(|py| {
-                let f = self.cost_fn.bind(py);
-                missing
-                    .iter()
-                    .map(|&k| {
-                        let v: f64 = f.call1((k,))?.extract()?;
-                        Ok((k, v))
-                    })
-                    .collect::<PyResult<Vec<_>>>()
-            })
-            .map_err(|e| ObservableError::External(Box::new(DisplaySafePyErr::from(e))))?;
+            let computed: Vec<(&str, f64)> = attach_or(
+                || Err(ObservableError::External(Box::new(InterpreterUnavailable))),
+                |py| {
+                    let f = self.cost_fn.bind(py);
+                    missing
+                        .iter()
+                        .map(|&k| {
+                            let v: f64 = f.call1((k,))?.extract()?;
+                            Ok((k, v))
+                        })
+                        .collect::<PyResult<Vec<_>>>()
+                        .map_err(|e| ObservableError::External(Box::new(DisplaySafePyErr::from(e))))
+                },
+            )?;
 
             if let Some(cache) = &self.cache {
                 let mut guard = cache.write().unwrap_or_else(|p| p.into_inner());
@@ -187,5 +192,52 @@ mod tests {
             }
             other => panic!("expected ObservableError::External, got {other:?}"),
         }
+    }
+
+    /// The observable is evaluated while the run is detached. When the
+    /// interpreter cannot be attached to, it fails with `InterpreterUnavailable`
+    /// boxed in `ObservableError::External` and never calls the cost function,
+    /// which records every call.
+    #[test]
+    fn fails_typed_without_calling_python_when_attaching_is_forbidden() {
+        use polypus_infrastructure::InterpreterUnavailable;
+        pyo3::Python::initialize();
+        let (module, observables) = Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"calls = []\ndef cost(bitstring):\n    calls.append(bitstring)\n    return 1.0\n",
+                c"observable_recorder.py",
+                c"observable_recorder",
+            )
+            .expect("the recorder compiles");
+            let cost = module
+                .getattr("cost")
+                .expect("the callback exists")
+                .unbind();
+            let observables = [
+                PyCallbackObservable::new(cost.clone_ref(py), false),
+                PyCallbackObservable::new(cost, true),
+            ];
+            (module.unbind(), observables)
+        });
+        for observable in observables {
+            let result = crate::test_support::run_while_attaching_is_forbidden(move || {
+                observable.expectation_batch(&[HashMap::from([("01".to_string(), 3)])])
+            });
+            match result {
+                Err(ObservableError::External(boxed)) => {
+                    assert!(boxed.is::<InterpreterUnavailable>(), "{boxed}")
+                }
+                other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
+            }
+        }
+        Python::attach(|py| {
+            let calls = module.bind(py).getattr("calls").unwrap();
+            assert_eq!(
+                calls.len().unwrap(),
+                0,
+                "the cost function must not be called"
+            );
+        });
     }
 }

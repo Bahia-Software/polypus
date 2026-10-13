@@ -12,7 +12,9 @@
 use std::fmt;
 
 use polypus_circuit::CircuitError;
-use polypus_infrastructure::{BackendError, DisplaySafePyErr, InfrastructureError};
+use polypus_infrastructure::{
+    BackendError, DisplaySafePyErr, InfrastructureError, InterpreterUnavailable,
+};
 use polypus_observable::ObservableError;
 
 /// A failure encountered while evaluating a candidate parameter vector.
@@ -129,6 +131,16 @@ impl std::error::Error for EvaluationError {}
 impl From<BackendError> for EvaluationError {
     fn from(err: BackendError) -> Self {
         EvaluationError::Backend(err)
+    }
+}
+
+/// Code on the evaluation path that runs while detached (binding a Qiskit
+/// circuit, a supervised objective, the QNG variance callback) returns this when
+/// it cannot attach to the interpreter. It is carried as the backend seams carry
+/// it, boxed in `BackendError::External`, so the FFI edge raises it the same way.
+impl From<InterpreterUnavailable> for EvaluationError {
+    fn from(err: InterpreterUnavailable) -> Self {
+        EvaluationError::Backend(err.into())
     }
 }
 
@@ -274,6 +286,19 @@ mod tests {
         let observable = ObservableError::External(Box::new(py_err()));
         assert_eq!(observable.to_string(), fallback);
         assert!(format!("{observable:?}").contains(fallback));
+
+        // An unreachable interpreter holds nothing from Python and formats as
+        // itself; it is boxed in `BackendError::External`, where the FFI edge
+        // downcasts it.
+        let unavailable = EvaluationError::from(InterpreterUnavailable);
+        assert_eq!(unavailable.to_string(), InterpreterUnavailable.to_string());
+        assert!(format!("{unavailable:?}").contains("InterpreterUnavailable"));
+        match unavailable {
+            EvaluationError::Backend(BackendError::External(boxed)) => {
+                assert!(boxed.is::<InterpreterUnavailable>())
+            }
+            other => panic!("expected Backend(External(InterpreterUnavailable)), got {other:?}"),
+        }
     }
 
     /// Run the test `name` alone in a fresh copy of this test binary, in which
