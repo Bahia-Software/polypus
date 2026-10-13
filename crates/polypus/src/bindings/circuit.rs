@@ -960,7 +960,9 @@ impl Circuit {
 /// ```python
 /// import polypus
 /// qft = polypus.circuits.templates.qft(4)
-/// counts = polypus.run_quantum_circuit(qft.measure_all(), shots=1024)
+/// result = polypus.run_quantum_circuit(qft.measure_all(), shots=1024,
+///                                      infrastructure="local", backend="polypus")
+/// counts = result.merged_counts
 /// ```
 #[pyfunction]
 #[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
