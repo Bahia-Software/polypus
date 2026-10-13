@@ -32,7 +32,7 @@
 //!
 //! // Bind (beta, gamma) and export.
 //! let qasm = qc.to_qasm2_with_params(&[0.8, 0.4]).unwrap();
-//! assert!(qasm.contains("rzz(0.400000000000) q[0],q[1];"));
+//! assert!(qasm.contains("rzz(0.4) q[0],q[1];"));
 //! assert!(qasm.ends_with("measure q -> c;\n"));
 //! ```
 

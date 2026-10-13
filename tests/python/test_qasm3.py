@@ -24,7 +24,7 @@ def test_inputs_are_the_parameters_under_their_names():
     )
     assert qc.num_params == 2
     assert qc.param_names == ["beta", "θ"]
-    assert qc.to_qasm2([0.1, 0.2]).endswith("rx(0.500000000000) q[0];\n")
+    assert qc.to_qasm2([0.1, 0.2]).endswith("rx(0.5) q[0];\n")
 
 
 def test_default_names_cover_every_index():

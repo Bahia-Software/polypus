@@ -21,11 +21,11 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | — |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | release-workflow check (planned; see §C-6) | ⚠️ planned (0.7.0) | tag/Cargo diverged at 0.6.0 |
+| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
@@ -342,9 +342,14 @@ Corollaries:
   `to_qasm2(from_qasm2(to_qasm2(c)))` is **byte-identical** to `to_qasm2(c)`
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
   is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
-  reproduces the same instruction sequence and parameters as `c`. Conversely,
-  a single gate statement already in canonical form (a `q` register, 12-decimal
-  angles, canonical spelling) is re-emitted byte-identically:
+  reproduces the same instruction sequence and parameters as `c`, angles
+  bit-for-bit: an angle is written as the shortest decimal that reads back as
+  the same binary64, in the number format of the OpenQASM 3 profile (C-10), so
+  a backend receives exactly the circuit's angles (`pi/2` is
+  `1.5707963267948966`; rounded, it is not a Clifford angle to Aer, which then
+  simulates with a statevector instead of the stabilizer method). Conversely,
+  a single gate statement already in canonical form (a `q` register, angles in
+  that format, canonical spelling) is re-emitted byte-identically:
   `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
   fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
   for its own canonical form (C-10).
@@ -385,8 +390,9 @@ Corollaries:
 `crates/polypus-circuit/tests/contracts.rs` (export → import → export per gate
 and for a circuit using every instruction kind — an exhaustive match fails the
 build when a new variant is not covered — plus canonical statement → import →
-export byte identity per gate, `cu1`/`cp` spelling preservation, and every
-angled gate exported with expressions as with their values); the
+export byte identity per gate, `cu1`/`cp` spelling preservation, every
+angled gate exported with expressions as with their values, and every angled
+gate's angles read back bit-for-bit); the
 table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; the
 QIR-vs-simulator unitary-equivalence test in
 `crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
@@ -607,18 +613,26 @@ silently-poisoned result.
 ## C-6 · Version coherence
 
 The workspace `Cargo.toml` version is the **single source of truth**. A release
-tag `vX.Y.Z` must match it exactly, and the Python package version is derived
-from it at build time. The release workflow refuses to publish when they
-diverge.
+tag `vX.Y.Z` must match it exactly, the root `version` of `CITATION.cff` must
+equal it, and the Python package version is derived from it at build time. The
+release workflow refuses to publish when the tag and `Cargo.toml` diverge.
 
 *Historical note: tag and Cargo.toml diverged at 0.6.0 (see CHANGELOG). The
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
-**Enforcing check:** *not yet present.* There is no `hygiene.yml` (nor a
-version-coherence step in any current workflow); coherence is maintained by
-convention until the release-workflow gate lands with 0.7.0 (see the historical
-note above).
+**Enforcing checks:**
+
+- Tag ↔ `Cargo.toml`: the `gate` job of `.github/workflows/release.yml`, on
+  every tag push (it reads `[workspace.package].version` and refuses a tag
+  other than `v<version>`).
+- `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
+  request and push to `main` (`.github/scripts/hygiene.py`, rule
+  `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
+
+The release gate requires a green `ci.yml` run for the tagged commit but not a
+green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
+releases.
 
 ---
 

@@ -49,7 +49,7 @@ pub use planner::{
 };
 pub use registry::{
     create_registered_backend, is_registered, register_backend, registered_names,
-    BackendBuildContext, BackendFactory,
+    BackendBuildContext, BackendFactory, OptionValue,
 };
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 

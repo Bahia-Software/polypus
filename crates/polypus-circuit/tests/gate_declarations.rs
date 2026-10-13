@@ -48,8 +48,8 @@ gate ecr q0,q1 {{ s q0; sx q1; cx q0,q1; x q0; }}\n\
 qreg q[3];\n\
 creg c[3];\n\
 h q[0];\n\
-ryy(0.300000000000) q[2],q[0];\n\
-xx_plus_yy(0.300000000000,-0.100000000000) q[1],q[2];\n\
+ryy(0.3) q[2],q[0];\n\
+xx_plus_yy(0.3,-0.1) q[1],q[2];\n\
 ecr q[0],q[1];\n\
 measure q -> c;\n"
     );
@@ -89,7 +89,7 @@ fn nested_declarations_are_reemitted_with_their_dependencies() {
     let src = format!(
         "{HEADER}gate inner(t) a {{ rz(t/2) a; }}\n\
 gate outer(t) a,b {{ inner(t) b; cx a,b; inner(-t) b; }}\n\
-qreg q[2];\nouter(1.000000000000) q[0],q[1];\n"
+qreg q[2];\nouter(1.0) q[0],q[1];\n"
     );
     let imported = parse(&src);
     assert_eq!(imported.gates.len(), 1);
@@ -553,10 +553,7 @@ fn calls_take_free_parameters_and_expressions() {
     assert_eq!(bound_call.expand(&[]), reference.expand(&[]));
 
     let qasm = qc.to_qasm2_with_params(&values).unwrap();
-    assert!(
-        qasm.contains("g(0.500000000000,0.500000000000) q[1],q[0];"),
-        "{qasm}"
-    );
+    assert!(qasm.contains("g(0.5,0.5) q[1],q[0];"), "{qasm}");
     assert_eq!(qasm, bound.to_qasm2());
     assert_eq!(parse(&qasm).to_qasm2_with_params(&[]).unwrap(), qasm);
     assert_eq!(qc.to_qir_with_params(&values).unwrap(), bound.to_qir());

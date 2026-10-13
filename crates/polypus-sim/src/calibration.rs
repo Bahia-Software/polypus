@@ -606,8 +606,31 @@ fn progress_stamp(path: Option<&Path>) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
+/// The time source of [`acquire_cache_lock`]'s wait: when it is now, and how a
+/// poll pauses. Production uses [`SystemClock`]. The lock tests drive a scripted
+/// clock instead, so whether a holder's write lands before the waiter's deadline
+/// is fixed by the script, not by how the runner happens to schedule threads.
+trait LockClock {
+    fn now(&self) -> Instant;
+    fn sleep(&mut self, pause: Duration);
+}
+
+/// Wall-clock time and a real `thread::sleep`.
+struct SystemClock;
+
+impl LockClock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&mut self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
+}
+
 /// Take an exclusive advisory lock on `lock_path` (flock(2) on Unix, LockFileEx
-/// on Windows, via `fs4`), waiting until `timeout` passes **with no progress**.
+/// on Windows, via `fs4`), waiting until `timeout` passes **with no progress**,
+/// as measured on `clock` ([`SystemClock`] outside tests).
 /// The lock is held for as long as the returned `File` lives and released when
 /// it is dropped (or when the process dies, so a crashed writer never wedges
 /// the cache).
@@ -648,7 +671,11 @@ fn progress_stamp(path: Option<&Path>) -> Option<(SystemTime, u64)> {
 /// cross-node result is one lost entry, recalibrated later by the node that
 /// lost it. The import-time secondary-rank skip (`python/polypus/__init__.py`)
 /// keeps simultaneous cross-node writers rare to begin with.
-fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
+fn acquire_cache_lock(
+    lock_path: &Path,
+    timeout: Duration,
+    clock: &mut impl LockClock,
+) -> Option<File> {
     let file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -664,7 +691,7 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
             return None;
         }
     };
-    let mut deadline = Instant::now() + timeout;
+    let mut deadline = clock.now() + timeout;
     // Both set on the first `WouldBlock`, so an uncontended take never touches
     // the cache: the file to watch, and its stamp when last looked at.
     let mut watched: Option<Option<PathBuf>> = None;
@@ -683,9 +710,9 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
                 {
                     // Someone wrote the cache since the last look: the lock is
                     // alive, so the wait for a stale one starts over.
-                    deadline = Instant::now() + timeout;
+                    deadline = clock.now() + timeout;
                 }
-                if Instant::now() >= deadline {
+                if clock.now() >= deadline {
                     log::warn!(
                         "no progress for {timeout:?} while waiting for calibration cache lock \
                          {}; treating it as stale and writing without it",
@@ -693,7 +720,7 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Option<File> {
                     );
                     return None;
                 }
-                std::thread::sleep(LOCK_POLL);
+                clock.sleep(LOCK_POLL);
             }
             Err(fs4::TryLockError::Error(e)) => {
                 log::warn!(
@@ -727,11 +754,22 @@ fn persist_entry(
     threshold: usize,
     lock_timeout: Duration,
 ) -> std::io::Result<()> {
+    persist_entry_with(path, key, threshold, lock_timeout, &mut SystemClock)
+}
+
+/// [`persist_entry`] waiting for the lock on an explicit [`LockClock`].
+fn persist_entry_with(
+    path: &Path,
+    key: String,
+    threshold: usize,
+    lock_timeout: Duration,
+    clock: &mut impl LockClock,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     // Held until the end of this function; dropping it releases the lock.
-    let _lock = acquire_cache_lock(&lock_path_for(path), lock_timeout);
+    let _lock = acquire_cache_lock(&lock_path_for(path), lock_timeout, clock);
     let cached = merged_cache(read_cache_from(path), key, threshold);
     write_cache_to(path, &cached)
 }
@@ -1427,12 +1465,13 @@ core id\t\t: 0
         let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("parallel_threshold.json.lock");
-        let held = acquire_cache_lock(&lock, LOCK_TIMEOUT).expect("uncontended lock");
+        let held =
+            acquire_cache_lock(&lock, LOCK_TIMEOUT, &mut SystemClock).expect("uncontended lock");
         let start = Instant::now();
-        assert!(acquire_cache_lock(&lock, Duration::from_millis(50)).is_none());
+        assert!(acquire_cache_lock(&lock, Duration::from_millis(50), &mut SystemClock).is_none());
         assert!(start.elapsed() >= Duration::from_millis(50));
         drop(held);
-        assert!(acquire_cache_lock(&lock, LOCK_TIMEOUT).is_some());
+        assert!(acquire_cache_lock(&lock, LOCK_TIMEOUT, &mut SystemClock).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1445,7 +1484,8 @@ core id\t\t: 0
         let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
         let path = dir.join("parallel_threshold.json");
         std::fs::create_dir_all(&dir).unwrap();
-        let _held = acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT).expect("lock");
+        let _held = acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT, &mut SystemClock)
+            .expect("lock");
         persist_entry(&path, XEON_8.to_owned(), 16, Duration::from_millis(20))
             .expect("degraded write still succeeds");
         assert_eq!(read_cache_from(&path), Some(cached(&[(XEON_8, 16)])));
@@ -1509,13 +1549,39 @@ core id\t\t: 0
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A holder's rewrite in the lock tests below: a plain write, no temp file
-    /// and no `sync_all`. What those tests time is the waiter seeing progress,
-    /// so the progress must not wait on the disk: one `write_cache_to` slowed by
-    /// a loaded runner's fsync past `lock_timeout` would read as a stale lock.
-    fn rewrite_without_fsync(path: &Path, cached: &CachedCalibration) {
-        let json = serde_json::to_vec(cached).expect("a cache always serialises");
-        std::fs::write(path, json).expect("temp dir is writable");
+    /// A [`LockClock`] whose time moves only when the waiter pauses: each poll
+    /// advances it by exactly the pause, then runs `holder` with the time since
+    /// the start, standing in for what the lock holder does meanwhile. The lock
+    /// tests below run their holder on it rather than on a thread of its own: a
+    /// holder thread descheduled past the waiter's timeout (a loaded CI runner, a
+    /// stolen vCPU) is indistinguishable from a stale lock, so the waiter rightly
+    /// gave up and the test failed at random. The lock and the cache are real;
+    /// only the interleaving is scripted.
+    struct ScriptedClock<F: FnMut(Duration)> {
+        start: Instant,
+        elapsed: Duration,
+        holder: F,
+    }
+
+    impl<F: FnMut(Duration)> ScriptedClock<F> {
+        fn new(holder: F) -> Self {
+            Self {
+                start: Instant::now(),
+                elapsed: Duration::ZERO,
+                holder,
+            }
+        }
+    }
+
+    impl<F: FnMut(Duration)> LockClock for ScriptedClock<F> {
+        fn now(&self) -> Instant {
+            self.start + self.elapsed
+        }
+
+        fn sleep(&mut self, pause: Duration) {
+            self.elapsed += pause;
+            (self.holder)(self.elapsed);
+        }
     }
 
     #[test]
@@ -1538,53 +1604,34 @@ core id\t\t: 0
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("parallel_threshold.json");
         write_cache_to(&path, &cached(&[("seed", 0)])).expect("temp dir is writable");
-        let holding = std::sync::atomic::AtomicBool::new(false);
-        let released = std::sync::atomic::AtomicBool::new(false);
-        let (holder_keys, waited, released_on_return) = std::thread::scope(|s| {
-            let holder = s.spawn(|| {
-                let lock = acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT)
-                    .expect("uncontended lock");
-                // One snapshot, as a real holder takes: every rewrite below is
-                // built from it, so an entry added behind its back is dropped.
-                let snapshot = read_cache_from(&path).expect("seed parses");
-                holding.store(true, Ordering::SeqCst);
-                let start = Instant::now();
-                let mut keys = Vec::new();
-                while start.elapsed() < holder_runs_for {
-                    std::thread::sleep(rewrite_every);
-                    keys.push(format!("holder-{}", keys.len()));
-                    let mut next = snapshot.clone();
-                    for key in &keys {
-                        next.entries.insert(key.clone(), 1);
-                    }
-                    rewrite_without_fsync(&path, &next);
-                }
-                released.store(true, Ordering::SeqCst);
-                drop(lock);
-                keys
-            });
-            while !holding.load(Ordering::SeqCst) {
-                // A holder that panicked before taking the lock must fail the
-                // test, not leave this loop spinning forever.
-                assert!(
-                    holding.load(Ordering::SeqCst) || !holder.is_finished(),
-                    "holder thread ended without taking the lock"
-                );
-                std::thread::yield_now();
+        let mut lock = Some(
+            acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT, &mut SystemClock)
+                .expect("uncontended lock"),
+        );
+        // One snapshot, as a real holder takes: every rewrite below is built from
+        // it, so an entry added behind its back is dropped.
+        let snapshot = read_cache_from(&path).expect("seed parses");
+        let mut holder_keys = Vec::new();
+        let mut clock = ScriptedClock::new(|now| {
+            if lock.is_none() {
+                return;
             }
-            let start = Instant::now();
-            persist_entry(&path, WAITER_KEY.to_owned(), 7, lock_timeout)
-                .expect("temp dir is writable");
-            let waited = start.elapsed();
-            let released_on_return = released.load(Ordering::SeqCst);
-            (
-                holder.join().expect("holder thread"),
-                waited,
-                released_on_return,
-            )
+            if now >= holder_runs_for {
+                lock = None;
+            } else if now >= rewrite_every * (holder_keys.len() as u32 + 1) {
+                holder_keys.push(format!("holder-{}", holder_keys.len()));
+                let mut next = snapshot.clone();
+                for key in &holder_keys {
+                    next.entries.insert(key.clone(), 1);
+                }
+                write_cache_to(&path, &next).expect("temp dir is writable");
+            }
         });
+        persist_entry_with(&path, WAITER_KEY.to_owned(), 7, lock_timeout, &mut clock)
+            .expect("temp dir is writable");
+        let waited = clock.elapsed;
         assert!(
-            released_on_return,
+            lock.is_none(),
             "the waiter wrote without the lock while a live writer still held it"
         );
         assert!(
@@ -1609,9 +1656,8 @@ core id\t\t: 0
         // The boundary of "no progress": a holder writes for a while, then goes
         // silent while still holding the lock (a wedged writer, or one stuck on a
         // `sync_all` longer than the timeout — the documented limit). The waiter
-        // must give up, but no sooner than `lock_timeout` after the last write.
-        // The holder notes the instant *before* each write, so it is never later
-        // than the change the waiter can observe: the bound below is exact.
+        // must give up a timeout after the last write: no sooner, and no later
+        // than the poll that first sees the deadline passed.
         let lock_timeout = Duration::from_millis(200);
         let progress_for = Duration::from_millis(300);
         let rewrite_every = lock_timeout / 5;
@@ -1620,48 +1666,28 @@ core id\t\t: 0
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("parallel_threshold.json");
         let lock_path = lock_path_for(&path);
-        let holding = std::sync::atomic::AtomicBool::new(false);
-        let waiter_done = std::sync::atomic::AtomicBool::new(false);
-        let (last_write, gave_up_at, took_lock) = std::thread::scope(|s| {
-            let holder = s.spawn(|| {
-                let lock = acquire_cache_lock(&lock_path, LOCK_TIMEOUT).expect("uncontended lock");
-                holding.store(true, Ordering::SeqCst);
-                let start = Instant::now();
-                let mut last_write = start;
-                let mut round = 0;
-                while start.elapsed() < progress_for {
-                    std::thread::sleep(rewrite_every);
-                    round += 1;
-                    let entries: Vec<(String, usize)> =
-                        (0..round).map(|i| (format!("holder-{i}"), i)).collect();
-                    let next = CachedCalibration {
-                        schema: CACHE_SCHEMA,
-                        entries: entries.into_iter().collect(),
-                    };
-                    last_write = Instant::now();
-                    rewrite_without_fsync(&path, &next);
-                }
-                // Silent from here on, still holding the lock.
-                while !waiter_done.load(Ordering::SeqCst) {
-                    std::thread::sleep(LOCK_POLL);
-                }
-                drop(lock);
-                last_write
-            });
-            while !holding.load(Ordering::SeqCst) {
-                // A holder that panicked before taking the lock must fail the
-                // test, not leave this loop spinning forever.
-                assert!(
-                    holding.load(Ordering::SeqCst) || !holder.is_finished(),
-                    "holder thread ended without taking the lock"
-                );
-                std::thread::yield_now();
+        let lock = acquire_cache_lock(&lock_path, LOCK_TIMEOUT, &mut SystemClock)
+            .expect("uncontended lock");
+        let mut rounds = 0u32;
+        let mut last_write = None;
+        let mut clock = ScriptedClock::new(|now| {
+            // Silent once `progress_for` has passed, still holding the lock.
+            if now < progress_for && now >= rewrite_every * (rounds + 1) {
+                rounds += 1;
+                let next = CachedCalibration {
+                    schema: CACHE_SCHEMA,
+                    entries: (0..rounds as usize)
+                        .map(|i| (format!("holder-{i}"), i))
+                        .collect(),
+                };
+                write_cache_to(&path, &next).expect("temp dir is writable");
+                last_write = Some(now);
             }
-            let took_lock = acquire_cache_lock(&lock_path, lock_timeout).is_some();
-            let gave_up_at = Instant::now();
-            waiter_done.store(true, Ordering::SeqCst);
-            (holder.join().expect("holder thread"), gave_up_at, took_lock)
         });
+        let took_lock = acquire_cache_lock(&lock_path, lock_timeout, &mut clock).is_some();
+        let gave_up_at = clock.elapsed;
+        drop(lock);
+        let last_write = last_write.expect("the holder wrote before going silent");
         assert!(
             !took_lock,
             "the lock was held throughout: the waiter must give up"
@@ -1669,10 +1695,16 @@ core id\t\t: 0
         assert!(
             gave_up_at >= last_write + lock_timeout,
             "{}, short of its {lock_timeout:?} timeout",
-            match gave_up_at.checked_duration_since(last_write) {
+            match gave_up_at.checked_sub(last_write) {
                 Some(after) => format!("gave up {after:?} after the last write"),
                 None => "gave up before the last write".to_owned(),
             }
+        );
+        assert!(
+            gave_up_at <= last_write + lock_timeout + LOCK_POLL,
+            "gave up {:?} after the last write: the deadline must restart from it, \
+             not from anything later",
+            gave_up_at - last_write
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
