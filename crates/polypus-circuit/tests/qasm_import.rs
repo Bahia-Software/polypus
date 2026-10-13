@@ -86,8 +86,8 @@ fn imported_angles_match_bound_values() {
             qubit: 0,
             theta: GateParam::Fixed(v),
         } => {
-            // 12 decimal places of precision survive the round-trip.
-            assert!((v - std::f64::consts::PI).abs() < 1e-11);
+            // The angle survives the round trip exactly.
+            assert_eq!(v.to_bits(), std::f64::consts::PI.to_bits());
         }
         other => panic!("expected Ry, got {other:?}"),
     }
@@ -467,10 +467,10 @@ fn id_rejects_wrong_arity_parameters_and_range() {
 #[test]
 fn single_qubit_spellings_are_kept_as_written() {
     let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\n\
-               p(0.100000000000) q[0];\nu1(0.200000000000) q[0];\n\
-               u2(0.300000000000,0.400000000000) q[0];\n\
-               u(0.500000000000,0.600000000000,0.700000000000) q[0];\n\
-               u3(0.500000000000,0.600000000000,0.700000000000) q[0];\n";
+               p(0.1) q[0];\nu1(0.2) q[0];\n\
+               u2(0.3,0.4) q[0];\n\
+               u(0.5,0.6,0.7) q[0];\n\
+               u3(0.5,0.6,0.7) q[0];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     use GateParam::Fixed;
     assert_eq!(
@@ -511,7 +511,7 @@ fn single_qubit_spellings_are_kept_as_written() {
         .to_qasm2_with_params(&[])
         .unwrap();
     assert!(
-        out.ends_with("u(0.100000000000,0.200000000000,0.300000000000) q[0];\ncx q[0],q[1];\n"),
+        out.ends_with("u(0.1,0.2,0.3) q[0];\ncx q[0],q[1];\n"),
         "{out}"
     );
 }
@@ -766,7 +766,7 @@ fn imported_circuit_is_a_first_class_citizen() {
         .rz(1, 0.5) // keep building on top of the import
         .measure_all();
     let out = qc.to_qasm2_with_params(&[]).unwrap();
-    assert!(out.contains("rz(0.500000000000) q[1];"));
+    assert!(out.contains("rz(0.5) q[1];"));
     assert!(out.ends_with("measure q -> c;\n"));
 }
 

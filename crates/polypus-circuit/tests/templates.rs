@@ -83,7 +83,7 @@ fn qft_zero_qubits_is_empty() {
 fn qft_exports_to_qasm() {
     let qasm = qft(3).measure_all().to_qasm2_with_params(&[]).unwrap();
     assert!(qasm.contains("h q[2];"));
-    assert!(qasm.contains("cp(1.570796326795) q[1],q[2];"));
+    assert!(qasm.contains("cp(1.5707963267948966) q[1],q[2];"));
     assert!(qasm.contains("swap q[0],q[2];"));
     assert!(qasm.contains("measure q -> c;"));
 }

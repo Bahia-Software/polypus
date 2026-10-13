@@ -1274,7 +1274,7 @@ fn a_native_and_a_declared_rzz_are_kept_apart() {
         "{qasm2}"
     );
     assert!(
-        qasm2.ends_with("rzz_(0.500000000000) q[0],q[1];\nrzz(0.250000000000) q[1],q[2];\n"),
+        qasm2.ends_with("rzz_(0.5) q[0],q[1];\nrzz(0.25) q[1],q[2];\n"),
         "{qasm2}"
     );
 }
@@ -1364,7 +1364,7 @@ gate q_1(x_) a { u(x_,-x_,6.283185307179586) a; p(2.718281828459045) a; }
 gate wrap(t_) a,b { rzz_(t_) a,b; q_1(-t_) b; cx a,b; cp(t_) a,b; }
 qreg q[2];
 creg c[2];
-wrap(0.125000000000) q[0],q[1];
+wrap(0.125) q[0],q[1];
 measure q -> c;
 "
     );
