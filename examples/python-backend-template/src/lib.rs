@@ -4,7 +4,7 @@
 //! of `polypus-subprocess-backend`'s `worker_template.py`, where the single
 //! `execute_circuits` function returns hardware-free deterministic counts. That is the
 //! whole backend — a `pip install polypus` user points Polypus at it with
-//! `infrastructure="subprocess", options={"command": "python3 worker.py"}`.
+//! `infrastructure="subprocess", options={"command": ["python3", "worker.py"]}`.
 //!
 //! This crate carries no code of its own; its purpose is the test in
 //! `tests/conformance.rs`, which spawns `worker.py` through the real subprocess bridge

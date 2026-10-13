@@ -234,7 +234,7 @@ use polypus_backend::{register_backend, BackendBuildContext, BackendError, Quant
 
 // Your backend implements QuantumBackend (see above).
 register_backend("acme-qpu", |ctx: &BackendBuildContext| {
-    let endpoint = ctx.option("endpoint").unwrap_or("tcp://localhost:9000");
+    let endpoint = ctx.option_str("endpoint")?.unwrap_or("tcp://localhost:9000");
     Ok(Arc::new(AcmeBackend::connect(endpoint)?) as Arc<dyn QuantumBackend>)
 });
 ```
@@ -246,12 +246,31 @@ kwarg below) just works.
 
 **What the factory receives.** A `BackendBuildContext` carries the pyo3-free,
 provider-agnostic construction inputs — `id`, `shots`, `n_qpus`, `seed`,
-`opt_level` — plus an `options: HashMap<String, String>` bag for whatever
+`opt_level` — plus an `options: HashMap<String, OptionValue>` bag for whatever
 provider-specific configuration you need (an endpoint, credentials env names, a
-device id). Strings keep the registry free of any provider-type coupling; read what
-you need with `ctx.option("key")` and ignore the rest. An unknown name yields
+device id, an argv). Each value is an `OptionValue`: `Str(String)` or
+`List(Vec<String>)`. Strings and string lists keep the registry free of any
+provider-type coupling; read what you need and ignore the rest:
+
+- `ctx.option_str("key")?` → `Option<&str>`
+- `ctx.option_list("key")?` → `Option<&[String]>`
+
+Both return `Ok(None)` **only** for an absent key — the one case to fall back to
+your default. A value of the other shape (a list where you read a string, or the
+reverse) is a `BackendError::Conversion` naming the key; propagate it with `?`
+rather than defaulting, so a configuration mistake surfaces as
+`polypus.BackendError` instead of being silently ignored. An unknown name yields
 `BackendError::UnknownInfrastructure` (a clean `ValueError` at the FFI edge), never a
 panic or a silent fallthrough.
+
+> **Migrating from `option()` (breaking change since v0.7.2).** `BackendBuildContext::option` is
+> gone and `options` is now `HashMap<String, OptionValue>`
+> ([ADR 0005](adr/0005-registry-option-values.md)). Replace
+> `ctx.option("k")` with `ctx.option_str("k")?` (the factory already returns a
+> `Result`), and wrap values when building a context or a
+> `BackendConfig::Registered` by hand: `OptionValue::from("…")`,
+> `OptionValue::from(vec![…])`. Python callers passing string values need no
+> change.
 
 **Last registration wins.** Re-registering a name replaces the previous factory, so
 an embedder can deliberately override a built-in (e.g. swap Polypus's `"subprocess"`
@@ -296,8 +315,6 @@ backend against that protocol (like QMIO) is preferable.
 ### Using it from Python
 
 ```python
-import json
-
 import polypus
 
 polypus.run_quantum_circuit(
@@ -305,10 +322,10 @@ polypus.run_quantum_circuit(
     shots=1024,
     infrastructure="subprocess",
     options={
-        # Required: the worker command. A JSON array of strings (argv) when the
-        # value starts with "[" -- the only form that can carry a space inside an
-        # argument; otherwise it is split on whitespace (no quotes, no escapes).
-        "command": json.dumps(["python3", "/path/to/my worker.py"]),
+        # Required: the worker command. A list of strings is the exact argv -- the
+        # form that can carry a space inside an argument; a plain string is split
+        # on whitespace (no quotes, no escapes).
+        "command": ["python3", "/path/to/my worker.py"],
         # Optional:
         "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
         "arm_pdeathsig": "true",  # orphan guard (Linux); default true
@@ -319,21 +336,29 @@ polypus.run_quantum_circuit(
 
 The `options` dict is the same one every entry point (`run_quantum_circuit`,
 `train`, `qml.train`) now accepts, and is how any registered backend receives its
-configuration.
+configuration. Each value is a `str` or a `list`/`tuple` of `str`; anything else
+(`int`, `bool`, `float`, `None`, a `dict`, a list holding a non-`str`) is a
+`TypeError` naming the key, e.g. `options['recv_timeout_ms'] must be a str or a
+list of str, got int` — pass numbers as strings. `local` and `cunqa` take no
+`options` and reject a non-empty dict with `ValueError`.
 
-**The `command` option has two forms.** Option values are plain strings, so the
-argv list travels as JSON text:
+**The `command` option has two forms:**
 
-- **JSON array** — if the value, after leading whitespace, starts with `[`, it must
-  be a JSON array of strings (`json.dumps([...])` in Python), e.g.
-  `["python3", "/path with spaces/worker.py"]`. Use this whenever the interpreter or
-  any argument contains whitespace. A value that starts with `[` but is not a valid
-  non-empty array of strings (malformed JSON, a non-string element, `[]`, an empty
-  `argv[0]`) is rejected with a `BackendError` — it is never silently split on
-  spaces instead.
-- **Plain string** — anything else is split on whitespace into argv. There is **no
-  quote or escape handling**: `python3 "a b.py"` yields the arguments `"a` and `b.py"`.
-  Fine for simple paths; switch to the array form for anything else.
+- **List of strings** — the exact argv, e.g.
+  `["python3", "/path with spaces/worker.py"]` (a tuple works too). Use this
+  whenever the interpreter or any argument contains whitespace. An empty list or an
+  empty `argv[0]` is rejected with a `BackendError`.
+- **Plain string** — split on whitespace into argv. There is **no quote or escape
+  handling**: `python3 "a b.py"` yields the arguments `"a` and `b.py"`. Fine for
+  simple paths; switch to the list form for anything else.
+
+Every other subprocess option is a string; a list there is a `BackendError`.
+
+> **Migration note.** Between v0.7.2 and this change, `main` briefly accepted the
+> argv as a JSON array *inside the string* (`json.dumps([...])`). That form was
+> never released and is gone: a string starting with `[` is now split on whitespace
+> like any other. Pass the list itself instead
+> ([ADR 0005](adr/0005-registry-option-values.md)).
 
 ### Writing the worker
 

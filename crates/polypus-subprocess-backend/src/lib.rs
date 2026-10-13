@@ -60,8 +60,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use polypus_backend::{
-    register_backend, BackendBuildContext, BackendError, BoundCircuit, Counts, QuantumBackend,
-    RunParams,
+    register_backend, BackendBuildContext, BackendError, BoundCircuit, Counts, OptionValue,
+    QuantumBackend, RunParams,
 };
 
 use protocol::{Circuit, Request, Response, PROTOCOL_VERSION};
@@ -613,13 +613,14 @@ impl SubprocessBackend {
 
     /// Build a [`SubprocessBackend`] from a registry [`BackendBuildContext`].
     ///
-    /// Options read: `command` (required; a JSON array of strings such as
-    /// `["python3", "/path with spaces/worker.py"]` when the value starts with `[`,
-    /// otherwise split on whitespace — no quotes or escapes, so use the array form
-    /// for any argument containing a space), `recv_timeout_ms` (default
+    /// Options read: `command` (required; a list of strings is the exact argv, e.g.
+    /// `["python3", "/path with spaces/worker.py"]`, while a string is split on
+    /// whitespace — no quotes or escapes, so use the list form for any argument
+    /// containing a space), `recv_timeout_ms` (default
     /// [`DEFAULT_RECV_TIMEOUT_MS`]; a present-but-malformed value is an error, not a
     /// fallback), `arm_pdeathsig` (default true; false spellings, case-insensitive:
-    /// `false`/`0`/`no`/`off`), `cwd` (optional).
+    /// `false`/`0`/`no`/`off`), `cwd` (optional). Every option but `command` is a
+    /// string; a list there is an error, not a fallback to the default.
     pub fn from_context(
         ctx: &BackendBuildContext,
     ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
@@ -629,28 +630,34 @@ impl SubprocessBackend {
     }
 }
 
-/// Parse the `command` option into an argv.
+/// Read the `command` option into an argv.
 ///
-/// A value that (after leading whitespace) starts with `[` is a JSON array of strings —
-/// the only way to pass an argument containing whitespace. Anything else is split on
-/// whitespace, without quotes or escapes. A value starting with `[` that is not a valid
-/// non-empty string array is an error, never a silent fall-back to the whitespace split.
-fn parse_command(raw: &str) -> Result<Vec<String>, BackendError> {
-    let empty = || {
-        BackendError::Conversion("the 'subprocess' backend's 'command' option is empty".to_string())
-    };
-    let command: Vec<String> = if raw.trim_start().starts_with('[') {
-        serde_json::from_str(raw).map_err(|e| {
-            BackendError::Conversion(format!(
-                "the 'subprocess' backend's 'command' option starts with '[' so it must be a \
-                 JSON array of strings (e.g. [\"python3\", \"worker.py\"]): {e}"
+/// A list of strings is taken as the exact argv — the form for any argument containing
+/// whitespace. A string is split on whitespace, without quotes or escapes (a string
+/// starting with `[` is no exception). Either way the argv must be non-empty with a
+/// non-empty program (`argv[0]`).
+fn command_from_context(ctx: &BackendBuildContext) -> Result<Vec<String>, BackendError> {
+    let command: Vec<String> = match ctx.options.get("command") {
+        None => {
+            return Err(BackendError::Conversion(
+                "the 'subprocess' backend requires a 'command' option (the worker argv)"
+                    .to_string(),
             ))
-        })?
-    } else {
-        raw.split_whitespace().map(str::to_string).collect()
+        }
+        Some(OptionValue::List(argv)) => argv.clone(),
+        Some(OptionValue::Str(raw)) => raw.split_whitespace().map(str::to_string).collect(),
+        // `OptionValue` is non-exhaustive: a value shape added later is not an argv.
+        Some(other) => {
+            return Err(BackendError::Conversion(format!(
+                "the 'subprocess' backend's 'command' option must be a string or a list of \
+                 strings, got {other:?}"
+            )))
+        }
     };
     match command.first() {
-        None => Err(empty()),
+        None => Err(BackendError::Conversion(
+            "the 'subprocess' backend's 'command' option is empty".to_string(),
+        )),
         Some(program) if program.is_empty() => Err(BackendError::Conversion(
             "the 'subprocess' backend's 'command' option has an empty program (argv[0])"
                 .to_string(),
@@ -665,15 +672,10 @@ fn parse_command(raw: &str) -> Result<Vec<String>, BackendError> {
 /// validates rather than silently defaulting a malformed value) is unit-testable
 /// without spawning a process.
 fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, BackendError> {
-    let command_str = ctx.option("command").ok_or_else(|| {
-        BackendError::Conversion(
-            "the 'subprocess' backend requires a 'command' option (the worker argv)".to_string(),
-        )
-    })?;
-    let command = parse_command(command_str)?;
+    let command = command_from_context(ctx)?;
     // A malformed value is a configuration mistake — surface it, don't silently
     // fall back to the default (which only an *absent* key uses).
-    let recv_timeout_ms = match ctx.option("recv_timeout_ms") {
+    let recv_timeout_ms = match ctx.option_str("recv_timeout_ms")? {
         None => DEFAULT_RECV_TIMEOUT_MS,
         Some(v) => v.parse::<u64>().map_err(|_| {
             BackendError::Conversion(format!(
@@ -685,7 +687,7 @@ fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, Ba
     // Boolean option: absent → default true. Present → true unless it is a
     // recognised false spelling. Case- and whitespace-insensitive; the false
     // values are "false", "0", "no", "off".
-    let arm_pdeathsig = match ctx.option("arm_pdeathsig") {
+    let arm_pdeathsig = match ctx.option_str("arm_pdeathsig")? {
         None => true,
         Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -694,7 +696,7 @@ fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, Ba
     };
     Ok(SubprocessConfig {
         command,
-        cwd: ctx.option("cwd").map(str::to_string),
+        cwd: ctx.option_str("cwd")?.map(str::to_string),
         env: Vec::new(),
         recv_timeout: Duration::from_millis(recv_timeout_ms),
         arm_pdeathsig,
@@ -877,9 +879,19 @@ mod tests {
             opt_level: Default::default(),
             options: options
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), OptionValue::from(*v)))
                 .collect(),
         }
+    }
+
+    /// A context whose `command` is the list `argv`, plus the given string options.
+    fn ctx_with_argv(argv: &[&str], options: &[(&str, &str)]) -> BackendBuildContext {
+        let mut ctx = ctx(options);
+        ctx.options.insert(
+            "command".to_string(),
+            OptionValue::from(argv.iter().map(|a| a.to_string()).collect::<Vec<_>>()),
+        );
+        ctx
     }
 
     #[test]
@@ -894,39 +906,36 @@ mod tests {
         config_from_context(&ctx(&[("command", value)])).map(|cfg| cfg.command)
     }
 
-    fn assert_conversion_error(value: &str) {
-        match command_of(value) {
+    fn argv_of(argv: &[&str]) -> Result<Vec<String>, BackendError> {
+        config_from_context(&ctx_with_argv(argv, &[])).map(|cfg| cfg.command)
+    }
+
+    fn assert_conversion_error(result: Result<Vec<String>, BackendError>) {
+        match result {
             Err(BackendError::Conversion(m)) => {
                 assert!(m.contains("command"), "message should name 'command': {m}")
             }
-            other => panic!("expected a Conversion error for {value:?}, got {other:?}"),
+            other => panic!("expected a Conversion error, got {other:?}"),
         }
     }
 
     #[test]
-    fn json_array_command_keeps_arguments_with_spaces_intact() {
-        let cmd = command_of(r#"["python3", "/path with spaces/worker.py", "--flag value"]"#)
-            .expect("a valid JSON array is accepted");
+    fn list_command_is_the_exact_argv() {
+        let cmd = argv_of(&["python3", "/path with spaces/worker.py", "--flag value"])
+            .expect("a non-empty list with a program is accepted");
         assert_eq!(
             cmd,
             ["python3", "/path with spaces/worker.py", "--flag value"]
         );
-        // Leading whitespace before the '[' still selects the JSON form.
-        let cmd = command_of("  \n[\"python3\", \"w.py\"]").unwrap();
-        assert_eq!(cmd, ["python3", "w.py"]);
+        // Nothing is trimmed or re-split inside a list element.
+        assert_eq!(argv_of(&[" py thon "]).unwrap(), [" py thon "]);
     }
 
     #[test]
-    fn invalid_json_command_is_an_error_never_a_whitespace_split() {
-        assert_conversion_error("[]");
-        assert_conversion_error(r#"[""]"#);
-        assert_conversion_error(r#"["", "w.py"]"#);
-        assert_conversion_error(r#"["python3", 3]"#);
-        assert_conversion_error(r#"["python3", null]"#);
-        assert_conversion_error(r#"["python3", "w.py""#); // truncated
-        assert_conversion_error(r#"["python3", "w.py"] trailing"#);
-        // Python-style quoting is not JSON; it must not be split on spaces instead.
-        assert_conversion_error("['python3', 'w.py']");
+    fn empty_list_command_or_empty_program_is_rejected() {
+        assert_conversion_error(argv_of(&[]));
+        assert_conversion_error(argv_of(&[""]));
+        assert_conversion_error(argv_of(&["", "w.py"]));
     }
 
     #[test]
@@ -935,13 +944,34 @@ mod tests {
             command_of("  python3   /path/worker.py --flag ").unwrap(),
             ["python3", "/path/worker.py", "--flag"]
         );
-        // No quote handling: the quotes stay in the tokens, which is why the JSON
-        // array form exists.
+        // No quote handling: the quotes stay in the tokens, which is why the list
+        // form exists.
         assert_eq!(
             command_of(r#"python3 "a b.py""#).unwrap(),
             ["python3", "\"a", "b.py\""]
         );
-        assert_conversion_error("   ");
+        // A string starting with '[' is no exception: it is split like any other
+        // (the JSON-in-a-string form was withdrawn in favour of the list form).
+        assert_eq!(
+            command_of(r#"["python3", "w.py"]"#).unwrap(),
+            [r#"["python3","#, r#""w.py"]"#]
+        );
+        assert_conversion_error(command_of("   "));
+    }
+
+    #[test]
+    fn a_list_in_a_string_option_is_an_error_not_a_default() {
+        for key in ["recv_timeout_ms", "arm_pdeathsig", "cwd"] {
+            let mut ctx = ctx(&[("command", "python3 w.py")]);
+            ctx.options
+                .insert(key.to_string(), OptionValue::from(vec!["1500".to_string()]));
+            match config_from_context(&ctx) {
+                Err(BackendError::Conversion(m)) => {
+                    assert!(m.contains(key), "message should name '{key}': {m}")
+                }
+                other => panic!("a list in '{key}' must be a Conversion error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
