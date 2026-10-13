@@ -174,7 +174,7 @@ fn c2_full_vocabulary_roundtrip_is_byte_stable() {
     let c = full_vocabulary();
     let qasm1 = c.to_qasm2_with_params(&[0.4, -0.9]).unwrap();
     assert!(
-        qasm1.contains("cp(0.750000000000) q[0],q[1];"),
+        qasm1.contains("cp(0.75) q[0],q[1];"),
         "exporter must emit cp:\n{qasm1}"
     );
 
@@ -294,10 +294,10 @@ fn c2_every_gate_statement_reemits_byte_identically() {
         "id q[1];",
         "sx q[2];",
         "sxdg q[0];",
-        "rx(0.250000000000) q[1];",
-        "ry(-1.500000000000) q[2];",
-        "rz(3.141592653590) q[0];",
-        "u3(0.100000000000,0.200000000000,0.300000000000) q[1];",
+        "rx(0.25) q[1];",
+        "ry(-1.5) q[2];",
+        "rz(3.141592653589793) q[0];",
+        "u3(0.1,0.2,0.3) q[1];",
         "cx q[2],q[0];",
         "cz q[1],q[2];",
         "cy q[2],q[1];",
@@ -306,25 +306,25 @@ fn c2_every_gate_statement_reemits_byte_identically() {
         "swap q[1],q[0];",
         "ccx q[2],q[0],q[1];",
         "cswap q[1],q[2],q[0];",
-        "rzz(0.400000000000) q[2],q[1];",
-        "rxx(-0.400000000000) q[1],q[0];",
-        "cp(0.750000000000) q[2],q[0];",
-        "cu1(0.750000000000) q[2],q[0];",
-        "crx(0.500000000000) q[1],q[0];",
-        "cry(-0.500000000000) q[2],q[1];",
-        "crz(1.250000000000) q[0],q[2];",
-        "cu3(0.100000000000,-0.200000000000,0.300000000000) q[2],q[0];",
-        "cu(0.100000000000,0.200000000000,-0.300000000000,0.400000000000) q[1],q[2];",
-        "u0(0.500000000000) q[4];",
+        "rzz(0.4) q[2],q[1];",
+        "rxx(-0.4) q[1],q[0];",
+        "cp(0.75) q[2],q[0];",
+        "cu1(0.75) q[2],q[0];",
+        "crx(0.5) q[1],q[0];",
+        "cry(-0.5) q[2],q[1];",
+        "crz(1.25) q[0],q[2];",
+        "cu3(0.1,-0.2,0.3) q[2],q[0];",
+        "cu(0.1,0.2,-0.3,0.4) q[1],q[2];",
+        "u0(0.5) q[4];",
         "rccx q[2],q[4],q[0];",
         "rc3x q[3],q[0],q[4],q[1];",
         "c3x q[1],q[4],q[0],q[2];",
         "c3sqrtx q[4],q[2],q[3],q[0];",
         "c4x q[3],q[0],q[4],q[2],q[1];",
-        "p(0.250000000000) q[3];",
-        "u1(0.250000000000) q[3];",
-        "u2(0.100000000000,-0.200000000000) q[2];",
-        "u(0.100000000000,0.200000000000,0.300000000000) q[4];",
+        "p(0.25) q[3];",
+        "u1(0.25) q[3];",
+        "u2(0.1,-0.2) q[2];",
+        "u(0.1,0.2,0.3) q[4];",
     ];
     for statement in statements {
         let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
@@ -522,12 +522,45 @@ fn c2_every_angled_gate_exports_expressions_by_value() {
     );
 }
 
+/// An exported angle reads back as exactly the `f64` the circuit holds, for
+/// every kind of angled gate: the export writes the shortest decimal that
+/// round-trips, so a backend receives the circuit's angles, not approximations
+/// of them (a rounded `pi/2` is not a Clifford angle to a simulator).
+#[test]
+fn c2_exported_angles_read_back_exactly() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let angles = [
+        FRAC_PI_2,
+        -PI,
+        FRAC_PI_4,
+        0.1 + 0.2,
+        1.0 / 3.0,
+        2.5e-9,
+        -7.0e17,
+        0.0,
+        -0.0,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        -f64::EPSILON,
+    ];
+    let original = angled_vocabulary(|_, k| GateParam::Fixed(angles[k % angles.len()]));
+    let imported =
+        ParameterizedCircuit::from_qasm2(&original.to_qasm2_with_params(&[]).unwrap()).unwrap();
+    assert_eq!(imported.gates, original.gates);
+    // `==` takes `-0.0` for `0.0`; `Debug` prints every `f64` (its sign
+    // included) as the shortest decimal that reads back as it.
+    assert_eq!(
+        format!("{:?}", imported.gates),
+        format!("{:?}", original.gates)
+    );
+}
+
 /// `cu1` and `cp` are the same operator but distinct instructions: each keeps
 /// its own spelling through import and export (the byte-identical round-trip
 /// guarantee), rather than one being normalised into the other.
 #[test]
 fn c2_cu1_and_cp_keep_their_own_spelling() {
-    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncu1(0.500000000000) q[0],q[1];\ncp(0.500000000000) q[0],q[1];\n";
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncu1(0.5) q[0],q[1];\ncp(0.5) q[0],q[1];\n";
     let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
     assert_eq!(
         imported.gates,

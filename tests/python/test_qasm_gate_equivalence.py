@@ -32,7 +32,7 @@ ANGLES = (0.37, -1.21, 2.03, 0.61)
 
 
 def _fmt(values):
-    return ",".join(f"{v:.12f}" for v in values)
+    return ",".join(repr(v) for v in values)
 
 
 # (name, qubit operands, number of angles, Qiskit builder, Polypus builder)
@@ -243,8 +243,8 @@ def _prep_lines():
     """A generic, entangling-free input state: distinct rotations per qubit."""
     lines = []
     for q in range(N_QUBITS):
-        lines.append(f"ry({0.3 + 0.4 * q:.12f}) q[{q}];")
-        lines.append(f"rz({0.2 + 0.5 * q:.12f}) q[{q}];")
+        lines.append(f"ry({0.3 + 0.4 * q!r}) q[{q}];")
+        lines.append(f"rz({0.2 + 0.5 * q!r}) q[{q}];")
     return lines
 
 
@@ -447,8 +447,43 @@ def test_out_of_range_qubit_is_rejected(name, qubits, n_angles, qk, pp):
 
 
 def test_angle_formatting_matches_the_exporter():
-    """The helper renders angles exactly as the exporter does (12 decimals),
-    which the byte-identity checks above depend on."""
+    """The helper renders angles exactly as the exporter does (the shortest
+    decimal that reads back as the same float, Python's ``repr`` for these
+    values), which the byte-identity checks above depend on."""
     import polypus
 
-    assert f"rx({math.pi:.12f}) q[0];" in polypus.Circuit(1).rx(0, math.pi).to_qasm2()
+    assert f"rx({math.pi!r}) q[0];" in polypus.Circuit(1).rx(0, math.pi).to_qasm2()
+
+
+def test_clifford_angles_keep_aer_on_the_stabilizer_method():
+    """Angles reach Aer exactly, so a Clifford program written with ``rz``
+    (the shape of MQT Bench's native-gate circuits) is still Clifford after
+    the Polypus round trip: Aer picks the stabilizer method for it as for the
+    original. Rounded, ``pi/2`` is not a Clifford angle, and Aer falls back to
+    a statevector, exponential in the register size."""
+    import polypus
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+
+    lines = ["OPENQASM 2.0;", 'include "qelib1.inc";', "qreg q[3];", "creg c[3];"]
+    lines += [
+        "h q[0];",
+        "rz(pi/2) q[0];",
+        "sx q[1];",
+        "rz(-pi/2) q[1];",
+        "x q[2];",
+        "rz(pi) q[2];",
+        "cx q[0],q[1];",
+        "cx q[1],q[2];",
+        "measure q -> c;",
+    ]
+    src = "\n".join(lines) + "\n"
+    exported = polypus.Circuit.from_qasm2(src).to_qasm2()
+    assert "rz(1.5707963267948966) q[0];" in exported
+
+    sim = AerSimulator()
+    for text in (src, exported):
+        result = sim.run(
+            QuantumCircuit.from_qasm_str(text), shots=64, seed_simulator=SEED
+        ).result()
+        assert result.results[0].metadata["method"] == "stabilizer", text
