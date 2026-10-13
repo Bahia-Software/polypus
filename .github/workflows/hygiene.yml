@@ -1,0 +1,80 @@
+name: Hygiene
+
+# Blocks internal files, ignored artefacts, infrastructure data, notebooks with
+# outputs, oversized blobs and Cargo.toml/CITATION.cff version drift. Logic and
+# policy live in .github/scripts/hygiene.py and .github/hygiene-allow.txt;
+# changes to either, or to this file, need human review.
+#
+# Pull requests run the public rules only. The maintainers' private patterns
+# (secret HYGIENE_LEAK_PATTERNS) run after the merge, on the push to main: they
+# detect a leak but cannot undo its publication.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Pull requests: one run per PR, superseded runs cancelled. Pushes: one group
+# per run, so no push to main is ever left unanalysed.
+concurrency:
+  group: hygiene-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The PR head itself, not the synthetic merge commit.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+      - name: Test the check (Python 3.9)
+        run: |
+          python -m pip install pytest==8.3.5
+          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Test the check (Python 3.11)
+        run: |
+          python -m pip install pytest==8.3.5
+          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py
+
+      - name: Check (pull request, public rules)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python .github/scripts/hygiene.py
+          --base "$BASE_SHA" --head "$HEAD_SHA" --comparison merge-base
+
+      - name: Check (push to main, public and private rules)
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          HYGIENE_LEAK_PATTERNS: ${{ secrets.HYGIENE_LEAK_PATTERNS }}
+        run: |
+          base="$BEFORE_SHA"
+          if [ -z "${base//0/}" ]; then
+            base=EMPTY  # new branch: no previous tree to compare against
+          fi
+          python .github/scripts/hygiene.py \
+            --base "$base" --head "$HEAD_SHA" --comparison direct \
+            --require-leak-patterns

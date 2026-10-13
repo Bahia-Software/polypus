@@ -1770,7 +1770,7 @@ mod tests {
                 let values: Vec<String> = params
                     .iter()
                     .map(|p| match p {
-                        GateParam::Fixed(v) => format!("{v:.12}"),
+                        GateParam::Fixed(v) => crate::expr::fmt_number(*v),
                         GateParam::Param(_) | GateParam::Expr(_) => unreachable!(),
                     })
                     .collect();

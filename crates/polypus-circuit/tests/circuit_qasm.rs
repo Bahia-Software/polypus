@@ -27,7 +27,7 @@ qreg q[2];
 creg c[2];
 h q[0];
 cx q[0],q[1];
-rz(0.250000000000) q[1];
+rz(0.25) q[1];
 measure q[0] -> c[0];
 measure q[1] -> c[1];
 ";
@@ -72,14 +72,14 @@ s q[1];
 t q[2];
 sdg q[0];
 tdg q[1];
-rx(0.100000000000) q[0];
-ry(0.200000000000) q[1];
-rz(0.300000000000) q[2];
+rx(0.1) q[0];
+ry(0.2) q[1];
+rz(0.3) q[2];
 cx q[0],q[1];
 cz q[1],q[2];
-rzz(0.400000000000) q[0],q[1];
-rxx(0.500000000000) q[1],q[2];
-u3(0.600000000000,0.700000000000,0.800000000000) q[0];
+rzz(0.4) q[0],q[1];
+rxx(0.5) q[1],q[2];
+u3(0.6,0.7,0.8) q[0];
 barrier q;
 barrier q[0],q[2];
 measure q[0] -> c[0];
@@ -141,8 +141,8 @@ fn assign_parameters_reuses_same_param_index() {
         .unwrap();
 
     let qasm = bound.to_qasm2();
-    assert!(qasm.contains("rzz(0.700000000000) q[0],q[1];"));
-    assert_eq!(qasm.matches("0.700000000000").count(), 3);
+    assert!(qasm.contains("rzz(0.7) q[0],q[1];"));
+    assert_eq!(qasm.matches("0.7").count(), 3);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn u_gate_binds_all_three_angles() {
         .u(0, Param(0), 0.5, Param(1))
         .to_qasm2_with_params(&[0.1, 0.9])
         .unwrap();
-    assert!(qasm.contains("u3(0.100000000000,0.500000000000,0.900000000000) q[0];"));
+    assert!(qasm.contains("u3(0.1,0.5,0.9) q[0];"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,14 +342,14 @@ h q[0];
 h q[1];
 h q[2];
 h q[3];
-rzz(0.400000000000) q[0],q[1];
-rzz(0.400000000000) q[1],q[2];
-rzz(0.400000000000) q[2],q[3];
-rzz(0.400000000000) q[3],q[0];
-rx(0.800000000000) q[0];
-rx(0.800000000000) q[1];
-rx(0.800000000000) q[2];
-rx(0.800000000000) q[3];
+rzz(0.4) q[0],q[1];
+rzz(0.4) q[1],q[2];
+rzz(0.4) q[2],q[3];
+rzz(0.4) q[3],q[0];
+rx(0.8) q[0];
+rx(0.8) q[1];
+rx(0.8) q[2];
+rx(0.8) q[3];
 measure q -> c;
 ";
     assert_eq!(qasm, expected);

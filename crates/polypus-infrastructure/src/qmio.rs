@@ -93,8 +93,10 @@ pub use crate::execution_config::QmioProgramFormat;
 /// [`BackendError::External`], keeping the registry contract pyo3-free; the FFI edge
 /// downcasts it back to the typed `polypus.QmioError`.
 pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>, BackendError> {
-    let endpoint = ctx.option("endpoint").unwrap_or("").to_string();
-    let program_format = match ctx.option("program_format").unwrap_or("openqasm") {
+    // Every qmio option is a string: `option_str` turns a list into a Conversion
+    // error naming the key, so it can never fall back to the default silently.
+    let endpoint = ctx.option_str("endpoint")?.unwrap_or("").to_string();
+    let program_format = match ctx.option_str("program_format")?.unwrap_or("openqasm") {
         "openqasm" => QmioProgramFormat::OpenQasm,
         "qir_text" => QmioProgramFormat::QirText,
         "qir_bitcode" => QmioProgramFormat::QirBitcode,
@@ -108,7 +110,7 @@ pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>
     // Present-but-malformed numeric options are a configuration mistake — surface
     // them, like the unknown-program_format branch above, rather than silently
     // falling back to the default (which only an *absent* key uses).
-    let optimization = match ctx.option("optimization") {
+    let optimization = match ctx.option_str("optimization")? {
         None => 0,
         Some(v) => v.parse::<u8>().map_err(|_| {
             BackendError::Conversion(format!(
@@ -116,7 +118,7 @@ pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>
             ))
         })?,
     };
-    let repetition_period = match ctx.option("repetition_period") {
+    let repetition_period = match ctx.option_str("repetition_period")? {
         None => None,
         Some(v) => Some(v.parse::<f64>().map_err(|_| {
             BackendError::Conversion(format!(
@@ -125,7 +127,7 @@ pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>
         })?),
     };
     let res_format = ctx
-        .option("res_format")
+        .option_str("res_format")?
         .unwrap_or("binary_count")
         .to_string();
     let backend = QmioBackend::new(
@@ -971,7 +973,7 @@ mod tests {
             opt_level: crate::OptLevel::default(),
             options: options
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), crate::OptionValue::from(*v)))
                 .collect(),
         }
     }
@@ -1016,6 +1018,32 @@ mod tests {
             ("repetition_period", "0.001"),
         ]))
         .is_ok());
+    }
+
+    /// Every qmio option is a string: a list in any of them is a Conversion error
+    /// naming the key, never a silent fall-back to the default.
+    #[test]
+    fn qmio_factory_rejects_a_list_in_a_string_option() {
+        for key in [
+            "endpoint",
+            "program_format",
+            "optimization",
+            "repetition_period",
+            "res_format",
+        ] {
+            let mut ctx = qmio_ctx(&[]);
+            ctx.options.insert(
+                key.to_string(),
+                crate::OptionValue::from(vec!["0".to_string()]),
+            );
+            match qmio_factory(&ctx) {
+                Err(BackendError::Conversion(m)) => {
+                    assert!(m.contains(key), "message should name '{key}': {m}")
+                }
+                Err(other) => panic!("expected Conversion for a list in '{key}', got {other:?}"),
+                Ok(_) => panic!("a list in '{key}' must be rejected, not defaulted"),
+            }
+        }
     }
 
     fn backend(format: QmioProgramFormat) -> QmioBackend {
