@@ -13,7 +13,11 @@ kept as-is. See `docs/backends.md` for the full specification.
 ## Protocol (v1)
 
 Framing: each message is `4-byte little-endian length || UTF-8 JSON payload`.
-stdout carries protocol frames ONLY; log to stderr (mixing corrupts the stream).
+stdout carries protocol frames ONLY; log to stderr (mixing corrupts the stream). A
+stray print() -- or an SDK banner printed on import -- is read by the bridge as a frame
+length: it fails the call at once ("... non-protocol output ... to stdout") and kills
+the worker. The bridge also rejects any frame longer than its `max_frame_bytes` option
+(default 64 MiB).
 
 Requests (bridge -> worker):
     {"op": "hello", "protocol": 1}
@@ -179,6 +183,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
+    # Test-only hook: write non-protocol text to stdout, as an SDK banner printed on
+    # import would, so the noisy-worker test can check the bridge rejects it.
+    banner = os.environ.get("WORKER_STDOUT_BANNER")
+    if banner is not None:
+        print(banner, flush=True)
     _log("started")
     while True:
         req = _read_frame(stdin)

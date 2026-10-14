@@ -328,6 +328,7 @@ polypus.run_quantum_circuit(
         "command": ["python3", "/path/to/my worker.py"],
         # Optional:
         "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
+        "max_frame_bytes": "134217728",  # largest reply frame; default 67108864 (64 MiB)
         "arm_pdeathsig": "true",  # orphan guard (Linux); default true
         "cwd": "/path/to/workdir",  # worker working directory
     },
@@ -374,8 +375,8 @@ frame = u32 little-endian length  ||  UTF-8 JSON payload
 ```
 
 stdout carries protocol frames **only** (log to stderr — mixing corrupts the
-stream). On spawn the bridge sends `{"op":"hello","protocol":1}` and the worker must
-answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per run:
+stream; see [Polluted stdout](#polluted-stdout-and-the-frame-size-cap)). On spawn the
+bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per run:
 
 | direction | frame |
 |---|---|
@@ -388,6 +389,34 @@ answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per r
 Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
 cross a process boundary and is rejected before it reaches the worker). Return one
 counts map per circuit, in order.
+
+### Polluted stdout and the frame-size cap
+
+The bridge reads the 4-byte length off the worker's stdout before it reads the
+payload, so it must not trust it blindly. Many SDKs print a banner when imported;
+those bytes are read as a length (`"Hell"` is 1,819,043,144 bytes). Two checks run
+on every header, before any buffer is allocated:
+
+- **Text header.** A header made only of printable ASCII (plus tab, CR, LF) is
+  refused as non-protocol output. An honest frame cannot look like that: below
+  16 MiB the top byte of the length is zero. The error quotes
+  the bytes and says the worker, or a library it imports, is writing to stdout:
+
+  ```text
+  subprocess bridge protocol error: the worker's stdout does not carry a protocol
+  frame: its first 4 bytes read as the text "Hell". The worker, or a library it
+  imports, is writing non-protocol output (a banner, a print()) to stdout; ...
+  ```
+
+- **Size cap.** A frame longer than `max_frame_bytes` (option `max_frame_bytes`,
+  default 64 MiB, a positive integer in bytes) is refused with an error naming the
+  limit. A counts payload is far below the default; raise it only for a worker that
+  really returns more.
+
+Either way the call fails at once with a `polypus.BackendError` (a protocol error,
+not the `Unresponsive` timeout), the worker is killed, and a later call fails fast.
+The fix on the worker side is to keep stdout for frames: send logs and prints to
+stderr, and make sure the SDK does not print to stdout on import.
 
 ### Liveness: how a hung worker is detected
 

@@ -47,6 +47,7 @@ pub fn config(python: &str, timeout_ms: u64, env: &[(&str, &str)]) -> Subprocess
             .collect(),
         recv_timeout: Duration::from_millis(timeout_ms),
         arm_pdeathsig: true,
+        ..SubprocessConfig::default()
     }
 }
 
