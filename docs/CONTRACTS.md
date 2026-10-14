@@ -429,7 +429,13 @@ declared gate run on Aer with the transpiled reference's counts and the native
 backend's distribution; a circuit in the basis is neither copied nor
 transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
 `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
-execution path) and `tests/python/test_backend_compatibility.py`; the CUNQA
+execution path) and `tests/python/test_backend_compatibility.py`. For a Qiskit
+`QuantumCircuit`, `polypus.backend_compatibility`
+(`crates/polypus/src/bindings/compatibility.rs`) replicates the Aer path's
+policy — when to lower, against which simulator, how — to report what the run
+would raise; it lowers nothing for execution, so it is not a lowering
+boundary, and `_assert_coherent` in that test, which runs every circuit it
+classifies, keeps the two copies in step. The CUNQA
 one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
 convert, and a declared gate, reach `run` as an equivalent circuit in its list;
 a circuit in the list is neither copied nor transpiled).
