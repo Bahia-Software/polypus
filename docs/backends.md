@@ -584,11 +584,9 @@ have no failure variants of their own).
 | Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
 |---|---|---|---|---|---|---|
 | **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
-| **Local (Aer)** | full battery (Aer present) | ✅ pass¹ | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
+| **Local (Aer)** | full battery (Aer present) | ✅ pass | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
 | **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
 | **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ❌ **QMIO-1** |
-
-¹ except the empty-batch edge case — finding **LOCAL-1** below.
 
 ### Native — fully conformant
 
@@ -617,20 +615,13 @@ consequences the battery makes concrete:
   `polypus.BackendError` with the original as `__cause__`, and any other exception
   verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
 
-Findings, **documented not fixed** (they live in `local.rs` / the seal — outside this
-phase's module scope):
+Findings (LOCAL-1 is fixed; the others are **documented, not fixed** — they live in
+the seal or `qmio.rs`, outside the phase's module scope):
 
-- **LOCAL-1 — an empty batch raises.** `LocalBackend::run_circuits(&[])` fails with
-  `ValueError: not enough values to unpack (expected 2, got 0)` from the seal, instead
-  of returning `Ok(vec![])` as the native backend does. It is **latent**: the
-  `Planner` special-cases an empty batch and never calls a backend with one, so no
-  Polypus path hits it today. Proposed fix: short-circuit `if qcs.is_empty() { return
-  Ok(Vec::new()); }` at the top of `LocalBackend::run_circuits` (and the CUNQA one).
-  Of the three findings this is the **cheapest to close**: unlike LOCAL-2 (seal /
-  contract territory) and QMIO-1 (changes a Python exception class), the fix is a
-  self-contained guard clause entirely inside `local.rs`/`cunqa.rs` with **no
-  contract implications**. It is left documented-not-fixed purely to respect this
-  phase's module boundary, not because it is hard.
+- **LOCAL-1 — an empty batch raised (fixed).** `LocalBackend::run_circuits(&[])` used
+  to fail with `ValueError: not enough values to unpack (expected 2, got 0)` from the
+  seal. `LocalBackend` and `CunqaBackend` now short-circuit an empty batch to
+  `Ok(vec![])`, as the native backend does (issue #229).
 - **LOCAL-2 — the `backend` kwarg is ignored (a C-1 contract violation).**
   `LocalBackend` sends a `backend` kwarg to the seal's `run_qcs`, but the seal's local
   path never reads it (it hard-codes `AerSimulator`). This is not cosmetic: contract
@@ -641,8 +632,7 @@ phase's module scope):
   in the seal or stop sending it from `local.rs`.
 
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
-row is by analysis: it shares the seal-delegation profile above, including LOCAL-1's
-empty-batch behaviour.
+row is by analysis: it shares the seal-delegation profile above.
 
 **Circuits without measurements (issue #218, fixed for Local).** Aer returns no counts
 for a circuit with no `measure` instruction, so the Local backend used to fail with
@@ -727,7 +717,6 @@ QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
 
 | Finding | Severity | Reachable today | Fix touches | Deferred because |
 |---|---|---|---|---|
-| LOCAL-1 (empty batch) | low (latent) | no (planner shields it) | `local.rs`, `cunqa.rs` | outside module scope; cheapest to close (self-contained guard clause, no contract impact) |
 | LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
 | QMIO-1 (Foreign→External) | low | only on a misuse (Qiskit circuit to QMIO) | `qmio.rs` | outside scope; **changes the Python exception class**, so needs a contract call |
 

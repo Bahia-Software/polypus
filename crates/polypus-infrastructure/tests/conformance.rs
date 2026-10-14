@@ -31,10 +31,10 @@
 //! - **Local / CUNQA (seal-delegating)**: same absence of `Unresponsive`/`Aborted` —
 //!   a dead in-process interpreter is a crash of *our* process, not a recoverable
 //!   "backend stopped responding". A clean provider error *is* produced (an Aer
-//!   failure → `External`). Finding **LOCAL-1**: an **empty batch** raises through the
-//!   seal instead of returning `Ok(vec![])`. Finding **LOCAL-2**: the seal ignores the
-//!   `backend` kwarg. Both are recorded, not silently fixed (they live outside this
-//!   phase's module scope).
+//!   failure → `External`). Finding **LOCAL-1** (an empty batch raised through the seal)
+//!   is fixed: it returns `Ok(vec![])`. Finding **LOCAL-2**: the seal ignores the
+//!   `backend` kwarg; it is recorded, not fixed (it lives outside this phase's module
+//!   scope).
 //! - **QMIO**: finding **QMIO-1**: a `Foreign` circuit is wrapped in `External` rather
 //!   than the contract's `UnsupportedCircuit`. Its wire timeout maps to `External`
 //!   (definitive) rather than `Unresponsive` — a deliberate choice, since QMIO exhausts
@@ -105,9 +105,8 @@ fn native_backend_conforms() {
 /// behavioural checks and its clean-error classification (a bogus `sim_method` makes
 /// Aer raise → `External`) pass; it has no `Unresponsive`/`Aborted` path (skips).
 ///
-/// It is **not asserted fully conformant**: finding LOCAL-1 (an empty batch raises
-/// through the seal) is a real, documented failure this phase records rather than
-/// fixes. The printed report is the evidence.
+/// The printed report is the evidence. Finding LOCAL-1 (an empty batch raised through
+/// the seal) is fixed, so `empty_batch_returns_empty` passes too.
 ///
 /// `#[ignore]`d: it drives Qiskit Aer's C++/OpenMP engine from a cargo-test worker
 /// thread, which is fragile there (Aer segfaults when it fans experiments across
@@ -159,10 +158,8 @@ fn local_aer_backend_conformance() {
     // The seal-delegating backend has no Unresponsive/Aborted path.
     assert_skipped(&report, "unresponsive_backend_is_classified");
     assert_skipped(&report, "interrupted_call_is_aborted");
-    // Finding LOCAL-1: the empty-batch check fails (the seal raises on []). Asserted
-    // here so the finding is pinned; when local.rs is fixed to short-circuit an empty
-    // batch, flip this to `true` (see docs/backends.md).
-    assert_status(&report, "empty_batch_returns_empty", false);
+    // Finding LOCAL-1 (fixed): an empty batch short-circuits to `Ok(vec![])`.
+    assert_status(&report, "empty_batch_returns_empty", true);
 }
 
 /// CUNQA needs a SLURM allocation *and* the seal even to construct, so it cannot run
@@ -200,7 +197,7 @@ fn cunqa_backend_conformance_is_environment_gated() {
                 .run();
             println!("\n{report}");
             // Same seal-delegation profile as Local: behaviour passes, Unresponsive/
-            // Aborted are N/A. (Not asserted conformant: shares LOCAL-1.)
+            // Aborted are N/A.
             assert_status(&report, "healthy_run_satisfies_result_contract", true);
             assert_skipped(&report, "unresponsive_backend_is_classified");
         }

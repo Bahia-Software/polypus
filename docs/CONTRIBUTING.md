@@ -175,7 +175,7 @@ under the project license.
 Single source of truth: the workspace `Cargo.toml` version (SemVer). Release
 tags must match it exactly (`vX.Y.Z`), and every release updates
 [`CHANGELOG.md`](../CHANGELOG.md). The short checklist lives in
-[`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+[`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development
 
