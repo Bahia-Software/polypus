@@ -64,9 +64,8 @@ pub struct ParameterizedCircuit {
     /// The total size of the classical registers the OpenQASM program this
     /// circuit was imported from declares (the sum of its `creg`s, or of its
     /// `bit` registers in OpenQASM 3); `None` when it declares none or the
-    /// circuit was built, not imported. Import
-    /// metadata, never part of the circuit's identity; read through the hidden
-    /// `declared_clbits` getter.
+    /// circuit was built, not imported. Read through the hidden
+    /// `declared_clbits` getter; see [`clbits_width`](Self::clbits_width).
     pub(crate) declared_clbits: Option<usize>,
 }
 
@@ -76,15 +75,14 @@ pub struct ParameterizedCircuit {
 /// by where they are stored: two circuits whose gates use equal expressions are
 /// equal even if one of them also stores an expression no gate uses. The
 /// parameters' names ([`ParameterizedCircuit::param_names`]) are part of the
-/// circuit. The classical width an OpenQASM import declares is not: like the
-/// `measured` cache it is not part of the circuit's identity (it is import
-/// metadata), so two imports that differ only in the size of a `creg` are
-/// equal, even though the native backend keys their counts at different widths
-/// (contract C-3).
+/// circuit, and so is its classical width
+/// ([`clbits_width`](ParameterizedCircuit::clbits_width)), which every export
+/// writes: a `creg c[3]` program measuring two bits is not a `creg c[2]` one.
 impl PartialEq for ParameterizedCircuit {
     fn eq(&self, other: &Self) -> bool {
         self.num_qubits == other.num_qubits
             && self.num_params == other.num_params
+            && self.clbits_width() == other.clbits_width()
             && self.gates.len() == other.gates.len()
             && self
                 .gates
@@ -159,11 +157,10 @@ impl ParameterizedCircuit {
     ///   `u2`, `u`, `u3`, `id` included — is kept one-to-one, as spelled.
     /// - Gate declarations are re-emitted right after the include, in source
     ///   order; a declaration no instruction uses is not re-emitted.
-    /// - The classical register is implicit (sized by the measurements), so
-    ///   trailing *unmeasured* classical bits are not re-exported. The total
-    ///   the program declares is kept only as import metadata, for the native
-    ///   backend to key counts at the declared width (contract C-3); it does
-    ///   not count for `==` and is dropped by binding and by every export.
+    /// - The classical registers are flattened into one, `c`, as wide as the
+    ///   program declares (the sum of its `creg`s), trailing unmeasured bits
+    ///   included: every backend keys the counts at that width, as Aer does
+    ///   for the source (contract C-3). See [`clbits_width`](Self::clbits_width).
     ///
     /// # Errors
     ///
@@ -745,16 +742,21 @@ impl ParameterizedCircuit {
         num_clbits(self.num_qubits, &self.gates)
     }
 
+    /// The width of the classical register every export writes: the classical
+    /// bits the OpenQASM program this circuit was imported from declares (the
+    /// sum of its `creg`s, or of its `bit` registers in OpenQASM 3), or the
+    /// implicit register ([`num_clbits`](Self::num_clbits)) if that is wider or
+    /// nothing was declared. Kept by [`assign_parameters`](Self::assign_parameters),
+    /// so a measured program's counts are keyed at this width on every backend,
+    /// as on Aer (contract C-3). The QIR export is the exception: it records
+    /// only the measured results.
+    pub fn clbits_width(&self) -> usize {
+        clbits_width(self.declared_clbits, self.num_clbits())
+    }
+
     /// The number of classical bits declared by the OpenQASM program this
-    /// circuit was imported from (the sum of its `creg` sizes, or of its `bit`
-    /// register sizes in OpenQASM 3), or `None` when it declares none or the
+    /// circuit was imported from, or `None` when it declares none or the
     /// circuit was built rather than imported.
-    ///
-    /// Not part of the public API: the native backend reads it so that a
-    /// measured program's counts are keyed at the declared width, as on Aer
-    /// (contract C-3). It is kept by `clone` and by the builder methods,
-    /// ignored by `==`, and dropped by [`assign_parameters`](Self::assign_parameters)
-    /// and by every export.
     #[doc(hidden)]
     pub fn declared_clbits(&self) -> Option<usize> {
         self.declared_clbits
@@ -818,6 +820,7 @@ impl ParameterizedCircuit {
         Ok(ConcreteCircuit {
             num_qubits: self.num_qubits,
             gates,
+            declared_clbits: self.declared_clbits,
         })
     }
 
@@ -837,7 +840,7 @@ impl ParameterizedCircuit {
         }
         qasm::write_qasm2(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             params,
             &self.exprs,
@@ -931,20 +934,57 @@ impl ParameterizedCircuit {
 
 /// A quantum circuit whose angles are all concrete values
 /// ([`GateParam::Fixed`]). Produced by
-/// [`ParameterizedCircuit::assign_parameters`]; ready for OpenQASM 2.0 export.
-#[derive(Debug, Clone, PartialEq)]
+/// [`ParameterizedCircuit::assign_parameters`], which keeps the classical width
+/// the source program declares, or built with [`new`](Self::new); ready for
+/// OpenQASM 2.0 export.
+#[derive(Debug, Clone)]
 pub struct ConcreteCircuit {
     /// Number of qubits in the (single) quantum register.
     pub num_qubits: usize,
     /// The instruction sequence; every [`GateParam`] is `Fixed`.
     pub gates: Vec<GateInstruction>,
+    /// See [`ParameterizedCircuit::clbits_width`].
+    declared_clbits: Option<usize>,
+}
+
+/// Same qubits, same instructions and same classical width
+/// ([`clbits_width`](ConcreteCircuit::clbits_width)): the same program.
+impl PartialEq for ConcreteCircuit {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_qubits == other.num_qubits
+            && self.gates == other.gates
+            && self.clbits_width() == other.clbits_width()
+    }
 }
 
 impl ConcreteCircuit {
+    /// A circuit on `num_qubits` qubits running `gates`, whose classical
+    /// register is implicit (sized by the measurements).
+    pub fn new(num_qubits: usize, gates: Vec<GateInstruction>) -> Self {
+        ConcreteCircuit {
+            num_qubits,
+            gates,
+            declared_clbits: None,
+        }
+    }
+
     /// Size of the implicit classical register (see
     /// [`ParameterizedCircuit::num_clbits`]).
     pub fn num_clbits(&self) -> usize {
         num_clbits(self.num_qubits, &self.gates)
+    }
+
+    /// The width of the classical register the exports write and the counts
+    /// are keyed at (see [`ParameterizedCircuit::clbits_width`]).
+    pub fn clbits_width(&self) -> usize {
+        clbits_width(self.declared_clbits, self.num_clbits())
+    }
+
+    /// The classical bits the source program declares, if any (see
+    /// [`clbits_width`](Self::clbits_width)).
+    #[doc(hidden)]
+    pub fn declared_clbits(&self) -> Option<usize> {
+        self.declared_clbits
     }
 
     /// Serialize to OpenQASM 2.0.
@@ -983,7 +1023,7 @@ impl ConcreteCircuit {
     pub fn try_to_qasm2(&self) -> Result<String, CircuitError> {
         qasm::write_qasm2(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             &[],
             &ExprArena::EMPTY,
@@ -1052,6 +1092,12 @@ fn default_param_name(index: usize, taken: &BTreeSet<&str>) -> String {
         .map(|k| format!("{base}_{k}"))
         .find(|name| !taken.contains(name.as_str()))
         .unwrap_or(base)
+}
+
+/// The classical width of a program that declares `declared` bits and
+/// measures into an implicit register of `implicit` bits.
+fn clbits_width(declared: Option<usize>, implicit: usize) -> usize {
+    declared.map_or(implicit, |declared| declared.max(implicit))
 }
 
 /// Shared classical-register sizing logic.

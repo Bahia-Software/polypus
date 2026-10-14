@@ -720,35 +720,32 @@ fn test_export_rejects_non_finite_angle() {
 // ConcreteCircuit
 #[test]
 fn test_concrete_circuit_num_clbits_no_measurements() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![],
-    };
+    let qc = ConcreteCircuit::new(2, vec![]);
 
     assert_eq!(qc.num_clbits(), 0);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_single_measurement() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        2,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
             },
             GateInstruction::Measure { qubit: 0, cbit: 0 },
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 1);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_multiple_measurements() {
-    let qc = ConcreteCircuit {
-        num_qubits: 5,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        5,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
@@ -756,46 +753,43 @@ fn test_concrete_circuit_num_clbits_multiple_measurements() {
             GateInstruction::Measure { qubit: 0, cbit: 2 },
             GateInstruction::Measure { qubit: 4, cbit: 5 },
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 6);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_measure_all() {
-    let qc = ConcreteCircuit {
-        num_qubits: 5,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        5,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
             },
             GateInstruction::MeasureAll,
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 5);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
-    let qc = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        3,
+        vec![
             GateInstruction::Measure { qubit: 0, cbit: 10 },
             GateInstruction::MeasureAll,
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 11);
 }
 
 #[test]
 fn test_concrete_circuit_to_qasm2_basic() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![GateInstruction::H(0)],
-    };
+    let qc = ConcreteCircuit::new(2, vec![GateInstruction::H(0)]);
     let qasm = qc.to_qasm2();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
@@ -806,9 +800,9 @@ fn test_concrete_circuit_to_qasm2_basic() {
 
 #[test]
 fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        2,
+        vec![
             GateInstruction::H(0),
             GateInstruction::Rx {
                 qubit: 0,
@@ -820,7 +814,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
             },
             GateInstruction::MeasureAll,
         ],
-    };
+    );
     let qasm = qc.to_qasm2();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
@@ -839,13 +833,13 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
 #[test]
 #[should_panic]
 fn test_concrete_circuit_to_qasm2_panics_on_param() {
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Param(0),
         }],
-    };
+    );
 
     let _ = qc.to_qasm2();
 }

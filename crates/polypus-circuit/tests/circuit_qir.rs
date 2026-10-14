@@ -320,13 +320,13 @@ fn concrete_circuit_to_qir_matches_parameterized() {
 fn concrete_circuit_to_qir_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // QIR exporter still refuses a non-finite fixed angle rather than emitting it.
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Fixed(f64::INFINITY),
         }],
-    };
+    );
     let _ = qc.to_qir();
 }
 

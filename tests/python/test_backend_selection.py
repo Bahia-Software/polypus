@@ -620,18 +620,39 @@ class TestMeasuredCircuitsUseTheDeclaredClbitWidth:
         )
         assert result.counts == [{"10": 20 // n_qpus}] * n_qpus
 
+    @pytest.mark.parametrize("n_qpus", [1, 2])
     @pytest.mark.parametrize("backend", ["aer", "polypus"])
-    def test_imported_circuit_loses_the_declared_width(self, backend):
-        """Known limit, the same on both backends: ``Circuit.from_qasm2`` keeps
-        only the implicit register once its parameters are bound, so the run
-        sees ``max(cbit) + 1`` (Aer receives the re-exported QASM)."""
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_imported_circuit_keeps_the_declared_width(self, case, backend, n_qpus):
+        """``Circuit.from_qasm2`` keeps the declared width through parameter
+        binding and the export Aer receives: the same keys as the source."""
         import polypus
 
-        qc = polypus.Circuit.from_qasm2(_WIDER_CREG_MEASURED)
+        body, key = _WIDER_CREG_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
+        )
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_qasm3_import_keeps_the_declared_width(self, backend):
+        import polypus
+
+        qc = polypus.Circuit.from_qasm3(
+            'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[3] c;\n'
+            "x q[0];\nc[1] = measure q[0];\n"
+        )
         result = polypus.run_quantum_circuit(
             qc, shots=20, infrastructure="local", backend=backend
         )
-        assert result.counts == [{"10": 20}]
+        assert result.counts == [{"010": 20}]
+
+    def test_the_export_declares_the_width(self):
+        import polypus
+
+        qc = polypus.Circuit.from_qasm2(_WIDER_CREG_MEASURED)
+        assert "creg c[3];" in qc.to_qasm2()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -360,10 +360,13 @@ fn declared_clbits_is_the_sum_of_the_bit_registers() {
     for (src, declared) in cases {
         assert_eq!(import(&src).declared_clbits(), declared, "{src}");
     }
-    // Import metadata: not part of the circuit's identity.
+    // Part of the program: written by the export, compared by `==`.
     let wide = format!("{HEADER}qubit[1] q;\nbit[4] c;\nc[0] = measure q[0];\n");
     let narrow = wide.replace("bit[4]", "bit[1]");
-    assert_eq!(import(&wide), import(&narrow));
+    assert_ne!(import(&wide), import(&narrow));
+    let exported = import(&wide).to_qasm3().unwrap();
+    assert!(exported.contains("bit[4] c;"), "{exported}");
+    assert_eq!(import(&exported).to_qasm3().unwrap(), exported);
 }
 
 #[test]
