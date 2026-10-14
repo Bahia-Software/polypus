@@ -15,10 +15,10 @@ Third-party data
 
 This project includes third-party evaluated photon interaction data files
 (the `ZA*.txt` files under
-`crates/polypus-physics/src/interactions/photon/endf_data/`), taken from the
+`reference-data/endf-epdl-2023/`), taken from the
 IAEA Nuclear Data Section's Evaluated Photon Data Library (EPDL / EPICS2023,
 ENDF-6 format; release NDS-IAEA-225). These files are distributed by the IAEA
 for free and open use with acknowledgement of the source. They retain their
 original IAEA/NDS provenance and are NOT covered by the EUPL licence above.
-See `crates/polypus-physics/src/interactions/photon/endf_data/PROVENANCE.md`
+See `reference-data/endf-epdl-2023/PROVENANCE.md`
 for full attribution, references, and usage terms.

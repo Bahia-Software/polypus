@@ -64,6 +64,7 @@ fn main() {
         ],
         recv_timeout: Duration::from_secs(120),
         arm_pdeathsig: true,
+        ..SubprocessConfig::default()
     };
     let backend = SubprocessBackend::spawn(config).expect("worker spawns and handshakes");
 

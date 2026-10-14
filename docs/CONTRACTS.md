@@ -20,9 +20,9 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles) |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
@@ -56,6 +56,18 @@ be changed independently.
 Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
+
+The CUNQA seal translates these into `cunqa.qpu.qraise(n, t, quantum_comm=False,
+co_located=True, n_nodes=..., family=..., cores_per_qpu=...)`, plus `backend`
+when `POLYPUS_CUNQA_BACKEND` is set. `qraise` has no `**kwargs`, so a name it
+does not know raises `TypeError`. **Supported CUNQA: `>=2.4,<4`.** The argument
+is `cores_per_qpu` from 2.4.0 (checked at 2.4.0, 3.0.0 and 3.1.0); CUNQA 2.3.0
+spells it `cores`, so **2.3 is not supported** and a reservation against it fails
+with `TypeError: qraise() got an unexpected keyword argument 'cores_per_qpu'`.
+`tests/python/test_cunqa_contract.py` binds the kwargs the seal sends against the
+`qraise`, `get_QPUs`, `run`, `gather` and `qdrop` signatures extracted from those
+four tags (`tests/python/data/cunqa/`, regenerated by `extract_signatures.py`).
+It checks the call shapes only: it has not been run against a real CUNQA.
 
 `family_name` is the run id (`RunParams::id`, derived from `ExecutionConfig::id`
 at backend construction), whose charset is constrained by C-9.
@@ -276,7 +288,7 @@ profile also reads `phase` as `p` and `cphase` as `cp`, and writes `u` as the
 builtin `U` (C-10). An instruction `stdgates.inc` lacks is written in OpenQASM
 3 as a call of a gate the output defines with the same matrix, under the
 instruction's name, and reads back as that declared gate (a declared gate is
-never recognised as a built-in). Decomposition is allowed at exactly three
+never recognised as a built-in). Decomposition is allowed at exactly four
 *lowering* boundaries, all confined to their module and invisible to the
 OpenQASM exporters: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
@@ -284,10 +296,14 @@ exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
 declared gates); the QIR exporter, for gates without a base-profile
 intrinsic; and the Aer path (`polypus_python/local.py`), for what is outside
 Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
-`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs). That one lowers the
-Qiskit circuit just before `AerSimulator.run`, with `qiskit.transpile` and only
-when the circuit holds such an instruction — a circuit already in Aer's basis
-is handed over as it is — and never touches the exported QASM.
+`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs); and the CUNQA path
+(`polypus_python/cunqa.py`), for what CUNQA's circuit converter does not take
+(the names outside its `SUPPORTED_QISKIT_OPERATIONS`: the same gates, plus
+`mcx`). Those two lower the Qiskit circuit just before handing it to the
+backend, rewriting only (synthesis and basis translation, as
+`qiskit.transpile(..., optimization_level=0)` does) and only when the circuit
+holds such an instruction — a circuit already in the basis is handed over as
+it is — and never touch the exported QASM.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
@@ -413,7 +429,10 @@ declared gate run on Aer with the transpiled reference's counts and the native
 backend's distribution; a circuit in the basis is neither copied nor
 transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
 `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
-execution path) and `tests/python/test_backend_compatibility.py`.
+execution path) and `tests/python/test_backend_compatibility.py`; the CUNQA
+one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
+convert, and a declared gate, reach `run` as an equivalent circuit in its list;
+a circuit in the list is neither copied nor transpiled).
 
 ---
 
@@ -432,14 +451,15 @@ execution path) and `tests/python/test_backend_compatibility.py`.
   sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
   **declares** (the sum of all its `creg`s), even when fewer are written —
   `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
-  measurement writes read `0`; for a `polypus.Circuit`, which declares no
-  registers, the implicit width `max(cbit) + 1` (`num_qubits` with
-  `measure_all`). Aer and the native backend agree on both (issue #251; before
-  it the native backend used `max(cbit) + 1` for OpenQASM input too). Known
-  limit, the same on both backends: `polypus.Circuit.from_qasm2(src)` and
-  `from_qasm3(src)` do not carry the declared width past parameter binding, so
-  running the imported circuit uses the implicit width (Aer receives the
-  re-exported QASM, which declares only the bits written). The QMIO and CUNQA paths are not verified.
+  measurement writes read `0`; for a `polypus.Circuit` built with the
+  builder, which declares no registers, the implicit width `max(cbit) + 1`
+  (`num_qubits` with `measure_all`). A `polypus.Circuit` imported with
+  `from_qasm2`/`from_qasm3` keeps the width its source declares, through
+  parameter binding and through the export Aer receives (its `creg c[n]` is
+  the declared width): it is keyed like the source. Aer and the native
+  backend agree on all three (issue #251; before it the native backend used
+  `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
+  verified; the QIR export records only the measured results.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -510,13 +530,18 @@ classical width of a measured OpenQASM program in
 `test_measured_circuit_with_a_wider_creg_has_the_same_keys` and
 `TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
 `tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
-plus the implicit width of a `polypus.Circuit` and of `Circuit.from_qasm2`),
+plus the implicit width of a built `polypus.Circuit` and the declared width
+of one from `Circuit.from_qasm2`/`from_qasm3`),
 `format_counts_width_follows_the_declared_clbits`,
 `measured_qasm_is_keyed_at_its_declared_clbit_width`,
-`native_circuit_keeps_the_implicit_clbit_width` and
+`native_circuit_keeps_the_implicit_clbit_width`,
+`imported_native_circuit_keeps_its_declared_clbit_width` and
 `declared_clbit_width_survives_a_transpiler` in
-`crates/polypus-infrastructure/src/native.rs`, and the `declared_clbits_*` /
-`builder_circuits_declare_no_clbits` tests in
+`crates/polypus-infrastructure/src/native.rs`, and
+`declared_clbits_is_the_sum_of_the_cregs`, `builder_circuits_declare_no_clbits`,
+`the_export_keeps_the_declared_width`,
+`the_width_is_never_narrower_than_the_measurements` and
+`declared_width_is_part_of_eq_and_kept_by_clone` in
 `crates/polypus-circuit/tests/qasm_import.rs` and
 `declared_clbits_is_the_sum_of_the_bit_registers` in
 `crates/polypus-circuit/tests/qasm3.rs` (issue #251).

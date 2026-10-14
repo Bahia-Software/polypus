@@ -42,10 +42,7 @@ fn simulator_rejects_out_of_range_single_qubit_gate() {
 #[test]
 fn simulator_rejects_out_of_range_control_qubit() {
     // Two-qubit gate with an out-of-range operand, on a field-built circuit.
-    let circuit = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![GateInstruction::Cx(0, 9)],
-    };
+    let circuit = ConcreteCircuit::new(2, vec![GateInstruction::Cx(0, 9)]);
     let err = StatevectorSimulator::new().run(&circuit).unwrap_err();
     assert_eq!(
         err,
@@ -85,14 +82,14 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
 
     // A run of consecutive diagonal gates (the #131 fusion path) with an
     // out-of-range member in the middle of the run.
-    let diagonal_run = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let diagonal_run = ConcreteCircuit::new(
+        3,
+        vec![
             GateInstruction::Z(0),
             GateInstruction::Z(7),
             GateInstruction::Z(1),
         ],
-    };
+    );
     assert_eq!(
         StatevectorSimulator::new().run(&diagonal_run).unwrap_err(),
         SimError::QubitIndexOutOfRange {
@@ -104,14 +101,14 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
     // A chain of dense gates sharing a qubit (the #132 connected-component path:
     // `H`·`X` on qubit 0 would compose into one 2×2) followed by an out-of-range
     // dense gate that would open its own component and reach `apply_1q`.
-    let dense_component = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let dense_component = ConcreteCircuit::new(
+        3,
+        vec![
             GateInstruction::H(0),
             GateInstruction::X(0),
             GateInstruction::Y(8),
         ],
-    };
+    );
     assert_eq!(
         StatevectorSimulator::new()
             .run(&dense_component)

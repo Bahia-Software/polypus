@@ -67,10 +67,7 @@ fn nan_terminated_circuit(gates: usize) -> ConcreteCircuit {
         qubit: 0,
         theta: Fixed(f64::NAN),
     });
-    ConcreteCircuit {
-        num_qubits: N,
-        gates: instructions,
-    }
+    ConcreteCircuit::new(N, instructions)
 }
 
 #[test]
@@ -139,9 +136,9 @@ fn a_hook_that_never_cancels_lets_the_run_finish() {
 
 #[test]
 fn no_hook_is_exactly_run() {
-    let circuit = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let circuit = ConcreteCircuit::new(
+        3,
+        vec![
             G::H(0),
             G::Cx(0, 1),
             G::Rx {
@@ -149,7 +146,7 @@ fn no_hook_is_exactly_run() {
                 theta: Fixed(0.7),
             },
         ],
-    };
+    );
     let sim = sequential_sim();
     let with_none = sim.run_cancellable(&circuit, None).unwrap();
     let plain = sim.run(&circuit).unwrap();

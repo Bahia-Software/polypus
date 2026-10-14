@@ -40,6 +40,11 @@ impl QuantumBackend for LocalBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        // The seal unpacks a non-empty batch; an empty one is a valid request with
+        // no results, as on the native backend.
+        if qcs.is_empty() {
+            return Ok(Vec::new());
+        }
         Python::attach(|py| {
             // Refuse up front a batch whose widest statevector cannot fit in the
             // memory budget (issue #215), before anything is converted or handed
