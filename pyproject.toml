@@ -37,7 +37,8 @@ classifiers = [
 ]
 # Runtime deps of the bundled `polypus_python` helpers (Qiskit/Aer execution
 # seam). The Rust core needs none of these, but the wheel ships the helpers, so
-# they are declared here.
+# they are declared here. CUNQA (supported range `>=2.4,<4`) is not on PyPI and
+# is installed on the cluster, so it is not declared; see the README.
 dependencies = [
     "qiskit>=2.0",
     "qiskit-aer>=0.17",
