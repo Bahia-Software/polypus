@@ -396,7 +396,11 @@ Additionally:
   `Local.run_qcs` (`polypus_python/local.py`) lowers a circuit that holds one
   with `qiskit.transpile(qc, AerSimulator(), optimization_level=0)` just before
   `AerSimulator.run` — the third lowering boundary of C-2, invisible to the
-  exported QASM. Whether an instruction is "outside the basis" is decided on
+  exported QASM. `Cunqa.run_qcs` (`polypus_python/cunqa.py`) does the same for
+  CUNQA, whose converter takes only the names in its
+  `cunqa.circuit.ir.SUPPORTED_QISKIT_OPERATIONS` (`mcx` included among those it
+  lacks): the fourth boundary, with `basis_gates` = the standard gates in that
+  list; with a CUNQA that does not publish the list, circuits go unchanged. Whether an instruction is "outside the basis" is decided on
   the names Qiskit parsed (`rc3x` is `rcccx`, `c3sqrtx` is `c3sx`) against the
   *default* `AerSimulator()` target, control-flow bodies included, never the
   target of the configured `sim_method` or `noise_model`; a circuit already in

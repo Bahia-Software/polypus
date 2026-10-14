@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` for the Aer lowering) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -276,7 +276,7 @@ profile also reads `phase` as `p` and `cphase` as `cp`, and writes `u` as the
 builtin `U` (C-10). An instruction `stdgates.inc` lacks is written in OpenQASM
 3 as a call of a gate the output defines with the same matrix, under the
 instruction's name, and reads back as that declared gate (a declared gate is
-never recognised as a built-in). Decomposition is allowed at exactly three
+never recognised as a built-in). Decomposition is allowed at exactly four
 *lowering* boundaries, all confined to their module and invisible to the
 OpenQASM exporters: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
@@ -284,10 +284,13 @@ exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
 declared gates); the QIR exporter, for gates without a base-profile
 intrinsic; and the Aer path (`polypus_python/local.py`), for what is outside
 Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
-`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs). That one lowers the
-Qiskit circuit just before `AerSimulator.run`, with `qiskit.transpile` and only
-when the circuit holds such an instruction — a circuit already in Aer's basis
-is handed over as it is — and never touches the exported QASM.
+`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs); and the CUNQA path
+(`polypus_python/cunqa.py`), for what CUNQA's circuit converter does not take
+(the names outside its `SUPPORTED_QISKIT_OPERATIONS`: the same gates, plus
+`mcx`). Those two lower the Qiskit circuit just before handing it to the
+backend, with `qiskit.transpile(..., optimization_level=0)` and only when the
+circuit holds such an instruction — a circuit already in the basis is handed
+over as it is — and never touch the exported QASM.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
@@ -413,7 +416,10 @@ declared gate run on Aer with the transpiled reference's counts and the native
 backend's distribution; a circuit in the basis is neither copied nor
 transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
 `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
-execution path) and `tests/python/test_backend_compatibility.py`.
+execution path) and `tests/python/test_backend_compatibility.py`; the CUNQA
+one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
+convert, and a declared gate, reach `run` as an equivalent circuit in its list;
+a circuit in the list is neither copied nor transpiled).
 
 ---
 

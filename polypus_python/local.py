@@ -89,25 +89,25 @@ def _default_aer():
     return simulator, frozenset(simulator.target.operation_names)
 
 
-def _outside_aer_basis(qc, supported):
-    """Whether ``qc`` holds an instruction Aer's target does not support, at any
-    depth (control-flow bodies included). ``barrier`` is a directive Aer always
-    accepts. Judged on the names Qiskit parsed the circuit into (``rc3x`` is
-    ``rcccx``, ``c3x`` and ``c4x`` are ``mcx``, which Aer does run), not on
-    Polypus's.
+def _outside_basis(qc, supported):
+    """Whether ``qc`` holds an instruction whose name is not in ``supported``, at
+    any depth (control-flow bodies included). ``barrier`` is a directive every
+    backend accepts. Judged on the names Qiskit parsed the circuit into
+    (``rc3x`` is ``rcccx``, ``c3x`` and ``c4x`` are ``mcx``), not on Polypus's.
+    Shared by the Aer path and the CUNQA one (``cunqa.py``).
 
     The names come from ``count_ops``, which Qiskit computes without building a
     ``CircuitInstruction`` per instruction; ``qc.data`` is walked only for the
     control-flow operations Qiskit declares (``CONTROL_FLOW_OP_NAMES``), to look
-    into their bodies. One that is not in Aer's target (today ``box``) is outside
-    the basis already by its name, before any body is looked at."""
+    into their bodies. One that is not in ``supported`` (for Aer, today ``box``)
+    is outside the basis already by its name, before any body is looked at."""
     names = qc.count_ops()
     if any(name != "barrier" and name not in supported for name in names):
         return True
     if CONTROL_FLOW_OP_NAMES.isdisjoint(names):
         return False
     return any(
-        _outside_aer_basis(block, supported)
+        _outside_basis(block, supported)
         for instruction in qc.data
         if instruction.operation.name in CONTROL_FLOW_OP_NAMES
         for block in instruction.operation.blocks
@@ -128,7 +128,7 @@ def _lower_to_aer_basis(qc):
     gates. ``transpile`` returns a new circuit: the caller's is never modified.
     """
     simulator, supported = _default_aer()
-    if not _outside_aer_basis(qc, supported):
+    if not _outside_basis(qc, supported):
         return qc
     return transpile(qc, simulator, optimization_level=0)
 
