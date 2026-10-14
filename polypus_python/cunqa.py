@@ -5,9 +5,9 @@ from functools import lru_cache
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import get_standard_gate_name_mapping
 
-# CUNQA is an optional, site-installed dependency (see the `cunqa` extra in
-# polypus_python's pyproject). Prefer a normal import -- installed via that extra
-# or already on PYTHONPATH. As an explicit escape hatch for a non-packaged site
+# CUNQA is an optional, site-installed dependency (the root pyproject.toml
+# declares no `cunqa` extra). Prefer a normal import -- already installed or on
+# PYTHONPATH. As an explicit escape hatch for a non-packaged site
 # install, honour POLYPUS_CUNQA_PATH (a documented, deployment-specific location)
 # instead of the previous unconditional `sys.path.append(os.getenv("HOME"))`,
 # which was non-portable and appended `None` to sys.path when HOME was unset.
@@ -165,11 +165,10 @@ class Cunqa(Infraestructure):
                     # isn't installed anywhere this can be exercised, and
                     # CESGA-Quantum-Spain/cunqa@2.3.0 (the version README.md
                     # pins) has no `QPU.run()` method at all (only
-                    # `.execute()`) and no `cunqa.qutils` module, which this
-                    # file already imports from above — this whole
-                    # integration may not run at all against that version.
-                    # See the follow-up task for reconciling this file with
-                    # the real, deployed CUNQA API.
+                    # `.execute()`) and no `cunqa.qutils` module (the legacy
+                    # `running_functions.run_qc_in_qpu` path still imports it,
+                    # see #212) — this whole integration may not run at all
+                    # against that version.
                     qjob = run(
                         qcs[i],
                         qpus[i],

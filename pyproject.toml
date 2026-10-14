@@ -41,7 +41,6 @@ classifiers = [
 dependencies = [
     "qiskit>=2.0",
     "qiskit-aer>=0.17",
-    'importlib-metadata; python_version<"3.10"',
 ]
 dynamic = ["version"]
 
