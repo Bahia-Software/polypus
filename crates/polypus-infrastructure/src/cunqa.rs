@@ -49,6 +49,11 @@ impl QuantumBackend for CunqaBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        // An empty batch is a valid request with no results, as on the native
+        // backend; do not reach the seal with it.
+        if qcs.is_empty() {
+            return Ok(Vec::new());
+        }
         Python::attach(|py| {
             // Native circuits are transpiled in pure Rust before submission;
             // Qiskit circuits pass through untouched and every native circuit
