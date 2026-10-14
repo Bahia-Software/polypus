@@ -184,30 +184,21 @@ fn c2_qir_u3_decomposition_matches_native() {
 
 #[test]
 fn c4_simulator_rejects_gate_after_measure() {
-    let cc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![G::Measure { qubit: 0, cbit: 0 }, G::X(0)],
-    };
+    let cc = ConcreteCircuit::new(1, vec![G::Measure { qubit: 0, cbit: 0 }, G::X(0)]);
     let err = StatevectorSimulator::new().run(&cc).unwrap_err();
     assert_eq!(err, SimError::GateAfterMeasure { qubit: 0 });
 }
 
 #[test]
 fn c4_simulator_accepts_terminal_measurement() {
-    let cc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![G::H(0), G::Cx(0, 1), G::MeasureAll],
-    };
+    let cc = ConcreteCircuit::new(2, vec![G::H(0), G::Cx(0, 1), G::MeasureAll]);
     let sv = StatevectorSimulator::new().run(&cc).unwrap();
     assert!((sv.norm() - 1.0).abs() < 1e-12);
 }
 
 #[test]
 fn c4_simulator_rejects_three_qubit_gate_on_measured_operand() {
-    let cc = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![G::Measure { qubit: 1, cbit: 0 }, G::Ccx(0, 1, 2)],
-    };
+    let cc = ConcreteCircuit::new(3, vec![G::Measure { qubit: 1, cbit: 0 }, G::Ccx(0, 1, 2)]);
     let err = StatevectorSimulator::new().run(&cc).unwrap_err();
     assert_eq!(err, SimError::GateAfterMeasure { qubit: 1 });
 }
@@ -218,7 +209,7 @@ const SHOTS: usize = 200;
 
 /// Counts of `gates` on `num_qubits` qubits, keyed by classical register.
 fn sample(num_qubits: usize, gates: Vec<G>, seed: u64) -> HashMap<usize, u64> {
-    let cc = ConcreteCircuit { num_qubits, gates };
+    let cc = ConcreteCircuit::new(num_qubits, gates);
     StatevectorSimulator::new()
         .run_and_sample(&cc, SHOTS, seed)
         .unwrap()
@@ -393,11 +384,7 @@ fn c2_multi_qubit_gates_emitted_qir_matches_the_native_gate() {
         G::C4x(1, 4, 0, 3, 2),
     ];
     for gate in vocabulary {
-        let ir = ConcreteCircuit {
-            num_qubits: 5,
-            gates: vec![gate.clone()],
-        }
-        .to_qir();
+        let ir = ConcreteCircuit::new(5, vec![gate.clone()]).to_qir();
         let lowered = qir_to_gates(&ir);
         assert_equiv_up_to_global_phase(5, std::slice::from_ref(&gate), &lowered);
     }
@@ -436,10 +423,7 @@ fn c2_simulator_applies_a_call_as_its_expanded_body() {
         }
     }
 
-    let cc = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![G::Measure { qubit: 1, cbit: 0 }, call],
-    };
+    let cc = ConcreteCircuit::new(3, vec![G::Measure { qubit: 1, cbit: 0 }, call]);
     assert_eq!(
         StatevectorSimulator::new().run(&cc).unwrap_err(),
         SimError::GateAfterMeasure { qubit: 1 }
@@ -560,11 +544,7 @@ fn c2_every_gate_emitted_qir_matches_the_native_gate() {
         declared_gate_call(),
     ];
     for gate in vocabulary {
-        let ir = ConcreteCircuit {
-            num_qubits: 3,
-            gates: vec![gate.clone()],
-        }
-        .to_qir();
+        let ir = ConcreteCircuit::new(3, vec![gate.clone()]).to_qir();
         let lowered = qir_to_gates(&ir);
         assert_equiv_up_to_global_phase(3, std::slice::from_ref(&gate), &lowered);
     }

@@ -2000,10 +2000,7 @@ mod tests {
             qubit: 0,
             theta: Fixed(f64::NAN),
         });
-        let circuit = ConcreteCircuit {
-            num_qubits: N,
-            gates,
-        };
+        let circuit = ConcreteCircuit::new(N, gates);
 
         let mut pending = None;
         let outcome = circuit::simulate_cancellable(&circuit, true, &mut pending);
