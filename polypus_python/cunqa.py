@@ -46,8 +46,8 @@ def _lower_to_cunqa_basis(qc):
     (``ch``, ``u0``, ``rccx``, ``rcccx``, ``c3sx``, ``mcx`` -- Qiskit's name for
     ``c3x`` and ``c4x`` -- and a ``gate`` declared in the OpenQASM source) and,
     like Aer, does not unroll it. The circuit is lowered here, a lowering
-    boundary of contract C-2 as in ``local.py``: with ``optimization_level=0``
-    (rewrite only, no reordering or merging), only when needed (a circuit CUNQA
+    boundary of contract C-2 as in ``local.py``: rewrite only
+    (``optimization_level=0``: no reordering or merging), only when needed (a circuit CUNQA
     converts is handed over as it is), never touching the exported QASM. With a
     CUNQA that does not publish the list, the circuit is forwarded unchanged."""
     if SUPPORTED_QISKIT_OPERATIONS is None:
