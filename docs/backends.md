@@ -328,6 +328,7 @@ polypus.run_quantum_circuit(
         "command": ["python3", "/path/to/my worker.py"],
         # Optional:
         "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
+        "max_frame_bytes": "134217728",  # largest reply frame; default 67108864 (64 MiB)
         "arm_pdeathsig": "true",  # orphan guard (Linux); default true
         "cwd": "/path/to/workdir",  # worker working directory
     },
@@ -374,8 +375,8 @@ frame = u32 little-endian length  ||  UTF-8 JSON payload
 ```
 
 stdout carries protocol frames **only** (log to stderr — mixing corrupts the
-stream). On spawn the bridge sends `{"op":"hello","protocol":1}` and the worker must
-answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per run:
+stream; see [Polluted stdout](#polluted-stdout-and-the-frame-size-cap)). On spawn the
+bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per run:
 
 | direction | frame |
 |---|---|
@@ -388,6 +389,34 @@ answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per r
 Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
 cross a process boundary and is rejected before it reaches the worker). Return one
 counts map per circuit, in order.
+
+### Polluted stdout and the frame-size cap
+
+The bridge reads the 4-byte length off the worker's stdout before it reads the
+payload, so it must not trust it blindly. Many SDKs print a banner when imported;
+those bytes are read as a length (`"Hell"` is 1,819,043,144 bytes). Two checks run
+on every header, before any buffer is allocated:
+
+- **Text header.** A header made only of printable ASCII (plus tab, CR, LF) is
+  refused as non-protocol output. An honest frame cannot look like that: below
+  16 MiB the top byte of the length is zero. The error quotes
+  the bytes and says the worker, or a library it imports, is writing to stdout:
+
+  ```text
+  subprocess bridge protocol error: the worker's stdout does not carry a protocol
+  frame: its first 4 bytes read as the text "Hell". The worker, or a library it
+  imports, is writing non-protocol output (a banner, a print()) to stdout; ...
+  ```
+
+- **Size cap.** A frame longer than `max_frame_bytes` (option `max_frame_bytes`,
+  default 64 MiB, a positive integer in bytes) is refused with an error naming the
+  limit. A counts payload is far below the default; raise it only for a worker that
+  really returns more.
+
+Either way the call fails at once with a `polypus.BackendError` (a protocol error,
+not the `Unresponsive` timeout), the worker is killed, and a later call fails fast.
+The fix on the worker side is to keep stdout for frames: send logs and prints to
+stderr, and make sure the SDK does not print to stdout on import.
 
 ### Liveness: how a hung worker is detected
 
@@ -584,11 +613,9 @@ have no failure variants of their own).
 | Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
 |---|---|---|---|---|---|---|
 | **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
-| **Local (Aer)** | full battery (Aer present) | ✅ pass¹ | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
+| **Local (Aer)** | full battery (Aer present) | ✅ pass | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
 | **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
 | **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ❌ **QMIO-1** |
-
-¹ except the empty-batch edge case — finding **LOCAL-1** below.
 
 ### Native — fully conformant
 
@@ -617,20 +644,13 @@ consequences the battery makes concrete:
   `polypus.BackendError` with the original as `__cause__`, and any other exception
   verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
 
-Findings, **documented not fixed** (they live in `local.rs` / the seal — outside this
-phase's module scope):
+Findings (LOCAL-1 is fixed; the others are **documented, not fixed** — they live in
+the seal or `qmio.rs`, outside the phase's module scope):
 
-- **LOCAL-1 — an empty batch raises.** `LocalBackend::run_circuits(&[])` fails with
-  `ValueError: not enough values to unpack (expected 2, got 0)` from the seal, instead
-  of returning `Ok(vec![])` as the native backend does. It is **latent**: the
-  `Planner` special-cases an empty batch and never calls a backend with one, so no
-  Polypus path hits it today. Proposed fix: short-circuit `if qcs.is_empty() { return
-  Ok(Vec::new()); }` at the top of `LocalBackend::run_circuits` (and the CUNQA one).
-  Of the three findings this is the **cheapest to close**: unlike LOCAL-2 (seal /
-  contract territory) and QMIO-1 (changes a Python exception class), the fix is a
-  self-contained guard clause entirely inside `local.rs`/`cunqa.rs` with **no
-  contract implications**. It is left documented-not-fixed purely to respect this
-  phase's module boundary, not because it is hard.
+- **LOCAL-1 — an empty batch raised (fixed).** `LocalBackend::run_circuits(&[])` used
+  to fail with `ValueError: not enough values to unpack (expected 2, got 0)` from the
+  seal. `LocalBackend` and `CunqaBackend` now short-circuit an empty batch to
+  `Ok(vec![])`, as the native backend does (issue #229).
 - **LOCAL-2 — the `backend` kwarg is ignored (a C-1 contract violation).**
   `LocalBackend` sends a `backend` kwarg to the seal's `run_qcs`, but the seal's local
   path never reads it (it hard-codes `AerSimulator`). This is not cosmetic: contract
@@ -641,8 +661,7 @@ phase's module scope):
   in the seal or stop sending it from `local.rs`.
 
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
-row is by analysis: it shares the seal-delegation profile above, including LOCAL-1's
-empty-batch behaviour.
+row is by analysis: it shares the seal-delegation profile above.
 
 **Circuits without measurements (issue #218, fixed for Local).** Aer returns no counts
 for a circuit with no `measure` instruction, so the Local backend used to fail with
@@ -703,7 +722,25 @@ confirm the verdict.
 ### QMIO — native wire backend
 
 QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
-`QmioError`. Run against an unreachable endpoint:
+`QmioError`.
+
+**Tuning variables.** Timeouts and retries are read from the environment when the backend
+is constructed:
+
+| Variable | Default | Valid values |
+|---|---|---|
+| `QMIO_RECV_TIMEOUT_MS` | `300000` | integer ≥ 1 |
+| `QMIO_MAX_RETRIES` | `3` | integer ≥ 0 (`0` = no retries) |
+| `QMIO_RETRY_BACKOFF_MS` | `100` | integer ≥ 0 (`0` = no delay) |
+| `QMIO_GLOBAL_TIMEOUT_MS` | `(retries + 1) · 3 · recv timeout` + backoff sum | integer ≥ 1 |
+
+An unset variable uses its default. A variable that is set but is not a non-negative
+integer (`QMIO_RECV_TIMEOUT_MS=3000O`), or is `0` for a timeout, fails construction with
+`polypus.QmioError` naming the variable and the rejected value — it is never replaced by
+the default. This matches the registry `options` path, which also rejects malformed numeric
+options.
+
+Run against an unreachable endpoint:
 
 - **Clean error → `External`.** A wire failure (connect/timeout) is boxed into
   `External` (a `QmioError`), which the edge re-raises as the typed `polypus.QmioError`.
@@ -727,7 +764,6 @@ QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
 
 | Finding | Severity | Reachable today | Fix touches | Deferred because |
 |---|---|---|---|---|
-| LOCAL-1 (empty batch) | low (latent) | no (planner shields it) | `local.rs`, `cunqa.rs` | outside module scope; cheapest to close (self-contained guard clause, no contract impact) |
 | LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
 | QMIO-1 (Foreign→External) | low | only on a misuse (Qiskit circuit to QMIO) | `qmio.rs` | outside scope; **changes the Python exception class**, so needs a contract call |
 

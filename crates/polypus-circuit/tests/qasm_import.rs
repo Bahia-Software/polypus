@@ -813,37 +813,80 @@ fn builder_circuits_declare_no_clbits() {
     );
 }
 
-/// Recording the declared width changes no export: the classical register is
-/// still sized by the measurements (`creg c[3]` written up to `c[1]` exports
-/// `creg c[2]`), and a program without measurements declares none.
+/// The export writes the declared width (contract C-2): `creg c[3]` written up
+/// to `c[1]` exports `creg c[3]`, unmeasured trailing bit included, so the
+/// program a backend receives keys its counts as the source does on Aer
+/// (C-3). The same through binding, and a program without measurements keeps
+/// its `creg`. The export is a fixed point.
 #[test]
-fn declared_clbits_does_not_change_the_export() {
-    let src = format!("{HEADER}qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n");
-    let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
-    assert_eq!(qc.declared_clbits(), Some(3));
-    assert_eq!(
-        qc.to_qasm2_with_params(&[]).unwrap(),
-        format!("{HEADER}qreg q[2];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[1];\n")
-    );
-    assert_eq!(
-        qc.to_qasm2_with_params(&[]).unwrap(),
-        qc.assign_parameters(&[]).unwrap().to_qasm2()
-    );
+fn the_export_keeps_the_declared_width() {
+    let cases = [
+        (
+            "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+            "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+        ),
+        (
+            "qreg q[2];\ncreg a[1];\ncreg b[2];\nmeasure q[1] -> a[0];\n",
+            "qreg q[2];\ncreg c[3];\nmeasure q[1] -> c[0];\n",
+        ),
+        // Collapsed to `MeasureAll`, which no longer fills the register.
+        (
+            "qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            "qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        ),
+        (
+            "qreg q[2];\ncreg c[3];\nx q[0];\n",
+            "qreg q[2];\ncreg c[3];\nx q[0];\n",
+        ),
+    ];
+    for (body, exported) in cases {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{HEADER}{body}")).unwrap();
+        let out = qc.to_qasm2_with_params(&[]).unwrap();
+        assert_eq!(out, format!("{HEADER}{exported}"), "{body:?}");
+        let bound = qc.assign_parameters(&[]).unwrap();
+        assert_eq!(bound.to_qasm2(), out, "{body:?}");
+        assert_eq!(bound.clbits_width(), 3, "{body:?}");
+        let again = ParameterizedCircuit::from_qasm2(&out).unwrap();
+        assert_eq!(again.to_qasm2_with_params(&[]).unwrap(), out, "{body:?}");
+    }
 }
 
-/// `==` ignores the declared width (import metadata, like the `measured`
-/// cache), while `clone` and builder methods keep it.
+/// A circuit whose measurements reach past the declared registers (only
+/// possible when built on top of an import) is as wide as they need.
 #[test]
-fn declared_clbits_is_ignored_by_eq_and_kept_by_clone() {
+fn the_width_is_never_narrower_than_the_measurements() {
+    let src = format!("{HEADER}qreg q[3];\ncreg c[1];\nmeasure q[0] -> c[0];\n");
+    let qc = ParameterizedCircuit::from_qasm2(&src)
+        .unwrap()
+        .measure(2, 2);
+    assert_eq!(qc.clbits_width(), 3);
+    assert!(qc.to_qasm2_with_params(&[]).unwrap().contains("creg c[3];"));
+}
+
+/// `==` compares the classical width a program has (declared or implicit),
+/// since every export writes it, while `clone` and builder methods keep it.
+#[test]
+fn declared_width_is_part_of_eq_and_kept_by_clone() {
     let body = "x q[0];\nmeasure q[0] -> c[1];\n";
-    let narrow =
-        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[2];\n{body}"))
-            .unwrap();
-    let wide = ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[7];\n{body}"))
-        .unwrap();
+    let import = |creg: usize| {
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[{creg}];\n{body}"))
+            .unwrap()
+    };
+    let (narrow, wide) = (import(2), import(7));
     assert_eq!(narrow.declared_clbits(), Some(2));
     assert_eq!(wide.declared_clbits(), Some(7));
-    assert_eq!(narrow, wide);
+    assert_ne!(narrow, wide);
+    assert_ne!(
+        narrow.assign_parameters(&[]).unwrap(),
+        wide.assign_parameters(&[]).unwrap()
+    );
+    // A declared register no wider than the measurements is the implicit one.
+    let built = ParameterizedCircuit::new(2).x(0).measure(0, 1);
+    assert_eq!(narrow, built);
+    assert_eq!(
+        narrow.assign_parameters(&[]).unwrap(),
+        built.assign_parameters(&[]).unwrap()
+    );
 
     assert_eq!(wide.clone().declared_clbits(), Some(7));
     assert_eq!(wide.h(1).declared_clbits(), Some(7));

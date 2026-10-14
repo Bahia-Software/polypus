@@ -305,9 +305,9 @@ fn unbound_expression_is_rejected() {
         }),
         Err(SimError::UnboundExpression)
     );
-    let hand_assembled = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![
+    let hand_assembled = ConcreteCircuit::new(
+        1,
+        vec![
             G::Rz {
                 qubit: 0,
                 theta: Fixed(0.1),
@@ -317,7 +317,7 @@ fn unbound_expression_is_rejected() {
                 theta: angle,
             },
         ],
-    };
+    );
     assert_eq!(
         StatevectorSimulator::new().run(&hand_assembled),
         Err(SimError::UnboundExpression)

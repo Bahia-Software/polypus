@@ -3,9 +3,10 @@
 //! Kept **pure** (no PyO3): this crate must be usable from any Rust project.
 //! The one concession to the FFI is [`ObservableError::External`], a type-erased
 //! box that a non-native implementation (e.g. a Python-callback observable in the
-//! `polypus` crate) uses to carry its own error — including a `PyErr` — back up
-//! through the pure trait. The `polypus` crate downcasts it to re-raise the
-//! original Python exception verbatim.
+//! `polypus` crate) uses to carry its own error back up through the pure trait.
+//! The callback observable boxes its Python exception as
+//! `polypus_infrastructure::DisplaySafePyErr`, the only carrier the `polypus`
+//! crate downcasts to in order to re-raise the original exception verbatim.
 
 use std::fmt;
 
@@ -27,8 +28,9 @@ pub enum ObservableError {
     /// constructors and surfaced as a `ValueError` at the Python boundary.
     Invalid(String),
     /// A foreign error from a non-native implementation, type-erased so this
-    /// pure crate needn't depend on PyO3. The FFI crate downcasts it back to its
-    /// concrete type (a `PyErr`) to re-raise the original exception verbatim.
+    /// pure crate needn't depend on PyO3. The FFI crate downcasts it to
+    /// `DisplaySafePyErr` to re-raise the original exception verbatim; a bare
+    /// `PyErr` boxed here surfaces as `polypus.EvaluationError` with its message.
     ///
     /// The bound is `Send` (not `Send + Sync`): rayon's `collect` into a
     /// `Result` only requires the error type to be `Send`, and the callback path

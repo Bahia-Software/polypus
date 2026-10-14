@@ -241,13 +241,13 @@ fn expressions_belong_to_their_circuit() {
 fn concrete_circuits_hold_no_expressions() {
     let mut pc = ParameterizedCircuit::new(1);
     let angle = pc.add_expr(x(0) * x(0)).unwrap();
-    let hand = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Ry {
+    let hand = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Ry {
             qubit: 0,
             theta: angle,
         }],
-    };
+    );
     // The bitcode export fails before it needs `llvm-as`.
     assert_eq!(hand.to_qir_bitcode(), Err(CircuitError::UnknownExpression));
     let panicked = std::panic::catch_unwind(|| hand.to_qasm2()).is_err();
