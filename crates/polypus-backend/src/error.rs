@@ -14,15 +14,17 @@
 //! `polypus-infrastructure::BackendError` — there is no `Seam(PyErr)` variant.
 //! A failure that originated in Python (or in any provider SDK) crosses this
 //! boundary type-erased in [`BackendError::External`], a
-//! `Box<dyn std::error::Error + Send + Sync>`. The Polypus FFI edge
-//! (`polypus::exceptions`) downcasts it back to the original `PyErr` and
-//! re-raises it with its original class, as the old `Seam` variant did — except
-//! an exception the edge identifies as raised by the circuit SDK behind the
-//! Python backends, which it raises as `polypus.BackendError` chaining the
-//! original (contract C-1, issue #218). The difference from `Seam` is that the
-//! boxing is generic, so a third-party backend boxes *its own* error type here
-//! without this crate ever naming it. Mapping either enum to a Python
-//! exception stays the sole responsibility of the FFI edge.
+//! `Box<dyn std::error::Error + Send + Sync>`. The Polypus Python backends box a
+//! Python exception there as `polypus_infrastructure::DisplaySafePyErr`, and the
+//! Polypus FFI edge (`polypus::exceptions`) recovers only that Python-exception
+//! carrier and re-raises the `PyErr` it holds with its original class, as the
+//! old `Seam` variant did — except an exception the edge identifies as raised
+//! by the circuit SDK behind the Python backends, which it raises as
+//! `polypus.BackendError` chaining the original (contract C-1, issue #218). A
+//! bare `PyErr` boxed there is not recovered with its class. The difference
+//! from `Seam` is that the boxing is generic, so a third-party backend boxes
+//! *its own* error type here without this crate ever naming it. Mapping either
+//! enum to a Python exception stays the sole responsibility of the FFI edge.
 
 use std::error::Error;
 use std::fmt;
@@ -105,14 +107,16 @@ pub enum BackendError {
     InsufficientMemory(InsufficientMemory),
     /// Any provider-specific failure, type-erased.
     ///
-    /// The Polypus Python backends box a `PyErr` here so the FFI edge can
-    /// downcast and re-raise the original Python exception (keeping its
-    /// `ValueError`/`TypeError`/`KeyboardInterrupt` class; an exception of the
-    /// circuit SDK behind those backends is raised as `polypus.BackendError`
-    /// with the original as its cause — contract C-1); the QMIO backend
-    /// boxes its own `QmioError`; a third-party backend boxes whatever error type
-    /// it likes. This is what keeps `polypus-backend` free of any provider or
-    /// PyO3 coupling in its error surface.
+    /// The Polypus Python backends box a Python exception here as
+    /// `polypus_infrastructure::DisplaySafePyErr`, the only Python-exception
+    /// carrier the FFI edge recovers, so it can re-raise the original Python
+    /// exception (keeping its `ValueError`/`TypeError`/`KeyboardInterrupt`
+    /// class; an exception of the circuit SDK behind those backends is raised as
+    /// `polypus.BackendError` with the original as its cause — contract C-1); a
+    /// bare `PyErr` boxed here does not keep its class. The QMIO backend boxes
+    /// its own `QmioError`; a third-party backend boxes whatever error type it
+    /// likes. This is what keeps `polypus-backend` free of any provider or PyO3
+    /// coupling in its error surface.
     External(Box<dyn Error + Send + Sync>),
 }
 
@@ -162,8 +166,9 @@ impl From<InsufficientMemory> for BackendError {
 /// the `KeyboardInterrupt` from the between-wave `check_signals`. That signal
 /// check is now injected via the [`Interrupt`](crate::Interrupt) guard on the
 /// [`CancelToken`](crate::CancelToken); a pending interrupt arrives here as
-/// [`Backend`](Self::Backend)`(`[`BackendError::External`]`(boxed PyErr))` and is
-/// re-raised verbatim at the FFI edge — so no PyO3 type appears on this enum.
+/// [`Backend`](Self::Backend)`(`[`BackendError::External`]`(boxed DisplaySafePyErr))`
+/// and is re-raised verbatim at the FFI edge — so no PyO3 type appears on this
+/// enum.
 ///
 /// `Clone`/`Eq` are omitted: [`Backend`](Self::Backend) may carry an
 /// [`External`](BackendError::External) box.
@@ -244,7 +249,7 @@ mod tests {
 
     /// The `External` box round-trips: a boxed error Displays through and can be
     /// downcast back to its concrete type (the pattern the FFI edge uses to
-    /// recover the original `PyErr`).
+    /// recover its carrier, `DisplaySafePyErr`).
     #[test]
     fn external_is_transparent_and_downcastable() {
         #[derive(Debug)]
@@ -258,7 +263,8 @@ mod tests {
 
         let err = BackendError::External(Box::new(Provider("nope")));
         assert_eq!(err.to_string(), "provider says nope");
-        // The edge recovers the concrete type via `source()`.
+        // The box is reachable through `source()` and downcasts to its concrete
+        // type.
         let source = std::error::Error::source(&err).expect("External has a source");
         assert!(source.downcast_ref::<Provider>().is_some());
     }

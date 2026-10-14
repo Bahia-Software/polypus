@@ -345,8 +345,8 @@ mod tests {
             seed: 7,
             errors: OracleErrorSlot::new(),
         };
-        // `OracleError` is not `Debug` (it may carry a boxed `PyErr`), so match
-        // rather than `.expect`.
+        // `OracleError` does not implement `Debug`, so match rather than
+        // `.expect`.
         let outcome = match scheduler.run(flow) {
             Ok(outcome) => outcome,
             Err(_) => panic!("the train flow must run"),
