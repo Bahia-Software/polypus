@@ -3,14 +3,10 @@
 
 # Rust/Python build
 maturin>=1.8,<2.0
-build>=1.0
-# packages/polypus_python builds with --no-isolation; Python >=3.12 no longer
-# ships setuptools in fresh environments, so declare it explicitly.
-setuptools>=70
 qiskit>=2.0
 # Aer is the default `local` simulator backend and is exercised by the test
-# suite directly; declare it here too, not only transitively via the
-# polypus_python package (packages/polypus_python/pyproject.toml).
+# suite directly; declare it here too, not only as a runtime dependency of the
+# wheel (`[project] dependencies` in the root pyproject.toml).
 qiskit-aer>=0.17
 # `qiskit.qasm3.loads` needs it; only the OpenQASM 3 interoperability tests
 # (tests/python/test_qasm3_interop.py) use it. Pinned: those tests state the
