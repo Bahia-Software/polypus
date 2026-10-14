@@ -5,8 +5,12 @@ from functools import lru_cache
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import get_standard_gate_name_mapping
 
-# CUNQA is an optional, site-installed dependency (the root pyproject.toml
-# declares no `cunqa` extra). Prefer a normal import -- already installed or on
+# CUNQA is an optional, site-installed dependency (not on PyPI, so the root
+# pyproject.toml declares no `cunqa` extra). Supported range: cunqa>=2.4,<4. The
+# seal sends `qraise(cores_per_qpu=...)`, the name CUNQA introduced in 2.4.0 (2.3.0
+# called it `cores` and has no `**kwargs`, so it rejects the new name); the
+# signatures at 2.3.0, 2.4.0, 3.0.0 and 3.1.0 are pinned by
+# tests/python/test_cunqa_contract.py. Prefer a normal import -- already installed or on
 # PYTHONPATH. As an explicit escape hatch for a non-packaged site
 # install, honour POLYPUS_CUNQA_PATH (a documented, deployment-specific location)
 # instead of the previous unconditional `sys.path.append(os.getenv("HOME"))`,
@@ -65,10 +69,9 @@ class Cunqa(Infraestructure):
         n_nodes = kwargs["n_nodes"]
         family_name = kwargs["family_name"]
         # Cores per QPU is forwarded by the Rust CunqaBackend (`raise_qpus` sets
-        # kwargs["cores_per_qpu"]); it used to be dropped here, so the requested
-        # allocation was silently ignored. Pass it through to qraise. `cores`
-        # follows CUNQA's qraise API (part of the unverified integration; see the
-        # note in run_qcs).
+        # kwargs["cores_per_qpu"]) and goes to qraise under the same name, as
+        # CUNQA >= 2.4 spells it (2.3.0's `cores` is unsupported). qraise has no
+        # **kwargs, so a name it does not know raises TypeError.
         cores_per_qpu = kwargs.get("cores_per_qpu")
 
         qraise_kwargs = {
@@ -78,7 +81,7 @@ class Cunqa(Infraestructure):
             "family": family_name,
         }
         if cores_per_qpu is not None:
-            qraise_kwargs["cores"] = cores_per_qpu
+            qraise_kwargs["cores_per_qpu"] = cores_per_qpu
         # The vQPU backend spec is deployment-specific: read it from
         # POLYPUS_CUNQA_BACKEND (a path to a CUNQA backend JSON) rather than a
         # hardcoded absolute path. Unset -> let CUNQA choose its own default.
@@ -163,12 +166,11 @@ class Cunqa(Infraestructure):
                     #
                     # UNVERIFIED beyond the kwarg name: the `cunqa` package
                     # isn't installed anywhere this can be exercised, and
-                    # CESGA-Quantum-Spain/cunqa@2.3.0 (the version README.md
-                    # pins) has no `QPU.run()` method at all (only
-                    # `.execute()`) and no `cunqa.qutils` module (the legacy
-                    # `running_functions.run_qc_in_qpu` path still imports it,
-                    # see #212) — this whole integration may not run at all
-                    # against that version.
+                    # CESGA-Quantum-Spain/cunqa@2.3.0 has no `QPU.run()` method
+                    # at all (only `.execute()`) and no `cunqa.qutils` module
+                    # (the legacy `running_functions.run_qc_in_qpu` path still
+                    # imports it, see #212); 2.3.0 is outside the supported
+                    # range (see the top of this file).
                     qjob = run(
                         qcs[i],
                         qpus[i],

@@ -1,0 +1,30 @@
+{
+  "2.3.0": {
+    "qraise": "n, t, *, classical_comm=False, quantum_comm=False, simulator=None, backend=None, noise_properties_path=None, no_thermal_relaxation=False, no_readout_error=False, no_gate_error=False, fakeqmio=False, family=None, co_located=True, cores=None, mem_per_qpu=None, n_nodes=None, node_list=None, qpus_per_node=None, partition=None, gpu=False, qmio=False",
+    "qdrop": "families=[], remove_logs=False",
+    "get_QPUs": "co_located=False, family=None",
+    "run": "circuits, qpus, param_values=None, **run_args",
+    "gather": "qjobs"
+  },
+  "2.4.0": {
+    "qraise": "n, t, *, classical_comm=False, quantum_comm=False, simulator=None, backend=None, noise_properties_path=None, no_thermal_relaxation=False, no_readout_error=False, no_gate_error=False, fakeqmio=False, family=None, co_located=True, cores_per_qpu=None, mem_per_qpu=None, n_nodes=None, node_list=None, qpus_per_node=None, partition=None, gpu=False, qmio=False",
+    "qdrop": "families=[], remove_logs=False",
+    "get_QPUs": "co_located=False, family=None",
+    "run": "circuits, qpus, param_values=None, **run_args",
+    "gather": "qjobs"
+  },
+  "3.0.0": {
+    "qraise": "n, t, *, classical_comm=False, quantum_comm=False, simulator=None, backend=None, infrastructure=None, family=None, co_located=True, cores_per_qpu=None, mem_per_qpu=None, n_nodes=None, node_list=None, qpus_per_node=None, partition=None, gpu=False, gpu_name=None, qmio=False",
+    "qdrop": "*families, remove_logs=False",
+    "get_QPUs": "co_located=False, family=None",
+    "run": "circuits, qpus, param_values=None, **run_args",
+    "gather": "qjobs"
+  },
+  "3.1.0": {
+    "qraise": "n, t, *, classical_comm=False, quantum_comm=False, simulator=None, backend=None, infrastructure=None, family=None, co_located=True, cores_per_qpu=None, mem_per_qpu=None, n_nodes=None, node_list=None, qpus_per_node=None, partition=None, gpu=False, gpu_name=None, qmio=False",
+    "qdrop": "*families, remove_logs=False",
+    "get_QPUs": "co_located=False, family=None",
+    "run": "circuits, qpus, param_values=None, **run_args",
+    "gather": "qjobs"
+  }
+}
