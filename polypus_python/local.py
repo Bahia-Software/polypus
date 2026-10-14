@@ -1,8 +1,11 @@
 from functools import lru_cache
 
-from qiskit import ClassicalRegister, QuantumCircuit, transpile
+from qiskit import ClassicalRegister, QuantumCircuit
 from qiskit.circuit import CONTROL_FLOW_OP_NAMES
+from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
 from qiskit.result import marginal_distribution
+from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import BasisTranslator, HighLevelSynthesis
 from qiskit_aer import AerSimulator
 
 from .infrastructure import Infraestructure
@@ -77,16 +80,15 @@ def _has_measurement(qc):
 
 
 @lru_cache(maxsize=1)
-def _default_aer():
-    """The default ``AerSimulator()`` and the instruction names its target
-    supports. Built on first use, not at import: the extension imports this
-    package at runtime. The *default* simulator, whatever ``sim_method`` or
+def _aer_basis():
+    """The instruction names the default ``AerSimulator()``'s target supports.
+    Built on first use, not at import: the extension imports this package at
+    runtime. The *default* simulator, whatever ``sim_method`` or
     ``noise_model`` a run asks for: a method-specific basis is smaller (a
-    ``noise_model`` cuts it from 98 to 40 gates), and lowering against it would
+    ``noise_model`` cuts it from 98 to 40 gates), and lowering into it would
     rewrite circuits Aer runs as they are or turn a method's own refusal into a
     transpiler error."""
-    simulator = AerSimulator()
-    return simulator, frozenset(simulator.target.operation_names)
+    return frozenset(AerSimulator().target.operation_names)
 
 
 def _outside_basis(qc, supported):
@@ -123,14 +125,34 @@ def _lower_to_aer_basis(qc):
     ``AerError: unknown instruction``. The circuit is lowered here, third
     lowering boundary of contract C-2, and never earlier, so the exported QASM
     stays the program the user wrote. A circuit already in the basis is handed
-    over as it is, neither copied nor transpiled, so its counts do not move.
-    ``optimization_level=0`` only rewrites; it neither reorders nor merges
-    gates. ``transpile`` returns a new circuit: the caller's is never modified.
+    over as it is, neither copied nor rewritten, so its counts do not move.
     """
-    simulator, supported = _default_aer()
+    supported = _aer_basis()
     if not _outside_basis(qc, supported):
         return qc
-    return transpile(qc, simulator, optimization_level=0)
+    return _rewrite_into_aer_basis(qc, supported)
+
+
+def _rewrite_into_aer_basis(qc, supported):
+    """Synthesis and basis translation into ``supported``, nothing else: the
+    translation stage of ``transpile(qc, AerSimulator(), optimization_level=0)``,
+    which gives the same circuit, without its layout stage. That stage was a
+    fixed cost on every lowered call, larger than the rewriting itself, and it
+    caps the width at the target's qubit count (derived from the host memory),
+    so it rejected wide circuits Aer runs, Clifford ones on the stabilizer
+    method among them. The names are Aer's own, not only Qiskit's standard
+    gates: ``mcx`` (Qiskit's ``c3x``/``c4x``) stays ``mcx``. A fresh pass
+    manager per call shares no state between threads. Returns a new circuit:
+    the caller's is never modified."""
+    names = sorted(supported)
+    return PassManager(
+        [
+            HighLevelSynthesis(
+                equivalence_library=SessionEquivalenceLibrary, basis_gates=names
+            ),
+            BasisTranslator(SessionEquivalenceLibrary, names),
+        ]
+    ).run(qc)
 
 
 def _with_full_readout(qc):

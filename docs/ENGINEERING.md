@@ -394,10 +394,12 @@ Additionally:
   `rccx`, `rc3x`, `c3sqrtx` and every declared gate are not (`c3x` and `c4x`
   parse as Qiskit's `mcx`, which is) and Aer never unrolls them by itself, so
   `Local.run_qcs` (`polypus_python/local.py`) lowers a circuit that holds one
-  with `qiskit.transpile(qc, AerSimulator(), optimization_level=0)` just before
-  `AerSimulator.run` — the third lowering boundary of C-2, invisible to the
-  exported QASM. `Cunqa.run_qcs` (`polypus_python/cunqa.py`) does the same for
-  CUNQA, whose converter takes only the names in its
+  just before `AerSimulator.run`, with the synthesis and basis-translation
+  passes of `transpile(qc, AerSimulator(), optimization_level=0)` (same
+  circuit, without the layout stage, a fixed cost on every lowered call that
+  also caps the width at the target's qubit count) — the third lowering
+  boundary of C-2, invisible to the exported QASM. `Cunqa.run_qcs`
+  (`polypus_python/cunqa.py`) does the same for CUNQA, whose converter takes only the names in its
   `cunqa.circuit.ir.SUPPORTED_QISKIT_OPERATIONS` (`mcx` included among those it
   lacks): the fourth boundary, with `basis_gates` = the standard gates in that
   list; with a CUNQA that does not publish the list, circuits go unchanged. Whether an instruction is "outside the basis" is decided on
