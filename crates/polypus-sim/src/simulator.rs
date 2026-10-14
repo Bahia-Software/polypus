@@ -889,10 +889,7 @@ mod tests {
 
         let mut gates: Vec<G> = (0..n).map(G::H).collect();
         gates.extend(run.iter().cloned());
-        let circuit = ConcreteCircuit {
-            num_qubits: n,
-            gates,
-        };
+        let circuit = ConcreteCircuit::new(n, gates);
 
         let sv = sequential_sim()
             .run(&circuit)
@@ -944,10 +941,7 @@ mod tests {
                 theta: Fixed(0.5),
             });
         }
-        let circuit = ConcreteCircuit {
-            num_qubits: n,
-            gates: gates.clone(),
-        };
+        let circuit = ConcreteCircuit::new(n, gates.clone());
 
         let fused = sequential_sim().run(&circuit).expect("all angles finite");
 
@@ -1006,10 +1000,7 @@ mod tests {
             theta: Fixed(f64::NAN),
         });
         assert!(gates.len() > MAX_FUSED_DIAGONAL_RUN);
-        let circuit = ConcreteCircuit {
-            num_qubits: CANCEL_N,
-            gates,
-        };
+        let circuit = ConcreteCircuit::new(CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {
@@ -1033,10 +1024,7 @@ mod tests {
     /// `Statevector::apply`, never fusing), pinned to the sequential kernels —
     /// the reference the fused run must match.
     fn reference_state(n: usize, gates: &[G]) -> Statevector {
-        let circuit = ConcreteCircuit {
-            num_qubits: n,
-            gates: gates.to_vec(),
-        };
+        let circuit = ConcreteCircuit::new(n, gates.to_vec());
         sequential_sim_unfused()
             .run(&circuit)
             .expect("all angles finite")
@@ -1045,10 +1033,7 @@ mod tests {
     /// The fused run (dense connected-component fusion) must land bit-for-bit
     /// close to applying every gate one at a time through `Statevector::apply`.
     fn assert_fused_matches_reference(n: usize, gates: &[G]) {
-        let circuit = ConcreteCircuit {
-            num_qubits: n,
-            gates: gates.to_vec(),
-        };
+        let circuit = ConcreteCircuit::new(n, gates.to_vec());
         let fused = sequential_sim().run(&circuit).expect("all angles finite");
         let reference = reference_state(n, gates);
         for (b, (a, c)) in fused
@@ -1247,10 +1232,7 @@ mod tests {
             qubit: real,
             theta: Fixed(f64::NAN),
         });
-        let circuit = ConcreteCircuit {
-            num_qubits: DENSE_CANCEL_N,
-            gates,
-        };
+        let circuit = ConcreteCircuit::new(DENSE_CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {
@@ -1302,10 +1284,7 @@ mod tests {
                 theta: Fixed(0.6),
             },
         ];
-        let circuit = ConcreteCircuit {
-            num_qubits: 3,
-            gates: gates.to_vec(),
-        };
+        let circuit = ConcreteCircuit::new(3, gates.to_vec());
         let fused = sequential_sim().run(&circuit).expect("all angles finite");
         let unfused = sequential_sim_unfused()
             .run(&circuit)
@@ -1345,10 +1324,7 @@ mod tests {
             qubit: 0,
             theta: Fixed(f64::NAN),
         });
-        let circuit = ConcreteCircuit {
-            num_qubits: CANCEL_N,
-            gates,
-        };
+        let circuit = ConcreteCircuit::new(CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {

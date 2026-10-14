@@ -474,7 +474,7 @@ pub(crate) fn write_qasm3(
         None => (&circuit.gates, &circuit.exprs, circuit.param_names()),
     };
     let num_qubits = circuit.num_qubits;
-    let num_clbits = crate::circuit::num_clbits(num_qubits, gates);
+    let num_clbits = circuit.clbits_width();
     if params.len() > MAX_INPUTS {
         return Err(over("MAX_INPUTS", MAX_INPUTS));
     }

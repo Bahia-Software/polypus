@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`) | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles) |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) | ✅ present | tag/Cargo diverged at 0.6.0 |
@@ -438,14 +438,15 @@ a circuit in the list is neither copied nor transpiled).
   sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
   **declares** (the sum of all its `creg`s), even when fewer are written —
   `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
-  measurement writes read `0`; for a `polypus.Circuit`, which declares no
-  registers, the implicit width `max(cbit) + 1` (`num_qubits` with
-  `measure_all`). Aer and the native backend agree on both (issue #251; before
-  it the native backend used `max(cbit) + 1` for OpenQASM input too). Known
-  limit, the same on both backends: `polypus.Circuit.from_qasm2(src)` and
-  `from_qasm3(src)` do not carry the declared width past parameter binding, so
-  running the imported circuit uses the implicit width (Aer receives the
-  re-exported QASM, which declares only the bits written). The QMIO and CUNQA paths are not verified.
+  measurement writes read `0`; for a `polypus.Circuit` built with the
+  builder, which declares no registers, the implicit width `max(cbit) + 1`
+  (`num_qubits` with `measure_all`). A `polypus.Circuit` imported with
+  `from_qasm2`/`from_qasm3` keeps the width its source declares, through
+  parameter binding and through the export Aer receives (its `creg c[n]` is
+  the declared width): it is keyed like the source. Aer and the native
+  backend agree on all three (issue #251; before it the native backend used
+  `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
+  verified; the QIR export records only the measured results.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -516,13 +517,18 @@ classical width of a measured OpenQASM program in
 `test_measured_circuit_with_a_wider_creg_has_the_same_keys` and
 `TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
 `tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
-plus the implicit width of a `polypus.Circuit` and of `Circuit.from_qasm2`),
+plus the implicit width of a built `polypus.Circuit` and the declared width
+of one from `Circuit.from_qasm2`/`from_qasm3`),
 `format_counts_width_follows_the_declared_clbits`,
 `measured_qasm_is_keyed_at_its_declared_clbit_width`,
-`native_circuit_keeps_the_implicit_clbit_width` and
+`native_circuit_keeps_the_implicit_clbit_width`,
+`imported_native_circuit_keeps_its_declared_clbit_width` and
 `declared_clbit_width_survives_a_transpiler` in
-`crates/polypus-infrastructure/src/native.rs`, and the `declared_clbits_*` /
-`builder_circuits_declare_no_clbits` tests in
+`crates/polypus-infrastructure/src/native.rs`, and
+`declared_clbits_is_the_sum_of_the_cregs`, `builder_circuits_declare_no_clbits`,
+`the_export_keeps_the_declared_width`,
+`the_width_is_never_narrower_than_the_measurements` and
+`declared_width_is_part_of_eq_and_kept_by_clone` in
 `crates/polypus-circuit/tests/qasm_import.rs` and
 `declared_clbits_is_the_sum_of_the_bit_registers` in
 `crates/polypus-circuit/tests/qasm3.rs` (issue #251).
