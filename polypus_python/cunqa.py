@@ -1,7 +1,9 @@
 import os
 import sys
+from functools import lru_cache
 
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
+from qiskit.circuit.library import get_standard_gate_name_mapping
 
 # CUNQA is an optional, site-installed dependency (see the `cunqa` extra in
 # polypus_python's pyproject). Prefer a normal import -- installed via that extra
@@ -16,7 +18,44 @@ if _cunqa_path and _cunqa_path not in sys.path:
 from cunqa.qjob import gather  # noqa: E402  (must follow the path setup above)
 from cunqa.qpu import get_QPUs, qdrop, qraise, run  # noqa: E402
 
+try:
+    # The instruction names CUNQA's QuantumCircuit converter accepts (CUNQA 3.x).
+    from cunqa.circuit.ir import SUPPORTED_QISKIT_OPERATIONS  # noqa: E402
+except ImportError:
+    SUPPORTED_QISKIT_OPERATIONS = None
+
 from .infrastructure import Infraestructure  # noqa: E402
+from .local import _outside_basis  # noqa: E402
+
+
+@lru_cache(maxsize=1)
+def _cunqa_basis():
+    """The instruction names CUNQA converts, and the gates among them that
+    ``qiskit.transpile`` can target (its ``basis_gates`` takes standard gates
+    only; ``unitary``, ``ccy``, ``if_else`` and CUNQA's own instructions are
+    accepted as they are but are no lowering target)."""
+    supported = frozenset(SUPPORTED_QISKIT_OPERATIONS)
+    return supported, sorted(supported & set(get_standard_gate_name_mapping()))
+
+
+def _lower_to_cunqa_basis(qc):
+    """``qc`` when CUNQA converts every instruction in it, else an equivalent
+    copy rewritten into the gates it converts.
+
+    CUNQA's converter rejects what is not in ``SUPPORTED_QISKIT_OPERATIONS``
+    (``ch``, ``u0``, ``rccx``, ``rcccx``, ``c3sx``, ``mcx`` -- Qiskit's name for
+    ``c3x`` and ``c4x`` -- and a ``gate`` declared in the OpenQASM source) and,
+    like Aer, does not unroll it. The circuit is lowered here, a lowering
+    boundary of contract C-2 as in ``local.py``: with ``optimization_level=0``
+    (rewrite only, no reordering or merging), only when needed (a circuit CUNQA
+    converts is handed over as it is), never touching the exported QASM. With a
+    CUNQA that does not publish the list, the circuit is forwarded unchanged."""
+    if SUPPORTED_QISKIT_OPERATIONS is None:
+        return qc
+    supported, basis_gates = _cunqa_basis()
+    if not _outside_basis(qc, supported):
+        return qc
+    return transpile(qc, basis_gates=basis_gates, optimization_level=0)
 
 
 class Cunqa(Infraestructure):
@@ -73,9 +112,12 @@ class Cunqa(Infraestructure):
         # known.
         #
         # Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
-        # currently consume QuantumCircuit objects, so parse here.
+        # currently consume QuantumCircuit objects, so parse here, then lower
+        # what CUNQA's converter does not take.
         qcs = [
-            QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+            _lower_to_cunqa_basis(
+                QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+            )
             for qc in args["qcs"]
         ]
         shots = args["shots"]
