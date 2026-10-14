@@ -45,6 +45,7 @@ fn config(python: &str, env: &[(&str, &str)]) -> SubprocessConfig {
         // crash and cancel paths end them first.
         recv_timeout: Duration::from_secs(30),
         arm_pdeathsig: true,
+        ..SubprocessConfig::default()
     }
 }
 
