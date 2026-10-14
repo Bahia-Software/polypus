@@ -722,7 +722,25 @@ confirm the verdict.
 ### QMIO — native wire backend
 
 QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
-`QmioError`. Run against an unreachable endpoint:
+`QmioError`.
+
+**Tuning variables.** Timeouts and retries are read from the environment when the backend
+is constructed:
+
+| Variable | Default | Valid values |
+|---|---|---|
+| `QMIO_RECV_TIMEOUT_MS` | `300000` | integer ≥ 1 |
+| `QMIO_MAX_RETRIES` | `3` | integer ≥ 0 (`0` = no retries) |
+| `QMIO_RETRY_BACKOFF_MS` | `100` | integer ≥ 0 (`0` = no delay) |
+| `QMIO_GLOBAL_TIMEOUT_MS` | `(retries + 1) · 3 · recv timeout` + backoff sum | integer ≥ 1 |
+
+An unset variable uses its default. A variable that is set but is not a non-negative
+integer (`QMIO_RECV_TIMEOUT_MS=3000O`), or is `0` for a timeout, fails construction with
+`polypus.QmioError` naming the variable and the rejected value — it is never replaced by
+the default. This matches the registry `options` path, which also rejects malformed numeric
+options.
+
+Run against an unreachable endpoint:
 
 - **Clean error → `External`.** A wire failure (connect/timeout) is boxed into
   `External` (a `QmioError`), which the edge re-raises as the typed `polypus.QmioError`.

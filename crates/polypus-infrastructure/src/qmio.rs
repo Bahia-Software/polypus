@@ -35,6 +35,21 @@
 //! size ([`QmioBackend::max_reply_bytes`]). The ZMQ traffic itself is in clear
 //! text over a trusted private HPC network (CURVE/auth is out of scope).
 //!
+//! # Environment variables
+//!
+//! Timeouts and retries are tunable through the environment (read when the backend
+//! is constructed). A variable that is set but not a non-negative integer — or is
+//! `0` for a timeout — fails construction with [`QmioError::Config`] (a
+//! `polypus.QmioError` in Python) naming the variable and the rejected value,
+//! rather than silently using the default.
+//!
+//! | Variable | Default | Valid values |
+//! |---|---|---|
+//! | `QMIO_RECV_TIMEOUT_MS` | `300000` | integer ≥ 1 |
+//! | `QMIO_MAX_RETRIES` | `3` | integer ≥ 0 (`0` = no retries) |
+//! | `QMIO_RETRY_BACKOFF_MS` | `100` | integer ≥ 0 (`0` = no delay) |
+//! | `QMIO_GLOBAL_TIMEOUT_MS` | `(retries + 1) · 3 · recv timeout` + backoff sum | integer ≥ 1 |
+//!
 //! # Points to verify against the live QPU (parametrised TODOs — do not invent)
 //!
 //! 1. **Reply JSON schema** for `binary_count`, verified against the live QPU:
@@ -63,6 +78,7 @@ use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use serde_json::json;
 use serde_pickle::{DeOptions, SerOptions, Value as PickleValue};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -301,8 +317,10 @@ impl QmioBackend {
     /// Create a backend targeting `endpoint`.
     ///
     /// Timeouts and retry behaviour can be overridden via the `QMIO_RECV_TIMEOUT_MS`,
-    /// `QMIO_MAX_RETRIES` and `QMIO_RETRY_BACKOFF_MS` environment variables
-    /// (sensible defaults otherwise).
+    /// `QMIO_MAX_RETRIES`, `QMIO_RETRY_BACKOFF_MS` and `QMIO_GLOBAL_TIMEOUT_MS`
+    /// environment variables (sensible defaults when unset). A variable that is set
+    /// but is not a non-negative integer, or is `0` for either timeout, is rejected
+    /// with [`QmioError::Config`]; see the module docs.
     pub fn new(
         endpoint: String,
         program_format: QmioProgramFormat,
@@ -315,6 +333,12 @@ impl QmioBackend {
         } else {
             endpoint
         };
+        let EnvTuning {
+            recv_timeout,
+            max_retries,
+            retry_backoff,
+            global_timeout,
+        } = EnvTuning::from_lookup(|name| std::env::var_os(name))?;
         // A single worker thread is enough (REQ is serial) but a multi-thread
         // runtime guarantees the socket's background IO tasks make progress
         // independently of the `block_on` call driving a request.
@@ -323,23 +347,6 @@ impl QmioBackend {
             .enable_all()
             .build()
             .map_err(|e| QmioError::Runtime(e.to_string()))?;
-        let recv_timeout = Duration::from_millis(env_u64("QMIO_RECV_TIMEOUT_MS", 300_000));
-        let max_retries = env_u64("QMIO_MAX_RETRIES", 3) as usize;
-        let retry_backoff = Duration::from_millis(env_u64("QMIO_RETRY_BACKOFF_MS", 100));
-        // Global deadline default: a generous worst-case bound so it never cuts a
-        // legitimate reconnect/retry sequence short, only a pathological hang.
-        // Each attempt bounds connect + send + recv at `recv_timeout` each (3x),
-        // over `max_retries + 1` attempts, plus the linear-backoff sum. Overridable
-        // via QMIO_GLOBAL_TIMEOUT_MS to impose a tighter cap.
-        let attempts = max_retries as u64 + 1;
-        let backoff_sum =
-            retry_backoff.as_millis() as u64 * (max_retries as u64 * (max_retries as u64 + 1) / 2);
-        let default_global = attempts
-            .saturating_mul(3)
-            .saturating_mul(recv_timeout.as_millis() as u64)
-            .saturating_add(backoff_sum);
-        let global_timeout =
-            Duration::from_millis(env_u64("QMIO_GLOBAL_TIMEOUT_MS", default_global));
         Ok(QmioBackend {
             endpoint,
             program_format,
@@ -939,18 +946,189 @@ pub fn build_config_json(
     }))
 }
 
-/// Read a `u64` from an environment variable, falling back to `default` when the
-/// variable is unset or unparsable.
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+/// Timeout and retry settings read from the `QMIO_*` environment variables.
+struct EnvTuning {
+    recv_timeout: Duration,
+    max_retries: usize,
+    retry_backoff: Duration,
+    global_timeout: Duration,
+}
+
+impl EnvTuning {
+    /// Resolve the settings through `get`, which returns the raw value of a variable
+    /// (`None` when unset). Taking the lookup as a parameter keeps the parsing
+    /// testable without mutating the process-wide environment.
+    fn from_lookup(get: impl Fn(&str) -> Option<OsString>) -> Result<Self, QmioError> {
+        let recv_ms = env_u64(&get, "QMIO_RECV_TIMEOUT_MS", 300_000, false)?;
+        let max_retries = env_u64(&get, "QMIO_MAX_RETRIES", 3, true)?;
+        let backoff_ms = env_u64(&get, "QMIO_RETRY_BACKOFF_MS", 100, true)?;
+        // Global deadline default: a generous worst-case bound so it never cuts a
+        // legitimate reconnect/retry sequence short, only a pathological hang.
+        // Each attempt bounds connect + send + recv at `recv_timeout` each (3x),
+        // over `max_retries + 1` attempts, plus the linear-backoff sum. Overridable
+        // via QMIO_GLOBAL_TIMEOUT_MS to impose a tighter cap.
+        let attempts = max_retries.saturating_add(1);
+        let backoff_sum = backoff_ms
+            .saturating_mul(max_retries)
+            .saturating_mul(attempts)
+            / 2;
+        let default_global = attempts
+            .saturating_mul(3)
+            .saturating_mul(recv_ms)
+            .saturating_add(backoff_sum);
+        let global_ms = env_u64(&get, "QMIO_GLOBAL_TIMEOUT_MS", default_global, false)?;
+        Ok(EnvTuning {
+            recv_timeout: Duration::from_millis(recv_ms),
+            max_retries: usize::try_from(max_retries).unwrap_or(usize::MAX),
+            retry_backoff: Duration::from_millis(backoff_ms),
+            global_timeout: Duration::from_millis(global_ms),
+        })
+    }
+}
+
+/// Read a `u64` environment variable through `get`: `default` when it is unset, a
+/// [`QmioError::Config`] naming the variable and the rejected value when it is set
+/// but not a non-negative integer, or `0` while `allow_zero` is false (a zero
+/// timeout makes every request fail instantly with a misleading `Timeout`).
+fn env_u64(
+    get: &impl Fn(&str) -> Option<OsString>,
+    name: &str,
+    default: u64,
+    allow_zero: bool,
+) -> Result<u64, QmioError> {
+    let Some(raw) = get(name) else {
+        return Ok(default);
+    };
+    let parsed = raw.to_str().and_then(|v| v.parse::<u64>().ok());
+    match parsed {
+        Some(0) if !allow_zero => Err(QmioError::Config(format!(
+            "{name} must be a positive integer, got 0"
+        ))),
+        Some(v) => Ok(v),
+        None => Err(QmioError::Config(format!(
+            "{name} must be a non-negative integer, got {raw:?}"
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tuning(vars: &[(&str, &str)]) -> Result<EnvTuning, QmioError> {
+        EnvTuning::from_lookup(|name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| OsString::from(v))
+        })
+    }
+
+    fn config_message(result: Result<EnvTuning, QmioError>) -> String {
+        match result {
+            Err(QmioError::Config(m)) => m,
+            Err(other) => panic!("expected QmioError::Config, got {other}"),
+            Ok(_) => panic!("expected QmioError::Config, got Ok"),
+        }
+    }
+
+    #[test]
+    fn env_tuning_defaults_when_unset() {
+        let t = tuning(&[]).unwrap();
+        assert_eq!(t.recv_timeout, Duration::from_millis(300_000));
+        assert_eq!(t.max_retries, 3);
+        assert_eq!(t.retry_backoff, Duration::from_millis(100));
+        // 4 attempts * 3 * 300_000 ms + 100 ms * (1 + 2 + 3)
+        assert_eq!(t.global_timeout, Duration::from_millis(3_600_600));
+    }
+
+    #[test]
+    fn env_tuning_accepts_valid_values() {
+        let t = tuning(&[
+            ("QMIO_RECV_TIMEOUT_MS", "1500"),
+            ("QMIO_MAX_RETRIES", "5"),
+            ("QMIO_RETRY_BACKOFF_MS", "20"),
+            ("QMIO_GLOBAL_TIMEOUT_MS", "9000"),
+        ])
+        .unwrap();
+        assert_eq!(t.recv_timeout, Duration::from_millis(1500));
+        assert_eq!(t.max_retries, 5);
+        assert_eq!(t.retry_backoff, Duration::from_millis(20));
+        assert_eq!(t.global_timeout, Duration::from_millis(9000));
+    }
+
+    #[test]
+    fn env_tuning_zero_is_valid_for_retries_and_backoff() {
+        let t = tuning(&[("QMIO_MAX_RETRIES", "0"), ("QMIO_RETRY_BACKOFF_MS", "0")]).unwrap();
+        assert_eq!(t.max_retries, 0);
+        assert_eq!(t.retry_backoff, Duration::ZERO);
+        // One attempt, no backoff: 1 * 3 * 300_000 ms.
+        assert_eq!(t.global_timeout, Duration::from_millis(900_000));
+    }
+
+    #[test]
+    fn env_tuning_default_global_follows_overridden_inputs() {
+        let t = tuning(&[
+            ("QMIO_RECV_TIMEOUT_MS", "1000"),
+            ("QMIO_MAX_RETRIES", "2"),
+            ("QMIO_RETRY_BACKOFF_MS", "10"),
+        ])
+        .unwrap();
+        // 3 attempts * 3 * 1000 ms + 10 ms * (1 + 2)
+        assert_eq!(t.global_timeout, Duration::from_millis(9_030));
+    }
+
+    #[test]
+    fn env_tuning_rejects_malformed_values() {
+        for name in [
+            "QMIO_RECV_TIMEOUT_MS",
+            "QMIO_MAX_RETRIES",
+            "QMIO_RETRY_BACKOFF_MS",
+            "QMIO_GLOBAL_TIMEOUT_MS",
+        ] {
+            for bad in [
+                "3000O",
+                "",
+                "-1",
+                "1.5",
+                " 7",
+                "0x10",
+                "99999999999999999999",
+            ] {
+                let msg = config_message(tuning(&[(name, bad)]));
+                assert!(msg.contains(name), "{name}={bad:?}: {msg}");
+                assert!(msg.contains(&format!("{bad:?}")), "{name}={bad:?}: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn env_tuning_rejects_zero_timeouts() {
+        for name in ["QMIO_RECV_TIMEOUT_MS", "QMIO_GLOBAL_TIMEOUT_MS"] {
+            let msg = config_message(tuning(&[(name, "0")]));
+            assert!(msg.contains(name) && msg.contains("positive"), "{msg}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_tuning_rejects_non_unicode_value() {
+        use std::os::unix::ffi::OsStringExt;
+        let result = EnvTuning::from_lookup(|name| {
+            (name == "QMIO_MAX_RETRIES").then(|| OsString::from_vec(vec![0x66, 0xff]))
+        });
+        assert!(config_message(result).contains("QMIO_MAX_RETRIES"));
+    }
+
+    #[test]
+    fn env_tuning_does_not_overflow_on_huge_values() {
+        let t = tuning(&[
+            ("QMIO_MAX_RETRIES", "18446744073709551615"),
+            ("QMIO_RETRY_BACKOFF_MS", "18446744073709551615"),
+            ("QMIO_RECV_TIMEOUT_MS", "18446744073709551615"),
+        ])
+        .unwrap();
+        assert_eq!(t.global_timeout, Duration::from_millis(u64::MAX));
+    }
 
     fn bell() -> ConcreteCircuit {
         ParameterizedCircuit::new(2)
