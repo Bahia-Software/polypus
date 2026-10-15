@@ -432,7 +432,7 @@ transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
 execution path) and `tests/python/test_backend_compatibility.py`. For a Qiskit
 `QuantumCircuit`, `polypus.backend_compatibility`
 (`crates/polypus/src/bindings/compatibility.rs`) replicates the Aer path's
-policy — when to lower, against which simulator, how — to report what the run
+decision to lower and calls the run's own rewrite to report what the run
 would raise; it lowers nothing for execution, so it is not a lowering
 boundary, and `_assert_coherent` in that test, which runs every circuit it
 classifies, keeps the two copies in step. The CUNQA
