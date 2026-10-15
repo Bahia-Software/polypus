@@ -19,11 +19,12 @@
 //! before running it (`polypus_python/local.py`, contract C-2), so an
 //! instruction outside the basis is no reason to reject. For a Qiskit
 //! `QuantumCircuit` the Aer entry replays that lowering: when an instruction is
-//! outside the basis it calls `qiskit.transpile` as the run would, so one that
-//! cannot be lowered (an opaque instruction without a definition, a `box`) is
-//! reported with the error the run would raise. The policy is copied from
-//! `local.py`, not shared with it; `tests/python/test_backend_compatibility.py`
-//! keeps the two in step.
+//! outside the basis it calls the rewrite the run calls
+//! (`_rewrite_into_aer_basis`), so one that cannot be lowered (an opaque
+//! instruction without a definition, a `box`) is reported with the error the run
+//! would raise. The rewrite is shared with `local.py`; the decision to rewrite
+//! is copied from it, and `tests/python/test_backend_compatibility.py` keeps the
+//! two in step.
 
 use std::collections::HashSet;
 
@@ -182,36 +183,34 @@ fn aer_missing(py: Python<'_>) -> String {
 /// prepares it for Aer (`_lower_to_aer_basis` in `polypus_python/local.py`,
 /// contract C-2). A circuit whose instructions are all in the basis of the
 /// default `AerSimulator()` reaches Aer as it is, so it is accepted without
-/// being transpiled. One with an instruction outside it, at any depth
-/// ([`outside_basis`]), is transpiled as the run transpiles it
-/// (`optimization_level=0`; the result is a new circuit and is discarded, the
+/// being rewritten. One with an instruction outside it, at any depth
+/// ([`outside_basis`]), is rewritten as the run rewrites it
+/// (`_rewrite_into_aer_basis`; the result is a new circuit and is discarded, the
 /// caller's is not modified). A failure follows the run's own rule
 /// ([`qiskit_error_to_pyerr`]): what the run would raise as
 /// `polypus.BackendError` (a Qiskit exception) is quoted as its message
 /// (`module.Class: message`); anything else, a Qiskit class that is also a
 /// `ValueError`, `TypeError` or `KeyboardInterrupt` included, propagates as the
-/// run would raise it. `qiskit.transpile` is looked up on every call.
+/// run would raise it. The rewrite is looked up on every call.
 fn aer_quantum_circuit_rejections(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     let py = qc.py();
     let Some(aer_simulator) = aer_simulator_class(py) else {
         return Ok(vec![aer_missing(py)]);
     };
-    let simulator = aer_simulator.call0()?;
-    let supported = names(
-        &simulator
-            .getattr(intern!(py, "target"))?
-            .getattr(intern!(py, "operation_names"))?,
-    )?;
+    let basis = aer_simulator
+        .call0()?
+        .getattr(intern!(py, "target"))?
+        .getattr(intern!(py, "operation_names"))?;
+    let supported = names(&basis)?;
     let control_flow = names(
         &PyModule::import(py, "qiskit.circuit")?.getattr(intern!(py, "CONTROL_FLOW_OP_NAMES"))?,
     )?;
     if !outside_basis(qc, &supported, &control_flow)? {
         return Ok(Vec::new());
     }
-    let transpile = PyModule::import(py, "qiskit")?.getattr(intern!(py, "transpile"))?;
-    let options = PyDict::new(py);
-    options.set_item(intern!(py, "optimization_level"), 0)?;
-    match transpile.call((qc, simulator), Some(&options)) {
+    let rewrite = PyModule::import(py, "polypus_python.local")?
+        .getattr(intern!(py, "_rewrite_into_aer_basis"))?;
+    match rewrite.call1((qc, basis)) {
         Ok(_) => Ok(Vec::new()),
         Err(err) => {
             let raised = qiskit_error_to_pyerr(err);
