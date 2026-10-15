@@ -5,6 +5,7 @@ from qiskit.circuit import CONTROL_FLOW_OP_NAMES
 from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
 from qiskit.result import marginal_distribution
 from qiskit.transpiler import PassManager
+from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.passes import BasisTranslator, HighLevelSynthesis
 from qiskit_aer import AerSimulator
 
@@ -84,10 +85,13 @@ def _aer_basis():
     """The instruction names the default ``AerSimulator()``'s target supports.
     Built on first use, not at import: the extension imports this package at
     runtime. The *default* simulator, whatever ``sim_method`` or
-    ``noise_model`` a run asks for: a method-specific basis is smaller (a
-    ``noise_model`` cuts it from 98 to 40 gates), and lowering into it would
-    rewrite circuits Aer runs as they are or turn a method's own refusal into a
-    transpiler error."""
+    ``noise_model`` a run asks for: either one narrows the simulator's target
+    (a ``noise_model`` cuts it to the gates the model names, ``stabilizer`` to
+    its Clifford set) but not what Aer runs, which still takes every
+    instruction of the default basis and refuses for itself what a method
+    cannot hold. Lowering into that narrower basis would rewrite gates Aer
+    runs as they are (``h`` into ``u2``, moving where the noise falls) or turn
+    a method's own refusal into a transpiler error."""
     return frozenset(AerSimulator().target.operation_names)
 
 
@@ -126,11 +130,44 @@ def _lower_to_aer_basis(qc):
     lowering boundary of contract C-2, and never earlier, so the exported QASM
     stays the program the user wrote. A circuit already in the basis is handed
     over as it is, neither copied nor rewritten, so its counts do not move.
+
+    A control-flow operation outside the basis (today ``box``), at any depth,
+    cannot be rewritten: it is refused here, before the rewrite, with the
+    ``TranspilerError`` ``transpile`` raised for one at the top level. The
+    rewrite's own error for it lists the circuit's operations and the whole
+    basis in an order that changes from call to call (issue #307).
     """
     supported = _aer_basis()
     if not _outside_basis(qc, supported):
         return qc
+    unsupported = _control_flow_outside(qc, supported)
+    if unsupported is not None:
+        raise TranspilerError(
+            f"The control-flow construct '{unsupported}' is not supported by the "
+            "backend."
+        )
     return _rewrite_into_aer_basis(qc, supported)
+
+
+def _control_flow_outside(qc, supported):
+    """The name of the first control-flow operation of ``qc`` (one of
+    ``CONTROL_FLOW_OP_NAMES``) that is not in ``supported``, looking into the
+    bodies of those that are, or ``None``. ``count_ops`` order: deterministic
+    for a given circuit."""
+    names = qc.count_ops()
+    for name in names:
+        if name in CONTROL_FLOW_OP_NAMES and name not in supported:
+            return name
+    if CONTROL_FLOW_OP_NAMES.isdisjoint(names):
+        return None
+    for instruction in qc.data:
+        if instruction.operation.name not in CONTROL_FLOW_OP_NAMES:
+            continue
+        for block in instruction.operation.blocks:
+            found = _control_flow_outside(block, supported)
+            if found is not None:
+                return found
+    return None
 
 
 def _rewrite_into_aer_basis(qc, supported):

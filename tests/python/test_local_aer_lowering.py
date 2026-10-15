@@ -456,17 +456,48 @@ class TestLoweringDetails:
         )
         assert got == {k.replace(" ", ""): v for k, v in direct.items()}
 
+    @pytest.mark.parametrize("nesting", ["top", "for_loop", "if_test"])
+    def test_box_is_refused_with_a_stable_message(self, nesting):
+        """``box`` cannot be rewritten into Aer's basis. It is refused before the
+        rewrite, at any depth, with the ``TranspilerError`` ``transpile`` gave
+        for a top-level one: the rewrite's own error lists the circuit's
+        operations and the whole basis in an order that changes from call to
+        call, so the same circuit gave a different message each time and
+        ``backend_compatibility`` could not quote the run (issue #307)."""
+        import polypus
+        from qiskit import QuantumCircuit
+        from qiskit.transpiler.exceptions import TranspilerError
+
+        qc = QuantumCircuit(2, 2)
+        qc.measure(0, 0)
+        if nesting == "top":
+            with qc.box():
+                qc.ch(0, 1)
+        elif nesting == "for_loop":
+            with qc.for_loop(range(2)):
+                with qc.box():
+                    qc.ch(0, 1)
+        else:
+            with qc.if_test((qc.clbits[0], 0)):
+                with qc.box():
+                    qc.ch(0, 1)
+        qc.measure(1, 1)
+        messages = set()
+        for _ in range(3):
+            with pytest.raises(polypus.BackendError) as info:
+                _run(qc)
+            assert type(info.value.__cause__) is TranspilerError
+            messages.add(str(info.value))
+        assert messages == {
+            'qiskit.transpiler.exceptions.TranspilerError: "The control-flow '
+            "construct 'box' is not supported by the backend.\""
+        }
+
 
 # Wider than any host's default ``AerSimulator()`` target, which depends on the
 # host's memory (issue #307).
 WIDE = 200
 MPS = {"sim_method": "matrix_product_state"}
-
-
-def _default_width():
-    from qiskit_aer import AerSimulator
-
-    return AerSimulator().target.num_qubits
 
 
 def _wide_program(case):
@@ -483,21 +514,6 @@ def _wide_program(case):
     return "\n".join(lines) + "\n"
 
 
-def _spy_transpile(monkeypatch):
-    """Record every ``transpile`` call ``local.py`` makes (args, kwargs)."""
-    import polypus_python.local as local
-
-    calls = []
-    original = local.transpile
-
-    def spy(*args, **kwargs):
-        calls.append((args, kwargs))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(local, "transpile", spy)
-    return calls
-
-
 def _wide_ch():
     from qiskit import QuantumCircuit
 
@@ -509,9 +525,10 @@ def _wide_ch():
 
 
 class TestWideCircuits:
-    """A circuit wider than the default ``AerSimulator()``'s target is lowered
-    against a target with the same instructions and the circuit's width, so a
-    ``sim_method`` that holds it runs it (issue #307)."""
+    """The lowering has no width cap (synthesis and basis translation only, no
+    layout stage), so a circuit wider than the default ``AerSimulator()``'s
+    target, whose width the host's memory sets, runs under a ``sim_method``
+    that holds it (issue #307)."""
 
     def test_wide_circuit_outside_the_basis_runs_with_mps(self):
         """The reproducer of issue #307: it used to fail with
@@ -590,112 +607,10 @@ class TestWideCircuits:
             "stabilizer",
         )
 
-    def test_lowering_against_the_wide_target_equals_the_narrow_one(self):
-        """The wide target changes the width cap, not the policy: on circuits the
-        default simulator holds, both lowerings give the same circuit. Besides
-        the Polypus gates, every Qiskit standard gate outside Aer's basis (with
-        bound angles) and the four control-flow blocks (``if_else``,
-        ``for_loop``, ``while_loop``, ``switch_case``), so a Qiskit release
-        where the two diverge is caught here."""
-        from polypus_python.local import _default_aer, _wide_aer_target
-        from qiskit import QuantumCircuit, transpile
-        from qiskit.circuit import Gate
-        from qiskit.circuit.library import get_standard_gate_name_mapping
-
-        simulator, supported = _default_aer()
-        circuits = [QuantumCircuit.from_qasm_str(_program(case)) for case in CASES]
-        polypus_gates = len(circuits)
-        for name, gate in sorted(get_standard_gate_name_mapping().items()):
-            if not isinstance(gate, Gate) or name in supported:
-                continue
-            qc = QuantumCircuit(gate.num_qubits, name=name)
-            qc.append(gate, range(gate.num_qubits))
-            angles = {p: 0.3 + 0.1 * i for i, p in enumerate(qc.parameters)}
-            circuits.append(qc.assign_parameters(angles))
-        flow = QuantumCircuit(3, 3)
-        flow.h(0)
-        flow.measure(0, 0)
-        with flow.if_test((flow.clbits[0], 1)):
-            flow.ch(0, 1)
-        with flow.for_loop(range(2)):
-            flow.rccx(0, 1, 2)
-        flow.measure([1, 2], [1, 2])
-        circuits.append(flow)
-        loops = QuantumCircuit(3, 3)
-        loops.h(0)
-        loops.measure(0, 0)
-        with loops.while_loop((loops.clbits[0], 1)):
-            loops.ch(0, 1)
-            loops.measure(0, 0)
-        with loops.switch(loops.clbits[1]) as case:
-            with case(0):
-                loops.ecr(0, 1)
-                loops.rccx(0, 1, 2)
-            with case(1):
-                loops.iswap(2, 0)
-        loops.measure([0, 1, 2], [0, 1, 2])
-        circuits.append(loops)
-        # The sweep is not empty: ``ch``, at least, is a standard gate outside.
-        assert len(circuits) > polypus_gates + 2
-        for qc in circuits:
-            narrow = transpile(qc, simulator, optimization_level=0)
-            wide = transpile(
-                qc, target=_wide_aer_target(qc.num_qubits), optimization_level=0
-            )
-            assert wide == narrow, qc.name
-
-    def test_wide_target_has_the_default_instructions_and_the_given_width(self):
-        from polypus_python.local import _default_aer, _wide_aer_target
-
-        simulator, _ = _default_aer()
-        target = _wide_aer_target(WIDE)
-        assert target.num_qubits == WIDE
-        assert set(target.operation_names) == set(simulator.target.operation_names)
-
-    def test_a_circuit_the_default_target_holds_takes_the_narrow_path(
-        self, monkeypatch
-    ):
-        """``W`` qubits, ``W`` the default target's width (host-dependent):
-        ``transpile(qc, simulator, optimization_level=0)`` with the default
-        simulator, exactly the call made before issue #307."""
-        from polypus_python.local import _default_aer
+    def test_a_wide_circuit_in_the_basis_is_not_lowered(self, monkeypatch):
         from qiskit import QuantumCircuit
 
-        calls = _spy_transpile(monkeypatch)
-        width = _default_width()
-        qc = QuantumCircuit(width)
-        qc.x(0)
-        qc.ch(0, 1)
-        qc.measure_all()
-        counts = _run(qc, shots=32, **MPS)
-        assert set(counts) <= {"0" * (width - 2) + "01", "0" * (width - 2) + "11"}
-        assert len(calls) == 1
-        args, kwargs = calls[0]
-        assert args[0] is qc and args[1] is _default_aer()[0] and len(args) == 2
-        assert kwargs == {"optimization_level": 0}
-
-    def test_one_qubit_wider_takes_the_wide_path(self, monkeypatch):
-        from qiskit import QuantumCircuit
-
-        calls = _spy_transpile(monkeypatch)
-        width = _default_width() + 1
-        qc = QuantumCircuit(width)
-        qc.x(0)
-        qc.ch(0, 1)
-        qc.measure_all()
-        counts = _run(qc, shots=32, **MPS)
-        assert set(counts) <= {"0" * (width - 2) + "01", "0" * (width - 2) + "11"}
-        assert len(calls) == 1
-        args, kwargs = calls[0]
-        assert len(args) == 1 and args[0] is qc
-        assert set(kwargs) == {"target", "optimization_level"}
-        assert kwargs["optimization_level"] == 0
-        assert kwargs["target"].num_qubits == width
-
-    def test_a_wide_circuit_in_the_basis_is_not_transpiled(self, monkeypatch):
-        from qiskit import QuantumCircuit
-
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         qc = QuantumCircuit(WIDE)
         qc.x(0)
         qc.cx(0, WIDE - 1)
@@ -758,7 +673,6 @@ class TestWideCircuits:
         assert result.stdout.split() == ["refused:", "ch", "refused:", "cx"]
 
 
-
 def _received_by_aer(monkeypatch, circuit):
     """The circuits ``AerSimulator.run`` receives when ``circuit`` runs."""
     from qiskit_aer import AerSimulator
@@ -817,3 +731,55 @@ class TestLoweredProgram:
         circuit = src if kind == "qasm_string" else polypus.Circuit.from_qasm2(src)
         counts = _run(circuit, shots=200)
         assert set(counts) <= {"0" * n, "1" * n} and sum(counts.values()) == 200
+
+    def test_the_rewrite_equals_transpile_against_aer_on_every_gate(self):
+        """The rewrite is ``transpile``'s against Aer minus its layout stage,
+        so on circuits the default simulator holds both give the same circuit.
+        Besides the Polypus gates, every Qiskit standard gate outside Aer's
+        basis (with bound angles) and the four control-flow blocks
+        (``if_else``, ``for_loop``, ``while_loop``, ``switch_case``), so a
+        Qiskit release where the two diverge is caught here (issue #307)."""
+        from polypus_python.local import _aer_basis, _rewrite_into_aer_basis
+        from qiskit import QuantumCircuit, transpile
+        from qiskit.circuit import Gate
+        from qiskit.circuit.library import get_standard_gate_name_mapping
+        from qiskit_aer import AerSimulator
+
+        simulator, supported = AerSimulator(), _aer_basis()
+        circuits = [QuantumCircuit.from_qasm_str(_program(case)) for case in CASES]
+        polypus_gates = len(circuits)
+        for name, gate in sorted(get_standard_gate_name_mapping().items()):
+            if not isinstance(gate, Gate) or name in supported:
+                continue
+            qc = QuantumCircuit(gate.num_qubits, name=name)
+            qc.append(gate, range(gate.num_qubits))
+            angles = {p: 0.3 + 0.1 * i for i, p in enumerate(qc.parameters)}
+            circuits.append(qc.assign_parameters(angles))
+        flow = QuantumCircuit(3, 3)
+        flow.h(0)
+        flow.measure(0, 0)
+        with flow.if_test((flow.clbits[0], 1)):
+            flow.ch(0, 1)
+        with flow.for_loop(range(2)):
+            flow.rccx(0, 1, 2)
+        flow.measure([1, 2], [1, 2])
+        circuits.append(flow)
+        loops = QuantumCircuit(3, 3)
+        loops.h(0)
+        loops.measure(0, 0)
+        with loops.while_loop((loops.clbits[0], 1)):
+            loops.ch(0, 1)
+            loops.measure(0, 0)
+        with loops.switch(loops.clbits[1]) as case:
+            with case(0):
+                loops.ecr(0, 1)
+                loops.rccx(0, 1, 2)
+            with case(1):
+                loops.iswap(2, 0)
+        loops.measure([0, 1, 2], [0, 1, 2])
+        circuits.append(loops)
+        # The sweep is not empty: ``ch``, at least, is a standard gate outside.
+        assert len(circuits) > polypus_gates + 2
+        for qc in circuits:
+            expected = transpile(qc, simulator, optimization_level=0)
+            assert _rewrite_into_aer_basis(qc, supported) == expected, qc.name
