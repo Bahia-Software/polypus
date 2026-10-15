@@ -32,6 +32,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `expectation_function` | The fitness: a `bitstring -> float` callable, a `polypus.CachedCost`, or a native `polypus.Qubo` / `polypus.Ising` |
 | `infrastructure` | `"local"`, `"cunqa"` or `"qmio"` |
 | `nodes`, `cores_per_qpu` | SLURM allocation, used by `"cunqa"` only (must be `>= 1` there) |
+| `walltime` | Optional SLURM walltime of the QPUs as `HH:MM:SS` (default `"10:00:00"`), used by `"cunqa"` only |
 | `id` | Run name prefix: `[A-Za-z0-9._-]`, at most 64 characters. A UUID is appended for uniqueness. |
 | `backend` | `"aer"` (default) or `"polypus"` for `infrastructure="local"` |
 | `seed` | Optional RNG seed. Without one, a seed is drawn from OS entropy and reported in the result. |

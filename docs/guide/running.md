@@ -37,16 +37,20 @@ result.merged_counts  # the total over all 10 000 shots
 
 `infrastructure="cunqa"` needs [CUNQA](https://github.com/CESGA-Quantum-Spain/cunqa) `>=2.4,<4` on the cluster. **CUNQA 2.3 is not supported**: it names the `qraise` argument `cores`, not `cores_per_qpu`, so the reservation fails with a `TypeError`.
 
-With `infrastructure="cunqa"`, two keyword arguments size the SLURM allocation. Both must be `>= 1`; a `0` raises `ValueError`. `"local"` and `"qmio"` ignore them.
+With `infrastructure="cunqa"`, three keyword arguments size the SLURM allocation. `nodes` and `cores_per_qpu` must be `>= 1`; a `0` raises `ValueError`. `"local"` and `"qmio"` ignore all three.
 
 | Parameter | Default | Description |
 |---|---|---|
 | `nodes` | `1` | SLURM nodes to request |
 | `cores_per_qpu` | `2` | CPU cores per QPU |
+| `walltime` | `"10:00:00"` | SLURM walltime of the QPUs, as `HH:MM:SS` |
+
+`walltime` accepts only `HH:MM:SS`: hours are one or more digits (so `"48:00:00"` is valid), minutes and seconds are two digits below 60, and the total must be above zero. SLURM's `D-HH:MM:SS` form is rejected. Anything else raises `ValueError` before any QPU is requested. The QPUs are released when the walltime runs out, so set it above the expected duration of a long optimisation.
 
 ```python
 result = polypus.run_quantum_circuit(
-    qc, shots=10_000, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4
+    qc, shots=10_000, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4,
+    walltime="48:00:00",
 )
 ```
 
