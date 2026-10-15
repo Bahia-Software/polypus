@@ -710,14 +710,23 @@ guard) and quotes the message a run would raise; for a Qiskit circuit it also li
 dynamic features found in it. The Aer entry parses with the parser the Aer path uses (a
 parse failure is its reason; so is Qiskit Aer not being installed) and rejects no
 instruction, because the local backend lowers what is outside Aer's basis before
-running it. For a Qiskit `QuantumCircuit` the instructions are not inspected at all, so
-one that `qiskit.transpile` cannot lower (an opaque instruction without a definition, a
-`box`) is only reported when the run raises `polypus.BackendError`. A
-`polypus.Circuit` with free parameters gets the same reason in both entries. The check is
-**structural**: it runs and connects to nothing, and does not check resources (the qubit
-ceiling, memory), so an accepted circuit can still fail for lack of them. Enforced by
-`tests/python/test_backend_compatibility.py`, which runs every circuit it classifies to
-confirm the verdict.
+running it. For a Qiskit `QuantumCircuit` it follows that lowering step: a circuit whose
+instructions are all in the default `AerSimulator()`'s basis is accepted untouched, and
+one with an instruction outside it (control-flow bodies included) is transpiled as the
+run would transpile it, so one that `qiskit.transpile` cannot lower (an opaque
+instruction without a definition, a `box`) is rejected with the
+`polypus.BackendError` message the run would raise. Checking a circuit outside the
+basis therefore costs the `qiskit.transpile` call the run would pay; one in the basis
+is not transpiled. Like the run, it lowers against the default `AerSimulator()`
+whatever `sim_method` or `noise_model` the run is given: a circuit with such an
+instruction that is wider than the default simulator's target
+(`CircuitTooWideForTarget`) is rejected even under a `sim_method` that could hold it,
+and a `noise_model` is not taken into account; both are known limitations of the
+lowering, not of the check. A `polypus.Circuit` with free parameters gets the same
+reason in both entries. The check is **structural**: it runs and connects to nothing,
+and does not check resources (the qubit ceiling, memory), so an accepted circuit can
+still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
+which runs every circuit it classifies to confirm the verdict.
 
 ### QMIO — native wire backend
 
