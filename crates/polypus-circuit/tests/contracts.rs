@@ -364,7 +364,84 @@ fn c2_export_is_a_fixed_point_on_the_fuzz_corpus() {
         assert_eq!(again, exported, "{}", path.display());
         checked += 1;
     }
-    assert!(checked >= 7, "corpus not found in {}", dir.display());
+    assert!(checked >= 9, "corpus not found in {}", dir.display());
+}
+
+/// An imported program's classical width survives the round trip (issue
+/// #279): the export writes one `creg` as wide as all the program's `creg`s
+/// together — wider than the bits it writes, several registers, no
+/// measurements at all, a full measurement into a wider register — the export
+/// imports back to the same circuit, and it is a fixed point.
+#[test]
+fn c2_declared_classical_width_round_trips() {
+    let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
+    let cases = [
+        (
+            "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+            3,
+        ),
+        (
+            "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
+            5,
+        ),
+        ("qreg q[3];\ncreg c[5];\nh q[0];\n", 5),
+        (
+            "qreg q[2];\ncreg c[4];\nh q[0];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            4,
+        ),
+        ("qreg q[2];\ncreg c[1];\nmeasure q[1] -> c[0];\n", 1),
+    ];
+    for (body, width) in cases {
+        let imported = ParameterizedCircuit::from_qasm2(&format!("{header}{body}")).unwrap();
+        let exported = imported.to_qasm2_with_params(&[]).unwrap();
+        assert!(
+            exported.contains(&format!("\ncreg c[{width}];\n")),
+            "{exported}"
+        );
+        assert_eq!(exported.matches("creg ").count(), 1, "{exported}");
+        let again = ParameterizedCircuit::from_qasm2(&exported).unwrap();
+        assert_eq!(again, imported, "{body:?}");
+        assert_eq!(again.clbits_width(), width, "{body:?}");
+        assert_eq!(
+            again.to_qasm2_with_params(&[]).unwrap(),
+            exported,
+            "{body:?}"
+        );
+    }
+}
+
+/// The same for the OpenQASM 3 profile (C-10): `bit[<width>] c;`, the sum of
+/// the program's `bit` registers, survives export, re-import and export.
+#[test]
+fn c2_qasm3_declared_classical_width_round_trips() {
+    let header = "OPENQASM 3.0;\ninclude \"stdgates.inc\";\n";
+    let cases = [
+        ("qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n", 3),
+        (
+            "qubit[2] q;\nbit[2] a;\nbit b;\nbit[2] d;\nb = measure q[1];\n",
+            5,
+        ),
+        ("qubit[3] q;\nbit[5] c;\nh q[0];\n", 5),
+        (
+            "qubit[2] q;\nbit[4] c;\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+            4,
+        ),
+    ];
+    for (body, width) in cases {
+        let imported = ParameterizedCircuit::from_qasm3(&format!("{header}{body}")).unwrap();
+        let exported = imported.to_qasm3().unwrap();
+        assert!(
+            exported.contains(&format!("\nbit[{width}] c;\n")),
+            "{exported}"
+        );
+        let again = ParameterizedCircuit::from_qasm3(&exported).unwrap();
+        assert_eq!(again, imported, "{body:?}");
+        assert_eq!(again.clbits_width(), width, "{body:?}");
+        assert_eq!(again.to_qasm3().unwrap(), exported, "{body:?}");
+        // And across dialects: the OpenQASM 2.0 export keeps it too.
+        let qasm2 = imported.to_qasm2_with_params(&[]).unwrap();
+        assert!(qasm2.contains(&format!("\ncreg c[{width}];\n")), "{qasm2}");
+    }
 }
 
 /// One instruction of every kind that takes angles (calls of declared gates
@@ -765,7 +842,7 @@ fn c2_qasm3_export_is_a_fixed_point_on_the_fuzz_corpus() {
         assert_eq!(again, exported, "{}", path.display());
         checked += 1;
     }
-    assert!(checked >= 8, "corpus not found in {}", dir.display());
+    assert!(checked >= 10, "corpus not found in {}", dir.display());
 }
 
 // ───────────────────────── C-4 · terminal measurement ─────────────────────
