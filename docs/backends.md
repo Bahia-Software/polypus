@@ -712,17 +712,14 @@ parse failure is its reason; so is Qiskit Aer not being installed) and rejects n
 instruction, because the local backend lowers what is outside Aer's basis before
 running it. For a Qiskit `QuantumCircuit` it follows that lowering step: a circuit whose
 instructions are all in the default `AerSimulator()`'s basis is accepted untouched, and
-one with an instruction outside it (control-flow bodies included) is transpiled as the
-run would transpile it, so one that `qiskit.transpile` cannot lower (an opaque
-instruction without a definition, a `box`) is rejected with the
-`polypus.BackendError` message the run would raise. Checking a circuit outside the
-basis therefore costs the `qiskit.transpile` call the run would pay; one in the basis
-is not transpiled. Like the run, it lowers against the default `AerSimulator()`
-whatever `sim_method` or `noise_model` the run is given: a circuit with such an
-instruction that is wider than the default simulator's target
-(`CircuitTooWideForTarget`) is rejected even under a `sim_method` that could hold it,
-and a `noise_model` is not taken into account; both are known limitations of the
-lowering, not of the check. A `polypus.Circuit` with free parameters gets the same
+one with an instruction outside it (control-flow bodies included) goes through the same
+rewrite the run uses (`polypus_python.local._rewrite_into_aer_basis`), so one that it
+cannot lower (an opaque instruction without a definition, a `box`) is rejected with
+the `polypus.BackendError` message the run would raise. Checking a circuit outside the
+basis therefore costs the rewrite the run would pay; one in the basis is not rewritten.
+Like the run, it lowers against the basis of the default `AerSimulator()` whatever
+`sim_method` or `noise_model` the run is given, so a `noise_model` is not taken into
+account; that is a known limitation of the lowering, not of the check. A `polypus.Circuit` with free parameters gets the same
 reason in both entries. The check is **structural**: it runs and connects to nothing,
 and does not check resources (the qubit ceiling, memory), so an accepted circuit can
 still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
