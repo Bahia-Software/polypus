@@ -85,10 +85,14 @@ def _aer_basis():
     """The instruction names the default ``AerSimulator()``'s target supports.
     Built on first use, not at import: the extension imports this package at
     runtime. The *default* simulator, whatever ``sim_method`` or
-    ``noise_model`` a run asks for: a method-specific basis is smaller (a
-    ``noise_model`` cuts it from 98 to 40 gates), and lowering into it would
-    rewrite circuits Aer runs as they are or turn a method's own refusal into a
-    transpiler error."""
+    ``noise_model`` a run asks for. Either one narrows the simulator's target,
+    not what Aer runs: a ``noise_model`` cuts it to ``cx``, ``id``, ``rz``,
+    ``sx`` and the gates the model names (98 to 40 names for an error on
+    ``cx`` alone), yet Aer still runs every gate of the default basis under
+    it, noiseless unless the model names it, as it does for a circuit it
+    receives unlowered. Lowering into that narrower basis would rewrite gates
+    Aer runs as they are (``h`` into ``rz`` and ``sx``, moving where the noise
+    falls); what a ``sim_method`` cannot hold stays Aer's own refusal."""
     return frozenset(AerSimulator().target.operation_names)
 
 
