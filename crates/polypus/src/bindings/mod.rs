@@ -610,7 +610,6 @@ fn build_backend_config(
     match infrastructure {
         "local" => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
-                backend: "AerSimulator".to_string(),
                 sim_method: sim_method.to_string(),
                 noise_model,
             }),
@@ -630,7 +629,6 @@ fn build_backend_config(
             ))),
         },
         "cunqa" => Ok(BackendConfig::Cunqa {
-            backend: "AerSimulator".to_string(),
             sim_method: sim_method.to_string(),
             nodes,
             cores_per_qpu,
@@ -2550,10 +2548,9 @@ mod tests {
         assert!(matches!(
             aer,
             BackendConfig::Local {
-                ref backend,
                 ref sim_method,
                 noise_model: None,
-            } if backend == "AerSimulator" && sim_method == "automatic"
+            } if sim_method == "automatic"
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {

@@ -110,7 +110,7 @@ fn execute_splits_high_qubit_native_batch_into_memory_capped_waves() {
 #[test]
 fn execute_splits_high_qubit_local_batch_into_memory_capped_waves() {
     pyo3::Python::initialize();
-    let local = LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+    let local = LocalBackend::new("statevector".to_string(), None);
     let wide = wide_native();
     let tasks = wide_batch(&wide);
     let spy = WaveSpy {
@@ -157,7 +157,7 @@ fn execute_checks_between_native_waves_not_only_at_the_end() {
 #[test]
 fn execute_checks_between_local_waves_not_only_at_the_end() {
     pyo3::Python::initialize();
-    let local = LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+    let local = LocalBackend::new("statevector".to_string(), None);
     let wide = wide_native();
     let tasks = wide_batch(&wide);
     let token = CancelToken::default();

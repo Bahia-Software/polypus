@@ -117,9 +117,9 @@ polypus.run_quantum_circuit(
 print(json.dumps(seen))
 """
 
+# `id` and `backend` are not sent: the local seal needs no run id and Aer is its
+# only simulator (#230).
 _LOCAL_REQUIRED_KWARGS = {
-    "id",
-    "backend",
     "qcs",
     "shots",
     "sim_method",
@@ -175,6 +175,24 @@ def test_local_run_qcs_kwargs_follow_the_budget_source_when_unset(tmp_path):
         assert seen["max_memory_mb"] >= 1
     else:
         assert set(seen["keys"]) == _LOCAL_REQUIRED_KWARGS
+
+
+def _seal_reads(method):
+    """The kwargs a seal's ``run_qcs(**args)`` reads, as ``args["k"]`` or
+    ``args.get("k"...)`` in its source."""
+    import inspect
+    import re
+
+    source = inspect.getsource(method)
+    return set(re.findall(r"""args(?:\[|\.get\()["'](\w+)["']""", source))
+
+
+def test_local_seal_reads_every_run_qcs_kwarg_rust_sends(tmp_path):
+    # C-1: every kwarg the Rust side sends must be consumed (#230).
+    from polypus_python.local import Local
+
+    sent = set(_local_kwargs("100M", tmp_path)["keys"]) | {"noise_model"}
+    assert sent <= _seal_reads(Local.run_qcs)
 
 
 # ── Qiskit exceptions join the polypus hierarchy (#218) ──────────────────────
@@ -335,3 +353,53 @@ def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
     polypus_python.disconnect_from_infrastructure("cunqa", family="fam-1")
 
     assert dropped == ["fam-1"], "the family handle must reach qdrop unchanged"
+
+
+_CUNQA_RUN_QCS_KWARGS = {"family_id", "qcs", "shots", "sim_method", "seed"}
+
+
+def _cunqa_run_qcs_kwargs(monkeypatch):
+    """Run one circuit on ``infrastructure="cunqa"`` against the fake ``cunqa``
+    and return the reserved family name and the kwargs ``run_qcs`` received."""
+    import polypus
+    import polypus_python
+
+    dropped = []
+    _install_fake_cunqa(monkeypatch, dropped)
+    reserved = {}
+    original_connect = polypus_python.connect_to_infrastructure
+
+    def connect(infrastructure, **kwargs):
+        reserved.update(kwargs)
+        return original_connect(infrastructure, **kwargs)
+
+    seen = {}
+
+    def record(infrastructure, **kwargs):
+        seen.update(kwargs)
+        return [{"0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+    monkeypatch.setattr(polypus_python, "connect_to_infrastructure", connect)
+    monkeypatch.setattr(polypus_python, "run_qcs", record)
+    polypus.run_quantum_circuit(
+        _native_qc(), shots=10, infrastructure="cunqa", seed=3, n_qpus=1
+    )
+    assert dropped == ["fam-1"]
+    return reserved["family_name"], seen
+
+
+def test_cunqa_run_qcs_kwargs_are_the_frozen_set(monkeypatch):
+    # C-1: `backend` is not sent (#230); `family_id` is the family reserved by
+    # `connect_to_infrastructure`.
+    family_name, seen = _cunqa_run_qcs_kwargs(monkeypatch)
+    assert set(seen) == _CUNQA_RUN_QCS_KWARGS
+    assert seen["family_id"] == family_name
+    assert seen["shots"] == 10
+    assert seen["seed"] == 3
+
+
+def test_cunqa_seal_reads_every_run_qcs_kwarg_rust_sends(monkeypatch):
+    _, seen = _cunqa_run_qcs_kwargs(monkeypatch)
+    from polypus_python.cunqa import Cunqa
+
+    assert set(seen) <= _seal_reads(Cunqa.run_qcs)

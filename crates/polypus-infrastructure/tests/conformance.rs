@@ -124,7 +124,6 @@ fn local_aer_backend_conformance() {
     }
     let report = Conformance::new("local-aer", || {
         Ok(Arc::new(LocalBackend::new(
-            "AerSimulator".to_string(),
             "statevector".to_string(),
             None,
         )) as Arc<dyn QuantumBackend>)
@@ -135,7 +134,6 @@ fn local_aer_backend_conformance() {
     // Unresponsive/Aborted factory — the seal-delegating backend cannot produce those.)
     .fault(Fault::CleanError, || {
         Ok(Arc::new(LocalBackend::new(
-            "AerSimulator".to_string(),
             "not_a_real_sim_method".to_string(),
             None,
         )) as Arc<dyn QuantumBackend>)
@@ -181,7 +179,6 @@ fn cunqa_backend_conformance_is_environment_gated() {
         n_qpus: 1,
         infrastructure: "cunqa".to_string(),
         backend_config: BackendConfig::Cunqa {
-            backend: "AerSimulator".to_string(),
             sim_method: "statevector".to_string(),
             nodes: 1,
             cores_per_qpu: 1,

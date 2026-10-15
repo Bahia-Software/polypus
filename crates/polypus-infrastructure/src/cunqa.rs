@@ -84,8 +84,6 @@ pub struct CunqaBackend {
     /// Guards against double-release of the QPU allocation (explicit `close()`
     /// followed by `Drop`, or vice versa).
     closed: AtomicBool,
-    /// Backend/device class name forwarded to CUNQA.
-    backend: String,
     /// Simulation method for CUNQA's simulated QPUs.
     sim_method: String,
     /// Number of physical QPUs in the allocation. Bounds how many circuits can
@@ -136,7 +134,6 @@ impl QuantumBackend for CunqaBackend {
                 let kwargs = PyDict::new(py);
                 let conv = |e: PyErr| BackendError::Conversion(e.to_string());
                 kwargs.set_item("family_id", &config.id).map_err(conv)?;
-                kwargs.set_item("backend", &self.backend).map_err(conv)?;
                 kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
                 kwargs.set_item("shots", config.shots).map_err(conv)?;
                 kwargs
@@ -228,7 +225,6 @@ impl CunqaBackend {
         id: &str,
         cores_per_qpu: u32,
         walltime: &str,
-        backend: String,
         sim_method: String,
     ) -> Result<Self, BackendError> {
         // Allocating QPUs reserves an HPC (SLURM) allocation — a rare, coarse
@@ -243,7 +239,6 @@ impl CunqaBackend {
         let release: ReleaseFn = Box::new(move |py| drop_qpus(py, &family));
         Ok(CunqaBackend {
             closed: AtomicBool::new(false),
-            backend,
             sim_method,
             n_qpus,
             transpiler: Box::new(IdentityTranspiler),
@@ -259,7 +254,6 @@ impl CunqaBackend {
     fn with_releaser(release: ReleaseFn) -> Self {
         CunqaBackend {
             closed: AtomicBool::new(false),
-            backend: String::new(),
             sim_method: String::new(),
             n_qpus: 1,
             transpiler: Box::new(IdentityTranspiler),
@@ -452,15 +446,7 @@ mod tests {
             Err(BackendError::External(boxed)) => boxed.is::<InterpreterUnavailable>(),
             other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
         };
-        let raised = CunqaBackend::new(
-            2,
-            1,
-            "no-interpreter",
-            1,
-            DEFAULT_WALLTIME,
-            String::new(),
-            String::new(),
-        );
+        let raised = CunqaBackend::new(2, 1, "no-interpreter", 1, DEFAULT_WALLTIME, String::new());
         assert!(unavailable(raised.map(|_backend| ())));
 
         let backend = CunqaBackend::with_releaser(Box::new(|_py| Ok(())));
