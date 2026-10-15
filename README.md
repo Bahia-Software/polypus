@@ -189,7 +189,7 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 
 </details>
 
-Design notes: [contracts](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRACTS.md), [engineering rules](https://github.com/Bahia-Software/polypus/blob/main/docs/ENGINEERING.md), [architecture decisions](https://github.com/Bahia-Software/polypus/tree/main/docs/adr). To contribute, see [CONTRIBUTING](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRIBUTING.md).
+Design notes: [contracts](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRACTS.md), [engineering rules](https://github.com/Bahia-Software/polypus/blob/main/docs/ENGINEERING.md), [architecture decisions](https://github.com/Bahia-Software/polypus/tree/main/docs/adr). To contribute, see [CONTRIBUTING](https://github.com/Bahia-Software/polypus/blob/main/docs/CONTRIBUTING.md). Release history: [CHANGELOG](https://github.com/Bahia-Software/polypus/blob/main/CHANGELOG.md). To report a vulnerability, see [SECURITY](https://github.com/Bahia-Software/polypus/blob/main/SECURITY.md); community rules are in the [Code of Conduct](https://github.com/Bahia-Software/polypus/blob/main/CODE_OF_CONDUCT.md).
 
 ## Citing Polypus
 
