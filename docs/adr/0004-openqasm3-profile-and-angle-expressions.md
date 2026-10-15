@@ -150,8 +150,8 @@ Upstream inconsistencies, recorded and not resolved:
   OpenQASM 3 declarations; binding cost stays within 5 %.
 - `ConcreteCircuit::to_qasm2` still panics where `try_to_qasm2` errs; new
   callers should use the fallible form.
-- From Python, expressions come only from OpenQASM 3: `2 * polypus.Param(0)`
-  is not supported yet (#239).
+- From Python, expressions came only from OpenQASM 3 at first; #239 added
+  `polypus.ParamExpr`, built with operators on `polypus.Param`.
 - The OpenQASM 3 exporter identifies definitions by address, so value-equal
   definitions from separately imported programs are written twice; the output
   is still a fixed point.

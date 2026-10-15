@@ -418,3 +418,23 @@ fn nesting_is_bounded_as_written() {
         Err(CircuitError::InvalidExpression { .. })
     ));
 }
+
+// ── Display ─────────────────────────────────────────────────────────────
+
+#[test]
+fn display_writes_openqasm3_with_param_references() {
+    let cases = [
+        (2.0 * x(0), "2.0*Param(0)"),
+        (x(7) - (x(2) - 1.0), "Param(7) - (Param(2) - 1.0)"),
+        (-(x(0) + x(1)), "-(Param(0) + Param(1))"),
+        (x(0).pow(-2.0), "Param(0)**-2.0"),
+        (
+            (ParamExpr::constant(Constant::Tau) - x(3)).apply(Function::Ln),
+            "log(tau - Param(3))",
+        ),
+        (x(0) * f64::NAN + f64::INFINITY, "Param(0)*nan + inf"),
+    ];
+    for (expr, text) in cases {
+        assert_eq!(expr.to_string(), text);
+    }
+}
