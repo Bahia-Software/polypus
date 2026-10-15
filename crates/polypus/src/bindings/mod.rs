@@ -1876,6 +1876,8 @@ fn backend_cleanup_failures() -> u64 {
 /// while the import name and the Rust crate both stay `polypus`.
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Baked in at compile time, so it names the binary actually loaded (C-6).
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     crate::exceptions::register(m)?;
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
