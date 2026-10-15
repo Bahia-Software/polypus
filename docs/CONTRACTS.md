@@ -174,6 +174,16 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   above apply to the original exception; a bare `PyErr` in an `External` box is
   not recovered and surfaces as `polypus.BackendError` (or
   `polypus.EvaluationError` from an observable) with its message.
+- **The interpreter is unavailable.** With the interpreter unavailable (it is
+  finalizing, say, while a run is still going on a daemon thread), the code a
+  run reaches inside `detach` that needs Python (the Aer/CUNQA seam calls, the
+  Qiskit binding, the user's callbacks, the between-wave interrupt guard)
+  returns a typed error, `polypus_infrastructure::InterpreterUnavailable`, that
+  the edge raises as `KeyboardInterrupt` ("the run was aborted: …", the class an
+  interrupted run gets); never a panic. It travels boxed in the same `External`
+  variants and is downcast after `DisplaySafePyErr`, so a seam exception keeps
+  its class (ENGINEERING.md §9). `polypus.statevector`, cancelled by its
+  interrupt hook for the same reason, raises the same `KeyboardInterrupt`.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
@@ -247,6 +257,24 @@ The `DisplaySafePyErr` carrier: `display_safe_py_err_reraises_the_original_excep
 `crates/polypus-evaluation/src/error.rs`; and
 `a_raising_callback_is_boxed_as_a_display_safe_py_err` in
 `crates/polypus-evaluation/src/py_callback_observable.rs`.
+An unavailable interpreter: `tests/python/test_interpreter_shutdown.py`
+(`test_a_training_run_on_a_daemon_thread_survives_shutdown`,
+`test_a_run_started_while_finalizing_aborts_as_keyboard_interrupt`; a real
+shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
+`interpreter_unavailable_maps_to_keyboard_interrupt_on_the_evaluation_path` and
+`interpreter_unavailable_maps_to_keyboard_interrupt` in
+`crates/polypus/src/exceptions.rs`;
+`interpreter_unavailable_is_an_error_carried_in_external` in
+`crates/polypus-infrastructure/src/attach.rs`; the
+`seams_fail_typed_without_an_interpreter` tests in `local.rs` and `cunqa.rs`,
+`create_backend_without_a_noise_model_does_not_attach` in `lib.rs` and
+`duplicate_shares_the_object_without_attaching` in `circuit.rs` (same crate);
+`python_carrying_errors_format_without_an_interpreter` and the
+`*_when_attaching_is_forbidden` tests in `crates/polypus-evaluation/src/`
+(`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
+among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
+`statevector_cancellation_raises_keyboard_interrupt` in
+`crates/polypus/src/bindings/mod.rs`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the

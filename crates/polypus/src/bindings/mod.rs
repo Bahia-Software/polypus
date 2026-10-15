@@ -52,22 +52,20 @@ use std::time::Instant;
 ///
 /// `poll` runs while the thread is detached (the run is inside `py.detach`), so
 /// attaching here is a fresh attach, not a reuse of the caller's: `Python::attach`
-/// could panic, or attach to a finalizing interpreter, if the interpreter were
-/// shutting down (on any Python version). It attaches with
+/// could panic, hang, or attach to a finalizing interpreter, if the interpreter
+/// were shutting down (on any Python version). It attaches with
 /// [`attach_or`](crate::infrastructure::attach_or) instead, and an unreachable
-/// interpreter aborts the run as `BackendError::Aborted` — the edge's
-/// `KeyboardInterrupt`, the same class a Ctrl+C gets — since its result could
-/// never be handed back to Python (docs/ENGINEERING.md §3 and §9).
+/// interpreter aborts the run with
+/// [`InterpreterUnavailable`](crate::infrastructure::InterpreterUnavailable), the
+/// error every other site reached while detached returns. The edge raises it as
+/// `KeyboardInterrupt`, the same class a Ctrl+C gets, since the run's result
+/// could never be handed back to Python (docs/ENGINEERING.md §3 and §9).
 struct SignalInterrupt;
 
 impl crate::infrastructure::Interrupt for SignalInterrupt {
     fn poll(&self) -> Result<(), crate::infrastructure::BackendError> {
         crate::infrastructure::attach_or(
-            || {
-                Err(crate::infrastructure::BackendError::Aborted(
-                    "the Python interpreter is no longer available (shutting down)".to_string(),
-                ))
-            },
+            || Err(crate::infrastructure::InterpreterUnavailable.into()),
             |py| {
                 py.check_signals()
                     .map_err(crate::infrastructure::seam_error)
@@ -1958,12 +1956,13 @@ mod tests {
 
     /// Without an interpreter, both signal-polling hooks that run while
     /// detached cancel instead of panicking: the planner's guard aborts the run
-    /// as `BackendError::Aborted` (the edge's `KeyboardInterrupt`) and the
-    /// `statevector` hook asks the gate loop to stop, with no pending
-    /// exception. "Not initialized" is also how a shutting-down interpreter
-    /// looks to PyO3 (CPython clears its `initialized` flag right after marking
-    /// itself finalizing), but a real shutdown cannot be reproduced from a Rust
-    /// test.
+    /// with `InterpreterUnavailable` boxed in `BackendError::External`, the
+    /// error every other site reached while detached returns (the edge's
+    /// `KeyboardInterrupt`), and the `statevector` hook asks the gate loop to
+    /// stop, with no pending exception. "Not initialized" is also how a
+    /// shutting-down interpreter looks to PyO3 (CPython clears its
+    /// `initialized` flag right after marking itself finalizing), but a real
+    /// shutdown cannot be reproduced from a Rust test.
     #[test]
     fn signal_polling_cancels_when_the_interpreter_is_unavailable() {
         if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
@@ -1972,12 +1971,14 @@ mod tests {
             );
             return;
         }
-        use crate::infrastructure::{BackendError, Interrupt};
-        let polled = SignalInterrupt.poll();
-        assert!(
-            matches!(&polled, Err(BackendError::Aborted(msg)) if msg.contains("no longer available")),
-            "an unreachable interpreter must abort the run, got {polled:?}"
-        );
+        use crate::infrastructure::{BackendError, InterpreterUnavailable, Interrupt};
+        match SignalInterrupt.poll() {
+            Err(BackendError::External(boxed)) => assert!(
+                boxed.is::<InterpreterUnavailable>(),
+                "an unreachable interpreter must abort the run with InterpreterUnavailable: {boxed}"
+            ),
+            other => panic!("an unreachable interpreter must abort the run, got {other:?}"),
+        }
 
         let mut pending = None;
         assert!(
@@ -2038,14 +2039,22 @@ mod tests {
     }
 
     /// A cancelled `statevector` re-raises the pending signal's own exception,
-    /// and raises `KeyboardInterrupt` — the class the planner's guard gets for
-    /// the same event — when the interpreter became unreachable.
+    /// and, when the interpreter became unreachable, the same
+    /// `KeyboardInterrupt` every other site reached while detached ends in:
+    /// same class, same text.
     #[test]
     fn statevector_cancellation_raises_keyboard_interrupt() {
         Python::initialize();
         Python::attach(|py| {
             let unreachable = circuit::cancellation_error(None);
             assert!(unreachable.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py));
+            assert_eq!(
+                unreachable.value(py).to_string(),
+                format!(
+                    "the run was aborted: {}",
+                    crate::infrastructure::InterpreterUnavailable
+                )
+            );
 
             let signal = pyo3::exceptions::PyKeyboardInterrupt::new_err("Ctrl+C");
             let signal_value = signal.value(py).clone();

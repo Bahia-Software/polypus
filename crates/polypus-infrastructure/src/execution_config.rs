@@ -206,6 +206,13 @@ pub enum BackendConfig {
 /// [`Infrastructure::create_backend`](crate::Infrastructure::create_backend)
 /// uses). Cloning a config is what lets an orchestration algorithm derive a
 /// per-batch config that differs only in `shots` without mutating the caller's.
+///
+/// Clone a `Local` config with a noise model only while attached to the
+/// interpreter (in a `#[pyfunction]`, outside `detach`): `Clone` cannot fail, so
+/// this uses `Python::attach`, which can panic or hang when called from a thread
+/// that is detached while the interpreter shuts down (docs/ENGINEERING.md §9).
+/// No production path clones one today; code that runs while detached must not
+/// start to.
 impl Clone for BackendConfig {
     fn clone(&self) -> Self {
         match self {
