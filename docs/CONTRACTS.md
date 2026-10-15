@@ -418,9 +418,12 @@ Corollaries:
   declares none, so it exports exactly the register its measurements need, and
   none without measurements. A full measurement into a register wider than
   `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
-  `measure q -> c;` needs equal sizes. The QIR export is the exception: it
-  records only the measured results, and its `required_num_results` is the
-  implicit register. Rationale: `docs/adr/0006-declared-classical-registers.md`.
+  `measure q -> c;` needs equal sizes. The QIR export declares it as
+  `required_num_results` and records only the measured results, so it may
+  declare results it never records, as a partial measurement already does
+  (one written at `c[1]` declares 2 and records 1); QMIO's `openqasm`, `qir`
+  and `qir_bitcode` formats thus submit the same width (issue #322).
+  Rationale: `docs/adr/0006-declared-classical-registers.md`.
 - Adding a gate is a **six-place change** plus a row in the equivalence test —
   the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
   (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
@@ -527,7 +530,8 @@ a circuit in the list is neither copied nor transpiled).
   the declared width): it is keyed like the source. Aer and the native
   backend agree on all three (issue #251; before it the native backend used
   `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
-  verified; the QIR export records only the measured results.
+  verified; QMIO receives the declared width in all three program formats
+  (the QIR export's `required_num_results`, issue #322).
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -617,7 +621,11 @@ that declares a `creg` but measures nothing),
 `crates/polypus-circuit/tests/qasm_import.rs` and
 `declared_clbits_is_the_sum_of_the_bit_registers` and
 `declared_clbits_is_exported` in
-`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279), plus the
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279);
+`qir_declares_the_imported_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs` and
+`qir_formats_declare_the_classical_width_of_the_openqasm_program` in
+`crates/polypus-infrastructure/src/qmio.rs` (issue #322), plus the
 circuit-side tests listed under C-2.
 
 ---
