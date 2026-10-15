@@ -41,6 +41,11 @@ impl QuantumBackend for LocalBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        // The seal unpacks a non-empty batch; an empty one is a valid request with
+        // no results, as on the native backend.
+        if qcs.is_empty() {
+            return Ok(Vec::new());
+        }
         // Called while the run is detached, so this attach is a fresh one: an
         // unreachable interpreter (finalizing, say) is a typed error, never a
         // panic or a hang (docs/ENGINEERING.md §9).

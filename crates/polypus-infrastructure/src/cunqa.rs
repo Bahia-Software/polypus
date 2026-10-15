@@ -49,6 +49,11 @@ impl QuantumBackend for CunqaBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        // An empty batch is a valid request with no results, as on the native
+        // backend; do not reach the seal with it.
+        if qcs.is_empty() {
+            return Ok(Vec::new());
+        }
         // Called while the run is detached, so this attach is a fresh one: an
         // unreachable interpreter is a typed error, never a panic or a hang
         // (docs/ENGINEERING.md §9).

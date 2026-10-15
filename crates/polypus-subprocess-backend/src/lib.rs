@@ -20,6 +20,11 @@
 //!   deadlocked SDK, a mute QPU) trips the timeout and surfaces as
 //!   [`BackendError::Unresponsive`] — the same variant a *dead* worker (EOF) maps
 //!   to — instead of blocking forever. See `docs/backends.md` for how to size it.
+//! - **Polluted stdout.** The worker's length prefix is bounded
+//!   ([`SubprocessConfig::max_frame_bytes`]) and a header that reads as text is
+//!   recognised, so a worker (or an SDK it imports) that prints a banner to stdout
+//!   fails the call at once with a protocol error naming the cause, rather than
+//!   reserving gigabytes and surfacing only as a timeout.
 //! - **Orphan guard.** On Linux the child is armed with `PR_SET_PDEATHSIG` so it
 //!   dies with us; this is Linux-only (documented, with the portable fallback: an
 //!   explicit `close()`/`Drop` that kills the child). The kernel delivers that
@@ -75,6 +80,13 @@ pub const BACKEND_NAME: &str = "subprocess";
 /// sole knob that also bounds how fast a genuine hang is detected — size it to your
 /// workload (see `docs/backends.md`).
 pub const DEFAULT_RECV_TIMEOUT_MS: u64 = 300_000;
+
+/// Default cap on the length a worker may announce for one frame (64 MiB). The
+/// length is read off the worker's stdout before anything is allocated, so without a
+/// cap a stray 4 bytes of text would be taken as a multi-gigabyte frame. A counts
+/// payload is far smaller; raise it (option `max_frame_bytes`) only for a worker that
+/// really returns more.
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Failure modes of the bridge itself, before mapping to [`BackendError`].
 ///
@@ -168,6 +180,8 @@ impl From<BridgeError> for BackendError {
 enum FromWorker {
     Frame(Response),
     Ended(String),
+    /// The worker is alive but its stdout is not valid protocol (see [`FrameError`]).
+    Corrupt(String),
 }
 
 /// A live worker subprocess: its stdin, a background reader thread draining stdout
@@ -215,22 +229,60 @@ impl Drop for Spawner {
     }
 }
 
+/// Why [`read_frame`] failed.
+#[derive(Debug)]
+enum FrameError {
+    /// Reading the stream failed.
+    Io(io::Error),
+    /// The header is not a plausible frame length: the stream is not carrying the
+    /// protocol. The message says why; no payload was allocated or read.
+    Invalid(String),
+}
+
+/// True when all four header bytes are printable ASCII (or tab/CR/LF): the shape of
+/// text such as `"Hell"` from a `print("Hello ...")`. A real length below 150 MB has a
+/// zero top byte, so this never fires on an honest frame.
+fn looks_like_text(header: [u8; 4]) -> bool {
+    header
+        .iter()
+        .all(|b| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7e))
+}
+
 /// Read one length-prefixed frame from `stream`. `Ok(None)` is a clean EOF at a
 /// frame boundary (the worker closed stdout); `Ok(Some(bytes))` is a full payload.
-fn read_frame(stream: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+///
+/// The announced length is checked before the payload buffer is allocated: a header
+/// that reads as text, or a length above `max_len`, is [`FrameError::Invalid`].
+fn read_frame(stream: &mut impl Read, max_len: usize) -> Result<Option<Vec<u8>>, FrameError> {
     let mut header = [0u8; 4];
     match stream.read_exact(&mut header) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+        Err(e) => return Err(FrameError::Io(e)),
     }
     let len = u32::from_le_bytes(header) as usize;
+    if looks_like_text(header) {
+        return Err(FrameError::Invalid(format!(
+            "the worker's stdout does not carry a protocol frame: its first 4 bytes read \
+             as the text {:?}. The worker, or a library it imports, is writing \
+             non-protocol output (a banner, a print()) to stdout; stdout is reserved for \
+             protocol frames, so log to stderr",
+            String::from_utf8_lossy(&header)
+        )));
+    }
+    if len > max_len {
+        return Err(FrameError::Invalid(format!(
+            "the worker announced a frame of {len} bytes, above the {max_len}-byte limit \
+             (option 'max_frame_bytes'): either its stdout stream is corrupted or the \
+             limit is too low for its replies"
+        )));
+    }
     let mut body = vec![0u8; len];
     match stream.read_exact(&mut body) {
         Ok(()) => Ok(Some(body)),
         // A partial frame after the header is a truncated stream — treat as EOF.
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => Err(FrameError::Io(e)),
     }
 }
 
@@ -247,6 +299,7 @@ impl Worker {
         cwd: Option<String>,
         env: Vec<(String, String)>,
         arm_pdeathsig: bool,
+        max_frame_bytes: usize,
         expected_parent: nix::unistd::Pid,
     ) -> Result<Worker, BridgeError> {
         let (result_tx, result_rx) = mpsc::channel::<Result<Worker, BridgeError>>();
@@ -254,8 +307,14 @@ impl Worker {
         let thread = std::thread::Builder::new()
             .name("polypus-subprocess-spawner".to_string())
             .spawn(move || {
-                let spawned =
-                    Worker::spawn(&argv, cwd.as_deref(), &env, arm_pdeathsig, expected_parent);
+                let spawned = Worker::spawn(
+                    &argv,
+                    cwd.as_deref(),
+                    &env,
+                    arm_pdeathsig,
+                    max_frame_bytes,
+                    expected_parent,
+                );
                 let parked = spawned.is_ok();
                 if result_tx.send(spawned).is_err() {
                     return; // the caller gave up; the worker (if any) is dropped here
@@ -296,6 +355,7 @@ impl Worker {
         cwd: Option<&str>,
         env: &[(String, String)],
         arm_pdeathsig: bool,
+        max_frame_bytes: usize,
         expected_parent: nix::unistd::Pid,
     ) -> Result<Worker, BridgeError> {
         let (program, args) = argv
@@ -377,7 +437,7 @@ impl Worker {
         let mut stdout = child.stdout.take().expect("stdout piped");
         let (tx, rx) = mpsc::channel::<FromWorker>();
         let reader = std::thread::spawn(move || loop {
-            match read_frame(&mut stdout) {
+            match read_frame(&mut stdout, max_frame_bytes) {
                 Ok(Some(bytes)) => match serde_json::from_slice::<Response>(&bytes) {
                     Ok(resp) => {
                         if tx.send(FromWorker::Frame(resp)).is_err() {
@@ -393,8 +453,12 @@ impl Worker {
                     let _ = tx.send(FromWorker::Ended("worker closed stdout (EOF)".to_string()));
                     break;
                 }
-                Err(e) => {
+                Err(FrameError::Io(e)) => {
                     let _ = tx.send(FromWorker::Ended(format!("stdout read error: {e}")));
+                    break;
+                }
+                Err(FrameError::Invalid(detail)) => {
+                    let _ = tx.send(FromWorker::Corrupt(detail));
                     break;
                 }
             }
@@ -450,6 +514,13 @@ impl Worker {
                 Err(BridgeError::WorkerDied {
                     detail: format!("{detail} ({})", self.reap()),
                 })
+            }
+            Ok(FromWorker::Corrupt(detail)) => {
+                // Unlike EOF the worker is still alive (typically blocked on stdin),
+                // so it is killed before being reaped; reaping alone would wait on it.
+                self.kill_and_mark_dead();
+                self.reap();
+                Err(BridgeError::Protocol(detail))
             }
             Err(RecvTimeoutError::Timeout) => Err(BridgeError::Timeout {
                 millis: timeout.as_millis(),
@@ -527,6 +598,10 @@ pub struct SubprocessConfig {
     /// Read timeout: how long to wait for a reply before declaring the worker
     /// unresponsive.
     pub recv_timeout: Duration,
+    /// Largest frame length a worker may announce, in bytes. A longer one, or a
+    /// header that reads as text (a banner printed to stdout), fails the call at once
+    /// with a protocol error and the worker is killed.
+    pub max_frame_bytes: usize,
     /// Arm the `PR_SET_PDEATHSIG` orphan guard (Linux only; ignored, with a logged
     /// warning, elsewhere). The kernel fires it when the *thread* that forked the
     /// worker exits, so the worker is forked from a dedicated thread that lives as
@@ -541,6 +616,7 @@ impl Default for SubprocessConfig {
             cwd: None,
             env: Vec::new(),
             recv_timeout: Duration::from_millis(DEFAULT_RECV_TIMEOUT_MS),
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             arm_pdeathsig: true,
         }
     }
@@ -582,6 +658,7 @@ impl SubprocessBackend {
             config.cwd.clone(),
             config.env.clone(),
             config.arm_pdeathsig,
+            config.max_frame_bytes,
             expected_parent,
         )?;
         let pid = worker.pid();
@@ -618,7 +695,8 @@ impl SubprocessBackend {
     /// whitespace — no quotes or escapes, so use the list form for any argument
     /// containing a space), `recv_timeout_ms` (default
     /// [`DEFAULT_RECV_TIMEOUT_MS`]; a present-but-malformed value is an error, not a
-    /// fallback), `arm_pdeathsig` (default true; false spellings, case-insensitive:
+    /// fallback), `max_frame_bytes` (default [`DEFAULT_MAX_FRAME_BYTES`]; a positive
+    /// integer, same strictness), `arm_pdeathsig` (default true; false spellings, case-insensitive:
     /// `false`/`0`/`no`/`off`), `cwd` (optional). Every option but `command` is a
     /// string; a list there is an error, not a fallback to the default.
     pub fn from_context(
@@ -684,6 +762,15 @@ fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, Ba
             ))
         })?,
     };
+    let max_frame_bytes = match ctx.option_str("max_frame_bytes")? {
+        None => DEFAULT_MAX_FRAME_BYTES,
+        Some(v) => v.parse::<usize>().ok().filter(|&n| n > 0).ok_or_else(|| {
+            BackendError::Conversion(format!(
+                "the 'subprocess' backend's 'max_frame_bytes' option must be a positive \
+                     integer (bytes), got {v:?}"
+            ))
+        })?,
+    };
     // Boolean option: absent → default true. Present → true unless it is a
     // recognised false spelling. Case- and whitespace-insensitive; the false
     // values are "false", "0", "no", "off".
@@ -699,6 +786,7 @@ fn config_from_context(ctx: &BackendBuildContext) -> Result<SubprocessConfig, Ba
         cwd: ctx.option_str("cwd")?.map(str::to_string),
         env: Vec::new(),
         recv_timeout: Duration::from_millis(recv_timeout_ms),
+        max_frame_bytes,
         arm_pdeathsig,
     })
 }
@@ -994,6 +1082,112 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(cfg.recv_timeout.as_millis(), 1500);
+    }
+
+    #[test]
+    fn max_frame_bytes_defaults_and_rejects_malformed_values() {
+        let cfg = config_from_context(&ctx(&[("command", "python3 w.py")])).unwrap();
+        assert_eq!(cfg.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        assert_eq!(DEFAULT_MAX_FRAME_BYTES, 64 * 1024 * 1024);
+        let cfg = config_from_context(&ctx(&[
+            ("command", "python3 w.py"),
+            ("max_frame_bytes", "4096"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.max_frame_bytes, 4096);
+        // Present but unusable (not a number, negative, zero — which would refuse
+        // every frame) is an error, not a fallback to the default.
+        for bad in ["big", "-1", "0", "1.5", ""] {
+            match config_from_context(&ctx(&[
+                ("command", "python3 w.py"),
+                ("max_frame_bytes", bad),
+            ])) {
+                Err(BackendError::Conversion(m)) => {
+                    assert!(m.contains("max_frame_bytes"), "{m}")
+                }
+                other => panic!("{bad:?} must be a Conversion error, got {other:?}"),
+            }
+        }
+    }
+
+    /// `len` as the 4-byte header followed by `payload`.
+    fn frame(len: u32, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = len.to_le_bytes().to_vec();
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn invalid_message(result: Result<Option<Vec<u8>>, FrameError>) -> String {
+        match result {
+            Err(FrameError::Invalid(m)) => m,
+            other => panic!("expected FrameError::Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_frame_returns_a_frame_and_eof_as_before() {
+        let mut ok = io::Cursor::new(frame(5, b"hello"));
+        assert_eq!(read_frame(&mut ok, 64).unwrap(), Some(b"hello".to_vec()));
+        let mut empty = io::Cursor::new(Vec::new());
+        assert!(read_frame(&mut empty, 64).unwrap().is_none());
+        let mut truncated = io::Cursor::new(frame(5, b"he"));
+        assert!(read_frame(&mut truncated, 64).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_frame_accepts_a_frame_exactly_at_the_limit_and_rejects_one_byte_more() {
+        let payload = vec![b'x'; 1024];
+        let mut at_limit = io::Cursor::new(frame(1024, &payload));
+        assert_eq!(read_frame(&mut at_limit, 1024).unwrap(), Some(payload));
+
+        // The header alone is enough to refuse: the payload is never read. Had it
+        // been, the missing bytes would surface as a truncated stream (`Ok(None)`).
+        let mut over = io::Cursor::new(frame(1025, &[]));
+        let m = invalid_message(read_frame(&mut over, 1024));
+        assert!(m.contains("1025") && m.contains("1024"), "{m}");
+        assert!(m.contains("max_frame_bytes"), "{m}");
+    }
+
+    #[test]
+    fn read_frame_refuses_a_huge_length_without_allocating_it() {
+        // `u32::MAX` bytes would be a 4 GiB buffer; the header check must fire first.
+        let mut stream = io::Cursor::new(frame(u32::MAX, &[]));
+        let m = invalid_message(read_frame(&mut stream, DEFAULT_MAX_FRAME_BYTES));
+        assert!(m.contains(&u32::MAX.to_string()), "{m}");
+    }
+
+    #[test]
+    fn read_frame_recognises_a_text_header_as_polluted_stdout() {
+        // "Hell" of `print("Hello from vendor SDK")` is 1_819_043_144 as a length.
+        let mut stream = io::Cursor::new(b"Hello from vendor SDK v1.2\n".to_vec());
+        let m = invalid_message(read_frame(&mut stream, DEFAULT_MAX_FRAME_BYTES));
+        assert!(m.contains("\"Hell\""), "{m}");
+        assert!(m.contains("stdout") && m.contains("stderr"), "{m}");
+        // The text check holds whatever the cap: a raised limit does not readmit it.
+        let mut stream = io::Cursor::new(b"Hello from vendor SDK v1.2\n".to_vec());
+        let m = invalid_message(read_frame(&mut stream, u32::MAX as usize));
+        assert!(m.contains("non-protocol"), "{m}");
+        // Line-ending banners count as text too.
+        let mut stream = io::Cursor::new(b"ok\r\n...".to_vec());
+        invalid_message(read_frame(&mut stream, DEFAULT_MAX_FRAME_BYTES));
+    }
+
+    #[test]
+    fn looks_like_text_never_fires_on_a_realistic_length() {
+        assert!(looks_like_text(*b"Hell"));
+        assert!(!looks_like_text(64u32.to_le_bytes()));
+        assert!(!looks_like_text(
+            DEFAULT_MAX_FRAME_BYTES.to_le_bytes()[..4]
+                .try_into()
+                .unwrap()
+        ));
+        // A single non-printable byte (here NUL, a binary length's usual top byte) clears it.
+        assert!(!looks_like_text(*b"Hel\0"));
+        assert!(!looks_like_text([0x7f, b'a', b'b', b'c']));
+        // Every length under 16 MiB has a zero top byte.
+        for len in [0u32, 1, 0x20, 0x2020, 0x20_2020, 0x00ff_ffff] {
+            assert!(!looks_like_text(len.to_le_bytes()), "{len:#x}");
+        }
     }
 
     #[test]

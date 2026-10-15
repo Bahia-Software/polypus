@@ -289,8 +289,8 @@ impl NativeStatevectorBackend {
 
 /// What the native backend runs for one [`BoundCircuit`]: the circuit, and the
 /// classical width its OpenQASM program declares (the sum of its `creg`s),
-/// which a [`ConcreteCircuit`] cannot carry. `None` for a `Native` circuit,
-/// whose classical register is implicit. See [`format_counts`].
+/// taken before any transpiler runs, so a transpiler that builds a new
+/// [`ConcreteCircuit`] cannot drop it. See [`format_counts`].
 struct NativeSource<'a> {
     circuit: Cow<'a, ConcreteCircuit>,
     declared_clbits: Option<usize>,
@@ -308,7 +308,7 @@ fn native_source(circuit: &BoundCircuit) -> Result<NativeSource<'_>, BackendErro
     match circuit {
         BoundCircuit::Native(cc) => Ok(NativeSource {
             circuit: Cow::Borrowed(cc),
-            declared_clbits: None,
+            declared_clbits: cc.declared_clbits(),
         }),
         BoundCircuit::Qasm2(qasm) => ParameterizedCircuit::from_qasm2(qasm)
             .and_then(|pc| {
@@ -1272,6 +1272,43 @@ mod tests {
                 HashMap::from([("10".to_string(), 5)]),
             ]
         );
+    }
+
+    /// An imported circuit keeps the width its source declares through
+    /// binding, even through a transpiler that rebuilds it without that width.
+    #[test]
+    fn imported_native_circuit_keeps_its_declared_clbit_width() {
+        struct RebuildingTranspiler;
+        impl Transpiler for RebuildingTranspiler {
+            fn transpile(
+                &self,
+                circuit: &ConcreteCircuit,
+                _: &TranspileOptions,
+            ) -> ConcreteCircuit {
+                ConcreteCircuit::new(circuit.num_qubits, circuit.gates.clone())
+            }
+        }
+        let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n";
+        let circuit = BoundCircuit::Native(
+            ParameterizedCircuit::from_qasm2(qasm)
+                .unwrap()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let cfg = config_with(OptLevel::default());
+        for backend in [
+            NativeStatevectorBackend::new(5),
+            NativeStatevectorBackend::with_transpiler(5, Box::new(RebuildingTranspiler)),
+        ] {
+            let batch = backend
+                .run_circuits(std::slice::from_ref(&circuit), &cfg.run_params())
+                .unwrap();
+            assert_eq!(batch, vec![HashMap::from([("010".to_string(), 500)])]);
+            let distributed = backend
+                .run_shots_distributed(&circuit, &[3], &cfg.run_params())
+                .unwrap();
+            assert_eq!(distributed, vec![HashMap::from([("010".to_string(), 3)])]);
+        }
     }
 
     /// A non-identity transpiler rebuilds the circuit; the declared width must

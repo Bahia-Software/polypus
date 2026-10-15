@@ -2,7 +2,8 @@
 #
 # NOTE: clippy.toml only tunes lint *thresholds/behaviour*. Lint *levels*
 # (deny/warn/allow) are set in CI (`-- -D warnings`) and, optionally, in the
-# `[workspace.lints]` table of the root Cargo.toml (see AI_GUIDELINES §7).
+# `[workspace.lints]` table of the root Cargo.toml (see "Lint policy" in
+# docs/CONTRIBUTING.md).
 
 # Polypus is pre-1.0 (0.7.2) and under active development: don't hold back lints
 # just to preserve a frozen public API.
@@ -16,8 +17,6 @@ avoid-breaking-exported-api = false
 # flagging a genuinely runaway parameter list.
 too-many-arguments-threshold = 20
 
-# Set this to your true Minimum Supported Rust Version so clippy won't suggest
-# APIs newer than you support. Pick the highest floor required by your deps
-# (pyo3 0.29, ndarray 0.16, tokio 1, ...). Uncomment and adjust to a version you
-# actually build and test against:
-# msrv = "1.74"
+# No `msrv` here on purpose: Clippy reads `rust-version` from the workspace
+# Cargo.toml, which is the single source of truth for the MSRV (see
+# docs/CONTRIBUTING.md). Setting it here would duplicate it.

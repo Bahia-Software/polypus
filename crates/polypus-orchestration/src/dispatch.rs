@@ -14,8 +14,9 @@
 //! (`py.detach(|| dispatch_optimizer(...))`) and re-acquired only inside
 //! the oracle. So a real oracle failure reaches here **type-erased** as a
 //! [`BoxedError`] held in the [`OracleErrorSlot`]: the concrete error (today an
-//! `EvaluationError` carrying a `PyErr`) is boxed by the oracle and recovered by
-//! the `polypus` edge via `downcast`, keeping this crate free of `pyo3`.
+//! `EvaluationError`, whose Python exception travels as a `DisplaySafePyErr`) is
+//! boxed by the oracle and recovered by the `polypus` edge via `downcast` to
+//! `EvaluationError`, keeping this crate free of `pyo3`.
 
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
@@ -85,11 +86,11 @@ pub enum OracleError {
 }
 
 /// A type-erased oracle failure. The concrete error — in practice an
-/// `EvaluationError` carrying a `PyErr` — is boxed by the oracle so this crate
-/// never names `pyo3`; the `polypus` edge downcasts it back to re-raise the
-/// original Python exception with its class preserved (plan §10.1), except as
-/// contract C-1 provides for failures of the circuit SDK behind the Python
-/// backends.
+/// `EvaluationError`, whose Python exception travels as a `DisplaySafePyErr` —
+/// is boxed by the oracle so this crate never names `pyo3`; the `polypus` edge
+/// downcasts it back to `EvaluationError` to re-raise the original Python
+/// exception with its class preserved (plan §10.1), except as contract C-1
+/// provides for failures of the circuit SDK behind the Python backends.
 pub type BoxedError = Box<dyn Error + Send + 'static>;
 
 /// Thread-safe holder for the first error an oracle hits during `optimize`.

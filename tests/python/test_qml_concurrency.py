@@ -142,11 +142,18 @@ def test_qml_train_bounds_the_population_into_windows(monkeypatch):
     # Correctness: every candidate's circuit reaches the backend, and each
     # evaluation submits exactly one population — no drops, no duplication. (DE
     # runs a few evaluation phases: the initial population and one per generation.)
-    assert probe.calls < _POPULATION, (
-        f"the backend was called {probe.calls} times for a population of "
-        f"{_POPULATION} — that is per-candidate dispatch, not batched"
-    )
     assert probe.total_circuits % _POPULATION == 0, (
         f"{probe.total_circuits} circuits is not a whole number of populations of "
         f"{_POPULATION} — a batch was dropped or duplicated"
+    )
+    # Each evaluation is ceil(population / window) backend calls — however many CPUs
+    # the runner has (a bare `calls < _POPULATION` is false on one CPU, where the
+    # window is 2 and an evaluation is 100 calls of 2).
+    window = _candidate_window()
+    evaluations = probe.total_circuits // _POPULATION
+    calls_per_evaluation = -(-_POPULATION // window)
+    assert probe.calls == evaluations * calls_per_evaluation, (
+        f"the backend was called {probe.calls} times; {evaluations} evaluation(s) of a "
+        f"population of {_POPULATION} in windows of {window} should make "
+        f"{evaluations * calls_per_evaluation} calls"
     )

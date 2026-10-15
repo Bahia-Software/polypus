@@ -5,7 +5,8 @@ CUNQA itself is an optional dependency that is not installed in CI or this
 environment, so the ``cunqa.qjob`` / ``cunqa.qpu`` modules are stubbed to capture
 exactly what :meth:`Cunqa.get_qpus` forwards to ``qraise``. These pin three
 regressions of the pre-fix code: ``cores_per_qpu`` was read by the Rust backend
-and passed across the seam but then *dropped* by ``get_qpus``; the vQPU backend
+and passed across the seam but then *dropped* by ``get_qpus`` (and, once passed,
+under CUNQA 2.3's ``cores`` name; see ``test_cunqa_contract.py``); the vQPU backend
 spec was a hardcoded absolute path to one developer's home; and the module
 appended ``$HOME`` to ``sys.path`` unconditionally.
 """
@@ -51,7 +52,8 @@ def test_get_qpus_forwards_cores_per_qpu(stub_cunqa, monkeypatch):
     Cunqa().get_qpus(n=2, t="1:00:00", n_nodes=1, family_name="fam", cores_per_qpu=4)
 
     kwargs = stub_cunqa["kwargs"]
-    assert kwargs.get("cores") == 4, "cores_per_qpu must reach qraise, not be dropped"
+    assert kwargs.get("cores_per_qpu") == 4, "cores_per_qpu must reach qraise"
+    assert "cores" not in kwargs
 
 
 def test_get_qpus_has_no_hardcoded_backend(stub_cunqa, monkeypatch):
