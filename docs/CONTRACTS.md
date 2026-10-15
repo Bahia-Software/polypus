@@ -21,7 +21,7 @@ Rules of the road:
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit); `polypus.backend_compatibility` kept replicating the full `transpile` after that fix, so for a wide circuit, or one holding a `box`, its Aer reason was not the error the run raised (#307, fixed: it replicates the rewrite, and both refuse a `box` before rewriting with one stable message) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
@@ -431,21 +431,24 @@ writes, against its instruction, as full matrices).
 The Aer lowering boundary is enforced in Python by
 `tests/python/test_local_aer_lowering.py` (every out-of-basis gate and a
 declared gate run on Aer with the transpiled reference's counts and the native
-backend's distribution; a circuit in the basis is neither copied nor
-transpiled; `TestWideCircuits`: the same gates on a circuit wider than the
-default target run with `matrix_product_state`, the wide target lowers exactly
-as the default one, and the switch happens one qubit past the default width;
+backend's distribution; a circuit in the basis is neither copied nor transpiled;
+`TestLoweredProgram`: the lowered circuit is `transpile`'s against Aer, gate for
+gate, for every Qiskit standard gate outside the basis and the four control-flow
+blocks; `TestWideCircuits`: the same gates on a circuit wider than the default
+target run with `matrix_product_state`;
+`test_box_is_refused_with_a_stable_message`: a `box`, at any depth, is refused
+before the rewrite with one message;
 `test_noise_model_does_not_change_the_lowering` pins the noiseless basis),
 `test_run_quantum_circuit_matches_qiskit_on_aer` in
 `tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
 execution path) and `tests/python/test_backend_compatibility.py`. For a Qiskit
 `QuantumCircuit`, `polypus.backend_compatibility`
 (`crates/polypus/src/bindings/compatibility.rs`) replicates the Aer path's
-policy — when to lower, against which simulator or target, how — to report
-what the run would raise; it lowers nothing for execution, so it is not a
-lowering boundary, and `_assert_coherent` in that test, which runs every
-circuit it classifies (wide ones with `matrix_product_state`), keeps the two
-copies in step. The CUNQA
+policy — when to lower, into which basis, with which passes, what it refuses
+before rewriting — to report what the run would raise; it lowers nothing for
+execution, so it is not a lowering boundary, and `_assert_coherent` in that
+test, which runs every circuit it classifies (wide ones with
+`matrix_product_state`), keeps the two copies in step. The CUNQA
 one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
 convert, and a declared gate, reach `run` as an equivalent circuit in its list;
 a circuit in the list is neither copied nor transpiled).

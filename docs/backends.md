@@ -679,7 +679,7 @@ The native backend runs terminal-measurement circuits only (contract C-4,
 [ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
 mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer does
 not unroll instructions outside its basis (`ch`, `u0`, `rccx`, declared gates, …), but
-the local backend lowers them with `qiskit.transpile` before running, so they are
+the local backend lowers them into Aer's basis before running, so they are
 not a reason to prefer one backend. `polypus.backend_compatibility`
 reports what each backend rejects before a run, for a `polypus.Circuit`, an OpenQASM
 2.0 string or a Qiskit `QuantumCircuit`:
@@ -712,25 +712,25 @@ parse failure is its reason; so is Qiskit Aer not being installed) and rejects n
 instruction, because the local backend lowers what is outside Aer's basis before
 running it. For a Qiskit `QuantumCircuit` it follows that lowering step: a circuit whose
 instructions are all in the default `AerSimulator()`'s basis is accepted untouched, and
-one with an instruction outside it (control-flow bodies included) is transpiled as the
-run would transpile it, so one that `qiskit.transpile` cannot lower (an opaque
-instruction without a definition, a `box`) is rejected with the
-`polypus.BackendError` message the run would raise. Checking a circuit outside the
-basis therefore costs the `qiskit.transpile` call the run would pay; one in the basis
-is not transpiled. Like the run, it lowers into the basis of the default
+one with an instruction outside it (control-flow bodies included) is rewritten as the
+run would rewrite it (synthesis and basis translation into that basis, as
+`qiskit.transpile(..., optimization_level=0)` does, without its layout stage), so one
+that cannot be lowered (an opaque instruction without a definition, a `box`) is rejected
+with the `polypus.BackendError` message the run would raise; the run refuses a `box`, at
+any depth, before rewriting, with a message that does not change between calls. Checking
+a circuit outside the basis therefore costs the rewrite the run would pay; one in the
+basis is not rewritten. Like the run, it lowers into the basis of the default
 `AerSimulator()` whatever `sim_method` or `noise_model` the run is given: either one
-narrows the simulator's target, not what Aer runs, so lowering against it would
-rewrite gates Aer takes as they are (moving where a noise model's errors fall) or turn
-a method's own refusal into a transpiler error. The default target's width is a
-host-dependent cap (the largest statevector the host's memory holds), so a circuit
-wider than it is lowered against a target with the same instructions and the
-circuit's width: its width is no reason to reject it, and a `sim_method` that holds it
-(such as `matrix_product_state`) runs it. A `polypus.Circuit` with free parameters gets
-the same reason in both entries. The check is **structural**: it runs and connects to
-nothing, and does not check resources (the qubit ceiling, memory), so an accepted
-circuit can still fail for lack of them. Enforced by
-`tests/python/test_backend_compatibility.py`, which runs every circuit it classifies to
-confirm the verdict.
+narrows the simulator's target, not what Aer runs, so lowering into it would rewrite
+gates Aer takes as they are (moving where a noise model's errors fall) or turn a
+method's own refusal into a transpiler error. The lowering has no width cap, so a
+circuit wider than the default simulator's target (whose width the host's memory sets)
+is no reason to reject either, and a `sim_method` that holds it (such as
+`matrix_product_state`) runs it. A `polypus.Circuit` with free parameters gets the same
+reason in both entries. The check is **structural**: it runs and connects to nothing,
+and does not check resources (the qubit ceiling, memory), so an accepted circuit can
+still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
+which runs every circuit it classifies to confirm the verdict.
 
 ### QMIO — native wire backend
 
