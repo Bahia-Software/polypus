@@ -721,8 +721,9 @@ Like the run, it lowers against the basis of the default `AerSimulator()` whatev
 `sim_method` or `noise_model` the run is given: either one narrows the simulator's
 target (a `noise_model` to `cx`, `id`, `rz`, `sx` and the gates it names), not what
 Aer runs, so neither changes the lowering. A `box` is refused with one fixed message,
-the same in the check and the run. A `polypus.Circuit` with free parameters gets the same
-reason in both entries. The check is **structural**: it runs and connects to nothing,
+the same in the check and the run. A circuit with free parameters, a `polypus.Circuit`
+or a Qiskit `QuantumCircuit`, is rejected by the run with a `ValueError` ("unbound
+parameters") before any backend sees it, and both entries give that message. The check is **structural**: it runs and connects to nothing,
 and does not check resources (the qubit ceiling, memory), so an accepted circuit can
 still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
 which runs every circuit it classifies to confirm the verdict.

@@ -845,16 +845,21 @@ fn extract_circuit_source(qc: &Bound<'_, PyAny>) -> CircuitSource {
     }
 }
 
+/// Start of the `ValueError` message for a circuit with free parameters, the
+/// same for a `polypus.Circuit` and a Qiskit `QuantumCircuit`.
+const UNBOUND_PARAMETERS: &str = "circuit has unbound parameters and cannot be executed directly";
+
 /// Interpret the `qc` argument of `run_quantum_circuit` as a fully bound,
 /// executable circuit:
 /// - `polypus.Circuit` → native circuit (must have no free parameters),
 /// - `str` → raw OpenQASM 2.0 program,
-/// - anything else → Qiskit `QuantumCircuit` (original behaviour).
+/// - anything else → Qiskit `QuantumCircuit` (must have no free parameters:
+///   no backend binds them, and Aer would fail with its own error, issue #308).
 fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     if let Ok(native) = qc.extract::<PyRef<'_, Circuit>>() {
         let concrete = native.native().assign_parameters(&[]).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!(
-                "circuit has unbound parameters and cannot be executed directly: {e}. \
+                "{UNBOUND_PARAMETERS}: {e}. \
                  Bind values first via to_qasm2(params) or use polypus.train"
             ))
         })?;
@@ -863,12 +868,32 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     if let Ok(qasm) = qc.extract::<String>() {
         return Ok(BoundCircuit::Qasm2(qasm));
     }
+    let free = free_parameter_names(qc)?;
+    if !free.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{UNBOUND_PARAMETERS}: {}. \
+             Bind values first via QuantumCircuit.assign_parameters or use polypus.train",
+            free.join(", ")
+        )));
+    }
     // Anything else is a Qiskit `QuantumCircuit`: carry it opaquely through the
     // pyo3-free `BoundCircuit` enum via its `Foreign` escape hatch, so the Aer/CUNQA
     // backends still receive the native Qiskit object unchanged.
     Ok(crate::infrastructure::QiskitCircuit::into_bound(
         qc.clone().unbind(),
     ))
+}
+
+/// The names of the free parameters of a Qiskit `QuantumCircuit` (its
+/// `parameters`), in Qiskit's order. An object without that attribute has none.
+fn free_parameter_names(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let Ok(parameters) = qc.getattr(pyo3::intern!(qc.py(), "parameters")) else {
+        return Ok(Vec::new());
+    };
+    parameters
+        .try_iter()?
+        .map(|parameter| Ok(parameter?.str()?.to_string()))
+        .collect()
 }
 
 /// Interpret the `expectation_function` argument as a cost observable.
@@ -3129,6 +3154,34 @@ mod tests {
                 .expect("a non-Circuit, non-str object is assumed to be a Qiskit circuit");
             // A Qiskit circuit rides through the pyo3-free enum's `Foreign` hatch.
             assert!(bound.is_foreign());
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_rejects_a_qiskit_circuit_with_free_parameters() {
+        // Stands in for a `QuantumCircuit` (only `parameters` is read), so the
+        // test needs no Qiskit.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let qc = py
+                .eval(
+                    c"type('QC', (), {'parameters': ['t', 'theta[0]']})()",
+                    None,
+                    None,
+                )
+                .expect("the stand-in builds");
+            let err = match extract_bound_circuit(&qc) {
+                Err(err) => err,
+                Ok(_) => panic!("a circuit with free parameters cannot be executed directly"),
+            };
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let message = err.to_string();
+            assert!(message.contains("unbound parameters"), "{message}");
+            assert!(message.contains("directly: t, theta[0]."), "{message}");
+            let unbound = py
+                .eval(c"type('QC', (), {'parameters': []})()", None, None)
+                .expect("the stand-in builds");
+            assert!(extract_bound_circuit(&unbound).is_ok_and(|b| b.is_foreign()));
         });
     }
 

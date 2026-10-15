@@ -133,6 +133,11 @@ is not frozen by this contract. The function still lives in
   "must-be-consumed" rule above: neither side silently drops or invents args).
 - A missing **required** kwarg raises `TypeError`.
 
+No backend binds parameters on this seam, so `run_quantum_circuit` rejects a
+circuit with free parameters (a `polypus.Circuit` or a Qiskit `QuantumCircuit`)
+with `ValueError` ("unbound parameters") before calling it; an unbound
+`QuantumCircuit` no longer reaches Aer to fail there (issue #308).
+
 A failure **must never** cross the seam as a `pyo3_runtime.PanicException` or a
 process abort (it used to: the Rust side `unwrap()`/`panic!`-ed on these calls).
 The Rust orchestration layer now returns a typed `Result` on every path:
