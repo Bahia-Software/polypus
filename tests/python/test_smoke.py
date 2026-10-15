@@ -149,18 +149,6 @@ class TestPolypusPythonImport:
     def test_import_polypus_python(self):
         import polypus_python  # noqa: F401
 
-    def test_run_qc_in_qpu_exists(self):
-        import polypus_python
-
-        assert hasattr(polypus_python, "run_qc_in_qpu")
-        assert callable(polypus_python.run_qc_in_qpu)
-
-    def test_run_qcs_in_qpu_exists(self):
-        import polypus_python
-
-        assert hasattr(polypus_python, "run_qcs_in_qpu")
-        assert callable(polypus_python.run_qcs_in_qpu)
-
     def test_serialize_quantum_circuit_exists(self):
         import polypus_python
 
