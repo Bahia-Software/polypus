@@ -315,20 +315,39 @@ class TestQiskitCircuits:
         assert 'HighLevelSynthesis is unable to synthesize "opaque_thing"' in reason
         _assert_coherent(qc, report)
 
-    def test_box_is_rejected_by_aer(self):
+    @pytest.mark.parametrize("nesting", ["top", "for_loop", "if_test"])
+    def test_box_is_rejected_by_aer(self, nesting):
         """``box`` is a control-flow operation Aer's target does not take and
-        the lowering cannot remove (issue #285)."""
+        the lowering cannot remove (issue #285), at any depth. The reason is
+        the run's message word for word, the same on every call (issue #307):
+        the basis translator's own error listed the basis in a different order
+        each time."""
+        import polypus
         from qiskit import QuantumCircuit
 
         qc = QuantumCircuit(2, 2)
-        with qc.box():
-            qc.h(0)
-        qc.measure([0, 1], [0, 1])
+        qc.measure(0, 0)
+        if nesting == "top":
+            with qc.box():
+                qc.ch(0, 1)
+        elif nesting == "for_loop":
+            with qc.for_loop(range(2)):
+                with qc.box():
+                    qc.ch(0, 1)
+        else:
+            with qc.if_test((qc.clbits[0], 0)):
+                with qc.box():
+                    qc.ch(0, 1)
+        qc.measure(1, 1)
         report = _report(qc)
-        assert len(report["aer"]) == 1
-        reason = report["aer"][0]
-        assert reason.startswith(TRANSPILER_ERROR)
-        assert "box" in reason
+        assert report["aer"] == [
+            TRANSPILER_ERROR + "\"The control-flow construct 'box' is not "
+            'supported by the backend."'
+        ]
+        assert _report(qc) == report
+        with pytest.raises(polypus.BackendError) as info:
+            _run(qc, "aer")
+        assert str(info.value) == report["aer"][0]
         _assert_coherent(qc, report)
 
     def test_gate_outside_basis_in_a_control_flow_body_is_lowered(self, monkeypatch):

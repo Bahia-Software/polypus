@@ -333,10 +333,12 @@ Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
 backend, rewriting only (synthesis and basis translation, as
 `qiskit.transpile(..., optimization_level=0)` does) and only when the circuit
 holds such an instruction — a circuit already in the basis is handed over as
-it is — and never touch the exported QASM. The Aer path may reuse the lowered
-circuit of an OpenQASM text it lowered before (the parse is deterministic, so
-it is the circuit lowering that text afresh gives); the caller's circuit is
-never modified.
+it is — and never touch the exported QASM. The Aer path lowers into the
+default `AerSimulator()`'s basis whatever the run's `sim_method` or
+`noise_model`, which narrow the simulator's target but not what Aer runs. It
+may reuse the lowered circuit of an OpenQASM text it lowered before (the parse
+is deterministic, so it is the circuit lowering that text afresh gives); the
+caller's circuit is never modified.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
