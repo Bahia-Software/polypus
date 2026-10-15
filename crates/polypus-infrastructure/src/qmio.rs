@@ -31,9 +31,20 @@
 //!
 //! `serde-pickle` only *builds data* — it never executes `__reduce__`/`GLOBAL`
 //! opcodes — so a malicious or buggy peer cannot achieve remote code execution
-//! the way Python's `pickle.loads` can. We additionally cap the accepted reply
-//! size ([`QmioBackend::max_reply_bytes`]). The ZMQ traffic itself is in clear
-//! text over a trusted private HPC network (CURVE/auth is out of scope).
+//! the way Python's `pickle.loads` can. The reply *content* is treated as
+//! untrusted too: counts are accepted only as `{bitstring: count}` objects with
+//! binary keys of one width, and the pickle-to-JSON conversion is depth-limited.
+//!
+//! The accepted reply size is capped ([`QmioBackend::max_reply_bytes`]), but
+//! **that cap is not a memory-exhaustion defence**. It is checked only after
+//! `recv` has received and buffered the entire message, so it bounds what is
+//! kept and parsed, not what a hostile peer can make the process allocate: the
+//! pinned `zeromq` 0.6.0 exposes no `ZMQ_MAXMSGSIZE` equivalent and reserves the
+//! frame buffer from the length announced in the peer's ZMTP header. Closing
+//! that gap needs an upstream size limit in `zeromq`; until then the backend
+//! relies on the transport being a trusted peer. The ZMQ traffic itself is in
+//! clear text over a trusted private HPC network (CURVE/auth is out of scope;
+//! the endpoint threat model is tracked in #210).
 //!
 //! # Environment variables
 //!
@@ -307,7 +318,15 @@ pub struct QmioBackend {
     /// a global wall-clock cap on top of the per-operation `recv_timeout`, so no
     /// request (including a pathologically slow reconnect) can run unboundedly.
     global_timeout: Duration,
-    /// Hard cap on an accepted reply, guarding against a hostile/buggy peer.
+    /// Cap on the size of a reply (all frames together) that is accepted and
+    /// parsed; a larger one is [`QmioError::ResponseTooLarge`].
+    ///
+    /// The check runs only **after** `socket.recv()` has received and buffered the
+    /// whole message, so it does **not** limit the memory a hostile or buggy peer
+    /// can make this process allocate: `zeromq` 0.6.0 has no `ZMQ_MAXMSGSIZE`
+    /// equivalent and sizes its frame buffer from the length the peer announces.
+    /// It only keeps an oversized reply from being kept, copied and parsed. See
+    /// the module-level `## Security` section.
     max_reply_bytes: usize,
     /// Idempotency guard for [`close`](Self::close)/[`Drop`].
     closed: AtomicBool,
@@ -373,6 +392,15 @@ impl QmioBackend {
         self.recv_timeout = Duration::from_millis(recv_ms);
         self.max_retries = max_retries;
         self.global_timeout = Duration::from_millis(global_ms);
+        self
+    }
+
+    /// Override the reply-size cap on a constructed backend. Test-only: lets the
+    /// simulated-server tests exercise [`QmioError::ResponseTooLarge`] without
+    /// sending 64 MiB.
+    #[cfg(test)]
+    fn with_test_max_reply_bytes(mut self, max_reply_bytes: usize) -> Self {
+        self.max_reply_bytes = max_reply_bytes;
         self
     }
 
@@ -554,13 +582,7 @@ impl QmioBackend {
                         // Raw wire reply (unparsed ZMQ frames): the noisiest,
                         // lowest-level dump, kept at `trace`.
                         log::trace!("QMIO reply: {reply:?}");
-                        let bytes = first_frame(reply);
-                        if bytes.len() > self.max_reply_bytes {
-                            return Err(QmioError::ResponseTooLarge {
-                                bytes: bytes.len(),
-                                limit: self.max_reply_bytes,
-                            });
-                        }
+                        let bytes = reply_payload(reply, self.max_reply_bytes)?;
                         return parse_counts(&bytes);
                     }
                     Ok(Err(e)) => {
@@ -700,14 +722,26 @@ async fn drop_socket(guard: &mut Option<ReqSocket>) {
     }
 }
 
-/// Extract the first frame of a reply as raw bytes.
-fn first_frame(reply: ZmqMessage) -> Vec<u8> {
-    reply
+/// Check an already-received reply against `limit` and return its payload (the
+/// first frame).
+///
+/// The size counted is that of **all** frames, so extra frames cannot hide
+/// bytes. This runs after `recv` has buffered the whole message: it bounds what
+/// is parsed, not what was allocated (see [`QmioBackend::max_reply_bytes`]).
+fn reply_payload(reply: ZmqMessage, limit: usize) -> Result<Vec<u8>, QmioError> {
+    let total: usize = reply.iter().map(|frame| frame.len()).sum();
+    if total > limit {
+        return Err(QmioError::ResponseTooLarge {
+            bytes: total,
+            limit,
+        });
+    }
+    Ok(reply
         .into_vec()
         .into_iter()
         .next()
         .map(|frame| frame.to_vec())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Pickle the `(circuit, config)` 2-tuple.
@@ -750,10 +784,46 @@ fn parse_counts(reply: &[u8]) -> Result<HashMap<String, u64>, QmioError> {
     }
 }
 
+/// Deepest pickle nesting [`pickle_to_json`] follows; a reply nested deeper is
+/// rejected with [`QmioError::Schema`] instead of recursing without bound.
+const MAX_PICKLE_DEPTH: usize = 64;
+
 /// Best-effort conversion of a non-string pickle reply into a JSON value, so the
 /// same [`counts_from_json`] extraction can handle a dict-shaped reply.
+///
+/// Every pickle value has a JSON image, so one field the extractor does not care
+/// about (a `success: True` flag, a `None` placeholder, a list of timings…) never
+/// rejects an otherwise valid counts payload. Tuples and sets become arrays, a
+/// big integer becomes a number when it fits in 64 bits and a decimal string
+/// otherwise, and raw bytes become `null` — none of those can be a count. Counts
+/// are still validated by [`as_counts_object`] afterwards.
 fn pickle_to_json(value: &PickleValue) -> Result<serde_json::Value, QmioError> {
+    pickle_to_json_at(value, 0)
+}
+
+fn pickle_to_json_at(value: &PickleValue, depth: usize) -> Result<serde_json::Value, QmioError> {
+    if depth > MAX_PICKLE_DEPTH {
+        return Err(QmioError::Schema(format!(
+            "reply is nested deeper than {MAX_PICKLE_DEPTH} levels"
+        )));
+    }
     match value {
+        PickleValue::None | PickleValue::Bytes(_) => Ok(serde_json::Value::Null),
+        PickleValue::Bool(b) => Ok(json!(b)),
+        PickleValue::I64(i) => Ok(json!(i)),
+        PickleValue::Int(big) => Ok(big_int_to_json(&big.to_string())),
+        PickleValue::F64(x) => Ok(json!(x)),
+        PickleValue::String(s) => Ok(json!(s)),
+        PickleValue::List(items) | PickleValue::Tuple(items) => items
+            .iter()
+            .map(|v| pickle_to_json_at(v, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        PickleValue::Set(items) | PickleValue::FrozenSet(items) => items
+            .iter()
+            .map(|v| hashable_to_json(v, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
         PickleValue::Dict(entries) => {
             let mut map = serde_json::Map::new();
             for (k, v) in entries {
@@ -762,16 +832,52 @@ fn pickle_to_json(value: &PickleValue) -> Result<serde_json::Value, QmioError> {
                     serde_pickle::HashableValue::I64(i) => i.to_string(),
                     other => format!("{other:?}"),
                 };
-                map.insert(key, pickle_to_json(v)?);
+                map.insert(key, pickle_to_json_at(v, depth + 1)?);
             }
             Ok(serde_json::Value::Object(map))
         }
-        PickleValue::I64(i) => Ok(json!(i)),
-        PickleValue::F64(x) => Ok(json!(x)),
-        PickleValue::String(s) => Ok(json!(s)),
-        other => Err(QmioError::Schema(format!(
-            "reply was neither a JSON string nor a counts dict (got {other:?})"
-        ))),
+    }
+}
+
+/// Set members are [`serde_pickle::HashableValue`]s; convert them like [`PickleValue`]s.
+fn hashable_to_json(
+    value: &serde_pickle::HashableValue,
+    depth: usize,
+) -> Result<serde_json::Value, QmioError> {
+    use serde_pickle::HashableValue as H;
+    if depth > MAX_PICKLE_DEPTH {
+        return Err(QmioError::Schema(format!(
+            "reply is nested deeper than {MAX_PICKLE_DEPTH} levels"
+        )));
+    }
+    match value {
+        H::None | H::Bytes(_) => Ok(serde_json::Value::Null),
+        H::Bool(b) => Ok(json!(b)),
+        H::I64(i) => Ok(json!(i)),
+        H::Int(big) => Ok(big_int_to_json(&big.to_string())),
+        H::F64(x) => Ok(json!(x)),
+        H::String(s) => Ok(json!(s)),
+        H::Tuple(items) => items
+            .iter()
+            .map(|v| hashable_to_json(v, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        H::FrozenSet(items) => items
+            .iter()
+            .map(|v| hashable_to_json(v, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+    }
+}
+
+/// A pickle big integer as JSON: a number when it fits in 64 bits, else its decimal string.
+fn big_int_to_json(decimal: &str) -> serde_json::Value {
+    if let Ok(u) = decimal.parse::<u64>() {
+        json!(u)
+    } else if let Ok(i) = decimal.parse::<i64>() {
+        json!(i)
+    } else {
+        json!(decimal)
     }
 }
 
@@ -781,9 +887,13 @@ fn pickle_to_json(value: &PickleValue) -> Result<serde_json::Value, QmioError> {
 /// the classical register name — verified against the live QPU, e.g.
 /// `{"results": {"c": {"00": 1000}}}`. We also accept a flat `{bitstring:
 /// count}` object or one nested directly under a common container key, and fall
-/// back to the first nested counts-like object.
+/// back to the first nested counts object. Only an object whose keys are all
+/// binary bitstrings counts as one ([`as_counts_object`]), so a metadata block
+/// of integer metrics (`{"optimized_instruction_count": 98}`) is skipped rather
+/// than mistaken for counts. A counts object that mixes key widths is a
+/// [`QmioError::Schema`], never silently accepted.
 fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, QmioError> {
-    if let Some(map) = as_counts_object(value) {
+    if let Some(map) = as_counts_object(value)? {
         return Ok(map);
     }
     if let Some(obj) = value.as_object() {
@@ -797,7 +907,7 @@ fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, Q
             "register",
             "measurements",
         ] {
-            if let Some(map) = obj.get(key).and_then(as_counts_object) {
+            if let Some(map) = obj.get(key).map(as_counts_object).transpose()?.flatten() {
                 return Ok(map);
             }
         }
@@ -805,13 +915,13 @@ fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, Q
         // classical register name (e.g. `{"results": {"c": {"00": 1000}}}`).
         // Merge every register — a single register is the common case.
         for key in ["results", "result", "data"] {
-            if let Some(map) = obj.get(key).and_then(as_register_counts) {
+            if let Some(map) = obj.get(key).map(as_register_counts).transpose()?.flatten() {
                 return Ok(map);
             }
         }
-        // Fall back to the first nested counts-like object.
+        // Fall back to the first nested counts object.
         for inner in obj.values() {
-            if let Some(map) = as_counts_object(inner) {
+            if let Some(map) = as_counts_object(inner)? {
                 return Ok(map);
             }
         }
@@ -821,19 +931,44 @@ fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, Q
     ))
 }
 
-/// Interpret a JSON value as a `{bitstring: count}` map, or `None` if it is not
-/// a non-empty object whose values are all non-negative integers.
-fn as_counts_object(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
-    let obj = value.as_object()?;
+/// Interpret a JSON value as a `{bitstring: count}` map.
+///
+/// `Ok(None)` means "not a counts object": not a non-empty object, a value that
+/// is not a non-negative integer, or a key that is not a binary bitstring
+/// (`[01]+` once whitespace is stripped). `Err` is reserved for an object that
+/// *is* counts-shaped but inconsistent: keys of different widths, or counts whose
+/// per-bitstring sum overflows `u64`.
+fn as_counts_object(value: &serde_json::Value) -> Result<Option<HashMap<String, u64>>, QmioError> {
+    let Some(obj) = value.as_object() else {
+        return Ok(None);
+    };
     if obj.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let mut counts = HashMap::with_capacity(obj.len());
+    let mut counts: HashMap<String, u64> = HashMap::with_capacity(obj.len());
+    let mut width = None;
     for (key, val) in obj {
-        let count = val.as_u64()?;
-        counts.insert(normalize_bitstring(key), count);
+        let Some(count) = val.as_u64() else {
+            return Ok(None);
+        };
+        let bitstring = normalize_bitstring(key);
+        if bitstring.is_empty() || !bitstring.bytes().all(|b| b == b'0' || b == b'1') {
+            return Ok(None);
+        }
+        match width {
+            None => width = Some(bitstring.len()),
+            Some(w) if w != bitstring.len() => {
+                return Err(QmioError::Schema(format!(
+                    "counts keys have mixed widths ({w} and {} bits)",
+                    bitstring.len()
+                )));
+            }
+            Some(_) => {}
+        }
+        // Keys that differ only in whitespace normalise to the same bitstring.
+        add_count(&mut counts, bitstring, count)?;
     }
-    Some(counts)
+    Ok(Some(counts))
 }
 
 /// Interpret a JSON value as a map of `register -> {bitstring: count}`, merging
@@ -842,21 +977,55 @@ fn as_counts_object(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
 /// This is the QMIO/`qat` reply shape, where the measured shots are grouped
 /// under the classical register name (e.g. `{"c": {"00": 1000}}`). A single
 /// register is the common case and is returned unchanged; multiple registers are
-/// summed per bitstring. Returns `None` unless *every* entry is itself a counts
-/// object, so it never matches metadata such as `execution_metrics`.
-fn as_register_counts(value: &serde_json::Value) -> Option<HashMap<String, u64>> {
-    let obj = value.as_object()?;
+/// summed per bitstring, which is only meaningful when they have the same width,
+/// so registers of different widths are a [`QmioError::Schema`]. Returns
+/// `Ok(None)` unless *every* entry is itself a counts object, so it never
+/// matches metadata such as `execution_metrics`.
+fn as_register_counts(
+    value: &serde_json::Value,
+) -> Result<Option<HashMap<String, u64>>, QmioError> {
+    let Some(obj) = value.as_object() else {
+        return Ok(None);
+    };
     if obj.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut merged: HashMap<String, u64> = HashMap::new();
+    let mut width = None;
     for register in obj.values() {
-        let counts = as_counts_object(register)?;
+        let Some(counts) = as_counts_object(register)? else {
+            return Ok(None);
+        };
+        // `as_counts_object` guarantees one width per register and a non-empty map.
+        let register_width = counts.keys().next().map_or(0, String::len);
+        match width {
+            None => width = Some(register_width),
+            Some(w) if w != register_width => {
+                return Err(QmioError::Schema(format!(
+                    "registers have different widths ({w} and {register_width} bits) and cannot \
+                     be merged"
+                )));
+            }
+            Some(_) => {}
+        }
         for (bitstring, count) in counts {
-            *merged.entry(bitstring).or_insert(0) += count;
+            add_count(&mut merged, bitstring, count)?;
         }
     }
-    Some(merged)
+    Ok(Some(merged))
+}
+
+/// Add `count` to `bitstring`'s total, rejecting a `u64` overflow.
+fn add_count(
+    counts: &mut HashMap<String, u64>,
+    bitstring: String,
+    count: u64,
+) -> Result<(), QmioError> {
+    let total = counts.entry(bitstring).or_insert(0);
+    *total = total.checked_add(count).ok_or_else(|| {
+        QmioError::Schema("a bitstring count overflows a 64-bit integer".to_string())
+    })?;
+    Ok(())
 }
 
 /// Normalise a returned bitstring key to Polypus' convention.
@@ -1831,12 +2000,6 @@ mod tests {
     fn counts_from_json_rejects_metadata_only_replies() {
         // Nothing here is `{bitstring: count}`-shaped at any depth: the leaves
         // are strings, floats and booleans rather than non-negative integers.
-        //
-        // Note the deliberate absence of an integer leaf. A metadata object such
-        // as `{"optimized_instruction_count": 98}` *is* accepted by the naive
-        // `{key: u64}` test and would be picked up by the last-resort nested
-        // scan — that permissiveness is the documented "fall back to the first
-        // nested counts-like object" behaviour, not a case this test asserts on.
         let reply = json!({
             "execution_metrics": {
                 "optimized_circuit": "OPENQASM 3.0;",
@@ -1891,6 +2054,323 @@ mod tests {
                 "a non-object reply must be a schema error: {reply}"
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Reply validation (#78): bitstring keys, uniform width, non-JSON pickle
+    // values and the reply-size cap.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn is_schema_err<T: fmt::Debug>(result: Result<T, QmioError>) -> bool {
+        matches!(result, Err(QmioError::Schema(_)))
+    }
+
+    #[test]
+    fn counts_from_json_skips_integer_metric_blocks_before_the_counts() {
+        // `data` is tried before the register scan and `execution_metrics` sorts
+        // before `payload`: both used to be taken for the counts.
+        let reply = json!({"data": {"optimized_instruction_count": 98}, "results": {"c": {"00": 600, "11": 400}}});
+        let counts = counts_from_json(&reply).unwrap();
+        assert_eq!(counts.get("00"), Some(&600));
+        assert_eq!(counts.get("11"), Some(&400));
+        assert_eq!(counts.len(), 2);
+
+        let reply = json!({
+            "execution_metrics": {"optimized_instruction_count": 98},
+            "payload": {"00": 600, "11": 400},
+        });
+        let counts = counts_from_json(&reply).unwrap();
+        assert_eq!(counts.values().sum::<u64>(), 1000);
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn counts_from_json_rejects_a_metrics_only_integer_block() {
+        let reply = json!({"execution_metrics": {"optimized_instruction_count": 98}});
+        assert!(is_schema_err(counts_from_json(&reply)));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_non_binary_keys() {
+        for reply in [
+            json!({"a": 1, "b": 2}),
+            json!({"counts": {"02": 1}}),
+            json!({"counts": {"0x1": 1}}),
+            json!({"counts": {"": 1}}),
+            json!({"results": {"c": {"00": 1, "1 ": 2, "xx": 3}}}),
+        ] {
+            assert!(
+                is_schema_err(counts_from_json(&reply)),
+                "non-binary keys must not be counts: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn counts_from_json_accepts_whitespace_separated_bitstrings() {
+        let counts = counts_from_json(&json!({"counts": {"01 10": 4}})).unwrap();
+        assert_eq!(counts.get("0110"), Some(&4));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_mixed_width_keys() {
+        for reply in [
+            json!({"0": 3, "01": 5}),
+            json!({"counts": {"0": 3, "01": 5}}),
+            json!({"results": {"c": {"00": 3, "1": 5}}}),
+            json!({"other": {"0": 3, "01": 5}}),
+        ] {
+            assert!(
+                is_schema_err(counts_from_json(&reply)),
+                "mixed-width keys must be rejected: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn counts_from_json_rejects_registers_of_different_widths() {
+        // Summing a 2-bit and a 1-bit register per bitstring would be meaningless.
+        let reply = json!({"results": {"c0": {"00": 3, "11": 1}, "c1": {"0": 2, "1": 6}}});
+        assert!(is_schema_err(counts_from_json(&reply)));
+        let counts =
+            counts_from_json(&json!({"results": {"c0": {"00": 3}, "c1": {"00": 2}}})).unwrap();
+        assert_eq!(counts.get("00"), Some(&5));
+    }
+
+    #[test]
+    fn counts_from_json_rejects_a_count_sum_overflow() {
+        let reply = json!({"results": {"c0": {"0": u64::MAX}, "c1": {"0": 1}}});
+        assert!(is_schema_err(counts_from_json(&reply)));
+        // Two spellings of one bitstring are summed too.
+        assert!(is_schema_err(counts_from_json(
+            &json!({"0 1": u64::MAX, "01": 1})
+        )));
+    }
+
+    /// Pickle `{"results": {"c": {"00": 512, "11": 488}}, <extra>}` as a dict.
+    fn pickled_dict_with(extra: Vec<(&str, PickleValue)>) -> Vec<u8> {
+        use serde_pickle::HashableValue as H;
+        let counts = PickleValue::Dict(
+            [
+                (H::String("00".into()), PickleValue::I64(512)),
+                (H::String("11".into()), PickleValue::I64(488)),
+            ]
+            .into(),
+        );
+        let results = PickleValue::Dict([(H::String("c".into()), counts)].into());
+        let mut dict = std::collections::BTreeMap::new();
+        dict.insert(H::String("results".into()), results);
+        for (k, v) in extra {
+            dict.insert(H::String(k.into()), v);
+        }
+        serde_pickle::value_to_vec(&PickleValue::Dict(dict), SerOptions::new()).unwrap()
+    }
+
+    #[test]
+    fn parse_counts_tolerates_non_json_pickle_values_outside_the_counts() {
+        use serde_pickle::HashableValue as H;
+        let pickled = pickled_dict_with(vec![
+            ("success", PickleValue::Bool(true)),
+            ("error", PickleValue::None),
+            (
+                "timings",
+                PickleValue::List(vec![PickleValue::F64(0.5), PickleValue::I64(2)]),
+            ),
+            (
+                "shape",
+                PickleValue::Tuple(vec![PickleValue::I64(2), PickleValue::I64(2)]),
+            ),
+            ("raw", PickleValue::Bytes(vec![0, 1, 2])),
+            ("qubits", PickleValue::Set([H::I64(0), H::I64(1)].into())),
+            (
+                "frozen",
+                PickleValue::FrozenSet([H::Bool(true), H::None, H::Bytes(vec![1])].into()),
+            ),
+            ("big", big_int_value("123456789012345678901234567890")),
+        ]);
+        let counts = parse_counts(&pickled).unwrap();
+        assert_eq!(counts.get("00"), Some(&512));
+        assert_eq!(counts.get("11"), Some(&488));
+        assert_eq!(counts.len(), 2);
+    }
+
+    /// A big-int [`PickleValue`] without naming `num-bigint` (not a direct
+    /// dependency): decode a hand-built pickle `LONG1`.
+    fn big_int_value(decimal: &str) -> PickleValue {
+        // pickle protocol 2 `LONG1`: little-endian two's-complement magnitude.
+        let mut digits: Vec<u8> = vec![0];
+        for c in decimal.bytes() {
+            let mut carry = u32::from(c - b'0');
+            for d in digits.iter_mut() {
+                let v = u32::from(*d) * 10 + carry;
+                *d = (v & 0xff) as u8;
+                carry = v >> 8;
+            }
+            if carry > 0 {
+                digits.push(carry as u8);
+            }
+        }
+        // A trailing zero byte keeps the two's-complement value positive.
+        digits.push(0);
+        let mut pickle = vec![0x80, 2, 0x8a, digits.len() as u8];
+        pickle.extend(&digits);
+        pickle.push(b'.');
+        let value = serde_pickle::value_from_slice(&pickle, DeOptions::new()).unwrap();
+        assert!(matches!(value, PickleValue::Int(_)), "got {value:?}");
+        value
+    }
+
+    #[test]
+    fn pickle_to_json_converts_every_value_kind() {
+        use serde_pickle::HashableValue as H;
+        let value = PickleValue::List(vec![
+            PickleValue::None,
+            PickleValue::Bool(false),
+            PickleValue::I64(-3),
+            PickleValue::F64(1.5),
+            PickleValue::String("s".into()),
+            PickleValue::Bytes(vec![9]),
+            PickleValue::Tuple(vec![PickleValue::I64(1)]),
+            PickleValue::Set([H::I64(7)].into()),
+            big_int_value("18446744073709551615"),
+            big_int_value("123456789012345678901234567890"),
+        ]);
+        assert_eq!(
+            pickle_to_json(&value).unwrap(),
+            json!([
+                null,
+                false,
+                -3,
+                1.5,
+                "s",
+                null,
+                [1],
+                [7],
+                18446744073709551615u64,
+                "123456789012345678901234567890"
+            ])
+        );
+    }
+
+    #[test]
+    fn pickle_to_json_rejects_pathological_nesting() {
+        let mut value = PickleValue::I64(0);
+        for _ in 0..(MAX_PICKLE_DEPTH + 10) {
+            value = PickleValue::List(vec![value]);
+        }
+        assert!(is_schema_err(pickle_to_json(&value)));
+    }
+
+    #[test]
+    fn parse_counts_rejects_mixed_width_pickled_counts() {
+        let pickled = serde_pickle::to_vec(
+            &json!({"results": {"c": {"0": 3, "01": 5}}}),
+            SerOptions::new(),
+        )
+        .unwrap();
+        assert!(is_schema_err(parse_counts(&pickled)));
+    }
+
+    #[test]
+    fn reply_payload_counts_every_frame_against_the_cap() {
+        let mut reply = ZmqMessage::from(vec![2u8; 30]);
+        reply.prepend(&ZmqMessage::from(vec![1u8; 10]));
+        // The first frame alone fits; the whole message does not.
+        assert!(matches!(
+            reply_payload(reply.clone(), 39),
+            Err(QmioError::ResponseTooLarge {
+                bytes: 40,
+                limit: 39
+            })
+        ));
+        assert_eq!(reply_payload(reply, 40).unwrap(), vec![1u8; 10]);
+    }
+
+    /// Run `reply` through a simulated REP server to a backend whose cap is `limit`.
+    fn run_against_reply(reply: ZmqMessage, limit: usize) -> QmioError {
+        use crate::{BackendConfig, BackendError, ExecutionConfig};
+        use std::sync::mpsc;
+        use zeromq::RepSocket;
+
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let server_endpoint = endpoint.clone();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut rep = RepSocket::new();
+                rep.bind(&server_endpoint).await.unwrap();
+                ready_tx.send(()).unwrap();
+                let _ = rep.recv().await.unwrap();
+                rep.send(reply).await.unwrap();
+            });
+        });
+        ready_rx.recv().unwrap();
+
+        let backend = QmioBackend::new(
+            endpoint,
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(5_000, 0, 10_000)
+        .with_test_max_reply_bytes(limit);
+        let config = ExecutionConfig {
+            id: "qmio-too-large".to_string(),
+            shots: 1024,
+            n_qpus: 1,
+            infrastructure: "qmio".to_string(),
+            backend_config: BackendConfig::Registered {
+                name: "qmio".to_string(),
+                options: std::collections::HashMap::new(),
+            },
+            opt_level: crate::OptLevel::default(),
+            seed: None,
+        };
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &config.run_params())
+            .unwrap_err();
+        server.join().unwrap();
+        match err {
+            BackendError::External(boxed) => *boxed
+                .downcast::<QmioError>()
+                .expect("the boxed error must be the original QmioError"),
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simulated_rep_server_oversized_reply_is_response_too_large() {
+        let pickled = pickled_dict_with(vec![]);
+        let size = pickled.len();
+        let err = run_against_reply(ZmqMessage::from(pickled), size - 1);
+        assert!(
+            matches!(err, QmioError::ResponseTooLarge { bytes, limit } if bytes == size && limit == size - 1),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn simulated_rep_server_extra_frames_count_towards_the_cap() {
+        // A valid first frame followed by a large one: only the sum exceeds the cap.
+        let first = pickled_dict_with(vec![]);
+        let limit = first.len() + 100;
+        let mut reply = ZmqMessage::from(vec![0u8; 200]);
+        reply.prepend(&ZmqMessage::from(first));
+        let err = run_against_reply(reply, limit);
+        assert!(
+            matches!(err, QmioError::ResponseTooLarge { .. }),
+            "got: {err:?}"
+        );
     }
 
     // The mapping of a QMIO failure to the typed `polypus.QmioError` Python class
