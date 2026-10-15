@@ -355,6 +355,7 @@ def train(
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
     options: Optional[dict[str, str]] = None,
+    walltime: Optional[str] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],
@@ -369,6 +370,7 @@ def run_quantum_circuit(
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
     options: Optional[dict[str, str]] = None,
+    walltime: Optional[str] = None,
 ) -> RunResult: ...
 def statevector(
     qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True

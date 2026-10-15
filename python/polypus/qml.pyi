@@ -55,6 +55,7 @@ def train(
     backend: str = "aer",
     seed: Optional[int] = None,
     options: Optional[dict[str, str]] = None,
+    walltime: Optional[str] = None,
     *,
     y_train: Optional[Iterable[float]] = None,
 ) -> TrainResult: ...
@@ -72,4 +73,5 @@ def predict(
     noise_model: Optional[NoiseModel] = None,
     backend: str = "aer",
     seed: Optional[int] = None,
+    walltime: Optional[str] = None,
 ) -> RunResult: ...
