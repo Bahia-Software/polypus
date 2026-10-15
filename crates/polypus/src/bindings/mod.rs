@@ -29,8 +29,9 @@ use crate::evaluation::{
 };
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
-    merge_counts, BackendConfig, BoundCircuit, Counts, EntropyError, ExecutionConfig,
-    Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner, ShotDistributingPlanner,
+    merge_counts, validate_walltime, BackendConfig, BoundCircuit, Counts, EntropyError,
+    ExecutionConfig, Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner,
+    ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
@@ -555,6 +556,7 @@ fn build_backend_config(
     noise_model: Option<Py<PyAny>>,
     nodes: u32,
     cores_per_qpu: u32,
+    walltime: Option<&str>,
     fusion: Option<bool>,
     options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
@@ -614,6 +616,7 @@ fn build_backend_config(
             sim_method: sim_method.to_string(),
             nodes,
             cores_per_qpu,
+            walltime: walltime.unwrap_or(DEFAULT_WALLTIME).to_string(),
         }),
         // QMIO is now dispatched through the runtime registry (it registers a
         // factory), so its config is a `Registered { name: "qmio", options }`.
@@ -730,14 +733,20 @@ fn validate_shots_and_qpus(shots: u32, n_qpus: u32) -> PyResult<()> {
 }
 
 /// Validate the CUNQA allocation parameters at the Python-facing boundary. Only
-/// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu` (they flow to
-/// SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu` via
+/// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu`/`walltime` (they
+/// flow to SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu`/`t` via
 /// `CunqaBackend`); the `local` and `qmio` match arms of `build_backend_config`
 /// ignore them, so validating unconditionally would reject harmless non-cunqa
-/// calls. A zero for either value has no sane meaning once it reaches SLURM, so
-/// reject it here before any seam call rather than forward it. Shared by every
-/// entry point rather than duplicated per function.
-fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u32) -> PyResult<()> {
+/// calls. A zero for either count has no sane meaning once it reaches SLURM, and
+/// a `walltime` that is not `HH:MM:SS` would only fail inside `qraise`, so
+/// reject both here before any seam call rather than forward them. Shared by
+/// every entry point rather than duplicated per function.
+fn validate_cunqa_allocation(
+    infrastructure: &str,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<&str>,
+) -> PyResult<()> {
     if infrastructure != "cunqa" {
         return Ok(());
     }
@@ -750,6 +759,10 @@ fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u3
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "cores_per_qpu must be >= 1 for the 'cunqa' infrastructure, got {cores_per_qpu}"
         )));
+    }
+    if let Some(walltime) = walltime {
+        validate_walltime(walltime)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     }
     Ok(())
 }
@@ -1029,6 +1042,13 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `>= 1` — a zero has no sane meaning once it reaches SLURM and is rejected.
 /// They default to `nodes=1, cores_per_qpu=2`.
 ///
+/// `walltime` is the SLURM walltime of the CUNQA QPUs (sent to `qraise` as `t`),
+/// again meaningful only for `infrastructure="cunqa"`. It must be `"HH:MM:SS"`:
+/// hours of one or more digits (`"48:00:00"` is valid), minutes and seconds of
+/// two digits below 60, total above zero; SLURM's `D-HH:MM:SS` is rejected. A
+/// malformed value raises `ValueError` before any QPU is requested. Omitted, it
+/// is `"10:00:00"`.
+///
 /// Returns a [`RunResult`] carrying the counts — `counts`, always a
 /// `list[dict]` with one dict per QPU replica, and `merged_counts`, their total as
 /// one `dict` — plus a manifest (`id`, effective `seed`, `backend`,
@@ -1047,7 +1067,7 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
 /// Any other value type is a `TypeError` naming the key; a non-empty `options` on
 /// `local`/`cunqa`, which would ignore it, is a `ValueError`.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None))]
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -1061,6 +1081,7 @@ pub fn run_quantum_circuit<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -1070,7 +1091,7 @@ pub fn run_quantum_circuit<'py>(
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) && bound_qc.is_foreign() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1116,6 +1137,7 @@ pub fn run_quantum_circuit<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         fusion,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1234,6 +1256,9 @@ pub fn run_quantum_circuit<'py>(
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+/// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
+/// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
+/// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1251,7 +1276,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1269,10 +1294,11 @@ pub fn train<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     validate_id(&id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
@@ -1318,6 +1344,7 @@ pub fn train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         fusion,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1504,6 +1531,9 @@ fn bind_feature_rows<'py>(
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+/// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
+/// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
+/// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1526,7 +1556,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, *, y_train=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1545,11 +1575,12 @@ pub fn qml_train<'py>(
     backend: &str,
     seed: Option<u64>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     validate_id(&id)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
@@ -1622,6 +1653,7 @@ pub fn qml_train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         None,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1698,6 +1730,10 @@ pub fn qml_train<'py>(
 /// finiteness of `params`, and a non-empty `x` are checked before anything runs
 /// (contract C-8).
 ///
+/// `nodes`, `cores_per_qpu` and `walltime` size the SLURM allocation and are
+/// consumed only by `infrastructure="cunqa"`, with the same rules as in
+/// [`run_quantum_circuit`]; `local` ignores them.
+///
 /// Example:
 ///
 /// ```ignore
@@ -1707,7 +1743,7 @@ pub fn qml_train<'py>(
 ///     )
 ///     predictions = [readout(counts) for counts in run.counts]
 /// ```
-#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None))]
 pub fn qml_predict<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1722,10 +1758,11 @@ pub fn qml_predict<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
     if is_native_backend(backend) {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1786,6 +1823,7 @@ pub fn qml_predict<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         None,
         // predict runs on aer/local only (qmio rejected above), so there is no
         // registered/provider backend to pass options to.
@@ -2072,6 +2110,7 @@ mod tests {
             seed,
             None,
             None,
+            None,
         )
         .expect("native run_quantum_circuit succeeds");
         let bound = result.bind(py);
@@ -2141,6 +2180,7 @@ mod tests {
                 Some(7),
                 None,
                 None,
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -2189,6 +2229,7 @@ mod tests {
                     None,
                     "polypus",
                     Some(7),
+                    None,
                     None,
                     None,
                 )
@@ -2267,6 +2308,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                None,
                 None,
                 None,
             );
@@ -2437,7 +2479,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None, None)
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None, None, None)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -2449,9 +2491,18 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native =
-                build_backend_config("local", name, "automatic", None, 1, 2, Some(true), None)
-                    .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
+            let native = build_backend_config(
+                "local",
+                name,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(true),
+                None,
+            )
+            .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
             assert!(matches!(
                 native,
                 BackendConfig::LocalNative { fusion: true }
@@ -2470,6 +2521,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             Some(true),
             None,
         )
@@ -2486,6 +2538,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             Some(false),
             None,
         )
@@ -2500,8 +2553,18 @@ mod tests {
     /// (`true`) — the crate-wide `StatevectorSimulator::default().fusion`.
     #[test]
     fn build_backend_config_defaults_fusion_to_enabled_when_omitted() {
-        let native = build_backend_config("local", "polypus", "automatic", None, 1, 2, None, None)
-            .expect("polypus is a valid local backend");
+        let native = build_backend_config(
+            "local",
+            "polypus",
+            "automatic",
+            None,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect("polypus is a valid local backend");
         assert!(matches!(
             native,
             BackendConfig::LocalNative { fusion: true }
@@ -2516,9 +2579,18 @@ mod tests {
     fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
         pyo3::Python::initialize();
         for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
-            let err =
-                build_backend_config(infra, backend, "automatic", None, 1, 2, Some(true), None)
-                    .expect_err("fusion=True on a non-fusing backend must be rejected");
+            let err = build_backend_config(
+                infra,
+                backend,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(true),
+                None,
+            )
+            .expect_err("fusion=True on a non-fusing backend must be rejected");
             Python::attach(|py| {
                 assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
                 assert!(
@@ -2528,9 +2600,19 @@ mod tests {
             });
 
             // fusion=False and an omitted fusion must build a config, not error.
-            build_backend_config(infra, backend, "automatic", None, 1, 2, Some(false), None)
-                .expect("fusion=False is accepted everywhere");
-            build_backend_config(infra, backend, "automatic", None, 1, 2, None, None)
+            build_backend_config(
+                infra,
+                backend,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(false),
+                None,
+            )
+            .expect("fusion=False is accepted everywhere");
+            build_backend_config(infra, backend, "automatic", None, 1, 2, None, None, None)
                 .expect("omitted fusion is accepted everywhere");
         }
     }
@@ -2544,6 +2626,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             None,
         )
@@ -2571,6 +2654,7 @@ mod tests {
             2,
             None,
             None,
+            None,
         )
         .expect_err("a noise model on the native backend must be rejected");
         Python::attach(|py| {
@@ -2595,6 +2679,7 @@ mod tests {
             2,
             None,
             None,
+            None,
         )
         .expect("aer accepts a noise model");
         assert!(matches!(
@@ -2609,23 +2694,69 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
-        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None, None)
-            .expect("cunqa is a valid infrastructure");
+        let config =
+            build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None, None, None)
+                .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
             BackendConfig::Cunqa {
                 nodes: 3,
                 cores_per_qpu: 4,
                 ref sim_method,
+                ref walltime,
                 ..
-            } if sim_method == "statevector"
+            } if sim_method == "statevector" && walltime == DEFAULT_WALLTIME
         ));
     }
 
     #[test]
+    fn build_backend_config_forwards_an_explicit_cunqa_walltime() {
+        let config = build_backend_config(
+            "cunqa",
+            "aer",
+            "statevector",
+            None,
+            1,
+            2,
+            Some("48:00:00"),
+            None,
+            None,
+        )
+        .expect("cunqa is a valid infrastructure");
+        assert!(matches!(
+            config,
+            BackendConfig::Cunqa { ref walltime, .. } if walltime == "48:00:00"
+        ));
+    }
+
+    #[test]
+    fn validate_cunqa_allocation_checks_the_walltime_only_for_cunqa() {
+        let msg = |r: PyResult<()>| r.expect_err("must be rejected").to_string();
+        assert!(
+            msg(validate_cunqa_allocation("cunqa", 1, 2, Some("1-00:00:00"))).contains("HH:MM:SS")
+        );
+        assert!(validate_cunqa_allocation("cunqa", 1, 2, Some("48:00:00")).is_ok());
+        assert!(validate_cunqa_allocation("cunqa", 1, 2, None).is_ok());
+        // local/qmio ignore the kwarg, as they do nodes/cores_per_qpu.
+        for infra in ["local", "qmio"] {
+            assert!(validate_cunqa_allocation(infra, 1, 2, Some("garbage")).is_ok());
+        }
+    }
+
+    #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, None, None)
-            .expect_err("an unknown infrastructure must be rejected");
+        let err = build_backend_config(
+            "quantum-cloud",
+            "aer",
+            "automatic",
+            None,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect_err("an unknown infrastructure must be rejected");
         pyo3::Python::initialize();
         Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -2662,6 +2793,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             Some(opts),
         )
@@ -2711,6 +2843,7 @@ mod tests {
                 1,
                 2,
                 None,
+                None,
                 Some(opts.clone()),
             )
             .expect_err("options on a typed built-in must be rejected");
@@ -2730,6 +2863,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             Some(HashMap::new()),
         )

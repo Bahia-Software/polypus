@@ -21,6 +21,64 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// attach a fresh one again, which can panic or hang at shutdown; don't.
 type ReleaseFn = Box<dyn Fn(Python<'_>) -> PyResult<()> + Send + Sync>;
 
+/// SLURM walltime of the virtual QPUs when the caller does not set one.
+pub const DEFAULT_WALLTIME: &str = "10:00:00";
+
+/// A walltime string that is not `HH:MM:SS` (see [`validate_walltime`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidWalltime {
+    /// The rejected value.
+    pub value: String,
+    reason: &'static str,
+}
+
+impl std::fmt::Display for InvalidWalltime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid walltime {:?}: {}; expected \"HH:MM:SS\" (hours: one or more digits, \
+             minutes and seconds: two digits below 60, total above zero), e.g. \"48:00:00\"",
+            self.value, self.reason
+        )
+    }
+}
+
+impl std::error::Error for InvalidWalltime {}
+
+/// Check that `walltime` is a SLURM walltime in the `HH:MM:SS` form.
+///
+/// Grammar: `HH ":" MM ":" SS`, where `HH` is one or more ASCII digits (it may
+/// exceed 24, so `48:00:00` is valid), `MM` and `SS` are exactly two digits
+/// below 60, and the total is greater than zero. SLURM's `D-HH:MM:SS` and the
+/// shorter `MM:SS` / `MM` forms are rejected.
+pub fn validate_walltime(walltime: &str) -> Result<(), InvalidWalltime> {
+    let err = |reason| InvalidWalltime {
+        value: walltime.to_string(),
+        reason,
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = walltime.split(':');
+    let (Some(h), Some(m), Some(s), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(err("it must have exactly three ':'-separated fields"));
+    };
+    if !digits(h) {
+        return Err(err("hours must be one or more digits"));
+    }
+    if m.len() != 2 || s.len() != 2 || !digits(m) || !digits(s) {
+        return Err(err("minutes and seconds must be two digits"));
+    }
+    // Two ASCII digits always parse.
+    if m.parse::<u8>().unwrap_or(99) >= 60 || s.parse::<u8>().unwrap_or(99) >= 60 {
+        return Err(err("minutes and seconds must be below 60"));
+    }
+    if [h, m, s].iter().all(|f| f.bytes().all(|b| b == b'0')) {
+        return Err(err("the walltime must be greater than zero"));
+    }
+    Ok(())
+}
+
 /// CunqaBackend: runs quantum circuits on the CUNQA distributed QPU platform.
 pub struct CunqaBackend {
     /// Guards against double-release of the QPU allocation (explicit `close()`
@@ -163,15 +221,16 @@ impl CunqaBackend {
         nodes: u32,
         id: &str,
         cores_per_qpu: u32,
+        walltime: &str,
         backend: String,
         sim_method: String,
     ) -> Result<Self, BackendError> {
         // Allocating QPUs reserves an HPC (SLURM) allocation — a rare, coarse
         // lifecycle event an operator wants to see at the default level.
         log::info!(
-            "Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}"
+            "Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}, walltime={walltime}"
         );
-        let family = raise_qpus(n_qpus, nodes, id, cores_per_qpu)?;
+        let family = raise_qpus(n_qpus, nodes, id, cores_per_qpu, walltime)?;
         // Capture the family handle in the release closure; it is the only thing
         // `drop_qpus` needs, and keeping it here (rather than as a struct field)
         // keeps the release operation self-contained and injectable.
@@ -210,12 +269,13 @@ fn raise_qpus(
     nodes: u32,
     id: &str,
     cores_per_qpu: u32,
+    walltime: &str,
 ) -> Result<Py<PyAny>, BackendError> {
     Python::attach(|py| {
         let kwargs = PyDict::new(py);
         let conv = |e: PyErr| BackendError::Conversion(e.to_string());
         kwargs.set_item("n", n_qpus).map_err(conv)?;
-        kwargs.set_item("t", "10:00:00").map_err(conv)?;
+        kwargs.set_item("t", walltime).map_err(conv)?;
         kwargs.set_item("n_nodes", nodes).map_err(conv)?;
         kwargs.set_item("family_name", id).map_err(conv)?;
         kwargs
@@ -255,6 +315,50 @@ mod tests {
     use pyo3::exceptions::PyValueError;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    #[test]
+    fn walltime_accepts_hh_mm_ss() {
+        for ok in [
+            DEFAULT_WALLTIME,
+            "48:00:00",
+            "1:02:03",
+            "100:59:59",
+            "00:00:01",
+            "000:01:00",
+        ] {
+            assert_eq!(validate_walltime(ok), Ok(()), "{ok:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn walltime_rejects_everything_else() {
+        for bad in [
+            "00:00:00",
+            "000:00:00",
+            "1:2:3",
+            "10:0:00",
+            "10:00:5",
+            "10:60:00",
+            "10:00:60",
+            "1-12:00:00",
+            "10:00",
+            "10",
+            "10:00:00:00",
+            "",
+            " 10:00:00",
+            "10:00:00 ",
+            "-1:00:00",
+            "+1:00:00",
+            "1e1:00:00",
+            "aa:00:00",
+            ":00:00",
+            "1\u{0663}:00:00",
+        ] {
+            let err = validate_walltime(bad).expect_err(bad);
+            assert_eq!(err.value, bad);
+            assert!(err.to_string().contains("HH:MM:SS"), "{err}");
+        }
+    }
 
     /// Failure-injection test (issue acceptance criterion 2): a `CunqaBackend`
     /// whose release raises a Python exception is dropped *while another panic
