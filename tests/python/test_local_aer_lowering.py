@@ -563,6 +563,7 @@ class TestLoweredProgram:
         assert received == _rewrite_into_aer_basis(qc, _aer_basis())
         assert "h" in received.count_ops()
 
+
 def _spy_lowering(monkeypatch):
     """The circuits ``_rewrite_into_aer_basis`` is called with, in order."""
     import polypus_python.local as local
