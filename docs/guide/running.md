@@ -49,7 +49,12 @@ With `infrastructure="cunqa"`, three keyword arguments size the SLURM allocation
 
 ```python
 result = polypus.run_quantum_circuit(
-    qc, shots=10_000, infrastructure="cunqa", n_qpus=10, nodes=2, cores_per_qpu=4,
+    qc,
+    shots=10_000,
+    infrastructure="cunqa",
+    n_qpus=10,
+    nodes=2,
+    cores_per_qpu=4,
     walltime="48:00:00",
 )
 ```
