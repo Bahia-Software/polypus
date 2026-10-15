@@ -1,9 +1,11 @@
 from functools import lru_cache
 
-from qiskit import ClassicalRegister, QuantumCircuit, transpile
+from qiskit import ClassicalRegister, QuantumCircuit
 from qiskit.circuit import CONTROL_FLOW_OP_NAMES
+from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
 from qiskit.result import marginal_distribution
-from qiskit.transpiler import Target
+from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import BasisTranslator, HighLevelSynthesis
 from qiskit_aer import AerSimulator
 
 from .infrastructure import Infraestructure
@@ -78,38 +80,15 @@ def _has_measurement(qc):
 
 
 @lru_cache(maxsize=1)
-def _default_aer():
-    """The default ``AerSimulator()`` and the instruction names its target
-    supports. Built on first use, not at import: the extension imports this
-    package at runtime. The *default* simulator, whatever ``sim_method`` or
-    ``noise_model`` a run asks for: either one narrows the simulator's target
-    (a ``noise_model`` cuts it to the gates the model names, ``stabilizer`` to
-    its Clifford set) but not what Aer runs, which still takes every
-    instruction of the default basis and refuses for itself what a method
-    cannot hold. Lowering against that narrower target would rewrite gates Aer
-    runs as they are (``h`` into ``u2``, moving where the noise falls) or turn
-    a method's own refusal into a transpiler error."""
-    simulator = AerSimulator()
-    return simulator, frozenset(simulator.target.operation_names)
-
-
-def _wide_aer_target(num_qubits):
-    """A ``Target`` with the instructions of the default ``AerSimulator()``'s
-    and ``num_qubits`` qubits (issue #307).
-
-    The default target's width is a host-dependent cap (the qubits of the
-    largest statevector the host's memory holds), not a property of the
-    basis, so ``transpile`` refuses a wider circuit (``CircuitTooWideForTarget``)
-    that a ``sim_method`` such as ``matrix_product_state`` would run. This one
-    has the same instructions, so it lowers exactly as the default one does,
-    without the cap. ``num_qubits`` must be given: a target without a width
-    cannot place ``measure``."""
-    simulator, _ = _default_aer()
-    default = simulator.target
-    target = Target(num_qubits=num_qubits)
-    for name in default.operation_names:
-        target.add_instruction(default.operation_from_name(name), name=name)
-    return target
+def _aer_basis():
+    """The instruction names the default ``AerSimulator()``'s target supports.
+    Built on first use, not at import: the extension imports this package at
+    runtime. The *default* simulator, whatever ``sim_method`` or
+    ``noise_model`` a run asks for: a method-specific basis is smaller (a
+    ``noise_model`` cuts it from 98 to 40 gates), and lowering into it would
+    rewrite circuits Aer runs as they are or turn a method's own refusal into a
+    transpiler error."""
+    return frozenset(AerSimulator().target.operation_names)
 
 
 def _outside_basis(qc, supported):
@@ -146,24 +125,34 @@ def _lower_to_aer_basis(qc):
     ``AerError: unknown instruction``. The circuit is lowered here, third
     lowering boundary of contract C-2, and never earlier, so the exported QASM
     stays the program the user wrote. A circuit already in the basis is handed
-    over as it is, neither copied nor transpiled, so its counts do not move.
-    ``optimization_level=0`` only rewrites; it neither reorders nor merges
-    gates. ``transpile`` returns a new circuit: the caller's is never modified.
-
-    The basis is the default ``AerSimulator()``'s whatever the run's
-    ``sim_method`` or ``noise_model`` (see ``_default_aer``). A circuit no wider
-    than that simulator's target is lowered against it; a wider one against a
-    target with the same instructions and the circuit's width
-    (``_wide_aer_target``), so the width is left for Aer to judge under the
-    run's ``sim_method``.
+    over as it is, neither copied nor rewritten, so its counts do not move.
     """
-    simulator, supported = _default_aer()
+    supported = _aer_basis()
     if not _outside_basis(qc, supported):
         return qc
-    width = simulator.target.num_qubits
-    if width is None or qc.num_qubits <= width:
-        return transpile(qc, simulator, optimization_level=0)
-    return transpile(qc, target=_wide_aer_target(qc.num_qubits), optimization_level=0)
+    return _rewrite_into_aer_basis(qc, supported)
+
+
+def _rewrite_into_aer_basis(qc, supported):
+    """Synthesis and basis translation into ``supported``, nothing else: the
+    translation stage of ``transpile(qc, AerSimulator(), optimization_level=0)``,
+    which gives the same circuit, without its layout stage. That stage was a
+    fixed cost on every lowered call, larger than the rewriting itself, and it
+    caps the width at the target's qubit count (derived from the host memory),
+    so it rejected wide circuits Aer runs, Clifford ones on the stabilizer
+    method among them. The names are Aer's own, not only Qiskit's standard
+    gates: ``mcx`` (Qiskit's ``c3x``/``c4x``) stays ``mcx``. A fresh pass
+    manager per call shares no state between threads. Returns a new circuit:
+    the caller's is never modified."""
+    names = sorted(supported)
+    return PassManager(
+        [
+            HighLevelSynthesis(
+                equivalence_library=SessionEquivalenceLibrary, basis_gates=names
+            ),
+            BasisTranslator(SessionEquivalenceLibrary, names),
+        ]
+    ).run(qc)
 
 
 def _with_full_readout(qc):

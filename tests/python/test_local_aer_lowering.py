@@ -4,9 +4,11 @@ Lowering of instructions outside Aer's basis on the local backend (issue #252).
 ``ch``, ``rccx``, ``rc3x``, ``c3sqrtx``, ``u0`` and the calls of declared
 ``gate`` blocks are in the Polypus vocabulary (C-2) and run on the native
 backend, but Aer does not unroll them (``AerError: unknown instruction``). The
-local backend therefore lowers a circuit with ``qiskit.transpile`` just before
-handing it to Aer, and only when it holds such an instruction: a circuit
-already in Aer's basis reaches Aer as it is.
+local backend therefore lowers a circuit into Aer's basis just before handing
+it to Aer, and only when it holds such an instruction: a circuit already in
+Aer's basis reaches Aer as it is. The lowered circuit is the one
+``transpile(qc, AerSimulator(), optimization_level=0)`` gives, without its
+layout stage.
 """
 
 import math
@@ -184,13 +186,13 @@ def _bell():
     return qc
 
 
-def _forbid_transpile(monkeypatch):
+def _forbid_lowering(monkeypatch):
     import polypus_python.local as local
 
     def forbidden(*_args, **_kwargs):
-        raise AssertionError("a circuit already in Aer's basis must not be transpiled")
+        raise AssertionError("a circuit already in Aer's basis must not be lowered")
 
-    monkeypatch.setattr(local, "transpile", forbidden)
+    monkeypatch.setattr(local, "_rewrite_into_aer_basis", forbidden)
 
 
 class TestCircuitInBasisIsUntouched:
@@ -198,7 +200,7 @@ class TestCircuitInBasisIsUntouched:
         from polypus_python.local import Local
         from qiskit_aer import AerSimulator
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         received = []
         original_run = AerSimulator.run
 
@@ -218,13 +220,13 @@ class TestCircuitInBasisIsUntouched:
         from qiskit import QuantumCircuit
 
         lowered = []
-        original = local.transpile
+        original = local._rewrite_into_aer_basis
 
         def spy(qc, *args, **kwargs):
             lowered.append(qc)
             return original(qc, *args, **kwargs)
 
-        monkeypatch.setattr(local, "transpile", spy)
+        monkeypatch.setattr(local, "_rewrite_into_aer_basis", spy)
         outside = QuantumCircuit(2, 2)
         outside.x(0)
         outside.ch(0, 1)
@@ -242,7 +244,7 @@ class TestCircuitInBasisIsUntouched:
     def test_counts_with_seed_match_a_direct_aer_call(self, monkeypatch):
         from qiskit_aer import AerSimulator
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         qc = _bell()
         direct = (
             AerSimulator()
@@ -252,8 +254,8 @@ class TestCircuitInBasisIsUntouched:
         )
         assert _run(qc) == {k.replace(" ", ""): v for k, v in direct.items()}
 
-    def test_a_qasm_string_in_basis_is_not_transpiled_either(self, monkeypatch):
-        _forbid_transpile(monkeypatch)
+    def test_a_qasm_string_in_basis_is_not_lowered_either(self, monkeypatch):
+        _forbid_lowering(monkeypatch)
         counts = _run(H + "qreg q[1];\ncreg c[1];\nx q[0];\nmeasure q -> c;\n")
         assert counts == {"1": SHOTS}
 
@@ -261,7 +263,7 @@ class TestCircuitInBasisIsUntouched:
         from qiskit_aer import AerSimulator
         from qiskit_aer.noise import NoiseModel, depolarizing_error
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         noise = NoiseModel()
         noise.add_all_qubit_quantum_error(depolarizing_error(0.2, 2), ["cx"])
         qc = _bell()
@@ -311,7 +313,7 @@ class TestLoweringDetails:
     ):
         from qiskit import QuantumCircuit
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         qc = QuantumCircuit(1, 1)
         with qc.for_loop(range(2)):
             qc.barrier()
@@ -325,13 +327,13 @@ class TestLoweringDetails:
         from qiskit import QuantumCircuit
 
         lowered = []
-        original = local.transpile
+        original = local._rewrite_into_aer_basis
 
         def spy(qc, *args, **kwargs):
             lowered.append(qc)
             return original(qc, *args, **kwargs)
 
-        monkeypatch.setattr(local, "transpile", spy)
+        monkeypatch.setattr(local, "_rewrite_into_aer_basis", spy)
         qc = QuantumCircuit(2, 2)
         qc.x(0)
         with qc.for_loop(range(2)):
@@ -345,7 +347,7 @@ class TestLoweringDetails:
     def test_barrier_alone_is_not_outside_the_basis(self, monkeypatch):
         from qiskit import QuantumCircuit
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         qc = QuantumCircuit(1, 1)
         qc.x(0)
         qc.barrier()
@@ -390,7 +392,7 @@ class TestLoweringDetails:
         from qiskit import QuantumCircuit
         from qiskit.exceptions import QiskitError
 
-        _forbid_transpile(monkeypatch)
+        _forbid_lowering(monkeypatch)
         qc = QuantumCircuit(1, 1)
         qc.t(0)
         qc.measure(0, 0)
@@ -754,3 +756,64 @@ class TestWideCircuits:
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
         assert result.stdout.split() == ["refused:", "ch", "refused:", "cx"]
+
+
+
+def _received_by_aer(monkeypatch, circuit):
+    """The circuits ``AerSimulator.run`` receives when ``circuit`` runs."""
+    from qiskit_aer import AerSimulator
+
+    received = []
+    original_run = AerSimulator.run
+
+    def spy(self, circuits, *args, **kwargs):
+        received.extend(circuits)
+        return original_run(self, circuits, *args, **kwargs)
+
+    monkeypatch.setattr(AerSimulator, "run", spy)
+    _run(circuit, shots=10)
+    return received
+
+
+class TestLoweredProgram:
+    @pytest.mark.parametrize("case", CASES)
+    def test_aer_receives_what_transpile_against_aer_gives(self, case, monkeypatch):
+        """Same circuit as the full ``transpile`` against Aer's target, gate
+        for gate, not only the same counts."""
+        from qiskit import QuantumCircuit, transpile
+        from qiskit_aer import AerSimulator
+
+        qc = QuantumCircuit.from_qasm_str(_program(case))
+        expected = transpile(qc, AerSimulator(), optimization_level=0)
+        assert _received_by_aer(monkeypatch, qc) == [expected]
+
+    def test_a_multi_controlled_x_aer_runs_is_kept(self, monkeypatch):
+        """``mcx`` is in Aer's basis but not a Qiskit standard gate: lowering
+        the ``ch`` next to it must not decompose it."""
+        from qiskit import QuantumCircuit
+
+        qc = QuantumCircuit(5, 5)
+        qc.x([0, 1, 2])
+        qc.ch(0, 4)
+        qc.mcx([0, 1, 2], 3)
+        qc.measure(range(5), range(5))
+        (received,) = _received_by_aer(monkeypatch, qc)
+        ops = received.count_ops()
+        assert ops["mcx"] == 1 and "ch" not in ops
+
+    @pytest.mark.parametrize("kind", ["qasm_string", "polypus_circuit"])
+    def test_a_circuit_wider_than_the_target_is_lowered(self, kind):
+        """Aer's target is only as wide as the host memory allows a
+        statevector, but a Clifford circuit runs on the stabilizer method at
+        any width: lowering must not reject it."""
+        import polypus
+
+        n = 64
+        lines = [H + "gate pair a,b { cx a,b; }", f"qreg q[{n}];", f"creg c[{n}];"]
+        lines.append("h q[0];")
+        lines += [f"pair q[{i}],q[{i + 1}];" for i in range(n - 1)]
+        lines.append("measure q -> c;")
+        src = "\n".join(lines) + "\n"
+        circuit = src if kind == "qasm_string" else polypus.Circuit.from_qasm2(src)
+        counts = _run(circuit, shots=200)
+        assert set(counts) <= {"0" * n, "1" * n} and sum(counts.values()) == 200

@@ -281,13 +281,13 @@ fn num_clbits_reflects_measurements() {
 #[test]
 #[should_panic(expected = "unbound Param")]
 fn concrete_circuit_panics_on_unbound_param() {
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Param(0),
         }],
-    };
+    );
     let _ = qc.to_qasm2();
 }
 
@@ -296,13 +296,13 @@ fn concrete_circuit_panics_on_unbound_param() {
 fn concrete_circuit_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // exporter still refuses a non-finite fixed angle rather than serialising it.
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Fixed(f64::NAN),
         }],
-    };
+    );
     let _ = qc.to_qasm2();
 }
 
