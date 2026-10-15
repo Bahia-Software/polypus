@@ -369,6 +369,23 @@ Corollaries:
   `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
   fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
   for its own canonical form (C-10).
+- **Classical width.** A circuit has one classical register, `c`, as wide as
+  `clbits_width()`: the classical bits the imported program declares (all its
+  `creg`s, or its `bit` registers in OpenQASM 3, flattened in declaration
+  order), or the implicit register its measurements need (`num_clbits()`:
+  `max(cbit) + 1`, `num_qubits` with `measure_all`) if that is wider or
+  nothing was declared. Binding keeps it, and the OpenQASM 2.0 and 3 exports
+  write it as `creg c[n];` / `bit[n] c;` (C-10) — also for a program that
+  declares a register and measures nothing. So `to_qasm2(from_qasm2(s))`
+  declares as many classical bits as `s` (`creg a[2]; creg b[1];` becomes
+  `creg c[3];`), and `==` compares this width: a declared width no larger than
+  the measurements' is the same as declaring none. A circuit from the builder
+  declares none, so it exports exactly the register its measurements need, and
+  none without measurements. A full measurement into a register wider than
+  `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
+  `measure q -> c;` needs equal sizes. The QIR export is the exception: it
+  records only the measured results, and its `required_num_results` is the
+  implicit register. Rationale: `docs/adr/0006-declared-classical-registers.md`.
 - Adding a gate is a **six-place change** plus a row in the equivalence test —
   the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
   (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
@@ -407,8 +424,18 @@ Corollaries:
 and for a circuit using every instruction kind — an exhaustive match fails the
 build when a new variant is not covered — plus canonical statement → import →
 export byte identity per gate, `cu1`/`cp` spelling preservation, every
-angled gate exported with expressions as with their values, and every angled
-gate's angles read back bit-for-bit); the
+angled gate exported with expressions as with their values, every angled
+gate's angles read back bit-for-bit, and the classical width:
+`c2_declared_classical_width_round_trips` and
+`c2_qasm3_declared_classical_width_round_trips`); the classical width of
+imported and built circuits through binding, export and `==` in
+`test_binding_keeps_the_declared_width_and_the_implicit_register`,
+`test_an_unmeasured_declared_register_counts_for_eq`,
+`test_builder_circuits_compare_as_before` and
+`test_builder_exports_are_unchanged_by_the_classical_width` (builder exports
+byte-identical to before) in `crates/polypus-circuit/tests/circuit.rs`, and
+`builder_qir_is_unchanged_by_the_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs`; the
 table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; the
 QIR-vs-simulator unitary-equivalence test in
 `crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
@@ -537,7 +564,9 @@ classical width of a measured OpenQASM program in
 `TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
 `tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
 plus the implicit width of a built `polypus.Circuit` and the declared width
-of one from `Circuit.from_qasm2`/`from_qasm3`),
+of one from `Circuit.from_qasm2`/`from_qasm3`, the agreement of Aer and native
+on such an imported circuit, and the full read-out of an imported circuit
+that declares a `creg` but measures nothing),
 `format_counts_width_follows_the_declared_clbits`,
 `measured_qasm_is_keyed_at_its_declared_clbit_width`,
 `native_circuit_keeps_the_implicit_clbit_width`,
@@ -546,11 +575,15 @@ of one from `Circuit.from_qasm2`/`from_qasm3`),
 `crates/polypus-infrastructure/src/native.rs`, and
 `declared_clbits_is_the_sum_of_the_cregs`, `builder_circuits_declare_no_clbits`,
 `the_export_keeps_the_declared_width`,
-`the_width_is_never_narrower_than_the_measurements` and
-`declared_width_is_part_of_eq_and_kept_by_clone` in
+`the_width_is_never_narrower_than_the_measurements`,
+`a_measurement_within_the_declared_width_keeps_it`,
+`declared_width_is_part_of_eq_and_kept_by_clone` and
+`a_zero_size_creg_is_rejected` in
 `crates/polypus-circuit/tests/qasm_import.rs` and
-`declared_clbits_is_the_sum_of_the_bit_registers` in
-`crates/polypus-circuit/tests/qasm3.rs` (issue #251).
+`declared_clbits_is_the_sum_of_the_bit_registers` and
+`declared_clbits_is_exported` in
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279), plus the
+circuit-side tests listed under C-2.
 
 ---
 
@@ -1014,10 +1047,15 @@ gate <name>(<p>, …) <q>, … {    each definition the circuit needs, once:
   <statement>;                    callees first, in order of first use
 }
 qubit[<n>] q;                   unless n = 0
-bit[<m>] c;                     unless m = 0
+bit[<m>] c;                     m = clbits_width(), unless 0
 <statement>;                    one per instruction
 ```
 
+- Registers: `bit[m] c;` is the circuit's classical width (C-2): the sum of
+  the `bit` registers an imported program declares, or the implicit register
+  the measurements need if that is wider — written with or without
+  measurements, so `bit[2] a; bit b;` becomes `bit[3] c;`. A circuit from the
+  builder writes only the bits its measurements need.
 - Statements: `name(a, b) q[i], q[j];`; `barrier q;` for every qubit
   (`barrier;` with none), `barrier q[i], …;` otherwise; `c = measure q;` for a
   full measurement when the registers have one size, `c[i] = measure q[j];`
@@ -1097,7 +1135,9 @@ and rejected construct with its line and message, the budgets on both sides,
 the canonical layout, numbers and parentheses, renaming and collisions — a
 native and a declared `rzz` included —, cross-dialect export),
 `crates/polypus-circuit/tests/contracts.rs` (`c2_*qasm3*`: the vocabulary's
-fixed point), `crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
+fixed point, and the declared `bit` width), the `declared_clbits_*` tests of
+`crates/polypus-circuit/tests/qasm3.rs` (the width written as `bit[m]`),
+`crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
 every `stdgates.inc` gate and `U` against the specification, `U`/`u2`/`u3` by
 the declared factors, `CX`, every exported definition, cross-dialect),
 `tests/python/test_qasm3.py` and `tests/python/test_qasm3_interop.py` (Qiskit

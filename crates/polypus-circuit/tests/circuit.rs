@@ -1000,3 +1000,110 @@ fn test_qelib1_bound_circuit_matches_fixed_angle_circuit() {
     );
     assert_eq!(bound.to_qasm2(), fixed.to_qasm2_with_params(&[]).unwrap());
 }
+
+// Classical width
+
+/// Binding keeps the two widths apart: the declared one travels into the
+/// `ConcreteCircuit` (`clbits_width()`, `declared_clbits()`), while
+/// `num_clbits()` stays the implicit register the measurements need — 2 for
+/// `creg c[3]` written only at `c[1]`, and 0 for a program that declares
+/// `creg c[3]` and measures nothing. C-3's "no measurements ⇒ `num_qubits`-wide
+/// keys" and Python's `Circuit.num_clbits` read `num_clbits()`, so it must not
+/// pick up the declared width after binding; the tests of #311 check only the
+/// declared width.
+#[test]
+fn test_binding_keeps_the_declared_width_and_the_implicit_register() {
+    let qc = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nmeasure q[0] -> c[1];\n",
+    )
+    .unwrap();
+    assert_eq!((qc.clbits_width(), qc.num_clbits()), (3, 2));
+    let bound = qc.assign_parameters(&[]).unwrap();
+    assert_eq!((bound.clbits_width(), bound.num_clbits()), (3, 2));
+    assert_eq!(bound.declared_clbits(), Some(3));
+
+    let unmeasured = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nh q[0];\n",
+    )
+    .unwrap()
+    .assign_parameters(&[])
+    .unwrap();
+    assert_eq!((unmeasured.clbits_width(), unmeasured.num_clbits()), (3, 0));
+}
+
+/// A program that declares a `creg` and measures nothing is a different
+/// circuit from one that declares none: its export writes the register.
+#[test]
+fn test_an_unmeasured_declared_register_counts_for_eq() {
+    let declared = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nh q[0];\n",
+    )
+    .unwrap();
+    let built = ParameterizedCircuit::new(2).h(0);
+    assert_eq!(declared.clbits_width(), 3);
+    assert_eq!(declared.num_clbits(), 0);
+    assert_ne!(declared, built);
+    assert_ne!(
+        declared.assign_parameters(&[]).unwrap(),
+        built.assign_parameters(&[]).unwrap()
+    );
+}
+
+/// The builder declares no classical bits, so its circuits compare as before
+/// the declared width existed: by instructions alone.
+#[test]
+fn test_builder_circuits_compare_as_before() {
+    let a = ParameterizedCircuit::new(2).h(0).measure(0, 1);
+    assert_eq!(a, ParameterizedCircuit::new(2).h(0).measure(0, 1));
+    assert_ne!(a, ParameterizedCircuit::new(2).h(0).measure(0, 0));
+    assert_eq!(
+        a.assign_parameters(&[]).unwrap(),
+        ParameterizedCircuit::new(2)
+            .h(0)
+            .measure(0, 1)
+            .assign_parameters(&[])
+            .unwrap()
+    );
+}
+
+/// Builder circuits — measured bit by bit, with `measure_all`, measured in
+/// part, unmeasured — export byte for byte what they did before the declared
+/// width was kept (`main` at 00ef078), in OpenQASM 2.0 and in the OpenQASM 3
+/// profile, from the parameterised and from the bound circuit.
+#[test]
+fn test_builder_exports_are_unchanged_by_the_classical_width() {
+    let cases = [
+        (
+            ParameterizedCircuit::new(2)
+                .h(0)
+                .cx(0, 1)
+                .measure(0, 0)
+                .measure(1, 1),
+            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n",
+        ),
+        (
+            ParameterizedCircuit::new(2).h(0).cx(0, 1).measure_all(),
+            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q -> c;\n",
+            "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n",
+        ),
+        (
+            ParameterizedCircuit::new(3).x(0).measure(0, 1),
+            "qreg q[3];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[1];\n",
+            "qubit[3] q;\nbit[2] c;\nx q[0];\nc[1] = measure q[0];\n",
+        ),
+        (
+            ParameterizedCircuit::new(2).h(0).cx(0, 1),
+            "qreg q[2];\nh q[0];\ncx q[0],q[1];\n",
+            "qubit[2] q;\nh q[0];\ncx q[0], q[1];\n",
+        ),
+    ];
+    for (qc, qasm2, qasm3) in cases {
+        let qasm2 = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n{qasm2}");
+        let qasm3 = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n{qasm3}");
+        assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), qasm2);
+        assert_eq!(qc.assign_parameters(&[]).unwrap().to_qasm2(), qasm2);
+        assert_eq!(qc.to_qasm3().unwrap(), qasm3);
+        assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), qasm3);
+    }
+}

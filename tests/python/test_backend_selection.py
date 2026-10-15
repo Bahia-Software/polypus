@@ -498,6 +498,26 @@ _WIDER_CREG_MEASURED_CASES = {
 }
 
 
+_QASM3_HEADER = 'OPENQASM 3.0;\ninclude "stdgates.inc";\n'
+
+# The OpenQASM 3 counterparts of `_WIDER_CREG_MEASURED_CASES`: the declared
+# width is the sum of the `bit` registers.
+_WIDER_BIT_MEASURED_CASES = {
+    "write_c1_of_c3": (
+        "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
+        "010",
+    ),
+    "two_registers_last_unwritten": (
+        "qubit[2] q;\nbit[2] a;\nbit[3] b;\nx q[1];\na[1] = measure q[1];\n",
+        "00010",
+    ),
+    "measure_all_shape_into_c4": (
+        "qubit[2] q;\nbit[4] c;\nx q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+        "0010",
+    ),
+}
+
+
 @pytest.mark.integration
 class TestUnmeasuredCircuitsReadTheFullRegister:
     """Aer used to raise ``QiskitError: No counts for experiment`` for a
@@ -581,8 +601,9 @@ class TestUnmeasuredCircuitsReadTheFullRegister:
 class TestMeasuredCircuitsUseTheDeclaredClbitWidth:
     """A measured OpenQASM program whose ``creg``s are wider than the bits it
     writes is keyed at the declared width — the sum of its ``creg``s — on Aer
-    and on the native backend alike, one QPU or several (C-3, issue #251). The
-    native backend used ``max(cbit) + 1`` instead."""
+    and on the native backend alike, one QPU or several, as text or imported
+    into a ``polypus.Circuit`` (C-3, issue #251). The native backend used
+    ``max(cbit) + 1`` instead, and an imported circuit lost the width."""
 
     @pytest.mark.parametrize("n_qpus", [1, 2])
     @pytest.mark.parametrize("backend", ["aer", "polypus"])
@@ -635,24 +656,75 @@ class TestMeasuredCircuitsUseTheDeclaredClbitWidth:
         )
         assert result.counts == [{key: 20 // n_qpus}] * n_qpus
 
+    @pytest.mark.parametrize("n_qpus", [1, 2])
     @pytest.mark.parametrize("backend", ["aer", "polypus"])
-    def test_qasm3_import_keeps_the_declared_width(self, backend):
+    @pytest.mark.parametrize("case", sorted(_WIDER_BIT_MEASURED_CASES))
+    def test_qasm3_import_keeps_the_declared_width(self, case, backend, n_qpus):
+        """The same for ``Circuit.from_qasm3``: the width is the sum of the
+        program's ``bit`` registers."""
         import polypus
 
-        qc = polypus.Circuit.from_qasm3(
-            'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[3] c;\n'
-            "x q[0];\nc[1] = measure q[0];\n"
-        )
+        body, key = _WIDER_BIT_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm3(_QASM3_HEADER + body)
         result = polypus.run_quantum_circuit(
-            qc, shots=20, infrastructure="local", backend=backend
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
         )
-        assert result.counts == [{"010": 20}]
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
 
     def test_the_export_declares_the_width(self):
         import polypus
 
         qc = polypus.Circuit.from_qasm2(_WIDER_CREG_MEASURED)
         assert "creg c[3];" in qc.to_qasm2()
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_imported_circuit_aer_and_native_agree(self, case, n_qpus):
+        """Guards against Aer and the native backend diverging on a circuit
+        imported with ``Circuit.from_qasm2``. It would also pass if both lost
+        the declared width (as they did before, both at ``max(cbit) + 1``);
+        what pins the width is
+        ``test_imported_circuit_keeps_the_declared_width``."""
+        import polypus
+
+        body, _ = _WIDER_CREG_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        aer, native = _run_both(qc, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_BIT_MEASURED_CASES))
+    def test_qasm3_import_aer_and_native_agree(self, case, n_qpus):
+        """The same guard for ``Circuit.from_qasm3``; what pins the width is
+        ``test_qasm3_import_keeps_the_declared_width``."""
+        import polypus
+
+        body, _ = _WIDER_BIT_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm3(_QASM3_HEADER + body)
+        aer, native = _run_both(qc, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_imported_unmeasured_circuit_reads_the_full_register(self, case, backend):
+        """An imported circuit keeps its ``creg`` even without measurements
+        (the re-export declares it), and is still read out on the full quantum
+        register on both backends (C-3, issue #218)."""
+        import polypus
+
+        body, key = _UNMEASURED[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        declared = sum(
+            int(line.split("[")[1].split("]")[0])
+            for line in body.splitlines()
+            if line.startswith("creg ")
+        )
+        if declared:
+            assert f"creg c[{declared}];" in qc.to_qasm2()
+        result = polypus.run_quantum_circuit(
+            qc, shots=30, infrastructure="local", backend=backend
+        )
+        assert result.counts == [{key: 30}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

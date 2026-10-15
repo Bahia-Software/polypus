@@ -418,3 +418,51 @@ fn qir_base_profile_module_is_valid_llvm() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The QIR module of `body` (the lines of `@main` before `ret`) with these
+/// declarations and attributes — the layout every export writes.
+fn qir_module(body: &str, decls: &str, attributes: &str) -> String {
+    format!(
+        "; ModuleID = 'polypus'\nsource_filename = \"polypus\"\n\n%Qubit = type opaque\n%Result = type opaque\n\ndefine void @main() #0 {{\nentry:\n{body}  ret void\n}}\n\n{decls}\n{attributes}\n!llvm.module.flags = !{{!0, !1, !2, !3}}\n\n!0 = !{{i32 1, !\"qir_major_version\", i32 1}}\n!1 = !{{i32 7, !\"qir_minor_version\", i32 0}}\n!2 = !{{i32 1, !\"dynamic_qubit_management\", i1 false}}\n!3 = !{{i32 1, !\"dynamic_result_management\", i1 false}}\n"
+    )
+}
+
+/// Builder circuits export the QIR they did before the declared width was
+/// kept (`main` at 00ef078), byte for byte: `required_num_results` is what the
+/// measurements need — 2 for one written at `c[1]`, 0 without measurements.
+#[test]
+fn builder_qir_is_unchanged_by_the_classical_width() {
+    let partial = ParameterizedCircuit::new(3).x(0).measure(0, 1);
+    let expected = qir_module(
+        "  call void @__quantum__qis__x__body(%Qubit* null)\n  call void @__quantum__qis__mz__body(%Qubit* null, %Result* inttoptr (i64 1 to %Result*))\n  call void @__quantum__rt__array_record_output(i64 1, i8* null)\n  call void @__quantum__rt__result_record_output(%Result* inttoptr (i64 1 to %Result*), i8* null)\n",
+        "declare void @__quantum__qis__mz__body(%Qubit*, %Result*) #1\ndeclare void @__quantum__qis__x__body(%Qubit*)\ndeclare void @__quantum__rt__array_record_output(i64, i8*)\ndeclare void @__quantum__rt__result_record_output(%Result*, i8*)\n",
+        "attributes #0 = { \"entry_point\" \"output_labeling_schema\" \"qir_profiles\"=\"base_profile\" \"required_num_qubits\"=\"3\" \"required_num_results\"=\"2\" }\nattributes #1 = { \"irreversible\" }\n",
+    );
+    assert_eq!(partial.to_qir_with_params(&[]).unwrap(), expected);
+    assert_eq!(partial.assign_parameters(&[]).unwrap().to_qir(), expected);
+
+    let unmeasured = ParameterizedCircuit::new(2).h(0).cx(0, 1);
+    let expected = qir_module(
+        "  call void @__quantum__qis__h__body(%Qubit* null)\n  call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))\n",
+        "declare void @__quantum__qis__cnot__body(%Qubit*, %Qubit*)\ndeclare void @__quantum__qis__h__body(%Qubit*)\n",
+        "attributes #0 = { \"entry_point\" \"output_labeling_schema\" \"qir_profiles\"=\"base_profile\" \"required_num_qubits\"=\"2\" \"required_num_results\"=\"0\" }\n",
+    );
+    assert_eq!(unmeasured.to_qir_with_params(&[]).unwrap(), expected);
+    assert_eq!(
+        unmeasured.assign_parameters(&[]).unwrap().to_qir(),
+        expected
+    );
+
+    for qc in [
+        ParameterizedCircuit::new(2)
+            .h(0)
+            .cx(0, 1)
+            .measure(0, 0)
+            .measure(1, 1),
+        ParameterizedCircuit::new(2).h(0).cx(0, 1).measure_all(),
+    ] {
+        let ir = qc.to_qir_with_params(&[]).unwrap();
+        assert!(ir.contains("\"required_num_results\"=\"2\" }\n"), "{ir}");
+        assert_eq!(ir, qc.assign_parameters(&[]).unwrap().to_qir());
+    }
+}
