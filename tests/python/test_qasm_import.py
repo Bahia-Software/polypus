@@ -94,6 +94,27 @@ class TestQasmImport:
         assert "rz(0.5) q[1];" in out
         assert out.endswith("measure q -> c;\n")
 
+    def test_clbits_width_is_the_declared_width(self):
+        """`clbits_width` is the width an imported program declares, as Qiskit's
+        `num_clbits`; `num_clbits` stays the implicit register (issue #323)."""
+        import polypus
+        from qiskit import QuantumCircuit
+
+        qasm2 = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\ncreg c[3];\n'
+        qasm3 = 'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[3] c;\n'
+        for qc, implicit in (
+            (polypus.Circuit.from_qasm2(qasm2 + "measure q[0] -> c[1];\n"), 2),
+            (polypus.Circuit.from_qasm2(qasm2 + "h q[0];\n"), 0),
+            (polypus.Circuit.from_qasm3(qasm3 + "c[1] = measure q[0];\n"), 2),
+            (polypus.Circuit.from_qasm3(qasm3 + "h q[0];\n"), 0),
+        ):
+            assert (qc.clbits_width, qc.num_clbits) == (3, implicit)
+            assert QuantumCircuit.from_qasm_str(qc.to_qasm2()).num_clbits == 3
+
+        built = polypus.Circuit(3).x(0).measure(0, 1)
+        assert (built.clbits_width, built.num_clbits) == (2, 2)
+        assert polypus.Circuit(2).h(0).clbits_width == 0
+
     def test_parse_error_carries_line_number(self):
         import polypus
 

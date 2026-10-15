@@ -517,9 +517,11 @@ a circuit in the list is neither copied nor transpiled).
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
   such a circuit). The CUNQA path is not verified.
 - For a circuit **with** measurements, `num_clbits` is the circuit's
-  classical width (the key width — not `Circuit.num_clbits` /
+  classical width (the key width, `Circuit.clbits_width` in Python and
+  `clbits_width()` in Rust — not `Circuit.num_clbits` /
   `ParameterizedCircuit::num_clbits()`, which stay the implicit register
-  sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
+  sized by the measurements, so that an unmeasured circuit's keys are
+  `num_qubits` wide): for an OpenQASM 2.0 program, the classical bits it
   **declares** (the sum of all its `creg`s), even when fewer are written —
   `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
   measurement writes read `0`; for a `polypus.Circuit` built with the
@@ -625,7 +627,9 @@ that declares a `creg` but measures nothing),
 `qir_declares_the_imported_classical_width` in
 `crates/polypus-circuit/tests/circuit_qir.rs` and
 `qir_formats_declare_the_classical_width_of_the_openqasm_program` in
-`crates/polypus-infrastructure/src/qmio.rs` (issue #322), plus the
+`crates/polypus-infrastructure/src/qmio.rs` (issue #322);
+`test_clbits_width_is_the_declared_width` in
+`tests/python/test_qasm_import.py` (issue #323), plus the
 circuit-side tests listed under C-2.
 
 ---
