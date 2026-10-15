@@ -413,7 +413,15 @@ Additionally:
   the names Qiskit parsed (`rc3x` is `rcccx`, `c3sqrtx` is `c3sx`) against the
   *default* `AerSimulator()` target, control-flow bodies included, never the
   target of the configured `sim_method` or `noise_model`; a circuit already in
-  the basis is passed to Aer as it is, neither copied nor transpiled.
+  the basis is passed to Aer as it is, neither copied nor transpiled. An
+  OpenQASM text (how a `polypus.Circuit` reaches `run_qcs`) that needed
+  lowering keeps its lowered circuit in a bounded, thread-safe LRU cache keyed
+  by the text (`_LOWERED_QASM`): running the same program again, or on several
+  QPUs, neither re-parses nor re-lowers it. That matters for declared gates,
+  whose definitions are rebuilt and unrolled on every parse at a cost that
+  grows quickly with their size. The kept circuit is shared and never
+  modified; texts already in the basis and `QuantumCircuit` inputs (mutable)
+  are not cached.
 - `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
   `gate` declarations included. Canonicalizations performed on import: the
   builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple
