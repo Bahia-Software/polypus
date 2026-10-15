@@ -13,13 +13,18 @@
 //! [`NativeStatevectorBackend::check_circuit`] (the OpenQASM importer, the same
 //! call execution makes) and the entry point's Qiskit guard, and reports the
 //! message the run would raise. The Aer one parses with the parser the Aer path
-//! uses (`QuantumCircuit.from_qasm_str`). It does not compare instructions with
-//! Aer's target: the local backend lowers what is outside Aer's basis before
-//! running it (`polypus_python/local.py`, contract C-2), so an instruction
-//! outside the basis is no reason to reject. A Qiskit `QuantumCircuit`'s
-//! instructions are not inspected: one `qiskit.transpile` cannot lower (an
-//! opaque instruction without a definition, a `box`) only shows when the
-//! circuit runs.
+//! uses (`QuantumCircuit.from_qasm_str`). For a circuit that reaches Aer as
+//! OpenQASM (a `polypus.Circuit` or a `str`) it does not compare instructions
+//! with Aer's target: the local backend lowers what is outside Aer's basis
+//! before running it (`polypus_python/local.py`, contract C-2), so an
+//! instruction outside the basis is no reason to reject. For a Qiskit
+//! `QuantumCircuit` the Aer entry replays that lowering: when an instruction is
+//! outside the basis it calls the rewrite the run calls
+//! (`_rewrite_into_aer_basis`), so one that cannot be lowered (an opaque
+//! instruction without a definition, a `box`) is reported with the error the run
+//! would raise. The rewrite is shared with `local.py`; the decision to rewrite
+//! is copied from it, and `tests/python/test_backend_compatibility.py` keeps the
+//! two in step.
 
 use std::collections::HashSet;
 
@@ -28,7 +33,9 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::exceptions::{backend_error_to_pyerr, describe_python_error, qiskit_error_to_pyerr};
+use crate::exceptions::{
+    backend_error_to_pyerr, describe_python_error, qiskit_error_to_pyerr, BackendError,
+};
 use crate::infrastructure::{to_py_object, BoundCircuit, NativeStatevectorBackend};
 
 /// Qiskit's classical control-flow operations: each makes a dynamic circuit.
@@ -50,10 +57,17 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 /// - `"aer"` rejects an OpenQASM program Qiskit cannot parse; if Qiskit Aer is
 ///   not installed, that is the reason. An instruction outside Aer's basis (such
 ///   as `ch` or a declared gate) is no reason: the local backend lowers it with
-///   `qiskit.transpile` before running it. For a Qiskit `QuantumCircuit` the
-///   instructions are not inspected, so one `qiskit.transpile` cannot lower (an
-///   opaque instruction without a definition, a `box`) is only reported when the
-///   run raises `polypus.BackendError`.
+///   `qiskit.transpile` before running it. A Qiskit `QuantumCircuit` with such
+///   an instruction is transpiled here as the run would transpile it, so one
+///   `qiskit.transpile` cannot lower (an opaque instruction without a
+///   definition, a `box`) is rejected with the error the run would raise
+///   (`polypus.BackendError`'s message); checking it costs the
+///   `qiskit.transpile` call the run would pay, which a circuit in the basis
+///   does not. Like the run, it lowers against the default `AerSimulator()`
+///   whatever `sim_method` or `noise_model` a run is given, so it shares the
+///   run's limits: such a circuit wider than the default simulator's target is
+///   rejected even under a `sim_method` that could hold it, and a
+///   `noise_model` is not taken into account.
 /// - A `polypus.Circuit` with free parameters cannot be run by either backend;
 ///   both entries give the same reason.
 ///
@@ -93,7 +107,7 @@ fn reasons(circuit: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Vec<String>)> {
         let qc = quantum_circuit(circuit)?;
         let mut native = vec![super::NATIVE_REJECTS_QISKIT.to_string()];
         native.extend(dynamic_features(qc)?);
-        return Ok((aer_unavailable(py), native));
+        return Ok((aer_quantum_circuit_rejections(qc)?, native));
     }
     let native = match NativeStatevectorBackend::check_circuit(&bound) {
         Ok(()) => Vec::new(),
@@ -165,17 +179,103 @@ fn aer_missing(py: Python<'_>) -> String {
     }
 }
 
-/// [`aer_missing`] as a rejection list: empty when Qiskit and Qiskit Aer are
-/// both importable.
-fn aer_unavailable(py: Python<'_>) -> Vec<String> {
-    if PyModule::import(py, "qiskit_aer")
-        .and(PyModule::import(py, "qiskit"))
-        .is_ok()
-    {
-        Vec::new()
-    } else {
-        vec![aer_missing(py)]
+/// The Aer reasons for a Qiskit `QuantumCircuit`, decided as the local backend
+/// prepares it for Aer (`_lower_to_aer_basis` in `polypus_python/local.py`,
+/// contract C-2). A circuit whose instructions are all in the basis of the
+/// default `AerSimulator()` reaches Aer as it is, so it is accepted without
+/// being rewritten. One with an instruction outside it, at any depth
+/// ([`outside_basis`]), is rewritten as the run rewrites it
+/// (`_rewrite_into_aer_basis`; the result is a new circuit and is discarded, the
+/// caller's is not modified). A failure follows the run's own rule
+/// ([`qiskit_error_to_pyerr`]): what the run would raise as
+/// `polypus.BackendError` (a Qiskit exception) is quoted as its message
+/// (`module.Class: message`); anything else, a Qiskit class that is also a
+/// `ValueError`, `TypeError` or `KeyboardInterrupt` included, propagates as the
+/// run would raise it. The rewrite is looked up on every call.
+fn aer_quantum_circuit_rejections(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let py = qc.py();
+    let Some(aer_simulator) = aer_simulator_class(py) else {
+        return Ok(vec![aer_missing(py)]);
+    };
+    let basis = aer_simulator
+        .call0()?
+        .getattr(intern!(py, "target"))?
+        .getattr(intern!(py, "operation_names"))?;
+    let supported = names(&basis)?;
+    let control_flow = names(
+        &PyModule::import(py, "qiskit.circuit")?.getattr(intern!(py, "CONTROL_FLOW_OP_NAMES"))?,
+    )?;
+    if !outside_basis(qc, &supported, &control_flow)? {
+        return Ok(Vec::new());
     }
+    let rewrite = PyModule::import(py, "polypus_python.local")?
+        .getattr(intern!(py, "_rewrite_into_aer_basis"))?;
+    match rewrite.call1((qc, basis)) {
+        Ok(_) => Ok(Vec::new()),
+        Err(err) => {
+            let raised = qiskit_error_to_pyerr(err);
+            if raised.is_instance_of::<BackendError>(py) {
+                Ok(vec![message(py, &raised)])
+            } else {
+                Err(raised)
+            }
+        }
+    }
+}
+
+/// `qiskit_aer.AerSimulator`, if Qiskit and Qiskit Aer are importable.
+fn aer_simulator_class(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
+    PyModule::import(py, "qiskit").ok()?;
+    PyModule::import(py, "qiskit_aer")
+        .and_then(|aer| aer.getattr("AerSimulator"))
+        .ok()
+}
+
+/// The strings in the Python iterable `iterable` (a set of names, or the keys
+/// of a `count_ops()` dict).
+fn names(iterable: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
+    iterable
+        .try_iter()?
+        .map(|name| name?.extract::<String>())
+        .collect()
+}
+
+/// Whether the Qiskit circuit `qc` holds an instruction whose name is not in
+/// `supported`, at any depth: `_outside_basis` in `polypus_python/local.py`,
+/// rule for rule. `barrier` is accepted everywhere; the names come from
+/// `count_ops()`, and `qc.data` is walked only when one of them is in
+/// `control_flow` (Qiskit's `CONTROL_FLOW_OP_NAMES`), to look into the bodies
+/// of those operations. A control-flow operation outside `supported` (for Aer,
+/// today `box`) is outside by its name, before any body is looked at.
+fn outside_basis(
+    qc: &Bound<'_, PyAny>,
+    supported: &HashSet<String>,
+    control_flow: &HashSet<String>,
+) -> PyResult<bool> {
+    let py = qc.py();
+    let used = names(&qc.call_method0(intern!(py, "count_ops"))?)?;
+    if used
+        .iter()
+        .any(|name| name != "barrier" && !supported.contains(name))
+    {
+        return Ok(true);
+    }
+    if used.is_disjoint(control_flow) {
+        return Ok(false);
+    }
+    for instruction in qc.getattr(intern!(py, "data"))?.try_iter()? {
+        let operation = instruction?.getattr(intern!(py, "operation"))?;
+        let name: String = operation.getattr(intern!(py, "name"))?.extract()?;
+        if !control_flow.contains(&name) {
+            continue;
+        }
+        for block in operation.getattr(intern!(py, "blocks"))?.try_iter()? {
+            if outside_basis(&block?, supported, control_flow)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The dynamic-circuit features of the Qiskit circuit `qc` that a Polypus
