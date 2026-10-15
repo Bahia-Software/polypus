@@ -452,7 +452,15 @@ mod tests {
             Err(BackendError::External(boxed)) => boxed.is::<InterpreterUnavailable>(),
             other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
         };
-        let raised = CunqaBackend::new(2, 1, "no-interpreter", 1, String::new(), String::new());
+        let raised = CunqaBackend::new(
+            2,
+            1,
+            "no-interpreter",
+            1,
+            DEFAULT_WALLTIME,
+            String::new(),
+            String::new(),
+        );
         assert!(unavailable(raised.map(|_backend| ())));
 
         let backend = CunqaBackend::with_releaser(Box::new(|_py| Ok(())));
