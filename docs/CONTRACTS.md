@@ -121,7 +121,10 @@ QUBO/Ising costs, and `polypus-evaluation`'s `PyCallbackObservable` calls a user
 callback once per unique bitstring in a single GIL section and aggregates in
 Rust. The Rust layer no longer calls `expectation_values` across the seam, so it
 is not frozen by this contract. The function still lives in
-`polypus_python/qaoa_utils.py` for Python-side use.*
+`polypus_python/qaoa_utils.py` for Python-side use. Unlike the native reducers,
+it and `expectation_value` raise `ValueError` for a counts dict that is empty or
+sums to zero (the backend validation already rejects such results before any
+reducer runs).*
 
 ### Failure modes (all three functions)
 

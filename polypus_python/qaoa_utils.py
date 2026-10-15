@@ -138,6 +138,10 @@ def expectation_value(counts, bitstring_to_obj):
 
     Returns:
         float: The expectation value.
+
+    Raises:
+        ValueError: If ``counts`` is empty or its counts sum to zero, since a
+            result without measurements cannot be reduced to a value.
     """
     avg = 0
     sum_count = 0
@@ -147,7 +151,7 @@ def expectation_value(counts, bitstring_to_obj):
         avg += obj * count
         sum_count += count
     if sum_count == 0:
-        return 0.0
+        raise ValueError("counts is empty or sums to zero: no measurements to average")
     return avg / sum_count
 
 
@@ -159,11 +163,15 @@ def expectation_values(array_counts, bitstring_to_obj):
         bitstring_to_obj (callable): Function that takes a bitstring and returns its objective value.
     Returns:
         float: The average expectation value across all counts.
+
+    Raises:
+        ValueError: If any counts dict is empty or sums to zero; the message
+            gives its index in ``array_counts``.
     """
 
     expectation_values = []
     # print(array_counts)
-    for counts in array_counts:
+    for index, counts in enumerate(array_counts):
         avg = 0
         sum_count = 0
         for bitstring, count in counts.items():
@@ -171,9 +179,11 @@ def expectation_values(array_counts, bitstring_to_obj):
             avg += obj * count
             sum_count += count
         if sum_count == 0:
-            expectation_values.append(0.0)
-        else:
-            expectation_values.append(avg / sum_count)
+            raise ValueError(
+                f"array_counts[{index}] is empty or sums to zero: "
+                "no measurements to average"
+            )
+        expectation_values.append(avg / sum_count)
 
     return expectation_values
 

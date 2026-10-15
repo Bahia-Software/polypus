@@ -135,3 +135,61 @@ def test_qaoa_params_to_dict_is_exported_from_package():
     import polypus_python
 
     assert polypus_python.qaoa_params_to_dict is qaoa_utils.qaoa_params_to_dict
+
+
+def _objective(bitstring):
+    return bitstring.count("1") * 0.1 + int(bitstring, 2) * 0.07
+
+
+def _reference_mean(counts):
+    """The pre-#227 arithmetic, kept verbatim to pin bit-identical results."""
+    avg = 0
+    sum_count = 0
+    for bitstring, count in counts.items():
+        avg += _objective(bitstring) * count
+        sum_count += count
+    return avg / sum_count
+
+
+_VALID_COUNTS = [
+    {"00": 311, "01": 127, "10": 401, "11": 185},
+    {"101": 7, "010": 1, "111": 993},
+    {"0": 1},
+]
+
+
+@pytest.mark.parametrize("counts", [{}, {"00": 0}, {"00": 0, "11": 0}])
+def test_expectation_value_rejects_counts_summing_to_zero(counts):
+    with pytest.raises(ValueError, match="empty or sums to zero"):
+        qaoa_utils.expectation_value(counts, _objective)
+
+
+@pytest.mark.parametrize("bad", [{}, {"00": 0}])
+def test_expectation_values_names_the_offending_index(bad):
+    array_counts = [_VALID_COUNTS[0], bad, _VALID_COUNTS[1]]
+    with pytest.raises(ValueError, match=r"array_counts\[1\]"):
+        qaoa_utils.expectation_values(array_counts, _objective)
+
+
+def test_expectation_values_rejects_empty_first_and_last_element():
+    for array_counts, index in (
+        ([{}, _VALID_COUNTS[0]], 0),
+        ([_VALID_COUNTS[0], {"11": 0}], 1),
+    ):
+        with pytest.raises(ValueError, match=rf"array_counts\[{index}\]"):
+            qaoa_utils.expectation_values(array_counts, _objective)
+
+
+@pytest.mark.parametrize("counts", _VALID_COUNTS)
+def test_expectation_value_valid_counts_are_bit_identical(counts):
+    assert qaoa_utils.expectation_value(counts, _objective) == _reference_mean(counts)
+
+
+def test_expectation_values_valid_counts_are_bit_identical():
+    assert qaoa_utils.expectation_values(_VALID_COUNTS, _objective) == [
+        _reference_mean(c) for c in _VALID_COUNTS
+    ]
+
+
+def test_expectation_values_empty_list_is_empty():
+    assert qaoa_utils.expectation_values([], _objective) == []
