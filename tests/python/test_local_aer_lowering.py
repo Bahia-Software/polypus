@@ -453,7 +453,7 @@ class TestLoweringDetails:
         }
 
 
-def _received_by_aer(monkeypatch, circuit):
+def _received_by_aer(monkeypatch, circuit, **kwargs):
     """The circuits ``AerSimulator.run`` receives when ``circuit`` runs."""
     from qiskit_aer import AerSimulator
 
@@ -465,7 +465,7 @@ def _received_by_aer(monkeypatch, circuit):
         return original_run(self, circuits, *args, **kwargs)
 
     monkeypatch.setattr(AerSimulator, "run", spy)
-    _run(circuit, shots=10)
+    _run(circuit, shots=10, **kwargs)
     return received
 
 
@@ -511,3 +511,43 @@ class TestLoweredProgram:
         circuit = src if kind == "qasm_string" else polypus.Circuit.from_qasm2(src)
         counts = _run(circuit, shots=200)
         assert set(counts) <= {"0" * n, "1" * n} and sum(counts.values()) == 200
+
+    def test_a_wide_non_clifford_circuit_is_lowered_for_mps(self):
+        """The reproducer of issue #307: ``ch`` is not Clifford, so this runs
+        on ``matrix_product_state``, not on the stabilizer method. It failed
+        with ``CircuitTooWideForTarget`` while the lowering had a layout
+        stage."""
+        from qiskit import QuantumCircuit
+
+        n = 200
+        qc = QuantumCircuit(n)
+        qc.x(0)
+        qc.ch(0, 1)
+        qc.measure_all()
+        counts = _run(qc, shots=200, sim_method="matrix_product_state")
+        zeros = "0" * (n - 2)
+        assert set(counts) <= {zeros + "01", zeros + "11"}
+        assert sum(counts.values()) == 200
+
+    def test_a_noise_model_does_not_change_the_lowering(self, monkeypatch):
+        """A ``noise_model`` narrows ``AerSimulator(noise_model=...).target``
+        to the gates it names plus ``cx``, ``id``, ``rz`` and ``sx`` (here
+        without ``h``), but Aer still runs every gate of the default basis
+        under it (issue #307). So the circuit is lowered into the default
+        basis, as without noise: ``h`` reaches Aer as ``h``, not as ``rz`` and
+        ``sx``, and the noise falls on the gates the circuit holds."""
+        from polypus_python.local import _aer_basis, _rewrite_into_aer_basis
+        from qiskit import QuantumCircuit
+        from qiskit_aer import AerSimulator
+        from qiskit_aer.noise import NoiseModel, depolarizing_error
+
+        noise = NoiseModel()
+        noise.add_all_qubit_quantum_error(depolarizing_error(0.2, 2), ["cx"])
+        assert "h" not in AerSimulator(noise_model=noise).target.operation_names
+        qc = QuantumCircuit(2, 2)
+        qc.h(0)
+        qc.ch(0, 1)
+        qc.measure([0, 1], [0, 1])
+        (received,) = _received_by_aer(monkeypatch, qc, noise_model=noise)
+        assert received == _rewrite_into_aer_basis(qc, _aer_basis())
+        assert "h" in received.count_ops()
