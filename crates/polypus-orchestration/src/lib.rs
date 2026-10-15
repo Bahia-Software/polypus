@@ -29,6 +29,9 @@
 pub mod dispatch;
 pub mod flow;
 pub mod scheduler;
+#[cfg(test)]
+mod test_log;
+mod walltime;
 
 pub use dispatch::{
     dispatch_optimizer, BoxedError, DeConfig, Method, OracleError, OracleErrorSlot, PsoConfig,
