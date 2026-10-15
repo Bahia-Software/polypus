@@ -52,7 +52,7 @@ pub use attach::{
     attach_for_cleanup, attach_or, CleanupError, DisplaySafePyErr, InterpreterUnavailable,
 };
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
-pub use cunqa::CunqaBackend;
+pub use cunqa::{validate_walltime, CunqaBackend, InvalidWalltime, DEFAULT_WALLTIME};
 pub use error::EntropyError;
 pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
@@ -177,11 +177,13 @@ impl Infrastructure {
                 sim_method,
                 nodes,
                 cores_per_qpu,
+                walltime,
             } => Ok(Arc::new(CunqaBackend::new(
                 config.n_qpus,
                 *nodes,
                 &config.id,
                 *cores_per_qpu,
+                walltime,
                 backend.clone(),
                 sim_method.clone(),
             )?)),

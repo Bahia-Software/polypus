@@ -185,6 +185,7 @@ fn cunqa_backend_conformance_is_environment_gated() {
             sim_method: "statevector".to_string(),
             nodes: 1,
             cores_per_qpu: 1,
+            walltime: polypus_infrastructure::DEFAULT_WALLTIME.to_string(),
         },
         opt_level: OptLevel::default(),
         seed: Some(1),

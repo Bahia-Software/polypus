@@ -178,6 +178,9 @@ pub enum BackendConfig {
         nodes: u32,
         /// CPU cores reserved per QPU.
         cores_per_qpu: u32,
+        /// SLURM walltime of the QPUs, `HH:MM:SS` (see
+        /// [`validate_walltime`](crate::cunqa::validate_walltime)).
+        walltime: String,
     },
     /// A backend built through the **runtime registry**
     /// ([`polypus_backend::register_backend`]), selected by `name`. This is how a
@@ -233,11 +236,13 @@ impl Clone for BackendConfig {
                 sim_method,
                 nodes,
                 cores_per_qpu,
+                walltime,
             } => BackendConfig::Cunqa {
                 backend: backend.clone(),
                 sim_method: sim_method.clone(),
                 nodes: *nodes,
                 cores_per_qpu: *cores_per_qpu,
+                walltime: walltime.clone(),
             },
             BackendConfig::Registered { name, options } => BackendConfig::Registered {
                 name: name.clone(),

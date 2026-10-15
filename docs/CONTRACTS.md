@@ -53,6 +53,8 @@ be changed independently.
 | `"local"` | — | the string `"local"` |
 | `"cunqa"` | `n: int` (QPUs), `t: str` (SLURM walltime `"HH:MM:SS"`), `n_nodes: int`, `family_name: str`, `cores_per_qpu: int` | CUNQA *family* handle (opaque object) |
 
+`t` comes from the user-facing `walltime` kwarg (default `"10:00:00"`). The edge accepts only `HH:MM:SS` — `HH` one or more digits (`48:00:00` is valid), `MM` and `SS` two digits below 60, total above zero; SLURM's `D-HH:MM:SS` is rejected — and raises `ValueError` before this call is made. `local` and `qmio` ignore it. `tests/python/test_cunqa_walltime.py` pins that the value arrives as `t`.
+
 Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
