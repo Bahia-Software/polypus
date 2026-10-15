@@ -34,11 +34,15 @@ AER_ONLY = {
 }
 
 
-def _run(circuit, backend):
+def _run(circuit, backend, aer_kwargs=None):
+    """``aer_kwargs`` (such as a ``sim_method``) go to the ``"aer"`` run only:
+    the native backend rejects any ``sim_method`` but ``statevector`` before it
+    looks at the circuit."""
     import polypus
 
+    kwargs = (aer_kwargs or {}) if backend == "aer" else {}
     return polypus.run_quantum_circuit(
-        circuit, shots=32, infrastructure="local", backend=backend, seed=5
+        circuit, shots=32, infrastructure="local", backend=backend, seed=5, **kwargs
     )
 
 
@@ -51,6 +55,11 @@ def _report(circuit):
     assert all(isinstance(m, str) and m for r in report.values() for m in r)
     return report
 
+
+# Wider than any host's default ``AerSimulator()`` target (issue #307), and the
+# ``sim_method`` that runs it.
+WIDE = 200
+MPS = {"sim_method": "matrix_product_state"}
 
 # How the run quotes a ``qiskit.transpile`` failure (``polypus.BackendError``'s
 # message), and so how the Aer entry quotes it.
@@ -79,17 +88,19 @@ def _spy_transpile(monkeypatch):
     return calls
 
 
-def _assert_coherent(circuit, report):
+def _assert_coherent(circuit, report, aer_kwargs=None):
     """Each backend the report accepts runs the circuit; each it rejects fails
-    with (one of) the reasons given."""
+    with (one of) the reasons given. ``aer_kwargs`` go to the Aer run only
+    (``_run``)."""
     import polypus
 
     for backend, reasons in report.items():
         if not reasons:
-            assert sum(_run(circuit, backend).counts[0].values()) == 32
+            counts = _run(circuit, backend, aer_kwargs).counts[0]
+            assert sum(counts.values()) == 32
             continue
         with pytest.raises((polypus.PolypusError, ValueError)) as info:
-            _run(circuit, backend)
+            _run(circuit, backend, aer_kwargs)
         assert any(reason in str(info.value) for reason in reasons), (
             f"{backend}: {info.value!s} does not state any of {reasons}"
         )
@@ -458,21 +469,80 @@ class TestQiskitCircuits:
         assert "Qiskit Aer is not installed" in report["aer"][0]
         assert 'backend="aer" cannot run' in report["aer"][0]
 
-    def test_wide_circuit_outside_the_basis_gets_the_run_verdict(self):
-        """Known limitation, outside issue #285: the run lowers against the
-        default ``AerSimulator()``, whose target is narrower than some
-        ``sim_method`` could hold, and so does the check. Whatever the run
-        answers, the check answers the same; 200 qubits is wider than any
-        host's default target, and both fail before anything is executed."""
+    def test_wide_circuit_outside_the_basis_is_accepted_by_aer(self):
+        """Wider than the default ``AerSimulator()``'s target (whose width
+        depends on the host's memory; 200 qubits is above any): the run lowers
+        it against a target with the same instructions and the circuit's width,
+        so ``matrix_product_state`` runs it and the check accepts it (issue
+        #307). The check looks at no resources: a ``sim_method`` without the
+        memory for it is not its concern."""
         from qiskit import QuantumCircuit
 
-        qc = QuantumCircuit(200)
+        qc = QuantumCircuit(WIDE)
+        qc.x(0)
         qc.ch(0, 1)
         qc.measure_all()
         report = _report(qc)
+        assert report["aer"] == []
+        _assert_coherent(qc, report, MPS)
+
+    @pytest.mark.parametrize("kind", ["opaque", "box"])
+    def test_wide_circuit_that_cannot_be_lowered_is_rejected_by_aer(self, kind):
+        """The wide target lowers what the default one lowers, and fails on what
+        it fails on, with the same error the run raises."""
+        from qiskit import QuantumCircuit
+
+        qc = QuantumCircuit(WIDE, 1)
+        if kind == "opaque":
+            qc.append(_opaque(), [0])
+            fragment = 'HighLevelSynthesis is unable to synthesize "opaque_thing"'
+        else:
+            with qc.box():
+                qc.h(WIDE - 1)
+            fragment = (
+                "The control-flow construct 'box' is not supported by the backend."
+            )
+        qc.measure(0, 0)
+        report = _report(qc)
         assert len(report["aer"]) == 1
-        assert "CircuitTooWideForTarget" in report["aer"][0]
-        _assert_coherent(qc, report)
+        reason = report["aer"][0]
+        assert reason.startswith(TRANSPILER_ERROR)
+        assert fragment in reason
+        _assert_coherent(qc, report, MPS)
+
+    @pytest.mark.parametrize("extra", [0, 1])
+    def test_the_lowering_switches_target_one_qubit_past_the_default(
+        self, monkeypatch, extra
+    ):
+        """At the default target's width ``W`` the check transpiles against the
+        default ``AerSimulator()``; at ``W + 1`` against a ``target=`` of
+        ``W + 1`` qubits with the default target's instructions, as the run
+        does (``_lower_to_aer_basis``)."""
+        from qiskit import QuantumCircuit
+        from qiskit_aer import AerSimulator
+
+        default = AerSimulator().target
+        width = default.num_qubits + extra
+        calls = _spy_transpile(monkeypatch)
+        qc = QuantumCircuit(width)
+        qc.x(0)
+        qc.ch(0, 1)
+        qc.measure_all()
+        report = _report(qc)
+        assert report["aer"] == []
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args[0] is qc
+        if extra == 0:
+            assert len(args) == 2 and type(args[1]).__name__ == "AerSimulator"
+            assert kwargs == {"optimization_level": 0}
+        else:
+            assert len(args) == 1
+            assert set(kwargs) == {"target", "optimization_level"}
+            assert kwargs["optimization_level"] == 0
+            assert kwargs["target"].num_qubits == width
+            assert set(kwargs["target"].operation_names) == set(default.operation_names)
+        _assert_coherent(qc, report, MPS)
 
     def test_the_caller_circuit_is_not_modified(self):
         from qiskit import QuantumCircuit

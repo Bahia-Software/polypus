@@ -3,6 +3,7 @@ from functools import lru_cache
 from qiskit import ClassicalRegister, QuantumCircuit, transpile
 from qiskit.circuit import CONTROL_FLOW_OP_NAMES
 from qiskit.result import marginal_distribution
+from qiskit.transpiler import Target
 from qiskit_aer import AerSimulator
 
 from .infrastructure import Infraestructure
@@ -81,12 +82,34 @@ def _default_aer():
     """The default ``AerSimulator()`` and the instruction names its target
     supports. Built on first use, not at import: the extension imports this
     package at runtime. The *default* simulator, whatever ``sim_method`` or
-    ``noise_model`` a run asks for: a method-specific basis is smaller (a
-    ``noise_model`` cuts it from 98 to 40 gates), and lowering against it would
-    rewrite circuits Aer runs as they are or turn a method's own refusal into a
-    transpiler error."""
+    ``noise_model`` a run asks for: either one narrows the simulator's target
+    (a ``noise_model`` cuts it to the gates the model names, ``stabilizer`` to
+    its Clifford set) but not what Aer runs, which still takes every
+    instruction of the default basis and refuses for itself what a method
+    cannot hold. Lowering against that narrower target would rewrite gates Aer
+    runs as they are (``h`` into ``u2``, moving where the noise falls) or turn
+    a method's own refusal into a transpiler error."""
     simulator = AerSimulator()
     return simulator, frozenset(simulator.target.operation_names)
+
+
+def _wide_aer_target(num_qubits):
+    """A ``Target`` with the instructions of the default ``AerSimulator()``'s
+    and ``num_qubits`` qubits (issue #307).
+
+    The default target's width is a host-dependent cap (the qubits of the
+    largest statevector the host's memory holds), not a property of the
+    basis, so ``transpile`` refuses a wider circuit (``CircuitTooWideForTarget``)
+    that a ``sim_method`` such as ``matrix_product_state`` would run. This one
+    has the same instructions, so it lowers exactly as the default one does,
+    without the cap. ``num_qubits`` must be given: a target without a width
+    cannot place ``measure``."""
+    simulator, _ = _default_aer()
+    default = simulator.target
+    target = Target(num_qubits=num_qubits)
+    for name in default.operation_names:
+        target.add_instruction(default.operation_from_name(name), name=name)
+    return target
 
 
 def _outside_basis(qc, supported):
@@ -126,11 +149,21 @@ def _lower_to_aer_basis(qc):
     over as it is, neither copied nor transpiled, so its counts do not move.
     ``optimization_level=0`` only rewrites; it neither reorders nor merges
     gates. ``transpile`` returns a new circuit: the caller's is never modified.
+
+    The basis is the default ``AerSimulator()``'s whatever the run's
+    ``sim_method`` or ``noise_model`` (see ``_default_aer``). A circuit no wider
+    than that simulator's target is lowered against it; a wider one against a
+    target with the same instructions and the circuit's width
+    (``_wide_aer_target``), so the width is left for Aer to judge under the
+    run's ``sim_method``.
     """
     simulator, supported = _default_aer()
     if not _outside_basis(qc, supported):
         return qc
-    return transpile(qc, simulator, optimization_level=0)
+    width = simulator.target.num_qubits
+    if width is None or qc.num_qubits <= width:
+        return transpile(qc, simulator, optimization_level=0)
+    return transpile(qc, target=_wide_aer_target(qc.num_qubits), optimization_level=0)
 
 
 def _with_full_readout(qc):

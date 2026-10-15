@@ -62,11 +62,12 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 ///   definition, a `box`) is rejected with the error the run would raise
 ///   (`polypus.BackendError`'s message); checking it costs the
 ///   `qiskit.transpile` call the run would pay, which a circuit in the basis
-///   does not. Like the run, it lowers against the default `AerSimulator()`
-///   whatever `sim_method` or `noise_model` a run is given, so it shares the
-///   run's limits: such a circuit wider than the default simulator's target is
-///   rejected even under a `sim_method` that could hold it, and a
-///   `noise_model` is not taken into account.
+///   does not. Like the run, it lowers into the basis of the default
+///   `AerSimulator()` whatever `sim_method` or `noise_model` a run is given
+///   (either one narrows the simulator's target, not what Aer runs). A
+///   circuit wider than that target is lowered against one with the same
+///   instructions and the circuit's width, so its width alone is never a
+///   reason.
 /// - A `polypus.Circuit` with free parameters cannot be run by either backend;
 ///   both entries give the same reason.
 ///
@@ -185,7 +186,9 @@ fn aer_missing(py: Python<'_>) -> String {
 /// being transpiled. One with an instruction outside it, at any depth
 /// ([`outside_basis`]), is transpiled as the run transpiles it
 /// (`optimization_level=0`; the result is a new circuit and is discarded, the
-/// caller's is not modified). A failure follows the run's own rule
+/// caller's is not modified): against the default simulator when it is no
+/// wider than its target, else against [`wide_aer_target`]. A failure of
+/// either step follows the run's own rule
 /// ([`qiskit_error_to_pyerr`]): what the run would raise as
 /// `polypus.BackendError` (a Qiskit exception) is quoted as its message
 /// (`module.Class: message`); anything else, a Qiskit class that is also a
@@ -197,22 +200,16 @@ fn aer_quantum_circuit_rejections(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>
         return Ok(vec![aer_missing(py)]);
     };
     let simulator = aer_simulator.call0()?;
-    let supported = names(
-        &simulator
-            .getattr(intern!(py, "target"))?
-            .getattr(intern!(py, "operation_names"))?,
-    )?;
+    let default_target = simulator.getattr(intern!(py, "target"))?;
+    let supported = names(&default_target.getattr(intern!(py, "operation_names"))?)?;
     let control_flow = names(
         &PyModule::import(py, "qiskit.circuit")?.getattr(intern!(py, "CONTROL_FLOW_OP_NAMES"))?,
     )?;
     if !outside_basis(qc, &supported, &control_flow)? {
         return Ok(Vec::new());
     }
-    let transpile = PyModule::import(py, "qiskit")?.getattr(intern!(py, "transpile"))?;
-    let options = PyDict::new(py);
-    options.set_item(intern!(py, "optimization_level"), 0)?;
-    match transpile.call((qc, simulator), Some(&options)) {
-        Ok(_) => Ok(Vec::new()),
+    match lower_for_aer(qc, &simulator, &default_target) {
+        Ok(()) => Ok(Vec::new()),
         Err(err) => {
             let raised = qiskit_error_to_pyerr(err);
             if raised.is_instance_of::<BackendError>(py) {
@@ -222,6 +219,70 @@ fn aer_quantum_circuit_rejections(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>
             }
         }
     }
+}
+
+/// `_lower_to_aer_basis` in `polypus_python/local.py` past its basis check:
+/// `qc` is transpiled with `optimization_level=0` against `simulator`, the
+/// default `AerSimulator()`, when it has no more qubits than `default_target`
+/// (the simulator's target) holds, else against `target=`
+/// [`wide_aer_target`] of the circuit's width (issue #307). A target without
+/// a width takes every circuit, as in `local.py`. `qiskit.transpile` is looked
+/// up on every call.
+fn lower_for_aer(
+    qc: &Bound<'_, PyAny>,
+    simulator: &Bound<'_, PyAny>,
+    default_target: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let py = qc.py();
+    let width: Option<usize> = default_target
+        .getattr(intern!(py, "num_qubits"))?
+        .extract()?;
+    let qubits: usize = qc.getattr(intern!(py, "num_qubits"))?.extract()?;
+    let transpile = PyModule::import(py, "qiskit")?.getattr(intern!(py, "transpile"))?;
+    let options = PyDict::new(py);
+    options.set_item(intern!(py, "optimization_level"), 0)?;
+    match width {
+        Some(width) if qubits > width => {
+            options.set_item(
+                intern!(py, "target"),
+                wide_aer_target(default_target, qubits)?,
+            )?;
+            transpile.call((qc,), Some(&options))?;
+        }
+        _ => {
+            transpile.call((qc, simulator), Some(&options))?;
+        }
+    }
+    Ok(())
+}
+
+/// `_wide_aer_target` in `polypus_python/local.py`: a `qiskit.transpiler.Target`
+/// of `num_qubits` qubits with every instruction of `default_target`, the
+/// default `AerSimulator()`'s target. Its width is a host-dependent cap, not
+/// part of the basis, so this target lowers as the default one does without
+/// refusing a wider circuit (`CircuitTooWideForTarget`).
+fn wide_aer_target<'py>(
+    default_target: &Bound<'py, PyAny>,
+    num_qubits: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = default_target.py();
+    let options = PyDict::new(py);
+    options.set_item(intern!(py, "num_qubits"), num_qubits)?;
+    let target = PyModule::import(py, "qiskit.transpiler")?
+        .getattr(intern!(py, "Target"))?
+        .call((), Some(&options))?;
+    for name in default_target
+        .getattr(intern!(py, "operation_names"))?
+        .try_iter()?
+    {
+        let name = name?;
+        let operation =
+            default_target.call_method1(intern!(py, "operation_from_name"), (&name,))?;
+        let named = PyDict::new(py);
+        named.set_item(intern!(py, "name"), &name)?;
+        target.call_method(intern!(py, "add_instruction"), (operation,), Some(&named))?;
+    }
+    Ok(target)
 }
 
 /// `qiskit_aer.AerSimulator`, if Qiskit and Qiskit Aer are importable.
