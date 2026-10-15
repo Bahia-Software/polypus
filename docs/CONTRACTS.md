@@ -444,11 +444,10 @@ before the rewrite with one message;
 execution path) and `tests/python/test_backend_compatibility.py`. For a Qiskit
 `QuantumCircuit`, `polypus.backend_compatibility`
 (`crates/polypus/src/bindings/compatibility.rs`) replicates the Aer path's
-policy — when to lower, into which basis, with which passes, what it refuses
-before rewriting — to report what the run would raise; it lowers nothing for
-execution, so it is not a lowering boundary, and `_assert_coherent` in that
-test, which runs every circuit it classifies (wide ones with
-`matrix_product_state`), keeps the two copies in step. The CUNQA
+decision to lower and calls the run's own rewrite to report what the run
+would raise; it lowers nothing for execution, so it is not a lowering
+boundary, and `_assert_coherent` in that test, which runs every circuit it
+classifies, keeps the two copies in step. The CUNQA
 one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
 convert, and a declared gate, reach `run` as an equivalent circuit in its list;
 a circuit in the list is neither copied nor transpiled).

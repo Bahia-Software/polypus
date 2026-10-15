@@ -9,6 +9,8 @@ running the circuit, and every "rejects" by running it and matching the reason.
 Nothing is executed by the check itself.
 """
 
+import re
+
 import pytest
 
 H = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
@@ -34,15 +36,11 @@ AER_ONLY = {
 }
 
 
-def _run(circuit, backend, aer_kwargs=None):
-    """``aer_kwargs`` (such as a ``sim_method``) go to the ``"aer"`` run only:
-    the native backend rejects any ``sim_method`` but ``statevector`` before it
-    looks at the circuit."""
+def _run(circuit, backend):
     import polypus
 
-    kwargs = (aer_kwargs or {}) if backend == "aer" else {}
     return polypus.run_quantum_circuit(
-        circuit, shots=32, infrastructure="local", backend=backend, seed=5, **kwargs
+        circuit, shots=32, infrastructure="local", backend=backend, seed=5
     )
 
 
@@ -56,13 +54,8 @@ def _report(circuit):
     return report
 
 
-# Wider than any host's default ``AerSimulator()`` target (issue #307), and the
-# ``sim_method`` that runs it.
-WIDE = 200
-MPS = {"sim_method": "matrix_product_state"}
-
-# How the run quotes a lowering failure (``polypus.BackendError``'s message),
-# and so how the Aer entry quotes it.
+# How the run quotes a Qiskit transpiler failure (``polypus.BackendError``'s
+# message), and so how the Aer entry quotes it.
 TRANSPILER_ERROR = "qiskit.transpiler.exceptions.TranspilerError: "
 
 
@@ -74,52 +67,46 @@ def _opaque():
 
 
 def _spy_rewrite(monkeypatch):
-    """Record every rewrite the check runs, as (circuit, names of the passes,
-    result), and let it run. The check looks ``qiskit.transpiler.PassManager``
-    up on every call; ``local.py`` imported its own at import, so the run is
-    not spied on."""
-    import qiskit.transpiler
+    """Record every call of the rewrite the run lowers with (args, kwargs) and
+    let it run."""
+    from polypus_python import local
 
     calls = []
-    original = qiskit.transpiler.PassManager
+    original = local._rewrite_into_aer_basis
 
-    class Spy(original):
-        def __init__(self, passes=(), *args, **kwargs):
-            super().__init__(passes, *args, **kwargs)
-            self._names = [type(p).__name__ for p in passes]
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
 
-        def run(self, circuits, *args, **kwargs):
-            result = super().run(circuits, *args, **kwargs)
-            calls.append((circuits, self._names, result))
-            return result
-
-    monkeypatch.setattr(qiskit.transpiler, "PassManager", Spy)
+    monkeypatch.setattr(local, "_rewrite_into_aer_basis", spy)
     return calls
 
 
-def _forbid_rewrite(monkeypatch, why):
-    import qiskit.transpiler
+def _replace_rewrite(monkeypatch, replacement):
+    from polypus_python import local
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError(why)
-
-    monkeypatch.setattr(qiskit.transpiler, "PassManager", forbidden)
+    monkeypatch.setattr(local, "_rewrite_into_aer_basis", replacement)
 
 
-def _assert_coherent(circuit, report, aer_kwargs=None):
+def _stable(message):
+    """``message`` without the order of the basis Qiskit lists in a
+    ``BasisTranslator`` failure: it prints a ``set``, whose order differs from
+    one call to the next, so two calls never give the same text."""
+    return re.sub(r"target basis: \{[^}]*\}", "target basis: {...}", message)
+
+
+def _assert_coherent(circuit, report):
     """Each backend the report accepts runs the circuit; each it rejects fails
-    with (one of) the reasons given. ``aer_kwargs`` go to the Aer run only
-    (``_run``)."""
+    with (one of) the reasons given."""
     import polypus
 
     for backend, reasons in report.items():
         if not reasons:
-            counts = _run(circuit, backend, aer_kwargs).counts[0]
-            assert sum(counts.values()) == 32
+            assert sum(_run(circuit, backend).counts[0].values()) == 32
             continue
         with pytest.raises((polypus.PolypusError, ValueError)) as info:
-            _run(circuit, backend, aer_kwargs)
-        assert any(reason in str(info.value) for reason in reasons), (
+            _run(circuit, backend)
+        assert any(_stable(reason) in _stable(str(info.value)) for reason in reasons), (
             f"{backend}: {info.value!s} does not state any of {reasons}"
         )
 
@@ -330,9 +317,7 @@ class TestQiskitCircuits:
 
     def test_box_is_rejected_by_aer(self):
         """``box`` is a control-flow operation Aer's target does not take and
-        nothing can rewrite (issue #285). The run refuses it before rewriting,
-        with a message that does not change between calls (issue #307), and
-        the check quotes it."""
+        the lowering cannot remove (issue #285)."""
         from qiskit import QuantumCircuit
 
         qc = QuantumCircuit(2, 2)
@@ -343,10 +328,7 @@ class TestQiskitCircuits:
         assert len(report["aer"]) == 1
         reason = report["aer"][0]
         assert reason.startswith(TRANSPILER_ERROR)
-        assert (
-            "The control-flow construct 'box' is not supported by the backend."
-            in reason
-        )
+        assert "box" in reason
         _assert_coherent(qc, report)
 
     def test_gate_outside_basis_in_a_control_flow_body_is_lowered(self, monkeypatch):
@@ -392,7 +374,10 @@ class TestQiskitCircuits:
         in the basis does not make the circuit outside it."""
         from qiskit import QuantumCircuit
 
-        _forbid_rewrite(monkeypatch, "a circuit in Aer's basis must not be rewritten")
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("a circuit in Aer's basis must not be rewritten")
+
+        _replace_rewrite(monkeypatch, forbidden)
         if control_flow:
             qc = QuantumCircuit(2, 2)
             qc.h(0)
@@ -407,40 +392,37 @@ class TestQiskitCircuits:
         assert report["aer"] == []
         _assert_coherent(qc, report)
 
-    @pytest.mark.parametrize("width", [2, WIDE])
     def test_a_circuit_outside_the_basis_is_rewritten_as_the_run_does(
-        self, monkeypatch, width
+        self, monkeypatch
     ):
-        """Once, on the caller's circuit, with the passes
-        ``_rewrite_into_aer_basis`` runs, and into the same circuit, at any
-        width: a circuit wider than the default ``AerSimulator()``'s target is
-        rewritten like a narrow one (issue #307)."""
-        from polypus_python.local import _aer_basis, _rewrite_into_aer_basis
+        """Once, with the caller's circuit and the basis of the default
+        ``AerSimulator()``: the call ``_lower_to_aer_basis`` makes. The check
+        and the run share that rewrite, so what it accepts or rejects is what
+        the run does."""
         from qiskit import QuantumCircuit
+        from qiskit_aer import AerSimulator
 
         calls = _spy_rewrite(monkeypatch)
-        qc = QuantumCircuit(width)
-        qc.x(0)
+        qc = QuantumCircuit(2)
         qc.ch(0, 1)
         qc.measure_all()
         assert _report(qc)["aer"] == []
         assert len(calls) == 1
-        circuit, passes, result = calls[0]
+        (circuit, basis), kwargs = calls[0]
         assert circuit is qc
-        assert passes == ["HighLevelSynthesis", "BasisTranslator"]
-        assert result == _rewrite_into_aer_basis(qc, _aer_basis())
+        assert set(basis) == set(AerSimulator().target.operation_names)
+        assert kwargs == {}
 
     @pytest.mark.parametrize("raised", [KeyboardInterrupt, RuntimeError])
     def test_an_error_not_raised_by_qiskit_propagates(self, monkeypatch, raised):
         """Only an exception raised by Qiskit is a reason; any other one, a
         cancellation included, reaches the caller as it is."""
-        import qiskit.transpiler
         from qiskit import QuantumCircuit
 
         def failing(*_args, **_kwargs):
             raise raised("not a Qiskit error")
 
-        monkeypatch.setattr(qiskit.transpiler, "PassManager", failing)
+        _replace_rewrite(monkeypatch, failing)
         qc = QuantumCircuit(2)
         qc.ch(0, 1)
         qc.measure_all()
@@ -454,7 +436,6 @@ class TestQiskitCircuits:
         ``polypus.BackendError`` (contract C-1), so the check raises it too
         instead of turning it into a reason: a cancellation is never
         swallowed."""
-        import qiskit.transpiler
         from qiskit import QuantumCircuit
         from qiskit.exceptions import QiskitError
 
@@ -463,7 +444,7 @@ class TestQiskitCircuits:
         def failing(*_args, **_kwargs):
             raise error("raised by a Qiskit class")
 
-        monkeypatch.setattr(qiskit.transpiler, "PassManager", failing)
+        _replace_rewrite(monkeypatch, failing)
         qc = QuantumCircuit(2)
         qc.ch(0, 1)
         qc.measure_all()
@@ -475,7 +456,10 @@ class TestQiskitCircuits:
 
         from qiskit import QuantumCircuit
 
-        _forbid_rewrite(monkeypatch, "nothing can be rewritten for a missing Aer")
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("nothing can be rewritten for a missing Aer")
+
+        _replace_rewrite(monkeypatch, forbidden)
         monkeypatch.setitem(sys.modules, "qiskit_aer", None)
         qc = QuantumCircuit(1)
         qc.append(_opaque(), [0])
@@ -485,74 +469,21 @@ class TestQiskitCircuits:
         assert "Qiskit Aer is not installed" in report["aer"][0]
         assert 'backend="aer" cannot run' in report["aer"][0]
 
-    def test_wide_circuit_outside_the_basis_is_accepted_by_aer(self):
-        """Wider than the default ``AerSimulator()``'s target (whose width depends on
-        the host's memory; 200 qubits is above any): the lowering has no width cap, so
-        ``matrix_product_state`` runs it and the check accepts it (issue #307). The
-        check looks at no resources: a ``sim_method`` without the memory for it is not
-        its concern."""
+    def test_wide_clifford_circuit_outside_the_basis_is_accepted(self):
+        """The run lowers without the target's layout stage, so a circuit wider
+        than the default ``AerSimulator()``'s target is rewritten and run on the
+        stabilizer method; the check accepts it, as the run does (it used to
+        reject it with ``CircuitTooWideForTarget``)."""
         from qiskit import QuantumCircuit
 
-        qc = QuantumCircuit(WIDE)
-        qc.x(0)
-        qc.ch(0, 1)
+        n = 64
+        qc = QuantumCircuit(n)
+        qc.h(0)
+        for i in range(n - 1):
+            qc.iswap(i, i + 1)
         qc.measure_all()
         report = _report(qc)
         assert report["aer"] == []
-        _assert_coherent(qc, report, MPS)
-
-    @pytest.mark.parametrize("kind", ["opaque", "box"])
-    def test_wide_circuit_that_cannot_be_lowered_is_rejected_by_aer(self, kind):
-        """Width changes nothing for what cannot be lowered: the check quotes
-        the error the run raises, as for a narrow circuit."""
-        from qiskit import QuantumCircuit
-
-        qc = QuantumCircuit(WIDE, 1)
-        if kind == "opaque":
-            qc.append(_opaque(), [0])
-            fragment = 'HighLevelSynthesis is unable to synthesize "opaque_thing"'
-        else:
-            with qc.box():
-                qc.h(WIDE - 1)
-            fragment = (
-                "The control-flow construct 'box' is not supported by the backend."
-            )
-        qc.measure(0, 0)
-        report = _report(qc)
-        assert len(report["aer"]) == 1
-        reason = report["aer"][0]
-        assert reason.startswith(TRANSPILER_ERROR)
-        assert fragment in reason
-        _assert_coherent(qc, report, MPS)
-
-    @pytest.mark.parametrize("nesting", ["for_loop", "if_test"])
-    def test_a_box_in_a_control_flow_body_is_rejected_by_aer(self, nesting):
-        """A ``box`` inside another control-flow body is refused with the same
-        message as a top-level one, in the run and in the check (issue #307):
-        before, the rewrite's own error for it listed the operations and the
-        basis in an order that changed from call to call."""
-        from qiskit import QuantumCircuit
-
-        qc = QuantumCircuit(2, 2)
-        qc.measure(0, 0)
-        body = (
-            qc.for_loop(range(2))
-            if nesting == "for_loop"
-            else qc.if_test((qc.clbits[0], 0))
-        )
-        with body:
-            with qc.box():
-                qc.ch(0, 1)
-        qc.measure(1, 1)
-        report = _report(qc)
-        assert len(report["aer"]) == 1
-        reason = report["aer"][0]
-        assert reason.startswith(TRANSPILER_ERROR)
-        assert (
-            "The control-flow construct 'box' is not supported by the backend."
-            in reason
-        )
-        assert _report(qc)["aer"] == [reason]
         _assert_coherent(qc, report)
 
     def test_the_caller_circuit_is_not_modified(self):

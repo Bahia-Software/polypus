@@ -712,21 +712,14 @@ parse failure is its reason; so is Qiskit Aer not being installed) and rejects n
 instruction, because the local backend lowers what is outside Aer's basis before
 running it. For a Qiskit `QuantumCircuit` it follows that lowering step: a circuit whose
 instructions are all in the default `AerSimulator()`'s basis is accepted untouched, and
-one with an instruction outside it (control-flow bodies included) is rewritten as the
-run would rewrite it (synthesis and basis translation into that basis, as
-`qiskit.transpile(..., optimization_level=0)` does, without its layout stage), so one
-that cannot be lowered (an opaque instruction without a definition, a `box`) is rejected
-with the `polypus.BackendError` message the run would raise; the run refuses a `box`, at
-any depth, before rewriting, with a message that does not change between calls. Checking
-a circuit outside the basis therefore costs the rewrite the run would pay; one in the
-basis is not rewritten. Like the run, it lowers into the basis of the default
-`AerSimulator()` whatever `sim_method` or `noise_model` the run is given: either one
-narrows the simulator's target, not what Aer runs, so lowering into it would rewrite
-gates Aer takes as they are (moving where a noise model's errors fall) or turn a
-method's own refusal into a transpiler error. The lowering has no width cap, so a
-circuit wider than the default simulator's target (whose width the host's memory sets)
-is no reason to reject either, and a `sim_method` that holds it (such as
-`matrix_product_state`) runs it. A `polypus.Circuit` with free parameters gets the same
+one with an instruction outside it (control-flow bodies included) goes through the same
+rewrite the run uses (`polypus_python.local._rewrite_into_aer_basis`), so one that it
+cannot lower (an opaque instruction without a definition, a `box`) is rejected with
+the `polypus.BackendError` message the run would raise. Checking a circuit outside the
+basis therefore costs the rewrite the run would pay; one in the basis is not rewritten.
+Like the run, it lowers against the basis of the default `AerSimulator()` whatever
+`sim_method` or `noise_model` the run is given, so a `noise_model` is not taken into
+account; that is a known limitation of the lowering, not of the check. A `polypus.Circuit` with free parameters gets the same
 reason in both entries. The check is **structural**: it runs and connects to nothing,
 and does not check resources (the qubit ceiling, memory), so an accepted circuit can
 still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
