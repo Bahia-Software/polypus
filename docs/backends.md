@@ -718,8 +718,10 @@ cannot lower (an opaque instruction without a definition, a `box`) is rejected w
 the `polypus.BackendError` message the run would raise. Checking a circuit outside the
 basis therefore costs the rewrite the run would pay; one in the basis is not rewritten.
 Like the run, it lowers against the basis of the default `AerSimulator()` whatever
-`sim_method` or `noise_model` the run is given, so a `noise_model` is not taken into
-account; that is a known limitation of the lowering, not of the check. A `polypus.Circuit` with free parameters gets the same
+`sim_method` or `noise_model` the run is given: either one narrows the simulator's
+target (a `noise_model` to `cx`, `id`, `rz`, `sx` and the gates it names), not what
+Aer runs, so neither changes the lowering. A `box` is refused with one fixed message,
+the same in the check and the run. A `polypus.Circuit` with free parameters gets the same
 reason in both entries. The check is **structural**: it runs and connects to nothing,
 and does not check resources (the qubit ceiling, memory), so an accepted circuit can
 still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,

@@ -1,3 +1,4 @@
+use crate::attach::{attach_or, InterpreterUnavailable};
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
@@ -45,111 +46,117 @@ impl QuantumBackend for LocalBackend {
         if qcs.is_empty() {
             return Ok(Vec::new());
         }
-        Python::attach(|py| {
-            // Refuse up front a batch whose widest statevector cannot fit in the
-            // memory budget (issue #215), before anything is converted or handed
-            // to Aer — see `statevector_memory_is_known`. The other methods are
-            // bounded by Aer itself through `max_memory_mb` below.
-            let widest = widest_qubits(qcs, py);
-            let budget = active_budget();
-            if statevector_memory_is_known(&self.sim_method) {
-                check_fits(widest, budget).map_err(|e| {
-                    log::error!("local (Aer) backend refused a circuit: {e}");
-                    BackendError::from(e)
+        // Called while the run is detached, so this attach is a fresh one: an
+        // unreachable interpreter (finalizing, say) is a typed error, never a
+        // panic or a hang (docs/ENGINEERING.md §9).
+        attach_or(
+            || Err(InterpreterUnavailable.into()),
+            |py| {
+                // Refuse up front a batch whose widest statevector cannot fit in the
+                // memory budget (issue #215), before anything is converted or handed
+                // to Aer — see `statevector_memory_is_known`. The other methods are
+                // bounded by Aer itself through `max_memory_mb` below.
+                let widest = widest_qubits(qcs, py);
+                let budget = active_budget();
+                if statevector_memory_is_known(&self.sim_method) {
+                    check_fits(widest, budget).map_err(|e| {
+                        log::error!("local (Aer) backend refused a circuit: {e}");
+                        BackendError::from(e)
+                    })?;
+                }
+
+                // Native circuits are transpiled in pure Rust before submission;
+                // Qiskit circuits pass through untouched (Aer transpiles them) and
+                // every native circuit travels to Python as OpenQASM 2.0.
+                let opts = TranspileOptions {
+                    level: config.opt_level,
+                };
+                let qcs_pylist = PyList::empty(py);
+                for qc in qcs {
+                    let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
+                    qcs_pylist
+                        .append(crate::to_py_object(&qc, py)?)
+                        .map_err(|e| BackendError::Conversion(e.to_string()))?;
+                }
+
+                let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
+                let connection = module
+                    .call_method("connect_to_infrastructure", ("local",), None)
+                    .map_err(|e| {
+                        // Surface the failure before it crosses the FFI as a Python
+                        // exception (mirrors the QMIO/CUNQA error paths).
+                        log::error!("local infrastructure connection failed: {e}");
+                        crate::seam_error(e)
+                    })?;
+                // The call above succeeded; a wrong-shaped return value is our
+                // Rust-side conversion failure, not a seam exception (contract C-1).
+                let connection_str = connection.extract::<String>().map_err(|e| {
+                    BackendError::Conversion(format!(
+                        "expected connect_to_infrastructure(\"local\") to return str: {e}"
+                    ))
                 })?;
-            }
 
-            // Native circuits are transpiled in pure Rust before submission;
-            // Qiskit circuits pass through untouched (Aer transpiles them) and
-            // every native circuit travels to Python as OpenQASM 2.0.
-            let opts = TranspileOptions {
-                level: config.opt_level,
-            };
-            let qcs_pylist = PyList::empty(py);
-            for qc in qcs {
-                let qc = qc.transpiled(self.transpiler.as_ref(), &opts);
-                qcs_pylist
-                    .append(crate::to_py_object(&qc, py)?)
-                    .map_err(|e| BackendError::Conversion(e.to_string()))?;
-            }
-
-            let module = PyModule::import(py, "polypus_python").map_err(crate::seam_error)?;
-            let connection = module
-                .call_method("connect_to_infrastructure", ("local",), None)
-                .map_err(|e| {
-                    // Surface the failure before it crosses the FFI as a Python
-                    // exception (mirrors the QMIO/CUNQA error paths).
-                    log::error!("local infrastructure connection failed: {e}");
-                    crate::seam_error(e)
-                })?;
-            // The call above succeeded; a wrong-shaped return value is our
-            // Rust-side conversion failure, not a seam exception (contract C-1).
-            let connection_str = connection.extract::<String>().map_err(|e| {
-                BackendError::Conversion(format!(
-                    "expected connect_to_infrastructure(\"local\") to return str: {e}"
-                ))
-            })?;
-
-            let kwargs = PyDict::new(py);
-            let conv = |e: PyErr| BackendError::Conversion(e.to_string());
-            kwargs.set_item("id", &config.id).map_err(conv)?;
-            kwargs.set_item("backend", &self.backend).map_err(conv)?;
-            kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
-            kwargs.set_item("shots", config.shots).map_err(conv)?;
-            kwargs
-                .set_item("sim_method", &self.sim_method)
-                .map_err(conv)?;
-            // Bound Aer's concurrent experiments to the statevector memory budget
-            // (plan §4.5, P1-memory): Aer's `max_parallel_experiments=0` default
-            // ("auto") spawns one process per experiment and OOMs at high qubit
-            // counts. This is a pure resource knob — Aer seeds each experiment
-            // deterministically, so the counts are unchanged for any bound.
-            let cores = std::thread::available_parallelism()
-                .map(|c| c.get())
-                .unwrap_or(1);
-            let max_parallel_experiments = max_statevector_concurrency(widest, cores);
-            kwargs
-                .set_item("max_parallel_experiments", max_parallel_experiments)
-                .map_err(conv)?;
-            // Hand a *known* budget to Aer's own per-experiment memory validation
-            // (issue #215), for every method: it covers what the dense model above
-            // cannot — `automatic` picking a statevector for a non-Clifford circuit,
-            // `density_matrix`'s `4^n` — while a Clifford circuit that Aer runs on
-            // `stabilizer` still fits. Aer's refusal comes back as an unsuccessful
-            // experiment, which the Python side raises as
-            // `polypus.InsufficientMemoryError`. Omitted for the fallback budget,
-            // so Aer keeps its own default (the host's RAM).
-            if let Some(max_memory_mb) = aer_max_memory_mb(budget) {
+                let kwargs = PyDict::new(py);
+                let conv = |e: PyErr| BackendError::Conversion(e.to_string());
+                kwargs.set_item("id", &config.id).map_err(conv)?;
+                kwargs.set_item("backend", &self.backend).map_err(conv)?;
+                kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
+                kwargs.set_item("shots", config.shots).map_err(conv)?;
                 kwargs
-                    .set_item("max_memory_mb", max_memory_mb)
+                    .set_item("sim_method", &self.sim_method)
                     .map_err(conv)?;
-            }
-            if let Some(nm) = &self.noise_model {
+                // Bound Aer's concurrent experiments to the statevector memory budget
+                // (plan §4.5, P1-memory): Aer's `max_parallel_experiments=0` default
+                // ("auto") spawns one process per experiment and OOMs at high qubit
+                // counts. This is a pure resource knob — Aer seeds each experiment
+                // deterministically, so the counts are unchanged for any bound.
+                let cores = std::thread::available_parallelism()
+                    .map(|c| c.get())
+                    .unwrap_or(1);
+                let max_parallel_experiments = max_statevector_concurrency(widest, cores);
                 kwargs
-                    .set_item("noise_model", nm.clone_ref(py))
+                    .set_item("max_parallel_experiments", max_parallel_experiments)
                     .map_err(conv)?;
-            }
-            // Forwarded to Aer's `seed_simulator` on the Python side (contract
-            // C-7); `None` is simply omitted rather than sent as `seed=None`,
-            // so Aer's own unseeded default behavior is unchanged.
-            if let Some(seed) = config.seed {
-                kwargs.set_item("seed", seed).map_err(conv)?;
-            }
+                // Hand a *known* budget to Aer's own per-experiment memory validation
+                // (issue #215), for every method: it covers what the dense model above
+                // cannot — `automatic` picking a statevector for a non-Clifford circuit,
+                // `density_matrix`'s `4^n` — while a Clifford circuit that Aer runs on
+                // `stabilizer` still fits. Aer's refusal comes back as an unsuccessful
+                // experiment, which the Python side raises as
+                // `polypus.InsufficientMemoryError`. Omitted for the fallback budget,
+                // so Aer keeps its own default (the host's RAM).
+                if let Some(max_memory_mb) = aer_max_memory_mb(budget) {
+                    kwargs
+                        .set_item("max_memory_mb", max_memory_mb)
+                        .map_err(conv)?;
+                }
+                if let Some(nm) = &self.noise_model {
+                    kwargs
+                        .set_item("noise_model", nm.clone_ref(py))
+                        .map_err(conv)?;
+                }
+                // Forwarded to Aer's `seed_simulator` on the Python side (contract
+                // C-7); `None` is simply omitted rather than sent as `seed=None`,
+                // so Aer's own unseeded default behavior is unchanged.
+                if let Some(seed) = config.seed {
+                    kwargs.set_item("seed", seed).map_err(conv)?;
+                }
 
-            let result = module
-                .call_method("run_qcs", (connection_str,), Some(&kwargs))
-                .map_err(|e| {
-                    log::error!("local circuit execution failed: {e}");
-                    crate::seam_error(e)
-                })?;
-            // As above: `run_qcs` returned successfully, so a wrong-shaped
-            // value is a Rust-side conversion failure, not a seam exception.
-            result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
-                BackendError::Conversion(format!(
-                    "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
-                ))
-            })
-        })
+                let result = module
+                    .call_method("run_qcs", (connection_str,), Some(&kwargs))
+                    .map_err(|e| {
+                        log::error!("local circuit execution failed: {e}");
+                        crate::seam_error(e)
+                    })?;
+                // As above: `run_qcs` returned successfully, so a wrong-shaped
+                // value is a Rust-side conversion failure, not a seam exception.
+                result.extract::<Vec<HashMap<String, u64>>>().map_err(|e| {
+                    BackendError::Conversion(format!(
+                        "expected run_qcs() to return list[dict[str, int]] (contract C-1): {e}"
+                    ))
+                })
+            },
+        )
     }
 
     /// Report the wave size the planner should use for this batch, derived from
@@ -191,15 +198,20 @@ impl QuantumBackend for LocalBackend {
         let cores = std::thread::available_parallelism()
             .map(|c| c.get())
             .unwrap_or(1);
-        let widest = Python::attach(|py| -> Result<usize, InfrastructureError> {
-            let mut widest = 0usize;
-            for task in tasks {
-                if let Some(n) = circuit_qubits_checked(task.circuit, py)? {
-                    widest = widest.max(n);
+        // The planner calls this while the run is detached: attach fallibly, as
+        // `run_circuits` does.
+        let widest = attach_or(
+            || Err(InterpreterUnavailable.into()),
+            |py| -> Result<usize, InfrastructureError> {
+                let mut widest = 0usize;
+                for task in tasks {
+                    if let Some(n) = circuit_qubits_checked(task.circuit, py)? {
+                        widest = widest.max(n);
+                    }
                 }
-            }
-            Ok(widest)
-        })?;
+                Ok(widest)
+            },
+        )?;
         Ok(BackendCapabilities {
             max_concurrency: crate::wave_concurrency(widest, cores, tasks.len()),
             supports_shot_distribution: true,
@@ -496,6 +508,56 @@ mod tests {
                 "a 40-qubit Qiskit population must be wave-split (its widths ARE read)"
             );
         });
+    }
+
+    /// Both seams the planner calls on this backend while the run is detached
+    /// fail with a typed `InterpreterUnavailable` when the interpreter cannot be
+    /// attached to, instead of panicking (or, at shutdown, attaching to a
+    /// finalizing interpreter), and neither initializes it. Native tasks need
+    /// no Python object, so "not initialized" (the one unavailable state a Rust
+    /// test can produce without one) covers them; the test runs in a fresh
+    /// process because other tests here initialize the interpreter.
+    #[test]
+    fn seams_fail_typed_without_an_interpreter() {
+        use crate::attach::{is_fresh_process, run_in_fresh_process};
+        use crate::{InterpreterUnavailable, OptLevel};
+        if !is_fresh_process() {
+            run_in_fresh_process("local::tests::seams_fail_typed_without_an_interpreter");
+            return;
+        }
+        let circuit = BoundCircuit::Native(
+            ParameterizedCircuit::new(1)
+                .x(0)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let backend =
+            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let params = RunParams {
+            id: "no-interpreter".to_string(),
+            shots: 8,
+            seed: Some(1),
+            opt_level: OptLevel::default(),
+        };
+        match backend.run_circuits(std::slice::from_ref(&circuit), &params) {
+            Err(BackendError::External(boxed)) => assert!(boxed.is::<InterpreterUnavailable>()),
+            other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
+        }
+        let tasks = [CircuitTask {
+            circuit: &circuit,
+            shots: 8,
+        }];
+        match backend.capabilities_for(&tasks) {
+            Err(InfrastructureError::Backend(BackendError::External(boxed))) => {
+                assert!(boxed.is::<InterpreterUnavailable>())
+            }
+            other => panic!("expected Backend(External(InterpreterUnavailable)), got {other:?}"),
+        }
+        assert!(
+            Python::try_attach(|_py| ()).is_none(),
+            "a seam must never initialize the interpreter"
+        );
     }
 
     /// Issue #147 follow-up: a `KeyboardInterrupt` CPython raises while reading a

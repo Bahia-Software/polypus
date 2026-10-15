@@ -23,7 +23,8 @@
 //!   or hang.
 //!
 //! Such code attaches through [`attach_or`] (or [`attach_for_cleanup`]) instead,
-//! choosing explicitly what happens when the interpreter cannot be reached.
+//! choosing explicitly what happens when the interpreter cannot be reached; code
+//! that has to fail then returns [`InterpreterUnavailable`].
 //! Attaching is re-entrant only when the thread is *already* attached: then the
 //! existing attachment is reused and none of the checks can fail.
 //!
@@ -40,6 +41,8 @@ use std::fmt;
 
 use pyo3::prelude::*;
 
+use crate::{BackendError, InfrastructureError};
+
 /// Run `f` attached to the interpreter, or return `unavailable()` when the
 /// interpreter cannot be attached to (finalizing, in a GC traversal, or not
 /// initialized). Never panics on its own account.
@@ -55,6 +58,47 @@ pub fn attach_or<R>(
     f: impl for<'py> FnOnce(Python<'py>) -> R,
 ) -> R {
     Python::try_attach(f).unwrap_or_else(unavailable)
+}
+
+/// The interpreter could not be attached to (finalizing, in a GC traversal, or
+/// not initialized), so code that needed it did not run.
+///
+/// The error a site reached while detached returns from the `unavailable` branch
+/// of [`attach_or`] when it has to fail: the backend seams, the Qiskit binding
+/// and the Python callbacks an oracle calls. It holds nothing from Python, so it
+/// can be formatted, logged or dropped at any time. It crosses the pyo3-free
+/// contract boxed in `BackendError::External` (or `ObservableError::External`),
+/// never as a new variant of those enums, and the FFI edge downcasts it back and
+/// raises `KeyboardInterrupt`, the class an interrupted run gets: by then the
+/// run's result could not reach Python anyway.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InterpreterUnavailable;
+
+impl fmt::Display for InterpreterUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the Python interpreter is unavailable (not initialized, finalizing or in a \
+             GC traversal), so the run cannot continue"
+        )
+    }
+}
+
+impl std::error::Error for InterpreterUnavailable {}
+
+/// Carried type-erased in [`External`](BackendError::External), like every
+/// provider error this crate defines.
+impl From<InterpreterUnavailable> for BackendError {
+    fn from(err: InterpreterUnavailable) -> Self {
+        BackendError::External(Box::new(err))
+    }
+}
+
+/// For the sites that return the planner's error type (`capabilities_for`).
+impl From<InterpreterUnavailable> for InfrastructureError {
+    fn from(err: InterpreterUnavailable) -> Self {
+        InfrastructureError::Backend(err.into())
+    }
 }
 
 /// Why an [`attach_for_cleanup`] call failed. Holds no Python object: it can be
@@ -339,5 +383,42 @@ mod tests {
 
         let slot_payload: Box<dyn std::error::Error + Send> = Box::new(backend);
         assert_eq!(format!("{slot_payload}"), fallback);
+    }
+
+    /// The carrier for "the interpreter could not be reached" is an ordinary
+    /// error that holds nothing from Python: it formats without an interpreter,
+    /// and it crosses the backend contract boxed in `BackendError::External`
+    /// (alone or inside `InfrastructureError::Backend`), from which the FFI edge
+    /// downcasts it back. Runs in a fresh process that never initializes Python.
+    #[test]
+    fn interpreter_unavailable_is_an_error_carried_in_external() {
+        if !is_fresh_process() {
+            run_in_fresh_process(
+                "attach::tests::interpreter_unavailable_is_an_error_carried_in_external",
+            );
+            return;
+        }
+        fn is_error<E: std::error::Error + Send + Sync + 'static>(_: &E) {}
+        is_error(&InterpreterUnavailable);
+        let text = InterpreterUnavailable.to_string();
+        assert!(text.contains("interpreter is unavailable"), "{text}");
+        assert!(format!("{InterpreterUnavailable:?}").contains("InterpreterUnavailable"));
+
+        let carried = |err: crate::BackendError| match err {
+            crate::BackendError::External(boxed) => {
+                assert_eq!(boxed.to_string(), text);
+                boxed.downcast::<InterpreterUnavailable>().is_ok()
+            }
+            other => panic!("expected BackendError::External, got {other:?}"),
+        };
+        assert!(carried(crate::BackendError::from(InterpreterUnavailable)));
+        match crate::InfrastructureError::from(InterpreterUnavailable) {
+            crate::InfrastructureError::Backend(err) => assert!(carried(err)),
+            other => panic!("expected InfrastructureError::Backend, got {other:?}"),
+        }
+        assert!(
+            Python::try_attach(|_py| ()).is_none(),
+            "nothing here may initialize the interpreter"
+        );
     }
 }

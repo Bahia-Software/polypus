@@ -11,6 +11,7 @@
 //! rejects any `Foreign` variant up front.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use polypus_backend::{BackendError, BoundCircuit, ForeignCircuit};
 use pyo3::prelude::*;
@@ -37,18 +38,21 @@ pub fn seam_error(err: PyErr) -> BackendError {
 /// A bound Qiskit `QuantumCircuit`, wrapped so it can travel inside
 /// [`BoundCircuit::Foreign`] without `polypus-backend` ever depending on PyO3.
 ///
-/// [`clone_boxed`](ForeignCircuit::clone_boxed) bumps the Python object's
-/// reference count under the GIL (a `Py::clone_ref`), which is what lets a
-/// [`BoundCircuit`] carrying one be [`duplicate`](BoundCircuit::duplicate)-d by the
-/// planner between waves; [`as_any`](ForeignCircuit::as_any) lets the Aer/CUNQA
-/// backends recover the `Py<PyAny>` at submission time.
+/// The object is held in an [`Arc`], so [`clone_boxed`](ForeignCircuit::clone_boxed)
+/// shares it without attaching to the interpreter: the planner
+/// [`duplicate`](BoundCircuit::duplicate)s circuits between waves while the run
+/// is detached, where an attach could panic or hang at interpreter shutdown
+/// (docs/ENGINEERING.md §9). Dropping the last clone while detached is safe too:
+/// PyO3 defers that reference-count decrement until a thread next attaches.
+/// [`as_any`](ForeignCircuit::as_any) lets the Aer/CUNQA backends recover the
+/// `Py<PyAny>` at submission time.
 #[derive(Debug)]
-pub struct QiskitCircuit(Py<PyAny>);
+pub struct QiskitCircuit(Arc<Py<PyAny>>);
 
 impl QiskitCircuit {
     /// Wrap a bound Qiskit `QuantumCircuit` Python object.
     pub fn new(circuit: Py<PyAny>) -> Self {
-        QiskitCircuit(circuit)
+        QiskitCircuit(Arc::new(circuit))
     }
 
     /// Borrow the wrapped Python object.
@@ -58,21 +62,18 @@ impl QiskitCircuit {
 
     /// Wrap a Qiskit circuit directly as a ready [`BoundCircuit::Foreign`].
     pub fn into_bound(circuit: Py<PyAny>) -> BoundCircuit {
-        BoundCircuit::Foreign(Box::new(QiskitCircuit(circuit)))
+        BoundCircuit::Foreign(Box::new(QiskitCircuit::new(circuit)))
     }
 }
 
 impl ForeignCircuit for QiskitCircuit {
     fn clone_boxed(&self) -> Box<dyn ForeignCircuit> {
-        // Reference-count bump under the GIL, plus one small heap allocation for the
-        // box — the only per-circuit cost the `Foreign` escape hatch adds over the
-        // old `BoundCircuit::Qiskit(Py<PyAny>)` duplicate (a bare `clone_ref`). Its
-        // hot-path relevance is the planner's per-wave `duplicate()`; measured at
-        // ~75 ns/call vs ~23 ns for the bare `clone_ref`, i.e. a ~50 ns delta —
-        // negligible next to one Aer/CUNQA submission (a GIL crossing plus circuit
-        // execution, tens of microseconds and up). See the `#[ignore]`d
-        // `bench_foreign_duplicate_overhead` in this file. Left as-is deliberately.
-        Box::new(QiskitCircuit(Python::attach(|py| self.0.clone_ref(py))))
+        // An atomic `Arc` increment plus one small heap allocation for the box; no
+        // attach, so it is safe while detached. Its hot-path relevance is the
+        // planner's per-wave `duplicate()`: ~50 ns/call in a debug test build,
+        // negligible next to one Aer/CUNQA submission (tens of microseconds and
+        // up). See the `#[ignore]`d `bench_foreign_duplicate_overhead` in this file.
+        Box::new(QiskitCircuit(Arc::clone(&self.0)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -155,6 +156,36 @@ mod tests {
         });
     }
 
+    /// Duplicating a Qiskit circuit shares the wrapped object instead of taking a
+    /// new Python reference: the planner duplicates circuits per wave while the
+    /// run is detached, where attaching to bump the reference count could panic
+    /// or hang at interpreter shutdown. The Python reference count is unchanged
+    /// and both circuits hold the very same object.
+    #[test]
+    fn duplicate_shares_the_object_without_attaching() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let getrefcount = py.import("sys").unwrap().getattr("getrefcount").unwrap();
+            let refcount = |object: &Py<PyAny>| -> usize {
+                getrefcount.call1((object,)).unwrap().extract().unwrap()
+            };
+            let object: Py<PyAny> = pyo3::types::PyList::empty(py).into_any().unbind();
+            let bound = QiskitCircuit::into_bound(object.clone_ref(py));
+            let before = refcount(&object);
+            let duplicate = bound.duplicate();
+            assert_eq!(
+                refcount(&object),
+                before,
+                "duplicate() must not take a new Python reference"
+            );
+            let original = as_qiskit(&bound).expect("a Qiskit payload");
+            let copy = as_qiskit(&duplicate).expect("the duplicate keeps the payload");
+            assert!(copy.is(original), "both circuits share one Python object");
+            drop(duplicate);
+            assert_eq!(refcount(&object), before);
+        });
+    }
+
     #[test]
     fn to_py_object_serialises_native_and_qasm_without_the_gil_payload() {
         pyo3::Python::initialize();
@@ -212,8 +243,9 @@ mod tests {
     /// The only new cost the escape hatch adds on the hot Aer/CUNQA path is that a
     /// circuit `duplicate()` (which the planner does once per circuit per wave) goes
     /// from a bare `Py::clone_ref` (a ref-count bump, no allocation) to
-    /// `Box::new(QiskitCircuit(clone_ref))` — one small heap allocation plus the
-    /// `dyn` box. This isolates exactly that delta, side by side in one binary. It is
+    /// `Box::new(QiskitCircuit(Arc::clone))` — an atomic increment, with no
+    /// attach, plus one small heap allocation for the `dyn` box. This isolates
+    /// exactly that delta, side by side in one binary. It is
     /// `#[ignore]`d and assertion-free (it prints timings), like native.rs's
     /// `bench_identity_path_avoids_clone_and_qasm_roundtrip`.
     ///
@@ -241,7 +273,7 @@ mod tests {
             let old_ns = t0.elapsed().as_secs_f64() * 1e9 / N as f64;
 
             // (b) new cost: the `Foreign` variant's `duplicate` == `clone_boxed`,
-            // i.e. a boxed `QiskitCircuit(clone_ref)`.
+            // i.e. a boxed `QiskitCircuit(Arc::clone)`.
             let foreign = QiskitCircuit::into_bound(obj.clone_ref(py));
             let t0 = Instant::now();
             for _ in 0..N {

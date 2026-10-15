@@ -23,8 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -36,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/ruff-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/ruff-action@4919ec5cf1f49eff0871dbcea0da843445b837e6 # v3.6.1
         with:
           # Pin ruff so a new release's changed default rules / formatter output
           # cannot turn CI red without a deliberate bump. Keep in sync with the
@@ -53,8 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
 
@@ -69,8 +69,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
       - name: Verify Cargo.lock is in sync with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
@@ -79,16 +79,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs to locate a Python interpreter even for a
       # `cargo check`/clippy build of the `polypus` crate.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Default features only. Do NOT add --all-features here: the `polypus`
       # crate's `extension-module` feature tells PyO3 not to link libpython,
       # which breaks building the test/bench targets that --all-targets compiles.
@@ -112,12 +112,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@69084b241933c14c2fa24234c4596f11a2655339 # tip of 1.85.0 branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check (workspace, default features)
         run: cargo check --locked --workspace --all-targets
       - name: Check (qmio backend)
@@ -130,15 +130,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3 links libpython at build time, and the PyO3-touching crates' tests
       # start a bare embedded interpreter. No Python package is installed: the
       # Rust tests need no Qiskit/Aer/polypus_python (docs/ENGINEERING.md §3).
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
       # whose results must be bit-identical to the sequential path).
       # `polypus-subprocess-backend` is pyo3-free (belongs here), but its
@@ -201,13 +201,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs a Python interpreter to compile `polypus`.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build docs (no deploy)
         run: cargo doc --locked --workspace --no-deps
         env:
@@ -231,12 +231,12 @@ jobs:
           - os: macos-latest
             python-version: "3.9"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install maturin
         run: python -m pip install --upgrade maturin
       # Smoke-test that the full distribution wheel builds — the root
@@ -260,12 +260,12 @@ jobs:
       matrix:
         python-version: ["3.9", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip maturin pytest
@@ -285,6 +285,21 @@ jobs:
         run: python -m compileall -q examples benchmarks
       - name: Run Python tests
         run: pytest tests/python
+      # The hand-written typing stubs (python/polypus/*.pyi) must match the
+      # compiled extension just installed: stubtest fails on a renamed or
+      # missing parameter, a changed default or a name the stubs do not declare.
+      # mypy comes from requirements-dev.txt, where it is pinned; it needs
+      # Python >= 3.10, so only the latest leg runs this. The stubs use only
+      # `typing`, so they stay valid for 3.9 users.
+      - name: Check typing stubs against the extension (stubtest)
+        if: matrix.python-version == '3.13'
+        env:
+          # Importing polypus would otherwise calibrate the machine (#176).
+          POLYPUS_NO_AUTOCALIBRATE: "1"
+        run: >
+          python -m mypy.stubtest polypus
+          --allowlist tests/python/stubtest_allowlist.txt
+          --mypy-config-file tests/python/stubtest_mypy.ini
 
   # Execute every tutorial notebook headless against this PR's own build, so a
   # broken notebook (a stale API call, a typo introduced while editing) fails
@@ -300,12 +315,12 @@ jobs:
       # Headless: no display available on the runner.
       MPLBACKEND: Agg
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
       # Same pattern as the python-tests job: build the full wheel (extension
@@ -339,9 +354,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f0d5300ba8908d942c808f4d31c08471d7798ba3 # tip of nightly branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       # Seeds from the committed corpora (fuzz/corpus/<target>). A crash or

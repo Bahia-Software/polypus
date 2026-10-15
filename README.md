@@ -141,7 +141,7 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO` or `polypus.QN
 |---|---|---|---|---|
 | `"local"` | `"aer"` (default) | Qiskit Aer | Yes | Full Qiskit circuit support |
 | `"local"` | `"polypus"` | Native Rust statevector | Yes | Terminal measurements only ([ADR 0001](https://github.com/Bahia-Software/polypus/blob/main/docs/adr/0001-terminal-measurements.md)) |
-| `"cunqa"` | | CUNQA QPUs over SLURM | Yes | `nodes` and `cores_per_qpu` size the allocation |
+| `"cunqa"` | | CUNQA QPUs over SLURM | Yes | `nodes`, `cores_per_qpu` and `walltime` (`HH:MM:SS`) size the allocation |
 | `"qmio"` | | QMIO quantum processor | No | Pure-Rust ZeroMQ client; build with `--features qmio` |
 
 `polypus.backend_compatibility(qc)` lists, for each backend, why it would reject a circuit, without running it. Third-party backends plug in through a Rust trait or a Python worker; see [Writing a backend](https://github.com/Bahia-Software/polypus/blob/main/docs/backends.md).

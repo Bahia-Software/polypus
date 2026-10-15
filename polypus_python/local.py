@@ -1,3 +1,5 @@
+import threading
+from collections import OrderedDict
 from functools import lru_cache
 
 from qiskit import ClassicalRegister, QuantumCircuit
@@ -5,6 +7,7 @@ from qiskit.circuit import CONTROL_FLOW_OP_NAMES
 from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
 from qiskit.result import marginal_distribution
 from qiskit.transpiler import PassManager
+from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.passes import BasisTranslator, HighLevelSynthesis
 from qiskit_aer import AerSimulator
 
@@ -53,19 +56,6 @@ def _raise_if_out_of_memory(result, max_memory_mb):
             )
 
 
-def _ensure_quantum_circuits(qcs):
-    """Accept both Qiskit ``QuantumCircuit`` objects and OpenQASM 2.0 strings.
-
-    Circuits built with the native Rust layer (``polypus.Circuit``) cross the
-    FFI boundary as QASM text; they are parsed here, at the last possible
-    moment, because AerSimulator needs ``QuantumCircuit`` instances. Future
-    backends that speak QASM natively can skip this step entirely.
-    """
-    return [
-        QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc for qc in qcs
-    ]
-
-
 def _has_measurement(qc):
     """Whether ``qc`` contains a ``measure`` anywhere, control-flow bodies
     included. Scanned from the end: measurements are terminal in the common
@@ -84,10 +74,14 @@ def _aer_basis():
     """The instruction names the default ``AerSimulator()``'s target supports.
     Built on first use, not at import: the extension imports this package at
     runtime. The *default* simulator, whatever ``sim_method`` or
-    ``noise_model`` a run asks for: a method-specific basis is smaller (a
-    ``noise_model`` cuts it from 98 to 40 gates), and lowering into it would
-    rewrite circuits Aer runs as they are or turn a method's own refusal into a
-    transpiler error."""
+    ``noise_model`` a run asks for. Either one narrows the simulator's target,
+    not what Aer runs: a ``noise_model`` cuts it to ``cx``, ``id``, ``rz``,
+    ``sx`` and the gates the model names (98 to 40 names for an error on
+    ``cx`` alone), yet Aer still runs every gate of the default basis under
+    it, noiseless unless the model names it, as it does for a circuit it
+    receives unlowered. Lowering into that narrower basis would rewrite gates
+    Aer runs as they are (``h`` into ``rz`` and ``sx``, moving where the noise
+    falls); what a ``sim_method`` cannot hold stays Aer's own refusal."""
     return frozenset(AerSimulator().target.operation_names)
 
 
@@ -143,7 +137,19 @@ def _rewrite_into_aer_basis(qc, supported):
     method among them. The names are Aer's own, not only Qiskit's standard
     gates: ``mcx`` (Qiskit's ``c3x``/``c4x``) stays ``mcx``. A fresh pass
     manager per call shares no state between threads. Returns a new circuit:
-    the caller's is never modified."""
+    the caller's is never modified.
+
+    A control-flow operation outside ``supported`` (today ``box``), at any
+    depth, cannot be rewritten: it is refused first, with the
+    ``TranspilerError`` ``transpile`` raises for one at the top level. The
+    basis translator's own error for it lists the circuit's operations and the
+    whole basis in an order that changes from call to call (issue #307)."""
+    unsupported = _control_flow_outside(qc, supported)
+    if unsupported is not None:
+        raise TranspilerError(
+            f"The control-flow construct '{unsupported}' is not supported by the "
+            "backend."
+        )
     names = sorted(supported)
     return PassManager(
         [
@@ -153,6 +159,109 @@ def _rewrite_into_aer_basis(qc, supported):
             BasisTranslator(SessionEquivalenceLibrary, names),
         ]
     ).run(qc)
+
+
+def _control_flow_outside(qc, supported):
+    """The name of the first control-flow operation of ``qc`` that is not in
+    ``supported``, looking into the bodies of those that are, or ``None``.
+    ``count_ops`` order, deterministic for a given circuit."""
+    names = qc.count_ops()
+    for name in names:
+        if name in CONTROL_FLOW_OP_NAMES and name not in supported:
+            return name
+    if CONTROL_FLOW_OP_NAMES.isdisjoint(names):
+        return None
+    for instruction in qc.data:
+        if instruction.operation.name not in CONTROL_FLOW_OP_NAMES:
+            continue
+        for block in instruction.operation.blocks:
+            found = _control_flow_outside(block, supported)
+            if found is not None:
+                return found
+    return None
+
+
+class _LoweredQasmCache:
+    """The lowered circuits of the last OpenQASM programs that needed lowering,
+    keyed by their text. Least recently used first out, bounded both in entries
+    and in total instructions; a circuit larger than the instruction bound is
+    not kept. Thread-safe: a lock guards every access, never the lowering
+    itself, so two threads missing the same text at once both lower it (to the
+    same circuit) and the second store overwrites the first."""
+
+    def __init__(self, max_entries=64, max_instructions=200_000):
+        self._max_entries = max_entries
+        self._max_instructions = max_instructions
+        self._entries = OrderedDict()
+        self._instructions = 0
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._entries)
+
+    def get(self, text):
+        with self._lock:
+            lowered = self._entries.get(text)
+            if lowered is not None:
+                self._entries.move_to_end(text)
+            return lowered
+
+    def put(self, text, lowered):
+        size = len(lowered.data)
+        if size > self._max_instructions:
+            return
+        with self._lock:
+            previous = self._entries.pop(text, None)
+            if previous is not None:
+                self._instructions -= len(previous.data)
+            self._entries[text] = lowered
+            self._instructions += size
+            while (
+                len(self._entries) > self._max_entries
+                or self._instructions > self._max_instructions
+            ):
+                _, evicted = self._entries.popitem(last=False)
+                self._instructions -= len(evicted.data)
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+            self._instructions = 0
+
+
+_LOWERED_QASM = _LoweredQasmCache()
+
+
+def _for_aer(qc):
+    """The circuit Aer runs for ``qc``: a ``QuantumCircuit`` or an OpenQASM 2.0
+    string, lowered into Aer's basis when it needs it (``_lower_to_aer_basis``).
+
+    Circuits built with the native Rust layer (``polypus.Circuit``) cross the
+    FFI boundary as QASM text and are parsed here, at the last possible moment,
+    because AerSimulator needs ``QuantumCircuit`` instances. Parsing builds the
+    instructions anew, the definitions of declared gates included, and
+    unrolling those definitions is most of the lowering's cost (it roughly
+    doubles per qubit in MQT Bench's Grover files). So a text that needed
+    lowering keeps its lowered circuit in ``_LOWERED_QASM``: running the same
+    program again, or on several QPUs, neither parses nor lowers it again. The
+    parse is deterministic, so the circuit kept is the one lowering the text
+    afresh gives. It is shared between calls and never modified: only Aer reads
+    it, and ``_with_full_readout`` copies before adding its register. A text
+    already in the basis is not kept, so a loop of changing angles does not
+    evict the programs that need lowering. A ``QuantumCircuit`` is mutable and
+    is lowered on each call; Qiskit keeps the definitions it built on the
+    caller's instructions, so lowering it again costs much less."""
+    if not isinstance(qc, str):
+        return _lower_to_aer_basis(qc)
+    lowered = _LOWERED_QASM.get(qc)
+    if lowered is not None:
+        return lowered
+    parsed = QuantumCircuit.from_qasm_str(qc)
+    lowered = _lower_to_aer_basis(parsed)
+    if lowered is not parsed:
+        _LOWERED_QASM.put(qc, lowered)
+    return lowered
 
 
 def _with_full_readout(qc):
@@ -202,10 +311,7 @@ class Local(Infraestructure):
     def run_qcs(self, **args) -> object:
         # Lowering comes first: the read-out register is added to the lowered
         # circuit, whose qubits and classical bits keep their order.
-        prepared = [
-            _with_full_readout(_lower_to_aer_basis(qc))
-            for qc in _ensure_quantum_circuits(args["qcs"])
-        ]
+        prepared = [_with_full_readout(_for_aer(qc)) for qc in args["qcs"]]
         qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
         sim_method = args.get("sim_method", "automatic")

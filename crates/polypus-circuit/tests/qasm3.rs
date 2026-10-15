@@ -369,6 +369,39 @@ fn declared_clbits_is_the_sum_of_the_bit_registers() {
     assert_eq!(import(&exported).to_qasm3().unwrap(), exported);
 }
 
+/// The export writes the declared width as `bit[<clbits_width>] c;` (C-10):
+/// a register wider than the bits written, several registers as one, and a
+/// program without measurements keep their width. A full measurement into a
+/// wider register is written bit by bit.
+#[test]
+fn declared_clbits_is_exported() {
+    let cases = [
+        (
+            "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
+            "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
+        ),
+        (
+            "qubit[2] q;\nbit[2] a;\nbit b;\nb = measure q[1];\n",
+            "qubit[2] q;\nbit[3] c;\nc[2] = measure q[1];\n",
+        ),
+        (
+            "qubit[2] q;\nbit[3] c;\nh q[0];\n",
+            "qubit[2] q;\nbit[3] c;\nh q[0];\n",
+        ),
+        (
+            "qubit[2] q;\nbit[4] c;\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+            "qubit[2] q;\nbit[4] c;\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+        ),
+    ];
+    for (body, exported) in cases {
+        let qc = import(&format!("{HEADER}{body}"));
+        let expected = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n{exported}");
+        assert_eq!(qc.to_qasm3().unwrap(), expected, "{body}");
+        assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), expected, "{body}");
+        assert_eq!(import(&expected).to_qasm3().unwrap(), expected, "{body}");
+    }
+}
+
 #[test]
 fn barriers() {
     assert_eq!(

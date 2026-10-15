@@ -891,3 +891,26 @@ fn declared_width_is_part_of_eq_and_kept_by_clone() {
     assert_eq!(wide.clone().declared_clbits(), Some(7));
     assert_eq!(wide.h(1).declared_clbits(), Some(7));
 }
+
+/// A measurement within the declared registers leaves their width; one past
+/// them widens it (see `the_width_is_never_narrower_than_the_measurements`).
+#[test]
+fn a_measurement_within_the_declared_width_keeps_it() {
+    let qc =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[6];\nh q[0];\n"))
+            .unwrap()
+            .measure(1, 4);
+    assert_eq!((qc.clbits_width(), qc.num_clbits()), (6, 5));
+    assert_eq!(qc.assign_parameters(&[]).unwrap().clbits_width(), 6);
+}
+
+/// A zero-size register is a parse error, so an imported program never
+/// declares an empty classical register: `declared_clbits` is `None` or at
+/// least 1.
+#[test]
+fn a_zero_size_creg_is_rejected() {
+    let err =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[1];\ncreg c[0];\n")).unwrap_err();
+    assert!(matches!(err, CircuitError::Parse { .. }), "{err:?}");
+    assert!(err.to_string().contains("register 'c' has size 0"), "{err}");
+}
