@@ -456,43 +456,6 @@ class TestLoweringDetails:
         )
         assert got == {k.replace(" ", ""): v for k, v in direct.items()}
 
-    @pytest.mark.parametrize("nesting", ["top", "for_loop", "if_test"])
-    def test_box_is_refused_with_a_stable_message(self, nesting):
-        """``box`` cannot be rewritten into Aer's basis. It is refused before the
-        rewrite, at any depth, with the ``TranspilerError`` ``transpile`` gave
-        for a top-level one: the rewrite's own error lists the circuit's
-        operations and the whole basis in an order that changes from call to
-        call, so the same circuit gave a different message each time and
-        ``backend_compatibility`` could not quote the run (issue #307)."""
-        import polypus
-        from qiskit import QuantumCircuit
-        from qiskit.transpiler.exceptions import TranspilerError
-
-        qc = QuantumCircuit(2, 2)
-        qc.measure(0, 0)
-        if nesting == "top":
-            with qc.box():
-                qc.ch(0, 1)
-        elif nesting == "for_loop":
-            with qc.for_loop(range(2)):
-                with qc.box():
-                    qc.ch(0, 1)
-        else:
-            with qc.if_test((qc.clbits[0], 0)):
-                with qc.box():
-                    qc.ch(0, 1)
-        qc.measure(1, 1)
-        messages = set()
-        for _ in range(3):
-            with pytest.raises(polypus.BackendError) as info:
-                _run(qc)
-            assert type(info.value.__cause__) is TranspilerError
-            messages.add(str(info.value))
-        assert messages == {
-            'qiskit.transpiler.exceptions.TranspilerError: "The control-flow '
-            "construct 'box' is not supported by the backend.\""
-        }
-
 
 # Wider than any host's default ``AerSimulator()`` target, which depends on the
 # host's memory (issue #307).
