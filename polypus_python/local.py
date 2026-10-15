@@ -5,6 +5,7 @@ from qiskit.circuit import CONTROL_FLOW_OP_NAMES
 from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
 from qiskit.result import marginal_distribution
 from qiskit.transpiler import PassManager
+from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.passes import BasisTranslator, HighLevelSynthesis
 from qiskit_aer import AerSimulator
 
@@ -143,7 +144,19 @@ def _rewrite_into_aer_basis(qc, supported):
     method among them. The names are Aer's own, not only Qiskit's standard
     gates: ``mcx`` (Qiskit's ``c3x``/``c4x``) stays ``mcx``. A fresh pass
     manager per call shares no state between threads. Returns a new circuit:
-    the caller's is never modified."""
+    the caller's is never modified.
+
+    A control-flow operation outside ``supported`` (today ``box``), at any
+    depth, cannot be rewritten: it is refused first, with the
+    ``TranspilerError`` ``transpile`` raises for one at the top level. The
+    basis translator's own error for it lists the circuit's operations and the
+    whole basis in an order that changes from call to call (issue #307)."""
+    unsupported = _control_flow_outside(qc, supported)
+    if unsupported is not None:
+        raise TranspilerError(
+            f"The control-flow construct '{unsupported}' is not supported by the "
+            "backend."
+        )
     names = sorted(supported)
     return PassManager(
         [
@@ -153,6 +166,26 @@ def _rewrite_into_aer_basis(qc, supported):
             BasisTranslator(SessionEquivalenceLibrary, names),
         ]
     ).run(qc)
+
+
+def _control_flow_outside(qc, supported):
+    """The name of the first control-flow operation of ``qc`` that is not in
+    ``supported``, looking into the bodies of those that are, or ``None``.
+    ``count_ops`` order, deterministic for a given circuit."""
+    names = qc.count_ops()
+    for name in names:
+        if name in CONTROL_FLOW_OP_NAMES and name not in supported:
+            return name
+    if CONTROL_FLOW_OP_NAMES.isdisjoint(names):
+        return None
+    for instruction in qc.data:
+        if instruction.operation.name not in CONTROL_FLOW_OP_NAMES:
+            continue
+        for block in instruction.operation.blocks:
+            found = _control_flow_outside(block, supported)
+            if found is not None:
+                return found
+    return None
 
 
 def _with_full_readout(qc):
