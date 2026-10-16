@@ -32,9 +32,8 @@
 //!   a dead in-process interpreter is a crash of *our* process, not a recoverable
 //!   "backend stopped responding". A clean provider error *is* produced (an Aer
 //!   failure → `External`). Finding **LOCAL-1** (an empty batch raised through the seal)
-//!   is fixed: it returns `Ok(vec![])`. Finding **LOCAL-2**: the seal ignores the
-//!   `backend` kwarg; it is recorded, not fixed (it lives outside this phase's module
-//!   scope).
+//!   is fixed: it returns `Ok(vec![])`. Finding **LOCAL-2** (`run_qcs` kwargs the seal
+//!   never read: `backend` and `id`) is fixed: Rust no longer sends them (issue #230).
 //! - **QMIO**: finding **QMIO-1**: a `Foreign` circuit is wrapped in `External` rather
 //!   than the contract's `UnsupportedCircuit`. Its wire timeout maps to `External`
 //!   (definitive) rather than `Unresponsive` — a deliberate choice, since QMIO exhausts
@@ -124,7 +123,6 @@ fn local_aer_backend_conformance() {
     }
     let report = Conformance::new("local-aer", || {
         Ok(Arc::new(LocalBackend::new(
-            "AerSimulator".to_string(),
             "statevector".to_string(),
             None,
         )) as Arc<dyn QuantumBackend>)
@@ -135,7 +133,6 @@ fn local_aer_backend_conformance() {
     // Unresponsive/Aborted factory — the seal-delegating backend cannot produce those.)
     .fault(Fault::CleanError, || {
         Ok(Arc::new(LocalBackend::new(
-            "AerSimulator".to_string(),
             "not_a_real_sim_method".to_string(),
             None,
         )) as Arc<dyn QuantumBackend>)
@@ -181,7 +178,6 @@ fn cunqa_backend_conformance_is_environment_gated() {
         n_qpus: 1,
         infrastructure: "cunqa".to_string(),
         backend_config: BackendConfig::Cunqa {
-            backend: "AerSimulator".to_string(),
             sim_method: "statevector".to_string(),
             nodes: 1,
             cores_per_qpu: 1,
