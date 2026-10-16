@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// The QPU-release operation, boxed so it can capture the CUNQA family handle
 /// obtained at construction, and injectable so the panic-safety of `Drop` can be
@@ -52,6 +53,11 @@ impl std::error::Error for InvalidWalltime {}
 /// below 60, and the total is greater than zero. SLURM's `D-HH:MM:SS` and the
 /// shorter `MM:SS` / `MM` forms are rejected.
 pub fn validate_walltime(walltime: &str) -> Result<(), InvalidWalltime> {
+    parse_walltime(walltime).map(|_| ())
+}
+
+/// Parse a walltime accepted by [`validate_walltime`] into its duration.
+pub fn parse_walltime(walltime: &str) -> Result<Duration, InvalidWalltime> {
     let err = |reason| InvalidWalltime {
         value: walltime.to_string(),
         reason,
@@ -76,7 +82,13 @@ pub fn validate_walltime(walltime: &str) -> Result<(), InvalidWalltime> {
     if [h, m, s].iter().all(|f| f.bytes().all(|b| b == b'0')) {
         return Err(err("the walltime must be greater than zero"));
     }
-    Ok(())
+    // Fields are validated digits; an hour count beyond `u64` saturates.
+    let field = |f: &str| f.parse::<u64>().unwrap_or(u64::MAX);
+    let seconds = field(h)
+        .saturating_mul(3600)
+        .saturating_add(field(m) * 60)
+        .saturating_add(field(s));
+    Ok(Duration::from_secs(seconds))
 }
 
 /// CunqaBackend: runs quantum circuits on the CUNQA distributed QPU platform.
@@ -91,6 +103,8 @@ pub struct CunqaBackend {
     /// Number of physical QPUs in the allocation. Bounds how many circuits can
     /// be dispatched per `run_circuits` call (one circuit per QPU).
     n_qpus: u32,
+    /// SLURM walltime the QPUs were raised with (see [`QuantumBackend::walltime`]).
+    walltime: Option<Duration>,
     /// Native-circuit transpiler applied before submission. CUNQA's simulated
     /// QPUs transpile internally, so this defaults to the no-op
     /// [`IdentityTranspiler`] and the observable behavior is unchanged.
@@ -185,6 +199,11 @@ impl QuantumBackend for CunqaBackend {
         Some(self.n_qpus)
     }
 
+    /// The QPUs are released when their SLURM walltime runs out.
+    fn walltime(&self) -> Option<Duration> {
+        self.walltime
+    }
+
     fn close(&self) {
         // Idempotent: only the first call actually releases the allocation.
         if self.closed.swap(true, Ordering::SeqCst) {
@@ -237,6 +256,9 @@ impl CunqaBackend {
             "Raising QPUs in CUNQA: n_qpus={n_qpus}, nodes={nodes}, id={id}, cores_per_qpu={cores_per_qpu}, walltime={walltime}"
         );
         let family = raise_qpus(n_qpus, nodes, id, cores_per_qpu, walltime)?;
+        // The edge validated the string; one that does not parse here only loses
+        // the overrun warning, never the run.
+        let walltime = parse_walltime(walltime).ok();
         // Capture the family handle in the release closure; it is the only thing
         // `drop_qpus` needs, and keeping it here (rather than as a struct field)
         // keeps the release operation self-contained and injectable.
@@ -246,6 +268,7 @@ impl CunqaBackend {
             backend,
             sim_method,
             n_qpus,
+            walltime,
             transpiler: Box::new(IdentityTranspiler),
             release,
         })
@@ -262,6 +285,7 @@ impl CunqaBackend {
             backend: String::new(),
             sim_method: String::new(),
             n_qpus: 1,
+            walltime: None,
             transpiler: Box::new(IdentityTranspiler),
             release,
         }
@@ -341,6 +365,24 @@ mod tests {
         ] {
             assert_eq!(validate_walltime(ok), Ok(()), "{ok:?} must be accepted");
         }
+    }
+
+    #[test]
+    fn parse_walltime_returns_the_duration() {
+        for (text, secs) in [
+            (DEFAULT_WALLTIME, 36_000),
+            ("48:00:00", 172_800),
+            ("1:02:03", 3_723),
+            ("00:00:01", 1),
+            ("99999999999999999999:00:00", u64::MAX),
+        ] {
+            assert_eq!(
+                parse_walltime(text),
+                Ok(Duration::from_secs(secs)),
+                "{text:?}"
+            );
+        }
+        assert!(parse_walltime("00:00:00").is_err());
     }
 
     #[test]

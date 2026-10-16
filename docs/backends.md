@@ -176,6 +176,27 @@ nothing is refused against the fallback. A backend whose memory is not a dense
 statevector should likewise defer to its own validation rather than call
 `check_statevector_fits`.
 
+### Allocation walltime
+
+A backend whose execution units expire overrides `walltime()` to return how long
+they live. CUNQA returns the `walltime` its QPUs were raised with (`HH:MM:SS`,
+default `10:00:00`); SLURM releases them when it runs out, even mid-run. Every other
+built-in backend keeps the default `None`.
+
+When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
+times the first generation (the initial population for DE and PSO, the first
+iteration for QNG), multiplies it by the generation budget and logs one `warn` if
+the projection exceeds the walltime:
+
+```text
+run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
+may take up to 3:22:00, beyond the 3:00:00 walltime; the QPUs are released when it
+runs out. Raise `walltime` or lower the generations.
+```
+
+The projection is an upper bound, since early stopping only shortens a run. Nothing
+is enforced, and backends that return `None` are not timed at all.
+
 ### Cancellation
 
 Three things interact, by design:
