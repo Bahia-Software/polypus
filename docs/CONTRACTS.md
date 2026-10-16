@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -78,8 +78,8 @@ at backend construction), whose charset is constrained by C-9.
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
-| cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
+| local | `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
+| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
 `max_memory_mb` is sent by the local backend **only when the memory budget is a
 known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
@@ -89,21 +89,21 @@ passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
 absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
 lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
 
-`id` / `family_id` are the run id (`RunParams::id`, derived from
-`ExecutionConfig::id`), whose charset is constrained by C-9. `qcs` elements are
+`family_id` is the run id (`RunParams::id`, derived from
+`ExecutionConfig::id`), whose charset is constrained by C-9; only CUNQA receives
+it, as the name of the family to run on. The local seal receives no run id: it
+creates nothing named after the run, and the id reaches the caller in
+`RunResult.id`. Neither seal receives a `backend` kwarg: the local seal always
+runs Aer's `AerSimulator` (the caller's `backend="aer"` / `"polypus"` choice is
+resolved on the Rust side before any seam call), and CUNQA picks no simulator
+class per job (the vQPU's is set at `qraise`, from `POLYPUS_CUNQA_BACKEND`).
+`tests/python/test_seam_contract.py` pins the exact kwarg set each backend sends
+and checks, by reading the seal's source, that `Local.run_qcs` and
+`Cunqa.run_qcs` read every one of them. `qcs` elements are
 either Qiskit `QuantumCircuit` objects or OpenQASM 2.0 strings; the Python side
 parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
-
-*(Known break, audit LOCAL-2, open: the `local` path's `run_qcs` receives the
-`backend` kwarg the Rust side sends but never consumes it — the Python side
-hard-codes `AerSimulator`. This is the same "must-be-consumed" violation as
-`cores_per_qpu` above. Surfaced by the Fase-5 conformance run (see
-`docs/backends.md` §"Conformance of the built-in backends"); recorded here and not
-yet fixed, because the fix lives in the `polypus_python` seal, outside that phase's
-module scope. Its resolution is either to consume the kwarg on the Python side or to
-stop sending it from `local.rs`.)*
 
 ### `disconnect_from_infrastructure(infrastructure: str, **kwargs)`
 

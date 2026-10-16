@@ -146,8 +146,6 @@ where
 pub enum BackendConfig {
     /// Local Qiskit Aer simulator.
     Local {
-        /// Backend/device class name forwarded to Python (e.g. `"AerSimulator"`).
-        backend: String,
         /// Aer simulation method: `"automatic"`, `"statevector"`, `"matrix_product_state"`, …
         sim_method: String,
         /// Optional Qiskit `NoiseModel` forwarded to the Aer backend.
@@ -170,8 +168,6 @@ pub enum BackendConfig {
     },
     /// CUNQA distributed QPU platform (SLURM-managed HPC).
     Cunqa {
-        /// Backend/device class name forwarded to CUNQA.
-        backend: String,
         /// Simulation method for CUNQA's simulated QPUs.
         sim_method: String,
         /// Number of cluster nodes to reserve.
@@ -220,11 +216,9 @@ impl Clone for BackendConfig {
     fn clone(&self) -> Self {
         match self {
             BackendConfig::Local {
-                backend,
                 sim_method,
                 noise_model,
             } => BackendConfig::Local {
-                backend: backend.clone(),
                 sim_method: sim_method.clone(),
                 noise_model: noise_model
                     .as_ref()
@@ -232,13 +226,11 @@ impl Clone for BackendConfig {
             },
             BackendConfig::LocalNative { fusion } => BackendConfig::LocalNative { fusion: *fusion },
             BackendConfig::Cunqa {
-                backend,
                 sim_method,
                 nodes,
                 cores_per_qpu,
                 walltime,
             } => BackendConfig::Cunqa {
-                backend: backend.clone(),
                 sim_method: sim_method.clone(),
                 nodes: *nodes,
                 cores_per_qpu: *cores_per_qpu,

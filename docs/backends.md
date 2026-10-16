@@ -665,21 +665,21 @@ consequences the battery makes concrete:
   `polypus.BackendError` with the original as `__cause__`, and any other exception
   verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
 
-Findings (LOCAL-1 is fixed; the others are **documented, not fixed** — they live in
-the seal or `qmio.rs`, outside the phase's module scope):
+Findings (LOCAL-1, LOCAL-2 and QMIO-1 are fixed):
 
 - **LOCAL-1 — an empty batch raised (fixed).** `LocalBackend::run_circuits(&[])` used
   to fail with `ValueError: not enough values to unpack (expected 2, got 0)` from the
   seal. `LocalBackend` and `CunqaBackend` now short-circuit an empty batch to
   `Ok(vec![])`, as the native backend does (issue #229).
-- **LOCAL-2 — the `backend` kwarg is ignored (a C-1 contract violation).**
-  `LocalBackend` sends a `backend` kwarg to the seal's `run_qcs`, but the seal's local
-  path never reads it (it hard-codes `AerSimulator`). This is not cosmetic: contract
-  C-1 states that every kwarg the Rust side sends **must be consumed**, and silently
-  ignoring one is "a contract violation" — the same class of break as the historical
-  `cores_per_qpu` one. It is now recorded in the C-1 known-breaks list in
-  [`docs/CONTRACTS.md`](CONTRACTS.md) (audit LOCAL-2, open). Proposed fix: consume it
-  in the seal or stop sending it from `local.rs`.
+- **LOCAL-2 — unread `run_qcs` kwargs (a C-1 contract violation; fixed).**
+  `LocalBackend` sent `backend` and `id` to the seal's `run_qcs`, and `CunqaBackend`
+  sent `backend`, but neither seal read them (the local one hard-codes
+  `AerSimulator`). Contract C-1 states that every kwarg the Rust side sends **must be
+  consumed** — the same class of break as the historical `cores_per_qpu` one. Rust no
+  longer sends the three, and `LocalBackend`, `CunqaBackend` and their
+  `BackendConfig` variants lost the `backend` field (issue #230).
+  `tests/python/test_seam_contract.py` now checks that each seal reads every kwarg
+  Rust sends.
 
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
 row is by analysis: it shares the seal-delegation profile above.
@@ -825,14 +825,10 @@ Run against an unreachable endpoint:
   `infrastructure="qmio"` with a `ValueError` before the backend runs, so this class is seen by
   Rust callers of the backend.
 
-### Status of the open findings
+### Status of the findings
 
-| Finding | Severity | Reachable today | Fix touches | Deferred because |
-|---|---|---|---|---|
-| LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
-
-LOCAL-2 is recorded, not fixed: the only edit to a contract document for it is a **record**
-in the C-1 known-breaks list of [`docs/CONTRACTS.md`](CONTRACTS.md). QMIO-1 is fixed.
+LOCAL-1 (issue #229), LOCAL-2 (issue #230) and QMIO-1 (issue #231) are fixed; no
+conformance finding is open.
 
 ## Stability commitment
 
