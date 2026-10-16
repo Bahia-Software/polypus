@@ -309,6 +309,59 @@ class TestCunqaAllocationValidation:
             )
 
 
+class TestCunqaRejectsWhatItCannotHonour:
+    """CUNQA's QPUs run Aer with a simulator fixed when they are raised, so a
+    non-Aer ``backend`` or a ``noise_model`` is a ``ValueError`` at the edge.
+    The error comes before the seam, so these tests need no ``cunqa``."""
+
+    @pytest.mark.parametrize("backend", ["polypus", "foo"])
+    def test_non_aer_backend_rejected(self, backend):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="unknown cunqa backend"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", backend=backend
+            )
+
+    def test_noise_model_rejected(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="noise_model"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", noise_model=object()
+            )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"backend": "foo"}, "unknown cunqa backend"),
+            ({"noise_model": object()}, "noise_model"),
+        ],
+        ids=["backend", "noise_model"],
+    )
+    def test_rejected_in_train(self, simple_expectation_fn, kwargs, match):
+        """The same guard protects the train() entry point."""
+        import polypus
+
+        qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
+        with pytest.raises(ValueError, match=match):
+            polypus.train(
+                qc,
+                polypus.DE(generations=2, population_size=4),
+                shots=100,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="cunqa",
+                nodes=1,
+                cores_per_qpu=2,
+                id=f"test_train_cunqa_rejects_{next(iter(kwargs))}",
+                **kwargs,
+            )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────

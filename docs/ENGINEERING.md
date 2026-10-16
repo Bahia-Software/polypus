@@ -452,6 +452,11 @@ Additionally:
   from a QPU, backend or network peer must treat that data as **untrusted**
   and must not use a deserializer capable of executing code. Do not introduce
   dependencies that reintroduce a deserialization-RCE surface.
+- **Unauthenticated transport:** the QMIO ZeroMQ link is neither encrypted nor
+  authenticated, and the backend has no default endpoint. The assumed threat model
+  and the decision to rely on the private network (or a tunnel) are in
+  [`backends.md`](backends.md#qmio-transport-threat-model). Do not reintroduce a
+  hard-coded endpoint fallback.
 - The `zeromq` crate was chosen because it is **pure Rust** (no C `libzmq`
   build dependency, at the cost of an async tokio API). Do not replace it
   with a C binding without an explicit trade-off discussion with the
@@ -490,8 +495,8 @@ names only, so Qiskit is never imported for it.
 
 Argument-conversion errors are PyO3's, not ours. When a `#[pyfunction]` /
 `#[pymethods]` argument fails to convert, the caller gets the conversion's own
-exception (for an angle, `TypeError: angle must be a number or polypus.Param`),
-and since PyO3 0.29 the argument is named in an exception note
+exception (for an angle, `TypeError: angle must be a number, polypus.Param or
+polypus.ParamExpr`), and since PyO3 0.29 the argument is named in an exception note
 (`__notes__ == ["while processing 'theta'"]`) rather than in the message
 (PyO3 ≤ 0.25 raised `argument 'theta': …`). Notes need Python ≥ 3.11, so on
 3.9/3.10 the argument name is not reported at all. This is accepted, not a

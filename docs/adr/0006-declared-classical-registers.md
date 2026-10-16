@@ -3,7 +3,7 @@
 - **Status:** Proposed (2026-10)
 - **Contracts:** [C-2 · Gate vocabulary symmetry](../CONTRACTS.md#c-2--gate-vocabulary-symmetry), [C-3 · Measurement counts format](../CONTRACTS.md#c-3--measurement-counts-format), [C-10 · OpenQASM 3 profile](../CONTRACTS.md#c-10--openqasm-3-profile-with-qiskit-phase-conventions)
 - **Supersedes:** —
-- **Issue / PRs:** #279 (this record, tests and contract text); #311 (the implementation); follows #251
+- **Issue / PRs:** #279 (this record, tests and contract text); #311 (the implementation); #322 (QIR width); #323 (Python `clbits_width`); follows #251
 
 ## Context
 
@@ -51,14 +51,19 @@ As implemented by #311:
 4. **The OpenQASM 2.0 and 3 exports write `clbits_width()`** (`creg c[n];`,
    `bit[n] c;`), also without measurements. A builder circuit declares none and
    exports byte for byte as before.
-5. **QIR is unchanged**: it records only the measured results, and
-   `required_num_results` is `num_clbits()`.
+5. **QIR declares `clbits_width()`** as `required_num_results` (#322; #311
+   had left it at `num_clbits()`) and records only the measured results. It
+   may declare results it never records, as a partial measurement already
+   does: one written at `c[1]` declares 2 and records 1. QMIO's `openqasm`,
+   `qir` and `qir_bitcode` formats submit the same width.
 6. **The native backend reads the declared width from the circuit before any
    transpiler runs** (`NativeSource`, now filled from the `Native` circuit
    too), so a transpiler that rebuilds the circuit with `ConcreteCircuit::new`
    cannot change the keys.
 7. **Python's `Circuit.num_clbits`** keeps returning `num_clbits()`, the
-   implicit register.
+   implicit register; **`Circuit.clbits_width`** returns `clbits_width()`
+   (#323), the width Qiskit's `QuantumCircuit.num_clbits` reports for the
+   same program.
 
 What is modelled is the **total** width — what changes the length of the
 counts' keys. Named registers and their partition are not: `creg a[2]; creg
@@ -106,16 +111,16 @@ of counts (C-3, #206).
 
 ## Open questions (follow-ups)
 
-- **QIR / QMIO parity.** For an imported program whose `creg` is wider than
-  the bits it writes, QMIO's `openqasm` format submits the declared width but
-  its `qir`/`qir_bitcode` formats declare `required_num_results =
-  num_clbits()`, the measured register. Whether QIR should report
-  `clbits_width()` instead (results declared but never recorded) is to be
-  decided separately.
-- **Python `Circuit.num_clbits`.** It reports the implicit register, while
-  Qiskit's `QuantumCircuit.num_clbits` reports the declared width for the same
-  program; whether to expose `clbits_width` (or change `num_clbits`) in Python
-  is to be decided separately.
+- ~~**QIR / QMIO parity.**~~ Decided in #322: `required_num_results` is
+  `clbits_width()` (Decision 5), so QMIO's three formats declare the same
+  width. The alternative, documenting the formats' difference as intended,
+  would have left one program submitted at two widths depending on
+  `program_format`.
+- ~~**Python `Circuit.num_clbits`.**~~ Decided in #323: Python gains
+  `Circuit.clbits_width` (Decision 7) and `num_clbits` keeps its meaning.
+  Changing `num_clbits` to the effective width would match Qiskit but break
+  callers, and C-3's "no measurements ⇒ `num_qubits`-wide keys" relies on it
+  staying 0 for an unmeasured circuit.
 - Letting a builder user declare the width (e.g. `Circuit(3, num_clbits=5)`)
   is new public API no issue asks for yet.
 

@@ -152,7 +152,6 @@ impl Infrastructure {
         register_builtin_backends();
         match &config.backend_config {
             BackendConfig::Local {
-                backend,
                 sim_method,
                 noise_model,
             } => {
@@ -166,14 +165,9 @@ impl Infrastructure {
                     )?),
                     None => None,
                 };
-                Ok(Arc::new(LocalBackend::new(
-                    backend.clone(),
-                    sim_method.clone(),
-                    noise_model,
-                )))
+                Ok(Arc::new(LocalBackend::new(sim_method.clone(), noise_model)))
             }
             BackendConfig::Cunqa {
-                backend,
                 sim_method,
                 nodes,
                 cores_per_qpu,
@@ -184,7 +178,6 @@ impl Infrastructure {
                 &config.id,
                 *cores_per_qpu,
                 walltime,
-                backend.clone(),
                 sim_method.clone(),
             )?)),
             // The Python-facing layer resolves a concrete seed whenever the
@@ -247,7 +240,6 @@ mod tests {
             n_qpus: 1,
             infrastructure: "local".to_string(),
             backend_config: BackendConfig::Local {
-                backend: "AerSimulator".to_string(),
                 sim_method: "statevector".to_string(),
                 noise_model: None,
             },

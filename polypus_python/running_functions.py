@@ -3,22 +3,12 @@ import getpass
 import logging
 import os
 import stat
-import sys
 import tempfile
-import time
 import warnings
 
 from qiskit.exceptions import MissingOptionalLibraryError, QiskitError
 from qiskit.qpy import dump, load
 from qiskit.qpy.exceptions import QpyError
-
-# Optional escape hatch for a non-packaged CUNQA site install (mirrors cunqa.py):
-# a portable, explicit location, unlike the previous unconditional
-# `sys.path.append(os.getenv("HOME"))`, which appended None when HOME was unset.
-_cunqa_path = os.getenv("POLYPUS_CUNQA_PATH")
-if _cunqa_path and _cunqa_path not in sys.path:
-    sys.path.append(_cunqa_path)
-
 
 # Contract C-9, mirrored from `validate_id` in crates/polypus/src/bindings/mod.rs:
 # same charset, same length bound, same order of checks and same messages.
@@ -330,77 +320,3 @@ def serialize_quantum_circuit(id, qc, *, directory=None):
                 os.unlink(partial)
 
     return True
-
-
-def run_qcs_in_qpu(id, qcs, shots):
-    # `id` travels to CUNQA/SLURM as the `family` name (contract C-9); validate
-    # it before the optional import so a bad id is a ValueError, not an
-    # ImportError, and so the `log_message` below cannot raise on it.
-    validate_id(id)
-
-    # counts = []
-    # for i in range(len(qcs)):
-    #     counts.append(AerSimulator().run(qcs[i], shots=shots).result().get_counts(qcs[i]))
-    # return counts
-
-    # CUNQA is an optional dependency; import it only when this path runs.
-    from cunqa.qjob import gather
-    from cunqa.qutils import get_QPUs
-
-    # # Get the QPUs
-    # sys.path.append(os.getenv("HOME"))
-    try:
-        qpus = get_QPUs(local=False, family=id)
-        # log_message(id,f"Time to get QPUs: {time.time() - tic_total}s", "debug")
-    except Exception:
-        # log_message(id,f"Error getting QPUs: {e}", "error")
-        raise
-
-    # Asynchronously run the quantum circuits on the QPUs
-    try:
-        qjobs = []
-        for i in range(len(qcs)):
-            qjob = qpus[i].run(qcs[i], shots=shots, transpile=False)
-            qjobs.append(qjob)
-            # log_message(id,f"Running qpu: {qpus[i]}", "info")
-
-        results = gather(qjobs)
-        # log_message(id, f"Results: {results}", "debug")
-        counts = [result.counts for result in results]
-        return counts
-    except Exception as e:
-        log_message(id, f"Error running quantum circuits on QPUs: {e}", "error")
-        raise
-
-
-def run_qc_in_qpu(id, qc, shots):
-    # As in `run_qcs_in_qpu`: `id` becomes the CUNQA `family` (contract C-9).
-    validate_id(id)
-    # CUNQA is an optional dependency; import it only when this path runs.
-    from cunqa.qjob import gather
-    from cunqa.qutils import get_QPUs
-
-    # Get the QPUs
-    tic_total = time.time()
-    try:
-        qpus = get_QPUs(local=False, family=id)
-        log_message(id, f"Time to get the QPU: {time.time() - tic_total}s", "debug")
-    except Exception as e:
-        log_message(id, f"Error getting QPU: {e}", "error")
-        raise
-
-    # Asynchronously run the quantum circuits on the QPUs
-    try:
-        qjobs = []
-        for i in range(len(qpus)):
-            qjob = qpus[i].run(qc, shots=shots, transpile=False)
-            qjobs.append(qjob)
-            log_message(id, f"Running qpu: {qpus[i]}", "info")
-
-        results = gather(qjobs)
-        log_message(id, f"Results: {results}", "debug")
-        counts = [result.counts for result in results]
-        return counts
-    except Exception as e:
-        log_message(id, f"Error running quantum circuits on QPUs: {e}", "error")
-        raise

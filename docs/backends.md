@@ -176,6 +176,27 @@ nothing is refused against the fallback. A backend whose memory is not a dense
 statevector should likewise defer to its own validation rather than call
 `check_statevector_fits`.
 
+### Allocation walltime
+
+A backend whose execution units expire overrides `walltime()` to return how long
+they live. CUNQA returns the `walltime` its QPUs were raised with (`HH:MM:SS`,
+default `10:00:00`); SLURM releases them when it runs out, even mid-run. Every other
+built-in backend keeps the default `None`.
+
+When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
+times the first generation (the initial population for DE and PSO, the first
+iteration for QNG), multiplies it by the generation budget and logs one `warn` if
+the projection exceeds the walltime:
+
+```text
+run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
+may take up to 3:22:00, beyond the 3:00:00 walltime; the QPUs are released when it
+runs out. Raise `walltime` or lower the generations.
+```
+
+The projection is an upper bound, since early stopping only shortens a run. Nothing
+is enforced, and backends that return `None` are not timed at all.
+
 ### Cancellation
 
 Three things interact, by design:
@@ -615,7 +636,7 @@ have no failure variants of their own).
 | **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
 | **Local (Aer)** | full battery (Aer present) | ✅ pass | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
 | **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
-| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ❌ **QMIO-1** |
+| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ✅ `UnsupportedCircuit` |
 
 ### Native — fully conformant
 
@@ -644,21 +665,21 @@ consequences the battery makes concrete:
   `polypus.BackendError` with the original as `__cause__`, and any other exception
   verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
 
-Findings (LOCAL-1 is fixed; the others are **documented, not fixed** — they live in
-the seal or `qmio.rs`, outside the phase's module scope):
+Findings (LOCAL-1, LOCAL-2 and QMIO-1 are fixed):
 
 - **LOCAL-1 — an empty batch raised (fixed).** `LocalBackend::run_circuits(&[])` used
   to fail with `ValueError: not enough values to unpack (expected 2, got 0)` from the
   seal. `LocalBackend` and `CunqaBackend` now short-circuit an empty batch to
   `Ok(vec![])`, as the native backend does (issue #229).
-- **LOCAL-2 — the `backend` kwarg is ignored (a C-1 contract violation).**
-  `LocalBackend` sends a `backend` kwarg to the seal's `run_qcs`, but the seal's local
-  path never reads it (it hard-codes `AerSimulator`). This is not cosmetic: contract
-  C-1 states that every kwarg the Rust side sends **must be consumed**, and silently
-  ignoring one is "a contract violation" — the same class of break as the historical
-  `cores_per_qpu` one. It is now recorded in the C-1 known-breaks list in
-  [`docs/CONTRACTS.md`](CONTRACTS.md) (audit LOCAL-2, open). Proposed fix: consume it
-  in the seal or stop sending it from `local.rs`.
+- **LOCAL-2 — unread `run_qcs` kwargs (a C-1 contract violation; fixed).**
+  `LocalBackend` sent `backend` and `id` to the seal's `run_qcs`, and `CunqaBackend`
+  sent `backend`, but neither seal read them (the local one hard-codes
+  `AerSimulator`). Contract C-1 states that every kwarg the Rust side sends **must be
+  consumed** — the same class of break as the historical `cores_per_qpu` one. Rust no
+  longer sends the three, and `LocalBackend`, `CunqaBackend` and their
+  `BackendConfig` variants lost the `backend` field (issue #230).
+  `tests/python/test_seam_contract.py` now checks that each seal reads every kwarg
+  Rust sends.
 
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
 row is by analysis: it shares the seal-delegation profile above.
@@ -721,8 +742,9 @@ Like the run, it lowers against the basis of the default `AerSimulator()` whatev
 `sim_method` or `noise_model` the run is given: either one narrows the simulator's
 target (a `noise_model` to `cx`, `id`, `rz`, `sx` and the gates it names), not what
 Aer runs, so neither changes the lowering. A `box` is refused with one fixed message,
-the same in the check and the run. A `polypus.Circuit` with free parameters gets the same
-reason in both entries. The check is **structural**: it runs and connects to nothing,
+the same in the check and the run. A circuit with free parameters, a `polypus.Circuit`
+or a Qiskit `QuantumCircuit`, is rejected by the run with a `ValueError` ("unbound
+parameters") before any backend sees it, and both entries give that message. The check is **structural**: it runs and connects to nothing,
 and does not check resources (the qubit ceiling, memory), so an accepted circuit can
 still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
 which runs every circuit it classifies to confirm the verdict.
@@ -748,6 +770,41 @@ integer (`QMIO_RECV_TIMEOUT_MS=3000O`), or is `0` for a timeout, fails construct
 the default. This matches the registry `options` path, which also rejects malformed numeric
 options.
 
+**Endpoint.** QMIO has no default endpoint. From Python it is read from `ZMQ_SERVER`, and
+`options={"endpoint": "tcp://qmio.example:5556"}` overrides it; from Rust it is the
+`endpoint` registry option (or the argument to `QmioBackend::new`). With none of these, or
+with an empty value, building the backend fails with `polypus.QmioError` (`QmioError::Config`
+in Rust). Up to 0.7 an unset endpoint silently fell back to a hard-coded private address.
+
+#### QMIO transport threat model
+
+The ZeroMQ link to QMIO uses the ZMTP `NULL` mechanism: no encryption and no
+authentication in either direction. The pinned `zeromq` 0.6.0 crate implements only `NULL`
+(it recognises the `CURVE` name in a peer's greeting but has no `CURVE` handshake or API),
+so the backend cannot do better without a different client or an upstream change.
+
+**Assumption.** The client and the QMIO server sit on CESGA's private HPC network, and
+everyone with access to that network is trusted.
+
+**What an attacker on that network can do.** Read the circuits and the results; impersonate
+the server (Polypus does not authenticate it) and return fabricated counts, which pass
+the schema checks if they are well-formed; drop or delay replies; announce a huge frame
+and make the client allocate it before the size cap runs (see `## Security` in
+`qmio.rs`).
+
+**What the client still guarantees.** A hostile reply cannot execute code (`serde-pickle`
+never runs `__reduce__`/`GLOBAL`), cannot crash the process with malformed data (schema
+checks, depth-limited conversion, typed errors), and is never resent blindly after a
+send (`ResultUnknown`). With no endpoint configured the backend refuses to build instead
+of connecting to a guessed host.
+
+**Decision.** Accept the risk inside the trusted network; no transport security in
+Polypus. Off that network, carry the traffic over a tunnel (SSH port forwarding or
+WireGuard) and point the endpoint at the local end, e.g.
+`ssh -N -L 5556:<qmio-host>:5556 <login-node>` with `ZMQ_SERVER=tcp://127.0.0.1:5556`.
+`CURVE` would need server-side keys from CESGA and a client that implements it; it is
+reconsidered if either changes.
+
 Run against an unreachable endpoint:
 
 - **Clean error → `External`.** A wire failure (connect/timeout) is boxed into
@@ -759,30 +816,19 @@ Run against an unreachable endpoint:
   outcome is *definitive*, not retryable — `External` is the honest classification, and
   the battery's `Unresponsive` check is simply not supplied for QMIO (skip). This is a
   deliberate reading of recoverable-vs-fatal, not a defect.
-- **QMIO-1 — a `Foreign` circuit surfaces as `External`, not `UnsupportedCircuit`.**
-  `QmioBackend::run_circuits` maps *every* `QmioError` — including
-  `QmioError::UnsupportedCircuit` for a `Foreign` circuit — into `External`, so a caller
-  matching on `BackendError::UnsupportedCircuit` misses it (it arrives as a
-  `polypus.QmioError` at the edge, not the structural unsupported-circuit error). The
-  foreign-rejection check **fails** for QMIO. Proposed fix: in `run_circuits`, map
-  `QmioError::UnsupportedCircuit` to `BackendError::UnsupportedCircuit` before the
-  catch-all `External`.
+- **A `Foreign` circuit → `UnsupportedCircuit`.** `QmioBackend::run_circuits` maps
+  `QmioError::UnsupportedCircuit` (a Qiskit circuit, which QMIO cannot serialize without the
+  interpreter) to `BackendError::UnsupportedCircuit`; every other `QmioError` stays
+  `External`. The edge raises it as `polypus.NativeCircuitError`, like the native backend.
+  This check passes. It was finding **QMIO-1**: the circuit used to arrive as
+  `External`, a `polypus.QmioError`. The Python entry points reject a Qiskit circuit for
+  `infrastructure="qmio"` with a `ValueError` before the backend runs, so this class is seen by
+  Rust callers of the backend.
 
-### Status of the open findings
+### Status of the findings
 
-| Finding | Severity | Reachable today | Fix touches | Deferred because |
-|---|---|---|---|---|
-| LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
-| QMIO-1 (Foreign→External) | low | only on a misuse (Qiskit circuit to QMIO) | `qmio.rs` | outside scope; **changes the Python exception class**, so needs a contract call |
-
-None of these code changes has been made. The only edit to a contract document is a
-**record** of LOCAL-2 in the C-1 known-breaks list of
-[`docs/CONTRACTS.md`](CONTRACTS.md) — documenting an existing violation where the
-contract already says it belongs, not altering the contract or fixing the break. Note
-that fixing QMIO-1 would change the Python-visible exception for that case (from
-`polypus.QmioError` to the structural unsupported-circuit error), which is a
-contract-visible decision and
-should be taken as one.
+LOCAL-1 (issue #229), LOCAL-2 (issue #230) and QMIO-1 (issue #231) are fixed; no
+conformance finding is open.
 
 ## Stability commitment
 
