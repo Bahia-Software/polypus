@@ -5,7 +5,8 @@ They fix the *documented* parameter order of ``build_qaoa_circuit`` — Qiskit
 sorts ``qc.parameters`` alphabetically, so the β vector comes before γ — and the
 name→value helper ``qaoa_params_to_dict`` used to read ``best_params`` without
 depending on that order. The module doctests run here too, so the docstring
-examples cannot rot again.
+examples cannot rot again. The expectation helpers' rejection of counts that
+sum to zero (issue #227) is pinned at the end.
 """
 
 import doctest
@@ -135,3 +136,110 @@ def test_qaoa_params_to_dict_is_exported_from_package():
     import polypus_python
 
     assert polypus_python.qaoa_params_to_dict is qaoa_utils.qaoa_params_to_dict
+
+
+# --- expectation_value / expectation_values (issue #227) ---------------------
+#
+# Counts that sum to zero carry no measurement outcomes; returning 0.0 for them
+# reads as a good cost to a minimizer, so both helpers raise instead.
+
+
+def _bit_value(bitstring):
+    return int(bitstring, 2)
+
+
+_ZERO_SUM_COUNTS = [{}, {"00": 0}, {"00": 0, "11": 0}]
+_ZERO_SUM_IDS = ["empty", "single-zero", "all-zero"]
+
+
+@pytest.mark.parametrize("counts", _ZERO_SUM_COUNTS, ids=_ZERO_SUM_IDS)
+def test_expectation_value_rejects_zero_sum_counts(counts):
+    from polypus_python.qaoa_utils import expectation_value
+
+    with pytest.raises(ValueError, match="sum to zero") as excinfo:
+        expectation_value(counts, _bit_value)
+    # A plain ValueError: no private subclass name in the user's traceback.
+    assert type(excinfo.value) is ValueError
+
+
+@pytest.mark.parametrize("counts", _ZERO_SUM_COUNTS, ids=_ZERO_SUM_IDS)
+def test_expectation_value_checks_counts_before_calling_objective(counts):
+    from polypus_python.qaoa_utils import expectation_value
+
+    seen = []
+    with pytest.raises(ValueError, match="sum to zero"):
+        expectation_value(counts, seen.append)
+    assert seen == []
+
+
+def test_expectation_value_normal_counts_unchanged():
+    from polypus_python.qaoa_utils import expectation_value
+
+    # (0 * 3 + 3 * 1) / 4
+    assert expectation_value({"00": 3, "11": 1}, _bit_value) == pytest.approx(0.75)
+    # (1 * 2 + 2 * 5 + 3 * 1) / 8
+    counts = {"01": 2, "10": 5, "11": 1}
+    assert expectation_value(counts, _bit_value) == pytest.approx(15 / 8)
+
+
+def test_expectation_value_propagates_objective_error_unwrapped():
+    from polypus_python.qaoa_utils import expectation_value
+
+    boom = ValueError("objective failed")
+
+    def objective(bitstring):
+        raise boom
+
+    with pytest.raises(ValueError) as excinfo:
+        expectation_value({"00": 1}, objective)
+    assert excinfo.value is boom
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("bad", _ZERO_SUM_COUNTS, ids=_ZERO_SUM_IDS)
+def test_expectation_values_reports_index_of_zero_sum_counts(bad, index):
+    from polypus_python.qaoa_utils import expectation_values
+
+    array_counts = [{"00": 3, "11": 1}, {"01": 4}]
+    array_counts.insert(index, bad)
+    with pytest.raises(
+        ValueError, match=rf"array_counts\[{index}\]: counts sum to zero"
+    ) as excinfo:
+        expectation_values(array_counts, _bit_value)
+    assert type(excinfo.value) is ValueError
+
+
+@pytest.mark.parametrize("bad", _ZERO_SUM_COUNTS, ids=_ZERO_SUM_IDS)
+def test_expectation_values_rejects_single_zero_sum_element(bad):
+    from polypus_python.qaoa_utils import expectation_values
+
+    with pytest.raises(ValueError, match=r"array_counts\[0\].*sum to zero"):
+        expectation_values([bad], _bit_value)
+
+
+def test_expectation_values_normal_counts_unchanged():
+    from polypus_python.qaoa_utils import expectation_values
+
+    values = expectation_values(
+        [{"00": 3, "11": 1}, {"01": 2, "10": 5, "11": 1}, {"10": 7}], _bit_value
+    )
+    assert values == pytest.approx([0.75, 15 / 8, 2.0])
+
+
+def test_expectation_values_empty_batch_returns_empty_list():
+    from polypus_python.qaoa_utils import expectation_values
+
+    assert expectation_values([], _bit_value) == []
+
+
+def test_expectation_values_propagates_objective_error_unwrapped():
+    from polypus_python.qaoa_utils import expectation_values
+
+    boom = ValueError("objective failed")
+
+    def objective(bitstring):
+        raise boom
+
+    with pytest.raises(ValueError) as excinfo:
+        expectation_values([{"00": 1}], objective)
+    assert excinfo.value is boom
