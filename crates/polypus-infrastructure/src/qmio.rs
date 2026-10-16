@@ -9,8 +9,8 @@
 //!
 //! # Wire protocol (verified against the `qmio` 0.1.3 client)
 //!
-//! - **Transport:** a ZeroMQ **REQ** socket connected to `ZMQ_SERVER`
-//!   (e.g. `tcp://10.133.29.226:5556`). REQ is strict lock-step: exactly one
+//! - **Transport:** a ZeroMQ **REQ** socket connected to the configured
+//!   endpoint (e.g. `tcp://qmio.example:5556`). REQ is strict lock-step: exactly one
 //!   request in flight, one reply, repeat. We use the pure-Rust `zeromq` crate
 //!   (ZMTP 3.x, interoperable with the server's `pyzmq`/`libzmq`).
 //! - **Request payload** = a Python **pickle** of the 2-tuple `(circuit, config)`
@@ -42,9 +42,9 @@
 //! pinned `zeromq` 0.6.0 exposes no `ZMQ_MAXMSGSIZE` equivalent and reserves the
 //! frame buffer from the length announced in the peer's ZMTP header. Closing
 //! that gap needs an upstream size limit in `zeromq`; until then the backend
-//! relies on the transport being a trusted peer. The ZMQ traffic itself is in
-//! clear text over a trusted private HPC network (CURVE/auth is out of scope;
-//! the endpoint threat model is tracked in #210).
+//! relies on the transport being a trusted peer. The ZMQ traffic itself is
+//! neither encrypted nor authenticated; the assumed threat model is documented
+//! in `docs/backends.md` ("QMIO transport threat model").
 //!
 //! # Environment variables
 //!
@@ -110,7 +110,7 @@ pub use crate::execution_config::QmioProgramFormat;
 ///
 /// | option | meaning | default |
 /// |--------|---------|---------|
-/// | `endpoint` | ZMQ REQ endpoint | the built-in default endpoint |
+/// | `endpoint` | ZMQ REQ endpoint | required; absent or empty is a [`QmioError::Config`] |
 /// | `program_format` | `openqasm` / `qir_text` / `qir_bitcode` | `openqasm` |
 /// | `optimization` | Tket optimisation level (u8) | `0` |
 /// | `repetition_period` | seconds (f64), or absent for the server default | absent |
@@ -167,10 +167,6 @@ pub fn qmio_factory(ctx: &BackendBuildContext) -> Result<Arc<dyn QuantumBackend>
     .map_err(|e| BackendError::External(Box::new(e)))?;
     Ok(Arc::new(backend))
 }
-
-/// Default endpoint, used only when `ZMQ_SERVER` is unset. Documented fallback,
-/// never silently hard-coded over an explicit configuration.
-const DEFAULT_ENDPOINT: &str = "tcp://10.255.3.70:5556";
 
 /// A serialised program ready to be pickled as the first tuple element.
 ///
@@ -335,6 +331,9 @@ pub struct QmioBackend {
 impl QmioBackend {
     /// Create a backend targeting `endpoint`.
     ///
+    /// There is no default endpoint: an empty one fails with [`QmioError::Config`]
+    /// rather than connecting to a guessed host.
+    ///
     /// Timeouts and retry behaviour can be overridden via the `QMIO_RECV_TIMEOUT_MS`,
     /// `QMIO_MAX_RETRIES`, `QMIO_RETRY_BACKOFF_MS` and `QMIO_GLOBAL_TIMEOUT_MS`
     /// environment variables (sensible defaults when unset). A variable that is set
@@ -347,11 +346,13 @@ impl QmioBackend {
         repetition_period: Option<f64>,
         res_format: String,
     ) -> Result<Self, QmioError> {
-        let endpoint = if endpoint.is_empty() {
-            DEFAULT_ENDPOINT.to_string()
-        } else {
-            endpoint
-        };
+        if endpoint.trim().is_empty() {
+            return Err(QmioError::Config(
+                "no endpoint configured; set the `endpoint` option, or ZMQ_SERVER from \
+                 Python (e.g. tcp://qmio.example:5556)"
+                    .to_string(),
+            ));
+        }
         let EnvTuning {
             recv_timeout,
             max_retries,
@@ -1308,9 +1309,9 @@ mod tests {
             .unwrap()
     }
 
-    /// A `BackendBuildContext` with the given qmio options (endpoint left empty so
-    /// `QmioBackend::new` uses its default; it connects lazily, so no live server is
-    /// needed to *build* the backend).
+    /// A `BackendBuildContext` with a placeholder endpoint plus the given qmio
+    /// options (the backend connects lazily, so no live server is needed to *build*
+    /// it).
     fn qmio_ctx(options: &[(&str, &str)]) -> BackendBuildContext {
         BackendBuildContext {
             id: "qmio-factory-test".to_string(),
@@ -1318,10 +1319,34 @@ mod tests {
             n_qpus: 1,
             seed: None,
             opt_level: crate::OptLevel::default(),
-            options: options
-                .iter()
+            options: std::iter::once(&("endpoint", "tcp://qmio.example:5556"))
+                .chain(options)
                 .map(|(k, v)| (k.to_string(), crate::OptionValue::from(*v)))
                 .collect(),
+        }
+    }
+
+    /// No endpoint (absent, empty or blank) fails construction with a config error
+    /// instead of falling back to a built-in address.
+    #[test]
+    fn missing_or_empty_endpoint_is_a_config_error() {
+        let mut absent = qmio_ctx(&[]);
+        absent.options.remove("endpoint");
+        for ctx in [
+            absent,
+            qmio_ctx(&[("endpoint", "")]),
+            qmio_ctx(&[("endpoint", "  ")]),
+        ] {
+            match qmio_factory(&ctx) {
+                Err(BackendError::External(e)) => match e.downcast_ref::<QmioError>() {
+                    Some(QmioError::Config(m)) => {
+                        assert!(m.contains("no endpoint configured"), "{m}")
+                    }
+                    other => panic!("expected QmioError::Config, got {other:?}"),
+                },
+                Err(other) => panic!("expected External(QmioError::Config), got {other:?}"),
+                Ok(_) => panic!("a backend without an endpoint must not build"),
+            }
         }
     }
 
@@ -1395,7 +1420,7 @@ mod tests {
 
     fn backend(format: QmioProgramFormat) -> QmioBackend {
         QmioBackend::new(
-            "tcp://10.255.3.70:5556".to_string(),
+            "tcp://qmio.example:5556".to_string(),
             format,
             0,
             None,
@@ -1955,7 +1980,7 @@ mod tests {
         use crate::{BackendConfig, ExecutionConfig};
 
         let endpoint = std::env::var("ZMQ_SERVER")
-            .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://10.255.3.70:5556");
+            .expect("set ZMQ_SERVER to the QMIO endpoint, e.g. tcp://qmio.example:5556");
         let backend = QmioBackend::new(
             endpoint.clone(),
             QmioProgramFormat::OpenQasm,

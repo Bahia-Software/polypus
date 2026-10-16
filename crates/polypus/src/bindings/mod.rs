@@ -663,8 +663,9 @@ fn build_backend_config(
 /// Build the QMIO backend's registry config for the CESGA QMIO QPU.
 ///
 /// The endpoint is read from the `ZMQ_SERVER` environment variable (the same
-/// variable the reference `qmio` Python client uses), falling back to the
-/// documented CESGA address. The public `backend` argument selects the program
+/// variable the reference `qmio` Python client uses); there is no default, so with
+/// neither `ZMQ_SERVER` nor an `endpoint` option the backend fails to build with
+/// `polypus.QmioError`. The public `backend` argument selects the program
 /// representation submitted to the QPU. Caller-supplied `options` override the
 /// computed defaults (e.g. `optimization`, `repetition_period`, `res_format`, a
 /// custom `endpoint`). Only available with `--features qmio`; otherwise it returns
@@ -674,10 +675,17 @@ fn build_qmio_registered(
     backend: &str,
     options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
-    // Default endpoint documented by CESGA; overridden by ZMQ_SERVER when set.
-    const DEFAULT_QMIO_ENDPOINT: &str = "tcp://10.133.29.226:5556";
-    let endpoint =
-        std::env::var("ZMQ_SERVER").unwrap_or_else(|_| DEFAULT_QMIO_ENDPOINT.to_string());
+    qmio_registered_config(backend, std::env::var("ZMQ_SERVER").ok(), options)
+}
+
+/// [`build_qmio_registered`] with the `ZMQ_SERVER` value passed in, so tests do not
+/// depend on the process environment.
+#[cfg(feature = "qmio")]
+fn qmio_registered_config(
+    backend: &str,
+    zmq_server: Option<String>,
+    options: Option<HashMap<String, OptionValue>>,
+) -> PyResult<BackendConfig> {
     let program_format = match backend {
         // `"aer"` is the entry-point default, so treat it (and the explicit
         // aliases) as OpenQASM for the QMIO path.
@@ -691,7 +699,9 @@ fn build_qmio_registered(
         }
     };
     let mut opts: HashMap<String, OptionValue> = HashMap::new();
-    opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
+    if let Some(endpoint) = zmq_server {
+        opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
+    }
     opts.insert(
         "program_format".to_string(),
         OptionValue::from(program_format),
@@ -2978,13 +2988,21 @@ mod tests {
                 OptionValue::from(vec!["a b".to_string()]),
             ),
         ]);
-        let config = build_qmio_registered("qir", Some(user)).expect("qir is a qmio format");
+        let config = qmio_registered_config(
+            "qir",
+            Some("tcp://qmio.example:5556".to_string()),
+            Some(user),
+        )
+        .expect("qir is a qmio format");
         let BackendConfig::Registered { name, options } = config else {
             panic!("qmio must build a Registered config");
         };
         assert_eq!(name, "qmio");
         // Defaults the user did not override stay.
-        assert!(matches!(options.get("endpoint"), Some(OptionValue::Str(_))));
+        assert_eq!(
+            options.get("endpoint"),
+            Some(&OptionValue::from("tcp://qmio.example:5556"))
+        );
         assert_eq!(
             options.get("program_format"),
             Some(&OptionValue::from("qir_text"))
@@ -3000,6 +3018,33 @@ mod tests {
             Some(&OptionValue::from(vec!["a b".to_string()]))
         );
         assert_eq!(options.len(), 5);
+    }
+
+    /// Without `ZMQ_SERVER` no endpoint is invented: the key is absent (the factory
+    /// then rejects the config) unless the caller passes one.
+    #[cfg(feature = "qmio")]
+    #[test]
+    fn qmio_registered_config_has_no_default_endpoint() {
+        let BackendConfig::Registered { options, .. } =
+            qmio_registered_config("qmio", None, None).expect("qmio is a qmio format")
+        else {
+            panic!("qmio must build a Registered config");
+        };
+        assert_eq!(options.get("endpoint"), None);
+
+        let user = HashMap::from([(
+            "endpoint".to_string(),
+            OptionValue::from("tcp://qmio.example:5556"),
+        )]);
+        let BackendConfig::Registered { options, .. } =
+            qmio_registered_config("qmio", None, Some(user)).expect("qmio is a qmio format")
+        else {
+            panic!("qmio must build a Registered config");
+        };
+        assert_eq!(
+            options.get("endpoint"),
+            Some(&OptionValue::from("tcp://qmio.example:5556"))
+        );
     }
 
     /// Convert a Python expression through the `options` kwarg's extractor.

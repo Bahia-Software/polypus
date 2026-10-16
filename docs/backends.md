@@ -749,6 +749,41 @@ integer (`QMIO_RECV_TIMEOUT_MS=3000O`), or is `0` for a timeout, fails construct
 the default. This matches the registry `options` path, which also rejects malformed numeric
 options.
 
+**Endpoint.** QMIO has no default endpoint. From Python it is read from `ZMQ_SERVER`, and
+`options={"endpoint": "tcp://qmio.example:5556"}` overrides it; from Rust it is the
+`endpoint` registry option (or the argument to `QmioBackend::new`). With none of these, or
+with an empty value, building the backend fails with `polypus.QmioError` (`QmioError::Config`
+in Rust). Up to 0.7 an unset endpoint silently fell back to a hard-coded private address.
+
+#### QMIO transport threat model
+
+The ZeroMQ link to QMIO uses the ZMTP `NULL` mechanism: no encryption and no
+authentication in either direction. The pinned `zeromq` 0.6.0 crate implements only `NULL`
+(it recognises the `CURVE` name in a peer's greeting but has no `CURVE` handshake or API),
+so the backend cannot do better without a different client or an upstream change.
+
+**Assumption.** The client and the QMIO server sit on CESGA's private HPC network, and
+everyone with access to that network is trusted.
+
+**What an attacker on that network can do.** Read the circuits and the results; impersonate
+the server (Polypus does not authenticate it) and return fabricated counts, which pass
+the schema checks if they are well-formed; drop or delay replies; announce a huge frame
+and make the client allocate it before the size cap runs (see `## Security` in
+`qmio.rs`).
+
+**What the client still guarantees.** A hostile reply cannot execute code (`serde-pickle`
+never runs `__reduce__`/`GLOBAL`), cannot crash the process with malformed data (schema
+checks, depth-limited conversion, typed errors), and is never resent blindly after a
+send (`ResultUnknown`). With no endpoint configured the backend refuses to build instead
+of connecting to a guessed host.
+
+**Decision.** Accept the risk inside the trusted network; no transport security in
+Polypus. Off that network, carry the traffic over a tunnel (SSH port forwarding or
+WireGuard) and point the endpoint at the local end, e.g.
+`ssh -N -L 5556:<qmio-host>:5556 <login-node>` with `ZMQ_SERVER=tcp://127.0.0.1:5556`.
+`CURVE` would need server-side keys from CESGA and a client that implements it; it is
+reconsidered if either changes.
+
 Run against an unreachable endpoint:
 
 - **Clean error → `External`.** A wire failure (connect/timeout) is boxed into

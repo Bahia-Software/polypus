@@ -452,6 +452,11 @@ Additionally:
   from a QPU, backend or network peer must treat that data as **untrusted**
   and must not use a deserializer capable of executing code. Do not introduce
   dependencies that reintroduce a deserialization-RCE surface.
+- **Unauthenticated transport:** the QMIO ZeroMQ link is neither encrypted nor
+  authenticated, and the backend has no default endpoint. The assumed threat model
+  and the decision to rely on the private network (or a tunnel) are in
+  [`backends.md`](backends.md#qmio-transport-threat-model). Do not reintroduce a
+  hard-coded endpoint fallback.
 - The `zeromq` crate was chosen because it is **pure Rust** (no C `libzmq`
   build dependency, at the cost of an async tokio API). Do not replace it
   with a C binding without an explicit trade-off discussion with the
