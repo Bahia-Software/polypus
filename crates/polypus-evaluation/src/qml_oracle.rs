@@ -10,13 +10,12 @@ use pyo3::prelude::*;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-/// Multiplier applied to the machine's available parallelism to size the
-/// candidate window (see [`candidate_window_size`]).
+/// Multiplier applied to the execution parallelism to size the candidate window
+/// (see [`window_size`]).
 ///
-/// Two, not more: the GIL serialises the per-candidate binding and the Aer
-/// simulation, so a larger window only raises peak memory (more live
-/// [`BoundCircuit`]s) without buying throughput. One window per core, doubled,
-/// keeps the pipeline fed while the cap stays proportional to the hardware.
+/// Two, not more: one window's worth of work per execution unit, doubled, keeps
+/// the pipeline fed while the next window is bound. A larger window only raises
+/// peak memory (more live [`BoundCircuit`]s) without buying throughput.
 const CONCURRENCY_MULTIPLIER: usize = 2;
 
 /// Parallelism assumed when [`std::thread::available_parallelism`] cannot report
@@ -28,19 +27,64 @@ const CONCURRENCY_MULTIPLIER: usize = 2;
 /// cap exists to prevent.
 const FALLBACK_PARALLELISM: usize = 1;
 
-/// Maximum number of candidates bound into one in-flight window:
-/// `CONCURRENCY_MULTIPLIER × available_parallelism()`.
+/// Live [`BoundCircuit`]s one window may hold when a backend wider than the host
+/// lifts it above the local window (see [`window_size`]).
+///
+/// The same order as the local window of a typical node (#146: `2 × cores ×
+/// n_train`, ~800 circuits for 8 cores and 50 samples), and far below the eager
+/// `population × n_train` product it replaced (15 000 for 300 × 50).
+const MAX_WINDOW_CIRCUITS: usize = 4096;
+
+/// Maximum number of candidates bound into one in-flight window.
+///
+/// `local` is the host's parallelism, `backend` the backend's batch-agnostic
+/// `capabilities().max_concurrency` and `n_train` the circuits bound per
+/// candidate. The rule (issue #272):
+///
+/// ```text
+/// window = min(memory_bound, max(local, backend) × CONCURRENCY_MULTIPLIER)
+/// memory_bound = max(local × CONCURRENCY_MULTIPLIER, MAX_WINDOW_CIRCUITS / n_train)
+/// ```
+///
+/// - A backend narrower than the host (QMIO: 1) or as wide keeps the local window:
+///   binding is host work, and the planner splits the window into waves anyway.
+/// - A wider backend (CUNQA with more QPUs than local cores) lifts the window so
+///   one window can fill every QPU instead of leaving some idle.
+/// - `usize::MAX` means "no backend limit", not "unbounded parallelism": native
+///   and local report it whenever the batch fits in memory, and their real
+///   parallelism is the host's. It is therefore treated as `local`.
+/// - The memory bound caps the lift at [`MAX_WINDOW_CIRCUITS`] live circuits, but
+///   never below the #146 local window, so a run without a wide backend is sized
+///   exactly as before.
+///
+/// The batch-agnostic `capabilities()` is used because `capabilities_for` needs
+/// the bound tasks, which do not exist until the window is sized.
 ///
 /// Derived, not configured — there is no kwarg or [`ExecutionConfig`] field for
-/// it, so `qml.train`'s public signature is untouched. Never zero (both constants
-/// are `>= 1`), so the windowing loop is always finite.
-fn candidate_window_size() -> usize {
-    let parallelism = std::thread::available_parallelism()
+/// it, so `qml.train`'s public signature is untouched. Never zero, so the
+/// windowing loop is always finite.
+fn window_size(local: usize, backend: usize, n_train: usize) -> usize {
+    let local = local.max(1);
+    let units = if backend == usize::MAX {
+        local
+    } else {
+        local.max(backend)
+    };
+    let local_window = local.saturating_mul(CONCURRENCY_MULTIPLIER);
+    let memory_bound = local_window.max(MAX_WINDOW_CIRCUITS / n_train.max(1));
+    units
+        .saturating_mul(CONCURRENCY_MULTIPLIER)
+        .min(memory_bound)
+        .max(1)
+}
+
+/// [`window_size`] for this host: `local` is
+/// [`std::thread::available_parallelism`].
+fn candidate_window_size(backend: usize, n_train: usize) -> usize {
+    let local = std::thread::available_parallelism()
         .map(NonZeroUsize::get)
         .unwrap_or(FALLBACK_PARALLELISM);
-    // Both constants are >= 1, so this is a floor rather than a correction: it
-    // keeps the window usable whatever they become.
-    parallelism.saturating_mul(CONCURRENCY_MULTIPLIER).max(1)
+    window_size(local, backend, n_train)
 }
 
 /// How [`QmlOracle`] turns each training circuit's counts into a per-sample value.
@@ -95,9 +139,9 @@ pub enum QmlObjective {
 /// n_train` circuits, submits that window to the [`Planner`], reduces it to its
 /// per-candidate means, and drops it before building the next. At most `window *
 /// n_train` [`BoundCircuit`]s are ever live, independent of the population size.
-/// The window is derived from [`std::thread::available_parallelism`] (see
-/// `candidate_window_size`), not configured, so `qml.train`'s public signature is
-/// untouched.
+/// The window is derived from the host's parallelism and the backend's
+/// `capabilities().max_concurrency`, capped by a memory bound (see `window_size`),
+/// not configured, so `qml.train`'s public signature is untouched.
 ///
 /// This changes only peak memory, never results: the circuits are submitted in the
 /// same candidate-major order and each candidate's mean is taken over the same
@@ -152,7 +196,15 @@ impl QmlOracle {
     /// candidates so at most `window * n_train` [`BoundCircuit`]s live at once —
     /// see the type-level "Bounded in-flight circuit batch" note.
     fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        self.try_evaluate_windowed(candidates, candidate_window_size())
+        self.try_evaluate_windowed(candidates, self.window())
+    }
+
+    /// The candidate window for this oracle's backend and training set.
+    fn window(&self) -> usize {
+        candidate_window_size(
+            self.backend.capabilities().max_concurrency,
+            self.training_circuits.len(),
+        )
     }
 
     /// [`try_evaluate`](Self::try_evaluate) with the window size injected, so the
@@ -455,6 +507,8 @@ class Bound:
     struct MockBackend {
         encode_position: bool,
         fail_on_call: Option<usize>,
+        /// Reported as `capabilities().max_concurrency`.
+        max_concurrency: usize,
         /// Circuit count of each `run_circuits` call, in order.
         call_sizes: Mutex<Vec<usize>>,
     }
@@ -464,6 +518,7 @@ class Bound:
             Self {
                 encode_position: false,
                 fail_on_call: None,
+                max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
             }
         }
@@ -472,6 +527,7 @@ class Bound:
             Self {
                 encode_position: true,
                 fail_on_call: None,
+                max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
             }
         }
@@ -480,7 +536,16 @@ class Bound:
             Self {
                 encode_position: false,
                 fail_on_call: Some(call),
+                max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A backend that runs at most `max_concurrency` circuits per call.
+        fn with_concurrency(max_concurrency: usize) -> Self {
+            Self {
+                max_concurrency,
+                ..Self::recording()
             }
         }
 
@@ -526,10 +591,10 @@ class Bound:
         }
 
         fn capabilities(&self) -> BackendCapabilities {
-            // Unbounded, like `LocalBackend`: the whole window reaches the backend in
-            // one wave, so a recorded call size is exactly one oracle window.
+            // Unbounded by default, like `LocalBackend`: the whole window reaches the
+            // backend in one wave, so a recorded call size is exactly one window.
             BackendCapabilities {
-                max_concurrency: usize::MAX,
+                max_concurrency: self.max_concurrency,
                 supports_shot_distribution: true,
             }
         }
@@ -841,16 +906,99 @@ class Bound:
         assert_eq!(stub.assign_calls(), 0, "nothing may be bound or run");
     }
 
-    #[test]
-    fn candidate_window_size_is_two_per_core() {
-        let parallelism = std::thread::available_parallelism()
+    fn local_parallelism() -> usize {
+        std::thread::available_parallelism()
             .map(NonZeroUsize::get)
-            .unwrap_or(FALLBACK_PARALLELISM);
+            .unwrap_or(FALLBACK_PARALLELISM)
+    }
+
+    #[test]
+    fn a_backend_no_wider_than_the_host_keeps_the_local_window() {
+        // QMIO-like (1), as wide as the host, and "no limit" (local/native).
+        for backend in [1, 4, 8, usize::MAX] {
+            assert_eq!(
+                window_size(8, backend, 50),
+                8 * CONCURRENCY_MULTIPLIER,
+                "backend concurrency {backend}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_wider_than_the_host_lifts_the_window() {
+        // 32 QPUs on a 4-core host: 8 candidates would leave 24 QPUs idle.
+        assert_eq!(window_size(4, 32, 1), 32 * CONCURRENCY_MULTIPLIER);
+        assert_eq!(window_size(4, 32, 50), 32 * CONCURRENCY_MULTIPLIER);
+    }
+
+    #[test]
+    fn the_lift_never_exceeds_the_memory_bound() {
+        // A huge finite concurrency is capped at MAX_WINDOW_CIRCUITS live circuits.
+        for n_train in [1, 3, 50, 1000] {
+            let window = window_size(4, 1 << 40, n_train);
+            let bound = (4 * CONCURRENCY_MULTIPLIER).max(MAX_WINDOW_CIRCUITS / n_train);
+            assert_eq!(window, bound, "n_train {n_train}");
+        }
+        // The memory bound never shrinks the #146 local window.
+        assert_eq!(window_size(64, 1 << 40, 1000), 64 * CONCURRENCY_MULTIPLIER);
         assert_eq!(
-            candidate_window_size(),
-            parallelism * CONCURRENCY_MULTIPLIER
+            window_size(64, usize::MAX, 1000),
+            64 * CONCURRENCY_MULTIPLIER
         );
-        // Never zero, whatever the platform reports: a zero window would stall the loop.
-        assert!(candidate_window_size() >= CONCURRENCY_MULTIPLIER);
+    }
+
+    #[test]
+    fn the_window_is_never_zero() {
+        assert_eq!(window_size(0, 0, 0), CONCURRENCY_MULTIPLIER);
+        assert_eq!(
+            window_size(1, usize::MAX, usize::MAX),
+            CONCURRENCY_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn the_oracle_sizes_its_window_from_its_backend() {
+        let local = local_parallelism();
+        let stub = Stub::new();
+        for (backend, expected) in [
+            (1, local),
+            (local, local),
+            (usize::MAX, local),
+            (local * 4, local * 4),
+        ] {
+            let oracle = oracle(
+                &stub,
+                1,
+                Arc::new(MockBackend::with_concurrency(backend)),
+                8,
+            );
+            assert_eq!(
+                oracle.window(),
+                expected * CONCURRENCY_MULTIPLIER,
+                "backend concurrency {backend} on {local} local cores"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wider_backend_receives_full_waves() {
+        // Before #272 the window was 2 × local, so every call to a backend four times
+        // wider than the host carried at most half its capacity.
+        let concurrency = local_parallelism() * 4;
+        let population = concurrency * 3;
+        let stub = Stub::new();
+        let backend = Arc::new(MockBackend::with_concurrency(concurrency));
+        let oracle = oracle(&stub, 1, Arc::clone(&backend), 8);
+
+        oracle
+            .try_evaluate(&candidates(population))
+            .expect("a healthy evaluation succeeds");
+
+        let sizes = backend.call_sizes();
+        assert!(
+            sizes.iter().all(|&n| n == concurrency),
+            "every wave must fill the backend's {concurrency} slots, got {sizes:?}"
+        );
+        assert_eq!(sizes.iter().sum::<usize>(), population);
     }
 }
