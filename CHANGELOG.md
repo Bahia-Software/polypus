@@ -19,6 +19,10 @@ Changes on `main` since 0.7.2.
 - `walltime` kwarg for the SLURM walltime of CUNQA virtual QPUs.
 - `polypus.__version__`, PEP 561 typing stubs and `py.typed`.
 - `qaoa_params_to_dict` helper, with the real QAOA parameter order documented.
+- Angle expressions from `polypus.Param` in Python (`2 * Param(0)`,
+  `polypus.sin`, `pi`, ...), stored as circuit expressions.
+- `Circuit.clbits_width`: the classical width an imported program declares.
+- A warning when training on CUNQA is projected to outlive the walltime.
 
 ### Changed
 - **BREAKING:** the declared classical width is kept through circuit binding
@@ -27,9 +31,21 @@ Changes on `main` since 0.7.2.
   may differ from earlier releases.
 - Native and Aer backends lower gates outside Aer's basis before running; the
   Aer lowering of a repeated OpenQASM program is cached.
+- **BREAKING:** QMIO has no default endpoint; set `ZMQ_SERVER` or pass
+  `options={"endpoint": ...}`. The transport threat model is documented.
+- **BREAKING:** QMIO reports a Qiskit circuit as `UnsupportedCircuit`
+  instead of a generic `QmioError`.
+- **BREAKING:** `run_qc_in_qpu`, `run_qcs_in_qpu` and `run_worker_qpu.py` are
+  removed; they could not run against any supported CUNQA version.
+- The QIR export declares the circuit's classical width in
+  `required_num_results`, as the OpenQASM exports do.
+- The QML candidate window also follows the backend's concurrency, within the
+  memory bound.
 
 ### Fixed
 - OpenQASM 2.0 export keeps angles at full round-trip precision.
+- A Qiskit circuit with free parameters is rejected before any backend, and
+  `backend_compatibility` reports it.
 - Backends report circuits OpenQASM 2.0 cannot express instead of panicking.
 - QMIO: reply bitstrings are validated and malformed `QMIO_*` tuning variables
   are rejected.
