@@ -505,6 +505,72 @@ class TestQiskitCircuits:
         assert report["aer"] == []
         _assert_coherent(qc, report)
 
+    @pytest.mark.parametrize("gate", [None, "ch"])
+    def test_free_parameters_are_reported_for_both(self, gate):
+        """A free ``Parameter`` makes the run raise the ``ValueError`` a
+        ``polypus.Circuit`` gets, before Aer sees the circuit; both entries
+        quote it (issue #308). The native entry keeps its Qiskit guard."""
+        from qiskit import QuantumCircuit
+        from qiskit.circuit import Parameter
+
+        qc = QuantumCircuit(2)
+        qc.rx(Parameter("t"), 0)
+        if gate == "ch":
+            qc.ch(0, 1)
+        qc.measure_all()
+        report = _report(qc)
+        assert len(report["aer"]) == 1
+        reason = report["aer"][0]
+        assert "unbound parameters" in reason
+        assert "executed directly: t." in reason
+        assert report["polypus"][0] == reason
+        assert "cannot execute a Qiskit QuantumCircuit" in report["polypus"][1]
+        _assert_coherent(qc, report)
+
+    def test_bound_parameters_are_accepted_by_aer(self):
+        import math
+
+        from qiskit import QuantumCircuit
+        from qiskit.circuit import Parameter
+
+        t = Parameter("t")
+        qc = QuantumCircuit(2)
+        qc.rx(t, 0)
+        qc.ch(0, 1)
+        qc.measure_all()
+        bound = qc.assign_parameters({t: math.pi})
+        report = _report(bound)
+        assert report["aer"] == []
+        _assert_coherent(bound, report)
+
+    @pytest.mark.parametrize("infrastructure", ["local", "cunqa", "qmio"])
+    def test_run_rejects_free_parameters_before_any_backend(
+        self, monkeypatch, infrastructure
+    ):
+        """No infrastructure binds parameters, so the run rejects the circuit
+        before connecting to one, naming every free parameter."""
+        import polypus
+        import polypus_python
+        from qiskit import QuantumCircuit
+        from qiskit.circuit import ParameterVector
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError(
+                "a circuit with free parameters must not reach a backend"
+            )
+
+        monkeypatch.setattr(polypus_python, "run_qcs", forbidden)
+        monkeypatch.setattr(polypus_python, "connect_to_infrastructure", forbidden)
+        theta = ParameterVector("theta", 2)
+        qc = QuantumCircuit(1)
+        qc.rx(theta[0], 0)
+        qc.ry(theta[1], 0)
+        qc.measure_all()
+        with pytest.raises(
+            ValueError, match=r"unbound parameters .*: theta\[0\], theta\[1\]\."
+        ):
+            polypus.run_quantum_circuit(qc, shots=8, infrastructure=infrastructure)
+
     def test_the_caller_circuit_is_not_modified(self):
         from qiskit import QuantumCircuit
 
