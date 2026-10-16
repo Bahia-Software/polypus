@@ -37,6 +37,8 @@ result.merged_counts  # the total over all 10 000 shots
 
 `infrastructure="cunqa"` needs [CUNQA](https://github.com/CESGA-Quantum-Spain/cunqa) `>=2.4,<4` on the cluster. **CUNQA 2.3 is not supported**: it names the `qraise` argument `cores`, not `cores_per_qpu`, so the reservation fails with a `TypeError`.
 
+CUNQA's QPUs run Aer, so with `infrastructure="cunqa"` the `backend` must be `"aer"` (the default) or `"AerSimulator"`, and `noise_model` is not accepted; either one raises `ValueError` before any QPU is requested.
+
 With `infrastructure="cunqa"`, three keyword arguments size the SLURM allocation. `nodes` and `cores_per_qpu` must be `>= 1`; a `0` raises `ValueError`. `"local"` and `"qmio"` ignore all three.
 
 | Parameter | Default | Description |

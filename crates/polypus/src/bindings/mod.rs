@@ -550,8 +550,10 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
 ///
 /// `backend` selects the *device* within an infrastructure. For `local`:
 /// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
-/// statevector simulator. The choice is ignored for CUNQA, which manages its
-/// own simulated QPUs.
+/// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
+/// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
+/// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
+/// silently.
 ///
 /// `fusion` only applies to the native `"polypus"` backend (see
 /// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
@@ -606,6 +608,24 @@ fn build_backend_config(
                     opts.len()
                 )));
             }
+        }
+    }
+    // CUNQA's QPUs run Aer with a simulator fixed at `qraise`, and its run takes
+    // no noise model, so `BackendConfig::Cunqa` has nowhere to carry either: a
+    // non-Aer `backend` or a `noise_model` would be dropped while the manifest
+    // echoed the caller's `backend`. Reject both here, before any QPU is raised.
+    if infrastructure == "cunqa" {
+        if !matches!(backend, "aer" | "AerSimulator") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown cunqa backend '{backend}'; CUNQA's QPUs run Aer, expected \"aer\""
+            )));
+        }
+        if noise_model.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "the 'cunqa' infrastructure does not accept a noise_model: its simulated QPUs \
+                 are configured when they are raised, not per run; omit it, or use \
+                 infrastructure=\"local\" with backend=\"aer\"",
+            ));
         }
     }
     match infrastructure {
@@ -1078,7 +1098,9 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `infrastructure`: for `"local"` it selects the device — `"aer"` (default)
 /// or the pure-Rust `"polypus"` statevector simulator; for `"qmio"` it
 /// instead selects the program format submitted to the QPU (`"openqasm"`
-/// (default), `"qir"`, or `"qir_bitcode"`); CUNQA ignores it.
+/// (default), `"qir"`, or `"qir_bitcode"`); for `"cunqa"`, whose QPUs run Aer,
+/// it must be `"aer"` (default) or `"AerSimulator"`. Any other value, or a
+/// `noise_model` with `"cunqa"`, raises `ValueError` before any QPU is requested.
 ///
 /// `seed` controls shot sampling (contract C-7) on every simulated backend —
 /// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs
@@ -1197,8 +1219,7 @@ pub fn run_quantum_circuit<'py>(
     // so surface the one-time default-visible warning only when this run
     // actually resolves to it — never for Aer/CUNQA/QMIO. Gated on the resolved
     // `BackendConfig`, not the raw `backend` string, so it tracks the real
-    // dispatch (e.g. `backend="polypus"` under `infrastructure="cunqa"`, which
-    // Aer-simulates, correctly does not warn).
+    // dispatch rather than re-deriving it from the kwargs.
     if matches!(backend_config, BackendConfig::LocalNative { .. }) {
         calibration::warn_if_using_default_threshold(qc.py())?;
     }
@@ -1311,6 +1332,9 @@ pub fn run_quantum_circuit<'py>(
 /// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
 /// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
 /// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1586,6 +1610,9 @@ fn bind_feature_rows<'py>(
 /// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
 /// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
 /// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1785,6 +1812,9 @@ pub fn qml_train<'py>(
 /// `nodes`, `cores_per_qpu` and `walltime` size the SLURM allocation and are
 /// consumed only by `infrastructure="cunqa"`, with the same rules as in
 /// [`run_quantum_circuit`]; `local` ignores them.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// Example:
 ///
@@ -2736,6 +2766,63 @@ mod tests {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("unknown local backend"));
         });
+    }
+
+    /// CUNQA's QPUs run Aer, so any other `backend` (the native aliases
+    /// included) is rejected instead of being dropped while the manifest echoes it.
+    #[test]
+    fn build_backend_config_rejects_an_unknown_cunqa_backend() {
+        pyo3::Python::initialize();
+        for backend in ["polypus", "statevector", "polypus_statevector", "foo"] {
+            let err =
+                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                    .expect_err("a non-Aer cunqa backend must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("unknown cunqa backend"),
+                    "unexpected error for {backend}: {err}"
+                );
+            });
+        }
+        for backend in ["aer", "AerSimulator"] {
+            let config =
+                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                    .expect("cunqa accepts the Aer backend names");
+            assert!(matches!(config, BackendConfig::Cunqa { .. }));
+        }
+    }
+
+    #[test]
+    fn build_backend_config_rejects_a_noise_model_on_cunqa() {
+        // `BackendConfig::Cunqa` has no noise model to carry, so one must be an
+        // error rather than a silently noiseless run. As on the native backend,
+        // any Python object will do — the check is `Option::is_some`.
+        pyo3::Python::initialize();
+        let noise_model = Python::attach(|py| py.None());
+        let err = build_backend_config(
+            "cunqa",
+            "aer",
+            "automatic",
+            Some(noise_model),
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect_err("a noise model on cunqa must be rejected");
+        Python::attach(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("noise_model"),
+                "the message must name the offending kwarg: {err}"
+            );
+        });
+        assert!(matches!(
+            build_backend_config("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
+            Ok(BackendConfig::Cunqa { .. })
+        ));
     }
 
     #[test]
