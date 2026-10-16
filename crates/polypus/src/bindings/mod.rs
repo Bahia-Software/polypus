@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod circuit;
 mod compatibility;
 pub mod de;
+pub mod expr;
 pub mod logging;
 pub mod observable;
 pub mod pso;
@@ -1955,6 +1956,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QNG>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
+    expr::register(m)?;
     m.add_class::<RunResult>()?;
     m.add_class::<TrainResult>()?;
     m.add_class::<Qubo>()?;

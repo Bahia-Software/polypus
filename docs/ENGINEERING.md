@@ -495,8 +495,8 @@ names only, so Qiskit is never imported for it.
 
 Argument-conversion errors are PyO3's, not ours. When a `#[pyfunction]` /
 `#[pymethods]` argument fails to convert, the caller gets the conversion's own
-exception (for an angle, `TypeError: angle must be a number or polypus.Param`),
-and since PyO3 0.29 the argument is named in an exception note
+exception (for an angle, `TypeError: angle must be a number, polypus.Param or
+polypus.ParamExpr`), and since PyO3 0.29 the argument is named in an exception note
 (`__notes__ == ["while processing 'theta'"]`) rather than in the message
 (PyO3 ≤ 0.25 raised `argument 'theta': …`). Notes need Python ≥ 3.11, so on
 3.9/3.10 the argument name is not reported at all. This is accepted, not a
