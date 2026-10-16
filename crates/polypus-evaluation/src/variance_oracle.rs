@@ -1,4 +1,5 @@
 use crate::{EvaluationError, OracleErrorSlot};
+use polypus_infrastructure::{attach_or, InterpreterUnavailable};
 use polypus_optimizers::VarianceOracle;
 use pyo3::prelude::*;
 
@@ -67,14 +68,100 @@ impl PyVarianceOracle {
         }
         Ok(value)
     }
+
+    /// Record that the interpreter could not be attached to, so the entry point
+    /// raises it once `optimize` returns.
+    fn record_unavailable(&self) {
+        self.errors.record(
+            Box::new(EvaluationError::from(InterpreterUnavailable)),
+            &self.run_id,
+        );
+    }
 }
 
+/// QNG calls these while the run is detached, so they attach with [`attach_or`]
+/// (docs/ENGINEERING.md §9). The trait cannot return an error: an unreachable
+/// interpreter is recorded in the error slot, like a callback failure, and the
+/// finite sentinel is returned.
 impl VarianceOracle for PyVarianceOracle {
     fn variance(&self, theta: &[f64], param_index: usize) -> f64 {
-        Python::attach(|py| self.call(py, theta, param_index))
+        attach_or(
+            || {
+                self.record_unavailable();
+                0.0
+            },
+            |py| self.call(py, theta, param_index),
+        )
     }
 
     fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
-        Python::attach(|py| (0..dims).map(|a| self.call(py, theta, a)).collect())
+        attach_or(
+            || {
+                self.record_unavailable();
+                vec![0.0; dims]
+            },
+            |py| (0..dims).map(|a| self.call(py, theta, a)).collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polypus_infrastructure::{BackendError, InterpreterUnavailable};
+    use pyo3::types::PyModule;
+
+    /// QNG calls the variance oracle while the run is detached, and its trait
+    /// cannot return an error. When the interpreter cannot be attached to, both
+    /// methods record `InterpreterUnavailable` in the run's error slot and return
+    /// the finite sentinel, without calling `variance_function` (which records
+    /// every call). The entry point then raises the recorded error.
+    #[test]
+    fn records_the_failure_without_calling_python_when_attaching_is_forbidden() {
+        pyo3::Python::initialize();
+        let (module, variance_function) = Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"calls = []\ndef variance(theta, a):\n    calls.append(a)\n    return 1.0\n",
+                c"variance_recorder.py",
+                c"variance_recorder",
+            )
+            .expect("the recorder compiles");
+            let function = module.getattr("variance").expect("the callback exists");
+            (module.unbind(), function.unbind())
+        });
+        let errors = OracleErrorSlot::new();
+        let oracle = PyVarianceOracle {
+            variance_function,
+            errors: errors.clone(),
+            run_id: "variance-without-interpreter".to_string(),
+        };
+        let (single, diagonal) = crate::test_support::run_while_attaching_is_forbidden(move || {
+            (
+                oracle.variance(&[0.1, 0.2], 0),
+                oracle.variance_diagonal(&[0.1, 0.2], 2),
+            )
+        });
+        assert_eq!(single, 0.0);
+        assert_eq!(diagonal, vec![0.0, 0.0]);
+        let recorded = errors
+            .take()
+            .expect("the failure is recorded")
+            .downcast::<EvaluationError>()
+            .expect("an EvaluationError is recorded");
+        match *recorded {
+            EvaluationError::Backend(BackendError::External(boxed)) => {
+                assert!(boxed.is::<InterpreterUnavailable>(), "{boxed}")
+            }
+            other => panic!("expected Backend(External(InterpreterUnavailable)), got {other:?}"),
+        }
+        Python::attach(|py| {
+            let calls = module.bind(py).getattr("calls").unwrap();
+            assert_eq!(
+                calls.len().unwrap(),
+                0,
+                "variance_function must not be called"
+            );
+        });
     }
 }

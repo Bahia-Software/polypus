@@ -1630,6 +1630,29 @@ mod tests {
         assert_eq!(normalize_bitstring("01 10"), "0110");
     }
 
+    /// Bind a simulated QMIO REP server to an OS-assigned port on a background
+    /// thread, run `serve` on it, and return its endpoint once it is bound.
+    fn spawn_rep_server<F, Fut>(serve: F) -> (String, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(zeromq::RepSocket) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let mut rep = zeromq::RepSocket::new();
+                let endpoint = rep.bind("tcp://127.0.0.1:0").await.unwrap();
+                ready_tx.send(endpoint.to_string()).unwrap();
+                serve(rep).await;
+            });
+        });
+        (ready_rx.recv().unwrap(), server)
+    }
+
     /// End-to-end test against a simulated QMIO server: a real ZMQ REP socket on
     /// a background thread deserialises the pickled `(circuit, config)` tuple,
     /// validates it, and replies with pickled JSON counts — exercising the whole
@@ -1637,64 +1660,40 @@ mod tests {
     #[test]
     fn simulated_rep_server_end_to_end() {
         use crate::{BackendConfig, ExecutionConfig};
-        use std::sync::mpsc;
-        use zeromq::RepSocket;
 
-        // Reserve a free port, then bind the simulated server to it.
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let endpoint = format!("tcp://127.0.0.1:{port}");
-
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-        let server_endpoint = endpoint.clone();
-        let server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut rep = RepSocket::new();
-                rep.bind(&server_endpoint).await.unwrap();
-                ready_tx.send(()).unwrap();
-
-                // Handle exactly one request/response exchange.
-                let msg = rep.recv().await.unwrap();
-                let bytes = msg.into_vec().into_iter().next().unwrap().to_vec();
-                let request = serde_pickle::value_from_slice(&bytes, DeOptions::new()).unwrap();
-                let (program, config) = match request {
-                    PickleValue::Tuple(items) if items.len() == 2 => {
-                        (items[0].clone(), items[1].clone())
-                    }
-                    other => panic!("expected a 2-tuple request, got {other:?}"),
-                };
-                match program {
-                    PickleValue::String(qasm) => {
-                        assert!(qasm.starts_with("OPENQASM 2.0"), "header: {qasm}")
-                    }
-                    other => panic!("expected QASM text, got {other:?}"),
+        let (endpoint, server) = spawn_rep_server(move |mut rep| async move {
+            // Handle exactly one request/response exchange.
+            let msg = rep.recv().await.unwrap();
+            let bytes = msg.into_vec().into_iter().next().unwrap().to_vec();
+            let request = serde_pickle::value_from_slice(&bytes, DeOptions::new()).unwrap();
+            let (program, config) = match request {
+                PickleValue::Tuple(items) if items.len() == 2 => {
+                    (items[0].clone(), items[1].clone())
                 }
-                let config_json = match config {
-                    PickleValue::String(s) => s,
-                    other => panic!("expected a config JSON string, got {other:?}"),
-                };
-                let parsed: serde_json::Value = serde_json::from_str(&config_json).unwrap();
-                assert_eq!(parsed["$data"]["repeats"].as_u64(), Some(1024));
+                other => panic!("expected a 2-tuple request, got {other:?}"),
+            };
+            match program {
+                PickleValue::String(qasm) => {
+                    assert!(qasm.starts_with("OPENQASM 2.0"), "header: {qasm}")
+                }
+                other => panic!("expected QASM text, got {other:?}"),
+            }
+            let config_json = match config {
+                PickleValue::String(s) => s,
+                other => panic!("expected a config JSON string, got {other:?}"),
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+            assert_eq!(parsed["$data"]["repeats"].as_u64(), Some(1024));
 
-                // Reply with the verified live-QPU shape: a pickled `dict` whose
-                // counts are grouped under the classical register name.
-                let reply_value = json!({
-                    "results": {"c": {"00": 500, "11": 524}},
-                    "execution_metrics": {"optimized_instruction_count": 98},
-                });
-                let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
-                rep.send(ZmqMessage::from(reply)).await.unwrap();
+            // Reply with the verified live-QPU shape: a pickled `dict` whose
+            // counts are grouped under the classical register name.
+            let reply_value = json!({
+                "results": {"c": {"00": 500, "11": 524}},
+                "execution_metrics": {"optimized_instruction_count": 98},
             });
+            let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
+            rep.send(ZmqMessage::from(reply)).await.unwrap();
         });
-
-        // Wait until the server is bound before connecting.
-        ready_rx.recv().unwrap();
 
         let backend = QmioBackend::new(
             endpoint.clone(),
@@ -1743,37 +1742,18 @@ mod tests {
     fn recv_timeout_after_delivery_is_result_unknown_not_resent() {
         use crate::{BackendConfig, BackendError, ExecutionConfig};
         use std::sync::mpsc;
-        use zeromq::RepSocket;
 
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let endpoint = format!("tcp://127.0.0.1:{port}");
-
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
         let (delivered_tx, delivered_rx) = mpsc::channel::<()>();
-        let server_endpoint = endpoint.clone();
-        let server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut rep = RepSocket::new();
-                rep.bind(&server_endpoint).await.unwrap();
-                ready_tx.send(()).unwrap();
-                // Receive the request but deliberately never reply, forcing the
-                // client's receive to time out. Signal receipt so the test knows
-                // the request reached the post-send (delivered) path.
-                let _ = rep.recv().await.unwrap();
-                delivered_tx.send(()).unwrap();
-                // Hold the socket open long enough that a (buggy) resend would have
-                // had time to arrive before teardown.
-                tokio::time::sleep(Duration::from_millis(600)).await;
-            });
+        let (endpoint, server) = spawn_rep_server(move |mut rep| async move {
+            // Receive the request but deliberately never reply, forcing the
+            // client's receive to time out. Signal receipt so the test knows
+            // the request reached the post-send (delivered) path.
+            let _ = rep.recv().await.unwrap();
+            delivered_tx.send(()).unwrap();
+            // Hold the socket open long enough that a (buggy) resend would have
+            // had time to arrive before teardown.
+            tokio::time::sleep(Duration::from_millis(600)).await;
         });
-        ready_rx.recv().unwrap();
 
         let backend = QmioBackend::new(
             endpoint.clone(),
@@ -1840,47 +1820,26 @@ mod tests {
     #[test]
     fn concurrent_callers_are_serialized_over_a_single_socket() {
         use crate::{BackendConfig, ExecutionConfig};
-        use std::sync::mpsc;
         use std::sync::Arc;
-        use zeromq::RepSocket;
 
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let endpoint = format!("tcp://127.0.0.1:{port}");
-
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-        let server_endpoint = endpoint.clone();
         // The server replies to request #k with a `"00"` count of `1000 + k`, so
         // the two replies are distinguishable. Because it is lock-step, the first
         // request to arrive gets 1000 and the second gets 1001 — regardless of
         // which client thread that is.
-        let server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut rep = RepSocket::new();
-                rep.bind(&server_endpoint).await.unwrap();
-                ready_tx.send(()).unwrap();
-
-                for k in 0..2u64 {
-                    let msg = rep.recv().await.unwrap();
-                    let bytes = msg.into_vec().into_iter().next().unwrap().to_vec();
-                    let request = serde_pickle::value_from_slice(&bytes, DeOptions::new()).unwrap();
-                    match request {
-                        PickleValue::Tuple(items) if items.len() == 2 => {}
-                        other => panic!("expected a 2-tuple request, got {other:?}"),
-                    }
-                    let reply_value = json!({"results": {"c": {"00": 1000 + k}}});
-                    let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
-                    rep.send(ZmqMessage::from(reply)).await.unwrap();
+        let (endpoint, server) = spawn_rep_server(move |mut rep| async move {
+            for k in 0..2u64 {
+                let msg = rep.recv().await.unwrap();
+                let bytes = msg.into_vec().into_iter().next().unwrap().to_vec();
+                let request = serde_pickle::value_from_slice(&bytes, DeOptions::new()).unwrap();
+                match request {
+                    PickleValue::Tuple(items) if items.len() == 2 => {}
+                    other => panic!("expected a 2-tuple request, got {other:?}"),
                 }
-            });
+                let reply_value = json!({"results": {"c": {"00": 1000 + k}}});
+                let reply = serde_pickle::to_vec(&reply_value, SerOptions::new()).unwrap();
+                rep.send(ZmqMessage::from(reply)).await.unwrap();
+            }
         });
-        ready_rx.recv().unwrap();
 
         let backend = Arc::new(
             QmioBackend::new(
@@ -2289,30 +2248,11 @@ mod tests {
     /// Run `reply` through a simulated REP server to a backend whose cap is `limit`.
     fn run_against_reply(reply: ZmqMessage, limit: usize) -> QmioError {
         use crate::{BackendConfig, BackendError, ExecutionConfig};
-        use std::sync::mpsc;
-        use zeromq::RepSocket;
 
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
-        let endpoint = format!("tcp://127.0.0.1:{port}");
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-        let server_endpoint = endpoint.clone();
-        let server = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut rep = RepSocket::new();
-                rep.bind(&server_endpoint).await.unwrap();
-                ready_tx.send(()).unwrap();
-                let _ = rep.recv().await.unwrap();
-                rep.send(reply).await.unwrap();
-            });
+        let (endpoint, server) = spawn_rep_server(move |mut rep| async move {
+            let _ = rep.recv().await.unwrap();
+            rep.send(reply).await.unwrap();
         });
-        ready_rx.recv().unwrap();
 
         let backend = QmioBackend::new(
             endpoint,

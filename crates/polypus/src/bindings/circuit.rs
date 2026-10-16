@@ -9,11 +9,11 @@ use polypus_circuit::{
     CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
 };
 use polypus_sim::{SimError, Simulator, Statevector, StatevectorSimulator};
-use pyo3::exceptions::{PyKeyboardInterrupt, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::infrastructure::{attach_or, check_statevector_fits};
+use crate::infrastructure::{attach_or, check_statevector_fits, InterpreterUnavailable};
 
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
 fn to_py_err(e: CircuitError) -> PyErr {
@@ -202,7 +202,7 @@ pub fn statevector<'py>(
     // fraction of the run, so the frequency is decoupled from gate cost and a
     // fast circuit never pays for it). Reacquiring the GIL from inside
     // `detach` is a *fresh* attach, not a reuse: `detach` resets the thread's
-    // attachment, so `Python::attach` here could panic, or attach to a
+    // attachment, so `Python::attach` here could panic, hang, or attach to a
     // finalizing interpreter, if the interpreter were shutting down (e.g. a
     // daemon thread at exit, on any Python version). The hook therefore
     // attaches with `attach_or` (§9, see `poll_for_cancellation`) and, when the
@@ -264,14 +264,12 @@ pub(super) fn simulate_cancellable(
 
 /// The exception a cancelled `statevector` raises: the pending signal's own
 /// (a Ctrl+C stays a `KeyboardInterrupt`), or, when the hook cancelled because
-/// the interpreter became unreachable (shutdown), a `KeyboardInterrupt` too.
-/// That matches what the planner's guard raises for the same event
-/// (`BackendError::Aborted`): it is an abort, not an invalid input.
+/// the interpreter became unreachable (shutdown), the `KeyboardInterrupt` every
+/// other site reached while detached ends in for the same event
+/// ([`InterpreterUnavailable`]): it is an abort, not an invalid input.
 pub(super) fn cancellation_error(pending: Option<PyErr>) -> PyErr {
     pending.unwrap_or_else(|| {
-        PyKeyboardInterrupt::new_err(
-            "the simulation was aborted: the Python interpreter is no longer available",
-        )
+        crate::exceptions::interpreter_unavailable_to_pyerr(InterpreterUnavailable)
     })
 }
 
@@ -960,7 +958,9 @@ impl Circuit {
 /// ```python
 /// import polypus
 /// qft = polypus.circuits.templates.qft(4)
-/// counts = polypus.run_quantum_circuit(qft.measure_all(), shots=1024)
+/// result = polypus.run_quantum_circuit(qft.measure_all(), shots=1024,
+///                                      infrastructure="local", backend="polypus")
+/// counts = result.merged_counts
 /// ```
 #[pyfunction]
 #[pyo3(signature = (num_qubits, inverse = false, swaps = true))]

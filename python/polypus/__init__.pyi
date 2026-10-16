@@ -1,0 +1,392 @@
+# Typing stubs for the compiled `polypus` extension (PEP 561).
+#
+# Hand-written: every signature here mirrors a `#[pyfunction]`/`#[pymethods]`
+# signature in `crates/polypus/src/bindings/`. CI checks them against the built
+# wheel with `python -m mypy.stubtest` (docs/CONTRIBUTING.md), and
+# `tests/python/test_typing_stubs.py` fails when the extension exports a name
+# no stub declares. Change both sides together.
+#
+# Stubs must stay valid for the Python 3.9 floor: `typing` only, no
+# `typing_extensions`.
+#
+# Qiskit publishes no type information, so for mypy `QuantumCircuit` and
+# `NoiseModel` below are `Any` (or an `import-untyped` error in user code,
+# depending on its configuration); pyright/Pylance resolve them by reading
+# Qiskit's source.
+
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Optional,
+    Sequence,
+    TypedDict,
+    Union,
+    final,
+)
+
+import numpy as np
+import numpy.typing as npt
+from qiskit import QuantumCircuit
+from qiskit_aer.noise import NoiseModel
+
+from . import circuits as circuits
+from . import qml as qml
+
+__all__ = [
+    "__version__",
+    "PolypusError",
+    "BackendError",
+    "CunqaError",
+    "QmioError",
+    "NativeCircuitError",
+    "InsufficientMemoryError",
+    "EvaluationError",
+    "DE",
+    "PSO",
+    "QNG",
+    "Circuit",
+    "Param",
+    "RunResult",
+    "TrainResult",
+    "Qubo",
+    "Ising",
+    "CachedCost",
+    "SampleCost",
+    "train",
+    "run_quantum_circuit",
+    "statevector",
+    "init_logger",
+    "calibrate_parallel_threshold",
+    "backend_cleanup_failures",
+    "backend_compatibility",
+    "qml",
+    "circuits",
+]
+
+__version__: str
+
+# A vector of floats, as PyO3 extracts a `Vec<f64>`: any sequence, NumPy
+# arrays included.
+_FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
+# One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
+_Counts = dict[str, int]
+# The optimizer configurations `train` / `qml.train` accept as `method`.
+_Method = Union[DE, PSO, QNG]
+# `train`'s `expectation_function`: a `bitstring -> float` callable, the same
+# memoised, or a native GIL-free observable.
+_CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
+
+class _CalibrationOutcome(TypedDict):
+    threshold: int
+    num_threads: int
+    duration_secs: float
+    reused_cache: bool
+    cache_path: Optional[str]
+    cache_written: bool
+
+class _CompatibilityReport(TypedDict):
+    aer: list[str]
+    polypus: list[str]
+
+# ── Exceptions ──────────────────────────────────────────────────────────────
+
+class PolypusError(Exception): ...
+class BackendError(PolypusError): ...
+class CunqaError(BackendError): ...
+class QmioError(BackendError): ...
+class NativeCircuitError(BackendError): ...
+class InsufficientMemoryError(BackendError): ...
+class EvaluationError(PolypusError): ...
+
+# ── Optimizers ──────────────────────────────────────────────────────────────
+
+@final
+class DE:
+    generations: int
+    population_size: int
+    tolerance: float
+    patience: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        generations: int = 100,
+        population_size: int = 50,
+        tolerance: float = 0.01,
+        patience: int = 20,
+        seed: Optional[int] = None,
+    ) -> DE: ...
+
+@final
+class PSO:
+    generations: int
+    population_size: int
+    bounds: tuple[float, float]
+    inertia_weight: float
+    cognitive_weight: float
+    social_weight: float
+    tolerance: float
+    seed: Optional[int]
+    def __new__(
+        cls,
+        generations: int = 100,
+        population_size: int = 50,
+        # Default `(-pi, pi)` (bindings/pso.rs).
+        bounds: tuple[float, float] = ...,
+        inertia_weight: float = 0.5,
+        cognitive_weight: float = 1.0,
+        social_weight: float = 1.0,
+        tolerance: float = 0.01,
+        seed: Optional[int] = None,
+    ) -> PSO: ...
+
+@final
+class QNG:
+    max_iters: int
+    bounds: tuple[float, float]
+    learning_rate: float
+    finite_difference_step: float
+    tikhonov_reg: float
+    # Called as `variance_function(theta, param_index)`; returns one QFIM
+    # diagonal element (finite, non-negative).
+    variance_function: Callable[[list[float], int], float]
+    seed: Optional[int]
+    def __new__(
+        cls,
+        variance_function: Callable[[list[float], int], float],
+        max_iters: int = 100,
+        # Default `(-pi, pi)` (bindings/qng.rs).
+        bounds: tuple[float, float] = ...,
+        learning_rate: float = 0.1,
+        finite_difference_step: float = 0.1,
+        tikhonov_reg: float = 0.05,
+        seed: Optional[int] = None,
+    ) -> QNG: ...
+
+# ── Native circuits ─────────────────────────────────────────────────────────
+
+_Angle = Union[float, Param]
+
+@final
+class Param:
+    # Defining `__eq__` makes the class unhashable at runtime (`__hash__` is
+    # `None`); declaring that needs the ignore, as in typeshed, because
+    # `object.__hash__` is a method.
+    __hash__: ClassVar[None]  # type: ignore[assignment]
+    def __new__(cls, index: int) -> Param: ...
+    @property
+    def index(self) -> int: ...
+    def __eq__(self, value: object, /) -> bool: ...
+
+@final
+class Circuit:
+    def __new__(cls, num_qubits: int) -> Circuit: ...
+    @staticmethod
+    def from_qasm2(source: str) -> Circuit: ...
+    @staticmethod
+    def from_qasm3(source: str) -> Circuit: ...
+    @property
+    def param_names(self) -> list[str]: ...
+    @property
+    def num_qubits(self) -> int: ...
+    @property
+    def num_params(self) -> int: ...
+    @property
+    def num_clbits(self) -> int: ...
+    def h(self, qubit: int) -> Circuit: ...
+    def x(self, qubit: int) -> Circuit: ...
+    def y(self, qubit: int) -> Circuit: ...
+    def z(self, qubit: int) -> Circuit: ...
+    def s(self, qubit: int) -> Circuit: ...
+    def t(self, qubit: int) -> Circuit: ...
+    def sdg(self, qubit: int) -> Circuit: ...
+    def tdg(self, qubit: int) -> Circuit: ...
+    def id(self, qubit: int) -> Circuit: ...
+    def rx(self, qubit: int, theta: _Angle) -> Circuit: ...
+    def ry(self, qubit: int, theta: _Angle) -> Circuit: ...
+    def rz(self, qubit: int, theta: _Angle) -> Circuit: ...
+    def u(self, qubit: int, theta: _Angle, phi: _Angle, lam: _Angle) -> Circuit: ...
+    def cx(self, control: int, target: int) -> Circuit: ...
+    def cz(self, control: int, target: int) -> Circuit: ...
+    def swap(self, q0: int, q1: int) -> Circuit: ...
+    def rzz(self, q0: int, q1: int, theta: _Angle) -> Circuit: ...
+    def rxx(self, q0: int, q1: int, theta: _Angle) -> Circuit: ...
+    def cp(self, q0: int, q1: int, theta: _Angle) -> Circuit: ...
+    def sx(self, qubit: int) -> Circuit: ...
+    def sxdg(self, qubit: int) -> Circuit: ...
+    def cy(self, control: int, target: int) -> Circuit: ...
+    def ch(self, control: int, target: int) -> Circuit: ...
+    def csx(self, control: int, target: int) -> Circuit: ...
+    def ccx(self, control0: int, control1: int, target: int) -> Circuit: ...
+    def cswap(self, control: int, target0: int, target1: int) -> Circuit: ...
+    def crx(self, control: int, target: int, theta: _Angle) -> Circuit: ...
+    def cry(self, control: int, target: int, theta: _Angle) -> Circuit: ...
+    def crz(self, control: int, target: int, theta: _Angle) -> Circuit: ...
+    def cu1(self, q0: int, q1: int, theta: _Angle) -> Circuit: ...
+    def cu3(
+        self, control: int, target: int, theta: _Angle, phi: _Angle, lam: _Angle
+    ) -> Circuit: ...
+    def cu(
+        self,
+        control: int,
+        target: int,
+        theta: _Angle,
+        phi: _Angle,
+        lam: _Angle,
+        gamma: _Angle,
+    ) -> Circuit: ...
+    def p(self, qubit: int, lam: _Angle) -> Circuit: ...
+    def u1(self, qubit: int, lam: _Angle) -> Circuit: ...
+    def u2(self, qubit: int, phi: _Angle, lam: _Angle) -> Circuit: ...
+    def u0(self, qubit: int, gamma: _Angle) -> Circuit: ...
+    def rccx(self, control0: int, control1: int, target: int) -> Circuit: ...
+    def rc3x(self, c0: int, c1: int, c2: int, target: int) -> Circuit: ...
+    def c3x(self, c0: int, c1: int, c2: int, target: int) -> Circuit: ...
+    def c3sqrtx(self, c0: int, c1: int, c2: int, target: int) -> Circuit: ...
+    def c4x(self, c0: int, c1: int, c2: int, c3: int, target: int) -> Circuit: ...
+    def barrier(self, qubits: Optional[Sequence[int]] = None) -> Circuit: ...
+    def measure(self, qubit: int, cbit: int) -> Circuit: ...
+    def measure_all(self) -> Circuit: ...
+    def to_qasm2(self, params: Optional[_FloatVector] = None) -> str: ...
+    def to_qasm3(self, params: Optional[_FloatVector] = None) -> str: ...
+    def to_qir(self, params: Optional[_FloatVector] = None) -> str: ...
+    def to_qir_bitcode(self, params: Optional[_FloatVector] = None) -> bytes: ...
+    def __len__(self) -> int: ...
+
+# ── Results ─────────────────────────────────────────────────────────────────
+
+@final
+class RunResult:
+    @property
+    def counts(self) -> list[_Counts]: ...
+    # `None` for `qml.predict`, whose entries are distinct circuits.
+    @property
+    def merged_counts(self) -> Optional[_Counts]: ...
+    @property
+    def id(self) -> str: ...
+    # `None` only for the `qmio` infrastructure (real hardware).
+    @property
+    def seed(self) -> Optional[int]: ...
+    @property
+    def backend(self) -> str: ...
+    @property
+    def infrastructure(self) -> str: ...
+
+@final
+class TrainResult:
+    @property
+    def best_params(self) -> list[float]: ...
+    @property
+    def best_fitness(self) -> float: ...
+    @property
+    def iterations_run(self) -> int: ...
+    @property
+    def converged(self) -> bool: ...
+    @property
+    def fitness_history(self) -> list[float]: ...
+    @property
+    def seed(self) -> int: ...
+    @property
+    def id(self) -> str: ...
+
+# ── Native cost observables ─────────────────────────────────────────────────
+
+@final
+class Qubo:
+    def __new__(
+        cls,
+        num_vars: int,
+        linear: Optional[Sequence[tuple[int, float]]] = None,
+        quadratic: Optional[Sequence[tuple[int, int, float]]] = None,
+        constant: float = 0.0,
+        scale: float = 1.0,
+    ) -> Qubo: ...
+    @staticmethod
+    def from_matrix(
+        matrix: Union[Sequence[Sequence[float]], npt.NDArray[np.floating[Any]]],
+        scale: float = 1.0,
+    ) -> Qubo: ...
+    @property
+    def num_vars(self) -> int: ...
+
+@final
+class Ising:
+    def __new__(
+        cls,
+        num_vars: int,
+        fields: Optional[Sequence[tuple[int, float]]] = None,
+        couplings: Optional[Sequence[tuple[int, int, float]]] = None,
+        constant: float = 0.0,
+        scale: float = 1.0,
+    ) -> Ising: ...
+    @property
+    def num_vars(self) -> int: ...
+
+@final
+class CachedCost:
+    # `bitstring -> float`, or `(bitstring, label) -> float` with
+    # `qml.train(..., y_train=...)`.
+    def __new__(
+        cls, cost_fn: Union[Callable[[str], float], Callable[[str, float], float]]
+    ) -> CachedCost: ...
+
+@final
+class SampleCost:
+    # `(counts, label) -> float`; labels are `int` class indices or `float`
+    # targets, so the callback must accept `float` (which includes `int`).
+    def __new__(cls, cost_fn: Callable[[_Counts, float], float]) -> SampleCost: ...
+
+# ── Entry points ────────────────────────────────────────────────────────────
+
+def train(
+    qc: Union[QuantumCircuit, Circuit],
+    method: _Method,
+    shots: int,
+    n_qpus: int,
+    dimensions: int,
+    expectation_function: _CostFunction,
+    infrastructure: str,
+    nodes: int,
+    cores_per_qpu: int,
+    id: str,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: str = "aer",
+    seed: Optional[int] = None,
+    fusion: Optional[bool] = None,
+    options: Optional[dict[str, str]] = None,
+    walltime: Optional[str] = None,
+) -> TrainResult: ...
+def run_quantum_circuit(
+    qc: Union[QuantumCircuit, Circuit, str],
+    shots: int,
+    infrastructure: str,
+    n_qpus: int = 1,
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    sim_method: str = "automatic",
+    noise_model: Optional[NoiseModel] = None,
+    backend: str = "aer",
+    seed: Optional[int] = None,
+    fusion: Optional[bool] = None,
+    options: Optional[dict[str, str]] = None,
+    walltime: Optional[str] = None,
+) -> RunResult: ...
+def statevector(
+    qc: Circuit, params: Optional[_FloatVector] = None, fusion: bool = True
+) -> npt.NDArray[np.complex128]: ...
+def init_logger(
+    level: str = "info",
+    format: str = "text",
+    file: Optional[str] = None,
+    run_name: Optional[str] = None,
+    console: bool = False,
+    timestamp: bool = True,
+    thread_id: bool = False,
+    module_path: bool = False,
+) -> Optional[str]: ...
+def calibrate_parallel_threshold(force: bool = False) -> _CalibrationOutcome: ...
+def backend_cleanup_failures() -> int: ...
+def backend_compatibility(
+    circuit: Union[Circuit, str, QuantumCircuit],
+) -> _CompatibilityReport: ...

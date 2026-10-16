@@ -57,19 +57,15 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 /// - `"aer"` rejects an OpenQASM program Qiskit cannot parse; if Qiskit Aer is
 ///   not installed, that is the reason. An instruction outside Aer's basis (such
 ///   as `ch` or a declared gate) is no reason: the local backend lowers it
-///   before running it, with the rewrite of
-///   `polypus_python.local._rewrite_into_aer_basis` (synthesis and basis
-///   translation, no layout stage). A Qiskit `QuantumCircuit` with such an
-///   instruction goes through that same rewrite here, so one it cannot lower
-///   (an opaque instruction without a definition, a `box`) is rejected with
-///   the error the run would raise (`polypus.BackendError`'s message);
-///   checking it costs the rewrite the run would pay, which a circuit in the
-///   basis does not. Like the run, it lowers into the basis of the default
-///   `AerSimulator()` whatever `sim_method` or `noise_model` a run is given:
-///   either one narrows the simulator's target, not what Aer runs. The rewrite
-///   has no width cap, so a circuit wider than the default simulator's target
-///   is no reason to reject either, and a `sim_method` that holds it (such as
-///   `matrix_product_state`) runs it.
+///   (synthesis and basis translation) before running it. A Qiskit
+///   `QuantumCircuit` with such an instruction is rewritten here by the run's
+///   own rewrite, so one that cannot be lowered (an opaque instruction without
+///   a definition, a `box`) is rejected with the error the run would raise
+///   (`polypus.BackendError`'s message); checking it costs the rewrite the run
+///   would pay, which a circuit in the basis does not. Like the run, it lowers
+///   into the basis of the default `AerSimulator()` whatever `sim_method` or
+///   `noise_model` a run is given (either one narrows the simulator's target,
+///   not what Aer runs), with no cap on the width.
 /// - A `polypus.Circuit` with free parameters cannot be run by either backend;
 ///   both entries give the same reason.
 ///
