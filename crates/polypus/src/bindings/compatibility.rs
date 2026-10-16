@@ -56,18 +56,16 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 ///   as well.
 /// - `"aer"` rejects an OpenQASM program Qiskit cannot parse; if Qiskit Aer is
 ///   not installed, that is the reason. An instruction outside Aer's basis (such
-///   as `ch` or a declared gate) is no reason: the local backend lowers it with
-///   `qiskit.transpile` before running it. A Qiskit `QuantumCircuit` with such
-///   an instruction is transpiled here as the run would transpile it, so one
-///   `qiskit.transpile` cannot lower (an opaque instruction without a
-///   definition, a `box`) is rejected with the error the run would raise
-///   (`polypus.BackendError`'s message); checking it costs the
-///   `qiskit.transpile` call the run would pay, which a circuit in the basis
-///   does not. Like the run, it lowers against the default `AerSimulator()`
-///   whatever `sim_method` or `noise_model` a run is given, so it shares the
-///   run's limits: such a circuit wider than the default simulator's target is
-///   rejected even under a `sim_method` that could hold it, and a
-///   `noise_model` is not taken into account.
+///   as `ch` or a declared gate) is no reason: the local backend lowers it
+///   (synthesis and basis translation) before running it. A Qiskit
+///   `QuantumCircuit` with such an instruction is rewritten here by the run's
+///   own rewrite, so one that cannot be lowered (an opaque instruction without
+///   a definition, a `box`) is rejected with the error the run would raise
+///   (`polypus.BackendError`'s message); checking it costs the rewrite the run
+///   would pay, which a circuit in the basis does not. Like the run, it lowers
+///   into the basis of the default `AerSimulator()` whatever `sim_method` or
+///   `noise_model` a run is given (either one narrows the simulator's target,
+///   not what Aer runs), with no cap on the width.
 /// - A `polypus.Circuit` with free parameters cannot be run by either backend;
 ///   both entries give the same reason.
 ///

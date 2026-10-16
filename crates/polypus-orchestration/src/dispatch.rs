@@ -119,13 +119,28 @@ impl OracleErrorSlot {
     /// failure is logged at `error!` here, as it is recorded: from this point on
     /// the oracle only yields sentinel values, so without this record the log
     /// would go quiet until `optimize()` returns and the entry point raises.
+    ///
+    /// The error is formatted for that line *before* the mutex is taken. A boxed
+    /// Python exception formats itself by attaching to the interpreter, while an
+    /// oracle thread that holds the interpreter may be calling [`failed`](Self::failed);
+    /// formatting under the mutex would make each wait for the other.
     pub fn record(&self, err: BoxedError, run_id: &str) {
-        let mut guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // Log only when this call actually stores the error, so the message never
+        if self.failed() {
+            return;
+        }
+        let message = log::log_enabled!(log::Level::Error).then(|| describe(&err));
+        let stored = {
+            let mut guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            let empty = guard.is_none();
+            if empty {
+                *guard = Some(err);
+            }
+            empty
+        };
+        // Log only when this call actually stored the error, so the message never
         // claims to have "recorded" a failure it silently dropped.
-        if guard.is_none() {
-            log::error!("run {run_id}: oracle evaluation failed: {err}");
-            *guard = Some(err);
+        if let (true, Some(message)) = (stored, message) {
+            log::error!("run {run_id}: oracle evaluation failed: {message}");
         }
     }
 
@@ -138,6 +153,19 @@ impl OracleErrorSlot {
     /// Take the recorded failure, if any.
     pub fn take(&self) -> Option<BoxedError> {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+}
+
+/// Format `err` for a log line without panicking: `ToString::to_string` panics
+/// when a `Display` impl returns an error, and `record` runs on oracle threads
+/// where a panic would cross into the optimizer. A failed format falls back to a
+/// fixed message.
+fn describe(err: &BoxedError) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    match write!(out, "{err}") {
+        Ok(()) => out,
+        Err(std::fmt::Error) => "<unformattable error>".to_string(),
     }
 }
 
@@ -271,6 +299,142 @@ mod tests {
         let handed_out = slot.clone();
         handed_out.record(boxed("x"), RUN_ID);
         assert!(slot.failed(), "a clone must share the original's storage");
+    }
+
+    /// Records every `ERROR` line it receives. `log::set_logger` is global per
+    /// process, so it is installed once for the whole test binary; each test
+    /// reads back only the lines naming its own run id.
+    struct Capture(Mutex<Vec<String>>);
+
+    impl log::Log for Capture {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Error
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                let line = record.args().to_string();
+                self.0.lock().unwrap_or_else(|p| p.into_inner()).push(line);
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE: Capture = Capture(Mutex::new(Vec::new()));
+
+    /// Install [`CAPTURE`] (once) and return the lines logged so far for `run_id`.
+    fn logged_for(run_id: &str) -> Vec<String> {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            log::set_logger(&CAPTURE).expect("the only logger this test binary installs");
+            log::set_max_level(log::LevelFilter::Error);
+        });
+        CAPTURE
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|line| line.starts_with(&format!("run {run_id}:")))
+            .cloned()
+            .collect()
+    }
+
+    /// Only the error that is actually stored is logged; a later one, dropped by
+    /// first-error-wins, leaves no line claiming it was recorded.
+    #[test]
+    fn record_logs_only_the_error_it_stores() {
+        let run_id = "oracle-error-slot-logs-only-the-stored-error";
+        assert!(logged_for(run_id).is_empty());
+        let slot = OracleErrorSlot::new();
+        slot.record(boxed("first"), run_id);
+        slot.record(boxed("second"), run_id);
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!("run {run_id}: oracle evaluation failed: first")]
+        );
+        assert_eq!(
+            slot.take().expect("an error was recorded").to_string(),
+            "first"
+        );
+    }
+
+    /// An error whose `Display` cannot finish until another thread has called
+    /// [`OracleErrorSlot::failed`]. Formatting it while holding the slot's mutex
+    /// therefore deadlocks until the bounded wait below gives up.
+    #[derive(Debug)]
+    struct WaitsForFailedCall {
+        formatting: std::sync::mpsc::Sender<()>,
+        failed_called: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl fmt::Display for WaitsForFailedCall {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let _ = self.formatting.send(());
+            // Bounded, so a deadlocked run still ends instead of hanging the binary.
+            let _ = self
+                .failed_called
+                .recv_timeout(std::time::Duration::from_secs(10));
+            write!(f, "slow to format")
+        }
+    }
+
+    impl Error for WaitsForFailedCall {}
+
+    /// `record` formats the error (for its log line) without holding the slot's
+    /// mutex. Formatting can block: a `DisplaySafePyErr` attaches to the
+    /// interpreter to format itself, while an oracle thread that holds the
+    /// interpreter calls `failed()`. Formatting under the mutex made each wait
+    /// for the other. Here thread A records an error whose `Display` waits for
+    /// thread B's `failed()` call; B must get its answer while A is still
+    /// formatting.
+    #[test]
+    fn record_does_not_hold_the_slot_while_formatting_the_error() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let run_id = "oracle-error-slot-formats-outside-the-lock";
+        // The format only happens when an `ERROR` line will be written.
+        assert!(logged_for(run_id).is_empty());
+        let slot = OracleErrorSlot::new();
+        let (formatting_tx, formatting_rx) = mpsc::channel();
+        let (failed_called_tx, failed_called_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let err = WaitsForFailedCall {
+            formatting: formatting_tx,
+            failed_called: failed_called_rx,
+        };
+
+        let recorder = {
+            let slot = slot.clone();
+            std::thread::spawn(move || slot.record(Box::new(err), run_id))
+        };
+        let checker = {
+            let slot = slot.clone();
+            std::thread::spawn(move || {
+                formatting_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the recorder starts formatting the error");
+                let failed = slot.failed();
+                let _ = failed_called_tx.send(());
+                let _ = done_tx.send(failed);
+            })
+        };
+
+        let failed = done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "failed() must not wait for record() to finish formatting the error \
+             (the slot's mutex was held while formatting)",
+        );
+        assert!(!failed, "nothing is stored before the format completes");
+        recorder.join().expect("the recorder does not panic");
+        checker.join().expect("the checker does not panic");
+        assert!(slot.failed(), "the error is stored once formatted");
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: oracle evaluation failed: slow to format"
+            )]
+        );
     }
 
     #[test]

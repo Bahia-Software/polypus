@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-use polypus_infrastructure::Counts;
+use polypus_infrastructure::{attach_or, Counts, InterpreterUnavailable};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
@@ -137,19 +137,23 @@ impl SupervisedObjective for PyLabelledCost {
         missing.sort_unstable();
 
         // One GIL section for all of them. A Python exception is kept as is, so
-        // the entry point re-raises its original type.
+        // the entry point re-raises its original type. This runs while the run
+        // is detached, so the attach is fallible (docs/ENGINEERING.md §9).
         if !missing.is_empty() {
-            let computed: Vec<f64> = Python::attach(|py| {
-                let f = self.cost_fn.bind(py);
-                missing
-                    .iter()
-                    .map(|&(key, bitstring)| {
-                        f.call1((bitstring, key.label().to_object(py)?))?
-                            .extract::<f64>()
-                    })
-                    .collect::<PyResult<Vec<f64>>>()
-            })
-            .map_err(|e| EvaluationError::Python(e.into()))?;
+            let computed: Vec<f64> = attach_or(
+                || Err(InterpreterUnavailable.into()),
+                |py| {
+                    let f = self.cost_fn.bind(py);
+                    missing
+                        .iter()
+                        .map(|&(key, bitstring)| {
+                            f.call1((bitstring, key.label().to_object(py)?))?
+                                .extract::<f64>()
+                        })
+                        .collect::<PyResult<Vec<f64>>>()
+                        .map_err(|e| EvaluationError::Python(e.into()))
+                },
+            )?;
 
             if let Some(cache) = &self.cache {
                 let mut memo = cache.write().unwrap_or_else(|p| p.into_inner());
@@ -209,23 +213,27 @@ impl SupervisedObjective for PySampleCost {
         counts: &[Counts],
         labels: &[Label],
     ) -> Result<Vec<f64>, EvaluationError> {
-        Python::attach(|py| {
-            let g = self.cost_fn.bind(py);
-            counts
-                .iter()
-                .zip(labels)
-                .map(|(sample_counts, &label)| {
-                    let mut outcomes: Vec<(&String, &u64)> = sample_counts.iter().collect();
-                    outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                    let dict = PyDict::new(py);
-                    for (bitstring, n) in outcomes {
-                        dict.set_item(bitstring, n)?;
-                    }
-                    g.call1((dict, label.to_object(py)?))?.extract::<f64>()
-                })
-                .collect::<PyResult<Vec<f64>>>()
-        })
-        .map_err(|e| EvaluationError::Python(e.into()))
+        // Runs while the run is detached: attach fallibly (docs/ENGINEERING.md §9).
+        attach_or(
+            || Err(InterpreterUnavailable.into()),
+            |py| {
+                let g = self.cost_fn.bind(py);
+                counts
+                    .iter()
+                    .zip(labels)
+                    .map(|(sample_counts, &label)| {
+                        let mut outcomes: Vec<(&String, &u64)> = sample_counts.iter().collect();
+                        outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                        let dict = PyDict::new(py);
+                        for (bitstring, n) in outcomes {
+                            dict.set_item(bitstring, n)?;
+                        }
+                        g.call1((dict, label.to_object(py)?))?.extract::<f64>()
+                    })
+                    .collect::<PyResult<Vec<f64>>>()
+                    .map_err(|e| EvaluationError::Python(e.into()))
+            },
+        )
     }
 }
 
@@ -506,6 +514,42 @@ def raises(*_args):
                     other => panic!("expected the verbatim ValueError, got {other:?}"),
                 }
             }
+        });
+    }
+
+    /// Both objectives are called while the run is detached. When the
+    /// interpreter cannot be attached to, they fail with `InterpreterUnavailable`
+    /// boxed in `BackendError::External` and never call the user's function.
+    #[test]
+    fn objectives_fail_typed_without_calling_python_when_attaching_is_forbidden() {
+        use polypus_infrastructure::{BackendError, InterpreterUnavailable};
+        use std::sync::Arc;
+        pyo3::Python::initialize();
+        let (module, objectives) = Python::attach(|py| {
+            let module = recorders(py);
+            let objectives: [Arc<dyn SupervisedObjective>; 3] = [
+                Arc::new(PyLabelledCost::new(callback(&module, "per_shot"), false)),
+                Arc::new(PyLabelledCost::new(callback(&module, "per_shot"), true)),
+                Arc::new(PySampleCost::new(callback(&module, "whole_sample"))),
+            ];
+            (module.unbind(), objectives)
+        });
+        for objective in objectives {
+            let result = crate::test_support::run_while_attaching_is_forbidden(move || {
+                objective.score_batch(&[counts(&[("01", 3), ("10", 1)])], &[Label::Class(1)])
+            });
+            match result {
+                Err(EvaluationError::Backend(BackendError::External(boxed))) => {
+                    assert!(boxed.is::<InterpreterUnavailable>(), "{boxed}")
+                }
+                other => {
+                    panic!("expected Backend(External(InterpreterUnavailable)), got {other:?}")
+                }
+            }
+        }
+        Python::attach(|py| {
+            let recorded: Vec<Call<String>> = calls(module.bind(py));
+            assert!(recorded.is_empty(), "no callback may run: {recorded:?}");
         });
     }
 }

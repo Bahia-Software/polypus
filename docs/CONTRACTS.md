@@ -25,8 +25,8 @@ Rules of the road:
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) | ✅ present | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249, fixed: `polypus.BackendError`), but the run `id`'s UUID v4 draw still panics on the same failure (open, #264) |
+| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
@@ -52,6 +52,8 @@ be changed independently.
 |---|---|---|
 | `"local"` | — | the string `"local"` |
 | `"cunqa"` | `n: int` (QPUs), `t: str` (SLURM walltime `"HH:MM:SS"`), `n_nodes: int`, `family_name: str`, `cores_per_qpu: int` | CUNQA *family* handle (opaque object) |
+
+`t` comes from the user-facing `walltime` kwarg (default `"10:00:00"`). The edge accepts only `HH:MM:SS` — `HH` one or more digits (`48:00:00` is valid), `MM` and `SS` two digits below 60, total above zero; SLURM's `D-HH:MM:SS` is rejected — and raises `ValueError` before this call is made. `local` and `qmio` ignore it. `tests/python/test_cunqa_walltime.py` pins that the value arrives as `t`.
 
 Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
@@ -174,6 +176,16 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   above apply to the original exception; a bare `PyErr` in an `External` box is
   not recovered and surfaces as `polypus.BackendError` (or
   `polypus.EvaluationError` from an observable) with its message.
+- **The interpreter is unavailable.** With the interpreter unavailable (it is
+  finalizing, say, while a run is still going on a daemon thread), the code a
+  run reaches inside `detach` that needs Python (the Aer/CUNQA seam calls, the
+  Qiskit binding, the user's callbacks, the between-wave interrupt guard)
+  returns a typed error, `polypus_infrastructure::InterpreterUnavailable`, that
+  the edge raises as `KeyboardInterrupt` ("the run was aborted: …", the class an
+  interrupted run gets); never a panic. It travels boxed in the same `External`
+  variants and is downcast after `DisplaySafePyErr`, so a seam exception keeps
+  its class (ENGINEERING.md §9). `polypus.statevector`, cancelled by its
+  interrupt hook for the same reason, raises the same `KeyboardInterrupt`.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
   conversion, a statevector that does not fit in the memory budget) raises a
@@ -247,6 +259,24 @@ The `DisplaySafePyErr` carrier: `display_safe_py_err_reraises_the_original_excep
 `crates/polypus-evaluation/src/error.rs`; and
 `a_raising_callback_is_boxed_as_a_display_safe_py_err` in
 `crates/polypus-evaluation/src/py_callback_observable.rs`.
+An unavailable interpreter: `tests/python/test_interpreter_shutdown.py`
+(`test_a_training_run_on_a_daemon_thread_survives_shutdown`,
+`test_a_run_started_while_finalizing_aborts_as_keyboard_interrupt`; a real
+shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
+`interpreter_unavailable_maps_to_keyboard_interrupt_on_the_evaluation_path` and
+`interpreter_unavailable_maps_to_keyboard_interrupt` in
+`crates/polypus/src/exceptions.rs`;
+`interpreter_unavailable_is_an_error_carried_in_external` in
+`crates/polypus-infrastructure/src/attach.rs`; the
+`seams_fail_typed_without_an_interpreter` tests in `local.rs` and `cunqa.rs`,
+`create_backend_without_a_noise_model_does_not_attach` in `lib.rs` and
+`duplicate_shares_the_object_without_attaching` in `circuit.rs` (same crate);
+`python_carrying_errors_format_without_an_interpreter` and the
+`*_when_attaching_is_forbidden` tests in `crates/polypus-evaluation/src/`
+(`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
+among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
+`statevector_cancellation_raises_keyboard_interrupt` in
+`crates/polypus/src/bindings/mod.rs`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
@@ -303,7 +333,12 @@ Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
 backend, rewriting only (synthesis and basis translation, as
 `qiskit.transpile(..., optimization_level=0)` does) and only when the circuit
 holds such an instruction — a circuit already in the basis is handed over as
-it is — and never touch the exported QASM.
+it is — and never touch the exported QASM. The Aer path lowers into the
+default `AerSimulator()`'s basis whatever the run's `sim_method` or
+`noise_model`, which narrow the simulator's target but not what Aer runs. It
+may reuse the lowered circuit of an OpenQASM text it lowered before (the parse
+is deterministic, so it is the circuit lowering that text afresh gives); the
+caller's circuit is never modified.
 
 `cu1` and `cp` are the same operator but distinct instructions: each keeps its
 own spelling through import and export (neither is normalised into the other).
@@ -369,6 +404,23 @@ Corollaries:
   `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
   fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
   for its own canonical form (C-10).
+- **Classical width.** A circuit has one classical register, `c`, as wide as
+  `clbits_width()`: the classical bits the imported program declares (all its
+  `creg`s, or its `bit` registers in OpenQASM 3, flattened in declaration
+  order), or the implicit register its measurements need (`num_clbits()`:
+  `max(cbit) + 1`, `num_qubits` with `measure_all`) if that is wider or
+  nothing was declared. Binding keeps it, and the OpenQASM 2.0 and 3 exports
+  write it as `creg c[n];` / `bit[n] c;` (C-10) — also for a program that
+  declares a register and measures nothing. So `to_qasm2(from_qasm2(s))`
+  declares as many classical bits as `s` (`creg a[2]; creg b[1];` becomes
+  `creg c[3];`), and `==` compares this width: a declared width no larger than
+  the measurements' is the same as declaring none. A circuit from the builder
+  declares none, so it exports exactly the register its measurements need, and
+  none without measurements. A full measurement into a register wider than
+  `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
+  `measure q -> c;` needs equal sizes. The QIR export is the exception: it
+  records only the measured results, and its `required_num_results` is the
+  implicit register. Rationale: `docs/adr/0006-declared-classical-registers.md`.
 - Adding a gate is a **six-place change** plus a row in the equivalence test —
   the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
   (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
@@ -407,8 +459,18 @@ Corollaries:
 and for a circuit using every instruction kind — an exhaustive match fails the
 build when a new variant is not covered — plus canonical statement → import →
 export byte identity per gate, `cu1`/`cp` spelling preservation, every
-angled gate exported with expressions as with their values, and every angled
-gate's angles read back bit-for-bit); the
+angled gate exported with expressions as with their values, every angled
+gate's angles read back bit-for-bit, and the classical width:
+`c2_declared_classical_width_round_trips` and
+`c2_qasm3_declared_classical_width_round_trips`); the classical width of
+imported and built circuits through binding, export and `==` in
+`test_binding_keeps_the_declared_width_and_the_implicit_register`,
+`test_an_unmeasured_declared_register_counts_for_eq`,
+`test_builder_circuits_compare_as_before` and
+`test_builder_exports_are_unchanged_by_the_classical_width` (builder exports
+byte-identical to before) in `crates/polypus-circuit/tests/circuit.rs`, and
+`builder_qir_is_unchanged_by_the_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs`; the
 table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; the
 QIR-vs-simulator unitary-equivalence test in
 `crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
@@ -537,7 +599,9 @@ classical width of a measured OpenQASM program in
 `TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
 `tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
 plus the implicit width of a built `polypus.Circuit` and the declared width
-of one from `Circuit.from_qasm2`/`from_qasm3`),
+of one from `Circuit.from_qasm2`/`from_qasm3`, the agreement of Aer and native
+on such an imported circuit, and the full read-out of an imported circuit
+that declares a `creg` but measures nothing),
 `format_counts_width_follows_the_declared_clbits`,
 `measured_qasm_is_keyed_at_its_declared_clbit_width`,
 `native_circuit_keeps_the_implicit_clbit_width`,
@@ -546,11 +610,15 @@ of one from `Circuit.from_qasm2`/`from_qasm3`),
 `crates/polypus-infrastructure/src/native.rs`, and
 `declared_clbits_is_the_sum_of_the_cregs`, `builder_circuits_declare_no_clbits`,
 `the_export_keeps_the_declared_width`,
-`the_width_is_never_narrower_than_the_measurements` and
-`declared_width_is_part_of_eq_and_kept_by_clone` in
+`the_width_is_never_narrower_than_the_measurements`,
+`a_measurement_within_the_declared_width_keeps_it`,
+`declared_width_is_part_of_eq_and_kept_by_clone` and
+`a_zero_size_creg_is_rejected` in
 `crates/polypus-circuit/tests/qasm_import.rs` and
-`declared_clbits_is_the_sum_of_the_bit_registers` in
-`crates/polypus-circuit/tests/qasm3.rs` (issue #251).
+`declared_clbits_is_the_sum_of_the_bit_registers` and
+`declared_clbits_is_exported` in
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279), plus the
+circuit-side tests listed under C-2.
 
 ---
 
@@ -643,10 +711,19 @@ silently-poisoned result.
 
 ## C-6 · Version coherence
 
-The workspace `Cargo.toml` version is the **single source of truth**. A release
-tag `vX.Y.Z` must match it exactly, the root `version` of `CITATION.cff` must
-equal it, and the Python package version is derived from it at build time. The
-release workflow refuses to publish when the tag and `Cargo.toml` diverge.
+The workspace `Cargo.toml` version (`[workspace.package].version`) is the
+**single source of truth**. Everything else must equal it exactly:
+
+- a release tag `vX.Y.Z`;
+- the root `version` of `CITATION.cff`;
+- the version of the installed `polypus-quantum` distribution, which maturin
+  derives from it at build time;
+- `polypus.__version__`, a `str` the compiled extension sets from
+  `CARGO_PKG_VERSION` when it is built, so it names the binary actually loaded
+  rather than whatever distribution metadata happens to be installed. It is
+  listed in `polypus.__all__`.
+
+The release workflow refuses to publish when the tag and `Cargo.toml` diverge.
 
 *Historical note: tag and Cargo.toml diverged at 0.6.0 (see CHANGELOG). The
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
@@ -660,6 +737,11 @@ is the first release action.*
 - `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
   request and push to `main` (`.github/scripts/hygiene.py`, rule
   `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
+- `polypus.__version__` ↔ `Cargo.toml` ↔ installed distribution:
+  `tests/python/test_version_coherence.py`, in the CI Python suite against the
+  installed wheel. Its distribution comparison skips only when no
+  `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
+  only when the tests run outside the repository.
 
 The release gate requires a green `ci.yml` run for the tagged commit but not a
 green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
@@ -719,14 +801,13 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
   outright, since a QML model is a Qiskit circuit.
-- **OS entropy failure.** If the OS entropy source cannot be read while
-  drawing a default seed (`seed=None` — and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG` instance), the entry point raises
-  `polypus.BackendError` instead of panicking. A call that draws no default
-  seed — an explicit seed, or `run_quantum_circuit` with
-  `infrastructure="qmio"` — is not independent of OS entropy: the run `id`'s
-  UUID v4 suffix is drawn from it too, and that draw still panics (known break,
-  #264).
+- **OS entropy failure.** If the OS entropy source cannot be read, the entry
+  point raises `polypus.BackendError` instead of panicking — whether while
+  drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
+  pinned on the `DE`/`PSO`/`QNG` instance) or while drawing the random bytes of
+  the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
+  with or without an explicit seed and for `infrastructure="qmio"`, which
+  never draws a seed.
 
 ### The run manifest (return shapes)
 
@@ -759,10 +840,14 @@ rejection, and the returned manifest/outcome fields), `tests/python/test_qml_pre
 (the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
-precedence / optimizer determinism, and the default-seed entropy-failure path
-(`seed_or_entropy`, `resolve_optimizer_seed`)), `crates/polypus/src/exceptions.rs`
-(that failure's `polypus.BackendError` mapping) and `crates/polypus-infrastructure/src/native.rs`
-(same-seed reproduces / omitted-seed differs at the backend level). CUNQA's
+precedence / optimizer determinism, the default-seed entropy-failure path
+(`seed_or_entropy`, `resolve_optimizer_seed`), and the run-id entropy-failure
+path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
+(the entropy-failure `polypus.BackendError` mapping),
+`crates/polypus-infrastructure/src/execution_config.rs` (the fallible draws
+`random_seed_from` / `random_id_bytes_from` and their error messages) and
+`crates/polypus-infrastructure/src/native.rs` (same-seed reproduces /
+omitted-seed differs at the backend level). CUNQA's
 `seed` forwarding follows the same shape as Aer's on the Rust side
 (`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) but has no
 dedicated automated test and no verified-working status: per `ENGINEERING.md`
@@ -997,10 +1082,15 @@ gate <name>(<p>, …) <q>, … {    each definition the circuit needs, once:
   <statement>;                    callees first, in order of first use
 }
 qubit[<n>] q;                   unless n = 0
-bit[<m>] c;                     unless m = 0
+bit[<m>] c;                     m = clbits_width(), unless 0
 <statement>;                    one per instruction
 ```
 
+- Registers: `bit[m] c;` is the circuit's classical width (C-2): the sum of
+  the `bit` registers an imported program declares, or the implicit register
+  the measurements need if that is wider — written with or without
+  measurements, so `bit[2] a; bit b;` becomes `bit[3] c;`. A circuit from the
+  builder writes only the bits its measurements need.
 - Statements: `name(a, b) q[i], q[j];`; `barrier q;` for every qubit
   (`barrier;` with none), `barrier q[i], …;` otherwise; `c = measure q;` for a
   full measurement when the registers have one size, `c[i] = measure q[j];`
@@ -1080,7 +1170,9 @@ and rejected construct with its line and message, the budgets on both sides,
 the canonical layout, numbers and parentheses, renaming and collisions — a
 native and a declared `rzz` included —, cross-dialect export),
 `crates/polypus-circuit/tests/contracts.rs` (`c2_*qasm3*`: the vocabulary's
-fixed point), `crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
+fixed point, and the declared `bit` width), the `declared_clbits_*` tests of
+`crates/polypus-circuit/tests/qasm3.rs` (the width written as `bit[m]`),
+`crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
 every `stdgates.inc` gate and `U` against the specification, `U`/`u2`/`u3` by
 the declared factors, `CX`, every exported definition, cross-dialect),
 `tests/python/test_qasm3.py` and `tests/python/test_qasm3_interop.py` (Qiskit

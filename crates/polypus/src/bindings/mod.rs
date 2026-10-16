@@ -27,10 +27,11 @@ use crate::evaluation::{
     PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, SupervisedObjective,
     VqcOracleFactory,
 };
-use crate::infrastructure::execution_config::random_seed;
+use crate::infrastructure::execution_config::{random_id_bytes, random_seed};
 use crate::infrastructure::{
-    merge_counts, BackendConfig, BoundCircuit, Counts, EntropyError, ExecutionConfig,
-    Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner, ShotDistributingPlanner,
+    merge_counts, validate_walltime, BackendConfig, BoundCircuit, Counts, EntropyError,
+    ExecutionConfig, Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner,
+    ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
     DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow, Scheduler,
@@ -40,7 +41,6 @@ use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use uuid::Uuid;
 
 /// Between-wave interrupt guard backed by CPython's pending-signal check, so a
 /// Ctrl+C (`SIGINT`) aborts a run at the next wave boundary.
@@ -53,22 +53,20 @@ use uuid::Uuid;
 ///
 /// `poll` runs while the thread is detached (the run is inside `py.detach`), so
 /// attaching here is a fresh attach, not a reuse of the caller's: `Python::attach`
-/// could panic, or attach to a finalizing interpreter, if the interpreter were
-/// shutting down (on any Python version). It attaches with
+/// could panic, hang, or attach to a finalizing interpreter, if the interpreter
+/// were shutting down (on any Python version). It attaches with
 /// [`attach_or`](crate::infrastructure::attach_or) instead, and an unreachable
-/// interpreter aborts the run as `BackendError::Aborted` — the edge's
-/// `KeyboardInterrupt`, the same class a Ctrl+C gets — since its result could
-/// never be handed back to Python (docs/ENGINEERING.md §3 and §9).
+/// interpreter aborts the run with
+/// [`InterpreterUnavailable`](crate::infrastructure::InterpreterUnavailable), the
+/// error every other site reached while detached returns. The edge raises it as
+/// `KeyboardInterrupt`, the same class a Ctrl+C gets, since the run's result
+/// could never be handed back to Python (docs/ENGINEERING.md §3 and §9).
 struct SignalInterrupt;
 
 impl crate::infrastructure::Interrupt for SignalInterrupt {
     fn poll(&self) -> Result<(), crate::infrastructure::BackendError> {
         crate::infrastructure::attach_or(
-            || {
-                Err(crate::infrastructure::BackendError::Aborted(
-                    "the Python interpreter is no longer available (shutting down)".to_string(),
-                ))
-            },
+            || Err(crate::infrastructure::InterpreterUnavailable.into()),
             |py| {
                 py.check_signals()
                     .map_err(crate::infrastructure::seam_error)
@@ -289,8 +287,29 @@ fn seed_or_entropy(
 /// and log streams. Used by `run_quantum_circuit`'s auto-generated id,
 /// `train`'s and `qml_train`'s caller-supplied id (#45 / PR #70, #75): in
 /// every case `base` is kept as a human-readable prefix on the effective id.
-fn unique_id(base: &str) -> String {
-    format!("{}_{}", base, Uuid::new_v4())
+///
+/// A failed OS-entropy read raises `polypus.BackendError`, never a panic (C-1,
+/// C-7) — which is why the UUID is built from [`random_id_bytes`] rather than
+/// drawn by the `uuid` crate itself, which panics on that failure (#264).
+fn unique_id(base: &str) -> PyResult<String> {
+    unique_id_from(base, random_id_bytes)
+}
+
+/// `base` suffixed with a UUID v4 built from the bytes `draw` returns
+/// (`random_id_bytes` in production): the body of [`unique_id`], with the
+/// entropy source injectable so its failure path can be tested.
+fn unique_id_from(
+    base: &str,
+    draw: impl FnOnce() -> Result<[u8; 16], EntropyError>,
+) -> PyResult<String> {
+    let bytes = draw().map_err(|e| {
+        crate::exceptions::backend_error_to_pyerr(crate::infrastructure::BackendError::from(e))
+    })?;
+    Ok(format!(
+        "{}_{}",
+        base,
+        uuid::Builder::from_random_bytes(bytes).into_uuid()
+    ))
 }
 
 /// Announce the start of a training run at the default log level.
@@ -555,6 +574,7 @@ fn build_backend_config(
     noise_model: Option<Py<PyAny>>,
     nodes: u32,
     cores_per_qpu: u32,
+    walltime: Option<&str>,
     fusion: Option<bool>,
     options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
@@ -614,6 +634,7 @@ fn build_backend_config(
             sim_method: sim_method.to_string(),
             nodes,
             cores_per_qpu,
+            walltime: walltime.unwrap_or(DEFAULT_WALLTIME).to_string(),
         }),
         // QMIO is now dispatched through the runtime registry (it registers a
         // factory), so its config is a `Registered { name: "qmio", options }`.
@@ -730,14 +751,20 @@ fn validate_shots_and_qpus(shots: u32, n_qpus: u32) -> PyResult<()> {
 }
 
 /// Validate the CUNQA allocation parameters at the Python-facing boundary. Only
-/// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu` (they flow to
-/// SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu` via
+/// the `"cunqa"` infrastructure consumes `nodes`/`cores_per_qpu`/`walltime` (they
+/// flow to SLURM's `qraise` as the C-1 kwargs `n_nodes`/`cores_per_qpu`/`t` via
 /// `CunqaBackend`); the `local` and `qmio` match arms of `build_backend_config`
 /// ignore them, so validating unconditionally would reject harmless non-cunqa
-/// calls. A zero for either value has no sane meaning once it reaches SLURM, so
-/// reject it here before any seam call rather than forward it. Shared by every
-/// entry point rather than duplicated per function.
-fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u32) -> PyResult<()> {
+/// calls. A zero for either count has no sane meaning once it reaches SLURM, and
+/// a `walltime` that is not `HH:MM:SS` would only fail inside `qraise`, so
+/// reject both here before any seam call rather than forward them. Shared by
+/// every entry point rather than duplicated per function.
+fn validate_cunqa_allocation(
+    infrastructure: &str,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<&str>,
+) -> PyResult<()> {
     if infrastructure != "cunqa" {
         return Ok(());
     }
@@ -750,6 +777,10 @@ fn validate_cunqa_allocation(infrastructure: &str, nodes: u32, cores_per_qpu: u3
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "cores_per_qpu must be >= 1 for the 'cunqa' infrastructure, got {cores_per_qpu}"
         )));
+    }
+    if let Some(walltime) = walltime {
+        validate_walltime(walltime)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     }
     Ok(())
 }
@@ -1029,6 +1060,13 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `>= 1` — a zero has no sane meaning once it reaches SLURM and is rejected.
 /// They default to `nodes=1, cores_per_qpu=2`.
 ///
+/// `walltime` is the SLURM walltime of the CUNQA QPUs (sent to `qraise` as `t`),
+/// again meaningful only for `infrastructure="cunqa"`. It must be `"HH:MM:SS"`:
+/// hours of one or more digits (`"48:00:00"` is valid), minutes and seconds of
+/// two digits below 60, total above zero; SLURM's `D-HH:MM:SS` is rejected. A
+/// malformed value raises `ValueError` before any QPU is requested. Omitted, it
+/// is `"10:00:00"`.
+///
 /// Returns a [`RunResult`] carrying the counts — `counts`, always a
 /// `list[dict]` with one dict per QPU replica, and `merged_counts`, their total as
 /// one `dict` — plus a manifest (`id`, effective `seed`, `backend`,
@@ -1047,7 +1085,7 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
 /// Any other value type is a `TypeError` naming the key; a non-empty `options` on
 /// `local`/`cunqa`, which would ignore it, is a `ValueError`.
-#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None))]
+#[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
     shots: u32,
@@ -1061,6 +1099,7 @@ pub fn run_quantum_circuit<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     // Entry-point trace carrying the full circuit `Debug` repr on every call:
@@ -1070,7 +1109,7 @@ pub fn run_quantum_circuit<'py>(
          infrastructure: {infrastructure}, n_qpus: {n_qpus}, backend: {backend}, seed: {seed:?}"
     );
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     let bound_qc = extract_bound_circuit(&qc)?;
     if is_native_backend(backend) && bound_qc.is_foreign() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1108,7 +1147,7 @@ pub fn run_quantum_circuit<'py>(
     // temp files and log streams (see ExecutionConfig::id), so a byte-identical
     // id across runs is a real hazard, not a cosmetic one. The `run_{n}_{infra}`
     // prefix is kept for human-readable debuggability.
-    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure));
+    let id = unique_id(&format!("run_{}_{}", n_qpus, infrastructure))?;
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1116,6 +1155,7 @@ pub fn run_quantum_circuit<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         fusion,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1234,6 +1274,9 @@ pub fn run_quantum_circuit<'py>(
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+/// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
+/// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
+/// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1251,7 +1294,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1269,10 +1312,11 @@ pub fn train<'py>(
     seed: Option<u64>,
     fusion: Option<bool>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     validate_id(&id)?;
     // Resolve the seed that drives the optimizer's RNG (contract C-7): explicit
     // kwarg > optimizer object's `seed` field > fresh OS entropy. Unlike
@@ -1318,6 +1362,7 @@ pub fn train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         fusion,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1326,7 +1371,7 @@ pub fn train<'py>(
     // temp files or log streams named by ExecutionConfig::id (#75, mirroring
     // run_quantum_circuit). The prefix is kept for debuggability and the
     // effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id);
+    let effective_id = unique_id(&id)?;
     let config = Arc::new(ExecutionConfig {
         id: effective_id.clone(),
         shots,
@@ -1504,6 +1549,9 @@ fn bind_feature_rows<'py>(
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
 /// `cunqa` both must be `>= 1` (a zero is meaningless to SLURM and rejected).
+/// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
+/// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
+/// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1526,7 +1574,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, *, y_train=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1545,11 +1593,12 @@ pub fn qml_train<'py>(
     backend: &str,
     seed: Option<u64>,
     options: Option<OptionsArg>,
+    walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     validate_id(&id)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
@@ -1622,6 +1671,7 @@ pub fn qml_train<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         None,
         options.map(OptionsArg::into_inner),
     )?;
@@ -1629,7 +1679,7 @@ pub fn qml_train<'py>(
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
     // ExecutionConfig::id. The effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id);
+    let effective_id = unique_id(&id)?;
     let config = Arc::new(ExecutionConfig {
         id: effective_id.clone(),
         shots,
@@ -1698,6 +1748,10 @@ pub fn qml_train<'py>(
 /// finiteness of `params`, and a non-empty `x` are checked before anything runs
 /// (contract C-8).
 ///
+/// `nodes`, `cores_per_qpu` and `walltime` size the SLURM allocation and are
+/// consumed only by `infrastructure="cunqa"`, with the same rules as in
+/// [`run_quantum_circuit`]; `local` ignores them.
+///
 /// Example:
 ///
 /// ```ignore
@@ -1707,7 +1761,7 @@ pub fn qml_train<'py>(
 ///     )
 ///     predictions = [readout(counts) for counts in run.counts]
 /// ```
-#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None))]
+#[pyfunction(name = "predict", signature = (feature_map, ansatz, x, params, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, walltime=None))]
 pub fn qml_predict<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1722,10 +1776,11 @@ pub fn qml_predict<'py>(
     noise_model: Option<Bound<'py, PyAny>>,
     backend: &str,
     seed: Option<u64>,
+    walltime: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu)?;
+    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
     if is_native_backend(backend) {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1778,7 +1833,7 @@ pub fn qml_predict<'py>(
 
     // Always simulated (qmio is rejected), so a seed always applies (contract C-7).
     let effective_seed = seed_or_entropy(seed, random_seed)?;
-    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure));
+    let id = unique_id(&format!("predict_{}_{}", n_qpus, infrastructure))?;
     let backend_config = build_backend_config(
         &infrastructure,
         backend,
@@ -1786,6 +1841,7 @@ pub fn qml_predict<'py>(
         noise_model.map(|nm| nm.unbind()),
         nodes,
         cores_per_qpu,
+        walltime.as_deref(),
         None,
         // predict runs on aer/local only (qmio rejected above), so there is no
         // registered/provider backend to pass options to.
@@ -1856,6 +1912,8 @@ fn backend_cleanup_failures() -> u64 {
 /// while the import name and the Rust crate both stay `polypus`.
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Baked in at compile time, so it names the binary actually loaded (C-6).
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     crate::exceptions::register(m)?;
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
@@ -1936,12 +1994,13 @@ mod tests {
 
     /// Without an interpreter, both signal-polling hooks that run while
     /// detached cancel instead of panicking: the planner's guard aborts the run
-    /// as `BackendError::Aborted` (the edge's `KeyboardInterrupt`) and the
-    /// `statevector` hook asks the gate loop to stop, with no pending
-    /// exception. "Not initialized" is also how a shutting-down interpreter
-    /// looks to PyO3 (CPython clears its `initialized` flag right after marking
-    /// itself finalizing), but a real shutdown cannot be reproduced from a Rust
-    /// test.
+    /// with `InterpreterUnavailable` boxed in `BackendError::External`, the
+    /// error every other site reached while detached returns (the edge's
+    /// `KeyboardInterrupt`), and the `statevector` hook asks the gate loop to
+    /// stop, with no pending exception. "Not initialized" is also how a
+    /// shutting-down interpreter looks to PyO3 (CPython clears its
+    /// `initialized` flag right after marking itself finalizing), but a real
+    /// shutdown cannot be reproduced from a Rust test.
     #[test]
     fn signal_polling_cancels_when_the_interpreter_is_unavailable() {
         if std::env::var_os(FRESH_PROCESS_ENV).is_none() {
@@ -1950,12 +2009,14 @@ mod tests {
             );
             return;
         }
-        use crate::infrastructure::{BackendError, Interrupt};
-        let polled = SignalInterrupt.poll();
-        assert!(
-            matches!(&polled, Err(BackendError::Aborted(msg)) if msg.contains("no longer available")),
-            "an unreachable interpreter must abort the run, got {polled:?}"
-        );
+        use crate::infrastructure::{BackendError, InterpreterUnavailable, Interrupt};
+        match SignalInterrupt.poll() {
+            Err(BackendError::External(boxed)) => assert!(
+                boxed.is::<InterpreterUnavailable>(),
+                "an unreachable interpreter must abort the run with InterpreterUnavailable: {boxed}"
+            ),
+            other => panic!("an unreachable interpreter must abort the run, got {other:?}"),
+        }
 
         let mut pending = None;
         assert!(
@@ -2016,14 +2077,22 @@ mod tests {
     }
 
     /// A cancelled `statevector` re-raises the pending signal's own exception,
-    /// and raises `KeyboardInterrupt` — the class the planner's guard gets for
-    /// the same event — when the interpreter became unreachable.
+    /// and, when the interpreter became unreachable, the same
+    /// `KeyboardInterrupt` every other site reached while detached ends in:
+    /// same class, same text.
     #[test]
     fn statevector_cancellation_raises_keyboard_interrupt() {
         Python::initialize();
         Python::attach(|py| {
             let unreachable = circuit::cancellation_error(None);
             assert!(unreachable.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py));
+            assert_eq!(
+                unreachable.value(py).to_string(),
+                format!(
+                    "the run was aborted: {}",
+                    crate::infrastructure::InterpreterUnavailable
+                )
+            );
 
             let signal = pyo3::exceptions::PyKeyboardInterrupt::new_err("Ctrl+C");
             let signal_value = signal.value(py).clone();
@@ -2070,6 +2139,7 @@ mod tests {
             None,
             "polypus",
             seed,
+            None,
             None,
             None,
         )
@@ -2141,6 +2211,7 @@ mod tests {
                 Some(7),
                 None,
                 None,
+                None,
             )
             .expect("native run succeeds");
             let bound = result.bind(py);
@@ -2191,6 +2262,7 @@ mod tests {
                     Some(7),
                     None,
                     None,
+                    None,
                 )
                 .expect("native run succeeds");
                 result
@@ -2233,8 +2305,8 @@ mod tests {
         // Same base (as with `train(..., id="run1")` twice) ⇒ unique ids that
         // both keep the supplied string as a prefix.
         for base in ["run1", "qml_run", "run_1_local"] {
-            let id1 = unique_id(base);
-            let id2 = unique_id(base);
+            let id1 = unique_id(base).unwrap();
+            let id2 = unique_id(base).unwrap();
             let prefix = format!("{base}_");
             assert!(
                 id1.starts_with(&prefix) && id2.starts_with(&prefix),
@@ -2267,6 +2339,7 @@ mod tests {
                 None,
                 "aer",
                 Some(3),
+                None,
                 None,
                 None,
             );
@@ -2361,6 +2434,41 @@ mod tests {
         assert_entropy_failure(&err);
     }
 
+    /// The run id's UUID is built from exactly the bytes drawn, with the v4
+    /// version and RFC 4122 variant bits set — the id format is unchanged.
+    #[test]
+    fn unique_id_from_builds_a_v4_uuid_from_the_drawn_bytes() {
+        let id = unique_id_from("run1", || Ok(std::array::from_fn(|i| i as u8))).unwrap();
+        assert_eq!(id, "run1_00010203-0405-4607-8809-0a0b0c0d0e0f");
+        let suffix = uuid::Uuid::parse_str(id.strip_prefix("run1_").unwrap()).unwrap();
+        assert_eq!(suffix.get_version(), Some(uuid::Version::Random));
+        assert_eq!(suffix.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    /// Every entry point draws a run id, even with an explicit seed or on
+    /// `qmio`: a failed draw must raise `polypus.BackendError` (catchable as
+    /// `Exception`), never a `PanicException` (#264, contract C-1/C-7).
+    #[test]
+    fn unique_id_from_raises_backend_error_when_the_draw_fails() {
+        let err = unique_id_from("run1", || {
+            Err(EntropyError::for_run_id(std::io::Error::other(
+                "getrandom: device not available",
+            )))
+        })
+        .expect_err("a failed draw must be an Err");
+        assert_entropy_failure(&err);
+        Python::attach(|py| {
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyException>(py),
+                "must be catchable as Exception: {err}"
+            );
+            assert!(
+                err.to_string().contains("run id"),
+                "message must say the run id draw failed: {err}"
+            );
+        });
+    }
+
     /// The seed the binding resolves must actually make the optimizer
     /// reproducible (same seed ⇒ identical outcome) and its entropy fallback must
     /// vary (no seed ⇒ different outcomes) — the `train`/`qml.train` acceptance
@@ -2437,7 +2545,7 @@ mod tests {
 
     #[test]
     fn build_backend_config_selects_the_local_variants() {
-        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None, None)
+        let aer = build_backend_config("local", "aer", "automatic", None, 1, 2, None, None, None)
             .expect("aer is a valid local backend");
         assert!(matches!(
             aer,
@@ -2449,9 +2557,18 @@ mod tests {
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
-            let native =
-                build_backend_config("local", name, "automatic", None, 1, 2, Some(true), None)
-                    .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
+            let native = build_backend_config(
+                "local",
+                name,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(true),
+                None,
+            )
+            .unwrap_or_else(|_| panic!("'{name}' selects the native backend"));
             assert!(matches!(
                 native,
                 BackendConfig::LocalNative { fusion: true }
@@ -2470,6 +2587,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             Some(true),
             None,
         )
@@ -2486,6 +2604,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             Some(false),
             None,
         )
@@ -2500,8 +2619,18 @@ mod tests {
     /// (`true`) — the crate-wide `StatevectorSimulator::default().fusion`.
     #[test]
     fn build_backend_config_defaults_fusion_to_enabled_when_omitted() {
-        let native = build_backend_config("local", "polypus", "automatic", None, 1, 2, None, None)
-            .expect("polypus is a valid local backend");
+        let native = build_backend_config(
+            "local",
+            "polypus",
+            "automatic",
+            None,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect("polypus is a valid local backend");
         assert!(matches!(
             native,
             BackendConfig::LocalNative { fusion: true }
@@ -2516,9 +2645,18 @@ mod tests {
     fn build_backend_config_rejects_fusion_true_on_non_fusing_backends() {
         pyo3::Python::initialize();
         for (infra, backend) in [("local", "aer"), ("cunqa", "aer")] {
-            let err =
-                build_backend_config(infra, backend, "automatic", None, 1, 2, Some(true), None)
-                    .expect_err("fusion=True on a non-fusing backend must be rejected");
+            let err = build_backend_config(
+                infra,
+                backend,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(true),
+                None,
+            )
+            .expect_err("fusion=True on a non-fusing backend must be rejected");
             Python::attach(|py| {
                 assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
                 assert!(
@@ -2528,9 +2666,19 @@ mod tests {
             });
 
             // fusion=False and an omitted fusion must build a config, not error.
-            build_backend_config(infra, backend, "automatic", None, 1, 2, Some(false), None)
-                .expect("fusion=False is accepted everywhere");
-            build_backend_config(infra, backend, "automatic", None, 1, 2, None, None)
+            build_backend_config(
+                infra,
+                backend,
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                Some(false),
+                None,
+            )
+            .expect("fusion=False is accepted everywhere");
+            build_backend_config(infra, backend, "automatic", None, 1, 2, None, None, None)
                 .expect("omitted fusion is accepted everywhere");
         }
     }
@@ -2544,6 +2692,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             None,
         )
@@ -2571,6 +2720,7 @@ mod tests {
             2,
             None,
             None,
+            None,
         )
         .expect_err("a noise model on the native backend must be rejected");
         Python::attach(|py| {
@@ -2595,6 +2745,7 @@ mod tests {
             2,
             None,
             None,
+            None,
         )
         .expect("aer accepts a noise model");
         assert!(matches!(
@@ -2609,23 +2760,69 @@ mod tests {
 
     #[test]
     fn build_backend_config_forwards_the_cunqa_allocation() {
-        let config = build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None, None)
-            .expect("cunqa is a valid infrastructure");
+        let config =
+            build_backend_config("cunqa", "aer", "statevector", None, 3, 4, None, None, None)
+                .expect("cunqa is a valid infrastructure");
         assert!(matches!(
             config,
             BackendConfig::Cunqa {
                 nodes: 3,
                 cores_per_qpu: 4,
                 ref sim_method,
+                ref walltime,
                 ..
-            } if sim_method == "statevector"
+            } if sim_method == "statevector" && walltime == DEFAULT_WALLTIME
         ));
     }
 
     #[test]
+    fn build_backend_config_forwards_an_explicit_cunqa_walltime() {
+        let config = build_backend_config(
+            "cunqa",
+            "aer",
+            "statevector",
+            None,
+            1,
+            2,
+            Some("48:00:00"),
+            None,
+            None,
+        )
+        .expect("cunqa is a valid infrastructure");
+        assert!(matches!(
+            config,
+            BackendConfig::Cunqa { ref walltime, .. } if walltime == "48:00:00"
+        ));
+    }
+
+    #[test]
+    fn validate_cunqa_allocation_checks_the_walltime_only_for_cunqa() {
+        let msg = |r: PyResult<()>| r.expect_err("must be rejected").to_string();
+        assert!(
+            msg(validate_cunqa_allocation("cunqa", 1, 2, Some("1-00:00:00"))).contains("HH:MM:SS")
+        );
+        assert!(validate_cunqa_allocation("cunqa", 1, 2, Some("48:00:00")).is_ok());
+        assert!(validate_cunqa_allocation("cunqa", 1, 2, None).is_ok());
+        // local/qmio ignore the kwarg, as they do nodes/cores_per_qpu.
+        for infra in ["local", "qmio"] {
+            assert!(validate_cunqa_allocation(infra, 1, 2, Some("garbage")).is_ok());
+        }
+    }
+
+    #[test]
     fn build_backend_config_rejects_an_unknown_infrastructure() {
-        let err = build_backend_config("quantum-cloud", "aer", "automatic", None, 1, 2, None, None)
-            .expect_err("an unknown infrastructure must be rejected");
+        let err = build_backend_config(
+            "quantum-cloud",
+            "aer",
+            "automatic",
+            None,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect_err("an unknown infrastructure must be rejected");
         pyo3::Python::initialize();
         Python::attach(|py| {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
@@ -2662,6 +2859,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             Some(opts),
         )
@@ -2711,6 +2909,7 @@ mod tests {
                 1,
                 2,
                 None,
+                None,
                 Some(opts.clone()),
             )
             .expect_err("options on a typed built-in must be rejected");
@@ -2730,6 +2929,7 @@ mod tests {
             None,
             1,
             2,
+            None,
             None,
             Some(HashMap::new()),
         )
