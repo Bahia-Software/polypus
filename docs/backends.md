@@ -615,7 +615,7 @@ have no failure variants of their own).
 | **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
 | **Local (Aer)** | full battery (Aer present) | ✅ pass | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
 | **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
-| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ❌ **QMIO-1** |
+| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ✅ `UnsupportedCircuit` |
 
 ### Native — fully conformant
 
@@ -795,30 +795,23 @@ Run against an unreachable endpoint:
   outcome is *definitive*, not retryable — `External` is the honest classification, and
   the battery's `Unresponsive` check is simply not supplied for QMIO (skip). This is a
   deliberate reading of recoverable-vs-fatal, not a defect.
-- **QMIO-1 — a `Foreign` circuit surfaces as `External`, not `UnsupportedCircuit`.**
-  `QmioBackend::run_circuits` maps *every* `QmioError` — including
-  `QmioError::UnsupportedCircuit` for a `Foreign` circuit — into `External`, so a caller
-  matching on `BackendError::UnsupportedCircuit` misses it (it arrives as a
-  `polypus.QmioError` at the edge, not the structural unsupported-circuit error). The
-  foreign-rejection check **fails** for QMIO. Proposed fix: in `run_circuits`, map
-  `QmioError::UnsupportedCircuit` to `BackendError::UnsupportedCircuit` before the
-  catch-all `External`.
+- **A `Foreign` circuit → `UnsupportedCircuit`.** `QmioBackend::run_circuits` maps
+  `QmioError::UnsupportedCircuit` (a Qiskit circuit, which QMIO cannot serialize without the
+  interpreter) to `BackendError::UnsupportedCircuit`; every other `QmioError` stays
+  `External`. The edge raises it as `polypus.NativeCircuitError`, like the native backend.
+  This check passes. It was finding **QMIO-1**: the circuit used to arrive as
+  `External`, a `polypus.QmioError`. The Python entry points reject a Qiskit circuit for
+  `infrastructure="qmio"` with a `ValueError` before the backend runs, so this class is seen by
+  Rust callers of the backend.
 
 ### Status of the open findings
 
 | Finding | Severity | Reachable today | Fix touches | Deferred because |
 |---|---|---|---|---|
 | LOCAL-2 (ignored `backend` kwarg) | **C-1 contract violation** | n/a | the `polypus_python` seal or `local.rs` | outside scope; seal is C-1 |
-| QMIO-1 (Foreign→External) | low | only on a misuse (Qiskit circuit to QMIO) | `qmio.rs` | outside scope; **changes the Python exception class**, so needs a contract call |
 
-None of these code changes has been made. The only edit to a contract document is a
-**record** of LOCAL-2 in the C-1 known-breaks list of
-[`docs/CONTRACTS.md`](CONTRACTS.md) — documenting an existing violation where the
-contract already says it belongs, not altering the contract or fixing the break. Note
-that fixing QMIO-1 would change the Python-visible exception for that case (from
-`polypus.QmioError` to the structural unsupported-circuit error), which is a
-contract-visible decision and
-should be taken as one.
+LOCAL-2 is recorded, not fixed: the only edit to a contract document for it is a **record**
+in the C-1 known-breaks list of [`docs/CONTRACTS.md`](CONTRACTS.md). QMIO-1 is fixed.
 
 ## Stability commitment
 

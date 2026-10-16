@@ -181,7 +181,9 @@ enum ProgramPayload {
 ///
 /// These bubble up through [`QuantumBackend::run_circuits`] as a
 /// [`BackendError::External`] (a boxed `QmioError`), which the FFI boundary maps to the typed
-/// `polypus.QmioError` Python exception — never a panic. The enum keeps its own
+/// `polypus.QmioError` Python exception — never a panic. The one exception is
+/// [`QmioError::UnsupportedCircuit`], which `run_circuits` reports as the structural
+/// [`BackendError::UnsupportedCircuit`], like every other backend. The enum keeps its own
 /// rich variants (verified against the wire protocol) instead of being
 /// flattened into [`BackendError`]; see [`crate::error`] for the
 /// crate-wide granularity decision.
@@ -619,10 +621,15 @@ impl QuantumBackend for QmioBackend {
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         self.run_all(qcs, config).map_err(|e| {
             log::error!("QMIO backend error talking to {}: {e}", self.endpoint);
-            // The provider-specific QMIO error crosses the pyo3-free backend
-            // contract type-erased in `External`; the FFI edge downcasts it back to
-            // raise the typed `polypus.QmioError`.
-            BackendError::External(Box::new(e))
+            match e {
+                // A circuit representation QMIO cannot serialize is the contract's
+                // structural rejection, not a provider failure.
+                QmioError::UnsupportedCircuit => BackendError::UnsupportedCircuit(e.to_string()),
+                // Any other provider-specific QMIO error crosses the pyo3-free
+                // backend contract type-erased in `External`; the FFI edge downcasts
+                // it back to raise the typed `polypus.QmioError`.
+                other => BackendError::External(Box::new(other)),
+            }
         })
     }
 
@@ -1617,6 +1624,25 @@ mod tests {
             .serialize_program(&circuit)
             .unwrap_err();
         assert!(matches!(err, QmioError::UnsupportedCircuit));
+    }
+
+    #[test]
+    fn run_circuits_reports_a_qiskit_circuit_as_unsupported() {
+        // Serialization fails before any socket is opened, so no endpoint is needed.
+        pyo3::Python::initialize();
+        let circuit = pyo3::Python::attach(|py| crate::QiskitCircuit::into_bound(py.None()));
+        let params = RunParams {
+            id: "foreign-circuit".to_string(),
+            shots: 10,
+            seed: None,
+            opt_level: Default::default(),
+        };
+        match backend(QmioProgramFormat::OpenQasm).run_circuits(&[circuit], &params) {
+            Err(BackendError::UnsupportedCircuit(message)) => {
+                assert!(message.contains("Qiskit QuantumCircuit"), "{message}")
+            }
+            other => panic!("expected UnsupportedCircuit, got {other:?}"),
+        }
     }
 
     #[test]

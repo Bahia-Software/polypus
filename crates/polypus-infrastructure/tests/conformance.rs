@@ -35,10 +35,10 @@
 //!   is fixed: it returns `Ok(vec![])`. Finding **LOCAL-2**: the seal ignores the
 //!   `backend` kwarg; it is recorded, not fixed (it lives outside this phase's module
 //!   scope).
-//! - **QMIO**: finding **QMIO-1**: a `Foreign` circuit is wrapped in `External` rather
-//!   than the contract's `UnsupportedCircuit`. Its wire timeout maps to `External`
-//!   (definitive) rather than `Unresponsive` — a deliberate choice, since QMIO exhausts
-//!   its own retries first, so the `Unresponsive` check is not applicable to it.
+//! - **QMIO**: a `Foreign` circuit is rejected as `UnsupportedCircuit` (finding
+//!   **QMIO-1**, fixed). Its wire timeout maps to `External` (definitive) rather than
+//!   `Unresponsive` — a deliberate choice, since QMIO exhausts its own retries first,
+//!   so the `Unresponsive` check is not applicable to it.
 
 use std::sync::Arc;
 
@@ -213,8 +213,8 @@ fn cunqa_backend_conformance_is_environment_gated() {
 
 /// QMIO has no simulator mode, so only its error classification is exercised — against
 /// an **unreachable endpoint**, with a short timeout so the test is fast. Documents
-/// finding QMIO-1 (a `Foreign` circuit surfaces as `External`, not `UnsupportedCircuit`)
-/// and that a wire timeout is a clean `External` error (QMIO exhausts its own retries,
+/// that a `Foreign` circuit is rejected as `UnsupportedCircuit` (finding QMIO-1) and that a
+/// wire timeout is a clean `External` error (QMIO exhausts its own retries,
 /// so `Unresponsive` is not applicable and is not supplied).
 #[cfg(feature = "qmio")]
 #[test]
@@ -250,9 +250,6 @@ fn qmio_error_classification() {
 
     // QMIO does classify its wire failure as a clean (External) error.
     assert_status(&report, "clean_provider_error_is_classified", true);
-    // Finding QMIO-1: a Foreign circuit is wrapped in External, not UnsupportedCircuit,
-    // so the foreign-rejection check currently fails. Pinned here; flip to `true` when
-    // qmio.rs maps QmioError::UnsupportedCircuit to BackendError::UnsupportedCircuit
-    // (see docs/backends.md).
-    assert_status(&report, "foreign_circuit_rejected_as_unsupported", false);
+    // Finding QMIO-1 (fixed): a Foreign circuit is `UnsupportedCircuit`, not `External`.
+    assert_status(&report, "foreign_circuit_rejected_as_unsupported", true);
 }
