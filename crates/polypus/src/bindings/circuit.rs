@@ -398,10 +398,20 @@ impl Circuit {
         self.inner.num_params
     }
 
-    /// Size of the implicit classical register.
+    /// Size of the implicit classical register: the bits the measurements
+    /// need (`max(cbit) + 1`, `num_qubits` with `measure_all`, 0 without
+    /// measurements).
     #[getter]
     fn num_clbits(&self) -> usize {
         self.inner.num_clbits()
+    }
+
+    /// Width of the classical register the exports write and a measured
+    /// circuit's counts are keyed at: the bits an imported program declares,
+    /// or `num_clbits` if that is wider or nothing was declared (contract C-3).
+    #[getter]
+    fn clbits_width(&self) -> usize {
+        self.inner.clbits_width()
     }
 
     // ── Single-qubit gates ───────────────────────────────────────────────

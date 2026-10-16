@@ -1532,6 +1532,55 @@ mod tests {
         }
     }
 
+    /// Regression (issue #322, C-3): the QIR formats submit the classical width
+    /// the `openqasm` format does. For a program whose `creg` is wider than the
+    /// bits it writes, `required_num_results` is the `creg`'s width — as
+    /// OpenQASM text and as the circuit imported from it — not
+    /// `max(cbit) + 1`.
+    #[test]
+    fn qir_formats_declare_the_classical_width_of_the_openqasm_program() {
+        let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n";
+        let imported = ParameterizedCircuit::from_qasm2(qasm)
+            .unwrap()
+            .assign_parameters(&[])
+            .unwrap();
+        // The same gates from the builder, which declares no register.
+        let narrow = ParameterizedCircuit::new(2)
+            .x(0)
+            .measure(0, 1)
+            .assign_parameters(&[])
+            .unwrap();
+        let text = |format, circuit: &BoundCircuit| match backend(format)
+            .serialize_program(circuit)
+            .unwrap()
+        {
+            ProgramPayload::Text(text) => text,
+            ProgramPayload::Bytes(_) => panic!("{format:?} must be text"),
+        };
+        for circuit in [
+            BoundCircuit::Qasm2(qasm.to_string()),
+            BoundCircuit::Native(imported.clone()),
+        ] {
+            let openqasm = text(QmioProgramFormat::OpenQasm, &circuit);
+            assert!(openqasm.contains("creg c[3];\n"), "{openqasm}");
+            let qir = text(QmioProgramFormat::QirText, &circuit);
+            assert!(qir.contains("\"required_num_results\"=\"3\""), "{qir}");
+
+            // The bitcode is the same module, assembled. `llvm-as` may be
+            // missing; then the path has nothing to compare.
+            match backend(QmioProgramFormat::QirBitcode).serialize_program(&circuit) {
+                Ok(ProgramPayload::Bytes(bc)) => {
+                    assert_eq!(bc, imported.to_qir_bitcode().unwrap());
+                    assert_ne!(bc, narrow.to_qir_bitcode().unwrap());
+                }
+                Ok(ProgramPayload::Text(_)) => panic!("bitcode must be bytes"),
+                Err(QmioError::QirBitcode(_)) => { /* llvm-as not installed: acceptable */ }
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(narrow.to_qir().contains("\"required_num_results\"=\"2\""));
+    }
+
     #[test]
     fn rejects_qiskit_circuits() {
         // Constructing a Qiskit-variant bound circuit needs a Python object, so

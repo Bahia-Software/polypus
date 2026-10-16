@@ -423,9 +423,12 @@ Corollaries:
   declares none, so it exports exactly the register its measurements need, and
   none without measurements. A full measurement into a register wider than
   `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
-  `measure q -> c;` needs equal sizes. The QIR export is the exception: it
-  records only the measured results, and its `required_num_results` is the
-  implicit register. Rationale: `docs/adr/0006-declared-classical-registers.md`.
+  `measure q -> c;` needs equal sizes. The QIR export declares it as
+  `required_num_results` and records only the measured results, so it may
+  declare results it never records, as a partial measurement already does
+  (one written at `c[1]` declares 2 and records 1); QMIO's `openqasm`, `qir`
+  and `qir_bitcode` formats thus submit the same width (issue #322).
+  Rationale: `docs/adr/0006-declared-classical-registers.md`.
 - Adding a gate is a **six-place change** plus a row in the equivalence test —
   the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
   (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
@@ -519,9 +522,11 @@ a circuit in the list is neither copied nor transpiled).
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
   such a circuit). The CUNQA path is not verified.
 - For a circuit **with** measurements, `num_clbits` is the circuit's
-  classical width (the key width — not `Circuit.num_clbits` /
+  classical width (the key width, `Circuit.clbits_width` in Python and
+  `clbits_width()` in Rust — not `Circuit.num_clbits` /
   `ParameterizedCircuit::num_clbits()`, which stay the implicit register
-  sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
+  sized by the measurements, so that an unmeasured circuit's keys are
+  `num_qubits` wide): for an OpenQASM 2.0 program, the classical bits it
   **declares** (the sum of all its `creg`s), even when fewer are written —
   `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
   measurement writes read `0`; for a `polypus.Circuit` built with the
@@ -532,7 +537,8 @@ a circuit in the list is neither copied nor transpiled).
   the declared width): it is keyed like the source. Aer and the native
   backend agree on all three (issue #251; before it the native backend used
   `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
-  verified; the QIR export records only the measured results.
+  verified; QMIO receives the declared width in all three program formats
+  (the QIR export's `required_num_results`, issue #322).
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -622,7 +628,13 @@ that declares a `creg` but measures nothing),
 `crates/polypus-circuit/tests/qasm_import.rs` and
 `declared_clbits_is_the_sum_of_the_bit_registers` and
 `declared_clbits_is_exported` in
-`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279), plus the
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279);
+`qir_declares_the_imported_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs` and
+`qir_formats_declare_the_classical_width_of_the_openqasm_program` in
+`crates/polypus-infrastructure/src/qmio.rs` (issue #322);
+`test_clbits_width_is_the_declared_width` in
+`tests/python/test_qasm_import.py` (issue #323), plus the
 circuit-side tests listed under C-2.
 
 ---
