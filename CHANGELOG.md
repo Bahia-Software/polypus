@@ -39,11 +39,17 @@ Changes on `main` since 0.7.2.
   removed; they could not run against any supported CUNQA version.
 - The QIR export declares the circuit's classical width in
   `required_num_results`, as the OpenQASM exports do.
+- **BREAKING:** `expectation_value` and `expectation_values` raise `ValueError`
+  for counts that sum to zero instead of returning `0.0`.
+- Rust no longer sends the `backend` and `id` kwargs that `run_qcs` never read
+  (contract C-1).
 - The QML candidate window also follows the backend's concurrency, within the
   memory bound.
 
 ### Fixed
 - OpenQASM 2.0 export keeps angles at full round-trip precision.
+- With `infrastructure="cunqa"`, a non-Aer `backend` or a `noise_model` raises
+  `ValueError` instead of being silently ignored.
 - A Qiskit circuit with free parameters is rejected before any backend, and
   `backend_compatibility` reports it.
 - Backends report circuits OpenQASM 2.0 cannot express instead of panicking.
