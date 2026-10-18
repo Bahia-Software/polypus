@@ -28,6 +28,9 @@ warn()    { echo -e "${YELLOW}[polypus]${NC} $*"; }
 error()   { echo -e "${RED}[polypus]${NC} $*" >&2; exit 1; }
 
 # ── Interactive helpers ───────────────────────────────────────────────────────
+# lower STR   — lowercase STR (portable: macOS ships bash 3.2, which lacks ${var,,})
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # ask_yn VAR "Question?" "y|n"   — sets VAR to y or n
 ask_yn() {
     local var="$1" question="$2" default="$3"
@@ -35,7 +38,7 @@ ask_yn() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} ${question} [${hint}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             y|yes) eval "$var='y'"; return ;;
             n|no)  eval "$var='n'"; return ;;
             *) echo "    Please answer y or n." ;;
@@ -49,7 +52,7 @@ ask_build() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} Build mode (release/dev) [${BOLD}${default}${NC}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             release|dev) eval "$var='$ans'"; return ;;
             *) echo "    Please answer: release or dev." ;;
         esac
@@ -62,7 +65,7 @@ ask_tests() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} Run tests after install? (all/smoke/none) [${BOLD}${default}${NC}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             all|smoke|none) eval "$var='$ans'"; return ;;
             *) echo "    Please answer: all, smoke, or none." ;;
         esac
@@ -141,7 +144,7 @@ if [[ $YES == 0 ]] && [[ -t 0 ]]; then
     echo ""
     read -r -p "$(echo -e "  ${CYAN}?${NC} Proceed? [${BOLD}Y${NC}/n] ")" confirm
     confirm="${confirm:-y}"
-    [[ "${confirm,,}" == "n" || "${confirm,,}" == "no" ]] && { echo "Aborted."; exit 0; }
+    [[ "$(lower "$confirm")" == "n" || "$(lower "$confirm")" == "no" ]] && { echo "Aborted."; exit 0; }
     echo ""
 else
     echo ""
@@ -268,6 +271,9 @@ if [[ "$RUN_TESTS" != "none" ]]; then
         info "Running Rust tests..."
         PYTHON_LIBDIR=$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
         export LD_LIBRARY_PATH="${PYTHON_LIBDIR}:${LD_LIBRARY_PATH:-}"
+        # macOS's dyld ignores LD_LIBRARY_PATH. Use the *fallback* path so libpython is
+        # found without the Python lib dir (e.g. conda's) shadowing system libraries.
+        [[ "$(uname -s)" == "Darwin" ]] && export DYLD_FALLBACK_LIBRARY_PATH="${PYTHON_LIBDIR}:${DYLD_FALLBACK_LIBRARY_PATH:-$HOME/lib:/usr/local/lib:/usr/lib}"
         cargo test
     fi
 fi
