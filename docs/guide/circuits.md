@@ -49,6 +49,29 @@ qaoa.to_qasm3()  # rzz(2.0*theta_0) q[0], q[1]; ...
 
 Expressions follow the same rules as those imported from OpenQASM 3 (contract C-2): a gate method rejects a `NaN` or infinite number, a constant division by zero, and an expression nested more than 64 levels deep with `ValueError`; binding evaluates the expression exactly as written, in binary64 and without reassociation, and raises `ValueError` for a division by zero or a non-finite angle. An expression without parameters (`polypus.pi / 2`) is evaluated when the gate is added. `repr` shows the expression in OpenQASM 3 syntax, with `Param(i)` for each parameter; two expressions compare equal when they are built the same way (`a + b != b + a`). The constants are expressions, not floats: use `math.pi` where a number is needed.
 
+## Drawing
+
+A circuit draws itself, natively and with no plotting library: `print(qc)` shows a text drawing, and a notebook displays an SVG one.
+
+```python
+qc = polypus.Circuit(2).h(0).cx(0, 1).rz(1, Param(0)).measure_all()
+print(qc)
+```
+
+```text
+     ┌───┐                       ┌─┐
+q0: ─┤ H ├───■───────────────────┤M├─────
+     └───┘   │                   └╥┘
+           ┌─┴─┐ ┌─────────────┐  ║  ┌─┐
+q1: ───────┤ X ├─┤ Rz(theta_0) ├──╫──┤M├─
+           └───┘ └─────────────┘  ║  └╥┘
+                                  ║   ║
+c2: ══════════════════════════════╩═══╩══
+                                  0   1
+```
+
+`qc.draw()` returns that text; `qc.draw(ascii=True)` draws it with plain ASCII for terminals and logs without Unicode, and `fold` sets the width it wraps at (80 characters by default, `fold=None` never wraps). `qc.draw("svg")` returns a standalone SVG document to save or embed. Angles show as the circuit holds them: a parameter by its name (`param_names`), an expression as written, and a fixed value as a multiple of π when it is one (`π/2`). In Rust, the same drawings are `draw_text(TextOptions { .. })` and `draw_svg()` on `ParameterizedCircuit` and `ConcreteCircuit`, and `Display` prints the default text drawing.
+
 ## Export
 
 | Format | Python | Rust |

@@ -5,6 +5,7 @@
 //! `polypus.train` exactly like a Qiskit `QuantumCircuit`.
 
 use numpy::{IntoPyArray, PyArray1};
+use polypus_circuit::draw::TextOptions;
 use polypus_circuit::{
     CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
 };
@@ -968,6 +969,49 @@ impl Circuit {
             .to_qir_bitcode_with_params(&params.unwrap_or_default())
             .map_err(to_py_err)?;
         Ok(PyBytes::new(py, &bitcode))
+    }
+
+    /// Draw the circuit, natively (no Qiskit, no plotting library).
+    ///
+    /// * `output` — `"text"` (default): one wire per qubit drawn with Unicode
+    ///   box characters, and a bundled classical wire `c` when the circuit
+    ///   measures; `"svg"`: a standalone SVG document.
+    /// * `ascii` — text only: draw with plain ASCII (`-`, `|`, `+`, `*`, `pi`)
+    ///   for terminals and logs without Unicode.
+    /// * `fold` — text only: wrap into pages at most this many characters wide
+    ///   (default 80); `None` never wraps.
+    ///
+    /// Angles show as the circuit holds them: a free parameter by its name
+    /// ([`param_names`](Circuit::param_names)), an expression as written, a
+    /// fixed value as a multiple of π when it is one. `print(qc)` shows the
+    /// text drawing, and Jupyter displays the SVG one.
+    ///
+    /// ```python
+    /// qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+    /// print(qc.draw())
+    /// open("bell.svg", "w").write(qc.draw("svg"))
+    /// ```
+    #[pyo3(
+        signature = (output="text", *, ascii=false, fold=Some(80)),
+        text_signature = "($self, output='text', *, ascii=False, fold=80)"
+    )]
+    fn draw(&self, output: &str, ascii: bool, fold: Option<usize>) -> PyResult<String> {
+        match output {
+            "text" => Ok(self.inner.draw_text(TextOptions { ascii, fold })),
+            "svg" => Ok(self.inner.draw_svg()),
+            other => Err(PyValueError::new_err(format!(
+                "output must be \"text\" or \"svg\", got {other:?}"
+            ))),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.draw_text(TextOptions::default())
+    }
+
+    /// The SVG drawing, which IPython/Jupyter displays for a circuit.
+    fn _repr_svg_(&self) -> String {
+        self.inner.draw_svg()
     }
 
     fn __len__(&self) -> usize {

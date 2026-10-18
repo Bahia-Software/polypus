@@ -23,6 +23,9 @@ Changes on `main` since 0.7.2.
   `polypus.sin`, `pi`, ...), stored as circuit expressions.
 - `Circuit.clbits_width`: the classical width an imported program declares.
 - A warning when training on CUNQA is projected to outlive the walltime.
+- Native circuit drawings: `Circuit.draw()` (Unicode or ASCII text, or SVG),
+  `print(circuit)` and SVG display in Jupyter; `draw_text`/`draw_svg` and
+  `Display` in Rust. No new dependencies.
 
 ### Changed
 - **BREAKING:** the declared classical width is kept through circuit binding

@@ -18,6 +18,7 @@ from typing import (
     Any,
     Callable,
     ClassVar,
+    Literal,
     Optional,
     Sequence,
     TypedDict,
@@ -309,6 +310,14 @@ class Circuit:
     def to_qasm3(self, params: Optional[_FloatVector] = None) -> str: ...
     def to_qir(self, params: Optional[_FloatVector] = None) -> str: ...
     def to_qir_bitcode(self, params: Optional[_FloatVector] = None) -> bytes: ...
+    def draw(
+        self,
+        output: Literal["text", "svg"] = "text",
+        *,
+        ascii: bool = False,
+        fold: Optional[int] = 80,
+    ) -> str: ...
+    def _repr_svg_(self) -> str: ...
     def __len__(self) -> int: ...
 
 # ── Results ─────────────────────────────────────────────────────────────────

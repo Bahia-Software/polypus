@@ -38,6 +38,7 @@
 
 mod circuit;
 mod custom_gate;
+pub mod draw;
 mod error;
 pub mod expr;
 mod gate;
