@@ -1,6 +1,6 @@
 //! Circuit drawings: text (Unicode box drawing or plain ASCII) and SVG.
 //!
-//! Both renderers share one layout. Each instruction becomes an [`Op`] (what
+//! Both renderers share one layout. Each instruction becomes an op (what
 //! is drawn on which wires), and the ops are packed greedily into columns: an
 //! op goes in the first column after the last one that uses any wire between
 //! its topmost and bottommost qubit, so the vertical line joining a control to
