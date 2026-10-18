@@ -692,6 +692,38 @@ impl From<Constant> for ParamExpr {
     }
 }
 
+impl fmt::Display for ParamExpr {
+    /// The expression as OpenQASM 3 writes it, each free parameter as
+    /// `Param(<index>)`: `2.0*Param(0) - pi`. A number that is not finite,
+    /// which [`add_expr`](crate::ParameterizedCircuit::add_expr) rejects, is
+    /// written `nan` or `inf`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Each parameter and each non-finite number becomes a reference to a
+        // name, numbered densely in order of first use.
+        let mut names: Vec<String> = Vec::new();
+        let mut slots = std::collections::BTreeMap::new();
+        let mut slot = |name: String| {
+            *slots.entry(name.clone()).or_insert_with(|| {
+                names.push(name);
+                names.len() - 1
+            })
+        };
+        let nodes: Vec<Node<Input>> = self
+            .nodes
+            .iter()
+            .map(|node| match *node {
+                Node::Ref(Input(index)) => Node::Ref(Input(slot(format!("Param({index})")))),
+                Node::Num(v) if v.is_nan() => Node::Ref(Input(slot("nan".into()))),
+                Node::Num(v) if v.is_infinite() => Node::Ref(Input(slot("inf".into()))),
+                other => other,
+            })
+            .collect();
+        let mut out = String::new();
+        print(&nodes, Dialect::Qasm3, &names, &mut out).map_err(|_| fmt::Error)?;
+        f.write_str(&out)
+    }
+}
+
 impl ops::Neg for ParamExpr {
     type Output = ParamExpr;
 

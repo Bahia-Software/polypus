@@ -66,8 +66,10 @@ const CONTROL_FLOW: [&str; 4] = ["if_else", "while_loop", "for_loop", "switch_ca
 ///   into the basis of the default `AerSimulator()` whatever `sim_method` or
 ///   `noise_model` a run is given (either one narrows the simulator's target,
 ///   not what Aer runs), with no cap on the width.
-/// - A `polypus.Circuit` with free parameters cannot be run by either backend;
-///   both entries give the same reason.
+/// - A circuit with free parameters (a `polypus.Circuit` or a Qiskit
+///   `QuantumCircuit`) cannot be run by either backend; both entries give the
+///   `ValueError` message the run raises. For a `QuantumCircuit` the native
+///   entry lists its other reasons after it.
 ///
 /// Raises `TypeError` for any other object.
 ///
@@ -94,10 +96,17 @@ fn reasons(circuit: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Vec<String>)> {
     let py = circuit.py();
     let bound = match super::extract_bound_circuit(circuit) {
         Ok(bound) => bound,
-        // A `polypus.Circuit` with free parameters: no backend can run it.
+        // A circuit with free parameters: no backend can run it. For a Qiskit
+        // `QuantumCircuit` the native entry also keeps what binding would not
+        // fix.
         Err(err) if err.is_instance_of::<PyValueError>(py) => {
             let reason = message(py, &err);
-            return Ok((vec![reason.clone()], vec![reason]));
+            let mut native = vec![reason.clone()];
+            if let Ok(qc) = quantum_circuit(circuit) {
+                native.push(super::NATIVE_REJECTS_QISKIT.to_string());
+                native.extend(dynamic_features(qc)?);
+            }
+            return Ok((vec![reason], native));
         }
         Err(err) => return Err(err),
     };

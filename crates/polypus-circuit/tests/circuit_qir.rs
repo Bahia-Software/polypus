@@ -466,3 +466,34 @@ fn builder_qir_is_unchanged_by_the_classical_width() {
         assert_eq!(ir, qc.assign_parameters(&[]).unwrap().to_qir());
     }
 }
+
+/// An imported program's QIR declares the classical width the program does
+/// (issue #322; `required_num_results` used to be `max(cbit) + 1`): `creg c[3]`
+/// written only at `c[1]` needs 3 results, and so does a program that declares
+/// `creg c[3]` and measures nothing — no `mz` is emitted, the results are
+/// declared all the same, as the exported `creg c[3]` is. So
+/// `required_num_results` may exceed the results recorded: 3 declared, 1 and 0
+/// recorded.
+#[test]
+fn qir_declares_the_imported_classical_width() {
+    let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\n";
+    for (body, measures) in [
+        ("x q[0];\nmeasure q[0] -> c[1];\n", true),
+        ("x q[0];\n", false),
+    ] {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{header}{body}")).unwrap();
+        for ir in [
+            qc.to_qir_with_params(&[]).unwrap(),
+            qc.assign_parameters(&[]).unwrap().to_qir(),
+        ] {
+            assert!(ir.contains("\"required_num_results\"=\"3\""), "{ir}");
+            assert_eq!(ir.contains("__quantum__qis__mz__body"), measures, "{ir}");
+            assert_eq!(
+                ir.matches("call void @__quantum__rt__result_record_output")
+                    .count(),
+                usize::from(measures),
+                "{ir}"
+            );
+        }
+    }
+}

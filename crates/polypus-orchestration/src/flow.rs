@@ -11,6 +11,7 @@ use polypus_optimizers::{EvaluationOracle, OptimizationOutcome};
 
 use crate::dispatch::{dispatch_optimizer, Method, OracleError, OracleErrorSlot};
 use crate::scheduler::Resources;
+use crate::walltime::{SystemClock, WalltimeWatch};
 
 /// A unit of orchestratable work run by [`Scheduler::run`](crate::Scheduler::run).
 ///
@@ -130,6 +131,17 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         // token this run cancels on — while the *order* still lives with the
         // scheduler that runs it.
         let oracle = self.factory.build(resources, cancel, &self.errors);
+        // Only a backend whose allocation expires (CUNQA) gets the overrun watch.
+        let oracle: Box<dyn EvaluationOracle> = match resources.backend.walltime() {
+            Some(walltime) => Box::new(WalltimeWatch::new(
+                oracle,
+                walltime,
+                self.method.run_shape(),
+                &resources.config.id,
+                SystemClock,
+            )),
+            None => oracle,
+        };
         dispatch_optimizer(
             self.method,
             oracle,
@@ -357,5 +369,91 @@ mod tests {
         // The optimizer saw the stub oracle: every candidate scores 0.0.
         assert_eq!(outcome.best_fitness, 0.0);
         scheduler.close();
+    }
+
+    /// A backend whose allocation expires after `walltime` (CUNQA-like) or never.
+    struct ExpiringBackend(Option<std::time::Duration>);
+    impl QuantumBackend for ExpiringBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            _config: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Ok(qcs.iter().map(|_| HashMap::new()).collect())
+        }
+        fn walltime(&self) -> Option<std::time::Duration> {
+            self.0
+        }
+    }
+
+    /// Every batch takes a millisecond of real time.
+    struct SleepyOracle;
+    impl EvaluationOracle for SleepyOracle {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    struct SleepyFactory;
+    impl OracleFactory for SleepyFactory {
+        fn build(
+            self,
+            _resources: &Resources,
+            _cancel: &CancelToken,
+            _errors: &OracleErrorSlot,
+        ) -> Box<dyn EvaluationOracle> {
+            Box::new(SleepyOracle)
+        }
+    }
+
+    /// Train over `backend` and return the warnings logged for the run.
+    fn train_and_collect_warnings(
+        run_id: &str,
+        walltime: Option<std::time::Duration>,
+    ) -> Vec<String> {
+        use crate::test_log::logged_for;
+        let resources = Resources::new(
+            Arc::new(ExpiringBackend(walltime)),
+            Some(Arc::new(EchoPlanner)),
+            Arc::new(RunParams {
+                id: run_id.to_string(),
+                ..config()
+            }),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+        let flow = TrainFlow {
+            factory: SleepyFactory,
+            method: Method::De(crate::DeConfig {
+                generations: 3,
+                population_size: 6,
+                tolerance: 0.0,
+                patience: 10,
+            }),
+            dimensions: 2,
+            seed: 7,
+            errors: OracleErrorSlot::new(),
+        };
+        assert!(scheduler.run(flow).is_ok(), "the train flow must run");
+        scheduler.close();
+        logged_for(run_id)
+    }
+
+    /// A backend with a walltime the run cannot meet gets exactly one warning.
+    #[test]
+    fn train_flow_warns_when_the_run_outlives_the_backend_walltime() {
+        let warnings = train_and_collect_warnings(
+            "flow-walltime-exceeded",
+            Some(std::time::Duration::from_nanos(1)),
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("walltime"), "{warnings:?}");
+    }
+
+    /// Without a walltime (native, local, QMIO) the oracle is not watched at all.
+    #[test]
+    fn train_flow_does_not_watch_a_backend_without_walltime() {
+        assert!(train_and_collect_warnings("flow-walltime-none", None).is_empty());
     }
 }

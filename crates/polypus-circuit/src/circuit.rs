@@ -748,8 +748,8 @@ impl ParameterizedCircuit {
     /// implicit register ([`num_clbits`](Self::num_clbits)) if that is wider or
     /// nothing was declared. Kept by [`assign_parameters`](Self::assign_parameters),
     /// so a measured program's counts are keyed at this width on every backend,
-    /// as on Aer (contract C-3). The QIR export is the exception: it records
-    /// only the measured results.
+    /// as on Aer (contract C-3). The QIR export declares it as
+    /// `required_num_results`, and records only the measured results.
     pub fn clbits_width(&self) -> usize {
         clbits_width(self.declared_clbits, self.num_clbits())
     }
@@ -904,7 +904,7 @@ impl ParameterizedCircuit {
         }
         qir::write_qir(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             params,
             &self.exprs,
@@ -924,7 +924,7 @@ impl ParameterizedCircuit {
         }
         qir::write_qir_bitcode(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             params,
             &self.exprs,
@@ -1050,7 +1050,7 @@ impl ConcreteCircuit {
     pub fn to_qir(&self) -> String {
         qir::write_qir(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             &[],
             &ExprArena::EMPTY,
@@ -1071,7 +1071,7 @@ impl ConcreteCircuit {
     pub fn to_qir_bitcode(&self) -> Result<Vec<u8>, CircuitError> {
         qir::write_qir_bitcode(
             self.num_qubits,
-            self.num_clbits(),
+            self.clbits_width(),
             &self.gates,
             &[],
             &ExprArena::EMPTY,

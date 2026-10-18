@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod circuit;
 pub mod error;
@@ -270,6 +271,17 @@ pub trait QuantumBackend: Send + Sync {
     /// for every backend whose replica count is not a fixed integer, so the valid
     /// "QMIO with `n_qpus > 1` replicas run sequentially" case is unaffected.
     fn replica_count(&self) -> Option<u32> {
+        None
+    }
+
+    /// The wall-clock lifetime of the allocation this backend runs on, when it has
+    /// one — CUNQA returns the SLURM walltime its QPUs were raised with, after which
+    /// they are released mid-run. `None` (the default: native, local, QMIO) means
+    /// the backend does not expire.
+    ///
+    /// A training flow in `polypus-orchestration` reads it to warn, once, when the
+    /// first generation's duration projects past it; it is not enforced.
+    fn walltime(&self) -> Option<Duration> {
         None
     }
 }

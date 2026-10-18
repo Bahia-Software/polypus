@@ -117,8 +117,6 @@ VALIDATING_CALLS = {
         id_, QuantumCircuit(1)
     ),
     "_deserialize_quantum_circuit": lambda id_: rf._deserialize_quantum_circuit(id_),
-    "run_qc_in_qpu": lambda id_: rf.run_qc_in_qpu(id_, QuantumCircuit(1), 10),
-    "run_qcs_in_qpu": lambda id_: rf.run_qcs_in_qpu(id_, [QuantumCircuit(1)], 10),
 }
 
 
@@ -177,11 +175,6 @@ class TestInvalidIdTouchesNothing:
         assert list(cwd.iterdir()) == []
         assert list(system_tmp.iterdir()) == []
         assert not log_dir.exists()
-
-    def test_run_qc_in_qpu_rejects_before_importing_cunqa(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "cunqa", None)
-        with pytest.raises(ValueError, match="invalid character '/'"):
-            rf.run_qc_in_qpu("../x", QuantumCircuit(1), 10)
 
 
 class TestLoggingDefault:

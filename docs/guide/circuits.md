@@ -33,6 +33,22 @@ let qc = ParameterizedCircuit::new(4)
     .measure_all();
 ```
 
+### Angle expressions
+
+An angle can be an expression of the parameters: combine `polypus.Param`, numbers and the constants `polypus.pi`, `polypus.tau` and `polypus.euler` with `+ - * / **` and unary minus, and apply `polypus.sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `exp`, `log` (natural) and `sqrt`. The result, a `polypus.ParamExpr`, is accepted by every angle argument.
+
+```python
+import polypus
+from polypus import Param
+
+gamma, beta = Param(0), Param(1)
+qaoa = polypus.Circuit(2).h(0).h(1).rzz(0, 1, 2 * gamma).rx(0, 2 * beta).rx(1, 2 * beta)
+qaoa.measure_all()
+qaoa.to_qasm3()  # rzz(2.0*theta_0) q[0], q[1]; ...
+```
+
+Expressions follow the same rules as those imported from OpenQASM 3 (contract C-2): a gate method rejects a `NaN` or infinite number, a constant division by zero, and an expression nested more than 64 levels deep with `ValueError`; binding evaluates the expression exactly as written, in binary64 and without reassociation, and raises `ValueError` for a division by zero or a non-finite angle. An expression without parameters (`polypus.pi / 2`) is evaluated when the gate is added. `repr` shows the expression in OpenQASM 3 syntax, with `Param(i)` for each parameter; two expressions compare equal when they are built the same way (`a + b != b + a`). The constants are expressions, not floats: use `math.pi` where a number is needed.
+
 ## Export
 
 | Format | Python | Rust |
