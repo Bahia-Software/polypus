@@ -18,8 +18,25 @@ bash install.sh            # guided
 bash install.sh --yes      # non-interactive (CI)
 ```
 
-Manual route — build the wheel and install it (one wheel carries both the
-`polypus` extension and the bundled `polypus_python` helpers):
+Development route — an editable install of both packages (`polypus` and the
+`polypus_python` helpers, which live side by side under `python/`):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```bash
+maturin develop --release
+```
+
+Edits to any `.py` file under `python/` take effect on the next import, with no
+rebuild. After a Rust change, run `maturin develop --release` again; it rebuilds
+the extension incrementally and drops it in place next to
+`python/polypus/__init__.py` (git-ignored). Keep `--release`, matching the
+wheel CI tests: several Python tests time real simulations.
+
+Wheel route — what `install.sh`, CI and users get (one wheel carries both the
+`polypus` extension and the `polypus_python` helpers):
 
 ```bash
 pip install -r requirements-dev.txt
@@ -33,11 +50,8 @@ maturin build --release --out dist
 pip install --force-reinstall dist/polypus_quantum-*.whl
 ```
 
-Do not use `maturin develop` for this: it installs only the compiled extension
-and not `polypus_python`, so `pytest tests/python` fails with
-`ModuleNotFoundError: No module named 'polypus_python'`. `--force-reinstall`
-makes pip replace an already-installed wheel that has the same version after a
-rebuild.
+`--force-reinstall` makes pip replace an already-installed wheel that has the
+same version after a rebuild; it also replaces an editable install.
 
 **Toolchain:** the Minimum Supported Rust Version is declared as
 `rust-version` in the workspace `Cargo.toml` — that field is the single place
@@ -62,7 +76,7 @@ cargo test --workspace                     # all crates, no hand-maintained list
                                            #  worker; they skip gracefully if python3 is absent)
 cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
 cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs the wheel installed (see Setting up), not `maturin develop`
+pytest tests/python                        # needs polypus installed (see Setting up)
 python -m mypy.stubtest polypus \
   --allowlist tests/python/stubtest_allowlist.txt \
   --mypy-config-file tests/python/stubtest_mypy.ini

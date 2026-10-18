@@ -72,14 +72,15 @@ module-name = "polypus"
 # `polypus/polypus*.so` next to that `__init__.py`, which does `from .polypus
 # import *` exactly as the generated wrapper did.
 python-source = "python"
-# Bundle the pure-Python helper package into the same wheel as a real top-level
-# `polypus_python` package. The extension imports it by that name at its
-# execution seams (`PyModule::import(py, "polypus_python")`), and users import
-# `polypus_python.qaoa_utils` etc. directly, so it must be a real top-level
-# package (not a `polypus` submodule or a sys.modules alias). No `format` key =>
-# included in BOTH the wheel and the sdist, so a build from the sdist (e.g. PyPI's
-# fallback when there is no matching wheel) still ships the helpers.
-include = ["polypus_python/**/*.py"]
+# Ship the pure-Python helper package as a second, real top-level package
+# `polypus_python` next to `polypus`. The extension imports it by that name at
+# its execution seams (`PyModule::import(py, "polypus_python")`), and users
+# import `polypus_python.qaoa_utils` etc. directly, so it must be a real
+# top-level package (not a `polypus` submodule or a sys.modules alias). Living
+# under `python-source` puts it in the wheel and the sdist, and also on the path
+# of an editable install (`maturin develop` / `pip install -e .`), whose `.pth`
+# points at `python/` — so helper edits take effect without a rebuild.
+python-packages = ["polypus_python"]
 
 # Python lint + formatting for the whole repo (packages, tests, benchmarks,
 # examples). CI runs `ruff check` and `ruff format --check`.
@@ -101,11 +102,9 @@ select = ["E4", "E7", "E9", "F", "I"]
 "tests/**" = ["E402"]
 
 [tool.ruff.lint.isort]
-# `polypus_python/` now lives at the repo root, so ruff's isort would otherwise
-# auto-classify it as first-party and split it from `polypus` (the compiled
-# extension, classified third-party) in the files that import both. Pin it
-# third-party so the two stay in one import section, exactly as before the
-# packaging move (`polypus` needs no pin — it has no root source dir).
+# Pin `polypus_python` (under `python/`) third-party, like `polypus`, so the
+# two stay in one import section in the files that import both, whatever ruff
+# infers about first-party source roots.
 known-third-party = ["polypus_python"]
 
 [tool.pytest.ini_options]

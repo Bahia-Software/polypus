@@ -192,10 +192,9 @@ fi
 
 # ── 5. Build & install polypus (Rust extension + bundled polypus_python) ──────
 # A single maturin wheel now contains BOTH the `polypus` extension and the
-# pure-Python `polypus_python` helpers (bundled via `[tool.maturin] include`), so
-# one build+install provides both import names. NOTE: `maturin develop` is not
-# used here — it installs only the compiled extension, not the `include`d
-# helpers; a built wheel does include them.
+# pure-Python `polypus_python` helpers (both live under `python/`, the maturin
+# python-source), so one build+install provides both import names. This builds
+# a regular wheel; for an editable dev install see docs/CONTRIBUTING.md.
 MATURIN_FLAGS="--features extension-module"
 # Opt-in CESGA QMIO QPU backend (pure-Rust ZeroMQ; no system libzmq needed).
 [[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,qmio"

@@ -84,7 +84,7 @@ at backend construction), whose charset is constrained by C-9.
 `max_memory_mb` is sent by the local backend **only when the memory budget is a
 known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
 the reserve) and is omitted for the blind fallback; it is the budget in whole MiB,
-never `0` (which Aer reads as "no limit"). `polypus_python/local.py` consumes it by
+never `0` (which Aer reads as "no limit"). `python/polypus_python/local.py` consumes it by
 passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
 absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
 lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
@@ -123,7 +123,7 @@ QUBO/Ising costs, and `polypus-evaluation`'s `PyCallbackObservable` calls a user
 callback once per unique bitstring in a single GIL section and aggregates in
 Rust. The Rust layer no longer calls `expectation_values` across the seam, so it
 is not frozen by this contract. The function still lives in
-`polypus_python/qaoa_utils.py` for Python-side use.*
+`python/polypus_python/qaoa_utils.py` for Python-side use.*
 
 ### Failure modes (all three functions)
 
@@ -210,7 +210,7 @@ The Rust orchestration layer now returns a typed `Result` on every path:
     as `max_memory_mb` (above), so Aer validates each experiment for the method it
     actually picks — a large Clifford circuit that `automatic` runs on `stabilizer`
     still fits, while a non-Clifford one, or a `density_matrix` run (`16 · 4^n`),
-    is refused. `polypus_python/local.py` raises Aer's refusal (an unsuccessful
+    is refused. `python/polypus_python/local.py` raises Aer's refusal (an unsuccessful
     experiment whose `status` contains "insufficient memory") as
     `polypus.InsufficientMemoryError`, which crosses back through `seam_error` /
     `external_to_pyerr` verbatim, keeping its class.
@@ -329,10 +329,10 @@ OpenQASM exporters: the native simulator, for gates without a dedicated
 kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
 exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
 declared gates); the QIR exporter, for gates without a base-profile
-intrinsic; and the Aer path (`polypus_python/local.py`), for what is outside
+intrinsic; and the Aer path (`python/polypus_python/local.py`), for what is outside
 Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
 `c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs); and the CUNQA path
-(`polypus_python/cunqa.py`), for what CUNQA's circuit converter does not take
+(`python/polypus_python/cunqa.py`), for what CUNQA's circuit converter does not take
 (the names outside its `SUPPORTED_QISKIT_OPERATIONS`: the same gates, plus
 `mcx`). Those two lower the Qiskit circuit just before handing it to the
 backend, rewriting only (synthesis and basis translation, as
@@ -977,7 +977,7 @@ takes no such kwarg.
 
 ### Python mirror
 
-The `polypus_python` helpers in `polypus_python/running_functions.py` also turn
+The `polypus_python` helpers in `python/polypus_python/running_functions.py` also turn
 an `id` into file names (`circuit_<id>.qpy`, `polypus_python_<id>.log`). They are
 public and can be called without going through `train`/`qml.train`, so they
 validate `id` themselves with `validate_id`, a Python mirror of the Rust check.
