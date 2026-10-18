@@ -73,7 +73,7 @@ maturin build --release --out dist
 pip install dist/polypus_quantum-*.whl
 ```
 
-Install the wheel rather than using `maturin develop`, which leaves out the bundled `polypus_python` helpers.
+For development, `maturin develop --release` installs both packages in editable mode instead: edits to Python files take effect at once, and only a Rust change needs the command run again.
 </details>
 
 > The name `polypus` on PyPI belongs to an unrelated project, so the distribution is `polypus-quantum`. The import name and the Rust crate are `polypus`.
@@ -185,7 +185,7 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 | [`polypus-orchestration`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-orchestration) | `Flow`, `Scheduler` and `Resources`; optimizer dispatch |
 | [`polypus-evaluation`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-evaluation) | Oracles and objective assembly |
 | [`polypus-logger`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-logger) | Shared log sink |
-| [`polypus_python`](https://github.com/Bahia-Software/polypus/tree/main/polypus_python) | Python-side backend glue, bundled in the wheel |
+| [`polypus_python`](https://github.com/Bahia-Software/polypus/tree/main/python/polypus_python) | Python-side backend glue, bundled in the wheel |
 
 </details>
 

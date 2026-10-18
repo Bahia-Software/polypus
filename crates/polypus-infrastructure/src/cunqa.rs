@@ -157,7 +157,7 @@ impl QuantumBackend for CunqaBackend {
                 // (contract C-7); `None` is simply omitted, so CUNQA's own
                 // unseeded default behavior is unchanged. Unlike the identical
                 // arrangement for Aer (`local.rs`), this seam is unverified — see
-                // `polypus_python/cunqa.py` for the caveats.
+                // `python/polypus_python/cunqa.py` for the caveats.
                 if let Some(seed) = config.seed {
                     kwargs.set_item("seed", seed).map_err(conv)?;
                 }

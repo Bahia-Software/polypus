@@ -150,8 +150,8 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
-          # Features come from the root pyproject `[tool.maturin]`; the include
-          # rule bundles `polypus_python` into every wheel.
+          # Features come from the root pyproject `[tool.maturin]`, whose
+          # `python-packages` ships `polypus_python` in every wheel.
           args: --release --out dist -i python3.9 python3.10 python3.11 python3.12 python3.13
           manylinux: auto
       - name: Check built interpreters

@@ -16,7 +16,7 @@
 //! uses (`QuantumCircuit.from_qasm_str`). For a circuit that reaches Aer as
 //! OpenQASM (a `polypus.Circuit` or a `str`) it does not compare instructions
 //! with Aer's target: the local backend lowers what is outside Aer's basis
-//! before running it (`polypus_python/local.py`, contract C-2), so an
+//! before running it (`python/polypus_python/local.py`, contract C-2), so an
 //! instruction outside the basis is no reason to reject. For a Qiskit
 //! `QuantumCircuit` the Aer entry replays that lowering: when an instruction is
 //! outside the basis it calls the rewrite the run calls
@@ -187,7 +187,7 @@ fn aer_missing(py: Python<'_>) -> String {
 }
 
 /// The Aer reasons for a Qiskit `QuantumCircuit`, decided as the local backend
-/// prepares it for Aer (`_lower_to_aer_basis` in `polypus_python/local.py`,
+/// prepares it for Aer (`_lower_to_aer_basis` in `python/polypus_python/local.py`,
 /// contract C-2). A circuit whose instructions are all in the basis of the
 /// default `AerSimulator()` reaches Aer as it is, so it is accepted without
 /// being rewritten. One with an instruction outside it, at any depth
@@ -248,7 +248,7 @@ fn names(iterable: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
 }
 
 /// Whether the Qiskit circuit `qc` holds an instruction whose name is not in
-/// `supported`, at any depth: `_outside_basis` in `polypus_python/local.py`,
+/// `supported`, at any depth: `_outside_basis` in `python/polypus_python/local.py`,
 /// rule for rule. `barrier` is accepted everywhere; the names come from
 /// `count_ops()`, and `qc.data` is walked only when one of them is in
 /// `control_flow` (Qiskit's `CONTROL_FLOW_OP_NAMES`), to look into the bodies

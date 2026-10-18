@@ -312,7 +312,7 @@ boundary stays out-of-process and explicit; see
   `density_matrix` is `16 · 4^n`) are not refused in Rust, which would reject
   circuits that run: the local backend passes the budget to Aer as
   `max_memory_mb` instead, Aer validates against the method it picks, and
-  `polypus_python/local.py` raises its refusal as the same class (contract C-1).
+  `python/polypus_python/local.py` raises its refusal as the same class (contract C-1).
   The refusal never uses the fallback (it is a guess, not a limit). The
   detected limit is read once per process (`OnceLock`), the variable on every
   call. The model is `16 · 2^n` bytes (`BYTES_PER_AMPLITUDE`), which is the native
@@ -400,13 +400,13 @@ Additionally:
   it directly as long as every instruction is in Aer's basis; `ch`, `u0`,
   `rccx`, `rc3x`, `c3sqrtx` and every declared gate are not (`c3x` and `c4x`
   parse as Qiskit's `mcx`, which is) and Aer never unrolls them by itself, so
-  `Local.run_qcs` (`polypus_python/local.py`) lowers a circuit that holds one
+  `Local.run_qcs` (`python/polypus_python/local.py`) lowers a circuit that holds one
   just before `AerSimulator.run`, with the synthesis and basis-translation
   passes of `transpile(qc, AerSimulator(), optimization_level=0)` (same
   circuit, without the layout stage, a fixed cost on every lowered call that
   also caps the width at the target's qubit count) — the third lowering
   boundary of C-2, invisible to the exported QASM. `Cunqa.run_qcs`
-  (`polypus_python/cunqa.py`) does the same for CUNQA, whose converter takes only the names in its
+  (`python/polypus_python/cunqa.py`) does the same for CUNQA, whose converter takes only the names in its
   `cunqa.circuit.ir.SUPPORTED_QISKIT_OPERATIONS` (`mcx` included among those it
   lacks): the fourth boundary, with `basis_gates` = the standard gates in that
   list; with a CUNQA that does not publish the list, circuits go unchanged. Whether an instruction is "outside the basis" is decided on
