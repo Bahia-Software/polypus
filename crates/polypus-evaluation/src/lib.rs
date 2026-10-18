@@ -329,7 +329,6 @@ mod tests {
             n_qpus: 1,
             infrastructure: "local".to_string(),
             backend_config: BackendConfig::Local {
-                backend: "AerSimulator".to_string(),
                 sim_method: "statevector".to_string(),
                 noise_model: Some(noise_model),
             },

@@ -230,6 +230,7 @@ pub fn dispatch_optimizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_log::logged_for;
     use std::fmt;
 
     // The slot is type-erased, so these exercise it with a trivial pure error —
@@ -299,45 +300,6 @@ mod tests {
         let handed_out = slot.clone();
         handed_out.record(boxed("x"), RUN_ID);
         assert!(slot.failed(), "a clone must share the original's storage");
-    }
-
-    /// Records every `ERROR` line it receives. `log::set_logger` is global per
-    /// process, so it is installed once for the whole test binary; each test
-    /// reads back only the lines naming its own run id.
-    struct Capture(Mutex<Vec<String>>);
-
-    impl log::Log for Capture {
-        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-            metadata.level() <= log::Level::Error
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            if self.enabled(record.metadata()) {
-                let line = record.args().to_string();
-                self.0.lock().unwrap_or_else(|p| p.into_inner()).push(line);
-            }
-        }
-
-        fn flush(&self) {}
-    }
-
-    static CAPTURE: Capture = Capture(Mutex::new(Vec::new()));
-
-    /// Install [`CAPTURE`] (once) and return the lines logged so far for `run_id`.
-    fn logged_for(run_id: &str) -> Vec<String> {
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            log::set_logger(&CAPTURE).expect("the only logger this test binary installs");
-            log::set_max_level(log::LevelFilter::Error);
-        });
-        CAPTURE
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .filter(|line| line.starts_with(&format!("run {run_id}:")))
-            .cloned()
-            .collect()
     }
 
     /// Only the error that is actually stored is logged; a later one, dropped by

@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod circuit;
 mod compatibility;
 pub mod de;
+pub mod expr;
 pub mod logging;
 pub mod observable;
 pub mod pso;
@@ -549,8 +550,10 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
 ///
 /// `backend` selects the *device* within an infrastructure. For `local`:
 /// `"aer"` (default) runs Qiskit Aer; `"polypus"` runs the pure-Rust native
-/// statevector simulator. The choice is ignored for CUNQA, which manages its
-/// own simulated QPUs.
+/// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
+/// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
+/// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
+/// silently.
 ///
 /// `fusion` only applies to the native `"polypus"` backend (see
 /// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
@@ -607,10 +610,27 @@ fn build_backend_config(
             }
         }
     }
+    // CUNQA's QPUs run Aer with a simulator fixed at `qraise`, and its run takes
+    // no noise model, so `BackendConfig::Cunqa` has nowhere to carry either: a
+    // non-Aer `backend` or a `noise_model` would be dropped while the manifest
+    // echoed the caller's `backend`. Reject both here, before any QPU is raised.
+    if infrastructure == "cunqa" {
+        if !matches!(backend, "aer" | "AerSimulator") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown cunqa backend '{backend}'; CUNQA's QPUs run Aer, expected \"aer\""
+            )));
+        }
+        if noise_model.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "the 'cunqa' infrastructure does not accept a noise_model: its simulated QPUs \
+                 are configured when they are raised, not per run; omit it, or use \
+                 infrastructure=\"local\" with backend=\"aer\"",
+            ));
+        }
+    }
     match infrastructure {
         "local" => match backend {
             "aer" | "AerSimulator" => Ok(BackendConfig::Local {
-                backend: "AerSimulator".to_string(),
                 sim_method: sim_method.to_string(),
                 noise_model,
             }),
@@ -630,7 +650,6 @@ fn build_backend_config(
             ))),
         },
         "cunqa" => Ok(BackendConfig::Cunqa {
-            backend: "AerSimulator".to_string(),
             sim_method: sim_method.to_string(),
             nodes,
             cores_per_qpu,
@@ -663,8 +682,9 @@ fn build_backend_config(
 /// Build the QMIO backend's registry config for the CESGA QMIO QPU.
 ///
 /// The endpoint is read from the `ZMQ_SERVER` environment variable (the same
-/// variable the reference `qmio` Python client uses), falling back to the
-/// documented CESGA address. The public `backend` argument selects the program
+/// variable the reference `qmio` Python client uses); there is no default, so with
+/// neither `ZMQ_SERVER` nor an `endpoint` option the backend fails to build with
+/// `polypus.QmioError`. The public `backend` argument selects the program
 /// representation submitted to the QPU. Caller-supplied `options` override the
 /// computed defaults (e.g. `optimization`, `repetition_period`, `res_format`, a
 /// custom `endpoint`). Only available with `--features qmio`; otherwise it returns
@@ -674,10 +694,17 @@ fn build_qmio_registered(
     backend: &str,
     options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
-    // Default endpoint documented by CESGA; overridden by ZMQ_SERVER when set.
-    const DEFAULT_QMIO_ENDPOINT: &str = "tcp://10.133.29.226:5556";
-    let endpoint =
-        std::env::var("ZMQ_SERVER").unwrap_or_else(|_| DEFAULT_QMIO_ENDPOINT.to_string());
+    qmio_registered_config(backend, std::env::var("ZMQ_SERVER").ok(), options)
+}
+
+/// [`build_qmio_registered`] with the `ZMQ_SERVER` value passed in, so tests do not
+/// depend on the process environment.
+#[cfg(feature = "qmio")]
+fn qmio_registered_config(
+    backend: &str,
+    zmq_server: Option<String>,
+    options: Option<HashMap<String, OptionValue>>,
+) -> PyResult<BackendConfig> {
     let program_format = match backend {
         // `"aer"` is the entry-point default, so treat it (and the explicit
         // aliases) as OpenQASM for the QMIO path.
@@ -691,7 +718,9 @@ fn build_qmio_registered(
         }
     };
     let mut opts: HashMap<String, OptionValue> = HashMap::new();
-    opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
+    if let Some(endpoint) = zmq_server {
+        opts.insert("endpoint".to_string(), OptionValue::from(endpoint));
+    }
     opts.insert(
         "program_format".to_string(),
         OptionValue::from(program_format),
@@ -845,16 +874,21 @@ fn extract_circuit_source(qc: &Bound<'_, PyAny>) -> CircuitSource {
     }
 }
 
+/// Start of the `ValueError` message for a circuit with free parameters, the
+/// same for a `polypus.Circuit` and a Qiskit `QuantumCircuit`.
+const UNBOUND_PARAMETERS: &str = "circuit has unbound parameters and cannot be executed directly";
+
 /// Interpret the `qc` argument of `run_quantum_circuit` as a fully bound,
 /// executable circuit:
 /// - `polypus.Circuit` → native circuit (must have no free parameters),
 /// - `str` → raw OpenQASM 2.0 program,
-/// - anything else → Qiskit `QuantumCircuit` (original behaviour).
+/// - anything else → Qiskit `QuantumCircuit` (must have no free parameters:
+///   no backend binds them, and Aer would fail with its own error, issue #308).
 fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     if let Ok(native) = qc.extract::<PyRef<'_, Circuit>>() {
         let concrete = native.native().assign_parameters(&[]).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!(
-                "circuit has unbound parameters and cannot be executed directly: {e}. \
+                "{UNBOUND_PARAMETERS}: {e}. \
                  Bind values first via to_qasm2(params) or use polypus.train"
             ))
         })?;
@@ -863,12 +897,32 @@ fn extract_bound_circuit(qc: &Bound<'_, PyAny>) -> PyResult<BoundCircuit> {
     if let Ok(qasm) = qc.extract::<String>() {
         return Ok(BoundCircuit::Qasm2(qasm));
     }
+    let free = free_parameter_names(qc)?;
+    if !free.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{UNBOUND_PARAMETERS}: {}. \
+             Bind values first via QuantumCircuit.assign_parameters or use polypus.train",
+            free.join(", ")
+        )));
+    }
     // Anything else is a Qiskit `QuantumCircuit`: carry it opaquely through the
     // pyo3-free `BoundCircuit` enum via its `Foreign` escape hatch, so the Aer/CUNQA
     // backends still receive the native Qiskit object unchanged.
     Ok(crate::infrastructure::QiskitCircuit::into_bound(
         qc.clone().unbind(),
     ))
+}
+
+/// The names of the free parameters of a Qiskit `QuantumCircuit` (its
+/// `parameters`), in Qiskit's order. An object without that attribute has none.
+fn free_parameter_names(qc: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let Ok(parameters) = qc.getattr(pyo3::intern!(qc.py(), "parameters")) else {
+        return Ok(Vec::new());
+    };
+    parameters
+        .try_iter()?
+        .map(|parameter| Ok(parameter?.str()?.to_string()))
+        .collect()
 }
 
 /// Interpret the `expectation_function` argument as a cost observable.
@@ -1044,7 +1098,9 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `infrastructure`: for `"local"` it selects the device — `"aer"` (default)
 /// or the pure-Rust `"polypus"` statevector simulator; for `"qmio"` it
 /// instead selects the program format submitted to the QPU (`"openqasm"`
-/// (default), `"qir"`, or `"qir_bitcode"`); CUNQA ignores it.
+/// (default), `"qir"`, or `"qir_bitcode"`); for `"cunqa"`, whose QPUs run Aer,
+/// it must be `"aer"` (default) or `"AerSimulator"`. Any other value, or a
+/// `noise_model` with `"cunqa"`, raises `ValueError` before any QPU is requested.
 ///
 /// `seed` controls shot sampling (contract C-7) on every simulated backend —
 /// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs
@@ -1163,8 +1219,7 @@ pub fn run_quantum_circuit<'py>(
     // so surface the one-time default-visible warning only when this run
     // actually resolves to it — never for Aer/CUNQA/QMIO. Gated on the resolved
     // `BackendConfig`, not the raw `backend` string, so it tracks the real
-    // dispatch (e.g. `backend="polypus"` under `infrastructure="cunqa"`, which
-    // Aer-simulates, correctly does not warn).
+    // dispatch rather than re-deriving it from the kwargs.
     if matches!(backend_config, BackendConfig::LocalNative { .. }) {
         calibration::warn_if_using_default_threshold(qc.py())?;
     }
@@ -1277,6 +1332,9 @@ pub fn run_quantum_circuit<'py>(
 /// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
 /// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
 /// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1552,6 +1610,9 @@ fn bind_feature_rows<'py>(
 /// `walltime` (default `"10:00:00"`) is the SLURM walltime of the CUNQA QPUs,
 /// also `cunqa` only: `"HH:MM:SS"` (hours may exceed 24, e.g. `"48:00:00"`;
 /// `D-HH:MM:SS` is rejected), otherwise `ValueError` before any QPU is requested.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1751,6 +1812,9 @@ pub fn qml_train<'py>(
 /// `nodes`, `cores_per_qpu` and `walltime` size the SLURM allocation and are
 /// consumed only by `infrastructure="cunqa"`, with the same rules as in
 /// [`run_quantum_circuit`]; `local` ignores them.
+/// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
+/// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
+/// raises `ValueError` before any QPU is requested.
 ///
 /// Example:
 ///
@@ -1920,6 +1984,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QNG>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
+    expr::register(m)?;
     m.add_class::<RunResult>()?;
     m.add_class::<TrainResult>()?;
     m.add_class::<Qubo>()?;
@@ -2550,10 +2615,9 @@ mod tests {
         assert!(matches!(
             aer,
             BackendConfig::Local {
-                ref backend,
                 ref sim_method,
                 noise_model: None,
-            } if backend == "AerSimulator" && sim_method == "automatic"
+            } if sim_method == "automatic"
         ));
 
         for name in ["polypus", "statevector", "polypus_statevector"] {
@@ -2702,6 +2766,63 @@ mod tests {
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("unknown local backend"));
         });
+    }
+
+    /// CUNQA's QPUs run Aer, so any other `backend` (the native aliases
+    /// included) is rejected instead of being dropped while the manifest echoes it.
+    #[test]
+    fn build_backend_config_rejects_an_unknown_cunqa_backend() {
+        pyo3::Python::initialize();
+        for backend in ["polypus", "statevector", "polypus_statevector", "foo"] {
+            let err =
+                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                    .expect_err("a non-Aer cunqa backend must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("unknown cunqa backend"),
+                    "unexpected error for {backend}: {err}"
+                );
+            });
+        }
+        for backend in ["aer", "AerSimulator"] {
+            let config =
+                build_backend_config("cunqa", backend, "automatic", None, 1, 2, None, None, None)
+                    .expect("cunqa accepts the Aer backend names");
+            assert!(matches!(config, BackendConfig::Cunqa { .. }));
+        }
+    }
+
+    #[test]
+    fn build_backend_config_rejects_a_noise_model_on_cunqa() {
+        // `BackendConfig::Cunqa` has no noise model to carry, so one must be an
+        // error rather than a silently noiseless run. As on the native backend,
+        // any Python object will do — the check is `Option::is_some`.
+        pyo3::Python::initialize();
+        let noise_model = Python::attach(|py| py.None());
+        let err = build_backend_config(
+            "cunqa",
+            "aer",
+            "automatic",
+            Some(noise_model),
+            1,
+            2,
+            None,
+            None,
+            None,
+        )
+        .expect_err("a noise model on cunqa must be rejected");
+        Python::attach(|py| {
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("noise_model"),
+                "the message must name the offending kwarg: {err}"
+            );
+        });
+        assert!(matches!(
+            build_backend_config("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
+            Ok(BackendConfig::Cunqa { .. })
+        ));
     }
 
     #[test]
@@ -2953,13 +3074,21 @@ mod tests {
                 OptionValue::from(vec!["a b".to_string()]),
             ),
         ]);
-        let config = build_qmio_registered("qir", Some(user)).expect("qir is a qmio format");
+        let config = qmio_registered_config(
+            "qir",
+            Some("tcp://qmio.example:5556".to_string()),
+            Some(user),
+        )
+        .expect("qir is a qmio format");
         let BackendConfig::Registered { name, options } = config else {
             panic!("qmio must build a Registered config");
         };
         assert_eq!(name, "qmio");
         // Defaults the user did not override stay.
-        assert!(matches!(options.get("endpoint"), Some(OptionValue::Str(_))));
+        assert_eq!(
+            options.get("endpoint"),
+            Some(&OptionValue::from("tcp://qmio.example:5556"))
+        );
         assert_eq!(
             options.get("program_format"),
             Some(&OptionValue::from("qir_text"))
@@ -2975,6 +3104,33 @@ mod tests {
             Some(&OptionValue::from(vec!["a b".to_string()]))
         );
         assert_eq!(options.len(), 5);
+    }
+
+    /// Without `ZMQ_SERVER` no endpoint is invented: the key is absent (the factory
+    /// then rejects the config) unless the caller passes one.
+    #[cfg(feature = "qmio")]
+    #[test]
+    fn qmio_registered_config_has_no_default_endpoint() {
+        let BackendConfig::Registered { options, .. } =
+            qmio_registered_config("qmio", None, None).expect("qmio is a qmio format")
+        else {
+            panic!("qmio must build a Registered config");
+        };
+        assert_eq!(options.get("endpoint"), None);
+
+        let user = HashMap::from([(
+            "endpoint".to_string(),
+            OptionValue::from("tcp://qmio.example:5556"),
+        )]);
+        let BackendConfig::Registered { options, .. } =
+            qmio_registered_config("qmio", None, Some(user)).expect("qmio is a qmio format")
+        else {
+            panic!("qmio must build a Registered config");
+        };
+        assert_eq!(
+            options.get("endpoint"),
+            Some(&OptionValue::from("tcp://qmio.example:5556"))
+        );
     }
 
     /// Convert a Python expression through the `options` kwarg's extractor.
@@ -3129,6 +3285,34 @@ mod tests {
                 .expect("a non-Circuit, non-str object is assumed to be a Qiskit circuit");
             // A Qiskit circuit rides through the pyo3-free enum's `Foreign` hatch.
             assert!(bound.is_foreign());
+        });
+    }
+
+    #[test]
+    fn extract_bound_circuit_rejects_a_qiskit_circuit_with_free_parameters() {
+        // Stands in for a `QuantumCircuit` (only `parameters` is read), so the
+        // test needs no Qiskit.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let qc = py
+                .eval(
+                    c"type('QC', (), {'parameters': ['t', 'theta[0]']})()",
+                    None,
+                    None,
+                )
+                .expect("the stand-in builds");
+            let err = match extract_bound_circuit(&qc) {
+                Err(err) => err,
+                Ok(_) => panic!("a circuit with free parameters cannot be executed directly"),
+            };
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let message = err.to_string();
+            assert!(message.contains("unbound parameters"), "{message}");
+            assert!(message.contains("directly: t, theta[0]."), "{message}");
+            let unbound = py
+                .eval(c"type('QC', (), {'parameters': []})()", None, None)
+                .expect("the stand-in builds");
+            assert!(extract_bound_circuit(&unbound).is_ok_and(|b| b.is_foreign()));
         });
     }
 

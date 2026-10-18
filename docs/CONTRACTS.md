@@ -20,7 +20,7 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` ignores the `backend` kwarg (LOCAL-2, open — see below); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
@@ -78,8 +78,8 @@ at backend construction), whose charset is constrained by C-9.
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
-| cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
+| local | `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
+| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
 
 `max_memory_mb` is sent by the local backend **only when the memory budget is a
 known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
@@ -89,21 +89,21 @@ passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
 absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
 lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
 
-`id` / `family_id` are the run id (`RunParams::id`, derived from
-`ExecutionConfig::id`), whose charset is constrained by C-9. `qcs` elements are
+`family_id` is the run id (`RunParams::id`, derived from
+`ExecutionConfig::id`), whose charset is constrained by C-9; only CUNQA receives
+it, as the name of the family to run on. The local seal receives no run id: it
+creates nothing named after the run, and the id reaches the caller in
+`RunResult.id`. Neither seal receives a `backend` kwarg: the local seal always
+runs Aer's `AerSimulator` (the caller's `backend="aer"` / `"polypus"` choice is
+resolved on the Rust side before any seam call), and CUNQA picks no simulator
+class per job (the vQPU's is set at `qraise`, from `POLYPUS_CUNQA_BACKEND`).
+`tests/python/test_seam_contract.py` pins the exact kwarg set each backend sends
+and checks, by reading the seal's source, that `Local.run_qcs` and
+`Cunqa.run_qcs` read every one of them. `qcs` elements are
 either Qiskit `QuantumCircuit` objects or OpenQASM 2.0 strings; the Python side
 parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
-
-*(Known break, audit LOCAL-2, open: the `local` path's `run_qcs` receives the
-`backend` kwarg the Rust side sends but never consumes it — the Python side
-hard-codes `AerSimulator`. This is the same "must-be-consumed" violation as
-`cores_per_qpu` above. Surfaced by the Fase-5 conformance run (see
-`docs/backends.md` §"Conformance of the built-in backends"); recorded here and not
-yet fixed, because the fix lives in the `polypus_python` seal, outside that phase's
-module scope. Its resolution is either to consume the kwarg on the Python side or to
-stop sending it from `local.rs`.)*
 
 ### `disconnect_from_infrastructure(infrastructure: str, **kwargs)`
 
@@ -132,6 +132,11 @@ is not frozen by this contract. The function still lives in
 - An **unexpected** kwarg raises `TypeError` (the mirror of the
   "must-be-consumed" rule above: neither side silently drops or invents args).
 - A missing **required** kwarg raises `TypeError`.
+
+No backend binds parameters on this seam, so `run_quantum_circuit` rejects a
+circuit with free parameters (a `polypus.Circuit` or a Qiskit `QuantumCircuit`)
+with `ValueError` ("unbound parameters") before calling it; an unbound
+`QuantumCircuit` no longer reaches Aer to fail there (issue #308).
 
 A failure **must never** cross the seam as a `pyo3_runtime.PanicException` or a
 process abort (it used to: the Rust side `unwrap()`/`panic!`-ed on these calls).
@@ -418,9 +423,12 @@ Corollaries:
   declares none, so it exports exactly the register its measurements need, and
   none without measurements. A full measurement into a register wider than
   `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
-  `measure q -> c;` needs equal sizes. The QIR export is the exception: it
-  records only the measured results, and its `required_num_results` is the
-  implicit register. Rationale: `docs/adr/0006-declared-classical-registers.md`.
+  `measure q -> c;` needs equal sizes. The QIR export declares it as
+  `required_num_results` and records only the measured results, so it may
+  declare results it never records, as a partial measurement already does
+  (one written at `c[1]` declares 2 and records 1); QMIO's `openqasm`, `qir`
+  and `qir_bitcode` formats thus submit the same width (issue #322).
+  Rationale: `docs/adr/0006-declared-classical-registers.md`.
 - Adding a gate is a **six-place change** plus a row in the equivalence test —
   the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
   (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
@@ -514,9 +522,11 @@ a circuit in the list is neither copied nor transpiled).
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
   such a circuit). The CUNQA path is not verified.
 - For a circuit **with** measurements, `num_clbits` is the circuit's
-  classical width (the key width — not `Circuit.num_clbits` /
+  classical width (the key width, `Circuit.clbits_width` in Python and
+  `clbits_width()` in Rust — not `Circuit.num_clbits` /
   `ParameterizedCircuit::num_clbits()`, which stay the implicit register
-  sized by the measurements): for an OpenQASM 2.0 program, the classical bits it
+  sized by the measurements, so that an unmeasured circuit's keys are
+  `num_qubits` wide): for an OpenQASM 2.0 program, the classical bits it
   **declares** (the sum of all its `creg`s), even when fewer are written —
   `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
   measurement writes read `0`; for a `polypus.Circuit` built with the
@@ -527,7 +537,8 @@ a circuit in the list is neither copied nor transpiled).
   the declared width): it is keyed like the source. Aer and the native
   backend agree on all three (issue #251; before it the native backend used
   `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
-  verified; the QIR export records only the measured results.
+  verified; QMIO receives the declared width in all three program formats
+  (the QIR export's `required_num_results`, issue #322).
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -617,7 +628,13 @@ that declares a `creg` but measures nothing),
 `crates/polypus-circuit/tests/qasm_import.rs` and
 `declared_clbits_is_the_sum_of_the_bit_registers` and
 `declared_clbits_is_exported` in
-`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279), plus the
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279);
+`qir_declares_the_imported_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs` and
+`qir_formats_declare_the_classical_width_of_the_openqasm_program` in
+`crates/polypus-infrastructure/src/qmio.rs` (issue #322);
+`test_clbits_width_is_the_declared_width` in
+`tests/python/test_qasm_import.py` (issue #323), plus the
 circuit-side tests listed under C-2.
 
 ---
@@ -961,8 +978,7 @@ takes no such kwarg.
 ### Python mirror
 
 The `polypus_python` helpers in `polypus_python/running_functions.py` also turn
-an `id` into file names (`circuit_<id>.qpy`, `polypus_python_<id>.log`) and, in
-`run_qc_in_qpu`/`run_qcs_in_qpu`, into the CUNQA `family` name. They are
+an `id` into file names (`circuit_<id>.qpy`, `polypus_python_<id>.log`). They are
 public and can be called without going through `train`/`qml.train`, so they
 validate `id` themselves with `validate_id`, a Python mirror of the Rust check.
 The policy is **identical**: same charset (ASCII letters, ASCII digits, `.`,
@@ -974,22 +990,9 @@ character and the id are shown with Python's `repr`). A non-`str` `id` raises
 
 It runs as the first statement of `get_logger`, `log_message`,
 `_get_temp_directory`, `serialize_quantum_circuit`,
-`_deserialize_quantum_circuit`, `run_qc_in_qpu` and `run_qcs_in_qpu`, before
-any filesystem access, any optional `cunqa` import and any `try` block, so a
-rejected `id` touches nothing and the `log_message` calls in the error handlers
-can never raise on `id` and mask the original exception.
-
-The 64-character bound applies to every one of these functions, including
-`run_qc_in_qpu`/`run_qcs_in_qpu`, where `id` is the CUNQA family name. Rust
-names the families it raises with the *effective* id (prefix + `_` + 36-char
-UUID, up to 101 characters), passing it only to `connect_to_infrastructure` /
-`run_qcs` (C-1), which do not go through `running_functions`. Today no caller in
-the repository passes an effective id to any of these functions, so
-`run_qc_in_qpu`/`run_qcs_in_qpu` accept only ids of at most 64 characters: they
-cannot attach to a polypus-raised family whose prefix is longer than 27
-characters. Anyone who later uses them to look up a family raised by polypus
-must keep the original prefix short enough for the effective id to fit (at most
-27 characters) or relax this policy through an explicit contract change.
+and `_deserialize_quantum_circuit`, before any filesystem access and any `try`
+block, so a rejected `id` touches nothing and the `log_message` calls in the
+error handlers can never raise on `id` and mask the original exception.
 
 **Enforcing tests:** `tests/python/test_id_validation.py` (Rust entry points);
 `tests/python/test_python_helpers_hygiene.py` (Python mirror: it reuses

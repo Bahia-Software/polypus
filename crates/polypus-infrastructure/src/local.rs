@@ -12,8 +12,6 @@ use std::collections::HashMap;
 
 /// LocalBackend: runs quantum circuits on the local machine using Qiskit AerSimulator.
 pub struct LocalBackend {
-    /// Backend/device class name forwarded to Python (e.g. `"AerSimulator"`).
-    backend: String,
     /// Aer simulation method.
     sim_method: String,
     /// Optional Qiskit `NoiseModel`.
@@ -25,9 +23,8 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(backend: String, sim_method: String, noise_model: Option<Py<PyAny>>) -> Self {
+    pub fn new(sim_method: String, noise_model: Option<Py<PyAny>>) -> Self {
         LocalBackend {
-            backend,
             sim_method,
             noise_model,
             transpiler: Box::new(IdentityTranspiler),
@@ -98,8 +95,6 @@ impl QuantumBackend for LocalBackend {
 
                 let kwargs = PyDict::new(py);
                 let conv = |e: PyErr| BackendError::Conversion(e.to_string());
-                kwargs.set_item("id", &config.id).map_err(conv)?;
-                kwargs.set_item("backend", &self.backend).map_err(conv)?;
                 kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
                 kwargs.set_item("shots", config.shots).map_err(conv)?;
                 kwargs
@@ -423,8 +418,7 @@ mod tests {
                 shots: 8,
             })
             .collect();
-        let backend =
-            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let backend = LocalBackend::new("statevector".to_string(), None);
 
         let cap = backend.capabilities_for(&tasks).unwrap().max_concurrency;
         assert_eq!(
@@ -455,8 +449,7 @@ mod tests {
                 shots: 8,
             })
             .collect();
-        let backend =
-            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let backend = LocalBackend::new("statevector".to_string(), None);
         assert_eq!(
             backend.capabilities_for(&tasks).unwrap().max_concurrency,
             usize::MAX,
@@ -500,8 +493,7 @@ mod tests {
                     shots: 8,
                 })
                 .collect();
-            let backend =
-                LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+            let backend = LocalBackend::new("statevector".to_string(), None);
             assert_eq!(
                 backend.capabilities_for(&tasks).unwrap().max_concurrency,
                 1,
@@ -532,8 +524,7 @@ mod tests {
                 .assign_parameters(&[])
                 .unwrap(),
         );
-        let backend =
-            LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+        let backend = LocalBackend::new("statevector".to_string(), None);
         let params = RunParams {
             id: "no-interpreter".to_string(),
             shots: 8,
@@ -590,8 +581,7 @@ mod tests {
                 circuit: &circuit,
                 shots: 8,
             }];
-            let backend =
-                LocalBackend::new("AerSimulator".to_string(), "statevector".to_string(), None);
+            let backend = LocalBackend::new("statevector".to_string(), None);
 
             let err = backend.capabilities_for(&tasks).unwrap_err();
             // The KeyboardInterrupt is carried verbatim, type-erased in
