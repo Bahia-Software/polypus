@@ -167,9 +167,7 @@ class Cunqa(Infraestructure):
                     # UNVERIFIED beyond the kwarg name: the `cunqa` package
                     # isn't installed anywhere this can be exercised, and
                     # CESGA-Quantum-Spain/cunqa@2.3.0 has no `QPU.run()` method
-                    # at all (only `.execute()`) and no `cunqa.qutils` module
-                    # (the legacy `running_functions.run_qc_in_qpu` path still
-                    # imports it, see #212); 2.3.0 is outside the supported
+                    # at all (only `.execute()`); 2.3.0 is outside the supported
                     # range (see the top of this file).
                     qjob = run(
                         qcs[i],

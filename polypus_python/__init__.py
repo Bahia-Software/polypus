@@ -10,8 +10,6 @@ from .qaoa_utils import (
     qaoa_params_to_dict,
 )
 from .running_functions import (
-    run_qc_in_qpu,
-    run_qcs_in_qpu,
     serialize_quantum_circuit,
     test_connection,
 )

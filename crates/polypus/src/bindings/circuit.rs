@@ -13,6 +13,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+use super::expr::{self, Operand, ParamExpr};
 use crate::infrastructure::{attach_or, check_statevector_fits, InterpreterUnavailable};
 
 /// Map a native [`CircuitError`] onto a Python `ValueError`.
@@ -47,21 +48,64 @@ impl Param {
     fn __eq__(&self, other: &Self) -> bool {
         self.index == other.index
     }
+
+    fn __add__(&self, rhs: Operand) -> ParamExpr {
+        (self.expr() + rhs.0).into()
+    }
+
+    fn __radd__(&self, lhs: Operand) -> ParamExpr {
+        (lhs.0 + self.expr()).into()
+    }
+
+    fn __sub__(&self, rhs: Operand) -> ParamExpr {
+        (self.expr() - rhs.0).into()
+    }
+
+    fn __rsub__(&self, lhs: Operand) -> ParamExpr {
+        (lhs.0 - self.expr()).into()
+    }
+
+    fn __mul__(&self, rhs: Operand) -> ParamExpr {
+        (self.expr() * rhs.0).into()
+    }
+
+    fn __rmul__(&self, lhs: Operand) -> ParamExpr {
+        (lhs.0 * self.expr()).into()
+    }
+
+    fn __truediv__(&self, rhs: Operand) -> ParamExpr {
+        (self.expr() / rhs.0).into()
+    }
+
+    fn __rtruediv__(&self, lhs: Operand) -> ParamExpr {
+        (lhs.0 / self.expr()).into()
+    }
+
+    fn __pow__(&self, exponent: Operand, modulo: Option<&Bound<'_, PyAny>>) -> PyResult<ParamExpr> {
+        expr::pow(self.expr(), exponent.0, modulo)
+    }
+
+    fn __rpow__(&self, base: Operand, modulo: Option<&Bound<'_, PyAny>>) -> PyResult<ParamExpr> {
+        expr::pow(base.0, self.expr(), modulo)
+    }
+
+    fn __neg__(&self) -> ParamExpr {
+        (-self.expr()).into()
+    }
 }
 
-/// Accepts either a plain number (fixed angle) or a [`Param`] reference.
+impl Param {
+    fn expr(&self) -> polypus_circuit::ParamExpr {
+        polypus_circuit::ParamExpr::param(self.index)
+    }
+}
+
+/// An angle argument: a number (fixed angle), a [`Param`] reference or a
+/// [`ParamExpr`] expression.
 pub(crate) enum AngleArg {
     Fixed(f64),
     Param(usize),
-}
-
-impl From<AngleArg> for GateParam {
-    fn from(value: AngleArg) -> Self {
-        match value {
-            AngleArg::Fixed(v) => GateParam::Fixed(v),
-            AngleArg::Param(i) => GateParam::Param(i),
-        }
-    }
+    Expr(polypus_circuit::ParamExpr),
 }
 
 impl<'a, 'py> FromPyObject<'a, 'py> for AngleArg {
@@ -71,11 +115,14 @@ impl<'a, 'py> FromPyObject<'a, 'py> for AngleArg {
         if let Ok(p) = ob.extract::<PyRef<'_, Param>>() {
             return Ok(AngleArg::Param(p.index));
         }
+        if let Ok(e) = ob.extract::<PyRef<'_, ParamExpr>>() {
+            return Ok(AngleArg::Expr(e.inner.clone()));
+        }
         if let Ok(v) = ob.extract::<f64>() {
             return Ok(AngleArg::Fixed(v));
         }
         Err(PyTypeError::new_err(
-            "angle must be a number or polypus.Param",
+            "angle must be a number, polypus.Param or polypus.ParamExpr",
         ))
     }
 }
@@ -105,6 +152,16 @@ impl Circuit {
     /// `CircuitSource::Native` / `BoundCircuit::Qasm2`).
     pub(crate) fn native(&self) -> &ParameterizedCircuit {
         &self.inner
+    }
+
+    /// The gate angle for `arg`; an expression is stored in the circuit
+    /// ([`ParameterizedCircuit::add_expr`]), which validates it.
+    fn angle(&mut self, arg: AngleArg) -> PyResult<GateParam> {
+        Ok(match arg {
+            AngleArg::Fixed(v) => GateParam::Fixed(v),
+            AngleArg::Param(i) => GateParam::Param(i),
+            AngleArg::Expr(e) => self.inner.add_expr(e).map_err(to_py_err)?,
+        })
     }
 }
 
@@ -398,10 +455,20 @@ impl Circuit {
         self.inner.num_params
     }
 
-    /// Size of the implicit classical register.
+    /// Size of the implicit classical register: the bits the measurements
+    /// need (`max(cbit) + 1`, `num_qubits` with `measure_all`, 0 without
+    /// measurements).
     #[getter]
     fn num_clbits(&self) -> usize {
         self.inner.num_clbits()
+    }
+
+    /// Width of the classical register the exports write and a measured
+    /// circuit's counts are keyed at: the bits an imported program declares,
+    /// or `num_clbits` if that is wider or nothing was declared (contract C-3).
+    #[getter]
+    fn clbits_width(&self) -> usize {
+        self.inner.clbits_width()
     }
 
     // ── Single-qubit gates ───────────────────────────────────────────────
@@ -444,51 +511,51 @@ impl Circuit {
         push(slf, GateInstruction::Id(qubit))
     }
 
-    fn rx(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Rx {
-                qubit,
-                theta: theta.into(),
-            },
-        )
+    fn rx(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Rx { qubit, theta })
     }
 
-    fn ry(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Ry {
-                qubit,
-                theta: theta.into(),
-            },
-        )
+    fn ry(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Ry { qubit, theta })
     }
 
-    fn rz(slf: PyRefMut<'_, Self>, qubit: usize, theta: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Rz {
-                qubit,
-                theta: theta.into(),
-            },
-        )
+    fn rz(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        theta: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Rz { qubit, theta })
     }
 
     /// Generic single-qubit gate `u3(theta, phi, lam)`.
     fn u(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         qubit: usize,
         theta: AngleArg,
         phi: AngleArg,
         lam: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        let phi = slf.angle(phi)?;
+        let lam = slf.angle(lam)?;
         push(
             slf,
             GateInstruction::U {
                 qubit,
-                theta: theta.into(),
-                phi: phi.into(),
-                lam: lam.into(),
+                theta,
+                phi,
+                lam,
             },
         )
     }
@@ -509,52 +576,34 @@ impl Circuit {
     }
 
     fn rzz(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         q0: usize,
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Rzz {
-                q0,
-                q1,
-                theta: theta.into(),
-            },
-        )
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Rzz { q0, q1, theta })
     }
 
     fn rxx(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         q0: usize,
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Rxx {
-                q0,
-                q1,
-                theta: theta.into(),
-            },
-        )
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Rxx { q0, q1, theta })
     }
 
     /// Controlled phase gate `cp(theta)` on `(q0, q1)`.
     fn cp(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         q0: usize,
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Cp {
-                q0,
-                q1,
-                theta: theta.into(),
-            },
-        )
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Cp { q0, q1, theta })
     }
 
     // ── The rest of qelib1.inc ───────────────────────────────────────────
@@ -606,51 +655,54 @@ impl Circuit {
 
     /// Controlled X-rotation `crx(control, target, theta)`.
     fn crx(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         control: usize,
         target: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
         push(
             slf,
             GateInstruction::Crx {
                 control,
                 target,
-                theta: theta.into(),
+                theta,
             },
         )
     }
 
     /// Controlled Y-rotation `cry(control, target, theta)`.
     fn cry(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         control: usize,
         target: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
         push(
             slf,
             GateInstruction::Cry {
                 control,
                 target,
-                theta: theta.into(),
+                theta,
             },
         )
     }
 
     /// Controlled Z-rotation `crz(control, target, theta)`.
     fn crz(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         control: usize,
         target: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
         push(
             slf,
             GateInstruction::Crz {
                 control,
                 target,
-                theta: theta.into(),
+                theta,
             },
         )
     }
@@ -658,38 +710,35 @@ impl Circuit {
     /// Controlled phase in its `cu1` spelling, `cu1(q0, q1, theta)`: the same
     /// operator as `cp`, exported as `cu1`.
     fn cu1(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         q0: usize,
         q1: usize,
         theta: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::Cu1 {
-                q0,
-                q1,
-                theta: theta.into(),
-            },
-        )
+        let theta = slf.angle(theta)?;
+        push(slf, GateInstruction::Cu1 { q0, q1, theta })
     }
 
     /// Controlled `u3`: `cu3(control, target, theta, phi, lam)`.
     fn cu3(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         control: usize,
         target: usize,
         theta: AngleArg,
         phi: AngleArg,
         lam: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        let phi = slf.angle(phi)?;
+        let lam = slf.angle(lam)?;
         push(
             slf,
             GateInstruction::Cu3 {
                 control,
                 target,
-                theta: theta.into(),
-                phi: phi.into(),
-                lam: lam.into(),
+                theta,
+                phi,
+                lam,
             },
         )
     }
@@ -697,7 +746,7 @@ impl Circuit {
     /// Controlled `u` with phase `gamma` on the controlled branch (Qiskit's
     /// `cu`): `cu(control, target, theta, phi, lam, gamma)`.
     fn cu(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         control: usize,
         target: usize,
         theta: AngleArg,
@@ -705,68 +754,60 @@ impl Circuit {
         lam: AngleArg,
         gamma: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
+        let theta = slf.angle(theta)?;
+        let phi = slf.angle(phi)?;
+        let lam = slf.angle(lam)?;
+        let gamma = slf.angle(gamma)?;
         push(
             slf,
             GateInstruction::Cu {
                 control,
                 target,
-                theta: theta.into(),
-                phi: phi.into(),
-                lam: lam.into(),
-                gamma: gamma.into(),
+                theta,
+                phi,
+                lam,
+                gamma,
             },
         )
     }
 
     /// Phase gate `p(qubit, lam)`.
-    fn p(slf: PyRefMut<'_, Self>, qubit: usize, lam: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::P {
-                qubit,
-                lam: lam.into(),
-            },
-        )
+    fn p(mut slf: PyRefMut<'_, Self>, qubit: usize, lam: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
+        let lam = slf.angle(lam)?;
+        push(slf, GateInstruction::P { qubit, lam })
     }
 
     /// `u1(qubit, lam)`: the phase gate in its `u1` spelling.
-    fn u1(slf: PyRefMut<'_, Self>, qubit: usize, lam: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::U1 {
-                qubit,
-                lam: lam.into(),
-            },
-        )
+    fn u1(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        lam: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let lam = slf.angle(lam)?;
+        push(slf, GateInstruction::U1 { qubit, lam })
     }
 
     /// `u2(qubit, phi, lam)` (= `u3(π/2, phi, lam)`).
     fn u2(
-        slf: PyRefMut<'_, Self>,
+        mut slf: PyRefMut<'_, Self>,
         qubit: usize,
         phi: AngleArg,
         lam: AngleArg,
     ) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::U2 {
-                qubit,
-                phi: phi.into(),
-                lam: lam.into(),
-            },
-        )
+        let phi = slf.angle(phi)?;
+        let lam = slf.angle(lam)?;
+        push(slf, GateInstruction::U2 { qubit, phi, lam })
     }
 
     /// `u0(gamma)`: the identity ("idle for `gamma` units"), kept as an
     /// instruction like `id`.
-    fn u0(slf: PyRefMut<'_, Self>, qubit: usize, gamma: AngleArg) -> PyResult<PyRefMut<'_, Self>> {
-        push(
-            slf,
-            GateInstruction::U0 {
-                qubit,
-                gamma: gamma.into(),
-            },
-        )
+    fn u0(
+        mut slf: PyRefMut<'_, Self>,
+        qubit: usize,
+        gamma: AngleArg,
+    ) -> PyResult<PyRefMut<'_, Self>> {
+        let gamma = slf.angle(gamma)?;
+        push(slf, GateInstruction::U0 { qubit, gamma })
     }
 
     /// Simplified Toffoli `rccx(control0, control1, target)`, up to relative

@@ -20,6 +20,9 @@ handle to ``qdrop`` (CONTRACTS.md C-1). This used to be a "known break" — the
 Python side read ``slurm_job_id`` (a key the Rust side never sends), so a
 ``KeyError`` fired before ``qdrop`` ran and the QPU allocation leaked; the test
 below locks in the fix without needing a real ``cunqa`` install or SLURM.
+
+The ``run_qcs`` kwargs are pinned for both paths: the exact set the Rust side
+sends (local and CUNQA), and that each seal reads every one of them (#230).
 """
 
 import pytest
@@ -117,9 +120,9 @@ polypus.run_quantum_circuit(
 print(json.dumps(seen))
 """
 
+# No `id` and no `backend` (issue #230): the seal never read them — the run id
+# travels in `RunResult.id`, and the edge fixed `backend` to `"AerSimulator"`.
 _LOCAL_REQUIRED_KWARGS = {
-    "id",
-    "backend",
     "qcs",
     "shots",
     "sim_method",
@@ -335,3 +338,166 @@ def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
     polypus_python.disconnect_from_infrastructure("cunqa", family="fam-1")
 
     assert dropped == ["fam-1"], "the family handle must reach qdrop unchanged"
+
+
+# ── Every `run_qcs` kwarg Rust sends is consumed (#230) ──────────────────────
+#
+# C-1: every kwarg the Rust side sends must be consumed by the Python side. The
+# local seal used to receive `id` and `backend`, and the CUNQA seal `backend`,
+# without reading any of them. Rust no longer sends them; the tests below record
+# what it does send and check it against what the seals read.
+
+# The exact kwargs the Rust CUNQA backend sends to `run_qcs` (C-1 table), with a
+# seed. No `backend`: CUNQA picks no simulator class per job (the vQPU's class is
+# set at `qraise`, from `POLYPUS_CUNQA_BACKEND`).
+_CUNQA_REQUIRED_KWARGS = {"family_id", "qcs", "shots", "sim_method", "seed"}
+
+
+def _record_run_qcs(monkeypatch, **run_kwargs):
+    """Run one circuit with ``polypus_python.run_qcs`` replaced by a recorder and
+    return the kwargs it received (``keys`` holds their names) and the result."""
+    import polypus
+    import polypus_python
+
+    seen = {}
+
+    def record(infrastructure, **kwargs):
+        seen["infrastructure"] = infrastructure
+        seen.update({k: v for k, v in kwargs.items() if k != "qcs"})
+        seen["keys"] = sorted(kwargs)
+        return [{"0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+    monkeypatch.setattr(polypus_python, "run_qcs", record)
+    result = polypus.run_quantum_circuit(
+        polypus.Circuit(1).h(0).measure_all(), shots=10, seed=3, **run_kwargs
+    )
+    return seen, result
+
+
+def _cunqa_kwargs(monkeypatch):
+    # The fake `cunqa` lets the real `connect`/`disconnect` seal calls run
+    # (`qraise`/`qdrop` are stubs); only `run_qcs` is recorded.
+    _install_fake_cunqa(monkeypatch, [])
+    return _record_run_qcs(monkeypatch, infrastructure="cunqa", backend="aer")
+
+
+def test_cunqa_run_qcs_kwargs_are_the_c1_set(monkeypatch):
+    seen, result = _cunqa_kwargs(monkeypatch)
+    assert seen["infrastructure"] == "cunqa"
+    assert set(seen["keys"]) == _CUNQA_REQUIRED_KWARGS
+    assert seen["family_id"] == result.id
+    assert seen["seed"] == 3
+
+
+def _is_name(node, name):
+    import ast
+
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _keys_read_by_run_qcs(module, cls):
+    """The kwarg names ``cls.run_qcs`` in ``module`` reads, from its source.
+
+    The module is parsed, not imported (``polypus_python.cunqa`` imports
+    ``cunqa``, which is absent here). A read is ``args["key"]``,
+    ``args.get("key", ...)`` or ``args.pop("key", ...)`` on the ``**`` parameter,
+    or a named parameter the body uses. Any other use of the ``**`` parameter
+    (passing it on, a computed key) cannot be read statically and fails the
+    test."""
+    import ast
+    import importlib.util
+
+    path = importlib.util.find_spec(module).origin
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
+    [method] = [
+        node
+        for klass in tree.body
+        if isinstance(klass, ast.ClassDef) and klass.name == cls
+        for node in klass.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_qcs"
+    ]
+
+    named = [a.arg for a in method.args.args[1:] + method.args.kwonlyargs]
+    used = {
+        n.id
+        for n in ast.walk(method)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    read = {name for name in named if name in used}
+    if method.args.kwarg is None:
+        return read
+    kwargs = method.args.kwarg.arg
+    understood = set()
+    for node in ast.walk(method):
+        if (
+            isinstance(node, ast.Subscript)
+            and _is_name(node.value, kwargs)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            read.add(node.slice.value)
+            understood.add(id(node.value))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("get", "pop")
+            and _is_name(node.func.value, kwargs)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            read.add(node.args[0].value)
+            understood.add(id(node.func.value))
+    unreadable = [
+        n.lineno
+        for n in ast.walk(method)
+        if _is_name(n, kwargs) and id(n) not in understood
+    ]
+    assert not unreadable, (
+        f"{cls}.run_qcs uses **{kwargs} in a way this test cannot read "
+        f"({path}, lines {unreadable})"
+    )
+    return read
+
+
+def test_keys_read_by_run_qcs_skips_a_named_parameter_the_body_never_uses(
+    monkeypatch, tmp_path
+):
+    # A strict signature that ignores one of its parameters is the same C-1
+    # violation as an unread `args` key, so `unused` must not count as read, and
+    # neither does `rebound`: reassigning a parameter is not reading it. A
+    # top-level module: `find_spec` locates it without importing anything.
+    (tmp_path / "_fake_run_qcs_seal.py").write_text(
+        "class S:\n"
+        "    def run_qcs(self, *, used, unused, rebound, **args):\n"
+        "        rebound = None\n"
+        '        return used, args["k"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert _keys_read_by_run_qcs("_fake_run_qcs_seal", "S") == {"used", "k"}
+
+
+def test_every_run_qcs_kwarg_rust_sends_is_read_by_the_seal(monkeypatch, tmp_path):
+    from qiskit_aer.noise import NoiseModel
+
+    # Local: the child run has a known budget (adds `max_memory_mb`); the run
+    # here has a noise model (adds `noise_model`). Together: every kwarg.
+    local_sent = set(_local_kwargs("100M", tmp_path)["keys"])
+    noisy, _ = _record_run_qcs(
+        monkeypatch, infrastructure="local", backend="aer", noise_model=NoiseModel()
+    )
+    local_sent |= set(noisy["keys"])
+    assert {"max_memory_mb", "noise_model", "seed"} <= local_sent
+    cunqa_sent = set(_cunqa_kwargs(monkeypatch)[0]["keys"])
+
+    local_read = _keys_read_by_run_qcs("polypus_python.local", "Local")
+    cunqa_read = _keys_read_by_run_qcs("polypus_python.cunqa", "Cunqa")
+
+    assert local_sent <= local_read, (
+        f"Rust sends kwargs Local.run_qcs never reads: {sorted(local_sent - local_read)}"
+    )
+    assert cunqa_sent <= cunqa_read, (
+        f"Rust sends kwargs Cunqa.run_qcs never reads: {sorted(cunqa_sent - cunqa_read)}"
+    )

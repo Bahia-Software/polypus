@@ -128,9 +128,34 @@ def qaoa_params_to_dict(qc, params) -> dict[str, float]:
     return {p.name: float(v) for p, v in zip(parameters, params)}
 
 
+def _expectation(counts, bitstring_to_obj, context):
+    # Shared by both helpers. ``context`` prefixes the error message (the
+    # element index for ``expectation_values``), so the error is raised with
+    # its final text and nothing has to catch it -- catching would also catch,
+    # and wrap, a ValueError raised by ``bitstring_to_obj``.
+    total = sum(counts.values())
+    if total == 0:
+        raise ValueError(
+            f"{context}counts sum to zero ({len(counts)} bitstring(s)): there "
+            "are no measurement outcomes to average, so no expectation value "
+            "exists (did the backend return an empty result?)"
+        )
+    avg = 0
+    for bitstring, count in counts.items():
+        avg += bitstring_to_obj(bitstring) * count
+    return avg / total
+
+
 def expectation_value(counts, bitstring_to_obj):
     """
     Compute the expectation value from measurement counts and a user-defined objective function.
+
+    Unlike the Rust ``CostObservable`` reducers, which yield ``0.0`` for counts
+    that sum to zero (their historical contract), this helper raises: it can be
+    handed the empty counts of a failed backend run directly, and ``0.0`` would
+    look like an excellent cost to a minimizer. In the native evaluation path
+    such results are rejected earlier, by the Planner's
+    ``validate_run_results``, before any reducer runs.
 
     Args:
         counts (dict): Measurement results as {bitstring: count}.
@@ -138,44 +163,49 @@ def expectation_value(counts, bitstring_to_obj):
 
     Returns:
         float: The expectation value.
+
+    Raises:
+        ValueError: If ``counts`` is empty or its counts sum to zero. It is
+            raised before ``bitstring_to_obj`` is called; an exception raised
+            by ``bitstring_to_obj`` itself propagates unchanged.
+
+    Example:
+        >>> from polypus_python.qaoa_utils import expectation_value
+        >>> expectation_value({"00": 3, "11": 1}, lambda b: int(b, 2))
+        0.75
+        >>> expectation_value({}, lambda b: int(b, 2))  # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+            ...
+        ValueError: counts sum to zero ...
     """
-    avg = 0
-    sum_count = 0
-    # print(counts)
-    for bitstring, count in counts.items():
-        obj = bitstring_to_obj(bitstring)
-        avg += obj * count
-        sum_count += count
-    if sum_count == 0:
-        return 0.0
-    return avg / sum_count
+    return _expectation(counts, bitstring_to_obj, "")
 
 
 def expectation_values(array_counts, bitstring_to_obj):
     """
-    Compute the expectation value from an array of measurement counts and a user-defined objective function.
+    Compute one expectation value per entry of ``array_counts`` with a user-defined objective function.
+
+    Each entry is reduced exactly as ``expectation_value`` does, so the same
+    rule applies: counts that sum to zero raise instead of yielding ``0.0``
+    (see ``expectation_value`` for why this differs from the Rust reducers).
+
     Args:
         array_counts (list): List of measurement results as [{bitstring: count}, ...].
         bitstring_to_obj (callable): Function that takes a bitstring and returns its objective value.
+
     Returns:
-        float: The average expectation value across all counts.
+        list[float]: One expectation value per entry of ``array_counts``, in
+        the same order (``[]`` for an empty list).
+
+    Raises:
+        ValueError: If any entry is empty or its counts sum to zero; the
+            message names the index of the first such entry. An exception
+            raised by ``bitstring_to_obj`` propagates unchanged.
     """
-
-    expectation_values = []
-    # print(array_counts)
-    for counts in array_counts:
-        avg = 0
-        sum_count = 0
-        for bitstring, count in counts.items():
-            obj = bitstring_to_obj(bitstring)
-            avg += obj * count
-            sum_count += count
-        if sum_count == 0:
-            expectation_values.append(0.0)
-        else:
-            expectation_values.append(avg / sum_count)
-
-    return expectation_values
+    return [
+        _expectation(counts, bitstring_to_obj, f"array_counts[{index}]: ")
+        for index, counts in enumerate(array_counts)
+    ]
 
 
 def assign_parameters(qc, params):

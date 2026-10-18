@@ -185,8 +185,11 @@ impl QirWriter {
 /// `params` supplies values for any unresolved [`GateParam::Param`], and
 /// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
 /// them; pass an empty slice and arena for fully concrete circuits.
-/// `num_clbits` is the size of the implicit classical register (reported as
-/// `required_num_results`).
+/// `num_clbits` is the circuit's classical width, declared or implicit
+/// (reported as `required_num_results`). It may exceed the results the module
+/// records: declared bits no measurement writes, or every bit of a circuit
+/// without measurements, as with a partial measurement (one written at `c[1]`
+/// declares 2 results and records 1).
 ///
 /// # Errors
 ///

@@ -136,7 +136,9 @@ class TestCircuitConstruction:
 
         with pytest.raises(TypeError) as excinfo:
             polypus.Circuit(1).rx(0, "not-an-angle")
-        assert str(excinfo.value) == "angle must be a number or polypus.Param"
+        assert str(excinfo.value) == (
+            "angle must be a number, polypus.Param or polypus.ParamExpr"
+        )
         if sys.version_info >= (3, 11):
             assert excinfo.value.__notes__ == ["while processing 'theta'"]
         else:
