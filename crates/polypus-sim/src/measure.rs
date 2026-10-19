@@ -4,6 +4,7 @@
 
 use crate::rng::SplitMix64;
 use crate::statevector::Statevector;
+use crate::SimError;
 use std::collections::HashMap;
 
 impl Statevector {
@@ -22,11 +23,22 @@ impl Statevector {
     /// Expectation value `⟨Z_{q0} Z_{q1} … ⟩` of a Pauli-Z string on the given
     /// qubits. Each basis state contributes `±|amp|²` with the sign set by the
     /// parity of the selected bits. An empty list returns the total
-    /// probability (`1` for a normalized state).
-    pub fn expectation_z(&self, qubits: &[usize]) -> f64 {
+    /// probability (`1` for a normalized state). A qubit listed twice cancels
+    /// (`Z·Z = I`).
+    ///
+    /// # Errors
+    ///
+    /// [`SimError::QubitIndexOutOfRange`] if a qubit is `>= num_qubits()`.
+    pub fn expectation_z(&self, qubits: &[usize]) -> Result<f64, SimError> {
         let mut mask = 0usize;
         for &q in qubits {
-            mask |= 1usize << q;
+            if q >= self.n {
+                return Err(SimError::QubitIndexOutOfRange {
+                    qubit: q,
+                    num_qubits: self.n,
+                });
+            }
+            mask ^= 1usize << q;
         }
         let mut acc = 0.0;
         for (i, amp) in self.data.iter().enumerate() {
@@ -34,7 +46,7 @@ impl Statevector {
             let sign = if parity == 0 { 1.0 } else { -1.0 };
             acc += sign * amp.norm_sqr();
         }
-        acc
+        Ok(acc)
     }
 
     /// Draw `shots` measurements of all qubits, returning a map from basis

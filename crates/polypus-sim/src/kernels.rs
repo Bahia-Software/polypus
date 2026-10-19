@@ -39,6 +39,9 @@
 //! When the `parallel` feature is on and `parallel` is `true`, the dense
 //! kernels distribute their outer loop across rayon. The closures share the
 //! buffer through a raw pointer; see the `SAFETY` notes for why that is sound.
+//! Their operand and buffer-length preconditions are checked with `assert!`
+//! (not `debug_assert!`), so a violation panics in release instead of writing
+//! out of bounds.
 //! The diagonal kernels — the fused one included — instead use `par_iter_mut`,
 //! which needs no `unsafe`: each index's write depends only on that index.
 
@@ -52,7 +55,11 @@ fn combine_1q(m: &[[C64; 2]; 2], a: C64, b: C64) -> (C64, C64) {
 
 /// Dense single-qubit gate on target `t`.
 pub(crate) fn apply_1q(data: &mut [C64], n: usize, t: usize, m: &[[C64; 2]; 2], parallel: bool) {
-    debug_assert!(t < n);
+    // Real `assert!`s, not `debug_assert!`s: the parallel path writes through a
+    // raw pointer, so these O(1) checks are what keep a bad index from being
+    // undefined behaviour in release. Callers validate first and return a
+    // typed error; reaching these is a bug.
+    assert!(t < n && data.len() == 1usize << n);
     let half = 1usize << (n - 1);
     let low = (1usize << t) - 1;
     let bit = 1usize << t;
@@ -286,7 +293,8 @@ pub(crate) fn apply_controlled_1q(
     m: &[[C64; 2]; 2],
     parallel: bool,
 ) {
-    debug_assert!(c < n && t < n && c != t);
+    // See `apply_1q`: these guard the raw-pointer writes below in release.
+    assert!(c < n && t < n && c != t && data.len() == 1usize << n);
     let quarter = 1usize << (n - 2);
 
     #[cfg(feature = "parallel")]
@@ -353,7 +361,8 @@ pub(crate) fn apply_2q(
     m: &[[C64; 4]; 4],
     parallel: bool,
 ) {
-    debug_assert!(q0 < n && q1 < n && q0 != q1);
+    // See `apply_1q`: these guard the raw-pointer writes below in release.
+    assert!(q0 < n && q1 < n && q0 != q1 && data.len() == 1usize << n);
     let quarter = 1usize << (n - 2);
 
     #[cfg(feature = "parallel")]
@@ -579,5 +588,30 @@ mod tests {
             assert_controlled_1q_matches_reference(n, &gates::x());
             assert_controlled_1q_matches_reference(n, &gates::u(0.7, 1.1, -0.4));
         }
+    }
+
+    // #342: the dense kernels' preconditions are real `assert!`s, so a violation
+    // panics — in release too — on the parallel path, before any raw-pointer
+    // write. (Without `parallel` the flag is ignored and the same asserts run.)
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn controlled_1q_panics_on_repeated_operands() {
+        let mut data = sample_data(1);
+        apply_controlled_1q(&mut data, 1, 0, 0, &gates::x(), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn two_qubit_panics_on_repeated_operands() {
+        let mut data = sample_data(1);
+        apply_2q(&mut data, 1, 0, 0, &gates::swap(), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn one_qubit_panics_on_a_buffer_shorter_than_two_to_the_n() {
+        let mut data = sample_data(2);
+        apply_1q(&mut data, 3, 2, &gates::h(), true);
     }
 }
