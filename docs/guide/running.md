@@ -23,6 +23,8 @@ result.merged_counts  # e.g. {'00': 507, '11': 493}
 
 Pass `seed=...` for reproducible shot noise on every simulated backend (native, Aer and CUNQA's simulated QPUs). `"qmio"` rejects an explicit seed.
 
+`"qmio"` and the registry-backed backends (`"subprocess"` or a registered third-party name) take their configuration only from `options`, so a `noise_model` or a `sim_method` other than `"automatic"` raises `ValueError` there before the backend is built.
+
 ## Distributing shots across QPUs
 
 With `n_qpus > 1` the shots are split across QPUs and run concurrently:
