@@ -15,6 +15,13 @@ import pytest  # noqa: E402
 from qiskit.circuit import ParameterVector, QuantumCircuit  # noqa: E402
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "cunqa: needs a real CUNQA install and SLURM (opt-in: POLYPUS_CUNQA_REAL=1)",
+    )
+
+
 @pytest.fixture
 def bell_circuit() -> QuantumCircuit:
     """A simple 2-qubit Bell circuit with measurements."""
