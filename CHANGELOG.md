@@ -34,6 +34,11 @@ Changes on `main` since 0.7.2.
   may differ from earlier releases.
 - Native and Aer backends lower gates outside Aer's basis before running; the
   Aer lowering of a repeated OpenQASM program is cached.
+- **BREAKING:** `templates::qft` and `qft_with_options` return a `Result`:
+  above `MAX_QFT_QUBITS` (2827) qubits, whose gates would exceed what the
+  OpenQASM importers read back, they fail with
+  `CircuitError::TemplateTooLarge` (`ValueError` in Python) instead of
+  exhausting memory (#356).
 - **BREAKING:** QMIO has no default endpoint; set `ZMQ_SERVER` or pass
   `options={"endpoint": ...}`. The transport threat model is documented.
 - **BREAKING:** QMIO reports a Qiskit circuit as `UnsupportedCircuit`
@@ -65,6 +70,9 @@ Changes on `main` since 0.7.2.
   front: a few hundred bytes could take gigabytes (#343).
 - The OpenQASM 3 importer bounds the qubits all barriers list: a full-register
   `barrier q;` counted as one instruction however large `q` was (#344).
+- The OpenQASM importers normalise the instructions in place instead of
+  copying them; QIR bitcode export stops `llvm-as` after 120 s and always
+  reaps it (#356).
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.

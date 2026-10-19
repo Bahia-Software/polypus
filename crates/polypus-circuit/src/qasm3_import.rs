@@ -2021,12 +2021,12 @@ impl<'s> Parser<'s> {
 
     /// Normalise the instruction stream and build the circuit: the inputs are
     /// its free parameters, in declaration order, under their names.
-    fn finish(self) -> ParameterizedCircuit {
-        let gates = normalize(&self.gates, self.num_qubits);
+    fn finish(mut self) -> ParameterizedCircuit {
+        normalize(&mut self.gates, self.num_qubits);
         ParameterizedCircuit {
             num_qubits: self.num_qubits,
             num_params: self.inputs.len(),
-            gates,
+            gates: self.gates,
             measured: Default::default(),
             exprs: self.exprs,
             param_names: self.inputs,

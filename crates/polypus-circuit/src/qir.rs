@@ -57,8 +57,11 @@ use crate::gate::{GateInstruction, GateParam};
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::FRAC_PI_2;
 use std::fmt::Write;
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// QIR major version reported in the module flags.
 const QIR_MAJOR_VERSION: i32 = 1;
@@ -540,11 +543,15 @@ fn write_qir_module(
     Ok(out)
 }
 
+/// Longest `llvm-as` may take to assemble a module before it is killed.
+const ASSEMBLY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Serialize a gate sequence to LLVM bitcode (`.bc`) by first emitting QIR
 /// text and assembling it with `llvm-as`.
 ///
 /// This keeps the crate dependency-free: no direct LLVM bindings are linked.
-/// Instead, the standard LLVM assembler must be available on `PATH`.
+/// Instead, the standard LLVM assembler must be available on `PATH`. It is
+/// killed after [`ASSEMBLY_TIMEOUT`], and always reaped.
 pub(crate) fn write_qir_bitcode(
     num_qubits: usize,
     num_clbits: usize,
@@ -553,10 +560,33 @@ pub(crate) fn write_qir_bitcode(
     exprs: &ExprArena,
 ) -> Result<Vec<u8>, CircuitError> {
     let ir = write_qir(num_qubits, num_clbits, gates, params, exprs)?;
-    assemble_qir_bitcode_with("llvm-as", &ir)
+    assemble_qir_bitcode_with("llvm-as", ir, ASSEMBLY_TIMEOUT)
 }
 
-fn assemble_qir_bitcode_with(tool: &str, ir: &str) -> Result<Vec<u8>, CircuitError> {
+/// Run `work` on a thread of its own; its result arrives on the channel. The
+/// thread is never joined, so a pipe that stays open cannot block the caller.
+fn background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+}
+
+/// Assemble `ir` with `tool`. Its stdin is fed, and its stdout and stderr
+/// drained, on threads of their own, so no pipe can block another, and every
+/// wait is bounded by `timeout`. The tool is reaped on every path: it exits,
+/// or it is killed and waited for.
+fn assemble_qir_bitcode_with(
+    tool: &str,
+    ir: String,
+    timeout: Duration,
+) -> Result<Vec<u8>, CircuitError> {
+    let failed = |message: String| CircuitError::QirAssemblyFailed {
+        tool: tool.to_string(),
+        message,
+    };
+    let deadline = Instant::now() + timeout;
     let mut child = Command::new(tool)
         .args(["-o", "-", "-"])
         .stdin(Stdio::piped())
@@ -569,43 +599,64 @@ fn assemble_qir_bitcode_with(tool: &str, ir: &str) -> Result<Vec<u8>, CircuitErr
                     tool: tool.to_string(),
                 }
             } else {
-                CircuitError::QirAssemblyFailed {
-                    tool: tool.to_string(),
-                    message: e.to_string(),
-                }
+                failed(e.to_string())
             }
         })?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(ir.as_bytes())
-            .map_err(|e| CircuitError::QirAssemblyFailed {
-                tool: tool.to_string(),
-                message: format!("failed to write QIR to stdin: {e}"),
-            })?;
-    }
+    let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    // Dropping stdin once written closes it: the tool sees the end of input.
+    let written = background(move || stdin.map_or(Ok(()), |mut s| s.write_all(ir.as_bytes())));
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        background(move || {
+            let mut bytes = Vec::new();
+            pipe.map_or(Ok(()), |mut p| p.read_to_end(&mut bytes).map(drop))
+                .map(|()| bytes)
+        })
+    };
+    let stdout = drain(stdout.map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(stderr.map(|p| Box::new(p) as Box<dyn Read + Send>));
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CircuitError::QirAssemblyFailed {
-            tool: tool.to_string(),
-            message: e.to_string(),
-        })?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed(match outcome {
+                    Err(e) => e.to_string(),
+                    _ => format!("timed out after {} s", timeout.as_secs_f64()),
+                }));
+            }
+        }
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // The tool has exited, so its pipes close unless something it started
+    // keeps them open: wait for them until the deadline only.
+    let receive = |receiver: &Receiver<std::io::Result<Vec<u8>>>, pipe: &str| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(result) => result.map_err(|e| failed(format!("failed to read its {pipe}: {e}"))),
+            Err(_) => Err(failed(format!("its {pipe} stayed open after it exited"))),
+        }
+    };
+    if !status.success() {
+        let stderr = receive(&stderr, "stderr").unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         let suffix = if stderr.is_empty() {
             String::new()
         } else {
             format!(": {stderr}")
         };
-        return Err(CircuitError::QirAssemblyFailed {
-            tool: tool.to_string(),
-            message: format!("non-zero exit status {}{suffix}", output.status),
-        });
+        return Err(failed(format!("non-zero exit status {status}{suffix}")));
     }
-
-    Ok(output.stdout)
+    let left = deadline.saturating_duration_since(Instant::now());
+    match written.recv_timeout(left) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(failed(format!("failed to write QIR to stdin: {e}"))),
+        Err(_) => return Err(failed("its stdin stayed open after it exited".into())),
+    }
+    receive(&stdout, "stdout")
 }
 
 #[cfg(test)]
@@ -669,9 +720,81 @@ mod tests {
     fn missing_assembler_reports_tool_not_found() {
         let err = assemble_qir_bitcode_with(
             "polypus-llvm-as-does-not-exist",
-            "define void @main() {\nentry:\n  ret void\n}\n",
+            "define void @main() {\nentry:\n  ret void\n}\n".into(),
+            ASSEMBLY_TIMEOUT,
         )
         .unwrap_err();
         assert!(matches!(err, CircuitError::QirAssemblyToolNotFound { .. }));
+    }
+
+    /// Fake assemblers that misbehave (#356): each is a shell script that
+    /// records its pid, so the test can check it was reaped. One test, so
+    /// that no other test forks while a script is being written.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_assembler_is_always_reaped_and_bounded_in_time() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("polypus-fake-llvm-as-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho $$ > '{}.pid'\n{body}\n", path.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let reaped = |tool: &std::path::Path| {
+            let pid = std::fs::read_to_string(tool.with_extension("pid")).unwrap();
+            !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists()
+        };
+        let tools = [
+            ("hangs", fake("hangs", "exec sleep 60")),
+            ("closes", fake("closes", "exec 0<&-\nexit 0")),
+            (
+                "closes_and_hangs",
+                fake("closes_and_hangs", "exec 0<&-\nexec sleep 60"),
+            ),
+            ("fails", fake("fails", "echo broken >&2\nexit 3")),
+            ("echoes", fake("echoes", "exec cat")),
+        ];
+        // More than a pipe buffer holds, so writing it blocks until it is read.
+        let ir = "x".repeat(1 << 20);
+        let assemble = |tool: &std::path::Path| {
+            let started = Instant::now();
+            let result = assemble_qir_bitcode_with(
+                tool.to_str().unwrap(),
+                ir.clone(),
+                Duration::from_millis(500),
+            );
+            assert!(started.elapsed() < Duration::from_secs(10), "{tool:?}");
+            result
+        };
+        for (name, tool) in &tools {
+            let result = assemble(tool);
+            let message = match &result {
+                Err(CircuitError::QirAssemblyFailed { message, .. }) => message.as_str(),
+                Ok(bytes) => {
+                    assert_eq!(*name, "echoes");
+                    assert_eq!(bytes.len(), ir.len());
+                    ""
+                }
+                Err(other) => panic!("{name}: {other:?}"),
+            };
+            match *name {
+                "hangs" | "closes_and_hangs" => assert!(message.contains("timed out"), "{message}"),
+                "closes" => assert!(
+                    message.contains("failed to write QIR to stdin"),
+                    "{message}"
+                ),
+                "fails" => assert!(message.contains("broken"), "{message}"),
+                _ => {}
+            }
+            assert!(reaped(tool), "{name} was not reaped");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

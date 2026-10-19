@@ -39,7 +39,7 @@ use crate::limits::{
 };
 use crate::naming::{fresh, DefinitionNames};
 use crate::qasm3_import::{parse_qasm3, MAX_INPUTS};
-use crate::qasm_import::normalize;
+use crate::qasm_import::normalized;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::OnceLock;
@@ -536,12 +536,12 @@ pub(crate) fn write_qasm3(
             .get(&(definition as *const GateDefinition))
             .map_or(0, |size| size.expansion)
     };
-    for gate in normalize(gates, num_qubits) {
-        spent.instructions(match gate {
+    for gate in normalized(gates, num_qubits) {
+        spent.instructions(match *gate {
             GateInstruction::MeasureAll => num_qubits,
             _ => 1,
         })?;
-        match &gate {
+        match &*gate {
             GateInstruction::Custom(call) => spent.call(expansion(call.definition()))?,
             other => {
                 if let Some(Spelling::Defined(helper)) = spelling(other) {

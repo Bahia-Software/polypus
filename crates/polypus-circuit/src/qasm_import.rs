@@ -73,6 +73,7 @@ use crate::limits::{
     check_declarations, check_instructions, check_source, check_token, spend_barrier_operands,
     spend_nodes, MAX_VALIDATED_EXPANSION,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
@@ -669,30 +670,64 @@ pub(crate) fn check_terminal(
 ///   barrier.
 ///
 /// Both rewrites are semantically identity; they exist so that
-/// export → import → export is byte-stable.
-pub(crate) fn normalize(input: &[GateInstruction], n: usize) -> Vec<GateInstruction> {
-    let all: Vec<usize> = (0..n).collect();
-    let mut gates = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        if n > 0 && i + n <= input.len() {
-            let full_measure_run =
-                (0..n).all(|k| input[i + k] == GateInstruction::Measure { qubit: k, cbit: k });
-            if full_measure_run {
-                gates.push(GateInstruction::MeasureAll);
-                i += n;
-                continue;
-            }
-        }
-        match &input[i] {
-            GateInstruction::Barrier(v) if *v == all => {
-                gates.push(GateInstruction::Barrier(Vec::new()))
-            }
-            other => gates.push(other.clone()),
-        }
-        i += 1;
+/// export → import → export is byte-stable. The importers rewrite their
+/// instructions in place, never holding a second copy of them.
+pub(crate) fn normalize(gates: &mut Vec<GateInstruction>, n: usize) {
+    let (mut read, mut write) = (0, 0);
+    while read < gates.len() {
+        // `write <= read`: the instructions `canonical` reads are untouched.
+        let (gate, consumed) = canonical(gates, read, n).unwrap_or_else(|| {
+            (
+                std::mem::replace(&mut gates[read], GateInstruction::MeasureAll),
+                1,
+            )
+        });
+        gates[write] = gate;
+        write += 1;
+        read += consumed;
     }
-    gates
+    gates.truncate(write);
+}
+
+/// The instructions of [`normalize`], without copying the ones it keeps: for
+/// an export, which only borrows the circuit.
+pub(crate) fn normalized(
+    gates: &[GateInstruction],
+    n: usize,
+) -> impl Iterator<Item = Cow<'_, GateInstruction>> {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let gate = gates.get(i)?;
+        Some(match canonical(gates, i, n) {
+            Some((gate, consumed)) => {
+                i += consumed;
+                Cow::Owned(gate)
+            }
+            None => {
+                i += 1;
+                Cow::Borrowed(gate)
+            }
+        })
+    })
+}
+
+/// The canonical form of the instructions from `gates[i]` (see [`normalize`])
+/// and how many it replaces, or `None` when `gates[i]` stays as it is.
+fn canonical(gates: &[GateInstruction], i: usize, n: usize) -> Option<(GateInstruction, usize)> {
+    let full_measure_run = n > 0
+        && i + n <= gates.len()
+        && (0..n).all(|k| gates[i + k] == GateInstruction::Measure { qubit: k, cbit: k });
+    if full_measure_run {
+        return Some((GateInstruction::MeasureAll, n));
+    }
+    match &gates[i] {
+        GateInstruction::Barrier(v)
+            if !v.is_empty() && v.len() == n && v.iter().enumerate().all(|(k, &q)| k == q) =>
+        {
+            Some((GateInstruction::Barrier(Vec::new()), 1))
+        }
+        _ => None,
+    }
 }
 
 /// One parsed angle expression: its nodes in postfix order, and the source
@@ -1711,9 +1746,10 @@ impl Parser<'_> {
     // ── Final assembly ───────────────────────────────────────────────────
 
     /// Normalise the instruction stream ([`normalize`]) and build the circuit.
-    fn finish(self) -> ParameterizedCircuit {
+    fn finish(mut self) -> ParameterizedCircuit {
         let n = self.num_qubits;
-        let gates = normalize(&self.gates, n);
+        normalize(&mut self.gates, n);
+        let gates = self.gates;
 
         // OpenQASM 2.0 has no free parameters: always fully concrete.
         ParameterizedCircuit {
@@ -1737,6 +1773,36 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The importers normalise in the buffer they parsed into: no second copy
+    /// of the instructions (#356), and the same result as the export sees.
+    #[test]
+    fn normalize_rewrites_in_place() {
+        let measure = |k| GateInstruction::Measure { qubit: k, cbit: k };
+        let mut gates = vec![
+            GateInstruction::H(0),
+            GateInstruction::Barrier(vec![0, 1]),
+            GateInstruction::Barrier(vec![1, 0]),
+            measure(0),
+            measure(1),
+            GateInstruction::Barrier(vec![]),
+        ];
+        let borrowed: Vec<GateInstruction> = normalized(&gates, 2).map(Cow::into_owned).collect();
+        let buffer = gates.as_ptr();
+        normalize(&mut gates, 2);
+        assert_eq!(gates.as_ptr(), buffer);
+        assert_eq!(
+            gates,
+            [
+                GateInstruction::H(0),
+                GateInstruction::Barrier(vec![]),
+                GateInstruction::Barrier(vec![1, 0]),
+                GateInstruction::MeasureAll,
+                GateInstruction::Barrier(vec![]),
+            ]
+        );
+        assert_eq!(borrowed, gates);
+    }
 
     fn reg(indices: std::ops::Range<usize>) -> ArgIndices {
         ArgIndices {

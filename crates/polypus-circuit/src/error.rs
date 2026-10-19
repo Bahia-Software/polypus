@@ -99,6 +99,16 @@ pub enum CircuitError {
     /// The external assembler failed while converting QIR text (`.ll`) to
     /// LLVM bitcode (`.bc`).
     QirAssemblyFailed { tool: String, message: String },
+    /// A circuit template was asked for more qubits than it builds (see
+    /// [`templates::MAX_QFT_QUBITS`](crate::templates::MAX_QFT_QUBITS)).
+    TemplateTooLarge {
+        /// The template (`qft`).
+        template: &'static str,
+        /// Qubits asked for.
+        num_qubits: usize,
+        /// Most qubits the template builds.
+        max_qubits: usize,
+    },
 }
 
 impl fmt::Display for CircuitError {
@@ -168,6 +178,14 @@ impl fmt::Display for CircuitError {
             CircuitError::QirAssemblyFailed { tool, message } => write!(
                 f,
                 "QIR bitcode export failed while running '{tool}': {message}"
+            ),
+            CircuitError::TemplateTooLarge {
+                template,
+                num_qubits,
+                max_qubits,
+            } => write!(
+                f,
+                "the {template} template builds at most {max_qubits} qubits, got {num_qubits}"
             ),
         }
     }
