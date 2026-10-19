@@ -44,6 +44,10 @@ impl Method {
     /// The call pattern of this method's optimizer. DE and PSO score their initial
     /// population in one batch the size of a generation's, so it counts as one;
     /// a QNG iteration is a gradient batch plus a single-candidate batch.
+    ///
+    /// Every DE strategy makes one batch per generation. L-SHADE's batches shrink
+    /// as its population does, so timing the first generation, a full-size one,
+    /// keeps the projection an upper bound.
     pub(crate) fn run_shape(&self) -> RunShape {
         match self {
             Method::De(cfg) => RunShape {
@@ -329,13 +333,17 @@ mod tests {
     #[test]
     fn run_shape_follows_the_optimizer_call_pattern() {
         use crate::{DeConfig, PsoConfig};
-        let de = Method::De(DeConfig {
-            generations: 100,
-            population_size: 10,
-            tolerance: 0.0,
-            patience: 10,
-        });
-        assert_eq!(de.run_shape(), DE_100);
+        use polypus_optimizers::DeStrategy;
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            let de = Method::De(DeConfig {
+                generations: 100,
+                population_size: 10,
+                tolerance: 0.0,
+                patience: 10,
+                strategy,
+            });
+            assert_eq!(de.run_shape(), DE_100, "{strategy}");
+        }
         let pso = Method::Pso(PsoConfig {
             generations: 7,
             population_size: 10,
