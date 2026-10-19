@@ -54,6 +54,11 @@ Changes on `main` since 0.7.2.
   qubit twice (`Cx(0, 0)` in a hand-built `ConcreteCircuit`) with the new
   `SimError::RepeatedQubit` instead of writing out of bounds; the kernels'
   operand checks are now `assert!`s (#342).
+- **BREAKING (Rust):** `Statevector::expectation_z` returns
+  `Result<f64, SimError>` and rejects a qubit outside the register instead of
+  returning a wrong value or overflowing; a repeated qubit cancels (`Z·Z = I`).
+  An out-of-range `parallel_threshold` in the calibration cache (e.g. `0`) is
+  ignored as a cache miss (#353).
 - OpenQASM 2.0 export keeps angles at full round-trip precision.
 - With `infrastructure="cunqa"`, a non-Aer `backend` or a `noise_model` raises
   `ValueError` instead of being silently ignored.

@@ -165,6 +165,18 @@ const PARALLELISM_DISABLED: usize = MAX_QUBITS + 1;
 // (`n <= MAX_QUBITS`); enforced at compile time so it can never silently regress.
 const _: () = assert!(PARALLELISM_DISABLED > MAX_QUBITS);
 
+/// Smallest threshold accepted from the cache: the two-qubit kernels enumerate
+/// `2^(n-2)` sub-states, so no register below 2 qubits should be routed to the
+/// parallel path. Calibration itself never picks below `CALIBRATION_SIZES[0]`.
+const MIN_CACHED_THRESHOLD: usize = 2;
+
+/// Whether a cached threshold is one calibration could have produced:
+/// `MIN_CACHED_THRESHOLD..=PARALLELISM_DISABLED`. The cache file may be shared
+/// (a cluster `$HOME`) or corrupt, so anything else is not trusted.
+fn is_valid_threshold(threshold: usize) -> bool {
+    (MIN_CACHED_THRESHOLD..=PARALLELISM_DISABLED).contains(&threshold)
+}
+
 /// The measured crossover plus the context needed to report it.
 #[derive(Debug, Clone)]
 pub struct CalibrationResult {
@@ -505,13 +517,25 @@ fn cache_file() -> Option<PathBuf> {
 
 /// Parse a cache file. Any problem — missing, unreadable, malformed, wrong
 /// schema — yields `None` (run uncached), never an error: a broken cache must
-/// degrade to the default, never break simulation.
+/// degrade to the default, never break simulation. An entry whose threshold is
+/// out of range ([`is_valid_threshold`], e.g. a tampered `0`) is dropped, so its
+/// key is a cache miss, and the next write for any key drops it from disk.
 fn read_cache_from(path: &Path) -> Option<CachedCalibration> {
     let bytes = std::fs::read(path).ok()?;
-    let cached: CachedCalibration = serde_json::from_slice(&bytes).ok()?;
+    let mut cached: CachedCalibration = serde_json::from_slice(&bytes).ok()?;
     if cached.schema != CACHE_SCHEMA {
         return None;
     }
+    cached.entries.retain(|key, &mut threshold| {
+        let valid = is_valid_threshold(threshold);
+        if !valid {
+            log::warn!(
+                "ignoring out-of-range cached gate-parallel threshold {threshold} for cache \
+                 key {key:?}"
+            );
+        }
+        valid
+    });
     Some(cached)
 }
 
@@ -1086,6 +1110,12 @@ mod tests {
         }
     }
 
+    /// A distinct-ish valid threshold per `i`, for tests that only need the
+    /// value as a payload (read-back drops out-of-range ones, see #353).
+    fn valid_threshold(i: usize) -> usize {
+        MIN_CACHED_THRESHOLD + i % (PARALLELISM_DISABLED - MIN_CACHED_THRESHOLD + 1)
+    }
+
     /// Two fingerprinted keys with the *same* thread count on different CPUs —
     /// the heterogeneous shared-`$HOME` pair the schema-3 key must keep apart.
     const XEON_8: &str = "8|Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz|49152 KB|2";
@@ -1413,6 +1443,53 @@ core id\t\t: 0
     }
 
     #[test]
+    fn read_cache_drops_out_of_range_thresholds() {
+        // #353: a tampered or corrupt entry (`0` would force the parallel path
+        // at every size) is a miss for its key; valid neighbours survive.
+        let dir = temp_dir("out-of-range");
+        let path = dir.join("parallel_threshold.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = format!(
+            r#"{{"schema":{CACHE_SCHEMA},"entries":{{"{XEON_8}":0,"{EPYC_8}":1,"{XEON_32}":16,"64":{},"128":{}}}}}"#,
+            PARALLELISM_DISABLED,
+            PARALLELISM_DISABLED + 1
+        );
+        std::fs::write(&path, json).unwrap();
+        let cache = read_cache_from(&path).expect("the file itself is well formed");
+        assert_eq!(
+            cache,
+            cached(&[(XEON_32, 16), ("64", PARALLELISM_DISABLED)])
+        );
+        // The dropped key resolves as uncalibrated, never as the bad value.
+        assert_eq!(
+            decide(Some(cache.clone()), XEON_8),
+            Decision::SizeUncalibrated
+        );
+        assert_eq!(threshold_to_reuse(false, Some(cache), XEON_8), None);
+
+        // A file holding only bad entries is the "never calibrated" fallback.
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema":{CACHE_SCHEMA},"entries":{{"{XEON_8}":0}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            decide(read_cache_from(&path), XEON_8),
+            Decision::Fallback(FallbackReason::NotCalibrated)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calibration_only_produces_valid_thresholds() {
+        for &n in &CALIBRATION_SIZES {
+            assert!(is_valid_threshold(n), "{n}");
+        }
+        assert!(is_valid_threshold(DEFAULT_PARALLEL_THRESHOLD));
+        assert!(is_valid_threshold(PARALLELISM_DISABLED));
+    }
+
+    #[test]
     fn read_cache_tolerates_missing_and_garbage() {
         let missing = temp_dir("missing").join("none.json");
         assert_eq!(read_cache_from(&missing), None);
@@ -1511,8 +1588,13 @@ core id\t\t: 0
                 s.spawn(move || {
                     barrier.wait();
                     for i in 0..PER_WRITER {
-                        persist_entry(path, format!("{i}|{writer}"), i, LOCK_TIMEOUT)
-                            .expect("temp dir is writable");
+                        persist_entry(
+                            path,
+                            format!("{i}|{writer}"),
+                            valid_threshold(i),
+                            LOCK_TIMEOUT,
+                        )
+                        .expect("temp dir is writable");
                         assert!(
                             read_cache_from(path).is_some(),
                             "cache must parse after every write"
@@ -1525,7 +1607,10 @@ core id\t\t: 0
         assert_eq!(cache.entries.len(), 2 * PER_WRITER, "an entry was lost");
         for writer in ["rank-a", "rank-b"] {
             for i in 0..PER_WRITER {
-                assert_eq!(cache.entries.get(&format!("{i}|{writer}")), Some(&i));
+                assert_eq!(
+                    cache.entries.get(&format!("{i}|{writer}")),
+                    Some(&valid_threshold(i))
+                );
             }
         }
         // Every temp file was renamed away; only the cache and its lock remain.
@@ -1603,7 +1688,7 @@ core id\t\t: 0
         let _ = std::fs::remove_dir_all(&dir); // debris from an aborted earlier run
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("parallel_threshold.json");
-        write_cache_to(&path, &cached(&[("seed", 0)])).expect("temp dir is writable");
+        write_cache_to(&path, &cached(&[("seed", 2)])).expect("temp dir is writable");
         let mut lock = Some(
             acquire_cache_lock(&lock_path_for(&path), LOCK_TIMEOUT, &mut SystemClock)
                 .expect("uncontended lock"),
@@ -1622,7 +1707,7 @@ core id\t\t: 0
                 holder_keys.push(format!("holder-{}", holder_keys.len()));
                 let mut next = snapshot.clone();
                 for key in &holder_keys {
-                    next.entries.insert(key.clone(), 1);
+                    next.entries.insert(key.clone(), 2);
                 }
                 write_cache_to(&path, &next).expect("temp dir is writable");
             }
@@ -1764,7 +1849,8 @@ core id\t\t: 0
         let big = |t: usize| -> CachedCalibration {
             let mut c = cached(&[]);
             for i in 0..200 {
-                c.entries.insert(format!("{i}|{XEON_8}"), t);
+                c.entries
+                    .insert(format!("{i}|{XEON_8}"), valid_threshold(t));
             }
             c
         };
