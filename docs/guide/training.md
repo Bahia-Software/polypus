@@ -80,10 +80,29 @@ Both take `scale=-1.0` to turn a minimisation into a maximisation. Bit order mat
 ### Differential Evolution
 
 ```python
-polypus.DE(generations=100, population_size=50, tolerance=0.01, patience=20, seed=None)
+polypus.DE(
+    generations=100,
+    population_size=50,
+    tolerance=0.01,
+    patience=20,
+    seed=None,
+    strategy="rand1bin",
+)
 ```
 
 The run stops early when the best fitness improves by less than `tolerance` over the last `patience` generations.
+
+`strategy` picks how each generation builds its trial vectors:
+
+| `strategy` | Algorithm |
+|---|---|
+| `"rand1bin"` (default) | Classic DE/rand/1/bin with fixed `F = 0.8` and `CR = 0.7` |
+| `"shade"` | SHADE (Tanabe and Fukunaga, 2013): current-to-pbest/1 mutation with an archive of replaced parents. Each individual draws its own `F` and `CR` from a memory of the values that recently improved the population, so there is nothing to tune |
+| `"lshade"` | L-SHADE (Tanabe and Fukunaga, 2014): SHADE with a population that shrinks linearly towards 4 |
+
+Any other name raises `ValueError`. `population_size` must be at least 4 with every strategy, and all three evaluate one batch per generation, so `generations` bounds the run the same way.
+
+L-SHADE plans its shrinking over `population_size × (generations + 1)` evaluations, the most a fixed population can spend in `generations` generations. Its generations get cheaper as the population shrinks, so the run ends after `generations` generations without reaching that budget: with the defaults, the last generation evaluates 20 circuits instead of 50. Those smaller batches can leave QPUs idle when `n_qpus` is large; with many QPUs, prefer `"shade"`, whose population stays fixed.
 
 ### Particle Swarm Optimization
 
