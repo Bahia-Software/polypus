@@ -3,11 +3,11 @@
 
 # Rust/Python build
 maturin>=1.8,<2.0
-qiskit>=2.0
+qiskit>=2.0,<3
 # Aer is the default `local` simulator backend and is exercised by the test
 # suite directly; declare it here too, not only as a runtime dependency of the
 # wheel (`[project] dependencies` in the root pyproject.toml).
-qiskit-aer>=0.17
+qiskit-aer>=0.17,<0.18
 # `qiskit.qasm3.loads` needs it; only the OpenQASM 3 interoperability tests
 # (tests/python/test_qasm3_interop.py) use it. Pinned: those tests state the
 # versions they support (Qiskit 2.5.2 with this importer).
@@ -23,9 +23,8 @@ ruff==0.16.1  # pinned; keep in sync with .github/workflows/ci.yml (see pyprojec
 # Typing stubs check: `python -m mypy.stubtest polypus` verifies the hand-written
 # python/polypus/*.pyi against the compiled extension (docs/CONTRIBUTING.md).
 # Pinned like ruff, so a new mypy release cannot turn CI red without a
-# deliberate bump. mypy 2.x needs Python >= 3.10, so it is skipped on the 3.9
-# floor, where CI does not run stubtest (.github/workflows/ci.yml).
-mypy==2.4.0; python_version >= "3.10"
+# deliberate bump.
+mypy==2.4.0
 
 # Strips outputs from tutorials/*.ipynb on commit (.gitattributes); after
 # installing, run `nbstripout --install` once per clone to register the git

@@ -2,19 +2,19 @@
 Default-visible fallback warning for the gate-parallel threshold (issue #127
 follow-up, revised for auto-calibration in issue #176).
 
-Since issue #176 ``import polypus`` auto-calibrates the machine once, so on the
-happy path the native statevector backend resolves to a *calibrated* threshold
+Since issue #176 the machine is auto-calibrated once (lazily, on the first
+native run of a process, since #351), so on the happy path the native statevector backend resolves to a *calibrated* threshold
 and nothing warns. The only remaining default-visible ``UserWarning`` is the
 ``HardwareChanged`` case; the ``NotCalibrated`` case (empty/unreadable cache) was
 demoted to a logger-only ``info!`` so it never nags ``pip install`` users whose
 cache dir happens to be read-only (containers/CI) — the result is numerically
 identical regardless.
 
-Every child here sets ``POLYPUS_NO_AUTOCALIBRATE=1`` so import does **not**
-silently calibrate the temp cache: that lets each scenario pin an exact cache
+Every child here sets ``POLYPUS_NO_AUTOCALIBRATE=1`` so the first native run
+does **not** silently calibrate the temp cache: that lets each scenario pin an exact cache
 state (empty / old-schema / foreign-thread-count / freshly calibrated) and assert
 what the *fallback* path does, which is the point of this file. The end-to-end
-"import calibrates so nothing warns" behaviour is covered in
+"the first run calibrates so nothing warns" behaviour is covered in
 ``test_autocalibrate.py``.
 
 Why subprocesses: ``resolve_threshold()`` memoises its answer in a process-life
@@ -57,8 +57,8 @@ def _run_child(code: str, cache_home) -> subprocess.CompletedProcess:
 
     Inherits the parent environment (so the editable `polypus` install and any
     LD_LIBRARY_PATH are visible) but never installs a logger, so any warning the
-    child prints proves the warning is visible with no setup. Auto-calibration at
-    import is disabled (POLYPUS_NO_AUTOCALIBRATE=1) so each test controls the
+    child prints proves the warning is visible with no setup. Auto-calibration on
+    the first native run is disabled (POLYPUS_NO_AUTOCALIBRATE=1) so each test controls the
     exact on-disk cache state; the fallback path is what these tests assert.
     """
     env = os.environ.copy()

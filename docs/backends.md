@@ -29,8 +29,8 @@ any of Polypus's execution machinery into your build.
 
 ```toml
 [dependencies]
-polypus-backend = "0.7"   # inherits the Polypus workspace version
-polypus-circuit = "0.7"   # only if you construct native circuits yourself
+polypus-backend = "0.8"   # inherits the Polypus workspace version
+polypus-circuit = "0.8"   # only if you construct native circuits yourself
 ```
 
 Everything you implement or name lives in this crate:
@@ -561,7 +561,7 @@ pyo3-free as the contract — add it as a dev-dependency and nothing else:
 
 ```toml
 [dev-dependencies]
-polypus-backend-conformance = "0.7"
+polypus-backend-conformance = "0.8"
 ```
 
 ```rust
@@ -838,10 +838,10 @@ third party can build against it. We treat it accordingly.
 - **Versioning.** `polypus-backend` inherits the unified Polypus workspace version
   (`version.workspace = true`, currently **0.7.x**, pre-1.0). It is not versioned
   independently: a given Polypus release and its backend contract move together, so
-  `polypus-backend = "0.7"` and the matching `polypus` are always compatible.
+  `polypus-backend = "0.8"` and `polypus = "0.8"` are always compatible.
 - **Pre-1.0 semantics (SemVer).** While pre-1.0, a **minor** bump (0.7 → 0.8) may
   make breaking changes to the trait or its types; **patch** bumps (0.7.1 → 0.7.2)
-  will not. Pin a minor range (`polypus-backend = "0.7"`) and expect to review the
+  will not. Pin a minor range (`polypus-backend = "0.8"`) and expect to review the
   changelog when the minor moves. We will keep additive changes additive: new trait
   methods ship with defaults (as `cancel` and `wants_cancel_watcher` did) rather than
   as breaking additions. **Enum variants are the exception:** `BackendError` is
@@ -861,11 +861,11 @@ third party can build against it. We treat it accordingly.
   in `polypus-backend-conformance`) is likewise a surface third parties build tests
   against, and follows the same pre-1.0 SemVer discipline.
 - **crates.io.** `polypus-backend`, `polypus-subprocess-backend` and
-  `polypus-backend-conformance` are **not yet published to crates.io.** The conformance
-  battery has now landed (this phase), so the contract's shape is exercised end-to-end;
-  publishing still waits on a deliberate decision to freeze the surface. Until it is
-  published, depend on these crates by path or git. This document will be updated when
-  they go to the registry.
+  `polypus-backend-conformance` are published to crates.io with every Polypus release
+  from 0.8.0 on, together with the other workspace crates
+  ([RELEASING.md](RELEASING.md#cratesio)); the snippets above assume 0.8. They are not
+  on crates.io for 0.7.x: until 0.8.0 is out, depend on them by git
+  (`polypus-backend = { git = "https://github.com/Bahia-Software/polypus" }`).
 
 When the contract reaches 1.0, this section will state the post-1.0 SemVer guarantee
 (breaking changes only on a major bump).

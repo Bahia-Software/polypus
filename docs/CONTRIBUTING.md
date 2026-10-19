@@ -180,8 +180,10 @@ for days.
 
 ## Adding things that have a defined shape
 
-- **A gate**: four places (QASM export, QASM import, simulator, QIR) plus a row
-  in the vocabulary equivalence test — see contract C-2.
+- **A gate**: six places (OpenQASM 2.0 export and import, OpenQASM 3 export,
+  simulator, QIR export, Python bindings and their `.pyi` stub), the
+  OpenQASM 3 importer if `stdgates.inc` names the gate, plus a row in the
+  vocabulary equivalence test — see contract C-2.
 - **A backend/provider**: one `BackendConfig` variant + one `QuantumBackend`
   impl + a contract entry + a seam test. Algorithms must not change.
 - **An optimizer**: implement `Optimizer` against `EvaluationOracle`; respect

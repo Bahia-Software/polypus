@@ -14,6 +14,9 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- CUNQA run-flow tests against a fake CUNQA SDK (`qraise`, `run`, `gather`,
+  `qdrop`, C-3 counts, C-7 per-QPU seeds), and an opt-in test for a real CUNQA
+  family, `POLYPUS_CUNQA_REAL=1 pytest tests/python/test_cunqa_real.py` (#357).
 - OpenQASM 3 profile: `Circuit.from_qasm3`, `to_qasm3`, `param_names`; the
   importer records the declared classical width.
 - `walltime` kwarg for the SLURM walltime of CUNQA virtual QPUs.
@@ -30,6 +33,21 @@ Changes on `main` since 0.7.2.
 ### Changed
 - **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
   returns a `Result` instead of panicking on an unexportable circuit (#350).
+- **BREAKING:** the native backend derives each circuit's seed from the base
+  seed and the circuit's index with SplitMix64 instead of `seed + index`, so
+  neighbouring seeds no longer share streams shifted by one circuit (circuit
+  `k` of seed `s` equalled circuit `k-1` of seed `s+1`). The same seed and batch
+  still reproduce bit-for-bit (C-7), but counts and `backend="polypus"`
+  training trajectories for a fixed seed differ from earlier releases (#348).
+- `import polypus` no longer calibrates the gate-parallel threshold or writes
+  the cache: the first native statevector run of a process does it
+  (`polypus.statevector`, or `run_quantum_circuit`/`train` with
+  `backend="polypus"`). The cache, `POLYPUS_NO_AUTOCALIBRATE` and the
+  SLURM/OpenMPI rank check are unchanged (#351).
+- **BREAKING:** Python 3.9 (end of life) is no longer supported;
+  `requires-python` is `>=3.10` and wheels are built for CPython 3.10–3.13.
+  Every wheel is installed and smoke-tested on its platform before it is
+  published (#360).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates

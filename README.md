@@ -47,7 +47,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 pip install polypus-quantum
 ```
 
-The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.9 and later.
+The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.10 to 3.13.
 
 | To use | Install |
 |---|---|
@@ -77,6 +77,8 @@ For development, `maturin develop --release` installs both packages in editable 
 </details>
 
 > The name `polypus` on PyPI belongs to an unrelated project, so the distribution is `polypus-quantum`. The import name and the Rust crate are `polypus`.
+
+`import polypus` does no work and writes nothing. The first native simulation of a process (`polypus.statevector`, or `backend="polypus"`) measures once per machine, in under a second, the qubit count at which the simulator's gate kernels go parallel, and caches it in `$XDG_CACHE_HOME/polypus/` (or `~/.cache/polypus/`). Set `POLYPUS_NO_AUTOCALIBRATE=1` to skip it (CI, containers); see [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md).
 
 ## Quickstart
 
@@ -157,11 +159,11 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO` or `polypus.QN
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
 
-The [API reference](https://bahia-software.github.io/polypus/) is generated from the Rust crates and the Python bindings.
+The [API reference](https://bahia-software.github.io/polypus/) is the rustdoc of the workspace crates. The Python API is documented in the [user guide](https://github.com/Bahia-Software/polypus/tree/main/docs/guide) and its type stubs ([`python/polypus/__init__.pyi`](https://github.com/Bahia-Software/polypus/blob/main/python/polypus/__init__.pyi)).
 
 ## Architecture
 
-Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Python; the others can be used from any Rust project.
+Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Python; the others can be used from any Rust project. Every crate is published on [crates.io](https://crates.io/crates/polypus) with each release; `polypus-backend`, `polypus-backend-conformance` and `polypus-subprocess-backend` from 0.8.0.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="Crate graph: polypus depends on polypus-evaluation, then polypus-orchestration, which uses polypus-infrastructure and polypus-optimizers; polypus-infrastructure uses polypus-backend, polypus-sim and polypus-observable; polypus-sim uses polypus-circuit" width="760">
@@ -178,10 +180,10 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 | [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE, PSO and QNG |
 | [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables |
 | [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport and Pauli-sum Hamiltonians |
-| [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement |
+| [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement and the `Planner` that sizes circuit waves |
 | [`polypus-backend-conformance`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend-conformance) | Conformance tests for backends |
 | [`polypus-subprocess-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-subprocess-backend) | Bridge for backends written in Python |
-| [`polypus-infrastructure`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-infrastructure) | Built-in backends and the `Planner` that sizes circuit waves |
+| [`polypus-infrastructure`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-infrastructure) | Built-in backends (Aer, CUNQA, QMIO, native) |
 | [`polypus-orchestration`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-orchestration) | `Flow`, `Scheduler` and `Resources`; optimizer dispatch |
 | [`polypus-evaluation`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-evaluation) | Oracles and objective assembly |
 | [`polypus-logger`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-logger) | Shared log sink |

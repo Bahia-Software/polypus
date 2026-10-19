@@ -1216,12 +1216,13 @@ pub fn run_quantum_circuit<'py>(
         options.map(OptionsArg::into_inner),
     )?;
     // Only the native statevector backend consults the gate-parallel threshold,
-    // so surface the one-time default-visible warning only when this run
-    // actually resolves to it — never for Aer/CUNQA/QMIO. Gated on the resolved
-    // `BackendConfig`, not the raw `backend` string, so it tracks the real
-    // dispatch rather than re-deriving it from the kwargs.
+    // so calibrate it lazily (#351) and surface the one-time default-visible
+    // warning only when this run actually resolves to it — never for
+    // Aer/CUNQA/QMIO. Gated on the resolved `BackendConfig`, not the raw
+    // `backend` string, so it tracks the real dispatch rather than re-deriving
+    // it from the kwargs.
     if matches!(backend_config, BackendConfig::LocalNative { .. }) {
-        calibration::warn_if_using_default_threshold(qc.py())?;
+        calibration::prepare_native_threshold(qc.py())?;
     }
     let config = ExecutionConfig {
         id: id.clone(),
@@ -1424,6 +1425,11 @@ pub fn train<'py>(
         fusion,
         options.map(OptionsArg::into_inner),
     )?;
+    // As in `run_quantum_circuit`: the native backend's simulator resolves the
+    // gate-parallel threshold, so calibrate it lazily before building it (#351).
+    if matches!(backend_config, BackendConfig::LocalNative { .. }) {
+        calibration::prepare_native_threshold(qc.py())?;
+    }
     // Suffix the caller-supplied `id` with a UUID v4 so two concurrent training
     // runs sharing the same `id` never collide on the SLURM family/allocation,
     // temp files or log streams named by ExecutionConfig::id (#75, mirroring

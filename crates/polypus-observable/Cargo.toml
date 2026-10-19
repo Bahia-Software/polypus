@@ -15,7 +15,7 @@ name = "polypus_observable"
 # The crate's raison d'être is GIL-free parallel aggregation over the whole
 # candidate population, which always pays off — so rayon is a required (not
 # feature-gated) dependency, unlike polypus-sim's opt-in gate kernels.
-rayon = "1"
+rayon = { workspace = true }
 # Logging *facade* only (no sink); stays a no-op until the app layer installs a
 # logger. No dependency on polypus-logger.
 log   = { workspace = true }
