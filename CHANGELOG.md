@@ -53,6 +53,9 @@ Changes on `main` since 0.7.2.
 - OpenQASM 2.0 export keeps angles at full round-trip precision.
 - With `infrastructure="cunqa"`, a non-Aer `backend` or a `noise_model` raises
   `ValueError` instead of being silently ignored.
+- With `infrastructure="qmio"` or a registry-backed backend (`"subprocess"`, a
+  registered third-party name), a `noise_model` or a `sim_method` other than
+  `"automatic"` raises `ValueError` instead of being silently ignored.
 - A Qiskit circuit with free parameters is rejected before any backend, and
   `backend_compatibility` reports it.
 - Backends report circuits OpenQASM 2.0 cannot express instead of panicking.

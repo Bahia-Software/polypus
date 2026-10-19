@@ -362,6 +362,117 @@ class TestCunqaRejectsWhatItCannotHonour:
             )
 
 
+def _qml_model():
+    from qiskit.circuit import ParameterVector, QuantumCircuit
+
+    x = ParameterVector("x", 1)
+    theta = ParameterVector("theta", 1)
+    feature_map = QuantumCircuit(1)
+    feature_map.ry(x[0], 0)
+    ansatz = QuantumCircuit(1)
+    ansatz.ry(theta[0], 0)
+    return feature_map, ansatz
+
+
+def _registry_run(infrastructure, **kwargs):
+    import polypus
+
+    qc = polypus.Circuit(1).h(0).measure_all()
+    return polypus.run_quantum_circuit(
+        qc, shots=100, infrastructure=infrastructure, **kwargs
+    )
+
+
+def _registry_train(infrastructure, **kwargs):
+    import polypus
+
+    return polypus.train(
+        polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all(),
+        polypus.DE(generations=1, population_size=4),
+        shots=100,
+        n_qpus=1,
+        dimensions=1,
+        expectation_function=lambda b: 0.0,
+        infrastructure=infrastructure,
+        nodes=1,
+        cores_per_qpu=1,
+        id="registry_rejects",
+        **kwargs,
+    )
+
+
+def _registry_qml_train(infrastructure, **kwargs):
+    import polypus
+
+    feature_map, ansatz = _qml_model()
+    return polypus.qml.train(
+        feature_map,
+        ansatz,
+        [[0.1], [0.2]],
+        polypus.DE(generations=1, population_size=4),
+        shots=100,
+        n_qpus=1,
+        dimensions=1,
+        expectation_function=lambda b: 0.0,
+        infrastructure=infrastructure,
+        nodes=1,
+        cores_per_qpu=1,
+        id="registry_rejects",
+        **kwargs,
+    )
+
+
+def _registry_qml_predict(infrastructure, **kwargs):
+    import polypus
+
+    feature_map, ansatz = _qml_model()
+    return polypus.qml.predict(
+        feature_map,
+        ansatz,
+        [[0.1]],
+        [0.2],
+        shots=100,
+        infrastructure=infrastructure,
+        **kwargs,
+    )
+
+
+_REJECTED_SIMULATOR_KWARGS = pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"noise_model": object()}, "noise_model"),
+        ({"sim_method": "statevector"}, "sim_method='statevector'"),
+    ],
+    ids=["noise_model", "sim_method"],
+)
+
+
+class TestRegistryBackendsRejectSimulatorSettings:
+    """``qmio`` and the registry-dispatched backends receive only ``options``,
+    so a ``noise_model`` or a non-default ``sim_method`` is a ``ValueError`` at
+    the edge. The error comes before the backend is built, so these tests need
+    neither ``--features qmio`` nor a subprocess worker."""
+
+    @_REJECTED_SIMULATOR_KWARGS
+    @pytest.mark.parametrize(
+        "entry",
+        [_registry_run, _registry_train, _registry_qml_train, _registry_qml_predict],
+        ids=["run_quantum_circuit", "train", "qml.train", "qml.predict"],
+    )
+    def test_subprocess(self, entry, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            entry("subprocess", **kwargs)
+
+    # The QML entry points reject `qmio` earlier, for its Qiskit circuits.
+    @_REJECTED_SIMULATOR_KWARGS
+    @pytest.mark.parametrize(
+        "entry", [_registry_run, _registry_train], ids=["run_quantum_circuit", "train"]
+    )
+    def test_qmio(self, entry, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            entry("qmio", **kwargs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────

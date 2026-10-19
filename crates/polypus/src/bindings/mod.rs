@@ -553,7 +553,9 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
 /// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
 /// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
 /// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
-/// silently.
+/// silently. For the same reason `qmio` and the registry-dispatched backends,
+/// which receive only `options`, reject a `noise_model` and any `sim_method`
+/// other than the default `"automatic"`.
 ///
 /// `fusion` only applies to the native `"polypus"` backend (see
 /// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
@@ -657,7 +659,10 @@ fn build_backend_config(
         }),
         // QMIO is now dispatched through the runtime registry (it registers a
         // factory), so its config is a `Registered { name: "qmio", options }`.
-        "qmio" => build_qmio_registered(backend, options),
+        "qmio" => {
+            reject_simulator_settings(infrastructure, sim_method, noise_model.is_some())?;
+            build_qmio_registered(backend, options)
+        }
         // Any other name is dispatched through the runtime backend registry: the
         // built-in `"subprocess"` bridge, or a backend a Rust embedder registered
         // before this call. The caller-supplied `options` reach the factory via the
@@ -665,6 +670,7 @@ fn build_backend_config(
         other => {
             crate::infrastructure::register_builtin_backends();
             if crate::infrastructure::is_registered(other) {
+                reject_simulator_settings(other, sim_method, noise_model.is_some())?;
                 Ok(BackendConfig::Registered {
                     name: other.to_string(),
                     options: options.unwrap_or_default(),
@@ -677,6 +683,33 @@ fn build_backend_config(
             }
         }
     }
+}
+
+/// Reject the Aer simulator settings on a registry-dispatched backend (`qmio`,
+/// `subprocess`, or a registered third-party name). `BackendConfig::Registered`
+/// carries only `options`, so a `noise_model` or a non-default `sim_method` would
+/// be dropped silently. `sim_method` is checked against its entry-point default,
+/// `"automatic"`, so an untouched call still passes.
+fn reject_simulator_settings(
+    infrastructure: &str,
+    sim_method: &str,
+    has_noise_model: bool,
+) -> PyResult<()> {
+    if has_noise_model {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the '{infrastructure}' infrastructure does not accept a noise_model: a \
+             registry-backed backend receives only 'options'; omit it, or use \
+             infrastructure=\"local\" with backend=\"aer\""
+        )));
+    }
+    if sim_method != "automatic" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the '{infrastructure}' infrastructure does not accept sim_method='{sim_method}': \
+             a registry-backed backend receives only 'options'; omit it, or use \
+             infrastructure=\"local\" with backend=\"aer\""
+        )));
+    }
+    Ok(())
 }
 
 /// Build the QMIO backend's registry config for the CESGA QMIO QPU.
@@ -1101,6 +1134,9 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// (default), `"qir"`, or `"qir_bitcode"`); for `"cunqa"`, whose QPUs run Aer,
 /// it must be `"aer"` (default) or `"AerSimulator"`. Any other value, or a
 /// `noise_model` with `"cunqa"`, raises `ValueError` before any QPU is requested.
+/// `"qmio"` and the registry-backed backends receive only `options`, so a
+/// `noise_model` or a `sim_method` other than `"automatic"` raises `ValueError`
+/// there before the backend is built.
 ///
 /// `seed` controls shot sampling (contract C-7) on every simulated backend —
 /// native, Aer (`infrastructure="local"`) and CUNQA's simulated QPUs
@@ -1335,6 +1371,9 @@ pub fn run_quantum_circuit<'py>(
 /// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
 /// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
 /// raises `ValueError` before any QPU is requested.
+/// `"qmio"` and the registry-backed backends receive only `options`, so a
+/// `noise_model` or a `sim_method` other than `"automatic"` raises `ValueError`
+/// there before the backend is built.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1613,6 +1652,9 @@ fn bind_feature_rows<'py>(
 /// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
 /// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
 /// raises `ValueError` before any QPU is requested.
+/// `"qmio"` and the registry-backed backends receive only `options`, so a
+/// `noise_model` or a `sim_method` other than `"automatic"` raises `ValueError`
+/// there before the backend is built.
 ///
 /// `options` configures a registry-backed backend (`"qmio"`, `"subprocess"`, or a
 /// registered third-party name): a `dict` whose values are each a `str` or a
@@ -1815,6 +1857,9 @@ pub fn qml_train<'py>(
 /// With `infrastructure="cunqa"`, whose QPUs run Aer, `backend` must be `"aer"`
 /// (default) or `"AerSimulator"` and `noise_model` is not accepted; either one
 /// raises `ValueError` before any QPU is requested.
+/// `"qmio"` and the registry-backed backends receive only `options`, so a
+/// `noise_model` or a `sim_method` other than `"automatic"` raises `ValueError`
+/// there before the backend is built.
 ///
 /// Example:
 ///
@@ -2822,6 +2867,78 @@ mod tests {
         assert!(matches!(
             build_backend_config("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
             Ok(BackendConfig::Cunqa { .. })
+        ));
+    }
+
+    /// `BackendConfig::Registered` carries only `options`, so on `qmio` and on a
+    /// registry-dispatched backend a `noise_model` or a non-default `sim_method`
+    /// is an error rather than silently dropped. The check precedes the QMIO
+    /// build, so `qmio` is covered with or without the `qmio` feature.
+    #[test]
+    fn build_backend_config_rejects_a_noise_model_on_registry_backends() {
+        pyo3::Python::initialize();
+        for infrastructure in ["qmio", "subprocess"] {
+            let noise_model = Python::attach(|py| py.None());
+            let err = build_backend_config(
+                infrastructure,
+                "aer",
+                "automatic",
+                Some(noise_model),
+                1,
+                2,
+                None,
+                None,
+                None,
+            )
+            .expect_err("a noise model on a registry backend must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("noise_model"),
+                    "the message must name the offending kwarg for {infrastructure}: {err}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn build_backend_config_rejects_a_sim_method_on_registry_backends() {
+        pyo3::Python::initialize();
+        for infrastructure in ["qmio", "subprocess"] {
+            let err = build_backend_config(
+                infrastructure,
+                "aer",
+                "statevector",
+                None,
+                1,
+                2,
+                None,
+                None,
+                None,
+            )
+            .expect_err("a non-default sim_method on a registry backend must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("sim_method='statevector'"),
+                    "the message must name the offending kwarg for {infrastructure}: {err}"
+                );
+            });
+        }
+        // The entry-point default still passes.
+        assert!(matches!(
+            build_backend_config(
+                "subprocess",
+                "aer",
+                "automatic",
+                None,
+                1,
+                2,
+                None,
+                None,
+                None
+            ),
+            Ok(BackendConfig::Registered { .. })
         ));
     }
 
