@@ -79,3 +79,44 @@ class TestRustOriginatedFailuresAreTyped:
         qc = polypus.Circuit(1).h(0).measure_all()
         with pytest.raises(ValueError):
             polypus.run_quantum_circuit(qc, shots=10, infrastructure="does-not-exist")
+
+    def test_wide_classical_register_raises_native_circuit_error(self):
+        """Issue #346: a ``creg`` of 65536 bits used to panic formatting the
+        counts (a ``PanicException``); the native backend now refuses any
+        register wider than its 64-bit counts key with a typed error, both as
+        an OpenQASM string and as an imported ``Circuit``."""
+        import polypus
+
+        qasm = (
+            'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[65536];\n'
+            "x q[0];\nmeasure q[0] -> c[0];\n"
+        )
+        kwargs = dict(shots=16, infrastructure="local", backend="polypus")
+        for circuit in (qasm, polypus.Circuit.from_qasm2(qasm)):
+            with pytest.raises(polypus.NativeCircuitError, match="65536 bits wide"):
+                polypus.run_quantum_circuit(circuit, **kwargs)
+
+    def test_measure_beyond_the_counts_key_raises_native_circuit_error(self):
+        """Issue #355: ``Circuit(1).measure(0, 70)`` on the native backend used
+        to panic shifting the bit into the counts key (a ``PanicException``,
+        not catchable as ``Exception``); it now raises a ``polypus.*Error``."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure(0, 70)
+        with pytest.raises(polypus.PolypusError) as caught:
+            polypus.run_quantum_circuit(
+                qc, shots=16, infrastructure="local", backend="polypus"
+            )
+        assert isinstance(caught.value, polypus.NativeCircuitError)
+        assert "71 bits wide" in str(caught.value)
+
+    def test_widest_supported_register_still_runs_on_native(self):
+        """The bound is the 64-bit key, not lower: ``measure(0, 63)`` runs and
+        reports the bit in its own place."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure(0, 63)
+        result = polypus.run_quantum_circuit(
+            qc, shots=16, infrastructure="local", backend="polypus"
+        )
+        assert result.counts[0] == {"1" + "0" * 63: 16}

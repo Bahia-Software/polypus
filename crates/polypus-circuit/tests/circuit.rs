@@ -408,6 +408,51 @@ fn test_parameterized_circuit_try_push_same_qubits() {
     assert_eq!(result, Err(CircuitError::IdenticalQubits { qubit: 0 }));
 }
 
+/// Issue #345: a classical bit index is bounded like a declared register
+/// (`MAX_REGISTER_BITS`), so `num_clbits` cannot overflow and no export can
+/// declare a `creg` an importer would refuse.
+#[test]
+fn test_parameterized_circuit_try_push_rejects_out_of_range_cbit() {
+    const MAX_REGISTER_BITS: usize = 1_000_000;
+    for cbit in [MAX_REGISTER_BITS, 1 << 40, usize::MAX] {
+        let mut qc = ParameterizedCircuit::new(1);
+        assert_eq!(
+            qc.try_push(GateInstruction::Measure { qubit: 0, cbit }),
+            Err(CircuitError::ClbitOutOfRange {
+                cbit,
+                max: MAX_REGISTER_BITS
+            })
+        );
+        assert!(
+            qc.gates.is_empty(),
+            "a rejected measurement is not appended"
+        );
+    }
+    let mut qc = ParameterizedCircuit::new(1);
+    let last = MAX_REGISTER_BITS - 1;
+    assert_eq!(
+        qc.try_push(GateInstruction::Measure {
+            qubit: 0,
+            cbit: last
+        }),
+        Ok(())
+    );
+    assert_eq!(qc.num_clbits(), MAX_REGISTER_BITS);
+}
+
+/// A `cbit` of `usize::MAX` assigned through the public `gates` field bypasses
+/// `try_push`; sizing the register saturates instead of overflowing.
+#[test]
+fn test_num_clbits_saturates_on_a_field_assigned_cbit() {
+    let mut qc = ParameterizedCircuit::new(1);
+    qc.gates = vec![GateInstruction::Measure {
+        qubit: 0,
+        cbit: usize::MAX,
+    }];
+    assert_eq!(qc.num_clbits(), usize::MAX);
+    assert_eq!(qc.clbits_width(), usize::MAX);
+}
+
 #[test]
 fn test_parameterized_circuit_try_push_track_params() {
     let mut qc = ParameterizedCircuit::new(2);

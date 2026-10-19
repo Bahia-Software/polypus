@@ -1470,10 +1470,14 @@ fn the_export_stays_within_the_importers_budgets() {
         export_limit(&ParameterizedCircuit::new(MAX_REGISTER_BITS + 1)),
         "MAX_REGISTER_BITS"
     );
-    assert_eq!(
-        export_limit(&ParameterizedCircuit::new(1).measure(0, MAX_REGISTER_BITS)),
-        "MAX_REGISTER_BITS"
-    );
+    // The builder refuses such a bit (issue #345); a circuit whose `gates` were
+    // assigned directly can still carry one, and the export refuses it too.
+    let mut wide = ParameterizedCircuit::new(1);
+    wide.gates = vec![G::Measure {
+        qubit: 0,
+        cbit: MAX_REGISTER_BITS,
+    }];
+    assert_eq!(export_limit(&wide), "MAX_REGISTER_BITS");
 
     // Instructions as the importer pushes them: `c = measure q;` is one
     // measurement per qubit.

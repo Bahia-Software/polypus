@@ -89,5 +89,9 @@ All Polypus exceptions derive from `polypus.PolypusError`.
 - A Qiskit failure while `train`, `qml.train` or `qml.predict` prepares or binds your circuits (for example an ansatz wider than the feature map) raises `polypus.EvaluationError` the same way.
 - An exception raised by your own `expectation_function` reaches you unchanged.
 - A circuit too large for the memory budget raises `polypus.InsufficientMemoryError` before anything is allocated. See [Memory budget](memory.md).
+- A circuit the native backend cannot run raises `polypus.NativeCircuitError`. That includes a measured circuit whose classical register is wider than 64 bits (for example `creg c[100];`, or `measure(0, 70)`); use `backend="aer"` for it.
+- Invalid circuit construction (an out-of-range qubit or classical bit, a non-finite angle) raises `ValueError`.
+
+Polypus is written not to panic. If a Rust panic does happen, it is a bug: it reaches Python as `pyo3_runtime.PanicException`, which derives from `BaseException`, so neither `except Exception` nor `except polypus.PolypusError` catches it. Please report it.
 
 [Writing a backend](../backends.md) documents the backend contract in detail.

@@ -88,6 +88,12 @@ pub use statevector::Statevector;
 /// is also well below `usize::BITS`, so `1 << n` can never overflow.
 pub const MAX_QUBITS: usize = 30;
 
+/// Maximum classical register width a counts key can hold. Sampled outcomes are
+/// keyed by a `usize` whose bit `i` is classical bit `i`, so a measurement into
+/// a classical bit at or above this index returns
+/// [`SimError::ClbitOutOfRange`] instead of shifting out of the key.
+pub const MAX_CLBITS: usize = usize::BITS as usize;
+
 /// Static fallback for the qubit count at which circuits switch to the parallel
 /// kernels (only when the `parallel` feature is enabled). Smaller circuits run
 /// sequentially to avoid thread-pool overhead that would dwarf the tiny
