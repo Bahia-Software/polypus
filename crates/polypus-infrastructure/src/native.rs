@@ -50,9 +50,10 @@ fn circuit_seed(base_seed: u64, index: u64) -> u64 {
 /// Local, noiseless statevector backend backed by `polypus-sim`.
 ///
 /// Sampling is seeded from an explicit base seed and a per-circuit counter,
-/// mixed by [`circuit_seed`], so two backends built with the same seed reproduce
-/// the same counts while distinct circuits in a batch, and backends with
-/// neighbouring seeds, get independent shot noise. The seed is
+/// mixed with SplitMix64 (circuit `k` takes output `k` of a SplitMix64 stream
+/// started at the mixed base seed), so two backends built with the same seed
+/// reproduce the same counts while distinct circuits in a batch, and backends
+/// with neighbouring seeds, get independent shot noise. The seed is
 /// supplied by the caller (`ExecutionConfig::seed`, resolved at the
 /// Python-facing boundary from a user value or an OS-entropy draw) and is
 /// **fully decoupled from the run `id`**: an omitted seed yields genuine,
@@ -505,7 +506,7 @@ impl QuantumBackend for NativeStatevectorBackend {
     ///
     /// Reproducibility is preserved exactly (contract C-7): the per-batch seeds
     /// come from the *same* contiguous-block scheme `run_circuits` uses
-    /// (`counter.fetch_add` + [`circuit_seed`]), and
+    /// (`counter.fetch_add` + the SplitMix64 per-circuit seed), and
     /// [`sample_projected`] with a given seed yields byte-identical counts to a
     /// full `run_and_sample`. Shot conservation is preserved too (contract
     /// C-3): a zero-shot batch samples nothing and returns an empty map.
