@@ -16,16 +16,17 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has eleven crates:
+with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` crate is excluded):
 
 | Crate | Role | PyO3? |
 |---|---|---|
-| `polypus-circuit` | Circuit IR + OpenQASM 2.0 import/export + QIR export | No |
+| `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
+| `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
 | `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
 | `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
 | `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
@@ -43,8 +44,8 @@ boundary stays out-of-process and explicit; see
 ## 2. Workspace boundaries
 
 - `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
-  `polypus-observable`, `polypus-backend`, `polypus-subprocess-backend` and
-  `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
+  `polypus-observable`, `polypus-backend`, `polypus-backend-conformance`,
+  `polypus-subprocess-backend` and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
   not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python types into them.
   `polypus-backend` is the strictest of these: it is the public backend contract, so
   its **whole dependency tree must stay PyO3-free** (a third party implements a

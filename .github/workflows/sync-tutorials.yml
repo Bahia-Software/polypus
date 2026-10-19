@@ -11,6 +11,10 @@ on:
   release:
     types: [published]
 
+# The job only reads this repo; the mirror push authenticates with its own PAT.
+permissions:
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -19,13 +23,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: polypus
+          persist-credentials: false
 
       - name: Checkout polypus-tutorials (mirror)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The mirror is public, so it is cloned anonymously. The PAT is only
+        # handed to the final push step, after every notebook has executed, so
+        # it is never on disk while third-party notebook code runs.
         with:
           repository: Bahia-Software/polypus-tutorials
-          token: ${{ secrets.TUTORIALS_MIRROR_TOKEN }}
           path: mirror
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -34,8 +42,9 @@ jobs:
 
       - name: Resolve the released version
         id: version
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name }}
         run: |
-          RAW_TAG="${{ github.event.release.tag_name }}"
           echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
       # README.md, LICENSE and .gitignore are the mirror's own files, hand-placed
@@ -50,29 +59,49 @@ jobs:
             polypus/tutorials/ mirror/
 
       - name: Pin the just-released version in requirements.txt
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cat > mirror/requirements.txt <<EOF
-          polypus-quantum==${{ steps.version.outputs.version }}
+          polypus-quantum==${VERSION}
           jupyterlab
           matplotlib
           numpy
           EOF
 
+      # The mirror's requirements.txt stays loose for learners; CI executes the
+      # notebooks against exact versions of the notebook tooling.
       - name: Install the pinned release and execute every notebook
         run: |
           python -m pip install --upgrade pip
-          pip install -r mirror/requirements.txt nbclient nbformat
+          cat > "$RUNNER_TEMP/constraints.txt" <<EOF
+          jupyterlab==4.6.4
+          matplotlib==3.11.2
+          numpy==2.4.6
+          nbconvert==7.17.1
+          nbclient==0.11.0
+          nbformat==5.11.1
+          ipykernel==7.4.0
+          EOF
+          pip install -c "$RUNNER_TEMP/constraints.txt" -r mirror/requirements.txt nbconvert nbclient nbformat ipykernel
           find mirror -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
             echo "Executing $nb"
             jupyter nbconvert --to notebook --execute --inplace "$nb"
           done
 
       - name: Commit and push only if everything above succeeded
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          MIRROR_TOKEN: ${{ secrets.TUTORIALS_MIRROR_TOKEN }}
         run: |
           cd mirror
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && echo "Nothing changed, skipping commit" && exit 0
-          git commit -m "sync: tutorials as of polypus-quantum ${{ steps.version.outputs.version }}"
-          git push
+          git commit -m "sync: tutorials as of polypus-quantum ${VERSION}"
+          # Same auth header actions/checkout would persist, but only for this
+          # one command and never written to .git/config.
+          AUTH="$(printf 'x-access-token:%s' "$MIRROR_TOKEN" | base64 -w0)"
+          echo "::add-mask::$AUTH"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push

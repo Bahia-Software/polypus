@@ -13,8 +13,8 @@ name = "polypus_sim"
 
 [dependencies]
 polypus-circuit = { workspace = true }
-num-complex     = "0.4"
-rayon           = { version = "1", optional = true }
+num-complex     = { workspace = true }
+rayon           = { workspace = true, optional = true }
 # Logging *facade* only (no sink): orchestration-level diagnostics are emitted
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.
@@ -22,11 +22,11 @@ log             = { workspace = true }
 # On-disk persistence of the calibrated gate-parallel threshold (see
 # `calibration`). Deliberately pulled in *only* under the `parallel` feature —
 # there is nothing to calibrate without the rayon kernels — so the default build
-# gains no serde dependency. `serde_json` matches the "1.0" already used by
-# `polypus-logger`/`polypus`; `dirs`/`directories` is intentionally *not* added
+# gains no serde dependency. `serde`/`serde_json` come from the workspace table;
+# `dirs`/`directories` is intentionally *not* added
 # (the cache directory is resolved by hand from XDG_CACHE_HOME/HOME).
-serde           = { version = "1.0", features = ["derive"], optional = true }
-serde_json      = { version = "1.0", optional = true }
+serde           = { workspace = true, optional = true }
+serde_json      = { workspace = true, optional = true }
 # Advisory lock around the calibration cache's read-merge-write, so concurrent
 # calibrations (SLURM ranks on a shared $HOME) cannot lose each other's entries.
 # `fs4` wraps flock(2)/LockFileEx behind a safe API on Linux, macOS and Windows

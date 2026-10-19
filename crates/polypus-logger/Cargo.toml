@@ -18,7 +18,7 @@ log = { workspace = true, features = ["std"] }
 chrono = "0.4"
 # JSON output built via `serde_json::Map`, so message content is always escaped
 # correctly and every line is valid JSON.
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 [features]
 # Compile-time maximum log level. Enabling one statically strips the more

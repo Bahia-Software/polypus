@@ -42,6 +42,10 @@ Changes on `main` since 0.7.2.
   (`polypus.statevector`, or `run_quantum_circuit`/`train` with
   `backend="polypus"`). The cache, `POLYPUS_NO_AUTOCALIBRATE` and the
   SLURM/OpenMPI rank check are unchanged (#351).
+- **BREAKING:** Python 3.9 (end of life) is no longer supported;
+  `requires-python` is `>=3.10` and wheels are built for CPython 3.10–3.13.
+  Every wheel is installed and smoke-tested on its platform before it is
+  published (#360).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates
