@@ -1,6 +1,6 @@
 name: Docs
 
-# Build the rustdoc for the `polypus` crate and publish it to GitHub Pages.
+# Build the rustdoc for the workspace crates and publish it to GitHub Pages.
 # Docs are no longer committed under docs/ — they are generated here on every
 # push to main and deployed as a Pages artifact.
 on:
@@ -40,15 +40,15 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Only the `polypus` crate is documented (matches the old ALL_CRATES).
-      # -D warnings turns broken intra-doc links into build failures instead of
-      # silently shipping them.
+      # Every workspace crate (`fuzz/` is excluded from the workspace);
+      # --no-deps leaves out third-party crates. -D warnings turns broken
+      # intra-doc links into build failures instead of silently shipping them.
       - name: Build docs
-        run: cargo doc --no-deps -p polypus
+        run: cargo doc --locked --no-deps --workspace
         env:
           RUSTDOCFLAGS: "-D warnings"
-      # Redirect the Pages root to the crate index (same behavior as the old
-      # committed docs/index.html).
+      # Redirect the Pages root to the `polypus` crate; its sidebar lists the
+      # other workspace crates.
       - name: Write redirect index
         run: |
           cat > target/doc/index.html <<'EOF'

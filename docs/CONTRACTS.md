@@ -31,11 +31,9 @@ Rules of the road:
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
 
-⏳ contracts are specified but not yet mechanically enforced; treat them as
-review-enforced until the test lands. Each known break has a public issue
-labelled `audit-2026-07`.
-<!-- TODO(maintainers): create those issues and link them here; flip ⏳ to ✅
-     as each test merges. -->
+✅ means the listed test enforces the contract; a ⏳ contract would be
+specified but only review-enforced until its test lands (none today). Known
+breaks link their issue where one was filed.
 
 ---
 
@@ -435,9 +433,12 @@ Corollaries:
   `stdgates.inc` name, or a definition in its `HELPER_PROGRAM` whose matrix
   `crates/polypus-sim/tests/qasm3_semantics.rs` checks), the native simulator
   (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
-  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method);
-  the OpenQASM 3 importer too, if `stdgates.inc` names the gate. A PR adding it
-  in fewer places must be rejected.
+  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method,
+  and its stub in `python/polypus/__init__.pyi`); the OpenQASM 3 importer
+  (`qasm3_import.rs`) too, if `stdgates.inc` names the gate. This is on top of
+  the IR variant (`gate.rs`) and its builder method (`circuit.rs`), after which
+  the compiler flags the text drawer (`draw.rs`). A PR adding it in fewer
+  places must be rejected.
 - **Non-finite parameters are rejected uniformly.** A `NaN` or infinite angle
   is never a valid parameter value: circuit construction and parameter binding
   reject it (`CircuitError::NonFiniteParam`), the OpenQASM importers reject it
@@ -802,7 +803,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     per-QPU offset so distributed shots aren't identical copies. **This path
     is unverified** — the `cunqa` package isn't installed anywhere this can be
     tested, and reading CUNQA's actual source (CESGA-Quantum-Spain/cunqa) at
-    the version README.md pins (`>= 2.3`) turned up API mismatches predating
+    the version README.md then pinned (`>= 2.3`; now `>=2.4,<4`) turned up API mismatches predating
     this contract (wrong module path, wrong kwarg names, a `.run()` method
     that may not exist on `QPU` objects at that version) — see the CUNQA
     integration follow-up.
