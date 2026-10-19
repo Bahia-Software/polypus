@@ -47,7 +47,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 pip install polypus-quantum
 ```
 
-The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.9 and later.
+The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.10 to 3.13.
 
 | To use | Install |
 |---|---|
@@ -161,7 +161,7 @@ The [API reference](https://bahia-software.github.io/polypus/) is the rustdoc of
 
 ## Architecture
 
-Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Python; the others can be used from any Rust project.
+Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Python; the others can be used from any Rust project. Every crate is published on [crates.io](https://crates.io/crates/polypus) with each release; `polypus-backend`, `polypus-backend-conformance` and `polypus-subprocess-backend` from 0.8.0.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Bahia-Software/polypus/main/assets/architecture.svg" alt="Crate graph: polypus depends on polypus-evaluation, then polypus-orchestration, which uses polypus-infrastructure and polypus-optimizers; polypus-infrastructure uses polypus-backend, polypus-sim and polypus-observable; polypus-sim uses polypus-circuit" width="760">

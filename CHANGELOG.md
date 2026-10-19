@@ -28,6 +28,10 @@ Changes on `main` since 0.7.2.
   `Display` in Rust. No new dependencies.
 
 ### Changed
+- **BREAKING:** Python 3.9 (end of life) is no longer supported;
+  `requires-python` is `>=3.10` and wheels are built for CPython 3.10–3.13.
+  Every wheel is installed and smoke-tested on its platform before it is
+  published (#360).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates

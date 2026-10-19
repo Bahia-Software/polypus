@@ -1063,7 +1063,9 @@ other `stdgates.inc` gate follows the specification exactly. `CX` is read as
 `stdgates.inc` defines it as `ctrl @ U(π, 0, π)`, which under the
 specification's `U` is controlled-(iX). That Polypus reads Qiskit's
 `qasm3.dumps` output as Qiskit does is tested for Qiskit 2.5.2 with
-`qiskit-qasm3-import` 0.6.0, not guaranteed for other versions.
+`qiskit-qasm3-import` 0.6.0, not guaranteed for other versions. The runtime
+dependencies are bounded accordingly: `qiskit>=2.0,<3` and
+`qiskit-aer>=0.17,<0.18` in `pyproject.toml`.
 
 **Spellings.** On import `U` → `u`, `CX` → `cx`, `phase` → `p`, `cphase` →
 `cp`; on export `u` → `U`; no other name changes. A declared gate is never
