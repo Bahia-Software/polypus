@@ -36,7 +36,7 @@ fn program(statements: &str) -> String {
 
 /// The single angle `statement` (in [`program`]) imports to.
 fn angle(statement: &str) -> GateParam {
-    match import(&program(statement)).gates.as_slice() {
+    match import(&program(statement)).gates() {
         [G::Rx { theta, .. }] => *theta,
         other => panic!("{statement}: {other:?}"),
     }
@@ -63,7 +63,7 @@ fn export_limit(circuit: &ParameterizedCircuit) -> &'static str {
 fn the_version_statement_is_optional() {
     let body = "include \"stdgates.inc\";\nqubit[1] q;\nh q[0];\n";
     let expected = import(&format!("OPENQASM 3.0;\n{body}"));
-    assert_eq!(expected.gates, [G::H(0)]);
+    assert_eq!(expected.gates(), [G::H(0)]);
     assert_eq!(import(&format!("OPENQASM 3;\n{body}")), expected);
     assert_eq!(import(body), expected);
 }
@@ -74,9 +74,9 @@ fn registers_are_flattened_in_declaration_order() {
         "{HEADER}qubit[2] a;\nqubit b;\nqubit[3] d;\nbit[2] m;\nbit n;\n\
          x b;\nh d[1];\ncx a[1], d[2];\nm[1] = measure a[0];\nn = measure d[2];\n"
     ));
-    assert_eq!(qc.num_qubits, 6);
+    assert_eq!(qc.num_qubits(), 6);
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             G::X(2),
             G::H(4),
@@ -93,7 +93,7 @@ fn register_arguments_broadcast() {
         "{HEADER}qubit[2] a;\nqubit[2] b;\nh a;\ncx a, b;\ncx a[0], b;\n"
     ));
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             G::H(0),
             G::H(1),
@@ -111,10 +111,10 @@ fn inputs_are_the_parameters_in_declaration_order_under_their_names() {
         "{HEADER}input float[64] beta;\ninput float alpha;\ninput float[64] unused;\n\
          qubit[2] q;\nrx(alpha) q[0];\nry(beta) q[1];\n"
     ));
-    assert_eq!(qc.num_params, 3);
+    assert_eq!(qc.num_params(), 3);
     assert_eq!(qc.param_names(), ["beta", "alpha", "unused"]);
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             G::Rx {
                 qubit: 0,
@@ -135,7 +135,7 @@ fn inputs_are_the_parameters_in_declaration_order_under_their_names() {
         }
     );
     assert_eq!(
-        qc.assign_parameters(&[0.1, 0.2, 0.3]).unwrap().gates,
+        qc.assign_parameters(&[0.1, 0.2, 0.3]).unwrap().gates(),
         [
             G::Rx {
                 qubit: 0,
@@ -292,7 +292,11 @@ fn every_stdgates_gate_is_the_instruction_of_its_name() {
     ];
     assert_eq!(cases.len(), 33, "the 32 stdgates.inc gates and U");
     for (statement, expected) in cases {
-        assert_eq!(import(&program(statement)).gates, [expected], "{statement}");
+        assert_eq!(
+            import(&program(statement)).gates(),
+            [expected],
+            "{statement}"
+        );
     }
 }
 
@@ -301,7 +305,7 @@ fn a_declared_gate_stays_a_declared_gate_whatever_its_name() {
     let qc = import(&program(
         "gate rzz(t) a, b { cx a, b; rz(t) b; cx a, b; }\nrzz(0.5) q[1], q[0];",
     ));
-    match qc.gates.as_slice() {
+    match qc.gates() {
         [G::Custom(call)] => {
             assert_eq!(call.name(), "rzz");
             assert_eq!(call.params(), [Fixed(0.5)]);
@@ -319,8 +323,8 @@ fn a_declarations_text_keeps_its_source_with_line_endings_normalised() {
     let qc = import(&format!(
         "{HEADER}qubit[1] q;\r\ngate g a {{\r\r\n  x a;\r\n}}\r\ng q[0];\r\n"
     ));
-    let G::Custom(call) = &qc.gates[0] else {
-        panic!("{:?}", qc.gates)
+    let G::Custom(call) = &qc.gates()[0] else {
+        panic!("{:?}", qc.gates())
     };
     assert_eq!(call.definition().declaration(), "gate g a {\n  x a;\n}");
 }
@@ -328,18 +332,18 @@ fn a_declarations_text_keeps_its_source_with_line_endings_normalised() {
 #[test]
 fn measurements_are_assigned_to_bits() {
     assert_eq!(
-        import(&program("h q[0];\nc[1] = measure q[0];")).gates,
+        import(&program("h q[0];\nc[1] = measure q[0];")).gates(),
         [G::H(0), G::Measure { qubit: 0, cbit: 1 }]
     );
     for statement in ["c = measure q;", "measure q -> c;"] {
         assert_eq!(
-            import(&program(&format!("h q[0];\n{statement}"))).gates,
+            import(&program(&format!("h q[0];\n{statement}"))).gates(),
             [G::H(0), G::MeasureAll],
             "{statement}"
         );
     }
     assert_eq!(
-        import(&program("measure q[2] -> c[0];")).gates,
+        import(&program("measure q[2] -> c[0];")).gates(),
         [G::Measure { qubit: 2, cbit: 0 }]
     );
 }
@@ -405,7 +409,7 @@ fn declared_clbits_is_exported() {
 #[test]
 fn barriers() {
     assert_eq!(
-        import(&program("barrier;\nbarrier q;\nbarrier q[2], q[0];")).gates,
+        import(&program("barrier;\nbarrier q;\nbarrier q[2], q[0];")).gates(),
         [
             G::Barrier(vec![]),
             G::Barrier(vec![]),
@@ -421,7 +425,7 @@ fn comments_are_skipped_and_lines_still_counted() {
     assert_eq!(line, 7, "{message}");
     assert!(message.contains("unsupported gate 'foo'"), "{message}");
     let qc = import(&src.replace("foo q[0];\n", ""));
-    assert_eq!(qc.gates, [G::H(0), G::X(0)]);
+    assert_eq!(qc.gates(), [G::H(0), G::X(0)]);
 }
 
 // ─────────────────────────── Angle expressions ───────────────────────────
@@ -501,7 +505,7 @@ fn evaluation_follows_the_source() {
         "{HEADER}input float[64] a;\nqubit[1] q;\nrx(a + 0.2 + 0.3) q[0];\nry(a + (0.2 + 0.3)) q[0];\n"
     ));
     assert_eq!(
-        qc.assign_parameters(&[0.1]).unwrap().gates,
+        qc.assign_parameters(&[0.1]).unwrap().gates(),
         [
             G::Rx {
                 qubit: 0,
@@ -570,7 +574,7 @@ fn expressions_of_inputs_are_evaluated_when_bound() {
         "{HEADER}input float[64] a;\nqubit[1] q;\nrx(1.0/a) q[0];\nry(exp(a)) q[0];\n"
     ));
     assert!(matches!(
-        qc.gates[0],
+        qc.gates()[0],
         G::Rx {
             theta: GateParam::Expr(_),
             ..
@@ -585,7 +589,7 @@ fn expressions_of_inputs_are_evaluated_when_bound() {
         CircuitError::NonFiniteParam
     );
     assert_eq!(
-        qc.assign_parameters(&[2.0]).unwrap().gates,
+        qc.assign_parameters(&[2.0]).unwrap().gates(),
         [
             G::Rx {
                 qubit: 0,
@@ -609,8 +613,8 @@ fn a_gate_body_is_over_the_gates_parameters_and_checked_when_called() {
         "{message}"
     );
     let qc = import(&src.replace("g(0.0) q[1];\n", ""));
-    let G::Custom(call) = &qc.gates[0] else {
-        panic!("{:?}", qc.gates)
+    let G::Custom(call) = &qc.gates()[0] else {
+        panic!("{:?}", qc.gates())
     };
     assert_eq!(
         call.expand(&[]).unwrap(),
@@ -636,7 +640,7 @@ fn adversarial_expressions_survive_every_stage() {
     let src = format!("{HEADER}input float[64] a;\nqubit[1] q;\n{sum}\n{nested}\n");
     let qc = import(&src);
     assert!(matches!(
-        qc.gates[0],
+        qc.gates()[0],
         G::Rx {
             theta: GateParam::Expr(_),
             ..
@@ -650,10 +654,10 @@ fn adversarial_expressions_survive_every_stage() {
     // gate's formal `t` (a stdgates.inc gate), so the definitions differ.
     let expanded = |qc: &ParameterizedCircuit| -> Vec<G> {
         let bound = qc.assign_parameters(&[0.5]).unwrap();
-        let G::Custom(call) = &bound.gates[1] else {
-            panic!("{:?}", bound.gates[1])
+        let G::Custom(call) = &bound.gates()[1] else {
+            panic!("{:?}", bound.gates()[1])
         };
-        let mut gates = vec![bound.gates[0].clone()];
+        let mut gates = vec![bound.gates()[0].clone()];
         gates.extend(call.expand(&[]).unwrap());
         gates
     };
@@ -838,7 +842,7 @@ fn stdgates_gates_need_the_include() {
     );
     // `U` is a builtin, included or not.
     assert_eq!(
-        import("OPENQASM 3.0;\nqubit q;\nU(0.5, 0, 0) q;\n").gates,
+        import("OPENQASM 3.0;\nqubit q;\nU(0.5, 0, 0) q;\n").gates(),
         [G::UGate {
             qubit: 0,
             theta: Fixed(0.5),
@@ -872,7 +876,7 @@ fn the_source_size_is_bounded() {
 fn tokens_are_bounded() {
     let name = "a".repeat(MAX_TOKEN_BYTES);
     assert_eq!(
-        import(&format!("{HEADER}qubit[1] {name};\nh {name}[0];\n")).num_qubits,
+        import(&format!("{HEADER}qubit[1] {name};\nh {name}[0];\n")).num_qubits(),
         1
     );
     let (line, message) = rejected(&format!("{HEADER}qubit[1] {name}b;\n"));
@@ -889,7 +893,7 @@ fn inputs_are_bounded() {
     for i in 0..MAX_INPUTS {
         src.push_str(&format!("input float[64] a{i};\n"));
     }
-    assert_eq!(import(&src).num_params, MAX_INPUTS);
+    assert_eq!(import(&src).num_params(), MAX_INPUTS);
     src.push_str("input float[64] one_more;\n");
     let (line, message) = rejected(&src);
     assert_eq!(line, MAX_INPUTS + 3);
@@ -974,7 +978,7 @@ fn register_sizes_are_bounded() {
     let (_, message) = rejected(&format!("{HEADER}bit[{}] c;\n", MAX_REGISTER_BITS + 1));
     assert!(message.contains("total classical bit count"), "{message}");
     assert_eq!(
-        import(&format!("{HEADER}qubit[{MAX_REGISTER_BITS}] q;\n")).num_qubits,
+        import(&format!("{HEADER}qubit[{MAX_REGISTER_BITS}] q;\n")).num_qubits(),
         MAX_REGISTER_BITS
     );
 }
@@ -997,7 +1001,7 @@ fn instructions_after_broadcasting_are_bounded() {
 fn barrier_operands_are_bounded() {
     let src = |barriers: &str| format!("{HEADER}qubit[{MAX_REGISTER_BITS}] q;\n{barriers}");
     let at = src(&"barrier q;\n".repeat(4));
-    assert_eq!(import(&at).gates, vec![G::Barrier(vec![]); 4]);
+    assert_eq!(import(&at).gates(), vec![G::Barrier(vec![]); 4]);
     let (line, message) = rejected(&format!("{at}barrier q[0];\n"));
     assert_eq!(line, 8);
     assert!(
@@ -1007,7 +1011,7 @@ fn barrier_operands_are_bounded() {
     let (line, _) = rejected(&src(&"barrier q;\n".repeat(200)));
     assert_eq!(line, 8);
     // `barrier;` lists nothing.
-    assert_eq!(import(&src(&"barrier;\n".repeat(100))).gates.len(), 100);
+    assert_eq!(import(&src(&"barrier;\n".repeat(100))).gates().len(), 100);
 }
 
 /// Declarations whose expansion doubles at each level: `g<k>` visits
@@ -1077,7 +1081,7 @@ fn the_canonical_layout() {
                gate inner(t) a { rz(t/2) a; }\n\
                gate outer(t) a,b { inner(t) b; cx a,b; }\n\
                qreg q[3];\nouter(0.25) q[2],q[0];\n";
-    let G::Custom(call) = ParameterizedCircuit::from_qasm2(src).unwrap().gates[0].clone() else {
+    let G::Custom(call) = ParameterizedCircuit::from_qasm2(src).unwrap().gates()[0].clone() else {
         unreachable!()
     };
     let mut qc = ParameterizedCircuit::new(3).rzz(0, 1, Param(1)).h(2);
@@ -1164,7 +1168,7 @@ fn numbers_are_the_shortest_decimal_that_reads_back_and_keep_negative_zero() {
             out.ends_with(&format!("rz({text}) q[0];\n")),
             "{value}: {out}"
         );
-        match import(&out).gates.as_slice() {
+        match import(&out).gates() {
             [G::Rz {
                 theta: Fixed(read), ..
             }] => assert_eq!(read.to_bits(), value.to_bits(), "{text}"),
@@ -1454,7 +1458,7 @@ fn to_qasm2_panics_where_try_to_qasm2_fails() {
 fn the_export_stays_within_the_importers_budgets() {
     // Inputs.
     let at = ParameterizedCircuit::new(1).rx(0, Param(MAX_INPUTS - 1));
-    assert_eq!(import(&at.to_qasm3().unwrap()).num_params, MAX_INPUTS);
+    assert_eq!(import(&at.to_qasm3().unwrap()).num_params(), MAX_INPUTS);
     assert_eq!(
         export_limit(&ParameterizedCircuit::new(1).rx(0, Param(MAX_INPUTS))),
         "MAX_INPUTS"
@@ -1463,20 +1467,23 @@ fn the_export_stays_within_the_importers_budgets() {
     // Register size, of qubits and of bits.
     let at = ParameterizedCircuit::new(MAX_REGISTER_BITS).h(0);
     assert_eq!(
-        import(&at.to_qasm3().unwrap()).num_qubits,
+        import(&at.to_qasm3().unwrap()).num_qubits(),
         MAX_REGISTER_BITS
     );
     assert_eq!(
         export_limit(&ParameterizedCircuit::new(MAX_REGISTER_BITS + 1)),
         "MAX_REGISTER_BITS"
     );
-    // The builder refuses such a bit (issue #345); a circuit whose `gates` were
-    // assigned directly can still carry one, and the export refuses it too.
-    let mut wide = ParameterizedCircuit::new(1);
-    wide.gates = vec![G::Measure {
-        qubit: 0,
-        cbit: MAX_REGISTER_BITS,
-    }];
+    // The builder refuses such a bit (issue #345); an unchecked circuit can
+    // still carry one, and the export refuses it too.
+    let wide = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![G::Measure {
+            qubit: 0,
+            cbit: MAX_REGISTER_BITS,
+        }],
+    );
     assert_eq!(export_limit(&wide), "MAX_REGISTER_BITS");
 
     // Instructions as the importer pushes them: `c = measure q;` is one
@@ -1495,7 +1502,7 @@ fn the_export_stays_within_the_importers_budgets() {
         qc = qc.barrier();
     }
     assert_eq!(
-        import(&qc.to_qasm3().unwrap()).gates,
+        import(&qc.to_qasm3().unwrap()).gates(),
         vec![G::Barrier(vec![]); 4]
     );
     assert_eq!(export_limit(&qc.barrier()), "MAX_BARRIER_OPERANDS");

@@ -19,12 +19,12 @@ fn qft_three_qubits_matches_qiskit_convention() {
     let qc = qft(3).unwrap();
 
     // No free parameters, no measurements: directly exportable / composable.
-    assert_eq!(qc.num_qubits, 3);
-    assert_eq!(qc.num_params, 0);
+    assert_eq!(qc.num_qubits(), 3);
+    assert_eq!(qc.num_params(), 0);
     assert_eq!(qc.num_clbits(), 0);
 
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         vec![
             GateInstruction::H(2),
             cp(1, 2, 1.0), // π/2
@@ -43,7 +43,7 @@ fn qft_inverse_is_the_adjoint_of_the_forward() {
 
     // Reverse of the forward circuit, phases negated, swaps first.
     assert_eq!(
-        inv.gates,
+        inv.gates(),
         vec![
             GateInstruction::Swap(0, 2),
             GateInstruction::H(0),
@@ -60,24 +60,24 @@ fn qft_inverse_is_the_adjoint_of_the_forward() {
 fn qft_without_swaps_omits_the_swap_network() {
     let qc = qft_with_options(3, false, false).unwrap();
     assert!(!qc
-        .gates
+        .gates()
         .iter()
         .any(|g| matches!(g, GateInstruction::Swap(..))));
     // Same rotation block as the default, just without the trailing swap.
-    assert_eq!(qc.gates.len(), 6);
+    assert_eq!(qc.gates().len(), 6);
 }
 
 #[test]
 fn qft_single_qubit_is_a_lone_hadamard() {
     let qc = qft(1).unwrap();
-    assert_eq!(qc.gates, vec![GateInstruction::H(0)]);
+    assert_eq!(qc.gates(), vec![GateInstruction::H(0)]);
 }
 
 #[test]
 fn qft_zero_qubits_is_empty() {
     let qc = qft(0).unwrap();
-    assert_eq!(qc.num_qubits, 0);
-    assert!(qc.gates.is_empty());
+    assert_eq!(qc.num_qubits(), 0);
+    assert!(qc.gates().is_empty());
 }
 
 #[test]

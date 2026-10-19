@@ -4,15 +4,16 @@ use std::fmt;
 
 /// Errors that can occur when building a circuit, binding parameter values
 /// to a [`ParameterizedCircuit`](crate::ParameterizedCircuit), or importing
-/// OpenQASM 2.0.
+/// OpenQASM 2.0. `#[non_exhaustive]`: new failure modes are added as variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CircuitError {
     /// The number of values passed to `assign_parameters` does not match the
     /// number of free parameters declared by the circuit.
     WrongNumberOfParams { expected: usize, got: usize },
     /// A gate references `Param(index)` but `index` is outside the range of
-    /// the provided parameter values. This can only happen when the circuit
-    /// was assembled manually (the fluent builder keeps `num_params` in sync).
+    /// the provided parameter values, or a [`ConcreteCircuit`](crate::ConcreteCircuit)
+    /// is given a free `Param` (the fluent builder keeps `num_params` in sync).
     ParamIndexOutOfBounds { index: usize, num_params: usize },
     /// A gate parameter resolved to a non-finite value (`NaN` or infinity),
     /// which is not a valid rotation angle. Rejected both at construction (a

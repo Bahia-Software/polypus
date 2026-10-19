@@ -7,9 +7,10 @@
 //! index derived from the out-of-range qubit (`1 << q`) with no bounds check —
 //! an out-of-bounds write, i.e. undefined behaviour. (The sequential kernel
 //! indexes a `Vec`, which still bounds-check-panics in release — a crash, not
-//! UB, but still not a clean failure.) The way in is a hand-assembled or
-//! field-mutated [`ConcreteCircuit`] whose public `gates` field bypasses the
-//! builder's per-push `QubitOutOfRange` validation.
+//! UB, but still not a clean failure.) The way in was a hand-assembled
+//! [`ConcreteCircuit`]; its fields are now private and its constructors
+//! validate (#349), so these tests use the hidden `new_unchecked` to keep the
+//! simulator's own checks covered.
 //!
 //! The same holds for a unitary that names one qubit twice (`Cx(0, 0)`, #342):
 //! the two-qubit kernels compute `1 << (n - 2)` and assume distinct operands.
@@ -25,13 +26,10 @@ use polypus_sim::{SimError, Simulator, Statevector, StatevectorSimulator};
 
 #[test]
 fn simulator_rejects_out_of_range_single_qubit_gate() {
-    // A valid 2-qubit circuit, then an out-of-range gate appended straight onto
-    // the public `gates` vector (the builder would have rejected `h(5)`).
-    let mut circuit = ParameterizedCircuit::new(2)
-        .h(0)
-        .assign_parameters(&[])
-        .expect("a bound 2-qubit circuit");
-    circuit.gates.push(GateInstruction::H(5));
+    // A valid gate, then an out-of-range one, assembled without validation
+    // (the builder and `ConcreteCircuit::try_new` reject `h(5)`).
+    let circuit =
+        ConcreteCircuit::new_unchecked(2, vec![GateInstruction::H(0), GateInstruction::H(5)]);
 
     let err = StatevectorSimulator::new().run(&circuit).unwrap_err();
     assert_eq!(
@@ -46,7 +44,7 @@ fn simulator_rejects_out_of_range_single_qubit_gate() {
 #[test]
 fn simulator_rejects_out_of_range_control_qubit() {
     // Two-qubit gate with an out-of-range operand, on a field-built circuit.
-    let circuit = ConcreteCircuit::new(2, vec![GateInstruction::Cx(0, 9)]);
+    let circuit = ConcreteCircuit::new_unchecked(2, vec![GateInstruction::Cx(0, 9)]);
     let err = StatevectorSimulator::new().run(&circuit).unwrap_err();
     assert_eq!(
         err,
@@ -86,7 +84,7 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
 
     // A run of consecutive diagonal gates (the #131 fusion path) with an
     // out-of-range member in the middle of the run.
-    let diagonal_run = ConcreteCircuit::new(
+    let diagonal_run = ConcreteCircuit::new_unchecked(
         3,
         vec![
             GateInstruction::Z(0),
@@ -105,7 +103,7 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
     // A chain of dense gates sharing a qubit (the #132 connected-component path:
     // `H`·`X` on qubit 0 would compose into one 2×2) followed by an out-of-range
     // dense gate that would open its own component and reach `apply_1q`.
-    let dense_component = ConcreteCircuit::new(
+    let dense_component = ConcreteCircuit::new_unchecked(
         3,
         vec![
             GateInstruction::H(0),
@@ -146,7 +144,7 @@ fn simulator_rejects_a_repeated_operand_on_one_qubit() {
     // #342: `Cx(0, 0)` on a 1-qubit register made the controlled kernel compute
     // `1 << (n - 2)` with `n = 1` and, on the parallel path in a release build
     // without overflow-checks, write out of bounds (SIGSEGV).
-    let circuit = ConcreteCircuit::new(1, vec![GateInstruction::Cx(0, 0)]);
+    let circuit = ConcreteCircuit::new_unchecked(1, vec![GateInstruction::Cx(0, 0)]);
     for sim in every_configuration() {
         assert_eq!(
             sim.run(&circuit).unwrap_err(),
@@ -188,7 +186,7 @@ fn repeated_operand_gates() -> Vec<GateInstruction> {
 fn simulator_rejects_repeated_operands_on_every_multi_qubit_gate() {
     for gate in repeated_operand_gates() {
         // Preceded by valid gates so fusion has something to fold it into.
-        let circuit = ConcreteCircuit::new(
+        let circuit = ConcreteCircuit::new_unchecked(
             3,
             vec![GateInstruction::H(1), GateInstruction::Z(1), gate.clone()],
         );

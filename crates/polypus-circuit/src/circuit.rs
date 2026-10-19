@@ -44,13 +44,16 @@ use std::convert::Infallible;
 /// time instead, returning [`CircuitError`].
 #[derive(Debug, Clone)]
 pub struct ParameterizedCircuit {
+    // The fields are private so the invariants `try_push` establishes (qubits
+    // in range, distinct operands, terminal measurement, `num_params` covering
+    // every `Param`) hold for every circuit built outside this crate.
     /// Number of qubits in the (single) quantum register.
-    pub num_qubits: usize,
+    pub(crate) num_qubits: usize,
     /// Number of free parameters. Kept in sync automatically by the builder:
     /// adding a gate with `Param(i)` grows it to at least `i + 1`.
-    pub num_params: usize,
+    pub(crate) num_params: usize,
     /// The instruction sequence, in execution order.
-    pub gates: Vec<GateInstruction>,
+    pub(crate) gates: Vec<GateInstruction>,
     /// Push-time cache backing the C-4 check in [`try_push`](Self::try_push).
     /// Derived from `gates`, never part of the circuit's identity; assigning
     /// `gates` directly leaves it in its "not derived yet" state, from which the
@@ -133,6 +136,23 @@ impl ParameterizedCircuit {
             exprs: ExprArena::default(),
             param_names: Vec::new(),
             declared_clbits: None,
+        }
+    }
+
+    /// A circuit with these raw parts and **no validation**: qubit range,
+    /// distinct operands, terminal measurement and `num_params` are not
+    /// checked. For tests of the consumers' own defensive checks only; build
+    /// circuits with the builder or [`try_push`](Self::try_push).
+    #[doc(hidden)]
+    pub fn from_parts_unchecked(
+        num_qubits: usize,
+        num_params: usize,
+        gates: Vec<GateInstruction>,
+    ) -> Self {
+        ParameterizedCircuit {
+            num_params,
+            gates,
+            ..ParameterizedCircuit::new(num_qubits)
         }
     }
 
@@ -746,6 +766,22 @@ impl ParameterizedCircuit {
 
     // ── Introspection ────────────────────────────────────────────────────
 
+    /// Number of qubits in the (single) quantum register.
+    pub fn num_qubits(&self) -> usize {
+        self.num_qubits
+    }
+
+    /// Number of free parameters: one past the highest `Param(i)` any gate
+    /// uses (0 for a circuit without free parameters).
+    pub fn num_params(&self) -> usize {
+        self.num_params
+    }
+
+    /// The instruction sequence, in execution order.
+    pub fn gates(&self) -> &[GateInstruction] {
+        &self.gates
+    }
+
     /// Size of the implicit classical register: `num_qubits` if the circuit
     /// contains a `MeasureAll`, otherwise `max(cbit) + 1` over all `Measure`
     /// instructions (0 when nothing is measured).
@@ -792,8 +828,8 @@ impl ParameterizedCircuit {
     ///   The same two errors report an angle of a declared gate's body that
     ///   the values bound to the call make unusable.
     /// - [`CircuitError::UnknownExpression`] if a gate refers to an expression
-    ///   this circuit does not hold (only possible when `gates` was assembled
-    ///   by hand).
+    ///   this circuit does not hold (only possible for a circuit from the
+    ///   hidden `from_parts_unchecked`).
     pub fn assign_parameters(&self, params: &[f64]) -> Result<ConcreteCircuit, CircuitError> {
         if params.len() != self.num_params {
             return Err(CircuitError::WrongNumberOfParams {
@@ -950,10 +986,12 @@ impl ParameterizedCircuit {
 /// OpenQASM 2.0 export.
 #[derive(Debug, Clone)]
 pub struct ConcreteCircuit {
+    // Private, like `ParameterizedCircuit`'s: every constructor but
+    // `new_unchecked` validates the gates against `num_qubits`.
     /// Number of qubits in the (single) quantum register.
-    pub num_qubits: usize,
+    pub(crate) num_qubits: usize,
     /// The instruction sequence; every [`GateParam`] is `Fixed`.
-    pub gates: Vec<GateInstruction>,
+    pub(crate) gates: Vec<GateInstruction>,
     /// See [`ParameterizedCircuit::clbits_width`].
     declared_clbits: Option<usize>,
 }
@@ -971,12 +1009,92 @@ impl PartialEq for ConcreteCircuit {
 impl ConcreteCircuit {
     /// A circuit on `num_qubits` qubits running `gates`, whose classical
     /// register is implicit (sized by the measurements).
+    ///
+    /// # Panics
+    ///
+    /// Where [`try_new`](Self::try_new) returns an error.
     pub fn new(num_qubits: usize, gates: Vec<GateInstruction>) -> Self {
+        Self::try_new(num_qubits, gates).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible version of [`new`](Self::new): every gate is checked as
+    /// [`ParameterizedCircuit::try_push`] checks it, and every angle must be a
+    /// finite `Fixed` value.
+    ///
+    /// # Errors
+    ///
+    /// - [`CircuitError::QubitOutOfRange`] / [`CircuitError::IdenticalQubits`]
+    ///   for an operand outside the register or named twice by one gate;
+    /// - [`CircuitError::QubitAlreadyMeasured`] for a gate after a measurement
+    ///   of one of its qubits (contract C-4);
+    /// - [`CircuitError::ClbitOutOfRange`] for a measurement into a classical
+    ///   bit at or above the register bound;
+    /// - [`CircuitError::ParamIndexOutOfBounds`] for a free `Param`,
+    ///   [`CircuitError::UnknownExpression`] for an `Expr`, and
+    ///   [`CircuitError::NonFiniteParam`] for a `NaN` or infinite angle.
+    pub fn try_new(num_qubits: usize, gates: Vec<GateInstruction>) -> Result<Self, CircuitError> {
+        let mut checked = ParameterizedCircuit::new(num_qubits);
+        for gate in gates {
+            // A concrete circuit binds no parameters, so any `Param` is out of
+            // bounds; `try_push` would instead grow `num_params` for it.
+            if let Some(index) = gate.params().find_map(|p| match p {
+                GateParam::Param(i) => Some(*i),
+                _ => None,
+            }) {
+                return Err(CircuitError::ParamIndexOutOfBounds {
+                    index,
+                    num_params: 0,
+                });
+            }
+            checked.try_push(gate)?;
+        }
+        Ok(ConcreteCircuit {
+            num_qubits,
+            gates: checked.gates,
+            declared_clbits: None,
+        })
+    }
+
+    /// The same circuit (qubit count and declared classical width) running
+    /// `gates` instead, validated like [`try_new`](Self::try_new): how a
+    /// transpiler builds the circuit it returns.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`try_new`](Self::try_new).
+    pub fn try_with_gates(&self, gates: Vec<GateInstruction>) -> Result<Self, CircuitError> {
+        Ok(ConcreteCircuit {
+            declared_clbits: self.declared_clbits,
+            ..Self::try_new(self.num_qubits, gates)?
+        })
+    }
+
+    /// A circuit with **no validation** of `gates`. For tests of the
+    /// consumers' own defensive checks (the simulator re-validates every
+    /// circuit, so this cannot cause undefined behaviour there); use
+    /// [`try_new`](Self::try_new) otherwise.
+    #[doc(hidden)]
+    pub fn new_unchecked(num_qubits: usize, gates: Vec<GateInstruction>) -> Self {
         ConcreteCircuit {
             num_qubits,
             gates,
             declared_clbits: None,
         }
+    }
+
+    /// Number of qubits in the (single) quantum register.
+    pub fn num_qubits(&self) -> usize {
+        self.num_qubits
+    }
+
+    /// The instruction sequence; every angle is a finite `Fixed` value.
+    pub fn gates(&self) -> &[GateInstruction] {
+        &self.gates
+    }
+
+    /// The instruction sequence, by value.
+    pub fn into_gates(self) -> Vec<GateInstruction> {
+        self.gates
     }
 
     /// Size of the implicit classical register (see
@@ -1012,8 +1130,8 @@ impl ConcreteCircuit {
     /// [`GateParam::Expr`], or a [`GateParam::Fixed`] holding a non-finite
     /// value (`NaN` or infinity). The last cannot happen for circuits produced
     /// by [`ParameterizedCircuit::assign_parameters`] (which rejects
-    /// non-finite values at binding time); it is only possible when the
-    /// `gates` field was assembled manually.
+    /// non-finite values at binding time) or by [`try_new`](Self::try_new); it
+    /// is only possible for a circuit from the hidden `new_unchecked`.
     pub fn to_qasm2(&self) -> String {
         self.try_to_qasm2().expect(
             "ConcreteCircuit contains an unbound Param or Expr, a non-finite fixed angle, two different declared gates under one name, or a declared gate OpenQASM 2.0 cannot express; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params, or try_to_qasm2",
@@ -1029,8 +1147,8 @@ impl ConcreteCircuit {
     /// from OpenQASM 3 whose body uses `arcsin`, `arccos` or `arctan`, which
     /// OpenQASM 2.0 lacks; [`CircuitError::ConflictingGateDefinitions`] if the
     /// circuit calls two different gates declared in OpenQASM 2.0 under one
-    /// name; and, for a hand-assembled `gates` field only, the errors of an
-    /// unbound or non-finite angle.
+    /// name; and, for a circuit from the hidden `new_unchecked` only, the
+    /// errors of an unbound or non-finite angle.
     pub fn try_to_qasm2(&self) -> Result<String, CircuitError> {
         qasm::write_qasm2(
             self.num_qubits,
@@ -1055,7 +1173,7 @@ impl ConcreteCircuit {
     /// holding a non-finite value), or if the sequence violates the terminal-measurement model (a
     /// gate acting on an already-measured qubit; contract C-4). None can happen
     /// for circuits produced by [`ParameterizedCircuit::assign_parameters`];
-    /// all are only possible when the `gates` field was assembled manually. For
+    /// all are only possible for a circuit from the hidden `new_unchecked`. For
     /// a fallible export, use
     /// [`ParameterizedCircuit::to_qir_with_params`](crate::ParameterizedCircuit::to_qir_with_params).
     pub fn to_qir(&self) -> String {
@@ -1112,7 +1230,7 @@ fn clbits_width(declared: Option<usize>, implicit: usize) -> usize {
 }
 
 /// Shared classical-register sizing logic. Saturates rather than overflows on a
-/// `cbit` of `usize::MAX`, which only direct `gates` assignment can carry.
+/// `cbit` of `usize::MAX`, which only an unchecked circuit can carry.
 pub(crate) fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
     let mut n = 0;
     for gate in gates {

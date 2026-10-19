@@ -3,7 +3,9 @@
 use std::fmt;
 
 /// Errors that can occur while preparing or running a simulation.
+/// `#[non_exhaustive]`: new failure modes are added as variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SimError {
     /// The circuit needs more qubits than the backend will allocate
     /// (see [`MAX_QUBITS`](crate::MAX_QUBITS)). A statevector requires `2^n`
@@ -42,8 +44,9 @@ pub enum SimError {
     },
     /// A gate references a qubit index outside the circuit's register
     /// (`qubit >= num_qubits`). The fluent builder rejects this at construction,
-    /// but a hand-assembled or field-mutated
-    /// [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit) can carry one. The
+    /// as does [`ConcreteCircuit::try_new`](polypus_circuit::ConcreteCircuit::try_new),
+    /// but a gate passed to [`Statevector::apply`](crate::Statevector::apply) can
+    /// carry one. The
     /// simulator rejects it *before any kernel runs*: an out-of-range qubit index
     /// yields an out-of-bounds amplitude index (`1 << qubit`), which the kernels
     /// would otherwise only catch with a panic.
@@ -71,6 +74,15 @@ pub enum SimError {
     RepeatedQubit {
         /// The qubit named more than once.
         qubit: usize,
+    },
+    /// The instruction is newer than this simulator: [`GateInstruction`] is
+    /// `#[non_exhaustive]`, so a gate added to `polypus-circuit` reaches here
+    /// until the simulator implements it.
+    ///
+    /// [`GateInstruction`]: polypus_circuit::GateInstruction
+    UnsupportedInstruction {
+        /// The instruction's `Debug` rendering.
+        instruction: String,
     },
     /// The caller asked for the simulation to stop before it finished, through
     /// the cancellation hook passed to
@@ -113,6 +125,10 @@ impl fmt::Display for SimError {
             SimError::RepeatedQubit { qubit } => write!(
                 f,
                 "gate names qubit {qubit} more than once; a gate's qubit operands must be distinct"
+            ),
+            SimError::UnsupportedInstruction { instruction } => write!(
+                f,
+                "the statevector simulator does not support the instruction {instruction}"
             ),
             SimError::Cancelled => {
                 write!(f, "the simulation was cancelled before it completed")

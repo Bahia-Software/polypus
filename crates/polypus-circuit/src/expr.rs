@@ -617,10 +617,10 @@ impl FormalExpr {
 /// let mut qc = ParameterizedCircuit::new(1);
 /// let two_beta = qc.add_expr(2.0 * ParamExpr::param(0)).unwrap();
 /// let qc = qc.rx(0, two_beta);
-/// assert_eq!(qc.num_params, 1);
+/// assert_eq!(qc.num_params(), 1);
 ///
 /// let bound = qc.assign_parameters(&[0.25]).unwrap();
-/// assert_eq!(bound.gates, [polypus_circuit::GateInstruction::Rx { qubit: 0, theta: 0.5.into() }]);
+/// assert_eq!(bound.gates(), [polypus_circuit::GateInstruction::Rx { qubit: 0, theta: 0.5.into() }]);
 /// ```
 ///
 /// Operations are kept exactly as built: `(a + b) + c` and `a + (b + c)` are

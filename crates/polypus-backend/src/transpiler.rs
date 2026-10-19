@@ -199,17 +199,19 @@ mod tests {
                 circuit: &ConcreteCircuit,
                 _opts: &TranspileOptions,
             ) -> ConcreteCircuit {
-                let mut out = circuit.clone();
-                out.gates.push(GateInstruction::Barrier(Vec::new()));
-                out
+                let mut gates = circuit.gates().to_vec();
+                gates.push(GateInstruction::Barrier(Vec::new()));
+                circuit
+                    .try_with_gates(gates)
+                    .expect("a trailing barrier keeps the circuit valid")
             }
         }
 
         let circuit = sample_circuit();
         let out = AppendBarrier.transpile(&circuit, &TranspileOptions::default());
-        assert_eq!(out.gates.len(), circuit.gates.len() + 1);
+        assert_eq!(out.gates().len(), circuit.gates().len() + 1);
         assert!(matches!(
-            out.gates.last(),
+            out.gates().last(),
             Some(GateInstruction::Barrier(_))
         ));
     }

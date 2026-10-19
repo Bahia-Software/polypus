@@ -354,7 +354,7 @@ pub fn sample_projected(
     // program order: `MeasureAll` is expanded where it appears, so it orders
     // correctly against explicit `Measure`s that touch the same bit.
     let mut measured: Vec<(usize, usize)> = Vec::new();
-    for gate in &circuit.gates {
+    for gate in circuit.gates() {
         match gate {
             GateInstruction::Measure { qubit, cbit } => measured.push((*qubit, *cbit)),
             GateInstruction::MeasureAll => measured.extend((0..sv.num_qubits()).map(|q| (q, q))),
@@ -387,7 +387,7 @@ pub fn sample_projected(
 /// hold. `MeasureAll` writes bit `q` for every qubit `q`, which the qubit
 /// ceiling keeps far below [`MAX_CLBITS`](crate::MAX_CLBITS).
 fn check_clbits(circuit: &ConcreteCircuit) -> Result<(), SimError> {
-    let offending = circuit.gates.iter().find_map(|gate| match gate {
+    let offending = circuit.gates().iter().find_map(|gate| match gate {
         GateInstruction::Measure { cbit, .. } if *cbit >= crate::MAX_CLBITS => Some(*cbit),
         _ => None,
     });
@@ -413,35 +413,35 @@ impl Simulator for StatevectorSimulator {
         circuit: &ConcreteCircuit,
         should_cancel: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<Statevector, SimError> {
-        if circuit.num_qubits > self.max_qubits {
+        if circuit.num_qubits() > self.max_qubits {
             return Err(SimError::TooManyQubits {
-                requested: circuit.num_qubits,
+                requested: circuit.num_qubits(),
                 max: self.max_qubits,
             });
         }
         // Reject any out-of-range qubit reference before allocating the `2^n`
-        // statevector (a hand-assembled / field-mutated circuit can carry one;
-        // the builder cannot). `apply` re-checks per gate, but doing it here
+        // statevector (only an unchecked circuit can carry one; the builder
+        // and `ConcreteCircuit::try_new` cannot). `apply` re-checks per gate, but doing it here
         // fails fast — and, near the qubit ceiling, avoids a multi-GiB
         // allocation for a circuit that can never run.
         if let Some(qubit) =
-            polypus_circuit::qubit_index_violation(&circuit.gates, circuit.num_qubits)
+            polypus_circuit::qubit_index_violation(circuit.gates(), circuit.num_qubits())
         {
             return Err(SimError::QubitIndexOutOfRange {
                 qubit,
-                num_qubits: circuit.num_qubits,
+                num_qubits: circuit.num_qubits(),
             });
         }
         // Likewise a repeated operand (`Cx(0, 0)`): the two-qubit kernels
         // assume distinct operands and index out of bounds otherwise.
-        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(&circuit.gates) {
+        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(circuit.gates()) {
             return Err(SimError::RepeatedQubit { qubit });
         }
         // Contract C-4: reject a gate acting on an already-measured qubit
         // (defense in depth for hand-assembled circuits). `apply` treats
         // measurements as no-ops, so without this the violation would be
         // silently simulated as if the measurement were terminal.
-        if let Some(qubit) = polypus_circuit::terminal_measurement_violation(&circuit.gates) {
+        if let Some(qubit) = polypus_circuit::terminal_measurement_violation(circuit.gates()) {
             return Err(SimError::GateAfterMeasure { qubit });
         }
         // Orchestration-level diagnostic, emitted once per run *outside* the
@@ -451,23 +451,23 @@ impl Simulator for StatevectorSimulator {
         // `log::debug!` gates itself on the level, so no manual guard is needed.
         log::debug!(
             "simulating {}-qubit circuit ({} gate(s)) on the {} kernel path",
-            circuit.num_qubits,
-            circuit.gates.len(),
-            if cfg!(feature = "parallel") && circuit.num_qubits >= self.parallel_threshold {
+            circuit.num_qubits(),
+            circuit.gates().len(),
+            if cfg!(feature = "parallel") && circuit.num_qubits() >= self.parallel_threshold {
                 "parallel"
             } else {
                 "sequential"
             }
         );
-        let mut sv = Statevector::new(circuit.num_qubits)?;
+        let mut sv = Statevector::new(circuit.num_qubits())?;
         sv.set_parallel_threshold(self.parallel_threshold);
         // `Statevector::new`'s `2^n` allocation above is deliberately *not* a
         // cancellation point: near the qubit ceiling it dominates the run, but
         // it is one `vec![]` with nothing to interleave a check into. What the
         // hook covers is the gate sequence — whose cost (gates x `2^n`) is
         // unbounded, where the allocation's is capped by `max_qubits`.
-        let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits);
-        let gates = &circuit.gates;
+        let mut cancellation = CancellationCheck::new(should_cancel, circuit.num_qubits());
+        let gates = &circuit.gates();
         let total = gates.len();
 
         if !self.fusion {
@@ -1033,7 +1033,7 @@ mod tests {
             theta: Fixed(f64::NAN),
         });
         assert!(gates.len() > MAX_FUSED_DIAGONAL_RUN);
-        let circuit = ConcreteCircuit::new(CANCEL_N, gates);
+        let circuit = ConcreteCircuit::new_unchecked(CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {
@@ -1265,7 +1265,7 @@ mod tests {
             qubit: real,
             theta: Fixed(f64::NAN),
         });
-        let circuit = ConcreteCircuit::new(DENSE_CANCEL_N, gates);
+        let circuit = ConcreteCircuit::new_unchecked(DENSE_CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {
@@ -1357,7 +1357,7 @@ mod tests {
             qubit: 0,
             theta: Fixed(f64::NAN),
         });
-        let circuit = ConcreteCircuit::new(CANCEL_N, gates);
+        let circuit = ConcreteCircuit::new_unchecked(CANCEL_N, gates);
 
         let mut calls = 0usize;
         let err = {

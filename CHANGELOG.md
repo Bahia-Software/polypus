@@ -28,6 +28,15 @@ Changes on `main` since 0.7.2.
   `Display` in Rust. No new dependencies.
 
 ### Changed
+- **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
+  private; read them with `num_qubits()`, `num_params()`, `gates()` and
+  `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates
+  like the builder and panics on invalid ones; `try_new` and `try_with_gates`
+  (for transpilers) return the error instead (#349).
+- **BREAKING (Rust):** `GateInstruction`, `CircuitError`, `BackendError` and
+  `SimError` are `#[non_exhaustive]`; a `match` on them needs a wildcard arm.
+  The simulator reports an instruction it does not know as
+  `SimError::UnsupportedInstruction` (#349).
 - **BREAKING:** the declared classical width is kept through circuit binding
   and export (`fix(circuit)!`).
 - **BREAKING:** migrated to the `rand` 0.10 API (`fix(deps)!`); seeded streams

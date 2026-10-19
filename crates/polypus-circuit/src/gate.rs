@@ -104,7 +104,11 @@ impl GateParam {
 /// Gate names follow the standard `qelib1.inc` vocabulary of OpenQASM 2.0
 /// (`h`, `cx`, `rz`, `rzz`, `u3`, …), so every variant maps one-to-one onto a
 /// QASM statement.
+///
+/// `#[non_exhaustive]`: adding a gate is not a breaking change, so a backend
+/// matching on it needs a wildcard arm that reports the gate as unsupported.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum GateInstruction {
     /// Hadamard gate.
     H(usize),
@@ -948,9 +952,10 @@ pub fn terminal_measurement_violation(gates: &[GateInstruction]) -> Option<usize
 /// and [`Barrier`] operands. ([`MeasureAll`] spans `0..num_qubits` by definition
 /// and is always in range; classical-bit indices are a separate concern.) The
 /// fluent builder already rejects an out-of-range qubit at push time
-/// ([`CircuitError::QubitOutOfRange`](crate::CircuitError::QubitOutOfRange)), but
-/// a [`ConcreteCircuit`](crate::ConcreteCircuit) can be assembled or mutated
-/// through its public `gates` field, bypassing that. This is the shared
+/// ([`CircuitError::QubitOutOfRange`](crate::CircuitError::QubitOutOfRange)), as
+/// does [`ConcreteCircuit::try_new`](crate::ConcreteCircuit::try_new), but a lone
+/// gate handed to a simulator, or a circuit from the hidden
+/// `ConcreteCircuit::new_unchecked`, bypasses that. This is the shared
 /// reference — the sibling of [`terminal_measurement_violation`] — that the
 /// builder-free consumers (notably the native simulator) use to reject such a
 /// circuit *before it reaches a kernel*, where an out-of-range index maps to an
@@ -988,7 +993,8 @@ pub fn qubit_index_violation(gates: &[GateInstruction], num_qubits: usize) -> Op
 ///
 /// The builder rejects such a gate at push time
 /// ([`CircuitError::IdenticalQubits`](crate::CircuitError::IdenticalQubits)), but a
-/// hand-assembled [`ConcreteCircuit`](crate::ConcreteCircuit) bypasses that.
+/// lone gate handed to a simulator, or a circuit from the hidden
+/// `ConcreteCircuit::new_unchecked`, bypasses that.
 /// The multi-qubit kernels assume distinct operands, so the builder-free
 /// consumers (notably the native simulator) use this — alongside
 /// [`qubit_index_violation`] — to reject such a circuit before any kernel runs.
@@ -997,6 +1003,69 @@ pub fn repeated_qubit_violation(gates: &[GateInstruction]) -> Option<usize> {
     gates
         .iter()
         .find_map(|gate| first_repeated_qubit(gate.acts_on().qubits()))
+}
+
+impl GateInstruction {
+    /// Number of instruction kinds (variants) in [`GateInstruction`].
+    #[doc(hidden)]
+    pub const KINDS: usize = 46;
+
+    /// This instruction's kind, numbered `0..KINDS`. The match is exhaustive
+    /// (`#[non_exhaustive]` does not apply inside this crate), so adding a
+    /// variant fails to build here until it is numbered; the vocabulary tests
+    /// of this crate and of `polypus-sim` then fail until they cover it.
+    #[doc(hidden)]
+    pub fn kind_index(&self) -> usize {
+        use GateInstruction as G;
+        match self {
+            G::H(_) => 0,
+            G::X(_) => 1,
+            G::Y(_) => 2,
+            G::Z(_) => 3,
+            G::S(_) => 4,
+            G::T(_) => 5,
+            G::Sdg(_) => 6,
+            G::Tdg(_) => 7,
+            G::Id(_) => 8,
+            G::Rx { .. } => 9,
+            G::Ry { .. } => 10,
+            G::Rz { .. } => 11,
+            G::Cx(..) => 12,
+            G::Cz(..) => 13,
+            G::Swap(..) => 14,
+            G::Rzz { .. } => 15,
+            G::Rxx { .. } => 16,
+            G::Cp { .. } => 17,
+            G::U { .. } => 18,
+            G::Sx(_) => 19,
+            G::Sxdg(_) => 20,
+            G::Cy(..) => 21,
+            G::Ch(..) => 22,
+            G::Csx(..) => 23,
+            G::Ccx(..) => 24,
+            G::Cswap(..) => 25,
+            G::Crx { .. } => 26,
+            G::Cry { .. } => 27,
+            G::Crz { .. } => 28,
+            G::Cu1 { .. } => 29,
+            G::Cu3 { .. } => 30,
+            G::Cu { .. } => 31,
+            G::Barrier(_) => 32,
+            G::Measure { .. } => 33,
+            G::MeasureAll => 34,
+            G::Custom(_) => 35,
+            G::U0 { .. } => 36,
+            G::Rccx(..) => 37,
+            G::Rc3x(..) => 38,
+            G::C3x(..) => 39,
+            G::C3sqrtx(..) => 40,
+            G::C4x(..) => 41,
+            G::P { .. } => 42,
+            G::U1 { .. } => 43,
+            G::U2 { .. } => 44,
+            G::UGate { .. } => 45,
+        }
+    }
 }
 
 #[cfg(test)]

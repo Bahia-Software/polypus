@@ -30,7 +30,7 @@ fn bind(expr: ParamExpr, params: &[f64]) -> Result<f64, CircuitError> {
     let mut qc = ParameterizedCircuit::new(1);
     let angle = qc.add_expr(expr)?;
     let bound = qc.rz(0, angle).assign_parameters(params)?;
-    match theta(&bound.gates[0]) {
+    match theta(&bound.gates()[0]) {
         GateParam::Fixed(v) => Ok(v),
         other => panic!("binding left {other:?}"),
     }
@@ -57,7 +57,7 @@ fn add_expr_returns_the_canonical_angle() {
     );
     assert!(matches!(qc.add_expr(2.0 * x(0)), Ok(GateParam::Expr(_))));
     // Storing an expression does not declare its parameters by itself...
-    assert_eq!(qc.num_params, 0);
+    assert_eq!(qc.num_params(), 0);
 }
 
 /// ... pushing a gate that uses it does, exactly as `Param(i)` does.
@@ -65,9 +65,9 @@ fn add_expr_returns_the_canonical_angle() {
 fn expressions_count_their_parameters_when_pushed() {
     let mut qc = ParameterizedCircuit::new(2);
     let angle = qc.add_expr(x(1) * x(4)).unwrap();
-    assert_eq!(qc.num_params, 0);
+    assert_eq!(qc.num_params(), 0);
     let qc = qc.rzz(0, 1, angle);
-    assert_eq!(qc.num_params, 5);
+    assert_eq!(qc.num_params(), 5);
     // Parameters 0, 2 and 3 are unused but still counted: binding takes five.
     assert!(qc.assign_parameters(&[0.0; 5]).is_ok());
     assert_eq!(
@@ -194,15 +194,18 @@ fn expressions_belong_to_their_circuit() {
         theta: two_x,
     };
     assert_eq!(b.try_push(rx.clone()), Err(CircuitError::UnknownExpression));
-    assert!(b.gates.is_empty(), "a rejected gate is not pushed");
+    // A concrete circuit holds no expressions at all (#349).
+    assert_eq!(
+        ConcreteCircuit::try_new(1, vec![rx.clone()]),
+        Err(CircuitError::UnknownExpression)
+    );
+    assert!(b.gates().is_empty(), "a rejected gate is not pushed");
     assert_eq!(
         ParameterizedCircuit::new(1).try_push(rx.clone()),
         Err(CircuitError::UnknownExpression)
     );
 
-    let mut hand = ParameterizedCircuit::new(1);
-    hand.gates = vec![rx.clone()];
-    hand.num_params = 1;
+    let hand = ParameterizedCircuit::from_parts_unchecked(1, 1, vec![rx.clone()]);
     assert_eq!(
         hand.assign_parameters(&[0.5]).err(),
         Some(CircuitError::UnknownExpression)
@@ -221,7 +224,7 @@ fn expressions_belong_to_their_circuit() {
     same.add_expr(2.0 * x(0)).unwrap();
     same.try_push(rx.clone()).unwrap();
     assert_eq!(
-        same.assign_parameters(&[0.5]).unwrap().gates,
+        same.assign_parameters(&[0.5]).unwrap().gates(),
         [GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Fixed(1.0)
@@ -232,7 +235,7 @@ fn expressions_belong_to_their_circuit() {
     a.try_push(rx.clone()).unwrap();
     let mut copy = a.clone();
     copy.try_push(rx).unwrap();
-    assert_eq!(copy.assign_parameters(&[0.25]).unwrap().gates.len(), 2);
+    assert_eq!(copy.assign_parameters(&[0.25]).unwrap().gates().len(), 2);
 }
 
 /// A bound circuit holds no expressions, so exporting one that still refers
@@ -241,7 +244,7 @@ fn expressions_belong_to_their_circuit() {
 fn concrete_circuits_hold_no_expressions() {
     let mut pc = ParameterizedCircuit::new(1);
     let angle = pc.add_expr(x(0) * x(0)).unwrap();
-    let hand = ConcreteCircuit::new(
+    let hand = ConcreteCircuit::new_unchecked(
         1,
         vec![GateInstruction::Ry {
             qubit: 0,
@@ -283,7 +286,7 @@ fn bound_exports_evaluate_expressions() {
         .cu3(2, 1, 0.4 - FRAC_PI_2, -1.1, 0.3)
         .u2(1, 1.1, 0.8)
         .measure_all();
-    assert_eq!(bound.gates, fixed.gates);
+    assert_eq!(bound.gates(), fixed.gates());
 
     let qasm = qc.to_qasm2_with_params(&values).unwrap();
     assert_eq!(qasm, fixed.to_qasm2_with_params(&[]).unwrap());
@@ -323,7 +326,7 @@ fn equality_compares_expressions_by_content() {
     let plain = build(false, 2.0);
     let shifted = build(true, 2.0);
     // Different ids, same expression.
-    assert_ne!(theta(&plain.gates[0]), theta(&shifted.gates[0]));
+    assert_ne!(theta(&plain.gates()[0]), theta(&shifted.gates()[0]));
     assert_eq!(plain, shifted);
     assert_eq!(plain, plain.clone());
     assert_ne!(plain, build(false, 3.0));
@@ -360,7 +363,7 @@ fn long_expressions_are_handled_without_recursion() {
             assert_eq!(copy, qc);
             drop(qc);
             let bound = copy.assign_parameters(&[0.5]).unwrap();
-            assert_eq!(theta(&bound.gates[0]), GateParam::Fixed(499_999.5));
+            assert_eq!(theta(&bound.gates()[0]), GateParam::Fixed(499_999.5));
             // A few nodes over the limit.
             let mut qc = ParameterizedCircuit::new(1);
             assert!(matches!(

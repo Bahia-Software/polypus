@@ -54,7 +54,7 @@ ecr q[0],q[1];\n\
 measure q -> c;\n"
     );
     let imported = parse(&src);
-    assert_eq!(imported.gates.len(), 5); // h, three calls, measure_all
+    assert_eq!(imported.gates().len(), 5); // h, three calls, measure_all
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), src);
 }
 
@@ -66,8 +66,8 @@ fn a_call_is_one_instruction_with_source_order_operands() {
         "{HEADER}gate g(a,b) x,y,z {{ rz(a) x; ry(b) z; ccx x,y,z; }}\nqreg q[4];\ng(0.5,-0.25) q[3],q[0],q[2];\n"
     );
     let imported = parse(&src);
-    assert_eq!(imported.gates.len(), 1);
-    let call = call(&imported.gates[0]);
+    assert_eq!(imported.gates().len(), 1);
+    let call = call(&imported.gates()[0]);
     assert_eq!(call.name(), "g");
     assert_eq!(
         call.params(),
@@ -92,7 +92,7 @@ gate outer(t) a,b {{ inner(t) b; cx a,b; inner(-t) b; }}\n\
 qreg q[2];\nouter(1.0) q[0],q[1];\n"
     );
     let imported = parse(&src);
-    assert_eq!(imported.gates.len(), 1);
+    assert_eq!(imported.gates().len(), 1);
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), src);
 }
 
@@ -129,7 +129,7 @@ fn declaration_text_is_verbatim_with_crlf_normalised() {
         "{out}"
     );
     // … and the re-emitted text imports to the same circuit.
-    assert_eq!(parse(&out).gates, imported.gates);
+    assert_eq!(parse(&out).gates(), imported.gates());
 }
 
 /// Carriage returns before a line break inside a declaration, however many,
@@ -161,7 +161,7 @@ gate outer(t,u) a,b {{ inner(t) b; cx a,b; ry(u*t) a; barrier a,b; id b; }}\n\
 qreg q[3];\nouter(pi,2) q[2],q[0];\n"
     );
     let imported = parse(&src);
-    let expanded = call(&imported.gates[0]).expand(&[]).unwrap();
+    let expanded = call(&imported.gates()[0]).expand(&[]).unwrap();
     assert_eq!(
         expanded,
         [
@@ -189,7 +189,7 @@ fn bodies_use_the_builtin_vocabulary() {
 gate nop a {{ }}\nqreg q[2];\ng q[0],q[1];\nnop q[1];\n"
     );
     let imported = parse(&src);
-    let expanded = call(&imported.gates[0]).expand(&[]).unwrap();
+    let expanded = call(&imported.gates()[0]).expand(&[]).unwrap();
     assert_eq!(
         expanded,
         [
@@ -209,7 +209,7 @@ gate nop a {{ }}\nqreg q[2];\ng q[0],q[1];\nnop q[1];\n"
             GateInstruction::Sx(1),
         ]
     );
-    assert!(call(&imported.gates[1]).expand(&[]).unwrap().is_empty());
+    assert!(call(&imported.gates()[1]).expand(&[]).unwrap().is_empty());
 }
 
 /// Calls broadcast over registers like any gate (OpenQASM 2.0 §3.1).
@@ -219,7 +219,7 @@ fn calls_broadcast_over_registers() {
         format!("{HEADER}gate g a,b {{ cx a,b; }}\nqreg a[2];\nqreg b[2];\ng a,b;\ng a[1],b;\n");
     let imported = parse(&src);
     let operands: Vec<Vec<usize>> = imported
-        .gates
+        .gates()
         .iter()
         .map(|g| call(g).qubits().to_vec())
         .collect();
@@ -446,8 +446,11 @@ fn qir_lowers_a_call_as_its_expansion() {
         "{HEADER}gate g(t) a,b {{ h a; cx a,b; rz(t) b; }}\nqreg q[2];\ng(0.5) q[1],q[0];\n"
     );
     let imported = parse(&src);
-    let mut expanded = ParameterizedCircuit::new(2);
-    expanded.gates = call(&imported.gates[0]).expand(&[]).unwrap();
+    let expanded = call(&imported.gates()[0])
+        .expand(&[])
+        .unwrap()
+        .into_iter()
+        .fold(ParameterizedCircuit::new(2), ParameterizedCircuit::push);
     assert_eq!(
         imported.to_qir_with_params(&[]).unwrap(),
         expanded.to_qir_with_params(&[]).unwrap()
@@ -467,8 +470,8 @@ fn conflicting_declarations_are_rejected_at_export() {
         "{HEADER}gate g a {{ y a; }}\nqreg q[1];\ng q[0];\n"
     ));
     let mut combined = ParameterizedCircuit::new(1);
-    combined.try_push(a.gates[0].clone()).unwrap();
-    combined.try_push(b.gates[0].clone()).unwrap();
+    combined.try_push(a.gates()[0].clone()).unwrap();
+    combined.try_push(b.gates()[0].clone()).unwrap();
     assert_eq!(
         combined.to_qasm2_with_params(&[]),
         Err(CircuitError::ConflictingGateDefinitions {
@@ -480,8 +483,8 @@ fn conflicting_declarations_are_rejected_at_export() {
         "{HEADER}gate g a {{ x a; }}\nqreg q[1];\ng q[0];\n"
     ));
     let mut combined = ParameterizedCircuit::new(1);
-    combined.try_push(a.gates[0].clone()).unwrap();
-    combined.try_push(same.gates[0].clone()).unwrap();
+    combined.try_push(a.gates()[0].clone()).unwrap();
+    combined.try_push(same.gates()[0].clone()).unwrap();
     let out = combined.to_qasm2_with_params(&[]).unwrap();
     assert_eq!(out.matches("gate g a").count(), 1, "{out}");
 }
@@ -494,7 +497,7 @@ fn builder_validates_pushed_calls() {
     ));
     let mut small = ParameterizedCircuit::new(2);
     assert_eq!(
-        small.try_push(imported.gates[0].clone()),
+        small.try_push(imported.gates()[0].clone()),
         Err(CircuitError::QubitOutOfRange {
             qubit: 2,
             num_qubits: 2
@@ -505,7 +508,7 @@ fn builder_validates_pushed_calls() {
         .try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
         .unwrap();
     assert_eq!(
-        measured.try_push(imported.gates[0].clone()),
+        measured.try_push(imported.gates()[0].clone()),
         Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
     );
 }
@@ -516,7 +519,7 @@ fn builder_validates_pushed_calls() {
 /// `call` (on a two-qubit register).
 fn declared_call(declarations: &str, call: &str) -> CustomGate {
     let imported = parse(&format!("{HEADER}{declarations}\nqreg q[2];\n{call}\n"));
-    match &imported.gates[..] {
+    match imported.gates() {
         [GateInstruction::Custom(call)] => call.clone(),
         other => panic!("expected one call, got {other:?}"),
     }
@@ -535,7 +538,7 @@ fn calls_take_free_parameters_and_expressions() {
     let twice = qc.add_expr(2.0 * ParamExpr::param(1)).unwrap();
     let call = g.with_arguments(vec![Param(0), twice], vec![1, 0]).unwrap();
     qc.try_push(GateInstruction::Custom(call)).unwrap();
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     let values = [0.5, 0.25];
     let bound = qc.assign_parameters(&values).unwrap();
@@ -543,7 +546,7 @@ fn calls_take_free_parameters_and_expressions() {
         "gate g(t,u) a,b { rz(t/2) a; cx a,b; ry(u*t) b; }",
         "g(0.5,0.5) q[1],q[0];",
     );
-    let GateInstruction::Custom(bound_call) = &bound.gates[0] else {
+    let GateInstruction::Custom(bound_call) = &bound.gates()[0] else {
         panic!("binding must keep the call");
     };
     assert_eq!(
@@ -672,7 +675,7 @@ fn call_expressions_belong_to_their_circuit() {
     );
     owner.try_push(call).unwrap();
     let bound = owner.assign_parameters(&[0.5]).unwrap();
-    let GateInstruction::Custom(bound_call) = &bound.gates[0] else {
+    let GateInstruction::Custom(bound_call) = &bound.gates()[0] else {
         panic!("binding must keep the call");
     };
     assert_eq!(bound_call.params(), [GateParam::Fixed(1.5)]);

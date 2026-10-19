@@ -57,7 +57,7 @@ fn roundtrip_measure_all_collapses_back() {
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
     // `measure q -> c;` must come back as a single MeasureAll, not 4 Measures.
-    assert_eq!(imported.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(imported.gates().last(), Some(&GateInstruction::MeasureAll));
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm1);
 }
 
@@ -67,11 +67,11 @@ fn roundtrip_preserves_structure_and_counts() {
     let qasm = original.to_qasm2_with_params(&[0.75, -0.4]).unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
 
-    assert_eq!(imported.num_qubits, original.num_qubits);
+    assert_eq!(imported.num_qubits(), original.num_qubits());
     assert_eq!(imported.num_clbits(), original.num_clbits());
     // QASM 2.0 is parameter-free: the import is fully concrete.
-    assert_eq!(imported.num_params, 0);
-    assert_eq!(imported.gates.len(), original.gates.len());
+    assert_eq!(imported.num_params(), 0);
+    assert_eq!(imported.gates().len(), original.gates().len());
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn imported_angles_match_bound_values() {
         .to_qasm2_with_params(&[std::f64::consts::PI])
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
-    match &imported.gates[0] {
+    match &imported.gates()[0] {
         GateInstruction::Ry {
             qubit: 0,
             theta: GateParam::Fixed(v),
@@ -116,7 +116,7 @@ measure q[1] -> meas[1];
 measure q[2] -> meas[2];
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.num_qubits, 3);
+    assert_eq!(qc.num_qubits(), 3);
     assert_eq!(qc.num_clbits(), 3);
 
     // `u` and `p` keep their own spelling (not rewritten to `u3`); swap →
@@ -149,7 +149,7 @@ measure q[2] -> meas[2];
         GateInstruction::Barrier(Vec::new()),
         GateInstruction::MeasureAll,
     ];
-    assert_eq!(qc.gates, expected);
+    assert_eq!(qc.gates(), expected);
 }
 
 #[test]
@@ -164,18 +164,18 @@ measure q -> c;
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     let h_count = qc
-        .gates
+        .gates()
         .iter()
         .filter(|g| matches!(g, GateInstruction::H(_)))
         .count();
     assert_eq!(h_count, 3);
     for q in 0..3 {
-        assert!(qc.gates.contains(&GateInstruction::Rx {
+        assert!(qc.gates().contains(&GateInstruction::Rx {
             qubit: q,
             theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
         }));
     }
-    assert_eq!(qc.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(qc.gates().last(), Some(&GateInstruction::MeasureAll));
 }
 
 #[test]
@@ -191,10 +191,10 @@ cx a[0],b[1];
 measure b[1] -> c[3];
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.num_qubits, 4);
+    assert_eq!(qc.num_qubits(), 4);
     // a = [0,1], b = [2,3]
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::X(1),
             GateInstruction::X(2),
@@ -240,11 +240,11 @@ rx(2^3) q[0];
             other => panic!("unexpected gate {other:?}"),
         }
     };
-    assert!((angle(&qc.gates[0]) - PI / 2.0).abs() < 1e-15);
-    assert!((angle(&qc.gates[1]) + PI / 4.0).abs() < 1e-15);
-    assert!((angle(&qc.gates[2]) - 2.0 * PI).abs() < 1e-15);
-    assert!((angle(&qc.gates[3]) - 1.5e-3).abs() < 1e-18);
-    match &qc.gates[3] {
+    assert!((angle(&qc.gates()[0]) - PI / 2.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[1]) + PI / 4.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[2]) - 2.0 * PI).abs() < 1e-15);
+    assert!((angle(&qc.gates()[3]) - 1.5e-3).abs() < 1e-18);
+    match &qc.gates()[3] {
         GateInstruction::U {
             phi: GateParam::Fixed(phi),
             lam: GateParam::Fixed(lam),
@@ -255,14 +255,14 @@ rx(2^3) q[0];
         }
         other => panic!("expected U, got {other:?}"),
     }
-    assert!((angle(&qc.gates[4]) - 8.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[4]) - 8.0).abs() < 1e-15);
 }
 
 #[test]
 fn skips_comments_and_blank_lines() {
     let src = "// leading comment\nOPENQASM 2.0;\n\ninclude \"qelib1.inc\"; // trailing\n// gate-less\nqreg q[1];\nh q[0];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.gates, [GateInstruction::H(0)]);
+    assert_eq!(qc.gates(), [GateInstruction::H(0)]);
 }
 
 // ───────────────────────────── Error cases ────────────────────────────────
@@ -418,7 +418,7 @@ fn id_is_preserved_and_roundtrips_byte_identically() {
     let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\nh q[0];\nid q[1];\nid q[0];\ncx q[0],q[1];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::H(0),
             GateInstruction::Id(1),
@@ -434,7 +434,7 @@ fn id_broadcasts_over_a_register() {
     let src = "OPENQASM 2.0;\nqreg q[3];\nid q;\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::Id(0),
             GateInstruction::Id(1),
@@ -474,7 +474,7 @@ fn single_qubit_spellings_are_kept_as_written() {
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     use GateParam::Fixed;
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::P {
                 qubit: 0,
@@ -591,7 +591,7 @@ fn qelib1_gates_import_with_their_operand_and_parameter_order() {
         let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{statement}\n");
         let qc =
             ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
-        assert_eq!(qc.gates, [expected], "{statement}");
+        assert_eq!(qc.gates(), [expected], "{statement}");
     }
 }
 
@@ -641,7 +641,7 @@ fn multi_qubit_qelib1_gates_import_with_their_operand_order() {
         let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
         let qc =
             ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
-        assert_eq!(qc.gates, [expected], "{statement}");
+        assert_eq!(qc.gates(), [expected], "{statement}");
     }
     // Repeated operands are rejected at any arity.
     assert_parse_err(
@@ -734,7 +734,7 @@ fn three_qubit_gates_broadcast_over_registers() {
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     // a = q[0..2], b = q[2..4], c = q[4]
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::Ccx(0, 2, 4),
             GateInstruction::Ccx(1, 3, 4),

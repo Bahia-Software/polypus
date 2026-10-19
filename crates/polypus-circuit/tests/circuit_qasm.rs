@@ -108,12 +108,12 @@ fn assign_parameters_substitutes_values() {
         .ry(1, Param(1))
         .rz(0, 0.5); // fixed angle must survive binding untouched
 
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     let bound = qc.assign_parameters(&[1.0, 2.0]).unwrap();
-    assert_eq!(bound.num_qubits, 2);
+    assert_eq!(bound.num_qubits(), 2);
     assert_eq!(
-        bound.gates,
+        bound.gates(),
         vec![
             GateInstruction::Rx {
                 qubit: 0,
@@ -174,7 +174,7 @@ fn u_gate_binds_all_three_angles() {
 #[test]
 fn wrong_number_of_params_is_rejected() {
     let qc = ParameterizedCircuit::new(1).rx(0, Param(0)).ry(0, Param(1));
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     assert_eq!(
         qc.assign_parameters(&[0.1]),
@@ -195,12 +195,14 @@ fn wrong_number_of_params_is_rejected() {
 #[test]
 fn param_index_out_of_bounds_is_rejected() {
     // Assemble manually so num_params and gate indices disagree.
-    let mut qc = ParameterizedCircuit::new(1);
-    qc.num_params = 1;
-    qc.gates = vec![GateInstruction::Rx {
-        qubit: 0,
-        theta: GateParam::Param(5),
-    }];
+    let qc = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        1,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(5),
+        }],
+    );
     assert_eq!(
         qc.assign_parameters(&[0.1]),
         Err(CircuitError::ParamIndexOutOfBounds {
@@ -281,7 +283,7 @@ fn num_clbits_reflects_measurements() {
 #[test]
 #[should_panic(expected = "unbound Param")]
 fn concrete_circuit_panics_on_unbound_param() {
-    let qc = ConcreteCircuit::new(
+    let qc = ConcreteCircuit::new_unchecked(
         1,
         vec![GateInstruction::Rx {
             qubit: 0,
@@ -296,7 +298,7 @@ fn concrete_circuit_panics_on_unbound_param() {
 fn concrete_circuit_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // exporter still refuses a non-finite fixed angle rather than serialising it.
-    let qc = ConcreteCircuit::new(
+    let qc = ConcreteCircuit::new_unchecked(
         1,
         vec![GateInstruction::Rx {
             qubit: 0,
@@ -327,8 +329,8 @@ fn qaoa_maxcut_4_qubits() {
     }
     let qc = qc.measure_all();
 
-    assert_eq!(qc.num_qubits, 4);
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_qubits(), 4);
+    assert_eq!(qc.num_params(), 2);
     assert_eq!(qc.num_clbits(), 4);
 
     let qasm = qc.to_qasm2_with_params(&[gamma, beta]).unwrap();

@@ -104,7 +104,7 @@ impl CircuitSource {
     pub fn num_params(&self) -> Option<usize> {
         match self {
             CircuitSource::Qiskit(_) => None,
-            CircuitSource::Native(c) => Some(c.num_params),
+            CircuitSource::Native(c) => Some(c.num_params()),
         }
     }
 }

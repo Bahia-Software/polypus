@@ -150,10 +150,10 @@ impl BoundCircuit {
     /// [`wave_concurrency`](crate::wave_concurrency).
     pub fn native_qubit_width(&self) -> Option<usize> {
         match self {
-            BoundCircuit::Native(cc) => Some(cc.num_qubits),
+            BoundCircuit::Native(cc) => Some(cc.num_qubits()),
             BoundCircuit::Qasm2(qasm) => polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
                 .ok()
-                .map(|pc| pc.num_qubits),
+                .map(|pc| pc.num_qubits()),
             BoundCircuit::Foreign(_) => None,
         }
     }
