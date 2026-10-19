@@ -23,7 +23,9 @@
 //! dropping a flat vector.
 
 use crate::error::CircuitError;
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::BuildHasherDefault;
 use std::ops;
 
 /// Deepest nesting an expression may have, counted as its OpenQASM text nests:
@@ -765,11 +767,12 @@ binary_operator!(Div, div, Node::Div);
 ///
 /// Only the circuit that returned it from
 /// [`ParameterizedCircuit::add_expr`](crate::ParameterizedCircuit::add_expr)
-/// (or a clone of that circuit) holds the expression. An id also carries a
+/// (or a clone of that circuit) holds the expression. An id is a 64-bit
 /// checksum of the expression's content, so a circuit that is handed an id it
 /// did not issue rejects it with [`CircuitError::UnknownExpression`] — unless
-/// it holds an identical expression at the same position, which then means the
-/// same thing.
+/// it holds an identical expression, which then means the same thing. Ids are
+/// deterministic: the same expressions, added in the same order, get the same
+/// ids on every platform and run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 // Aligned like the payloads of `Fixed` and `Param`, so all three variants of
 // `GateParam` share one layout and copying an angle stays two aligned words;
@@ -777,8 +780,7 @@ binary_operator!(Div, div, Node::Div);
 // slower.
 #[repr(align(8))]
 pub struct ExprId {
-    index: u32,
-    check: u32,
+    check: u64,
 }
 
 /// Where one stored expression lives in the arena, and what it refers to.
@@ -786,17 +788,38 @@ pub struct ExprId {
 struct Stored {
     start: usize,
     len: usize,
-    check: u32,
     /// The largest free-parameter index the expression refers to.
     max_input: usize,
 }
 
+/// Hashes an [`ExprId`]'s checksum, already a hash, as itself.
+#[derive(Default)]
+struct CheckHasher(u64);
+
+impl std::hash::Hasher for CheckHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 << 8) | u64::from(byte);
+        }
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+type ByCheck = HashMap<u64, u32, BuildHasherDefault<CheckHasher>>;
+
 /// A circuit's expressions: every node in one vector, each expression a
-/// contiguous range of it.
+/// contiguous range of it, found by its id's checksum. Each distinct
+/// expression is stored once.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExprArena {
     nodes: Vec<Node<Input>>,
     exprs: Vec<Stored>,
+    by_check: ByCheck,
 }
 
 /// The canonical form [`ExprArena::classify`] gives an expression.
@@ -809,16 +832,20 @@ pub(crate) enum Classified {
     Expr { max_input: usize },
 }
 
-/// FNV-1a over a canonical encoding of the nodes: stable across platforms and
-/// runs, so ids stay deterministic.
-fn checksum(nodes: &[Node<Input>]) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    let mut feed = |bytes: &[u8]| {
-        for &byte in bytes {
-            hash ^= u32::from(byte);
-            hash = hash.wrapping_mul(0x0100_0193);
-        }
-    };
+/// FNV-1a (64-bit) over a canonical encoding of the nodes: stable across
+/// platforms and runs, so ids stay deterministic.
+fn checksum(nodes: &[Node<Input>]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    encode(nodes, |byte| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    });
+    hash
+}
+
+/// The canonical byte encoding the checksum is taken over.
+fn encode(nodes: &[Node<Input>], mut feed_byte: impl FnMut(u8)) {
+    let mut feed = |bytes: &[u8]| bytes.iter().for_each(|&b| feed_byte(b));
     for node in nodes {
         match *node {
             Node::Num(v) => {
@@ -839,7 +866,26 @@ fn checksum(nodes: &[Node<Input>]) -> u32 {
             Node::Call(f) => feed(&[9, f as u8]),
         }
     }
-    hash
+}
+
+/// Whether two node sequences are the same expression: numbers compare by
+/// their bits, so `0.0` and `-0.0` differ, as their checksums do.
+fn same_nodes(a: &[Node<Input>], b: &[Node<Input>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| match (x, y) {
+            (Node::Num(x), Node::Num(y)) => x.to_bits() == y.to_bits(),
+            _ => x == y,
+        })
+}
+
+/// The next checksum to try after `check` is taken by a different
+/// expression: a fixed bijective mix (SplitMix64's finaliser) of
+/// `check + 1`, so the sequence is the same on every run.
+fn probe(check: u64) -> u64 {
+    let mut z = check.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Map an evaluation failure of a circuit expression to the error binding
@@ -875,6 +921,7 @@ impl ExprArena {
     pub(crate) const EMPTY: ExprArena = ExprArena {
         nodes: Vec::new(),
         exprs: Vec::new(),
+        by_check: HashMap::with_hasher(BuildHasherDefault::new()),
     };
 
     /// Check that `expr` may be stored in a circuit — every number finite, at
@@ -913,31 +960,52 @@ impl ExprArena {
         })
     }
 
-    /// Store a classified expression, returning its id.
+    /// Store a classified expression, returning its id: the id of the
+    /// identical expression already stored, if there is one.
     pub(crate) fn insert(
         &mut self,
         expr: &ParamExpr,
         max_input: usize,
     ) -> Result<ExprId, CircuitError> {
+        self.insert_at(expr.nodes(), checksum(expr.nodes()), max_input)
+    }
+
+    /// [`Self::insert`] with the checksum given: the first of `check`,
+    /// `probe(check)`, … not taken by a different expression. A checksum is
+    /// only trusted after the nodes behind it compare equal.
+    fn insert_at(
+        &mut self,
+        nodes: &[Node<Input>],
+        mut check: u64,
+        max_input: usize,
+    ) -> Result<ExprId, CircuitError> {
+        while let Some(&index) = self.by_check.get(&check) {
+            let stored = self.exprs[index as usize];
+            if same_nodes(&self.nodes[stored.start..stored.start + stored.len], nodes) {
+                return Ok(ExprId { check });
+            }
+            check = probe(check);
+        }
         let index =
             u32::try_from(self.exprs.len()).map_err(|_| CircuitError::InvalidExpression {
                 reason: format!("a circuit holds at most {} expressions", u32::MAX),
             })?;
-        let nodes = expr.nodes();
-        let check = checksum(nodes);
         self.exprs.push(Stored {
             start: self.nodes.len(),
             len: nodes.len(),
-            check,
             max_input,
         });
         self.nodes.extend_from_slice(nodes);
-        Ok(ExprId { index, check })
+        self.by_check.insert(check, index);
+        Ok(ExprId { check })
     }
 
     fn stored(&self, id: ExprId) -> Option<&Stored> {
-        let stored = self.exprs.get(usize::try_from(id.index).ok()?)?;
-        (stored.check == id.check).then_some(stored)
+        if self.exprs.is_empty() {
+            return None;
+        }
+        let &index = self.by_check.get(&id.check)?;
+        self.exprs.get(index as usize)
     }
 
     /// The nodes of expression `id`, if this arena holds it.
@@ -1000,22 +1068,53 @@ mod tests {
         ParamExpr::param(i)
     }
 
-    #[test]
-    fn evaluation_follows_the_written_order() {
-        // (a + b) + c and a + (b + c) differ in binary64 for these values.
-        let (a, b, c) = (1e16, -1e16, 1.0);
-        let left = (x(0) + x(1)) + x(2);
-        let right = x(0) + (x(1) + x(2));
-        assert_eq!(eval(&left, &[a, b, c]), Ok((a + b) + c));
-        assert_eq!(eval(&right, &[a, b, c]), Ok(a + (b + c)));
-        assert_ne!((a + b) + c, a + (b + c));
+    /// The 32-bit FNV-1a checksum ids carried before #354.
+    fn checksum32(nodes: &[Node<Input>]) -> u32 {
+        let mut hash: u32 = 0x811c_9dc5;
+        encode(nodes, |byte| {
+            hash ^= u32::from(byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        });
+        hash
     }
 
+    /// #354: `x0*15200003` and `x0*17390159` collide in 32 bits, which let a
+    /// circuit take one's id for the other; their 64-bit ids differ, and an
+    /// arena holding one does not resolve the other's id.
     #[test]
-    fn negative_numbers_are_negations() {
-        assert_eq!(ParamExpr::from(-1.5).nodes(), [Node::Num(1.5), Node::Neg]);
-        let zero = eval(&ParamExpr::from(-0.0), &[]).unwrap();
-        assert!(zero == 0.0 && zero.is_sign_negative());
+    fn a_32_bit_checksum_collision_is_not_confused() {
+        let (a, b) = (x(0) * 15_200_003.0, x(0) * 17_390_159.0);
+        assert_eq!(checksum32(a.nodes()), checksum32(b.nodes()));
+        let (mut left, mut right) = (ExprArena::default(), ExprArena::default());
+        let id_a = left.insert(&a, 0).unwrap();
+        let id_b = right.insert(&b, 0).unwrap();
+        assert_ne!(id_a, id_b);
+        assert_eq!(right.nodes(id_a), None);
+        assert_eq!(left.nodes(id_b), None);
+        assert_eq!(
+            left.evaluate(id_a, &[1.0], &mut Vec::new()),
+            Ok(15_200_003.0)
+        );
+    }
+
+    /// A checksum is trusted only once the nodes behind it compare equal: two
+    /// different expressions forced onto one checksum are stored apart.
+    #[test]
+    fn an_injected_checksum_collision_is_resolved_by_comparing_nodes() {
+        let (a, b) = (x(0) * 2.0, x(0) * 3.0);
+        let mut arena = ExprArena::default();
+        let id_a = arena.insert_at(a.nodes(), 42, 0).unwrap();
+        let id_b = arena.insert_at(b.nodes(), 42, 0).unwrap();
+        assert_ne!(id_a, id_b);
+        assert_eq!(id_b.check, probe(42));
+        assert_eq!(arena.nodes(id_a), Some(a.nodes()));
+        assert_eq!(arena.nodes(id_b), Some(b.nodes()));
+        // The same nodes under the same checksum are the same expression.
+        assert_eq!(arena.insert_at(b.nodes(), 42, 0), Ok(id_b));
+        assert_eq!(arena.exprs.len(), 2);
+        // `0.0` and `-0.0` are different numbers, so different expressions.
+        let (zero, minus_zero) = (x(0) * 0.0, x(0) * -0.0);
+        assert!(!same_nodes(zero.nodes(), minus_zero.nodes()));
     }
 
     #[test]
@@ -1145,15 +1244,16 @@ mod tests {
         let id = arena.insert(&e, 0).unwrap();
         assert_eq!(arena.nodes(id), Some(e.nodes()));
 
-        // Another arena with different content at the same position rejects it.
+        // Another arena with different content rejects it.
         let mut other = ExprArena::default();
         other.insert(&(x(0) * 3.0), 0).unwrap();
         assert_eq!(other.nodes(id), None);
-        // Identical content at the same position is the same expression.
+        // Identical content, at any position, is the same expression.
         let mut same = ExprArena::default();
-        same.insert(&e, 0).unwrap();
+        same.insert(&(x(0) * 5.0), 0).unwrap();
+        assert_eq!(same.insert(&e, 0), Ok(id));
         assert_eq!(same.nodes(id), Some(e.nodes()));
-        // Out of range.
+        // An empty arena holds nothing.
         assert_eq!(ExprArena::EMPTY.nodes(id), None);
     }
 

@@ -60,7 +60,9 @@ C-10 specifies the profile and C-2 the expressions; this section records why.
    `Input` references). Construction is validated; evaluation is one loop and
    never panics or recurses. An `ExprId` carries a content checksum, so an id
    from another circuit is rejected (`UnknownExpression`) without a global
-   counter.
+   counter. (Since #354 the id is a 64-bit checksum, resolved through a
+   per-circuit map and trusted only after the nodes compare equal; identical
+   expressions are stored once.)
 7. **Numbers.** Exactly the written operations, in source order, in binary64;
    no reassociation or folding. Only the final value must be finite. A division
    between two integer expressions (`1/2`) is rejected: it is 0 in OpenQASM 3

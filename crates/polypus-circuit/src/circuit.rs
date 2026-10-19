@@ -264,7 +264,8 @@ impl ParameterizedCircuit {
     /// [`GateParam::Param`]; an expression without free parameters is
     /// evaluated now and comes back as [`GateParam::Fixed`]; anything else is
     /// stored and comes back as a [`GateParam::Expr`], which only this circuit
-    /// (and its clones) can resolve. Like a `Param`, the free parameters an
+    /// (and its clones, or a circuit holding the identical expression) can
+    /// resolve. An expression already stored comes back as the same angle. Like a `Param`, the free parameters an
     /// expression refers to count towards [`num_params`](Self::num_params)
     /// once a gate that uses it is pushed. Binding evaluates the expression
     /// exactly as it is written, left to right and without reassociation.
