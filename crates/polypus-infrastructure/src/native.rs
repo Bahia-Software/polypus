@@ -22,11 +22,38 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// SplitMix64 increment (the golden-ratio gamma).
+const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// SplitMix64 output finaliser: a bijective 64-bit mixer.
+fn splitmix64_mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Seed for the circuit at global position `index` of a backend seeded with
+/// `base_seed`: output `index` of a SplitMix64 stream whose state starts at the
+/// mixed base seed.
+///
+/// A plain `base_seed + index` made neighbouring base seeds share streams shifted
+/// by one circuit (circuit `k` of seed `s` was circuit `k-1` of seed `s+1`,
+/// issue #348). Mixing the base seed first puts distinct base seeds on unrelated
+/// stream positions, so repetitions run with seeds `0, 1, 2, ...` are
+/// independent. The map is still a pure function of `(base_seed, index)`, which
+/// keeps contract C-7 (same seed and batch reproduce bit-for-bit).
+fn circuit_seed(base_seed: u64, index: u64) -> u64 {
+    let state = splitmix64_mix(base_seed);
+    splitmix64_mix(state.wrapping_add(index.wrapping_add(1).wrapping_mul(SPLITMIX64_GAMMA)))
+}
+
 /// Local, noiseless statevector backend backed by `polypus-sim`.
 ///
-/// Sampling is seeded from an explicit base seed plus a per-circuit counter, so
-/// two backends built with the same seed reproduce the same counts while
-/// distinct circuits in a batch still get independent shot noise. The seed is
+/// Sampling is seeded from an explicit base seed and a per-circuit counter,
+/// mixed with SplitMix64 (circuit `k` takes output `k` of a SplitMix64 stream
+/// started at the mixed base seed), so two backends built with the same seed
+/// reproduce the same counts while distinct circuits in a batch, and backends
+/// with neighbouring seeds, get independent shot noise. The seed is
 /// supplied by the caller (`ExecutionConfig::seed`, resolved at the
 /// Python-facing boundary from a user value or an OS-entropy draw) and is
 /// **fully decoupled from the run `id`**: an omitted seed yields genuine,
@@ -191,8 +218,8 @@ impl NativeStatevectorBackend {
 
     /// Run `qcs` while holding at most `cap` statevectors in memory at once.
     ///
-    /// This is a pure resource bound: the per-circuit seed is reserved as one
-    /// contiguous block up front (`base_seed + block_start + global_index`), so a
+    /// This is a pure resource bound: the per-circuit seed index is reserved as
+    /// one contiguous block up front (`circuit_seed(base_seed, block_start + i)`), so a
     /// circuit's seed — and therefore its counts — is independent of how the batch
     /// is chunked, and gate-vs-circuit parallelism is numerically identical. The
     /// result is byte-for-byte the historical single unbounded `par_iter` for
@@ -247,7 +274,7 @@ impl NativeStatevectorBackend {
     }
 
     /// Simulate one window in parallel ACROSS circuits, seeding circuit `i` of the
-    /// window with `base_seed + global_start + i`. A DE generation submits its
+    /// window with `circuit_seed(base_seed, global_start + i)`. A DE generation submits its
     /// whole population this way — the embarrassingly-parallel population axis.
     /// `simulate_one` is pure Rust (no GIL) and `&self`-only; rayon's indexed
     /// `collect` preserves order and short-circuits on the first `Err`.
@@ -263,10 +290,7 @@ impl NativeStatevectorBackend {
             .par_iter()
             .enumerate()
             .map(|(i, qc)| {
-                let seed = self
-                    .base_seed
-                    .wrapping_add(global_start)
-                    .wrapping_add(i as u64);
+                let seed = circuit_seed(self.base_seed, global_start.wrapping_add(i as u64));
                 self.simulate_one(qc, shots, seed, opts, parallel_threshold)
             })
             .collect()
@@ -482,7 +506,7 @@ impl QuantumBackend for NativeStatevectorBackend {
     ///
     /// Reproducibility is preserved exactly (contract C-7): the per-batch seeds
     /// come from the *same* contiguous-block scheme `run_circuits` uses
-    /// (`counter.fetch_add` + `base_seed.wrapping_add`), and
+    /// (`counter.fetch_add` + the SplitMix64 per-circuit seed), and
     /// [`sample_projected`] with a given seed yields byte-identical counts to a
     /// full `run_and_sample`. Shot conservation is preserved too (contract
     /// C-3): a zero-shot batch samples nothing and returns an empty map.
@@ -514,7 +538,7 @@ impl QuantumBackend for NativeStatevectorBackend {
             .iter()
             .enumerate()
             .map(|(i, &shots)| {
-                let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
+                let seed = circuit_seed(self.base_seed, start.wrapping_add(i as u64));
                 let raw = sample_projected(concrete, &sv, shots as usize, seed).map_err(|e| {
                     log::error!("native statevector sampling failed: {e}");
                     BackendError::NativeCircuit(format!("native statevector sampling failed: {e}"))
@@ -839,7 +863,7 @@ mod tests {
     /// P1-memory (plan §4.5): capping concurrent statevectors must be a pure
     /// resource bound — the counts are byte-identical to the single unbounded
     /// `par_iter` for *every* cap, because the per-circuit seed is fixed up front
-    /// (`base_seed + block_start + i`) and gate-vs-circuit parallelism is
+    /// (`circuit_seed(base_seed, block_start + i)`) and gate-vs-circuit parallelism is
     /// numerically identical. The batch is sized past the thread pool so the full
     /// path takes the `usize::MAX` gate-threshold branch while the small-cap
     /// windows take the default branch, pinning that this threshold flip changes
@@ -848,7 +872,7 @@ mod tests {
     fn capped_batches_match_the_full_batch_byte_for_byte() {
         let cfg = config_with(OptLevel::default());
         let n = rayon::current_num_threads() + 3;
-        // Identical circuits, but each index draws seed base+i, so the output
+        // Identical circuits, but each index draws its own seed, so the output
         // vector is order- and seed-sensitive: a mis-seeded or reordered window
         // would change it.
         let batch: Vec<BoundCircuit> = (0..n).map(|_| BoundCircuit::Native(uniform3())).collect();
@@ -1045,6 +1069,46 @@ mod tests {
         );
     }
 
+    /// Issue #348: neighbouring base seeds must not share sampling streams
+    /// shifted by one circuit. With the former `base_seed + index` scheme,
+    /// circuit `k` of seed `s` replayed circuit `k-1` of seed `s+1`.
+    #[test]
+    fn neighbouring_seeds_do_not_share_shifted_streams() {
+        for s in [0u64, 1, 42, 2024, u64::MAX - 1] {
+            for k in 1..64u64 {
+                assert_ne!(circuit_seed(s, k), circuit_seed(s.wrapping_add(1), k - 1));
+            }
+        }
+
+        let cfg = config_with(OptLevel::default());
+        let batch: Vec<BoundCircuit> = (0..4).map(|_| BoundCircuit::Native(uniform3())).collect();
+        let a = NativeStatevectorBackend::new(42)
+            .run_circuits(&batch, &cfg.run_params())
+            .unwrap();
+        let b = NativeStatevectorBackend::new(43)
+            .run_circuits(&batch, &cfg.run_params())
+            .unwrap();
+        for k in 1..batch.len() {
+            assert_ne!(
+                a[k],
+                b[k - 1],
+                "circuit {k} of seed 42 == circuit {} of seed 43",
+                k - 1
+            );
+        }
+    }
+
+    /// The per-circuit seed map is pinned: a change would silently move every
+    /// count for a fixed seed (C-7), so it must be deliberate.
+    #[test]
+    fn circuit_seed_is_pinned() {
+        assert_eq!(splitmix64_mix(0), 0);
+        // SplitMix64 seeded with state 0: first output (reference value).
+        assert_eq!(circuit_seed(0, 0), 0xE220_A839_7B1D_CDAF);
+        let seeds: std::collections::HashSet<u64> = (0..1000).map(|k| circuit_seed(7, k)).collect();
+        assert_eq!(seeds.len(), 1000);
+    }
+
     /// Distinct seeds produce distinct counts: the seed genuinely drives the
     /// sampling stream (guards against the seed being ignored).
     #[test]
@@ -1093,8 +1157,8 @@ mod tests {
 
     /// Fast path equivalence (C-7): the single-evolution path yields
     /// byte-identical counts to sampling each batch through `run_circuits` with
-    /// the same contiguous seed block (`seed = base_seed + i`). The optimisation
-    /// changes performance, never results.
+    /// the same contiguous seed block (batch `i` uses seed index `i`). The
+    /// optimisation changes performance, never results.
     #[test]
     fn run_shots_distributed_matches_run_circuits_per_batch() {
         let batches = [5u32, 5, 4];
@@ -1106,15 +1170,16 @@ mod tests {
             )
             .unwrap();
 
-        // Reference: one fresh backend per batch, seeded `99 + i` so it replays
-        // the exact seed the fast path reserves for replica `i`.
+        // Reference: one backend seeded 99, one single-circuit `run_circuits`
+        // call per batch, so call `i` draws seed index `i` — the exact seed the
+        // fast path reserves for replica `i`.
+        let reference_backend = NativeStatevectorBackend::new(99);
         let reference: Vec<_> = batches
             .iter()
-            .enumerate()
-            .map(|(i, &shots)| {
+            .map(|&shots| {
                 let mut cfg = config_with(OptLevel::default());
                 cfg.shots = shots;
-                NativeStatevectorBackend::new(99u64.wrapping_add(i as u64))
+                reference_backend
                     .run_circuits(&[BoundCircuit::Native(bell())], &cfg.run_params())
                     .unwrap()
                     .remove(0)

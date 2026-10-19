@@ -78,6 +78,8 @@ For development, `maturin develop --release` installs both packages in editable 
 
 > The name `polypus` on PyPI belongs to an unrelated project, so the distribution is `polypus-quantum`. The import name and the Rust crate are `polypus`.
 
+`import polypus` does no work and writes nothing. The first native simulation of a process (`polypus.statevector`, or `backend="polypus"`) measures once per machine, in under a second, the qubit count at which the simulator's gate kernels go parallel, and caches it in `$XDG_CACHE_HOME/polypus/` (or `~/.cache/polypus/`). Set `POLYPUS_NO_AUTOCALIBRATE=1` to skip it (CI, containers); see [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md).
+
 ## Quickstart
 
 **Run a circuit on 4 QPUs**

@@ -9,29 +9,20 @@ lists of the functions the seal calls, extracted from the sources at the tags
 2.3.0, 2.4.0, 3.0.0 and 3.1.0 (``data/cunqa/extract_signatures.py``). Each test
 installs a fake ``cunqa`` whose functions carry the ``inspect.Signature`` of one
 tag and bind every call against it, so this checks the call shapes the seal
-sends, not CUNQA's behaviour.
+sends, not CUNQA's behaviour; ``test_cunqa_run_flow.py`` drives the whole run
+flow against a stateful fake built on the same signatures.
 """
 
-import inspect
-import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
+from fake_cunqa import SIGNATURES, SUPPORTED_TAGS
+from fake_cunqa import signature as _signature
 from qiskit import QuantumCircuit
 
-SIGNATURES = json.loads(
-    (Path(__file__).parent / "data" / "cunqa" / "signatures.json").read_text()
-)
-SUPPORTED = ["2.4.0", "3.0.0", "3.1.0"]
+SUPPORTED = SUPPORTED_TAGS
 UNSUPPORTED = ["2.3.0"]
-
-
-def _signature(parameters: str) -> inspect.Signature:
-    namespace = {}
-    exec(f"def f({parameters}): pass", namespace)
-    return inspect.signature(namespace["f"])
 
 
 def _checked(signature, result):

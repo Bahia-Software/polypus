@@ -302,27 +302,13 @@ def test_real_qasm_parse_error_reaches_the_caller_as_polypus_error():
     assert isinstance(info.value.__cause__, QASM2ParseError)
 
 
-def _install_fake_cunqa(monkeypatch, dropped):
-    """Register a minimal fake ``cunqa`` package in ``sys.modules`` so the CUNQA
-    seam imports without a real install or SLURM. ``qdrop`` records the family
-    names it is handed; the rest are inert stubs to satisfy the module-level
-    ``from cunqa.qpu import ...`` in ``polypus_python.cunqa``."""
-    import sys
-    import types
+def _install_fake_cunqa(monkeypatch):
+    """Install the fake CUNQA SDK (``fake_cunqa.FakeCunqa``) so the CUNQA seam
+    imports and runs without a real install or SLURM; returns the fake, whose
+    ``dropped`` lists the families ``qdrop`` released."""
+    from fake_cunqa import FakeCunqa
 
-    qjob_mod = types.ModuleType("cunqa.qjob")
-    qjob_mod.gather = lambda *a, **k: []
-    qpu_mod = types.ModuleType("cunqa.qpu")
-    qpu_mod.get_QPUs = lambda *a, **k: []
-    qpu_mod.qraise = lambda *a, **k: "fam-1"
-    qpu_mod.run = lambda *a, **k: None
-    qpu_mod.qdrop = lambda *families, **k: dropped.extend(families)
-
-    monkeypatch.setitem(sys.modules, "cunqa", types.ModuleType("cunqa"))
-    monkeypatch.setitem(sys.modules, "cunqa.qjob", qjob_mod)
-    monkeypatch.setitem(sys.modules, "cunqa.qpu", qpu_mod)
-    # Force a fresh import so the fake ``qdrop`` is the one bound in the module.
-    monkeypatch.delitem(sys.modules, "polypus_python.cunqa", raising=False)
+    return FakeCunqa().install(monkeypatch)
 
 
 def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
@@ -332,12 +318,12 @@ def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
     # `slurm_job_id` (never sent) and `qdrop` was never reached.
     import polypus_python
 
-    dropped = []
-    _install_fake_cunqa(monkeypatch, dropped)
+    fake = _install_fake_cunqa(monkeypatch)
+    fake.qraise(1, "01:00:00", family="fam-1")
 
     polypus_python.disconnect_from_infrastructure("cunqa", family="fam-1")
 
-    assert dropped == ["fam-1"], "the family handle must reach qdrop unchanged"
+    assert fake.dropped == ["fam-1"], "the family handle must reach qdrop unchanged"
 
 
 # ── Every `run_qcs` kwarg Rust sends is consumed (#230) ──────────────────────
@@ -375,9 +361,9 @@ def _record_run_qcs(monkeypatch, **run_kwargs):
 
 
 def _cunqa_kwargs(monkeypatch):
-    # The fake `cunqa` lets the real `connect`/`disconnect` seal calls run
-    # (`qraise`/`qdrop` are stubs); only `run_qcs` is recorded.
-    _install_fake_cunqa(monkeypatch, [])
+    # The fake `cunqa` lets the real `connect`/`disconnect` seal calls run;
+    # only `run_qcs` is recorded.
+    _install_fake_cunqa(monkeypatch)
     return _record_run_qcs(monkeypatch, infrastructure="cunqa", backend="aer")
 
 

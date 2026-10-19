@@ -157,18 +157,15 @@ class Cunqa(Infraestructure):
                 if seed is not None:
                     # `seed` (not `seed_simulator`) is the kwarg CUNQA's own
                     # docs name (reference/api/run_configuration.html).
-                    # Offset by QPU index (mirrors the native backend's
-                    # `base_seed + i` in native.rs) so each QPU gets a
-                    # distinct, deterministic seed instead of every QPU
-                    # reproducing the exact same counts; masked to the 63-bit
-                    # range Aer accepts, since CUNQA's simulated QPUs are
-                    # Aer-based (same reason as local.py's mask).
+                    # Offset by QPU index so each QPU gets a distinct,
+                    # deterministic seed instead of every QPU reproducing the
+                    # exact same counts; masked to the 63-bit range Aer
+                    # accepts, since CUNQA's simulated QPUs are Aer-based (same
+                    # reason as local.py's mask) (contract C-7).
                     #
-                    # UNVERIFIED beyond the kwarg name: the `cunqa` package
-                    # isn't installed anywhere this can be exercised, and
-                    # CESGA-Quantum-Spain/cunqa@2.3.0 has no `QPU.run()` method
-                    # at all (only `.execute()`); 2.3.0 is outside the supported
-                    # range (see the top of this file).
+                    # Pinned against a fake CUNQA (tests/python/
+                    # test_cunqa_run_flow.py), not yet against a real one
+                    # (tests/python/test_cunqa_real.py, opt-in).
                     qjob = run(
                         qcs[i],
                         qpus[i],
