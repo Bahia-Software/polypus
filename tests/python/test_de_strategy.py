@@ -116,11 +116,13 @@ class TestDeStrategyOption:
 @pytest.mark.vqc
 class TestDeStrategyBatches:
     """What each strategy sends to the backend: one batch per generation after
-    the initial one (only L-SHADE's get smaller), and nothing at all when the
-    population is too small."""
+    the initial one, within the budget of ``population_size × (generations +
+    1)`` evaluations (L-SHADE spends it in more, smaller batches), and nothing
+    at all when the population is too small."""
 
     GENERATIONS = 10
     POPULATION = 20
+    BUDGET = POPULATION * (GENERATIONS + 1)
 
     def _run(self, monkeypatch, strategy, seed=11):
         import polypus
@@ -131,33 +133,38 @@ class TestDeStrategyBatches:
                 generations=self.GENERATIONS,
                 population_size=self.POPULATION,
                 # All fitness values are equal, so only a patience longer than
-                # the run keeps the stagnation stop from ending it early.
-                patience=self.GENERATIONS + 1,
+                # any run keeps the stagnation stop from ending it early.
+                patience=10_000,
                 strategy=strategy,
             ),
             seed=seed,
             ident="de_strategy_batches",
         )
-        assert result.iterations_run == self.GENERATIONS
+        assert not result.converged
         assert len(batches) == result.iterations_run + 1
         # The C-5 trajectory: one entry per generation, ending at the best.
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
-        return batches
+        return result, batches
 
     @pytest.mark.parametrize("strategy", ["rand1bin", "shade"])
     def test_fixed_population_strategies_send_full_batches(self, monkeypatch, strategy):
-        sizes = [len(b) for b in self._run(monkeypatch, strategy)]
-        assert sizes == [self.POPULATION] * (self.GENERATIONS + 1)
+        result, batches = self._run(monkeypatch, strategy)
+        assert result.iterations_run == self.GENERATIONS
+        assert [len(b) for b in batches] == [self.POPULATION] * (self.GENERATIONS + 1)
 
-    def test_lshade_batches_shrink_after_the_first_generation(self, monkeypatch):
-        sizes = [len(b) for b in self._run(monkeypatch, "lshade")]
+    def test_lshade_spends_the_budget_in_more_smaller_batches(self, monkeypatch):
+        result, batches = self._run(monkeypatch, "lshade")
+        sizes = [len(b) for b in batches]
+        assert result.iterations_run > self.GENERATIONS
         assert sizes[:2] == [self.POPULATION, self.POPULATION]
         assert all(a >= b for a, b in zip(sizes, sizes[1:]))
-        assert 4 <= sizes[-1] < self.POPULATION
+        assert sizes[-1] == 4
+        # Never past the budget, and short of it by less than the last batch.
+        assert self.BUDGET - sizes[-1] < sum(sizes) <= self.BUDGET
 
     def test_strategy_reaches_the_optimizer(self, monkeypatch):
-        runs = {s: self._run(monkeypatch, s) for s in STRATEGIES}
+        runs = {s: self._run(monkeypatch, s)[1] for s in STRATEGIES}
         # Every strategy draws its initial population the same way, so a seed
         # gives the same first batch; the next ones differ by strategy.
         first = {tuple(batches[0]) for batches in runs.values()}

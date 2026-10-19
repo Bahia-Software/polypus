@@ -100,9 +100,11 @@ The run stops early when the best fitness improves by less than `tolerance` over
 | `"shade"` | SHADE (Tanabe and Fukunaga, 2013): current-to-pbest/1 mutation with an archive of replaced parents. Each individual draws its own `F` and `CR` from a memory of the values that recently improved the population, so there is nothing to tune |
 | `"lshade"` | L-SHADE (Tanabe and Fukunaga, 2014): SHADE with a population that shrinks linearly towards 4 |
 
-Any other name raises `ValueError`. `population_size` must be at least 4 with every strategy, and all three evaluate one batch per generation, so `generations` bounds the run the same way.
+Any other name raises `ValueError`. `population_size` must be at least 4 with every strategy, and every strategy evaluates one batch per generation, after the initial population's.
 
-L-SHADE plans its shrinking over `population_size × (generations + 1)` evaluations, the most a fixed population can spend in `generations` generations. Its generations get cheaper as the population shrinks, so the run ends after `generations` generations without reaching that budget: with the defaults, the last generation evaluates 20 circuits instead of 50. Those smaller batches can leave QPUs idle when `n_qpus` is large; with many QPUs, prefer `"shade"`, whose population stays fixed.
+All three have the same budget of `population_size × (generations + 1)` evaluations: the initial population plus `generations` full generations. `"rand1bin"` and `"shade"` keep their population, so they run `generations` generations. For `"lshade"`, `generations` sets that budget rather than the number of generations: its population shrinks as the budget is spent, reaching 4 at the end, so it runs more, smaller generations until the next one would not fit. With the defaults that is 275 generations instead of 100, the last ones of 4 candidates, using 5048 of the 5050 evaluations. The early stop still counts generations, so late in an L-SHADE run `patience` generations hold fewer evaluations.
+
+More, smaller batches mean more sequential rounds: with several QPUs, an L-SHADE batch smaller than `n_qpus` leaves some of them idle, and the run takes more rounds than one with a fixed population. With many QPUs, prefer `"shade"`, whose population stays fixed. A CUNQA walltime warning counts L-SHADE's real number of generations.
 
 ### Particle Swarm Optimization
 

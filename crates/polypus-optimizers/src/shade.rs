@@ -15,18 +15,18 @@
 //!   DE/rand/1/bin does, instead of the papers' bound repair: the parameters
 //!   are angles, so the objective is periodic;
 //! - each generation is a single oracle batch, its length checked right away;
-//! - the run lasts at most `generations` generations and stops early on
-//!   fitness stagnation (`tolerance` / `patience`), like DE/rand/1/bin.
+//! - the evaluation budget is DE/rand/1/bin's, `population_size ×
+//!   (generations + 1)` (see [`Schedule`]), and the run stops early on fitness
+//!   stagnation (`tolerance` / `patience`, counted in generations).
 //!
 //! The constants are the papers' defaults. SHADE: a memory of `H =
 //! population_size` slots, an archive as large as the population, and the
 //! p-best fraction drawn per individual from `[2/N, 0.2]`. L-SHADE: `H = 6`, an
 //! archive of `2.6 N`, `p = 0.11`, the terminal value for `M_CR` and the
-//! weighted Lehmer mean for both memories. Its population shrinks linearly
-//! from `population_size` towards 4 over `population_size × (generations + 1)`
-//! evaluations, the largest number DE/rand/1/bin can spend. The run still ends
-//! after `generations` generations, so once the population shrinks it ends
-//! before that budget is used up.
+//! weighted Lehmer mean for both memories. As in the paper, its population
+//! shrinks linearly in the evaluations spent, from `population_size` to 4 when
+//! the budget runs out, so it spends the budget in more, smaller generations
+//! than `generations` full ones.
 
 use crate::differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
@@ -247,10 +247,76 @@ fn index_except_two<R: Rng>(rng: &mut R, n: usize, a: usize, b: usize) -> usize 
 /// L-SHADE's population size once `evaluations` of the `budget` are spent:
 /// `round(N_init + (N_min - N_init) · evaluations / budget)`, never below
 /// [`MIN_POPULATION`].
-fn reduced_size(initial: usize, evaluations: usize, budget: f64) -> usize {
-    let spent = evaluations as f64 / budget;
+fn reduced_size(initial: usize, evaluations: u64, budget: u64) -> usize {
+    let spent = evaluations as f64 / budget as f64;
     let size = (initial as f64 + (MIN_POPULATION as f64 - initial as f64) * spent).round();
     (size as usize).max(MIN_POPULATION)
+}
+
+/// How many members each generation evaluates, and when the run is out of
+/// evaluations.
+///
+/// Every DE strategy has the same budget, `population_size × (generations +
+/// 1)` evaluations: the initial population plus `generations` full
+/// generations. A generation runs only if its whole batch fits in what is left
+/// of it. SHADE keeps its population, so that is exactly `generations`
+/// generations. L-SHADE shrinks its population after every generation, so it
+/// runs more, smaller ones, until the next would overshoot the budget; it
+/// stops less than one (final) population short of it.
+///
+/// The schedule depends on the arguments alone, never on fitness, so
+/// [`DeStrategy::max_generations`](crate::DeStrategy::max_generations) counts a
+/// run's generations by stepping the very schedule the optimizer follows.
+#[derive(Debug, Clone)]
+pub(crate) struct Schedule {
+    initial: usize,
+    shrinks: bool,
+    budget: u64,
+    evaluations: u64,
+    size: usize,
+}
+
+impl Schedule {
+    /// The schedule of a run of `population_size` members with the budget of
+    /// `generations` generations, once the initial population is evaluated.
+    pub(crate) fn new(variant: Variant, population_size: usize, generations: u32) -> Self {
+        Self {
+            initial: population_size,
+            shrinks: variant == Variant::LShade,
+            budget: population_size as u64 * (u64::from(generations) + 1),
+            evaluations: population_size as u64,
+            size: population_size,
+        }
+    }
+
+    /// Whether the next generation, a batch of the current population, fits in
+    /// what is left of the budget.
+    pub(crate) fn has_next(&self) -> bool {
+        self.size > 0 && self.evaluations + self.size as u64 <= self.budget
+    }
+
+    /// Spend one generation of the current population and return the
+    /// population size for the next: smaller for L-SHADE, never below
+    /// [`MIN_POPULATION`] (nor above the current size).
+    pub(crate) fn advance(&mut self) -> usize {
+        self.evaluations += self.size as u64;
+        if self.shrinks {
+            self.size = self
+                .size
+                .min(reduced_size(self.initial, self.evaluations, self.budget));
+        }
+        self.size
+    }
+
+    /// How many generations the schedule runs.
+    pub(crate) fn generations(mut self) -> u64 {
+        let mut count = 0;
+        while self.has_next() {
+            self.advance();
+            count += 1;
+        }
+        count
+    }
 }
 
 /// Keep the best `size` members, in their current order.
@@ -291,7 +357,6 @@ pub(crate) fn run_with_rng<R: Rng>(
     } = args;
 
     let initial = population_size as usize;
-    let max_gen = generations as usize;
     let dims = dimensions as usize;
     let patience = patience as usize;
 
@@ -311,9 +376,7 @@ pub(crate) fn run_with_rng<R: Rng>(
         .collect();
     let mut fitness = oracle.evaluate_batch(&population);
     check_oracle_len(population.len(), fitness.len())?;
-    let mut evaluations = population.len();
-    // L-SHADE's reduction budget: what DE/rand/1/bin spends on a full run.
-    let budget = initial as f64 * (max_gen as f64 + 1.0);
+    let mut schedule = Schedule::new(variant, initial, generations);
 
     let mut memory = Memory::new(variant.memory_size(initial));
     let mut archive: Vec<Vec<f64>> = Vec::new();
@@ -321,9 +384,12 @@ pub(crate) fn run_with_rng<R: Rng>(
 
     let mut iterations_run = 0usize;
     let mut converged = false;
-    let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
+    let mut fitness_history: Vec<f64> = Vec::new();
 
-    for generation in 0..max_gen {
+    // The population always has the schedule's current size: it starts at
+    // `initial` and is cut to each size `advance` returns.
+    let mut generation = 0usize;
+    while schedule.has_next() {
         iterations_run = generation + 1;
         let size = population.len();
         let order = ranking(&fitness);
@@ -367,7 +433,6 @@ pub(crate) fn run_with_rng<R: Rng>(
 
         let trial_fitness = oracle.evaluate_batch(&trials);
         check_oracle_len(trials.len(), trial_fitness.len())?;
-        evaluations += trials.len();
 
         // Selection. A trial at least as good as its parent replaces it (ties
         // go to the trial, as in the papers); only a strict improvement sends
@@ -390,12 +455,10 @@ pub(crate) fn run_with_rng<R: Rng>(
         }
         memory.update(&successes, variant);
 
-        if variant == Variant::LShade {
-            let target = reduced_size(initial, evaluations, budget);
-            if target < population.len() {
-                keep_best(&mut population, &mut fitness, target);
-                log::debug!("Generation {generation}: L-SHADE population reduced to {target}");
-            }
+        let target = schedule.advance();
+        if target < population.len() {
+            keep_best(&mut population, &mut fitness, target);
+            log::debug!("Generation {generation}: L-SHADE population reduced to {target}");
         }
         let capacity = (variant.archive_rate() * population.len() as f64).round() as usize;
         trim_archive(&mut archive, capacity, rng);
@@ -408,6 +471,7 @@ pub(crate) fn run_with_rng<R: Rng>(
             converged = true;
             break;
         }
+        generation += 1;
     }
 
     Ok(OptimizationOutcome {
@@ -608,11 +672,70 @@ mod tests {
     #[test]
     fn reduced_size_is_linear_in_evaluations_and_floored_at_four() {
         // 50 members, 100 generations: budget 5050 evaluations.
-        assert_eq!(reduced_size(50, 50, 5050.0), 50);
-        assert_eq!(reduced_size(50, 2525, 5050.0), 27);
-        assert_eq!(reduced_size(50, 5050, 5050.0), 4);
-        assert_eq!(reduced_size(4, 44, 44.0), 4);
-        assert_eq!(reduced_size(50, 6000, 5050.0), 4);
+        assert_eq!(reduced_size(50, 50, 5050), 50);
+        assert_eq!(reduced_size(50, 2525, 5050), 27);
+        assert_eq!(reduced_size(50, 5050, 5050), 4);
+        assert_eq!(reduced_size(4, 44, 44), 4);
+        assert_eq!(reduced_size(50, 6000, 5050), 4);
+    }
+
+    /// Step a schedule to the end: every generation's size, and the size of
+    /// the one that no longer fits.
+    fn steps(mut schedule: Schedule) -> (Vec<usize>, usize) {
+        let mut sizes = Vec::new();
+        while schedule.has_next() {
+            sizes.push(schedule.size);
+            schedule.advance();
+        }
+        (sizes, schedule.size)
+    }
+
+    #[test]
+    fn shade_schedule_runs_exactly_the_given_generations() {
+        for (population, generations) in [(4, 0), (4, 1), (10, 25), (50, 100), (1, 7)] {
+            let schedule = Schedule::new(Variant::Shade, population, generations);
+            assert_eq!(
+                schedule.clone().generations(),
+                u64::from(generations),
+                "{population} × {generations}"
+            );
+            let (sizes, _) = steps(schedule);
+            assert!(sizes.iter().all(|&n| n == population));
+        }
+    }
+
+    #[test]
+    fn lshade_schedule_spends_the_budget_without_overshooting_it() {
+        for (population, generations) in [(4, 30), (5, 10), (6, 60), (20, 40), (50, 100), (9, 0)] {
+            let budget = (population * (generations as usize + 1)) as u64;
+            let schedule = Schedule::new(Variant::LShade, population, generations);
+            let count = schedule.clone().generations();
+            let (sizes, last) = steps(schedule);
+            let spent = (population + sizes.iter().sum::<usize>()) as u64;
+            let label = format!("{population} × {generations}: {sizes:?}");
+            assert_eq!(sizes.len() as u64, count, "{label}");
+            assert!(spent <= budget, "{label}");
+            assert!(budget - spent < last as u64, "{label}: {spent} of {budget}");
+            assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{label}");
+            assert!(sizes.iter().all(|&n| n >= MIN_POPULATION), "{label}");
+            assert!(count >= u64::from(generations), "{label}");
+        }
+    }
+
+    #[test]
+    fn lshade_schedule_with_five_members_drops_to_four_and_runs_longer() {
+        // Budget 55: 5 + 5 × 5 members, then 6 generations of 4; 54 spent.
+        let (sizes, last) = steps(Schedule::new(Variant::LShade, 5, 10));
+        assert_eq!(sizes, [vec![5; 5], vec![4; 6]].concat());
+        assert_eq!(last, 4);
+    }
+
+    #[test]
+    fn an_empty_schedule_ends_at_once() {
+        for variant in [Variant::Shade, Variant::LShade] {
+            assert_eq!(Schedule::new(variant, 0, 10).generations(), 0);
+            assert_eq!(Schedule::new(variant, 8, 0).generations(), 0);
+        }
     }
 
     #[test]

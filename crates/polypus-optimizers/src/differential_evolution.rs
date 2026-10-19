@@ -25,8 +25,10 @@ pub struct AlgorithmDifferentialEvolution;
 /// Every strategy takes the same [`AlgorithmDifferentialEvolutionArgs`] and
 /// shares the rest of the run: angles initialised in `[0, 2π)`, trial vectors
 /// wrapped back into it with `rem_euclid(2π)`, one oracle batch per
-/// generation, the fitness-stagnation early stop, and the postconditions of
-/// contract C-5. The strategies differ in mutation and parameter control:
+/// generation, the evaluation budget `population_size × (generations + 1)`
+/// (the initial population plus `generations` full generations), the
+/// fitness-stagnation early stop, and the postconditions of contract C-5. The
+/// strategies differ in mutation and parameter control:
 ///
 /// - [`Rand1Bin`](Self::Rand1Bin), the default: DE/rand/1/bin with fixed
 ///   `F = 0.8` and `CR = 0.7`.
@@ -35,12 +37,15 @@ pub struct AlgorithmDifferentialEvolution;
 ///   and `CR` drawn per individual from a memory of the values that produced
 ///   improvements.
 /// - [`LShade`](Self::LShade): L-SHADE (Tanabe & Fukunaga, CEC 2014): SHADE
-///   plus a population that shrinks linearly towards 4 members over a budget
-///   of `population_size × (generations + 1)` evaluations, the most
-///   `Rand1Bin` can spend. Each generation is still one batch and the run
-///   still stops after `generations` generations, so once the population
-///   shrinks the batches get smaller and the run ends before spending the
-///   whole budget.
+///   plus a population that shrinks after every generation, linearly in the
+///   evaluations spent, from `population_size` to 4 as the budget runs out.
+///   For L-SHADE `generations` therefore sets the evaluation budget rather
+///   than the number of generations: it spends the budget in more, smaller
+///   batches, stopping when the next would not fit.
+///   [`max_generations`](Self::max_generations) says how many.
+///
+/// `Rand1Bin` and `Shade` keep their population, so they run exactly
+/// `generations` generations unless they stop early.
 ///
 /// The names `polypus.DE(strategy=...)` accepts are [`as_str`](Self::as_str)
 /// and parse back with [`FromStr`]:
@@ -71,6 +76,39 @@ impl DeStrategy {
             DeStrategy::Rand1Bin => "rand1bin",
             DeStrategy::Shade => "shade",
             DeStrategy::LShade => "lshade",
+        }
+    }
+
+    /// How many generations, one oracle batch each after the initial
+    /// population's, a run with these arguments makes unless the
+    /// fitness-stagnation stop ends it sooner.
+    ///
+    /// For [`Rand1Bin`](Self::Rand1Bin) and [`Shade`](Self::Shade) that is
+    /// `generations`. [`LShade`](Self::LShade) spends the same budget,
+    /// `population_size × (generations + 1)` evaluations, with a shrinking
+    /// population, so it runs more generations. Its schedule depends on these
+    /// two numbers alone, never on fitness, and this counts it by stepping the
+    /// same schedule the optimizer follows, so the two cannot disagree. A
+    /// `population_size` below 4, which every strategy rejects, gives a
+    /// meaningless count.
+    ///
+    /// ```
+    /// use polypus_optimizers::DeStrategy;
+    ///
+    /// assert_eq!(DeStrategy::Shade.max_generations(50, 100), 100);
+    /// assert!(DeStrategy::LShade.max_generations(50, 100) > 100);
+    /// // Four members cannot shrink, so they run the plain 100 generations.
+    /// assert_eq!(DeStrategy::LShade.max_generations(4, 100), 100);
+    /// ```
+    pub fn max_generations(self, population_size: u32, generations: u32) -> u64 {
+        match self {
+            DeStrategy::Rand1Bin | DeStrategy::Shade => u64::from(generations),
+            DeStrategy::LShade => shade::Schedule::new(
+                shade::Variant::LShade,
+                population_size as usize,
+                generations,
+            )
+            .generations(),
         }
     }
 }
@@ -113,6 +151,10 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
     pub population_size: u32,
+    /// Generations to run, one oracle batch each after the initial
+    /// population's: the evaluation budget is `population_size ×
+    /// (generations + 1)`. [`DeStrategy::LShade`] spends that budget in more,
+    /// smaller generations (see [`DeStrategy::max_generations`]).
     pub generations: u32,
     pub dimensions: u32,
     /// Minimum cumulative improvement of the **best fitness** over the last
@@ -153,10 +195,10 @@ impl AlgorithmDifferentialEvolution {
     ///
     /// [`DeStrategy::Rand1Bin`] is exactly [`Optimizer::optimize`]: the same
     /// code, RNG draws and outcome for a given seed. [`DeStrategy::Shade`] and
-    /// [`DeStrategy::LShade`] take the same arguments with the same meaning and
-    /// return the same errors (a `population_size` below 4, an oracle that
-    /// returns the wrong number of values); see [`DeStrategy`] for what they
-    /// change.
+    /// [`DeStrategy::LShade`] take the same arguments and return the same
+    /// errors (a `population_size` below 4, an oracle that returns the wrong
+    /// number of values); see [`DeStrategy`] for what they change, including
+    /// L-SHADE's use of `generations` as an evaluation budget.
     ///
     /// ```
     /// use polypus_optimizers::{

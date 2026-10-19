@@ -201,17 +201,20 @@ fn batch_sizes(
 }
 
 /// The L-SHADE schedule as documented, computed independently of the crate:
-/// after each generation the size is `round(N + (4 - N) · evaluations /
-/// (N · (generations + 1)))`, floored at 4, and the population never grows.
+/// the budget is `N · (generations + 1)` evaluations, the initial population's
+/// included; a generation runs while its whole batch fits in what is left, and
+/// after each one the size becomes `round(N + (4 - N) · evaluations /
+/// budget)`, floored at 4, never growing. Returns every batch's size, the
+/// initial population's first.
 fn documented_lshade_sizes(population_size: usize, generations: usize) -> Vec<usize> {
-    let budget = (population_size * (generations + 1)) as f64;
+    let budget = population_size * (generations + 1);
     let mut sizes = vec![population_size];
     let mut current = population_size;
     let mut evaluations = population_size;
-    for _ in 0..generations {
+    while evaluations + current <= budget {
         sizes.push(current);
         evaluations += current;
-        let spent = evaluations as f64 / budget;
+        let spent = evaluations as f64 / budget as f64;
         let target =
             (population_size as f64 + (4.0 - population_size as f64) * spent).round() as usize;
         current = current.min(target.max(4));
@@ -525,7 +528,8 @@ fn adaptive_strategies_early_stop_on_fitness_stagnation() {
         .expect("valid arguments optimize successfully");
         assert!(outcome.converged, "{strategy}: expected a stagnation stop");
         assert!(
-            outcome.iterations_run > patience as usize && outcome.iterations_run < 500,
+            outcome.iterations_run > patience as usize
+                && (outcome.iterations_run as u64) < strategy.max_generations(30, 500),
             "{strategy}: iterations_run = {}",
             outcome.iterations_run
         );
@@ -544,45 +548,78 @@ fn adaptive_strategies_large_patience_never_stops_early() {
             },
         )
         .expect("valid arguments optimize successfully");
+        let expected = strategy.max_generations(30, 50) as usize;
         assert!(!outcome.converged, "{strategy}");
-        assert_eq!(outcome.iterations_run, 50, "{strategy}");
-        assert_eq!(outcome.fitness_history.len(), 50, "{strategy}");
+        assert_eq!(outcome.iterations_run, expected, "{strategy}");
+        assert_eq!(outcome.fitness_history.len(), expected, "{strategy}");
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Population size: SHADE keeps it, L-SHADE shrinks it linearly towards 4
+// Population size and budget: SHADE keeps its population for `generations`
+// generations; L-SHADE shrinks it towards 4 and spends the same evaluation
+// budget in more generations
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Patience longer than any run below, so none stops early.
+const NO_EARLY_STOP: u32 = 1_000_000;
 
 #[test]
 fn shade_and_rand1bin_keep_the_population_size() {
     for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade] {
-        let (outcome, sizes) = batch_sizes(strategy, 12, 25, 1_000);
+        let (outcome, sizes) = batch_sizes(strategy, 12, 25, NO_EARLY_STOP);
+        assert_eq!(outcome.iterations_run, 25, "{strategy}");
+        assert_eq!(strategy.max_generations(12, 25), 25, "{strategy}");
         assert_eq!(sizes.len(), outcome.iterations_run + 1, "{strategy}");
         assert!(sizes.iter().all(|&n| n == 12), "{strategy}: {sizes:?}");
     }
 }
 
 #[test]
-fn lshade_shrinks_the_population_linearly() {
-    let (population_size, generations) = (20, 40);
-    let (outcome, sizes) = batch_sizes(DeStrategy::LShade, 20, 40, 1_000);
-    assert_eq!(outcome.iterations_run, generations);
-    // One batch per generation plus the initial population's, as for every
-    // strategy: the batches shrink, their number does not.
-    assert_eq!(sizes.len(), generations + 1);
-    assert_eq!(sizes, documented_lshade_sizes(population_size, generations));
-    assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{sizes:?}");
-    assert!(*sizes.last().unwrap() < population_size, "{sizes:?}");
-    // Never more than DE/rand/1/bin's budget.
-    assert!(sizes.iter().sum::<usize>() <= population_size * (generations + 1));
+fn lshade_spends_the_budget_in_more_and_smaller_generations() {
+    for (population_size, generations) in [(20, 40), (30, 49), (50, 100), (12, 3), (6, 60)] {
+        let label = format!("{population_size} × {generations}");
+        let budget = population_size * (generations + 1);
+        let (outcome, sizes) = batch_sizes(
+            DeStrategy::LShade,
+            population_size as u32,
+            generations as u32,
+            NO_EARLY_STOP,
+        );
+        assert_eq!(
+            sizes,
+            documented_lshade_sizes(population_size, generations),
+            "{label}"
+        );
+        // One batch per generation after the initial population's, and exactly
+        // as many generations as `max_generations` (the walltime projection's
+        // count) says.
+        assert_eq!(sizes.len(), outcome.iterations_run + 1, "{label}");
+        assert_eq!(
+            outcome.iterations_run as u64,
+            DeStrategy::LShade.max_generations(population_size as u32, generations as u32),
+            "{label}"
+        );
+        assert!(outcome.iterations_run > generations, "{label}");
+        assert!(!outcome.converged, "{label}");
+        assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{label}: {sizes:?}");
+        assert!(sizes.iter().all(|&n| n >= 4), "{label}: {sizes:?}");
+        // Never past DE/rand/1/bin's budget, and short of it by less than one
+        // final population.
+        let spent: usize = sizes.iter().sum();
+        assert!(spent <= budget, "{label}: {spent} of {budget}");
+        assert!(
+            budget - spent < *sizes.last().unwrap(),
+            "{label}: {spent} of {budget}, {sizes:?}"
+        );
+    }
 }
 
 #[test]
 fn lshade_bottoms_out_at_four() {
-    // With 6 members over 60 generations the schedule reaches 4 well before the
-    // end, and stays there.
-    let (_, sizes) = batch_sizes(DeStrategy::LShade, 6, 60, 1_000);
+    // With 6 members the schedule reaches 4 long before the budget runs out,
+    // and stays there.
+    let (_, sizes) = batch_sizes(DeStrategy::LShade, 6, 60, NO_EARLY_STOP);
     assert_eq!(sizes, documented_lshade_sizes(6, 60));
     assert_eq!(*sizes.last().unwrap(), 4);
     assert!(sizes.iter().all(|&n| n >= 4), "{sizes:?}");
@@ -590,8 +627,30 @@ fn lshade_bottoms_out_at_four() {
 
 #[test]
 fn lshade_with_the_minimum_population_never_shrinks() {
-    let (_, sizes) = batch_sizes(DeStrategy::LShade, 4, 30, 1_000);
+    // Four members cannot shrink: `generations` generations spend the budget
+    // exactly, as for the other strategies.
+    let (outcome, sizes) = batch_sizes(DeStrategy::LShade, 4, 30, NO_EARLY_STOP);
     assert_eq!(sizes, vec![4; 31]);
+    assert_eq!(outcome.iterations_run, 30);
+    assert_eq!(DeStrategy::LShade.max_generations(4, 30), 30);
+}
+
+#[test]
+fn lshade_with_five_members_drops_to_four_and_runs_longer() {
+    // Budget 5 × 11 = 55: the initial 5, five generations of 5, then six of 4
+    // (54 spent); a seventh of 4 would overshoot.
+    let (outcome, sizes) = batch_sizes(DeStrategy::LShade, 5, 10, NO_EARLY_STOP);
+    assert_eq!(sizes, [vec![5; 6], vec![4; 6]].concat());
+    assert_eq!(outcome.iterations_run, 11);
+    assert_eq!(DeStrategy::LShade.max_generations(5, 10), 11);
+}
+
+#[test]
+fn lshade_with_zero_generations_scores_only_the_initial_population() {
+    let (outcome, sizes) = batch_sizes(DeStrategy::LShade, 9, 0, NO_EARLY_STOP);
+    assert_eq!(sizes, vec![9]);
+    assert_eq!(outcome.iterations_run, 0);
+    assert_eq!(DeStrategy::LShade.max_generations(9, 0), 0);
 }
 
 #[test]
@@ -650,7 +709,11 @@ fn adaptive_strategies_handle_zero_dimensions() {
         )
         .expect("valid arguments optimize successfully");
         assert!(outcome.best_params.is_empty(), "{strategy}");
-        assert_eq!(outcome.iterations_run, 5, "{strategy}");
+        assert_eq!(
+            outcome.iterations_run as u64,
+            strategy.max_generations(10, 5),
+            "{strategy}"
+        );
     }
 }
 
@@ -687,7 +750,11 @@ fn adaptive_strategies_survive_non_finite_fitness() {
             let outcome = run(strategy, args(Box::new(NonFiniteOracle), 12, 30, 2, seed))
                 .expect("valid arguments optimize successfully");
             assert_eq!(outcome.best_params.len(), 2, "{strategy}");
-            assert_eq!(outcome.iterations_run, 30, "{strategy}");
+            assert_eq!(
+                outcome.iterations_run as u64,
+                strategy.max_generations(12, 30),
+                "{strategy}"
+            );
         }
     }
 }

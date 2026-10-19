@@ -31,8 +31,12 @@ Changes on `main` since 0.7.2.
   `Display` in Rust. No new dependencies.
 - Adaptive Differential Evolution: `polypus.DE(strategy="shade")` (SHADE) and
   `strategy="lshade"` (L-SHADE, whose population shrinks linearly towards 4).
-  The default, `strategy="rand1bin"`, is the classic DE, unchanged; an unknown
-  name raises `ValueError`. In Rust, `DeStrategy` and
+  For `"lshade"`, `generations` sets the evaluation budget, `population_size ×
+  (generations + 1)` as for the classic DE, and the run spends it in more,
+  smaller generations: more sequential rounds on several QPUs, where
+  `"shade"` suits better. The default, `strategy="rand1bin"`, is the classic
+  DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
+  (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
 
 ### Changed

@@ -737,20 +737,26 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     their parent. As in the paper, a trial replaces its parent when it is at
     least as fit; `"rand1bin"` needs it strictly fitter.
   - `"lshade"` is L-SHADE (CEC 2014): SHADE with its memory rules, plus a
-    population that shrinks after every generation along a straight line from
-    `population_size` to 4 over `population_size × (generations + 1)`
-    evaluations, the budget of a fixed population. The best members survive
-    and the archive shrinks with the population. Generations get cheaper as it
-    shrinks, so a run of `generations` generations ends without spending that
-    budget; with the defaults, its last generation evaluates 20 members of 50.
+    population that shrinks after every generation, linearly in the
+    evaluations spent, from `population_size` to 4 when the evaluation budget
+    `population_size × (generations + 1)` runs out. The best members survive
+    and the archive shrinks with the population. For L-SHADE, `generations`
+    sets that budget, which is also `"rand1bin"`'s maximum, not the number of
+    generations: the run goes on in more, smaller batches until the next
+    generation would overshoot the budget, so it never exceeds the budget and
+    stops less than one final population short of it (with the defaults, 275
+    generations and 5048 of 5050 evaluations). The schedule depends only on
+    `population_size` and `generations`: `DeStrategy::max_generations` counts
+    it by stepping the schedule the optimizer follows, and the walltime
+    projection (`run_shape`) uses that count.
   - The adaptive strategies share with `"rand1bin"` the initial population
     (the same draws from the same seed), the wrapping of mutated angles into
     `[0, 2π)` (`rem_euclid`: the parameters are periodic), one oracle batch per
-    generation after the initial one, its length checked, at most
-    `generations` generations, the stagnation stop above and every
-    postcondition of this contract. Only L-SHADE's batches shrink, not their
-    number, so the walltime projection (`run_shape`) holds for every
-    strategy.
+    generation after the initial one, its length checked, the evaluation
+    budget, the stagnation stop above (`patience` counts generations for
+    L-SHADE too) and every postcondition of this contract. `"rand1bin"` and
+    `"shade"` run at most `generations` generations, `"lshade"` at most
+    `DeStrategy::max_generations`.
 - **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
   the best fitness at the end of each executed generation/iteration, so
   `fitness_history.len() == iterations_run` and `fitness_history.last()`
@@ -774,9 +780,12 @@ The DE strategies have their own suite,
 outcome (`rand1bin_default_matches_its_pinned_outcome`), the multi-seed
 invariant (`adaptive_strategies_best_params_fitness_invariant_holds_across_seeds`),
 the stagnation stop, length errors (one on a shrunken L-SHADE batch), the
-L-SHADE schedule and the population edge cases. In `polypus-orchestration`,
-`de_strategy_reaches_the_optimizer` and `run_shape_follows_the_optimizer_call_pattern`
-check the wiring and the batch count per strategy;
+L-SHADE schedule and budget
+(`lshade_spends_the_budget_in_more_and_smaller_generations`) and the
+population edge cases. In `polypus-orchestration`,
+`de_strategy_reaches_the_optimizer` checks the wiring and
+`de_run_shape_counts_the_batches_the_optimizer_sends` that the walltime
+projection counts exactly the batches each strategy sends;
 `tests/python/test_de_strategy.py` checks the `ValueError` and the batches
 each strategy sends, `test_seed_reproducibility.py` the seeded runs, and
 `test_oracle_contract.py` runs with every strategy.

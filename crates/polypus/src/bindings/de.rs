@@ -64,7 +64,9 @@ impl DE {
     /// How trial vectors are built: `"rand1bin"` (the default; DE/rand/1/bin
     /// with fixed `F = 0.8`, `CR = 0.7`), `"shade"` (SHADE: current-to-pbest/1
     /// with `F` and `CR` adapted from a success history) or `"lshade"`
-    /// (L-SHADE: SHADE with a population that shrinks linearly towards 4).
+    /// (L-SHADE: SHADE with a population that shrinks linearly towards 4; it
+    /// takes `generations` as an evaluation budget, `population_size ×
+    /// (generations + 1)`, and spends it in more, smaller generations).
     #[getter]
     fn strategy(&self) -> &'static str {
         self.strategy.as_str()
