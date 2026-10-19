@@ -796,6 +796,23 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     calls produce **independent** noise (never the run-`id`-derived
     repetition that motivated this contract). The run `id` is decoupled from
     the RNG — it is only a logging/temp-file/SLURM label.
+  - **Per-circuit seeds (native backend).** A native backend seeded with `s`
+    numbers the circuits it runs `0, 1, 2, ...` (a global counter across the
+    batches it executes, reserved as one contiguous block per batch) and seeds
+    circuit `k` with `circuit_seed(s, k)`: output `k` of a SplitMix64 stream
+    whose state starts at SplitMix64-mixed `s`
+    (`crates/polypus-infrastructure/src/native.rs`). Distinct circuits in a
+    batch and distinct base seeds therefore get unrelated streams; in
+    particular circuit `k` of seed `s` is not circuit `k-1` of seed `s+1`, so
+    repetitions with seeds `0, 1, 2, ...` are independent. The seed of a
+    circuit depends only on `(s, k)`, never on chunking, the memory cap or
+    gate-vs-circuit parallelism. Shot splitting across `n_qpus` replicas
+    gives replica `i` seed index `i` of the batch, so the single-evolution fast
+    path reproduces the per-replica counts of running the replicas one by
+    one. Until #348 the seed was `s + k`, which made neighbouring base seeds
+    share streams shifted by one circuit; counts for a fixed seed changed when
+    that was fixed. Aer receives the base seed unchanged, and CUNQA keeps its
+    per-QPU offset below.
   - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
     the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a

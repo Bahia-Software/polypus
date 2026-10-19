@@ -28,6 +28,12 @@ Changes on `main` since 0.7.2.
   `Display` in Rust. No new dependencies.
 
 ### Changed
+- **BREAKING:** the native backend derives each circuit's seed from the base
+  seed and the circuit's index with SplitMix64 instead of `seed + index`, so
+  neighbouring seeds no longer share streams shifted by one circuit (circuit
+  `k` of seed `s` equalled circuit `k-1` of seed `s+1`). The same seed and batch
+  still reproduce bit-for-bit (C-7), but counts and `backend="polypus"`
+  training trajectories for a fixed seed differ from earlier releases (#348).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates
