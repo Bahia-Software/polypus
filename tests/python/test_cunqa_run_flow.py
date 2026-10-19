@@ -181,8 +181,8 @@ def test_train_runs_each_wave_on_the_family(monkeypatch):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="#357 finding: an uneven shot split runs one run_qcs call per batch "
-    "size, so QPU indices and seed offsets restart at 0 for each call",
+    reason="#370: an uneven shot split runs one run_qcs call per batch size, "
+    "so QPU indices and seed offsets restart at 0 for each call",
 )
 def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch):
     fake = FakeCunqa()

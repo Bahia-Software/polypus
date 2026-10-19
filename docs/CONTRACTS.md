@@ -825,8 +825,8 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     sent to QPU `i` of a `run_qcs` call runs with `seed + i`, masked to 63
     bits. An uneven shot split (`shots` not a multiple of `n_qpus`) makes one
     `run_qcs` call per batch size, and the offset restarts at 0 in each call,
-    so two replicas can share QPU 0 and its seed (pinned as an expected failure
-    in `test_cunqa_run_flow.py`). **This path is verified against a fake CUNQA
+    so two replicas can share QPU 0 and its seed (#370; pinned as an expected
+    failure in `test_cunqa_run_flow.py`). **This path is verified against a fake CUNQA
     only**: `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts
     shape and reproducibility end to end, but has never run against a real
     CUNQA; `tests/python/test_cunqa_real.py` does, on demand (#357).
