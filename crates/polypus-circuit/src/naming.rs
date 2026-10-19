@@ -8,8 +8,8 @@
 //! qubit argument or register, `c` for a bit register) is prefixed if the
 //! result cannot start an identifier; `_` is appended to a reserved word; and
 //! `_1`, `_2`, … is appended until the name is unused. In OpenQASM 3, a name
-//! longer than the importer's `MAX_TOKEN_BYTES` (4096 bytes; only an
-//! OpenQASM 2.0 import has such names) is renamed too, cut to its first
+//! longer than the importers' `MAX_TOKEN_BYTES` (4096 bytes; neither importer
+//! reads one, so this is a safeguard) is renamed too, cut to its first
 //! 4075 bytes, so that any suffix still fits. The names that can be kept are
 //! claimed before any is renamed, so a renamed name never takes one that was
 //! valid and unique already, and no two names in a scope collide.
@@ -20,9 +20,8 @@
 
 use crate::custom_gate::GateDefinition;
 use crate::expr::Dialect;
-use crate::qasm3_import::{
-    is_ident_continue, is_ident_start, is_reserved, MAX_TOKEN_BYTES, STDGATES,
-};
+use crate::limits::MAX_TOKEN_BYTES;
+use crate::qasm3_import::{is_ident_continue, is_ident_start, is_reserved, STDGATES};
 use crate::qasm_import::builtin_gate;
 use std::collections::{HashMap, HashSet};
 

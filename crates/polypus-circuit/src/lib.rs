@@ -42,6 +42,7 @@ pub mod draw;
 mod error;
 pub mod expr;
 mod gate;
+mod limits;
 mod naming;
 mod qasm;
 mod qasm3;

@@ -33,12 +33,13 @@ use crate::expr::{
     fmt_number, print, printed_len, Dialect, ExprArena, Unprintable, MAX_EXPR_NODES,
 };
 use crate::gate::{GateInstruction, GateParam};
-use crate::naming::{fresh, DefinitionNames};
-use crate::qasm3_import::{
-    parse_qasm3, MAX_DECLARATIONS, MAX_INPUTS, MAX_INSTRUCTIONS, MAX_PROGRAM_NODES,
-    MAX_SOURCE_BYTES,
+use crate::limits::{
+    MAX_BARRIER_OPERANDS, MAX_DECLARATIONS, MAX_INSTRUCTIONS, MAX_PROGRAM_NODES, MAX_REGISTER_BITS,
+    MAX_SOURCE_BYTES, MAX_VALIDATED_EXPANSION,
 };
-use crate::qasm_import::{normalize, MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION};
+use crate::naming::{fresh, DefinitionNames};
+use crate::qasm3_import::{parse_qasm3, MAX_INPUTS};
+use crate::qasm_import::normalized;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::OnceLock;
@@ -419,6 +420,7 @@ struct Spent {
     instructions: usize,
     nodes: usize,
     expansion: usize,
+    barrier_operands: usize,
 }
 
 fn over(limit: &'static str, max: usize) -> CircuitError {
@@ -432,6 +434,15 @@ impl Spent {
         self.instructions = self.instructions.saturating_add(n);
         if self.instructions > MAX_INSTRUCTIONS {
             return Err(over("MAX_INSTRUCTIONS", MAX_INSTRUCTIONS));
+        }
+        Ok(())
+    }
+
+    /// A barrier the importer reads as listing `n` qubits.
+    fn barrier(&mut self, n: usize) -> Result<(), CircuitError> {
+        self.barrier_operands = self.barrier_operands.saturating_add(n);
+        if self.barrier_operands > MAX_BARRIER_OPERANDS {
+            return Err(over("MAX_BARRIER_OPERANDS", MAX_BARRIER_OPERANDS));
         }
         Ok(())
     }
@@ -525,12 +536,12 @@ pub(crate) fn write_qasm3(
             .get(&(definition as *const GateDefinition))
             .map_or(0, |size| size.expansion)
     };
-    for gate in normalize(gates, num_qubits) {
-        spent.instructions(match gate {
+    for gate in normalized(gates, num_qubits) {
+        spent.instructions(match *gate {
             GateInstruction::MeasureAll => num_qubits,
             _ => 1,
         })?;
-        match &gate {
+        match &*gate {
             GateInstruction::Custom(call) => spent.call(expansion(call.definition()))?,
             other => {
                 if let Some(Spelling::Defined(helper)) = spelling(other) {
@@ -641,6 +652,12 @@ fn write_statement(
     };
     let (name, params, qubits): (&str, Vec<&GateParam>, Vec<usize>) = match gate {
         GateInstruction::Barrier(qubits) => {
+            // `barrier q;` lists every qubit, as the importer counts it.
+            spent.barrier(if qubits.is_empty() {
+                num_qubits
+            } else {
+                qubits.len()
+            })?;
             if qubits.is_empty() {
                 if num_qubits > 0 {
                     let _ = writeln!(out, "barrier {q};");

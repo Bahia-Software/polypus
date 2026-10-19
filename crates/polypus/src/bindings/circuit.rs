@@ -1040,6 +1040,9 @@ impl Circuit {
 /// * `swaps` — include the qubit-reversal swaps (default `True`); set
 ///   `False` when the surrounding circuit already handles bit order.
 ///
+/// Raises `ValueError` above 2827 qubits: the gate count grows quadratically,
+/// and 2827 is the largest QFT the OpenQASM importers read back.
+///
 /// ```python
 /// import polypus
 /// qft = polypus.circuits.templates.qft(4)
@@ -1049,8 +1052,9 @@ impl Circuit {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (num_qubits, inverse = false, swaps = true))]
-pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> Circuit {
-    Circuit {
-        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps),
-    }
+pub fn qft(num_qubits: usize, inverse: bool, swaps: bool) -> PyResult<Circuit> {
+    Ok(Circuit {
+        inner: polypus_circuit::templates::qft_with_options(num_qubits, inverse, swaps)
+            .map_err(to_py_err)?,
+    })
 }
