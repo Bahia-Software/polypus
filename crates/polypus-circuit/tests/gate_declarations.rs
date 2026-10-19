@@ -557,9 +557,12 @@ fn calls_take_free_parameters_and_expressions() {
 
     let qasm = qc.to_qasm2_with_params(&values).unwrap();
     assert!(qasm.contains("g(0.5,0.5) q[1],q[0];"), "{qasm}");
-    assert_eq!(qasm, bound.to_qasm2());
+    assert_eq!(qasm, bound.try_to_qasm2().unwrap());
     assert_eq!(parse(&qasm).to_qasm2_with_params(&[]).unwrap(), qasm);
-    assert_eq!(qc.to_qir_with_params(&values).unwrap(), bound.to_qir());
+    assert_eq!(
+        qc.to_qir_with_params(&values).unwrap(),
+        bound.try_to_qir().unwrap()
+    );
 }
 
 /// The body is checked for the values a call is bound to, through every

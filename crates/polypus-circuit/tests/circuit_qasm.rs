@@ -140,7 +140,7 @@ fn assign_parameters_reuses_same_param_index() {
         .assign_parameters(&[0.7])
         .unwrap();
 
-    let qasm = bound.to_qasm2();
+    let qasm = bound.try_to_qasm2().unwrap();
     assert!(qasm.contains("rzz(0.7) q[0],q[1];"));
     assert_eq!(qasm.matches("0.7").count(), 3);
 }
@@ -154,7 +154,11 @@ fn to_qasm2_with_params_matches_assign_then_serialize() {
         .measure_all();
 
     let direct = qc.to_qasm2_with_params(&[0.3, 0.9]).unwrap();
-    let two_step = qc.assign_parameters(&[0.3, 0.9]).unwrap().to_qasm2();
+    let two_step = qc
+        .assign_parameters(&[0.3, 0.9])
+        .unwrap()
+        .try_to_qasm2()
+        .unwrap();
     assert_eq!(direct, two_step);
 }
 
@@ -282,6 +286,7 @@ fn num_clbits_reflects_measurements() {
 
 #[test]
 #[should_panic(expected = "unbound Param")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_panics_on_unbound_param() {
     let qc = ConcreteCircuit::new_unchecked(
         1,
@@ -295,6 +300,7 @@ fn concrete_circuit_panics_on_unbound_param() {
 
 #[test]
 #[should_panic(expected = "non-finite")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // exporter still refuses a non-finite fixed angle rather than serialising it.

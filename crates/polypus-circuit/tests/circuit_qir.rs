@@ -306,17 +306,45 @@ fn declarations_are_emitted_once_and_sorted() {
     );
 }
 
-/// Concrete circuits expose `to_qir()` directly (no params), mirroring
-/// `to_qasm2()`.
+/// Concrete circuits expose `try_to_qir()` directly (no params), mirroring
+/// `try_to_qasm2()`; the deprecated `to_qir()` returns the same module.
 #[test]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_to_qir_matches_parameterized() {
     let pc = ParameterizedCircuit::new(1).rx(0, 0.5).measure(0, 0);
     let concrete = pc.assign_parameters(&[]).unwrap();
-    assert_eq!(concrete.to_qir(), pc.to_qir_with_params(&[]).unwrap());
+    let expected = pc.to_qir_with_params(&[]).unwrap();
+    assert_eq!(concrete.try_to_qir().unwrap(), expected);
+    assert_eq!(concrete.to_qir(), expected);
+}
+
+/// #350: the fallible export reports what the panicking one panics on.
+#[test]
+fn concrete_circuit_try_to_qir_returns_the_error() {
+    let after_measure = ConcreteCircuit::new_unchecked(
+        1,
+        vec![
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::X(0),
+        ],
+    );
+    assert_eq!(
+        after_measure.try_to_qir(),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+    let non_finite = ConcreteCircuit::new_unchecked(
+        1,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::NAN),
+        }],
+    );
+    assert_eq!(non_finite.try_to_qir(), Err(CircuitError::NonFiniteParam));
 }
 
 #[test]
 #[should_panic(expected = "non-finite")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_to_qir_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // QIR exporter still refuses a non-finite fixed angle rather than emitting it.
@@ -439,7 +467,14 @@ fn builder_qir_is_unchanged_by_the_classical_width() {
         "attributes #0 = { \"entry_point\" \"output_labeling_schema\" \"qir_profiles\"=\"base_profile\" \"required_num_qubits\"=\"3\" \"required_num_results\"=\"2\" }\nattributes #1 = { \"irreversible\" }\n",
     );
     assert_eq!(partial.to_qir_with_params(&[]).unwrap(), expected);
-    assert_eq!(partial.assign_parameters(&[]).unwrap().to_qir(), expected);
+    assert_eq!(
+        partial
+            .assign_parameters(&[])
+            .unwrap()
+            .try_to_qir()
+            .unwrap(),
+        expected
+    );
 
     let unmeasured = ParameterizedCircuit::new(2).h(0).cx(0, 1);
     let expected = qir_module(
@@ -449,7 +484,11 @@ fn builder_qir_is_unchanged_by_the_classical_width() {
     );
     assert_eq!(unmeasured.to_qir_with_params(&[]).unwrap(), expected);
     assert_eq!(
-        unmeasured.assign_parameters(&[]).unwrap().to_qir(),
+        unmeasured
+            .assign_parameters(&[])
+            .unwrap()
+            .try_to_qir()
+            .unwrap(),
         expected
     );
 
@@ -463,7 +502,7 @@ fn builder_qir_is_unchanged_by_the_classical_width() {
     ] {
         let ir = qc.to_qir_with_params(&[]).unwrap();
         assert!(ir.contains("\"required_num_results\"=\"2\" }\n"), "{ir}");
-        assert_eq!(ir, qc.assign_parameters(&[]).unwrap().to_qir());
+        assert_eq!(ir, qc.assign_parameters(&[]).unwrap().try_to_qir().unwrap());
     }
 }
 
@@ -484,7 +523,7 @@ fn qir_declares_the_imported_classical_width() {
         let qc = ParameterizedCircuit::from_qasm2(&format!("{header}{body}")).unwrap();
         for ir in [
             qc.to_qir_with_params(&[]).unwrap(),
-            qc.assign_parameters(&[]).unwrap().to_qir(),
+            qc.assign_parameters(&[]).unwrap().try_to_qir().unwrap(),
         ] {
             assert!(ir.contains("\"required_num_results\"=\"3\""), "{ir}");
             assert_eq!(ir.contains("__quantum__qis__mz__body"), measures, "{ir}");

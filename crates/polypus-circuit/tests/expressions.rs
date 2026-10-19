@@ -241,6 +241,7 @@ fn expressions_belong_to_their_circuit() {
 /// A bound circuit holds no expressions, so exporting one that still refers
 /// to an expression fails instead of emitting anything.
 #[test]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuits_hold_no_expressions() {
     let mut pc = ParameterizedCircuit::new(1);
     let angle = pc.add_expr(x(0) * x(0)).unwrap();
@@ -290,7 +291,7 @@ fn bound_exports_evaluate_expressions() {
 
     let qasm = qc.to_qasm2_with_params(&values).unwrap();
     assert_eq!(qasm, fixed.to_qasm2_with_params(&[]).unwrap());
-    assert_eq!(qasm, bound.to_qasm2());
+    assert_eq!(qasm, bound.try_to_qasm2().unwrap());
     // The export imports back to the bound circuit and is a fixed point.
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm);

@@ -2182,7 +2182,8 @@ mod tests {
             .measure_all()
             .assign_parameters(&[])
             .expect("no free parameters")
-            .to_qasm2()
+            .try_to_qasm2()
+            .unwrap()
     }
 
     /// Drive `run_quantum_circuit` on the native backend and return the effective

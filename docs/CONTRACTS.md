@@ -1149,8 +1149,8 @@ definition on one line (`gate name(a,b) x,y { h x; cx x,y; }`), with `log` as
 names renamed by the same scheme for OpenQASM 2.0's `[a-z][A-Za-z0-9_]*`
 (avoiding its keywords, the `qelib1.inc` gates, `q`, `c` and the names of
 OpenQASM 2.0 declarations, which keep theirs). A body using `arcsin`, `arccos`
-or `arctan` is `GateNotExpressible`, naming the gate (`ConcreteCircuit::to_qasm2`
-panics there; `try_to_qasm2` returns the error). The backends that submit
+or `arctan` is `GateNotExpressible`, naming the gate (`try_to_qasm2` returns
+the error; the deprecated `ConcreteCircuit::to_qasm2` panics there). The backends that submit
 OpenQASM 2.0 — Aer and CUNQA (through `polypus_python`), QMIO, the subprocess
 bridge — report such a circuit as unsupported (`polypus.NativeCircuitError` in
 Python), never a panic; the native backend expands the gate and runs it.

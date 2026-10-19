@@ -27,7 +27,14 @@ Changes on `main` since 0.7.2.
   `print(circuit)` and SVG display in Jupyter; `draw_text`/`draw_svg` and
   `Display` in Rust. No new dependencies.
 
+### Deprecated
+- Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
+  they cannot export; use `try_to_qasm2` and the new `try_to_qir`. No
+  internal caller uses the panicking exports any more (#350).
+
 ### Changed
+- **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
+  returns a `Result` instead of panicking on an unexportable circuit (#350).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates

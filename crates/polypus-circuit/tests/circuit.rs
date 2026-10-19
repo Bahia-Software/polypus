@@ -939,7 +939,7 @@ fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
 #[test]
 fn test_concrete_circuit_to_qasm2_basic() {
     let qc = ConcreteCircuit::new(2, vec![GateInstruction::H(0)]);
-    let qasm = qc.to_qasm2();
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -964,7 +964,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
             GateInstruction::MeasureAll,
         ],
     );
-    let qasm = qc.to_qasm2();
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -981,6 +981,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
 
 #[test]
 #[should_panic]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn test_concrete_circuit_to_qasm2_panics_on_param() {
     let qc = ConcreteCircuit::new(
         1,
@@ -1149,7 +1150,10 @@ fn test_qelib1_bound_circuit_matches_fixed_angle_circuit() {
         parameterised.to_qasm2_with_params(&values).unwrap(),
         fixed.to_qasm2_with_params(&[]).unwrap()
     );
-    assert_eq!(bound.to_qasm2(), fixed.to_qasm2_with_params(&[]).unwrap());
+    assert_eq!(
+        bound.try_to_qasm2().unwrap(),
+        fixed.to_qasm2_with_params(&[]).unwrap()
+    );
 }
 
 // Classical width
@@ -1253,7 +1257,10 @@ fn test_builder_exports_are_unchanged_by_the_classical_width() {
         let qasm2 = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n{qasm2}");
         let qasm3 = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n{qasm3}");
         assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), qasm2);
-        assert_eq!(qc.assign_parameters(&[]).unwrap().to_qasm2(), qasm2);
+        assert_eq!(
+            qc.assign_parameters(&[]).unwrap().try_to_qasm2().unwrap(),
+            qasm2
+        );
         assert_eq!(qc.to_qasm3().unwrap(), qasm3);
         assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), qasm3);
     }

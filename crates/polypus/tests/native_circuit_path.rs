@@ -41,7 +41,7 @@ fn native_bind_requires_no_python_interpreter() {
         // A native template binds to the native variant; serialising it to
         // OpenQASM 2.0 is pure Rust, so this still needs no interpreter.
         BoundCircuit::Native(circuit) => {
-            let qasm = circuit.to_qasm2();
+            let qasm = circuit.try_to_qasm2().unwrap();
             assert!(qasm.starts_with("OPENQASM 2.0;"));
             assert!(qasm.contains("rzz(0.4) q[0],q[1];"));
             assert!(qasm.contains("rx(0.8) q[3];"));
@@ -69,7 +69,7 @@ fn native_bind_is_threadsafe_without_gil() {
                     let BoundCircuit::Native(circuit) = bound else {
                         panic!("expected native circuit");
                     };
-                    assert!(circuit.to_qasm2().starts_with("OPENQASM 2.0;"));
+                    assert!(circuit.try_to_qasm2().unwrap().starts_with("OPENQASM 2.0;"));
                 }
             })
         })

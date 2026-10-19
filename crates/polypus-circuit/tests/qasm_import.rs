@@ -844,7 +844,7 @@ fn the_export_keeps_the_declared_width() {
         let out = qc.to_qasm2_with_params(&[]).unwrap();
         assert_eq!(out, format!("{HEADER}{exported}"), "{body:?}");
         let bound = qc.assign_parameters(&[]).unwrap();
-        assert_eq!(bound.to_qasm2(), out, "{body:?}");
+        assert_eq!(bound.try_to_qasm2().unwrap(), out, "{body:?}");
         assert_eq!(bound.clbits_width(), 3, "{body:?}");
         let again = ParameterizedCircuit::from_qasm2(&out).unwrap();
         assert_eq!(again.to_qasm2_with_params(&[]).unwrap(), out, "{body:?}");

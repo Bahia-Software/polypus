@@ -103,8 +103,9 @@ impl BoundCircuit {
     /// - [`Qasm2`](Self::Qasm2) is parsed back to a
     ///   [`ConcreteCircuit`], transpiled, and
     ///   re-emitted as OpenQASM 2.0. This is *best-effort*: if the QASM cannot be
-    ///   parsed (an unsupported construct, a non-native program), the original
-    ///   text is returned untouched rather than panicking.
+    ///   parsed (an unsupported construct, a non-native program) or the
+    ///   transpiled circuit cannot be re-emitted, the original text is returned
+    ///   untouched rather than panicking.
     /// - [`Foreign`](Self::Foreign) is returned as-is: a provider transpiles its
     ///   own object internally, and rewriting one here would require reading its
     ///   gates through the provider SDK, crossing the deliberate native/foreign
@@ -126,9 +127,11 @@ impl BoundCircuit {
             BoundCircuit::Qasm2(qasm) => {
                 match polypus_circuit::ParameterizedCircuit::from_qasm2(qasm)
                     .and_then(|pc| pc.assign_parameters(&[]))
+                    .and_then(|cc| transpiler.transpile(&cc, opts).try_to_qasm2())
                 {
-                    Ok(cc) => BoundCircuit::Qasm2(transpiler.transpile(&cc, opts).to_qasm2()),
-                    // Unparseable QASM is left intact (best-effort, no new panic).
+                    Ok(transpiled) => BoundCircuit::Qasm2(transpiled),
+                    // QASM that cannot be parsed, or whose transpiled circuit
+                    // cannot be re-emitted, is left intact (best-effort, no panic).
                     Err(_) => BoundCircuit::Qasm2(qasm.clone()),
                 }
             }
@@ -190,7 +193,8 @@ mod tests {
                 .measure_all()
                 .assign_parameters(&[])
                 .unwrap()
-                .to_qasm2(),
+                .try_to_qasm2()
+                .unwrap(),
         );
         assert_eq!(qasm.native_qubit_width(), Some(3));
 
@@ -237,5 +241,30 @@ mod tests {
         let foreign = BoundCircuit::Foreign(Box::new(DummyForeign(2)))
             .transpiled(&IdentityTranspiler, &TranspileOptions::default());
         assert!(foreign.is_foreign());
+    }
+
+    /// #350: a transpiler whose output cannot be re-emitted as OpenQASM 2.0
+    /// leaves the program untouched instead of panicking in the export.
+    #[test]
+    fn unexportable_transpiled_qasm2_is_returned_untouched() {
+        struct NonFinite;
+        impl Transpiler for NonFinite {
+            fn transpile(&self, _: &ConcreteCircuit, _: &TranspileOptions) -> ConcreteCircuit {
+                ConcreteCircuit::new_unchecked(
+                    1,
+                    vec![polypus_circuit::GateInstruction::Rx {
+                        qubit: 0,
+                        theta: polypus_circuit::GateParam::Fixed(f64::NAN),
+                    }],
+                )
+            }
+        }
+        let original = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nh q[0];\n";
+        match BoundCircuit::Qasm2(original.to_string())
+            .transpiled(&NonFinite, &TranspileOptions::default())
+        {
+            BoundCircuit::Qasm2(text) => assert_eq!(text, original),
+            _ => panic!("expected the original Qasm2 variant"),
+        }
     }
 }

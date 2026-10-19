@@ -385,7 +385,9 @@ fn c2_multi_qubit_gates_emitted_qir_matches_the_native_gate() {
         G::C4x(1, 4, 0, 3, 2),
     ];
     for gate in vocabulary {
-        let ir = ConcreteCircuit::new(5, vec![gate.clone()]).to_qir();
+        let ir = ConcreteCircuit::new(5, vec![gate.clone()])
+            .try_to_qir()
+            .unwrap();
         let lowered = qir_to_gates(&ir);
         assert_equiv_up_to_global_phase(5, std::slice::from_ref(&gate), &lowered);
     }
@@ -545,7 +547,9 @@ fn c2_every_gate_emitted_qir_matches_the_native_gate() {
         declared_gate_call(),
     ];
     for gate in vocabulary {
-        let ir = ConcreteCircuit::new(3, vec![gate.clone()]).to_qir();
+        let ir = ConcreteCircuit::new(3, vec![gate.clone()])
+            .try_to_qir()
+            .unwrap();
         let lowered = qir_to_gates(&ir);
         assert_equiv_up_to_global_phase(3, std::slice::from_ref(&gate), &lowered);
     }

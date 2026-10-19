@@ -336,7 +336,7 @@ mod tests {
             .unwrap();
         let batch = vec![
             BoundCircuit::Native(small),
-            BoundCircuit::Qasm2(big.to_qasm2()),
+            BoundCircuit::Qasm2(big.try_to_qasm2().unwrap()),
         ];
         Python::attach(|py| {
             assert_eq!(widest_qubits(&batch, py), 7);

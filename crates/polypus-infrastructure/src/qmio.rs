@@ -412,9 +412,11 @@ impl QmioBackend {
     fn serialize_program(&self, circuit: &BoundCircuit) -> Result<ProgramPayload, QmioError> {
         match self.program_format {
             QmioProgramFormat::OpenQasm => Ok(ProgramPayload::Text(self.qasm_text(circuit)?)),
-            QmioProgramFormat::QirText => {
-                Ok(ProgramPayload::Text(self.concrete(circuit)?.to_qir()))
-            }
+            QmioProgramFormat::QirText => self
+                .concrete(circuit)?
+                .try_to_qir()
+                .map(ProgramPayload::Text)
+                .map_err(|e| QmioError::Circuit(e.to_string())),
             QmioProgramFormat::QirBitcode => Ok(ProgramPayload::Bytes(self.qir_bitcode(circuit)?)),
         }
     }
@@ -1519,7 +1521,7 @@ mod tests {
     #[test]
     fn program_format_openqasm_produces_text_with_20_header() {
         let circuit = bell();
-        let exported = circuit.to_qasm2();
+        let exported = circuit.try_to_qasm2().unwrap();
         assert!(
             exported.starts_with("OPENQASM 2.0"),
             "exporter changed: {exported}"
@@ -1610,7 +1612,31 @@ mod tests {
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
-        assert!(narrow.to_qir().contains("\"required_num_results\"=\"2\""));
+        assert!(narrow
+            .try_to_qir()
+            .unwrap()
+            .contains("\"required_num_results\"=\"2\""));
+    }
+
+    /// #350: a circuit the QIR exporter rejects is a `Circuit` error, not a
+    /// panic in the export.
+    #[test]
+    fn qir_text_reports_an_unexportable_circuit() {
+        use polypus_circuit::{ConcreteCircuit, GateInstruction};
+        let after_measure = ConcreteCircuit::new_unchecked(
+            1,
+            vec![
+                GateInstruction::Measure { qubit: 0, cbit: 0 },
+                GateInstruction::X(0),
+            ],
+        );
+        match backend(QmioProgramFormat::QirText)
+            .serialize_program(&BoundCircuit::Native(after_measure))
+        {
+            Err(QmioError::Circuit(msg)) => assert!(msg.contains("measured"), "{msg}"),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("a gate after a measurement must not export"),
+        }
     }
 
     #[test]

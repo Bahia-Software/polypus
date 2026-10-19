@@ -251,7 +251,7 @@ mod tests {
     /// is `Native`; the other arms exist to keep the match exhaustive.
     fn qasm_of(circuit: &BoundCircuit) -> String {
         match circuit {
-            BoundCircuit::Native(cc) => cc.to_qasm2(),
+            BoundCircuit::Native(cc) => cc.try_to_qasm2().unwrap(),
             BoundCircuit::Qasm2(qasm) => qasm.clone(),
             BoundCircuit::Foreign(_) => panic!("the mock never receives a Qiskit circuit"),
         }
