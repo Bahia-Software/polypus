@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use polypus_circuit::CircuitError;
+
 use polypus_backend::{
     validate_run_results, BackendError, BoundCircuit, CancelToken, CircuitTask, Counts, OptLevel,
     Planner, QuantumBackend, RunParams, SequentialPlanner,
@@ -29,9 +31,9 @@ pub(crate) fn params(shots: u32) -> RunParams {
 }
 
 /// Realise a circuit in the requested representation.
-fn as_repr(circuit: &BoundCircuit, repr: Representation) -> BoundCircuit {
+fn as_repr(circuit: &BoundCircuit, repr: Representation) -> Result<BoundCircuit, CircuitError> {
     match repr {
-        Representation::Native => circuit.duplicate(),
+        Representation::Native => Ok(circuit.duplicate()),
         Representation::Qasm2 => as_qasm2(circuit),
     }
 }
@@ -70,7 +72,20 @@ pub(crate) fn result_contract(
     const DESC: &str = "a healthy batch's counts pass validate_run_results (count, non-empty, shot conservation C-3, bitstring keys)";
     let template = [zeros(1), ones(2), bell()];
     for &repr in reprs {
-        let batch: Vec<BoundCircuit> = template.iter().map(|c| as_repr(c, repr)).collect();
+        let batch = match template
+            .iter()
+            .map(|c| as_repr(c, repr))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(batch) => batch,
+            Err(e) => {
+                return Check::failed(
+                    NAME,
+                    DESC,
+                    format!("could not build the {repr:?} batch: {e}"),
+                )
+            }
+        };
         let out = match backend.run_circuits(&batch, &params(shots)) {
             Ok(out) => out,
             Err(e) => {

@@ -49,7 +49,7 @@ fn continues(c: char, dialect: Dialect) -> bool {
 /// Whether no declaration may take `name` in `dialect`: a keyword or builtin,
 /// or a gate the target's standard library (`qelib1.inc`, `stdgates.inc`)
 /// defines — which the exports always include.
-fn reserved(name: &str, dialect: Dialect) -> bool {
+pub(crate) fn reserved(name: &str, dialect: Dialect) -> bool {
     match dialect {
         Dialect::Qasm2 => QASM2_KEYWORDS.contains(&name) || builtin_gate(name).is_some(),
         Dialect::Qasm3 => is_reserved(name) || STDGATES.contains(&name),
@@ -139,6 +139,9 @@ pub(crate) fn assign(
 pub(crate) struct DefinitionNames {
     gates: HashMap<*const GateDefinition, String>,
     formals: HashMap<*const GateDefinition, (Vec<String>, Vec<String>)>,
+    /// Renamed OpenQASM 2.0 declarations, by their own name (see
+    /// [`Self::alias_qasm2`]).
+    qasm2: HashMap<String, String>,
 }
 
 impl DefinitionNames {
@@ -186,11 +189,28 @@ impl DefinitionNames {
         }
     }
 
+    /// Also answer [`Self::gate`] for the OpenQASM 2.0 `definitions`, named
+    /// here already, by their own name: a call may hold a separately imported,
+    /// equal copy of the definition the export declares. One OpenQASM 2.0
+    /// export declares one definition per name, so the name identifies it.
+    pub(crate) fn alias_qasm2(&mut self, definitions: &[&GateDefinition]) {
+        for &definition in definitions {
+            if let Some(name) = self.gates.get(&(definition as *const GateDefinition)) {
+                self.qasm2
+                    .insert(definition.name().to_string(), name.clone());
+            }
+        }
+    }
+
     /// The name `definition` is written with (its own, if it was not named
     /// here).
     pub(crate) fn gate<'a>(&'a self, definition: &'a GateDefinition) -> &'a str {
         self.gates
             .get(&(definition as *const GateDefinition))
+            .or_else(|| match definition.dialect() {
+                Dialect::Qasm2 => self.qasm2.get(definition.name()),
+                Dialect::Qasm3 => None,
+            })
             .map_or(definition.name(), String::as_str)
     }
 

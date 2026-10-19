@@ -181,7 +181,7 @@ fn add_expr_rejects_unusable_numbers_and_constants() {
 
 /// An expression id only means something in the circuit that issued it: any
 /// other circuit rejects it — at push time and, for gates assembled by hand,
-/// at binding — unless it holds an identical expression at the same position.
+/// at binding — unless it holds an identical expression, wherever it stored it.
 #[test]
 fn expressions_belong_to_their_circuit() {
     let mut a = ParameterizedCircuit::new(1);
@@ -219,8 +219,9 @@ fn expressions_belong_to_their_circuit() {
         Err(CircuitError::UnknownExpression)
     );
 
-    // Identical content at the same position is the same expression.
+    // Identical content is the same expression, at any position.
     let mut same = ParameterizedCircuit::new(1);
+    same.add_expr(5.0 * x(0)).unwrap();
     same.add_expr(2.0 * x(0)).unwrap();
     same.try_push(rx.clone()).unwrap();
     assert_eq!(
@@ -238,9 +239,40 @@ fn expressions_belong_to_their_circuit() {
     assert_eq!(copy.assign_parameters(&[0.25]).unwrap().gates().len(), 2);
 }
 
+/// #354: `x0*15200003` and `x0*17390159` have the same 32-bit FNV-1a
+/// checksum, the whole content check an id carried before; a circuit holding
+/// one must still reject the other's id, at the same position or any other.
+#[test]
+fn expressions_with_colliding_32_bit_checksums_are_not_confused() {
+    let mut a = ParameterizedCircuit::new(1);
+    let first = a.add_expr(x(0) * 15_200_003.0).unwrap();
+    let mut b = ParameterizedCircuit::new(1);
+    let second = b.add_expr(x(0) * 17_390_159.0).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        b.try_push(GateInstruction::Rz {
+            qubit: 0,
+            theta: first
+        }),
+        Err(CircuitError::UnknownExpression)
+    );
+}
+
+/// A circuit stores each distinct expression once: adding it again returns
+/// the same angle.
+#[test]
+fn identical_expressions_are_stored_once() {
+    let mut qc = ParameterizedCircuit::new(1);
+    let first = qc.add_expr(2.0 * x(0) + x(1)).unwrap();
+    qc.add_expr(3.0 * x(0)).unwrap();
+    assert_eq!(qc.add_expr(2.0 * x(0) + x(1)).unwrap(), first);
+    assert_ne!(qc.add_expr(2.0 * x(0) - x(1)).unwrap(), first);
+}
+
 /// A bound circuit holds no expressions, so exporting one that still refers
 /// to an expression fails instead of emitting anything.
 #[test]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuits_hold_no_expressions() {
     let mut pc = ParameterizedCircuit::new(1);
     let angle = pc.add_expr(x(0) * x(0)).unwrap();
@@ -290,7 +322,7 @@ fn bound_exports_evaluate_expressions() {
 
     let qasm = qc.to_qasm2_with_params(&values).unwrap();
     assert_eq!(qasm, fixed.to_qasm2_with_params(&[]).unwrap());
-    assert_eq!(qasm, bound.to_qasm2());
+    assert_eq!(qasm, bound.try_to_qasm2().unwrap());
     // The export imports back to the bound circuit and is a fixed point.
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm);
@@ -325,8 +357,8 @@ fn equality_compares_expressions_by_content() {
     };
     let plain = build(false, 2.0);
     let shifted = build(true, 2.0);
-    // Different ids, same expression.
-    assert_ne!(theta(&plain.gates()[0]), theta(&shifted.gates()[0]));
+    // Stored at different positions, the same expression has the same id.
+    assert_eq!(theta(&plain.gates()[0]), theta(&shifted.gates()[0]));
     assert_eq!(plain, shifted);
     assert_eq!(plain, plain.clone());
     assert_ne!(plain, build(false, 3.0));

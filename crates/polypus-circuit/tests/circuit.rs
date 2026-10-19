@@ -939,7 +939,7 @@ fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
 #[test]
 fn test_concrete_circuit_to_qasm2_basic() {
     let qc = ConcreteCircuit::new(2, vec![GateInstruction::H(0)]);
-    let qasm = qc.to_qasm2();
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -964,7 +964,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
             GateInstruction::MeasureAll,
         ],
     );
-    let qasm = qc.to_qasm2();
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -981,6 +981,7 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
 
 #[test]
 #[should_panic]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn test_concrete_circuit_to_qasm2_panics_on_param() {
     let qc = ConcreteCircuit::new(
         1,
@@ -1149,7 +1150,10 @@ fn test_qelib1_bound_circuit_matches_fixed_angle_circuit() {
         parameterised.to_qasm2_with_params(&values).unwrap(),
         fixed.to_qasm2_with_params(&[]).unwrap()
     );
-    assert_eq!(bound.to_qasm2(), fixed.to_qasm2_with_params(&[]).unwrap());
+    assert_eq!(
+        bound.try_to_qasm2().unwrap(),
+        fixed.to_qasm2_with_params(&[]).unwrap()
+    );
 }
 
 // Classical width
@@ -1253,8 +1257,47 @@ fn test_builder_exports_are_unchanged_by_the_classical_width() {
         let qasm2 = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n{qasm2}");
         let qasm3 = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n{qasm3}");
         assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), qasm2);
-        assert_eq!(qc.assign_parameters(&[]).unwrap().to_qasm2(), qasm2);
+        assert_eq!(
+            qc.assign_parameters(&[]).unwrap().try_to_qasm2().unwrap(),
+            qasm2
+        );
         assert_eq!(qc.to_qasm3().unwrap(), qasm3);
         assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), qasm3);
     }
+}
+
+/// #347: the C-4 cache follows the instruction list through every public path.
+/// Mutating `gates` directly is no longer possible from outside the crate (a
+/// `compile_fail` doctest on the field pins that); a measurement makes a later
+/// gate on the same qubit fail, and a circuit without one accepts it, whether
+/// the circuit was built, hand-assembled or cloned after its cache was derived.
+#[test]
+fn try_push_measured_cache_tracks_the_gates_it_was_derived_from() {
+    let mut built = ParameterizedCircuit::new(1).h(0);
+    built
+        .try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
+        .unwrap();
+    let mut cloned = built.clone();
+    for qc in [&mut built, &mut cloned] {
+        assert_eq!(
+            qc.try_push(GateInstruction::X(0)),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+        );
+    }
+
+    let mut hand = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![GateInstruction::Measure { qubit: 0, cbit: 0 }],
+    );
+    assert_eq!(
+        hand.try_push(GateInstruction::X(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+
+    let mut empty = ParameterizedCircuit::from_parts_unchecked(1, 0, Vec::new());
+    assert_eq!(empty.try_push(GateInstruction::X(0)), Ok(()));
+    // The unmeasured prefix of a measured circuit.
+    let mut rebuilt = ParameterizedCircuit::from_parts_unchecked(1, 0, built.gates()[..1].to_vec());
+    assert_eq!(rebuilt.try_push(GateInstruction::X(0)), Ok(()));
 }

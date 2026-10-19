@@ -733,7 +733,8 @@ mod tests {
             .measure_all()
             .assign_parameters(&[])
             .unwrap()
-            .to_qasm2();
+            .try_to_qasm2()
+            .unwrap();
         let backend = NativeStatevectorBackend::new(0);
         let counts = backend
             .simulate_one(
@@ -765,7 +766,7 @@ mod tests {
             .unwrap();
         let qasm = backend
             .simulate_one(
-                &BoundCircuit::Qasm2(bell().to_qasm2()),
+                &BoundCircuit::Qasm2(bell().try_to_qasm2().unwrap()),
                 1000,
                 5,
                 &opts,
@@ -796,7 +797,8 @@ mod tests {
         let reserialized = ParameterizedCircuit::from_qasm2(&original)
             .and_then(|pc| pc.assign_parameters(&[]))
             .unwrap()
-            .to_qasm2();
+            .try_to_qasm2()
+            .unwrap();
         assert_ne!(
             reserialized, original,
             "test premise: this QASM must not round-trip byte-identically"
@@ -1046,7 +1048,7 @@ mod tests {
         Python::attach(|py| {
             let batch = vec![
                 BoundCircuit::Native(small),
-                BoundCircuit::Qasm2(big.to_qasm2()),
+                BoundCircuit::Qasm2(big.try_to_qasm2().unwrap()),
                 crate::QiskitCircuit::into_bound(py.None()),
             ];
             assert_eq!(representative_qubits(&batch), 7);
@@ -1640,7 +1642,7 @@ mod tests {
         const N_GATES: usize = 20_000;
         let opts = TranspileOptions::default();
         let circuit = big_circuit(N_GATES);
-        let qasm = circuit.to_qasm2();
+        let qasm = circuit.try_to_qasm2().unwrap();
 
         // --- Native path: two clones (old) vs. borrow (new) ---
         let t0 = Instant::now();
@@ -1672,7 +1674,10 @@ mod tests {
             let parsed = ParameterizedCircuit::from_qasm2(&qasm)
                 .and_then(|pc| pc.assign_parameters(&[]))
                 .unwrap();
-            let out = IdentityTranspiler.transpile(&parsed, &opts).to_qasm2();
+            let out = IdentityTranspiler
+                .transpile(&parsed, &opts)
+                .try_to_qasm2()
+                .unwrap();
             black_box(&out);
         }
         let qasm_old_us = t0.elapsed().as_secs_f64() * 1e6 / N as f64;

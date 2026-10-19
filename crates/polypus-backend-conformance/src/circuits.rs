@@ -9,7 +9,7 @@
 use std::any::Any;
 
 use polypus_backend::{BoundCircuit, ForeignCircuit};
-use polypus_circuit::ParameterizedCircuit;
+use polypus_circuit::{CircuitError, ParameterizedCircuit};
 
 /// An `n`-qubit circuit with **no gates** and a terminal measurement: every shot
 /// reads the all-zeros bitstring. Deterministic (no shot noise), so the battery can
@@ -56,10 +56,18 @@ pub fn bell() -> BoundCircuit {
 /// Re-emit a [`BoundCircuit`] as the `Qasm2` representation, so the battery can
 /// exercise a backend's OpenQASM 2.0 code path. A `Native` circuit is serialised; a
 /// circuit that is already `Qasm2`/`Foreign` is returned unchanged (duplicated).
-pub fn as_qasm2(circuit: &BoundCircuit) -> BoundCircuit {
+///
+/// # Errors
+///
+/// The [`CircuitError`] of [`ConcreteCircuit::try_to_qasm2`] when a `Native`
+/// circuit cannot be written in OpenQASM 2.0 (never for the battery's own
+/// circuits).
+///
+/// [`ConcreteCircuit::try_to_qasm2`]: polypus_circuit::ConcreteCircuit::try_to_qasm2
+pub fn as_qasm2(circuit: &BoundCircuit) -> Result<BoundCircuit, CircuitError> {
     match circuit {
-        BoundCircuit::Native(cc) => BoundCircuit::Qasm2(cc.to_qasm2()),
-        other => other.duplicate(),
+        BoundCircuit::Native(cc) => cc.try_to_qasm2().map(BoundCircuit::Qasm2),
+        other => Ok(other.duplicate()),
     }
 }
 

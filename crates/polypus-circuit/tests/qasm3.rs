@@ -1445,6 +1445,7 @@ fn an_openqasm3_body_with_arcsin_cannot_be_written_in_openqasm2() {
 
 #[test]
 #[should_panic(expected = "a declared gate OpenQASM 2.0 cannot express")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn to_qasm2_panics_where_try_to_qasm2_fails() {
     let qc = import(&program("gate g(t) a { rx(arccos(t)) a; }\ng(0.5) q[0];"));
     let _ = qc.assign_parameters(&[]).unwrap().to_qasm2();

@@ -31,6 +31,8 @@ Changes on `main` since 0.7.2.
   `Display` in Rust. No new dependencies.
 
 ### Changed
+- **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
+  returns a `Result` instead of panicking on an unexportable circuit (#350).
 - **BREAKING:** the native backend derives each circuit's seed from the base
   seed and the circuit's index with SplitMix64 instead of `seed + index`, so
   neighbouring seeds no longer share streams shifted by one circuit (circuit
@@ -81,7 +83,22 @@ Changes on `main` since 0.7.2.
 - The QML candidate window also follows the backend's concurrency, within the
   memory bound.
 
+### Deprecated
+- Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
+  they cannot export; use `try_to_qasm2` and the new `try_to_qir`. No
+  internal caller uses the panicking exports any more (#350).
+
 ### Fixed
+- An expression id (`ExprId`) is a 64-bit checksum of the expression, resolved
+  through the circuit and trusted only after the stored nodes compare equal;
+  with the 32-bit checksum it had, a circuit could take a foreign id for a
+  different expression it held at the same position. A circuit stores each
+  distinct expression once, and accepts an id of an identical expression
+  wherever it stored it (#354).
+- The OpenQASM 2.0 export renames a gate declaration named `q` or `c`
+  (`c_1`), which clashed with the registers it declares and made Qiskit's
+  `qasm2.loads` reject the program; its callers are printed with the new
+  name (#352).
 - **BREAKING (Rust):** the native simulator rejects a gate that names one
   qubit twice (`Cx(0, 0)` in a hand-built `ConcreteCircuit`) with the new
   `SimError::RepeatedQubit` instead of writing out of bounds; the kernels'

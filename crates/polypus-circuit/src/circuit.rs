@@ -52,12 +52,22 @@ pub struct ParameterizedCircuit {
     /// Number of free parameters. Kept in sync automatically by the builder:
     /// adding a gate with `Param(i)` grows it to at least `i + 1`.
     pub(crate) num_params: usize,
-    /// The instruction sequence, in execution order.
+    /// The instruction sequence, in execution order. Read-only outside this
+    /// crate (through [`gates`](Self::gates)), so the `measured` cache cannot
+    /// go stale behind `try_push`'s back:
+    ///
+    /// ```compile_fail,E0616
+    /// let mut qc = polypus_circuit::ParameterizedCircuit::new(1).measure_all();
+    /// qc.gates.clear();
+    /// ```
     pub(crate) gates: Vec<GateInstruction>,
     /// Push-time cache backing the C-4 check in [`try_push`](Self::try_push).
-    /// Derived from `gates`, never part of the circuit's identity; assigning
-    /// `gates` directly leaves it in its "not derived yet" state, from which the
-    /// next push rebuilds it.
+    /// Derived from `gates`, never part of the circuit's identity. A circuit
+    /// assembled with a struct literal (the importers, `from_parts_unchecked`)
+    /// starts with `MeasuredQubits::default()`, its "not derived yet" state,
+    /// and the next push rebuilds it from `gates`. Once derived, it is only
+    /// kept in sync by `try_push` itself: in-crate code that changes `gates` of
+    /// an existing circuit any other way must reset it to the default too.
     pub(crate) measured: MeasuredQubits,
     /// The expressions [`GateParam::Expr`] angles refer to.
     pub(crate) exprs: ExprArena,
@@ -254,7 +264,8 @@ impl ParameterizedCircuit {
     /// [`GateParam::Param`]; an expression without free parameters is
     /// evaluated now and comes back as [`GateParam::Fixed`]; anything else is
     /// stored and comes back as a [`GateParam::Expr`], which only this circuit
-    /// (and its clones) can resolve. Like a `Param`, the free parameters an
+    /// (and its clones, or a circuit holding the identical expression) can
+    /// resolve. An expression already stored comes back as the same angle. Like a `Param`, the free parameters an
     /// expression refers to count towards [`num_params`](Self::num_params)
     /// once a gate that uses it is pushed. Binding evaluates the expression
     /// exactly as it is written, left to right and without reassociation.
@@ -938,7 +949,7 @@ impl ParameterizedCircuit {
     }
 
     /// Bind `params` and serialize to a QIR Base Profile LLVM IR module in one
-    /// step. Equivalent to `self.assign_parameters(params)?.to_qir()`.
+    /// step. Equivalent to `self.assign_parameters(params)?.try_to_qir()`.
     ///
     /// See [`ConcreteCircuit::to_qir`] for the gate-to-intrinsic mapping and
     /// the decompositions applied to `rzz`/`rxx`/`u3`.
@@ -1132,6 +1143,10 @@ impl ConcreteCircuit {
     /// by [`ParameterizedCircuit::assign_parameters`] (which rejects
     /// non-finite values at binding time) or by [`try_new`](Self::try_new); it
     /// is only possible for a circuit from the hidden `new_unchecked`.
+    #[deprecated(
+        since = "0.8.0",
+        note = "panics on circuits it cannot export; use `try_to_qasm2`"
+    )]
     pub fn to_qasm2(&self) -> String {
         self.try_to_qasm2().expect(
             "ConcreteCircuit contains an unbound Param or Expr, a non-finite fixed angle, two different declared gates under one name, or a declared gate OpenQASM 2.0 cannot express; use ParameterizedCircuit::assign_parameters and to_qasm2_with_params, or try_to_qasm2",
@@ -1174,18 +1189,36 @@ impl ConcreteCircuit {
     /// gate acting on an already-measured qubit; contract C-4). None can happen
     /// for circuits produced by [`ParameterizedCircuit::assign_parameters`];
     /// all are only possible for a circuit from the hidden `new_unchecked`. For
-    /// a fallible export, use
-    /// [`ParameterizedCircuit::to_qir_with_params`](crate::ParameterizedCircuit::to_qir_with_params).
+    /// a fallible export, use [`try_to_qir`](Self::try_to_qir).
+    #[deprecated(
+        since = "0.8.0",
+        note = "panics on circuits it cannot export; use `try_to_qir`"
+    )]
     pub fn to_qir(&self) -> String {
+        self.try_to_qir().expect(
+            "ConcreteCircuit is invalid (unbound Param or Expr, non-finite fixed angle, or a gate after a measurement); build it via ParameterizedCircuit",
+        )
+    }
+
+    /// Serialize to a QIR Base Profile LLVM IR module, or report why the
+    /// circuit cannot be written in it. The module is the one described
+    /// under [`to_qir`](Self::to_qir).
+    ///
+    /// # Errors
+    ///
+    /// [`CircuitError::QubitAlreadyMeasured`] for a gate acting on an
+    /// already-measured qubit (contract C-4), and the errors of an unbound or
+    /// non-finite angle. None can happen for circuits produced by
+    /// [`ParameterizedCircuit::assign_parameters`] or
+    /// [`try_new`](Self::try_new); all are only possible for a circuit from
+    /// the hidden `new_unchecked`.
+    pub fn try_to_qir(&self) -> Result<String, CircuitError> {
         qir::write_qir(
             self.num_qubits,
             self.clbits_width(),
             &self.gates,
             &[],
             &ExprArena::EMPTY,
-        )
-        .expect(
-            "ConcreteCircuit is invalid (unbound Param or Expr, non-finite fixed angle, or a gate after a measurement); build it via ParameterizedCircuit",
         )
     }
 
