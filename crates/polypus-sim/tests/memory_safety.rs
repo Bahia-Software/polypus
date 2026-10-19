@@ -11,8 +11,12 @@
 //! field-mutated [`ConcreteCircuit`] whose public `gates` field bypasses the
 //! builder's per-push `QubitOutOfRange` validation.
 //!
+//! The same holds for a unitary that names one qubit twice (`Cx(0, 0)`, #342):
+//! the two-qubit kernels compute `1 << (n - 2)` and assume distinct operands.
+//!
 //! These assertions hold identically under `cargo test` and `cargo test
-//! --release`. Before the fix, the debug run panics in the kernel assertion and
+//! --release`, including a release build without overflow-checks (the default
+//! for downstream crates; CI runs this file that way with `parallel` on). Before the fix, the debug run panics in the kernel assertion and
 //! the release run either is UB (parallel path) or bounds-check-panics
 //! (sequential) — never the clean typed error asserted here.
 
@@ -118,6 +122,103 @@ fn fusion_does_not_bypass_the_out_of_range_guard() {
             num_qubits: 3
         }
     );
+}
+
+/// Every simulator configuration a repeated operand must be rejected under:
+/// the parallel kernels at every size (`parallel_threshold: 0`, the #342
+/// trigger) and the sequential ones, each fused and unfused.
+fn every_configuration() -> Vec<StatevectorSimulator> {
+    let mut sims = Vec::new();
+    for parallel_threshold in [0, usize::MAX] {
+        for fusion in [false, true] {
+            sims.push(StatevectorSimulator {
+                parallel_threshold,
+                fusion,
+                ..StatevectorSimulator::new()
+            });
+        }
+    }
+    sims
+}
+
+#[test]
+fn simulator_rejects_a_repeated_operand_on_one_qubit() {
+    // #342: `Cx(0, 0)` on a 1-qubit register made the controlled kernel compute
+    // `1 << (n - 2)` with `n = 1` and, on the parallel path in a release build
+    // without overflow-checks, write out of bounds (SIGSEGV).
+    let circuit = ConcreteCircuit::new(1, vec![GateInstruction::Cx(0, 0)]);
+    for sim in every_configuration() {
+        assert_eq!(
+            sim.run(&circuit).unwrap_err(),
+            SimError::RepeatedQubit { qubit: 0 },
+            "{sim:?}"
+        );
+    }
+}
+
+/// One gate of every multi-qubit shape with a repeated operand.
+fn repeated_operand_gates() -> Vec<GateInstruction> {
+    use polypus_circuit::GateParam::Fixed;
+    vec![
+        GateInstruction::Cx(1, 1),
+        GateInstruction::Cz(1, 1),
+        GateInstruction::Swap(1, 1),
+        GateInstruction::Rzz {
+            q0: 1,
+            q1: 1,
+            theta: Fixed(0.3),
+        },
+        GateInstruction::Rxx {
+            q0: 1,
+            q1: 1,
+            theta: Fixed(0.3),
+        },
+        GateInstruction::Cp {
+            q0: 1,
+            q1: 1,
+            theta: Fixed(0.3),
+        },
+        GateInstruction::Ch(1, 1),
+        GateInstruction::Ccx(0, 1, 1),
+        GateInstruction::Cswap(1, 0, 1),
+    ]
+}
+
+#[test]
+fn simulator_rejects_repeated_operands_on_every_multi_qubit_gate() {
+    for gate in repeated_operand_gates() {
+        // Preceded by valid gates so fusion has something to fold it into.
+        let circuit = ConcreteCircuit::new(
+            3,
+            vec![GateInstruction::H(1), GateInstruction::Z(1), gate.clone()],
+        );
+        for sim in every_configuration() {
+            assert_eq!(
+                sim.run(&circuit).unwrap_err(),
+                SimError::RepeatedQubit { qubit: 1 },
+                "{gate:?} under {sim:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn statevector_apply_rejects_a_repeated_operand() {
+    let mut sv = Statevector::new(1).expect("1 is well below MAX_QUBITS");
+    assert_eq!(
+        sv.apply(&GateInstruction::Cx(0, 0)).unwrap_err(),
+        SimError::RepeatedQubit { qubit: 0 }
+    );
+    for gate in repeated_operand_gates() {
+        let mut sv = Statevector::new(3).expect("3 is well below MAX_QUBITS");
+        assert_eq!(
+            sv.apply(&gate).unwrap_err(),
+            SimError::RepeatedQubit { qubit: 1 },
+            "{gate:?}"
+        );
+        // Rejected before any kernel ran: the state is untouched.
+        assert_eq!(sv.amplitudes()[0], polypus_sim::C64::new(1.0, 0.0));
+    }
 }
 
 #[test]
