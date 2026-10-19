@@ -52,12 +52,22 @@ pub struct ParameterizedCircuit {
     /// Number of free parameters. Kept in sync automatically by the builder:
     /// adding a gate with `Param(i)` grows it to at least `i + 1`.
     pub(crate) num_params: usize,
-    /// The instruction sequence, in execution order.
+    /// The instruction sequence, in execution order. Read-only outside this
+    /// crate (through [`gates`](Self::gates)), so the `measured` cache cannot
+    /// go stale behind `try_push`'s back:
+    ///
+    /// ```compile_fail,E0616
+    /// let mut qc = polypus_circuit::ParameterizedCircuit::new(1).measure_all();
+    /// qc.gates.clear();
+    /// ```
     pub(crate) gates: Vec<GateInstruction>,
     /// Push-time cache backing the C-4 check in [`try_push`](Self::try_push).
-    /// Derived from `gates`, never part of the circuit's identity; assigning
-    /// `gates` directly leaves it in its "not derived yet" state, from which the
-    /// next push rebuilds it.
+    /// Derived from `gates`, never part of the circuit's identity. A circuit
+    /// assembled with a struct literal (the importers, `from_parts_unchecked`)
+    /// starts with `MeasuredQubits::default()`, its "not derived yet" state,
+    /// and the next push rebuilds it from `gates`. Once derived, it is only
+    /// kept in sync by `try_push` itself: in-crate code that changes `gates` of
+    /// an existing circuit any other way must reset it to the default too.
     pub(crate) measured: MeasuredQubits,
     /// The expressions [`GateParam::Expr`] angles refer to.
     pub(crate) exprs: ExprArena,

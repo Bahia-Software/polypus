@@ -1258,3 +1258,39 @@ fn test_builder_exports_are_unchanged_by_the_classical_width() {
         assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), qasm3);
     }
 }
+
+/// #347: the C-4 cache follows the instruction list through every public path.
+/// Mutating `gates` directly is no longer possible from outside the crate (a
+/// `compile_fail` doctest on the field pins that); a measurement makes a later
+/// gate on the same qubit fail, and a circuit without one accepts it, whether
+/// the circuit was built, hand-assembled or cloned after its cache was derived.
+#[test]
+fn try_push_measured_cache_tracks_the_gates_it_was_derived_from() {
+    let mut built = ParameterizedCircuit::new(1).h(0);
+    built
+        .try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
+        .unwrap();
+    let mut cloned = built.clone();
+    for qc in [&mut built, &mut cloned] {
+        assert_eq!(
+            qc.try_push(GateInstruction::X(0)),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+        );
+    }
+
+    let mut hand = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![GateInstruction::Measure { qubit: 0, cbit: 0 }],
+    );
+    assert_eq!(
+        hand.try_push(GateInstruction::X(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+
+    let mut empty = ParameterizedCircuit::from_parts_unchecked(1, 0, Vec::new());
+    assert_eq!(empty.try_push(GateInstruction::X(0)), Ok(()));
+    // The unmeasured prefix of a measured circuit.
+    let mut rebuilt = ParameterizedCircuit::from_parts_unchecked(1, 0, built.gates()[..1].to_vec());
+    assert_eq!(rebuilt.try_push(GateInstruction::X(0)), Ok(()));
+}
