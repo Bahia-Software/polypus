@@ -6,7 +6,7 @@
 # `tests/python/test_typing_stubs.py` fails when the extension exports a name
 # no stub declares. Change both sides together.
 #
-# Stubs must stay valid for the Python 3.9 floor: `typing` only, no
+# Stubs must stay valid for the Python 3.10 floor: `typing` only, no
 # `typing_extensions`.
 #
 # Qiskit publishes no type information, so for mypy `QuantumCircuit` and

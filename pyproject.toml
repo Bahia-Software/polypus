@@ -9,9 +9,9 @@ build-backend = "maturin"
 name = "polypus-quantum"
 description = "Distributed quantum computing — Rust core, Python bindings, one API across simulators and real QPUs."
 readme = "README.md"
-# Floor set by the runtime deps of the bundled `polypus_python` helpers
-# (qiskit>=2.0 needs >=3.9). CI tests the floor and the latest supported version.
-requires-python = ">=3.9"
+# CPython 3.10–3.13: the versions wheels are built and tested for (3.9 is EOL).
+# CI tests the floor and the latest supported version.
+requires-python = ">=3.10"
 license = "EUPL-1.2"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
@@ -30,6 +30,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -85,7 +89,7 @@ python-packages = ["polypus_python"]
 # Python lint + formatting for the whole repo (packages, tests, benchmarks,
 # examples). CI runs `ruff check` and `ruff format --check`.
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Pin the rule set explicitly (pycodestyle errors E4/E7/E9 + pyflakes F, plus

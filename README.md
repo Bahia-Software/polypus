@@ -47,7 +47,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 pip install polypus-quantum
 ```
 
-The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.9 and later.
+The package imports as `polypus`. Wheels are published for Linux, macOS and Windows, Python 3.10 to 3.13.
 
 | To use | Install |
 |---|---|

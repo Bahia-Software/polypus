@@ -233,12 +233,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.13"]
-        exclude:
-          # macos-latest runners are arm64; actions/setup-python has no
-          # reliable 3.9 build there. macOS is covered by 3.13.
-          - os: macos-latest
-            python-version: "3.9"
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -267,7 +262,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -297,9 +292,9 @@ jobs:
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
       # missing parameter, a changed default or a name the stubs do not declare.
-      # mypy comes from requirements-dev.txt, where it is pinned; it needs
-      # Python >= 3.10, so only the latest leg runs this. The stubs use only
-      # `typing`, so they stay valid for 3.9 users.
+      # mypy comes from requirements-dev.txt, where it is pinned; only the
+      # latest leg runs this. The stubs use only `typing`, so they stay valid
+      # for 3.10 users.
       - name: Check typing stubs against the extension (stubtest)
         if: matrix.python-version == '3.13'
         env:
@@ -374,3 +369,31 @@ jobs:
         run: cargo fuzz run from_qasm2 -- -max_total_time=60 -rss_limit_mb=2048
       - name: Run libFuzzer on from_qasm3 (60s budget)
         run: cargo fuzz run from_qasm3 -- -max_total_time=60 -rss_limit_mb=2048
+
+  # Miri over the `unsafe` in polypus-sim: the raw-pointer rayon kernels
+  # (`parallel` feature) and their #342 guards. Reduced test set, since Miri is
+  # orders of magnitude slower than native: the kernel unit tests (parallel vs
+  # sequential on small registers) and the memory-safety suite, which runs
+  # valid and invalid circuits with `parallel_threshold: 0` so every gate takes
+  # the parallel path.
+  # MIRIFLAGS: Tree Borrows, because crossbeam-epoch (under rayon) trips the
+  # stricter Stacked Borrows model; isolation off, because the simulator reads
+  # the calibration cache and CPU info at construction; leaks ignored, because
+  # rayon's global pool threads outlive the test's main thread.
+  miri:
+    name: miri (polypus-sim)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@f0d5300ba8908d942c808f4d31c08471d7798ba3 # tip of nightly branch
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo miri setup
+      - name: Miri (kernel unit tests, parallel)
+        run: cargo miri test --locked -p polypus-sim --features parallel --lib "kernels::"
+      - name: Miri (memory-safety suite, parallel)
+        run: cargo miri test --locked -p polypus-sim --features parallel --test memory_safety

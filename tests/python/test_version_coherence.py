@@ -23,7 +23,7 @@ CARGO_TOML = Path(__file__).resolve().parents[2] / "Cargo.toml"
 def _workspace_version(text):
     """The ``version`` of the ``[workspace.package]`` table of ``Cargo.toml``.
 
-    Python 3.9 has no ``tomllib``, so this reads the table by hand, as the
+    Python 3.10 has no ``tomllib``, so this reads the table by hand, as the
     release workflow does: the table runs from its header to the next ``[``
     header, and its ``version = "X.Y.Z"`` line is the workspace version.
     """
