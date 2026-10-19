@@ -5,7 +5,8 @@
 //! This crate holds the parameter-optimization loops used to train variational
 //! quantum circuits:
 //!
-//! - [`AlgorithmDifferentialEvolution`] — Differential Evolution (DE)
+//! - [`AlgorithmDifferentialEvolution`] — Differential Evolution (DE): the
+//!   classic DE/rand/1/bin, or the adaptive SHADE and L-SHADE ([`DeStrategy`])
 //! - [`AlgorithmPSO`] — Particle Swarm Optimization (PSO)
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
 //!
@@ -78,10 +79,11 @@ pub mod pso;
 pub mod quantum_natural_gradient;
 
 mod rng;
+mod shade;
 mod util;
 
 pub use differential_evolution::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
+    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 pub use error::OptimizerError;
 pub use objective::{EvaluationOracle, VarianceOracle};

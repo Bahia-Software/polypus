@@ -4,13 +4,101 @@ use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
+use crate::shade;
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
 use ndarray::{Array1, Array2};
 use rand::{seq::IndexedRandom, Rng, RngExt};
 use std::f64::consts::PI;
+use std::fmt;
+use std::str::FromStr;
 
 /// Differential Evolution optimizer.
+///
+/// [`Optimizer::optimize`] runs the classic DE/rand/1/bin
+/// ([`DeStrategy::Rand1Bin`]);
+/// [`optimize_with_strategy`](Self::optimize_with_strategy) also runs the
+/// adaptive SHADE and L-SHADE strategies.
 pub struct AlgorithmDifferentialEvolution;
+
+/// How Differential Evolution builds its trial vectors.
+///
+/// Every strategy takes the same [`AlgorithmDifferentialEvolutionArgs`] and
+/// shares the rest of the run: angles initialised in `[0, 2π)`, trial vectors
+/// wrapped back into it with `rem_euclid(2π)`, one oracle batch per
+/// generation, the fitness-stagnation early stop, and the postconditions of
+/// contract C-5. The strategies differ in mutation and parameter control:
+///
+/// - [`Rand1Bin`](Self::Rand1Bin), the default: DE/rand/1/bin with fixed
+///   `F = 0.8` and `CR = 0.7`.
+/// - [`Shade`](Self::Shade): SHADE (Tanabe & Fukunaga, CEC 2013):
+///   current-to-pbest/1 mutation with an archive of replaced parents, and `F`
+///   and `CR` drawn per individual from a memory of the values that produced
+///   improvements.
+/// - [`LShade`](Self::LShade): L-SHADE (Tanabe & Fukunaga, CEC 2014): SHADE
+///   plus a population that shrinks linearly towards 4 members over a budget
+///   of `population_size × (generations + 1)` evaluations, the most
+///   `Rand1Bin` can spend. Each generation is still one batch and the run
+///   still stops after `generations` generations, so once the population
+///   shrinks the batches get smaller and the run ends before spending the
+///   whole budget.
+///
+/// The names `polypus.DE(strategy=...)` accepts are [`as_str`](Self::as_str)
+/// and parse back with [`FromStr`]:
+///
+/// ```
+/// use polypus_optimizers::DeStrategy;
+///
+/// assert_eq!("lshade".parse::<DeStrategy>(), Ok(DeStrategy::LShade));
+/// assert_eq!(DeStrategy::default().as_str(), "rand1bin");
+/// assert!("LSHADE".parse::<DeStrategy>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DeStrategy {
+    /// DE/rand/1/bin with `F = 0.8` and `CR = 0.7`.
+    #[default]
+    Rand1Bin,
+    /// SHADE: success-history adaptive DE with a fixed population.
+    Shade,
+    /// L-SHADE: SHADE with linear population size reduction.
+    LShade,
+}
+
+impl DeStrategy {
+    /// The strategy's name, as `polypus.DE(strategy=...)` takes it:
+    /// `"rand1bin"`, `"shade"` or `"lshade"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeStrategy::Rand1Bin => "rand1bin",
+            DeStrategy::Shade => "shade",
+            DeStrategy::LShade => "lshade",
+        }
+    }
+}
+
+impl fmt::Display for DeStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DeStrategy {
+    type Err = OptimizerError;
+
+    /// Parse one of the names [`as_str`](Self::as_str) returns. Matching is
+    /// exact; any other string is [`OptimizerError::InvalidConfig`] for
+    /// `strategy`, which the Python binding raises as `ValueError`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "rand1bin" => Ok(DeStrategy::Rand1Bin),
+            "shade" => Ok(DeStrategy::Shade),
+            "lshade" => Ok(DeStrategy::LShade),
+            other => Err(OptimizerError::InvalidConfig {
+                parameter: "strategy",
+                reason: format!("must be \"rand1bin\", \"shade\" or \"lshade\", got {other:?}"),
+            }),
+        }
+    }
+}
 
 /// Arguments for the Differential Evolution optimizer.
 ///
@@ -57,8 +145,68 @@ impl AlgorithmDifferentialEvolution {
     }
 
     /// The smallest valid `population_size`: each trial mutation samples 3
-    /// *distinct* other members, so at least 4 members are required.
-    const MIN_POPULATION: usize = 4;
+    /// *distinct* other members, so at least 4 members are required. Every
+    /// strategy shares it; 4 is also the size L-SHADE shrinks towards.
+    pub(crate) const MIN_POPULATION: usize = 4;
+
+    /// Run Differential Evolution with the given `strategy`.
+    ///
+    /// [`DeStrategy::Rand1Bin`] is exactly [`Optimizer::optimize`]: the same
+    /// code, RNG draws and outcome for a given seed. [`DeStrategy::Shade`] and
+    /// [`DeStrategy::LShade`] take the same arguments with the same meaning and
+    /// return the same errors (a `population_size` below 4, an oracle that
+    /// returns the wrong number of values); see [`DeStrategy`] for what they
+    /// change.
+    ///
+    /// ```
+    /// use polypus_optimizers::{
+    ///     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
+    ///     EvaluationOracle,
+    /// };
+    ///
+    /// // Fitness = -Σ(xᵢ - 1)² is maximised (value 0) at xᵢ = 1.
+    /// struct Sphere;
+    /// impl EvaluationOracle for Sphere {
+    ///     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+    ///         candidates
+    ///             .iter()
+    ///             .map(|c| -c.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>())
+    ///             .collect()
+    ///     }
+    /// }
+    ///
+    /// let outcome = AlgorithmDifferentialEvolution
+    ///     .optimize_with_strategy(
+    ///         DeStrategy::LShade,
+    ///         AlgorithmDifferentialEvolutionArgs {
+    ///             oracle: Box::new(Sphere),
+    ///             population_size: 40,
+    ///             generations: 200,
+    ///             dimensions: 2,
+    ///             tolerance: 1e-6,
+    ///             patience: 20,
+    ///             seed: Some(7),
+    ///         },
+    ///     )
+    ///     .expect("valid arguments optimize successfully");
+    ///
+    /// assert!(outcome.best_fitness > -1e-2, "fitness = {}", outcome.best_fitness);
+    /// ```
+    pub fn optimize_with_strategy(
+        &self,
+        strategy: DeStrategy,
+        args: AlgorithmDifferentialEvolutionArgs,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        match strategy {
+            DeStrategy::Rand1Bin => self.optimize(args),
+            DeStrategy::Shade => with_seeded_rng(args.seed, |rng| {
+                shade::run_with_rng(args, shade::Variant::Shade, rng)
+            }),
+            DeStrategy::LShade => with_seeded_rng(args.seed, |rng| {
+                shade::run_with_rng(args, shade::Variant::LShade, rng)
+            }),
+        }
+    }
 
     fn run_with_rng<R: Rng>(
         args: AlgorithmDifferentialEvolutionArgs,
