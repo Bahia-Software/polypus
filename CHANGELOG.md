@@ -34,6 +34,11 @@ Changes on `main` since 0.7.2.
   `k` of seed `s` equalled circuit `k-1` of seed `s+1`). The same seed and batch
   still reproduce bit-for-bit (C-7), but counts and `backend="polypus"`
   training trajectories for a fixed seed differ from earlier releases (#348).
+- `import polypus` no longer calibrates the gate-parallel threshold or writes
+  the cache: the first native statevector run of a process does it
+  (`polypus.statevector`, or `run_quantum_circuit`/`train` with
+  `backend="polypus"`). The cache, `POLYPUS_NO_AUTOCALIBRATE` and the
+  SLURM/OpenMPI rank check are unchanged (#351).
 - **BREAKING (Rust):** `ParameterizedCircuit` and `ConcreteCircuit` fields are
   private; read them with `num_qubits()`, `num_params()`, `gates()` and
   `ConcreteCircuit::into_gates()`. `ConcreteCircuit::new` validates its gates

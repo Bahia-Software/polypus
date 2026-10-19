@@ -15,7 +15,7 @@
 //! ## Concurrent writers
 //!
 //! Many processes may calibrate against one cache file at once (dozens of SLURM
-//! ranks importing `polypus` on a shared `$HOME`). Every write is atomic — a
+//! ranks starting their first native run on a shared `$HOME`). Every write is atomic — a
 //! temp file in the cache directory renamed over the old one — so a reader sees
 //! either the previous or the new complete file, never a torn one, and needs no
 //! lock. The read-merge-write that folds one entry into the map additionally
@@ -142,7 +142,7 @@ const CACHE_SCHEMA: u32 = 3;
 /// of it is long or its `sync_all`s slow (shared storage). Only a lock whose
 /// holder makes no write for this long counts as stale (e.g. an NFS lock server
 /// that lost track of a dead client), and a calibration must not hang an
-/// `import polypus` on that. There is no cap on the total wait.
+/// a user's first native run on that. There is no cap on the total wait.
 ///
 /// Known limit: a single critical section that takes longer than this without
 /// touching the file — a `sync_all` blocked for over 5 s on a loaded Lustre/NFS
@@ -664,7 +664,7 @@ impl LockClock for SystemClock {
 /// `ENOLCK`/`ENOSYS`), or the lock looks stale. The caller then still writes —
 /// the rename keeps the file whole, so the worst case is the lost update the
 /// lock exists to prevent (one entry recalibrated later), never corruption, a
-/// hang, or a skipped write that would make every later import recalibrate.
+/// hang, or a skipped write that would make every later process recalibrate.
 ///
 /// **What "stale" means.** Polling `try_lock` is not fair: a waiter can lose
 /// every race to other writers for as long as they keep arriving, and each of
@@ -693,8 +693,8 @@ impl LockClock for SystemClock {
 /// detected from here (the call reports success), and the outcome is the same
 /// as the `None` path: the rename still keeps the file whole, and the worst
 /// cross-node result is one lost entry, recalibrated later by the node that
-/// lost it. The import-time secondary-rank skip (`python/polypus/__init__.py`)
-/// keeps simultaneous cross-node writers rare to begin with.
+/// lost it. The implicit calibration's secondary-rank skip (in the `polypus`
+/// bindings, `bindings/calibration.rs`) keeps simultaneous cross-node writers rare to begin with.
 fn acquire_cache_lock(
     lock_path: &Path,
     timeout: Duration,
@@ -1036,8 +1036,9 @@ fn threshold_to_reuse(
 /// drops another's, even when several processes calibrate at once (the merge is
 /// lock-protected and the write atomic, see `persist_entry`). This runs on
 /// whichever process calls it, including a secondary MPI/SLURM rank: skipping
-/// those is the job of the *implicit* import-time auto-calibration in
-/// `python/polypus/__init__.py`, not of this explicit entry point. A cache that
+/// those is the job of the *implicit* auto-calibration the `polypus` bindings
+/// run before the first native simulation of a process
+/// (`bindings/calibration.rs`), not of this explicit entry point. A cache that
 /// cannot be written (read-only filesystem, container,
 /// CI) is **not** an error: the measured threshold is still returned, with
 /// `cache_written = false`, so this process runs calibrated even though the next
