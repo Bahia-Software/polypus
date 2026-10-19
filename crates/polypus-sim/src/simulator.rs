@@ -432,6 +432,11 @@ impl Simulator for StatevectorSimulator {
                 num_qubits: circuit.num_qubits,
             });
         }
+        // Likewise a repeated operand (`Cx(0, 0)`): the two-qubit kernels
+        // assume distinct operands and index out of bounds otherwise.
+        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(&circuit.gates) {
+            return Err(SimError::RepeatedQubit { qubit });
+        }
         // Contract C-4: reject a gate acting on an already-measured qubit
         // (defense in depth for hand-assembled circuits). `apply` treats
         // measurements as no-ops, so without this the violation would be

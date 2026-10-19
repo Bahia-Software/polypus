@@ -81,7 +81,7 @@ c2: ═════════════════════════�
 | QIR text (`.ll`) | `qc.to_qir(values)` | `to_qir_with_params(&values)` |
 | QIR bitcode (`.bc`) | `qc.to_qir_bitcode(values)` | `to_qir_bitcode_with_params(&values)` |
 
-`values` binds the parameters and can be omitted for a circuit without them. The OpenQASM 2.0 output uses the standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer. QIR bitcode needs `llvm-as` in `PATH`, since the textual module is assembled externally.
+`values` binds the parameters and can be omitted for a circuit without them. The OpenQASM 2.0 output uses the standard `qelib1.inc` gate names and is accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer. QIR bitcode needs `llvm-as` in `PATH`, since the textual module is assembled externally; it is stopped after 120 s.
 
 ## OpenQASM 2.0 import
 

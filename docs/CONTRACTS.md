@@ -1169,9 +1169,22 @@ OpenQASM 2.0 declarations are re-emitted verbatim as before (C-2).
 | Expression nesting as written (`MAX_EXPR_DEPTH`) | 64 |
 | Qubits, and bits (`MAX_REGISTER_BITS`) | 1 000 000 each |
 | Instructions after broadcasting (`MAX_INSTRUCTIONS`) | 4 000 000 |
+| Qubits all barriers list, `barrier q;` listing every qubit of `q` (`MAX_BARRIER_OPERANDS`) | 4 000 000 |
 | Declared-gate nesting (`MAX_GATE_NESTING`) | 64 |
 | Statements one declaration expands to (`MAX_GATE_EXPANSION`) | 1 000 000 |
 | Statements all calls of declared gates expand to (`MAX_VALIDATED_EXPANSION`) | 20 000 000 |
+
+The budgets live in one module (`crates/polypus-circuit/src/limits.rs`), and
+the OpenQASM 2.0 importer enforces them too, with the same messages (issue
+#343): source and token size, declarations, register size, instructions after
+broadcasting (checked before a statement is expanded), barrier operands, at
+most `MAX_EXPR_NODES`
+nodes in one parameter list, and at most `MAX_PROGRAM_NODES` nodes in gate
+bodies, whose expressions it keeps (top-level angles are evaluated as they are
+read). It lexes the source as it parses it. The OpenQASM 2.0 export is not
+budgeted: a register broadcast written out statement by statement can outgrow
+`MAX_SOURCE_BYTES`, and such an export does not import again.
+Enforcing tests: `crates/polypus-circuit/tests/hardening.rs`.
 
 Rationale, evidence and alternatives considered: see
 `docs/adr/0004-openqasm3-profile-and-angle-expressions.md`.

@@ -990,6 +990,26 @@ fn instructions_after_broadcasting_are_bounded() {
     );
 }
 
+/// The audit's input (#344): `barrier q;` lists every qubit of `q` until the
+/// circuit is assembled, so the qubits all barriers list are bounded; the
+/// fifth full barrier over a million qubits is rejected.
+#[test]
+fn barrier_operands_are_bounded() {
+    let src = |barriers: &str| format!("{HEADER}qubit[{MAX_REGISTER_BITS}] q;\n{barriers}");
+    let at = src(&"barrier q;\n".repeat(4));
+    assert_eq!(import(&at).gates, vec![G::Barrier(vec![]); 4]);
+    let (line, message) = rejected(&format!("{at}barrier q[0];\n"));
+    assert_eq!(line, 8);
+    assert!(
+        message.contains("more than MAX_BARRIER_OPERANDS (4000000) qubits"),
+        "{message}"
+    );
+    let (line, _) = rejected(&src(&"barrier q;\n".repeat(200)));
+    assert_eq!(line, 8);
+    // `barrier;` lists nothing.
+    assert_eq!(import(&src(&"barrier;\n".repeat(100))).gates.len(), 100);
+}
+
 /// Declarations whose expansion doubles at each level: `g<k>` visits
 /// 3·2^k − 2 statements.
 fn doubling(levels: usize) -> String {
@@ -1330,22 +1350,14 @@ fn names_openqasm3_cannot_take_are_renamed() {
     );
     assert!(out.ends_with("input_(0.5) q[0], q[1];\n"), "{out}");
 
-    // An identifier longer than the importer reads is cut.
-    let long = format!("g{}", "a".repeat(5000));
+    // No importer reads an identifier longer than MAX_TOKEN_BYTES, so none
+    // reaches the export (whose renaming would cut it, see `naming.rs`).
+    let long = format!("g{}", "a".repeat(MAX_TOKEN_BYTES));
     let src = format!("OPENQASM 2.0;\ngate {long} x {{ U(0,0,0) x; }}\nqreg q[1];\n{long} q[0];\n");
-    let out = canonical(&ParameterizedCircuit::from_qasm2(&src).unwrap());
-    let written = out
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("gate ")
-                .and_then(|l| l.strip_suffix(" x_ {"))
-        })
-        .unwrap();
-    assert!(
-        written.len() <= MAX_TOKEN_BYTES && long.starts_with(written),
-        "{}",
-        written.len()
-    );
+    assert!(matches!(
+        ParameterizedCircuit::from_qasm2(&src),
+        Err(CircuitError::Parse { line: 2, message }) if message.contains("MAX_TOKEN_BYTES")
+    ));
 }
 
 // ──────────────────────────── Cross-dialect ──────────────────────────────
@@ -1476,14 +1488,30 @@ fn the_export_stays_within_the_importers_budgets() {
     assert!(qc.to_qasm3().is_ok());
     assert_eq!(export_limit(&qc.measure_all()), "MAX_INSTRUCTIONS");
 
-    // Expression nodes, one expression at a time: OpenQASM 2.0 does not
-    // bound the size of an expression in a gate body.
-    let src = format!(
-        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\ngate g(t) a {{ rz(t{}) a; }}\nqreg q[1];\ng(0.5) q[0];\n",
-        "+t".repeat(MAX_EXPR_NODES / 2)
+    // Barrier operands as the importer lists them: `barrier q;` is every
+    // qubit.
+    let mut qc = ParameterizedCircuit::new(MAX_REGISTER_BITS);
+    for _ in 0..4 {
+        qc = qc.barrier();
+    }
+    assert_eq!(
+        import(&qc.to_qasm3().unwrap()).gates,
+        vec![G::Barrier(vec![]); 4]
     );
-    let declared = ParameterizedCircuit::from_qasm2(&src).unwrap();
-    assert_eq!(export_limit(&declared), "MAX_EXPR_NODES");
+    assert_eq!(export_limit(&qc.barrier()), "MAX_BARRIER_OPERANDS");
+
+    // Expression nodes, one expression at a time: the largest expression the
+    // OpenQASM 2.0 importer keeps in a gate body imports again; one more node
+    // is rejected by both importers.
+    let body = |terms: usize| {
+        format!(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\ngate g(t) a {{ rz(-t{}) a; }}\nqreg q[1];\ng(0.5) q[0];\n",
+            "+t".repeat(terms - 1)
+        )
+    };
+    let declared = ParameterizedCircuit::from_qasm2(&body(MAX_EXPR_NODES / 2)).unwrap();
+    assert!(ParameterizedCircuit::from_qasm3(&declared.to_qasm3().unwrap()).is_ok());
+    assert!(ParameterizedCircuit::from_qasm2(&body(MAX_EXPR_NODES / 2 + 1)).is_err());
 }
 
 #[test]

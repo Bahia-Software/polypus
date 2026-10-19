@@ -2,7 +2,7 @@
 //! measurement read-outs (expectation values and shot sampling).
 
 use polypus_circuit::ParameterizedCircuit;
-use polypus_sim::{Simulator, SplitMix64, StatevectorSimulator, C64};
+use polypus_sim::{SimError, Simulator, SplitMix64, StatevectorSimulator, C64};
 use std::f64::consts::FRAC_1_SQRT_2;
 
 fn close(a: C64, b: C64) -> bool {
@@ -43,9 +43,34 @@ fn ghz_state() {
 fn bell_expectation_values() {
     let sv = run(ParameterizedCircuit::new(2).h(0).cx(0, 1), &[]);
     // Perfectly correlated: <Z0 Z1> = +1, each marginal <Z> = 0.
-    assert!((sv.expectation_z(&[0, 1]) - 1.0).abs() < 1e-12);
-    assert!(sv.expectation_z(&[0]).abs() < 1e-12);
-    assert!(sv.expectation_z(&[1]).abs() < 1e-12);
+    assert!((sv.expectation_z(&[0, 1]).unwrap() - 1.0).abs() < 1e-12);
+    assert!(sv.expectation_z(&[0]).unwrap().abs() < 1e-12);
+    assert!(sv.expectation_z(&[1]).unwrap().abs() < 1e-12);
+}
+
+#[test]
+fn expectation_z_rejects_out_of_range_qubits() {
+    // #353: `q >= n` used to read a bit no amplitude index has (a silently
+    // wrong value) and `q >= 64` overflowed the shift.
+    let sv = run(ParameterizedCircuit::new(2).x(0), &[]);
+    for q in [2, 63, 64, 1000, usize::MAX] {
+        assert_eq!(
+            sv.expectation_z(&[0, q]),
+            Err(SimError::QubitIndexOutOfRange {
+                qubit: q,
+                num_qubits: 2
+            }),
+            "q = {q}"
+        );
+    }
+}
+
+#[test]
+fn expectation_z_cancels_a_repeated_qubit() {
+    // Z·Z = I, so `[0, 0]` is the total probability, not `⟨Z0⟩`.
+    let sv = run(ParameterizedCircuit::new(2).x(0), &[]);
+    assert!((sv.expectation_z(&[0]).unwrap() + 1.0).abs() < 1e-12);
+    assert!((sv.expectation_z(&[0, 0]).unwrap() - 1.0).abs() < 1e-12);
 }
 
 #[test]

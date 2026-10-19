@@ -7,8 +7,9 @@ use crate::expr::{evaluate_constant, Classified, ExprArena, ParamExpr};
 use crate::gate::{
     first_repeated_qubit, qubit_index_violation, GateInstruction, GateParam, MeasuredQubits,
 };
+use crate::limits::MAX_REGISTER_BITS;
 use crate::qasm;
-use crate::qasm_import::{self, MAX_REGISTER_BITS};
+use crate::qasm_import;
 use crate::qir;
 use std::borrow::Cow;
 use std::collections::BTreeSet;

@@ -45,9 +45,8 @@ pub enum SimError {
     /// but a hand-assembled or field-mutated
     /// [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit) can carry one. The
     /// simulator rejects it *before any kernel runs*: an out-of-range qubit index
-    /// yields an out-of-bounds amplitude index (`1 << qubit`), which the release
-    /// kernels — whose only bounds guard is a `debug_assert!` — would turn into
-    /// an out-of-bounds memory access (undefined behaviour).
+    /// yields an out-of-bounds amplitude index (`1 << qubit`), which the kernels
+    /// would otherwise only catch with a panic.
     QubitIndexOutOfRange {
         /// The offending qubit index.
         qubit: usize,
@@ -63,6 +62,15 @@ pub enum SimError {
         cbit: usize,
         /// Valid indices are `0..max`.
         max: usize,
+    },
+    /// A unitary names the same qubit more than once (e.g. `Cx(0, 0)`). The
+    /// fluent builder rejects this at construction, but a hand-assembled
+    /// [`ConcreteCircuit`](polypus_circuit::ConcreteCircuit) can carry one. The
+    /// multi-qubit kernels assume distinct operands, so it is rejected before
+    /// any kernel runs.
+    RepeatedQubit {
+        /// The qubit named more than once.
+        qubit: usize,
     },
     /// The caller asked for the simulation to stop before it finished, through
     /// the cancellation hook passed to
@@ -101,6 +109,10 @@ impl fmt::Display for SimError {
             SimError::ClbitOutOfRange { cbit, max } => write!(
                 f,
                 "measurement targets classical bit {cbit} but the statevector backend keys counts on at most {max} classical bits (valid indices are 0..{max})"
+            ),
+            SimError::RepeatedQubit { qubit } => write!(
+                f,
+                "gate names qubit {qubit} more than once; a gate's qubit operands must be distinct"
             ),
             SimError::Cancelled => {
                 write!(f, "the simulation was cancelled before it completed")

@@ -4,8 +4,14 @@
 //! caller can keep chaining gates, append `measure_all`, or export it directly.
 //! Templates add no measurements of their own.
 
-use crate::ParameterizedCircuit;
+use crate::{CircuitError, ParameterizedCircuit};
 use std::f64::consts::PI;
+
+/// Most qubits a QFT may act on: its `n(n+1)/2` Hadamards and controlled
+/// phases, plus `⌊n/2⌋` swaps, then stay within the 4 000 000 instructions
+/// the OpenQASM importers read back (`MAX_INSTRUCTIONS`). The gate count grows
+/// quadratically, so a larger `n` would only exhaust memory.
+pub const MAX_QFT_QUBITS: usize = 2827;
 
 /// Quantum Fourier Transform on `num_qubits` qubits.
 ///
@@ -15,13 +21,17 @@ use std::f64::consts::PI;
 ///
 /// The circuit has no free parameters and no measurements.
 ///
+/// # Errors
+///
+/// [`CircuitError::TemplateTooLarge`] above [`MAX_QFT_QUBITS`] qubits.
+///
 /// ```
 /// use polypus_circuit::templates::qft;
 ///
-/// let qasm = qft(3).measure_all().to_qasm2_with_params(&[]).unwrap();
+/// let qasm = qft(3).unwrap().measure_all().to_qasm2_with_params(&[]).unwrap();
 /// assert!(qasm.contains("swap q[0],q[2];"));
 /// ```
-pub fn qft(num_qubits: usize) -> ParameterizedCircuit {
+pub fn qft(num_qubits: usize) -> Result<ParameterizedCircuit, CircuitError> {
     qft_with_options(num_qubits, false, true)
 }
 
@@ -36,10 +46,25 @@ pub fn qft(num_qubits: usize) -> ParameterizedCircuit {
 ///
 /// `num_qubits == 0` yields an empty circuit; `num_qubits == 1` is a single
 /// Hadamard (no controlled phases, no swaps).
-pub fn qft_with_options(num_qubits: usize, inverse: bool, swaps: bool) -> ParameterizedCircuit {
+///
+/// # Errors
+///
+/// [`CircuitError::TemplateTooLarge`] above [`MAX_QFT_QUBITS`] qubits.
+pub fn qft_with_options(
+    num_qubits: usize,
+    inverse: bool,
+    swaps: bool,
+) -> Result<ParameterizedCircuit, CircuitError> {
+    if num_qubits > MAX_QFT_QUBITS {
+        return Err(CircuitError::TemplateTooLarge {
+            template: "qft",
+            num_qubits,
+            max_qubits: MAX_QFT_QUBITS,
+        });
+    }
     let mut qc = ParameterizedCircuit::new(num_qubits);
     if num_qubits == 0 {
-        return qc;
+        return Ok(qc);
     }
 
     // cp(θ) is symmetric in its two qubits; the controlled-phase angle between
@@ -80,5 +105,24 @@ pub fn qft_with_options(num_qubits: usize, inverse: bool, swaps: bool) -> Parame
             qc = add_swaps(qc);
         }
     }
-    qc
+    Ok(qc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::MAX_INSTRUCTIONS;
+
+    /// Instructions of a QFT on `n` qubits with its swaps.
+    fn qft_instructions(n: usize) -> usize {
+        n * (n + 1) / 2 + n / 2
+    }
+
+    #[test]
+    fn max_qft_qubits_is_the_largest_qft_within_max_instructions() {
+        assert!(qft_instructions(MAX_QFT_QUBITS) <= MAX_INSTRUCTIONS);
+        assert!(qft_instructions(MAX_QFT_QUBITS + 1) > MAX_INSTRUCTIONS);
+        let qc = qft(40).unwrap();
+        assert_eq!(qc.gates.len(), qft_instructions(40));
+    }
 }

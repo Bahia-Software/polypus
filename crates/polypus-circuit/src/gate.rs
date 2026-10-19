@@ -983,6 +983,22 @@ pub fn qubit_index_violation(gates: &[GateInstruction], num_qubits: usize) -> Op
     None
 }
 
+/// The first qubit that a unitary in `gates` names more than once (reported at
+/// its second occurrence within that gate), if any — e.g. `Cx(0, 0)`.
+///
+/// The builder rejects such a gate at push time
+/// ([`CircuitError::IdenticalQubits`](crate::CircuitError::IdenticalQubits)), but a
+/// hand-assembled [`ConcreteCircuit`](crate::ConcreteCircuit) bypasses that.
+/// The multi-qubit kernels assume distinct operands, so the builder-free
+/// consumers (notably the native simulator) use this — alongside
+/// [`qubit_index_violation`] — to reject such a circuit before any kernel runs.
+/// `Barrier` and measurements are not unitaries and are not checked.
+pub fn repeated_qubit_violation(gates: &[GateInstruction]) -> Option<usize> {
+    gates
+        .iter()
+        .find_map(|gate| first_repeated_qubit(gate.acts_on().qubits()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

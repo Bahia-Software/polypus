@@ -391,23 +391,25 @@ impl Statevector {
     ///
     /// # Errors
     ///
+    /// [`SimError::QubitIndexOutOfRange`] / [`SimError::RepeatedQubit`] if an
+    /// operand is outside the register or a gate names a qubit twice,
     /// [`SimError::UnboundParameter`] / [`SimError::UnboundExpression`] if an
     /// angle is still a free parameter or an expression of them, or
     /// [`SimError::NonFiniteAmplitude`] if an angle is `NaN`/infinity.
     pub fn apply(&mut self, gate: &GateInstruction) -> Result<(), SimError> {
-        // Reject an out-of-range qubit operand before it reaches a kernel. The
-        // kernels guard their indices only with a `debug_assert!`, which is gone
-        // in a release build — where the parallel path would then perform an
-        // out-of-bounds raw-pointer write (undefined behaviour). `apply` is a
-        // public entry point, so this check lives here rather than only in the
-        // simulator's whole-circuit pre-pass.
-        if let Some(qubit) =
-            polypus_circuit::qubit_index_violation(std::slice::from_ref(gate), self.n)
-        {
+        // Reject an out-of-range or repeated qubit operand before it reaches a
+        // kernel. The kernels' own `assert!`s would only panic; `apply` is a
+        // public entry point, so the typed error lives here rather than only in
+        // the simulator's whole-circuit pre-pass.
+        let one = std::slice::from_ref(gate);
+        if let Some(qubit) = polypus_circuit::qubit_index_violation(one, self.n) {
             return Err(SimError::QubitIndexOutOfRange {
                 qubit,
                 num_qubits: self.n,
             });
+        }
+        if let Some(qubit) = polypus_circuit::repeated_qubit_violation(one) {
+            return Err(SimError::RepeatedQubit { qubit });
         }
         let par = self.use_parallel();
         let n = self.n;
