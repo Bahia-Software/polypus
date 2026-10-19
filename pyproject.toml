@@ -43,9 +43,11 @@ classifiers = [
 # seam). The Rust core needs none of these, but the wheel ships the helpers, so
 # they are declared here. CUNQA (supported range `>=2.4,<4`) is not on PyPI and
 # is installed on the cluster, so it is not declared; see the README.
+# Upper bounds: the newest majors/minors the seam is verified on (contract C-10
+# in docs/CONTRACTS.md); widen them only once the tests pass on the new release.
 dependencies = [
-    "qiskit>=2.0",
-    "qiskit-aer>=0.17",
+    "qiskit>=2.0,<3",
+    "qiskit-aer>=0.17,<0.18",
 ]
 dynamic = ["version"]
 

@@ -3,11 +3,11 @@
 
 # Rust/Python build
 maturin>=1.8,<2.0
-qiskit>=2.0
+qiskit>=2.0,<3
 # Aer is the default `local` simulator backend and is exercised by the test
 # suite directly; declare it here too, not only as a runtime dependency of the
 # wheel (`[project] dependencies` in the root pyproject.toml).
-qiskit-aer>=0.17
+qiskit-aer>=0.17,<0.18
 # `qiskit.qasm3.loads` needs it; only the OpenQASM 3 interoperability tests
 # (tests/python/test_qasm3_interop.py) use it. Pinned: those tests state the
 # versions they support (Qiskit 2.5.2 with this importer).

@@ -90,6 +90,19 @@ rand               = "0.10"
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 nix                = { version = "0.31", features = ["signal", "process"] }
+# PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
+# `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
+# 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.
+# `num-complex`, `extension-module`) are added per crate.
+pyo3               = "0.29"
+numpy              = "0.29"
+# Data parallelism (the sim's gate kernels, the observables' aggregation, the
+# native backend's population parallelism).
+rayon              = "1"
+# Complex amplitudes of the statevector; pyo3's `num-complex` feature converts
+# the same type, so both must stay on one major.
+num-complex        = "0.4"
+ndarray            = "0.17"
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.
 #
