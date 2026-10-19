@@ -133,7 +133,7 @@ result = polypus.train(
 result.best_params, result.best_fitness
 ```
 
-To try another optimizer, replace `polypus.DE` with `polypus.PSO` or `polypus.QNG`; to run on CUNQA, set `infrastructure="cunqa"`. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go from a first circuit to QML step by step, and [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
+To try another optimizer, replace `polypus.DE` with `polypus.PSO` or `polypus.QNG`; to run on CUNQA, set `infrastructure="cunqa"`. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go step by step from a first circuit to variational training, covering gates, Qiskit and OpenQASM interoperability, local and cluster execution, and classic algorithms along the way; [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
 
 ## Backends
 

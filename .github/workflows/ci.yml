@@ -330,10 +330,10 @@ jobs:
         run: |
           maturin build --release --out dist
           pip install dist/polypus_quantum-*.whl
-      # matplotlib/pylatexenc are needed only by the tutorials' drawing
-      # cells (qasm2.loads(...).draw("mpl")), not by the package itself.
+      # matplotlib is needed only by the tutorials' plots (the histogram in
+      # 01_first_circuit and the demo's figures), not by the package itself.
       - name: Install notebook execution dependencies
-        run: pip install nbconvert ipykernel matplotlib pylatexenc
+        run: pip install nbconvert ipykernel matplotlib
       - name: Register the python3 Jupyter kernel
         run: python -m ipykernel install --user --name python3 --display-name "Python 3"
       - name: Execute every tutorial notebook

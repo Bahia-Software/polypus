@@ -56,7 +56,6 @@ jobs:
           jupyterlab
           matplotlib
           numpy
-          pylatexenc
           EOF
 
       - name: Install the pinned release and execute every notebook
