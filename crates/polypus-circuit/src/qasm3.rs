@@ -33,12 +33,13 @@ use crate::expr::{
     fmt_number, print, printed_len, Dialect, ExprArena, Unprintable, MAX_EXPR_NODES,
 };
 use crate::gate::{GateInstruction, GateParam};
-use crate::naming::{fresh, DefinitionNames};
-use crate::qasm3_import::{
-    parse_qasm3, MAX_DECLARATIONS, MAX_INPUTS, MAX_INSTRUCTIONS, MAX_PROGRAM_NODES,
-    MAX_SOURCE_BYTES,
+use crate::limits::{
+    MAX_DECLARATIONS, MAX_INSTRUCTIONS, MAX_PROGRAM_NODES, MAX_REGISTER_BITS, MAX_SOURCE_BYTES,
+    MAX_VALIDATED_EXPANSION,
 };
-use crate::qasm_import::{normalize, MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION};
+use crate::naming::{fresh, DefinitionNames};
+use crate::qasm3_import::{parse_qasm3, MAX_INPUTS};
+use crate::qasm_import::normalize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::OnceLock;

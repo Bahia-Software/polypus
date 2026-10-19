@@ -35,10 +35,12 @@
 //! always a declared gate ([`GateInstruction::Custom`]), even when it is
 //! named like a Polypus instruction (`rzz`).
 //!
-//! This is an **untrusted input surface**. The budgets below, and those of
-//! the OpenQASM 2.0 importer it shares (register size, expression depth,
-//! declared-gate nesting and expansion), bound the work any input can cause;
-//! each is a [`CircuitError::Parse`] when exceeded.
+//! This is an **untrusted input surface**. The budgets it shares with the
+//! OpenQASM 2.0 importer ([`crate::limits`]: source and token size,
+//! declarations, instructions, expression nodes, register size), those of
+//! expressions and declared gates (depth, nesting, expansion) and
+//! [`MAX_INPUTS`] bound the work any input can cause; each is a
+//! [`CircuitError::Parse`] when exceeded.
 
 use crate::circuit::ParameterizedCircuit;
 use crate::custom_gate::{
@@ -50,31 +52,20 @@ use crate::expr::{
     Input, Node, ParamExpr, MAX_EXPR_DEPTH, MAX_EXPR_NODES,
 };
 use crate::gate::{GateInstruction, GateParam};
+use crate::limits::{
+    check_declarations, check_instructions, check_source, check_token, spend_nodes,
+    MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION,
+};
 use crate::qasm_import::{
     broadcast, builtin_gate, check_distinct, check_signature, check_terminal, err, normalize,
-    normalize_line_endings, ArgIndices, BuiltinGate, MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION,
+    normalize_line_endings, ArgIndices, BuiltinGate,
 };
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
-/// Largest source accepted, in bytes. The OpenQASM 3 exporter writes at most
-/// this much, so everything it writes can be imported again.
-pub(crate) const MAX_SOURCE_BYTES: usize = 32 << 20;
-
-/// Longest identifier, number or string literal, in bytes.
-pub(crate) const MAX_TOKEN_BYTES: usize = 4096;
-
-/// Most `input` declarations.
+/// Most `input` declarations (the other budgets are shared with the
+/// OpenQASM 2.0 importer, in [`crate::limits`]).
 pub(crate) const MAX_INPUTS: usize = 100_000;
-
-/// Most `gate` declarations.
-pub(crate) const MAX_DECLARATIONS: usize = 10_000;
-
-/// Most expression nodes (numbers, names, operators, calls) in a program.
-pub(crate) const MAX_PROGRAM_NODES: usize = 4_000_000;
-
-/// Most instructions a program may produce, after register broadcasting.
-pub(crate) const MAX_INSTRUCTIONS: usize = 4_000_000;
 
 // ─────────────────────────────── Vocabulary ──────────────────────────────
 
@@ -357,11 +348,8 @@ impl<'s> Lexer<'s> {
             return Err(err(line, format!("unexpected character '{c}'")));
         };
         let end = self.pos;
-        if !matches!(tok, Tok::Punct(_)) && end - start > MAX_TOKEN_BYTES {
-            return Err(err(
-                line,
-                format!("token longer than MAX_TOKEN_BYTES ({MAX_TOKEN_BYTES} bytes)"),
-            ));
+        if !matches!(tok, Tok::Punct(_)) {
+            check_token(end - start, line)?;
         }
         Ok(Some(Token {
             tok,
@@ -609,13 +597,7 @@ struct ExprParser<'t, 's, R> {
 // parenthesis, unary minus, function argument and exponent.
 impl<R: Copy> ExprParser<'_, '_, R> {
     fn push(&mut self, node: Node<R>) -> Result<(), CircuitError> {
-        *self.nodes_used += 1;
-        if *self.nodes_used > MAX_PROGRAM_NODES {
-            return Err(err(
-                self.tokens.line(),
-                format!("the program's expressions exceed MAX_PROGRAM_NODES ({MAX_PROGRAM_NODES} nodes)"),
-            ));
-        }
+        spend_nodes(self.nodes_used, 1, self.tokens.line())?;
         if self.nodes.len() >= MAX_EXPR_NODES {
             return Err(err(
                 self.tokens.line(),
@@ -898,15 +880,7 @@ struct Parser<'s> {
 /// Parse a complete program in the OpenQASM 3 profile. Entry point of
 /// [`ParameterizedCircuit::from_qasm3`].
 pub(crate) fn parse_qasm3(src: &str) -> Result<ParameterizedCircuit, CircuitError> {
-    if src.len() > MAX_SOURCE_BYTES {
-        return Err(err(
-            1,
-            format!(
-                "source of {} bytes exceeds MAX_SOURCE_BYTES ({MAX_SOURCE_BYTES} bytes)",
-                src.len()
-            ),
-        ));
-    }
+    check_source(src)?;
     let mut parser = Parser {
         src,
         tokens: Tokens {
@@ -1700,14 +1674,7 @@ impl<'s> Parser<'s> {
     /// Append an instruction: within the instruction budget, and terminal
     /// (contract C-4).
     fn push(&mut self, gate: GateInstruction, line: usize) -> Result<(), CircuitError> {
-        if self.gates.len() >= MAX_INSTRUCTIONS {
-            return Err(err(
-                line,
-                format!(
-                    "the program has more than MAX_INSTRUCTIONS ({MAX_INSTRUCTIONS}) instructions"
-                ),
-            ));
-        }
+        check_instructions(self.gates.len(), 1, line)?;
         check_terminal(&self.measured, &gate, line)?;
         if let GateInstruction::Measure { qubit, .. } = &gate {
             self.measured.insert(*qubit);
@@ -1749,12 +1716,7 @@ impl<'s> Parser<'s> {
         let line = keyword.line;
         let (name, _) = self.tokens.ident("a gate name")?;
         self.check_new_name(name, line, "a gate")?;
-        if self.gate_defs.len() >= MAX_DECLARATIONS {
-            return Err(err(
-                line,
-                format!("more than MAX_DECLARATIONS ({MAX_DECLARATIONS}) gate declarations"),
-            ));
-        }
+        check_declarations(self.gate_defs.len(), line)?;
 
         let mut params: Vec<String> = Vec::new();
         if self.tokens.eat("(")? && !self.tokens.eat(")")? {

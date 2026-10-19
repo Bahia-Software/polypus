@@ -59,6 +59,10 @@ Changes on `main` since 0.7.2.
 - QMIO: reply bitstrings are validated and malformed `QMIO_*` tuning variables
   are rejected.
 - Subprocess backend bounds the worker frame length.
+- The OpenQASM 2.0 importer enforces the OpenQASM 3 importer's size budgets
+  (source, tokens, declarations, instructions after broadcasting, barrier
+  operands, expression nodes) and no longer tokenizes the whole source up
+  front: a few hundred bytes could take gigabytes (#343).
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.

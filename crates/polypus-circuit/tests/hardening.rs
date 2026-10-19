@@ -3,7 +3,10 @@
 //!
 //! - expression recursion depth cap (no stack overflow), and long flat sums or
 //!   products evaluated without recursion;
-//! - register-size cap (no multi-gigabyte allocation).
+//! - register-size cap (no multi-gigabyte allocation);
+//! - the budgets shared with the OpenQASM 3 importer (source and token size,
+//!   declarations, instructions after broadcasting, barrier operands,
+//!   expression nodes), with the audit's inputs (#343) among them.
 //!
 //! (The caps on `gate` declarations — nesting, expansion size, validation
 //! budget — are covered in `gate_declarations.rs`.)
@@ -187,4 +190,135 @@ fn very_long_sums_and_products_evaluate_without_recursion() {
             theta: polypus_circuit::GateParam::Fixed(1.0),
         }]
     );
+}
+
+// ──────────────────────── shared import budgets ─────────────────────
+
+const MAX_SOURCE_BYTES: usize = 32 << 20;
+const MAX_TOKEN_BYTES: usize = 4096;
+const MAX_DECLARATIONS: usize = 10_000;
+const MAX_EXPR_NODES: usize = 1_000_000;
+
+#[test]
+fn the_source_size_is_bounded() {
+    let at = |len: usize| format!("{HEADER}//{}\n", "x".repeat(len - HEADER.len() - 3));
+    let src = at(MAX_SOURCE_BYTES);
+    assert_eq!(src.len(), MAX_SOURCE_BYTES);
+    assert!(ParameterizedCircuit::from_qasm2(&src).is_ok());
+    let (line, message) = parse_err(&at(MAX_SOURCE_BYTES + 1));
+    assert_eq!(line, 1);
+    assert!(message.contains("exceeds MAX_SOURCE_BYTES"), "{message}");
+}
+
+#[test]
+fn tokens_are_bounded() {
+    let name = format!("r{}", "a".repeat(MAX_TOKEN_BYTES - 1));
+    let qc = ParameterizedCircuit::from_qasm2(&format!(
+        "OPENQASM 2.0;\nqreg {name}[1];\nh {name}[0];\n"
+    ))
+    .unwrap();
+    assert_eq!(qc.num_qubits, 1);
+    let number = "0".repeat(MAX_TOKEN_BYTES);
+    assert!(ParameterizedCircuit::from_qasm2(&format!("{HEADER}rx({number}) q[0];\n")).is_ok());
+    let string = "a".repeat(MAX_TOKEN_BYTES - 2);
+    assert!(ParameterizedCircuit::from_qasm2(&format!("{HEADER}include \"{string}\";\n")).is_ok());
+
+    for over in [
+        format!("qreg {name}b[1];"),
+        format!("rx({number}0) q[0];"),
+        format!("include \"{string}b\";"),
+    ] {
+        let (line, message) = parse_err(&format!("{HEADER}{over}\n"));
+        assert_eq!(line, 3);
+        assert!(
+            message.contains("token longer than MAX_TOKEN_BYTES (4096 bytes)"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn declarations_are_bounded() {
+    let mut src = String::from(HEADER);
+    for i in 0..MAX_DECLARATIONS {
+        src.push_str(&format!("gate g{i} a {{ }}\n"));
+    }
+    assert!(ParameterizedCircuit::from_qasm2(&src).is_ok());
+    src.push_str("gate one_more a { }\n");
+    let (line, message) = parse_err(&src);
+    assert_eq!(line, MAX_DECLARATIONS + 3);
+    assert!(
+        message.contains("more than MAX_DECLARATIONS (10000)"),
+        "{message}"
+    );
+}
+
+/// The audit's first input: 153 bytes that broadcast to 20 000 000
+/// instructions. The fifth `h q;` is rejected before it is expanded.
+#[test]
+fn instructions_after_broadcasting_are_bounded() {
+    let src = format!("OPENQASM 2.0;\nqreg q[1000000];\n{}", "h q;\n".repeat(20));
+    let (line, message) = parse_err(&src);
+    assert_eq!(line, 7);
+    assert!(
+        message.contains("more than MAX_INSTRUCTIONS (4000000)"),
+        "{message}"
+    );
+    // Register-broadcast measurements count alike.
+    let src = "OPENQASM 2.0;\nqreg q[1000000];\ncreg c[1000000];\n\
+               h q;\nh q;\nh q;\nh q[0];\nmeasure q -> c;\n";
+    let (line, message) = parse_err(src);
+    assert_eq!(line, 8);
+    assert!(message.contains("MAX_INSTRUCTIONS"), "{message}");
+}
+
+/// The audit's third input: each `barrier q;` lists every qubit until the
+/// circuit is assembled, so the operands of all barriers are bounded.
+#[test]
+fn barrier_operands_are_bounded() {
+    let src = |barriers: &str| format!("OPENQASM 2.0;\nqreg q[1000000];\n{barriers}");
+    let at = src(&"barrier q;\n".repeat(4));
+    assert_eq!(
+        ParameterizedCircuit::from_qasm2(&at).unwrap().gates,
+        vec![polypus_circuit::GateInstruction::Barrier(vec![]); 4]
+    );
+    let (line, message) = parse_err(&format!("{at}barrier q[0];\n"));
+    assert_eq!(line, 7);
+    assert!(
+        message.contains("more than MAX_BARRIER_OPERANDS (4000000) qubits"),
+        "{message}"
+    );
+    let (line, _) = parse_err(&src(&"barrier q;\n".repeat(100)));
+    assert_eq!(line, 7);
+}
+
+#[test]
+fn a_parameter_list_is_bounded() {
+    // n terms of a sum are 2n − 1 nodes; with the first parameter, n = N/2
+    // fill MAX_EXPR_NODES exactly, and a unary minus is one more.
+    let sum = format!("0{}", "+0".repeat(MAX_EXPR_NODES / 2 - 1));
+    assert!(ParameterizedCircuit::from_qasm2(&format!("{HEADER}u2(0,{sum}) q[0];\n")).is_ok());
+    let (line, message) = parse_err(&format!("{HEADER}u2(-0,{sum}) q[0];\n"));
+    assert_eq!(line, 3);
+    assert!(
+        message.contains("parameter list has more than 1000000 expression nodes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_expression_nodes_kept_in_gate_bodies_are_bounded() {
+    // 999 999 nodes per body: four fit in 4 000 000, a fifth does not.
+    let sum = format!("t{}", "+t".repeat(MAX_EXPR_NODES / 2 - 1));
+    let gates = |n: usize| {
+        let mut src = String::from(HEADER);
+        for i in 0..n {
+            src.push_str(&format!("gate g{i}(t) a {{ rz({sum}) a; }}\n"));
+        }
+        src
+    };
+    assert!(ParameterizedCircuit::from_qasm2(&gates(4)).is_ok());
+    let (line, message) = parse_err(&gates(5));
+    assert_eq!(line, 7);
+    assert!(message.contains("MAX_PROGRAM_NODES (4000000"), "{message}");
 }

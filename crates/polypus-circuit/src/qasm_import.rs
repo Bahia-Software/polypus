@@ -31,14 +31,24 @@
 //! A gate acting on an already-measured qubit is likewise rejected
 //! (terminal-measurement model, contract C-4).
 //!
-//! This is an **untrusted input surface**, so a few resource limits guard
-//! against denial-of-service inputs, each surfaced as a [`CircuitError::Parse`]:
-//! - angle expressions may nest at most [`MAX_EXPR_DEPTH`] levels (no stack
-//!   overflow from `((((…))))` or `----…-1`); long flat sums and products are
-//!   evaluated iteratively;
+//! This is an **untrusted input surface**, so resource limits guard against
+//! denial-of-service inputs, each surfaced as a [`CircuitError::Parse`]. The
+//! budgets of [`crate::limits`] are shared with the OpenQASM 3 importer:
+//! - the source may be at most [`MAX_SOURCE_BYTES`](crate::limits::MAX_SOURCE_BYTES) long, and each identifier,
+//!   number or string at most [`MAX_TOKEN_BYTES`](crate::limits::MAX_TOKEN_BYTES); the source is lexed as it
+//!   is parsed, never materialised as a token list;
+//! - the program may produce at most [`MAX_INSTRUCTIONS`](crate::limits::MAX_INSTRUCTIONS) instructions after
+//!   register broadcasting (checked before a statement is expanded), its
+//!   barriers may list at most [`MAX_BARRIER_OPERANDS`](crate::limits::MAX_BARRIER_OPERANDS) qubits in total, and
+//!   it may declare at most [`MAX_DECLARATIONS`](crate::limits::MAX_DECLARATIONS) gates;
 //! - the total declared qubits, and separately classical bits, may not exceed
 //!   [`MAX_REGISTER_BITS`] (no multi-gigabyte index vector from a hostile
 //!   `qreg q[4000000000];`);
+//! - angle expressions may nest at most [`MAX_EXPR_DEPTH`] levels (no stack
+//!   overflow from `((((…))))` or `----…-1`); long flat sums and products are
+//!   evaluated iteratively; one parameter list may hold at most
+//!   [`MAX_EXPR_NODES`] nodes, and gate bodies, whose expressions are kept, at
+//!   most [`MAX_PROGRAM_NODES`](crate::limits::MAX_PROGRAM_NODES) together;
 //! - a gate declaration may nest calls at most [`MAX_GATE_NESTING`] levels and
 //!   its full expansion may visit at most [`MAX_GATE_EXPANSION`] body
 //!   statements (no exponential blow-up from a few nested lines), and
@@ -55,18 +65,16 @@ use crate::error::CircuitError;
 // Bounds parser recursion so untrusted input like `((((…))))` or `----…-1`
 // cannot overflow the stack. Legitimate `qelib1.inc` angle expressions
 // (`pi/2`, `-pi/4`, `(1+2)*pi`, …) nest only a handful of levels.
-use crate::expr::MAX_EXPR_DEPTH;
 use crate::expr::{Constant, Dialect, EvalError, Formal, FormalExpr, Function, Node};
+use crate::expr::{MAX_EXPR_DEPTH, MAX_EXPR_NODES};
 use crate::gate::{first_repeated_qubit, GateInstruction, GateParam};
+pub(crate) use crate::limits::MAX_REGISTER_BITS;
+use crate::limits::{
+    check_declarations, check_instructions, check_source, check_token, spend_barrier_operands,
+    spend_nodes, MAX_VALIDATED_EXPANSION,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
-
-/// Upper bound on the *total* number of declared qubits (and, separately, of
-/// declared classical bits). Guards against a hostile `qreg q[4000000000];`
-/// materialising a multi-gigabyte index vector during argument expansion. One
-/// million bits is far beyond any simulable circuit (the statevector backend
-/// caps out around 30 qubits) yet cheap to reject.
-pub(crate) const MAX_REGISTER_BITS: usize = 1_000_000;
 
 /// Shorthand for building a [`CircuitError::Parse`].
 pub(crate) fn err(line: usize, message: impl Into<String>) -> CircuitError {
@@ -131,176 +139,145 @@ impl Tok {
     }
 }
 
-/// A token stream: each token with its 1-based line, and (in a parallel
-/// vector) the byte offset in the source where it starts, so the parser can
-/// recover source text verbatim (the text of a `gate` declaration).
-type Tokens = (Vec<(Tok, usize)>, Vec<usize>);
+/// One token, with its 1-based line and the byte offset in the source where
+/// it starts, so the parser can recover source text verbatim (the text of a
+/// `gate` declaration).
+#[derive(Debug, Clone)]
+struct Token {
+    tok: Tok,
+    line: usize,
+    start: usize,
+}
 
-/// Tokenize `src`, tracking 1-based line numbers and token start offsets.
-/// Comments (`// …`) and whitespace are skipped.
-fn tokenize(src: &str) -> Result<Tokens, CircuitError> {
-    let chars: Vec<char> = src.chars().collect();
-    let mut toks = Vec::new();
-    let mut starts = Vec::new();
-    let mut line = 1usize;
-    let mut i = 0usize;
-    // Byte offset of `chars[i]`, advanced incrementally as `i` grows.
-    let (mut cursor_char, mut cursor_byte) = (0usize, 0usize);
+/// Tokenizes `src` on demand, one token at a time, tracking 1-based line
+/// numbers. Comments (`// …`) and whitespace are skipped. Only the token being
+/// read is ever held, so lexing takes no memory beyond the source itself.
+struct Lexer<'src> {
+    src: &'src str,
+    pos: usize,
+    line: usize,
+}
 
-    while i < chars.len() {
-        while cursor_char < i {
-            cursor_byte += chars[cursor_char].len_utf8();
-            cursor_char += 1;
-        }
-        let (token_start, tokens_before) = (cursor_byte, toks.len());
-        let c = chars[i];
-        match c {
-            '\n' => {
-                line += 1;
-                i += 1;
-            }
-            _ if c.is_whitespace() => i += 1,
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
+impl Lexer<'_> {
+    /// The next token, or `None` at the end of the source. An error leaves
+    /// the lexer where it is, so asking again reports the same error.
+    fn next_token(&mut self) -> Result<Option<Token>, CircuitError> {
+        loop {
+            let rest = &self.src[self.pos..];
+            let Some(c) = rest.chars().next() else {
+                return Ok(None);
+            };
+            let (start, line) = (self.pos, self.line);
+            let punct = match c {
+                '(' => Some(Tok::LParen),
+                ')' => Some(Tok::RParen),
+                '[' => Some(Tok::LBracket),
+                ']' => Some(Tok::RBracket),
+                ',' => Some(Tok::Comma),
+                ';' => Some(Tok::Semi),
+                '+' => Some(Tok::Plus),
+                '*' => Some(Tok::Star),
+                '^' => Some(Tok::Caret),
+                '{' => Some(Tok::LBrace),
+                '}' => Some(Tok::RBrace),
+                '=' => Some(Tok::Eq),
+                '-' if rest.starts_with("->") => {
+                    self.pos += 1;
+                    Some(Tok::Arrow)
                 }
+                '-' => Some(Tok::Minus),
+                '/' if !rest.starts_with("//") => Some(Tok::Slash),
+                _ => None,
+            };
+            if let Some(tok) = punct {
+                self.pos += 1;
+                return Ok(Some(Token { tok, line, start }));
             }
-            '"' => {
-                let start = line;
-                i += 1;
-                let mut s = String::new();
-                loop {
-                    match chars.get(i) {
-                        Some('"') => {
-                            i += 1;
-                            break;
-                        }
-                        Some('\n') | None => return Err(err(start, "unterminated string literal")),
-                        Some(&ch) => {
-                            s.push(ch);
-                            i += 1;
-                        }
-                    }
+            let tok = match c {
+                '\n' => {
+                    self.line += 1;
+                    self.pos += 1;
+                    continue;
                 }
-                toks.push((Tok::Str(s), start));
-            }
-            '-' if chars.get(i + 1) == Some(&'>') => {
-                toks.push((Tok::Arrow, line));
-                i += 2;
-            }
-            '(' => {
-                toks.push((Tok::LParen, line));
-                i += 1;
-            }
-            ')' => {
-                toks.push((Tok::RParen, line));
-                i += 1;
-            }
-            '[' => {
-                toks.push((Tok::LBracket, line));
-                i += 1;
-            }
-            ']' => {
-                toks.push((Tok::RBracket, line));
-                i += 1;
-            }
-            ',' => {
-                toks.push((Tok::Comma, line));
-                i += 1;
-            }
-            ';' => {
-                toks.push((Tok::Semi, line));
-                i += 1;
-            }
-            '+' => {
-                toks.push((Tok::Plus, line));
-                i += 1;
-            }
-            '-' => {
-                toks.push((Tok::Minus, line));
-                i += 1;
-            }
-            '*' => {
-                toks.push((Tok::Star, line));
-                i += 1;
-            }
-            '/' => {
-                toks.push((Tok::Slash, line));
-                i += 1;
-            }
-            '^' => {
-                toks.push((Tok::Caret, line));
-                i += 1;
-            }
-            '{' => {
-                toks.push((Tok::LBrace, line));
-                i += 1;
-            }
-            '}' => {
-                toks.push((Tok::RBrace, line));
-                i += 1;
-            }
-            '=' => {
-                toks.push((Tok::Eq, line));
-                i += 1;
-            }
-            _ if c.is_ascii_digit() || c == '.' => {
-                let start = i;
-                let mut is_real = false;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
+                _ if c.is_whitespace() => {
+                    self.pos += c.len_utf8();
+                    continue;
                 }
-                if i < chars.len() && chars[i] == '.' {
-                    is_real = true;
-                    i += 1;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
+                '/' => {
+                    self.pos += rest.find('\n').unwrap_or(rest.len());
+                    continue;
                 }
-                if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
-                    is_real = true;
-                    i += 1;
-                    if i < chars.len() && (chars[i] == '+' || chars[i] == '-') {
-                        i += 1;
-                    }
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
+                '"' => {
+                    let body = &rest[1..];
+                    let len = match body.find(['"', '\n']) {
+                        Some(len) if body[len..].starts_with('"') => len,
+                        _ => return Err(err(line, "unterminated string literal")),
+                    };
+                    check_token(len + 2, line)?;
+                    self.pos += len + 2;
+                    Tok::Str(body[..len].to_string())
                 }
-                let text: String = chars[start..i].iter().collect();
-                if is_real {
-                    let v: f64 = text
-                        .parse()
-                        .map_err(|_| err(line, format!("invalid number '{text}'")))?;
-                    toks.push((Tok::Real(v), line));
-                } else if let Ok(v) = text.parse::<usize>() {
-                    toks.push((Tok::Int(v), line));
-                } else {
-                    // Too large for a register size or index, but still a valid
-                    // number in an expression (it is lexed as the nearest `f64`,
-                    // as Qiskit does); where an index is required, the parser
-                    // reports the real token.
-                    let v: f64 = text
-                        .parse()
-                        .map_err(|_| err(line, format!("invalid integer '{text}'")))?;
-                    toks.push((Tok::Real(v), line));
+                _ if c.is_ascii_digit() || c == '.' => self.number(rest, line)?,
+                _ if c.is_ascii_alphabetic() || c == '_' => {
+                    let len = rest
+                        .bytes()
+                        .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                        .unwrap_or(rest.len());
+                    check_token(len, line)?;
+                    self.pos += len;
+                    Tok::Ident(rest[..len].to_string())
                 }
-            }
-            _ if c.is_ascii_alphabetic() || c == '_' => {
-                let start = i;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                toks.push((Tok::Ident(chars[start..i].iter().collect()), line));
-            }
-            other => return Err(err(line, format!("unexpected character '{other}'"))),
-        }
-        // Every arm pushes at most one token.
-        if toks.len() > tokens_before {
-            starts.push(token_start);
+                other => return Err(err(line, format!("unexpected character '{other}'"))),
+            };
+            return Ok(Some(Token { tok, line, start }));
         }
     }
-    Ok((toks, starts))
+
+    /// A numeric literal starting at `rest`: digits, an optional fraction and
+    /// an optional exponent.
+    fn number(&mut self, rest: &str, line: usize) -> Result<Tok, CircuitError> {
+        let bytes = rest.as_bytes();
+        let digits = |from: usize| {
+            from + bytes[from..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count()
+        };
+        let mut len = digits(0);
+        let mut is_real = false;
+        if bytes.get(len) == Some(&b'.') {
+            is_real = true;
+            len = digits(len + 1);
+        }
+        if matches!(bytes.get(len), Some(b'e' | b'E')) {
+            is_real = true;
+            len += 1;
+            if matches!(bytes.get(len), Some(b'+' | b'-')) {
+                len += 1;
+            }
+            len = digits(len);
+        }
+        check_token(len, line)?;
+        self.pos += len;
+        let text = &rest[..len];
+        if is_real {
+            let v: f64 = text
+                .parse()
+                .map_err(|_| err(line, format!("invalid number '{text}'")))?;
+            Ok(Tok::Real(v))
+        } else if let Ok(v) = text.parse::<usize>() {
+            Ok(Tok::Int(v))
+        } else {
+            // Too large for a register size or index, but still a valid
+            // number in an expression (it is lexed as the nearest `f64`, as
+            // Qiskit does); where an index is required, the parser reports
+            // the real token.
+            let v: f64 = text
+                .parse()
+                .map_err(|_| err(line, format!("invalid integer '{text}'")))?;
+            Ok(Tok::Real(v))
+        }
+    }
 }
 
 // ──────────────────────────── Gate vocabulary ────────────────────────────
@@ -640,6 +617,16 @@ pub(crate) fn broadcast(args: &[ArgIndices], line: usize) -> Result<Vec<Vec<usiz
     Parser::broadcast(args, line)
 }
 
+/// How many applications broadcasting `args` makes: the length of the
+/// register arguments (checked equal by `broadcast`), or 1 without any.
+fn broadcast_span(args: &[ArgIndices]) -> usize {
+    args.iter()
+        .filter(|a| a.is_register)
+        .map(|a| a.indices.len())
+        .max()
+        .unwrap_or(1)
+}
+
 /// The distinct-qubits check, shared with the OpenQASM 3 importer (see
 /// `Parser::check_distinct`).
 pub(crate) fn check_distinct(qubits: &[usize], line: usize) -> Result<(), CircuitError> {
@@ -748,10 +735,13 @@ impl ParsedExpr {
 struct Parser<'src> {
     /// The source, for recovering a `gate` declaration's text verbatim.
     src: &'src str,
-    toks: Vec<(Tok, usize)>,
-    /// Byte offset in `src` where each token starts (parallel to `toks`).
-    starts: Vec<usize>,
-    pos: usize,
+    lexer: Lexer<'src>,
+    /// The token after the ones consumed (`None` at the end of the source),
+    /// or the error lexing it.
+    ahead: Result<Option<Token>, CircuitError>,
+    /// Line and start offset of the last token consumed.
+    last_line: usize,
+    last_start: usize,
     qregs: Vec<Reg>,
     cregs: Vec<Reg>,
     num_qubits: usize,
@@ -763,32 +753,38 @@ struct Parser<'src> {
     measured: BTreeSet<usize>,
     /// Gates declared so far with `gate` blocks, by name.
     gate_defs: HashMap<String, Arc<GateDefinition>>,
-    /// Formal parameter names in scope while parsing a gate body (empty at
+    /// Formal parameter names in scope while parsing a gate body (`None` at
     /// top level, where expressions are constant).
-    param_scope: Vec<String>,
+    param_scope: Option<Vec<String>>,
     /// Body statements the importer may still visit to validate calls of
     /// declared gates (see [`MAX_VALIDATED_EXPANSION`]).
     expansion_budget: usize,
+    /// Qubits the barriers so far list (see [`MAX_BARRIER_OPERANDS`](crate::limits::MAX_BARRIER_OPERANDS)).
+    barrier_operands: usize,
+    /// Expression nodes in the parameter list being read (see
+    /// [`MAX_EXPR_NODES`]).
+    list_nodes: usize,
+    /// Expression nodes kept in gate bodies so far (see
+    /// [`MAX_PROGRAM_NODES`](crate::limits::MAX_PROGRAM_NODES)).
+    body_nodes: usize,
 }
-
-/// Upper bound on the body statements the importer visits, over the whole
-/// program, to validate calls of declared gates (each call's angles
-/// are evaluated through its whole body, so a non-finite angle or a division
-/// by zero is rejected at parse time like everywhere else, contract C-2).
-/// Bounds the parse time of hostile input that calls a large declaration many
-/// times; real programs stay orders of magnitude below it.
-pub(crate) const MAX_VALIDATED_EXPANSION: usize = 20_000_000;
 
 /// Parse a complete OpenQASM 2.0 program into a (fully concrete)
 /// [`ParameterizedCircuit`]. Entry point used by
 /// [`ParameterizedCircuit::from_qasm2`].
 pub(crate) fn parse_qasm2(src: &str) -> Result<ParameterizedCircuit, CircuitError> {
-    let (toks, starts) = tokenize(src)?;
+    check_source(src)?;
+    let mut lexer = Lexer {
+        src,
+        pos: 0,
+        line: 1,
+    };
     let mut p = Parser {
         src,
-        toks,
-        starts,
-        pos: 0,
+        ahead: lexer.next_token(),
+        lexer,
+        last_line: 1,
+        last_start: 0,
         qregs: Vec::new(),
         cregs: Vec::new(),
         num_qubits: 0,
@@ -796,8 +792,11 @@ pub(crate) fn parse_qasm2(src: &str) -> Result<ParameterizedCircuit, CircuitErro
         gates: Vec::new(),
         measured: BTreeSet::new(),
         gate_defs: HashMap::new(),
-        param_scope: Vec::new(),
+        param_scope: None,
         expansion_budget: MAX_VALIDATED_EXPANSION,
+        barrier_operands: 0,
+        list_nodes: 0,
+        body_nodes: 0,
     };
     p.header()?;
     while !p.at_end() {
@@ -810,30 +809,44 @@ impl Parser<'_> {
     // ── Token-stream helpers ─────────────────────────────────────────────
 
     fn at_end(&self) -> bool {
-        self.pos >= self.toks.len()
+        matches!(self.ahead, Ok(None))
     }
 
     /// Line of the current (or last) token, for error reporting.
     fn line(&self) -> usize {
-        self.toks
-            .get(self.pos)
-            .or_else(|| self.toks.last())
-            .map_or(1, |(_, l)| *l)
+        match &self.ahead {
+            Ok(Some(token)) => token.line,
+            _ => self.last_line,
+        }
     }
 
+    /// The current token; `None` at the end of the source, and when it cannot
+    /// be lexed (consuming it then reports the error).
     fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos).map(|(t, _)| t)
+        match &self.ahead {
+            Ok(Some(token)) => Some(&token.tok),
+            _ => None,
+        }
+    }
+
+    /// Consume the current token and lex the one after it.
+    fn advance(&mut self) -> Result<Option<Token>, CircuitError> {
+        let next = self.lexer.next_token();
+        let current = std::mem::replace(&mut self.ahead, next)?;
+        if let Some(token) = &current {
+            (self.last_line, self.last_start) = (token.line, token.start);
+        }
+        Ok(current)
     }
 
     fn next(&mut self, what: &str) -> Result<(Tok, usize), CircuitError> {
-        let item = self.toks.get(self.pos).cloned().ok_or_else(|| {
-            err(
+        match self.advance()? {
+            Some(token) => Ok((token.tok, token.line)),
+            None => Err(err(
                 self.line(),
                 format!("unexpected end of input, expected {what}"),
-            )
-        })?;
-        self.pos += 1;
-        Ok(item)
+            )),
+        }
     }
 
     fn expect(&mut self, tok: Tok) -> Result<usize, CircuitError> {
@@ -1025,12 +1038,7 @@ impl Parser<'_> {
     /// application. E.g. `ccx a,b,c[0];` over `qreg a[2]; qreg b[2];` expands to
     /// `ccx a[0],b[0],c[0]; ccx a[1],b[1],c[0];`.
     fn broadcast(args: &[ArgIndices], line: usize) -> Result<Vec<Vec<usize>>, CircuitError> {
-        let span = args
-            .iter()
-            .filter(|a| a.is_register)
-            .map(|a| a.indices.len())
-            .max()
-            .unwrap_or(1);
+        let span = broadcast_span(args);
         for a in args {
             if a.is_register && a.indices.len() != span {
                 return Err(err(
@@ -1064,6 +1072,7 @@ impl Parser<'_> {
         let mut indices = Vec::new();
         loop {
             let arg = self.argument(true)?;
+            spend_barrier_operands(&mut self.barrier_operands, arg.indices.len(), line)?;
             indices.extend(arg.indices);
             match self.next("',' or ';'")? {
                 (Tok::Comma, _) => continue,
@@ -1098,6 +1107,7 @@ impl Parser<'_> {
                 ),
             ));
         }
+        check_instructions(self.gates.len(), q.indices.len(), line)?;
         for (&qubit, &cbit) in q.indices.iter().zip(&c.indices) {
             self.push_validated(GateInstruction::Measure { qubit, cbit }, line)?;
         }
@@ -1111,6 +1121,7 @@ impl Parser<'_> {
         if self.peek() != Some(&Tok::LParen) {
             return Ok(exprs);
         }
+        self.list_nodes = 0;
         self.expect(Tok::LParen)?;
         if self.peek() == Some(&Tok::RParen) {
             self.expect(Tok::RParen)?;
@@ -1188,6 +1199,7 @@ impl Parser<'_> {
             (params.len(), args.len()),
             line,
         )?;
+        check_instructions(self.gates.len(), broadcast_span(args), line)?;
         let params: Vec<GateParam> = params.iter().map(|&v| GateParam::Fixed(v)).collect();
         for qubits in Self::broadcast(args, line)? {
             Self::check_distinct(&qubits, line)?;
@@ -1215,6 +1227,7 @@ impl Parser<'_> {
             (params.len(), args.len()),
             line,
         )?;
+        check_instructions(self.gates.len(), broadcast_span(args), line)?;
         self.expansion_budget = self
             .expansion_budget
             .checked_sub(definition.expansion_size())
@@ -1245,7 +1258,7 @@ impl Parser<'_> {
     /// template over the formal arguments (see [`crate::custom_gate`]) and the
     /// declaration's text is kept verbatim, so the exporter can re-emit it.
     fn gate_decl(&mut self, line: usize) -> Result<(), CircuitError> {
-        let start = self.starts[self.pos - 1];
+        let start = self.last_start;
         let (name, _) = self.expect_ident("gate name")?;
         if is_expression_keyword(&name) {
             return Err(err(
@@ -1264,6 +1277,7 @@ impl Parser<'_> {
         if self.gate_defs.contains_key(&name) {
             return Err(err(line, format!("gate '{name}' is already declared")));
         }
+        check_declarations(self.gate_defs.len(), line)?;
 
         // Formal parameters: `(a, b, …)`, optional, possibly empty.
         let mut param_names: Vec<String> = Vec::new();
@@ -1334,13 +1348,13 @@ impl Parser<'_> {
             }
         }
 
-        self.param_scope = param_names.clone();
+        self.param_scope = Some(param_names.clone());
         let body = self.gate_body(&name, &qubit_names);
-        self.param_scope.clear();
+        self.param_scope = None;
         let body = body?;
 
         // Just past the closing `}` (a one-byte token).
-        let end = self.starts[self.pos - 1] + 1;
+        let end = self.last_start + 1;
         let declaration = normalize_line_endings(&self.src[start..end]);
         let ordinal = self.gate_defs.len();
         let definition = GateDefinition::new(
@@ -1374,14 +1388,18 @@ impl Parser<'_> {
         loop {
             match self.peek() {
                 Some(Tok::RBrace) => {
-                    self.pos += 1;
+                    self.advance()?;
                     return Ok(body);
                 }
                 None => {
+                    // A token that cannot be lexed is reported as such.
+                    if let Err(e) = &self.ahead {
+                        return Err(e.clone());
+                    }
                     return Err(err(
                         self.line(),
                         format!("unterminated body of gate '{gate}': expected '}}'"),
-                    ))
+                    ));
                 }
                 _ => body.push(self.body_stmt(gate, qubits)?),
             }
@@ -1523,6 +1541,7 @@ impl Parser<'_> {
     /// is rejected with the offending line, rather than silently accepted. This
     /// is the single push point for every statement handler.
     fn push_validated(&mut self, gate: GateInstruction, line: usize) -> Result<(), CircuitError> {
+        check_instructions(self.gates.len(), 1, line)?;
         check_terminal(&self.measured, &gate, line)?;
         if let GateInstruction::Measure { qubit, .. } = &gate {
             self.measured.insert(*qubit);
@@ -1548,6 +1567,24 @@ impl Parser<'_> {
     // descending into a nested sub-expression (parenthesis, function argument,
     // unary operator, exponent).
 
+    /// Spend one expression node: at most [`MAX_EXPR_NODES`] in a parameter
+    /// list, and, inside a gate body (whose expressions are kept), at most
+    /// [`MAX_PROGRAM_NODES`](crate::limits::MAX_PROGRAM_NODES) over the program.
+    fn spend_node(&mut self) -> Result<(), CircuitError> {
+        if self.list_nodes >= MAX_EXPR_NODES {
+            return Err(err(
+                self.line(),
+                format!("parameter list has more than {MAX_EXPR_NODES} expression nodes"),
+            ));
+        }
+        self.list_nodes += 1;
+        if self.param_scope.is_some() {
+            let line = self.line();
+            spend_nodes(&mut self.body_nodes, 1, line)?;
+        }
+        Ok(())
+    }
+
     /// Guard against runaway recursion (DoS via deeply nested expressions).
     fn check_depth(&self, depth: usize) -> Result<(), CircuitError> {
         if depth > MAX_EXPR_DEPTH {
@@ -1569,8 +1606,9 @@ impl Parser<'_> {
                 Some(Tok::Minus) => Node::Sub,
                 _ => return Ok(()),
             };
-            self.pos += 1;
+            self.advance()?;
             self.term(depth, out)?;
+            self.spend_node()?;
             out.push(op);
         }
     }
@@ -1585,8 +1623,9 @@ impl Parser<'_> {
                 _ => return Ok(()),
             };
             let line = self.line();
-            self.pos += 1;
+            self.advance()?;
             self.factor(depth, out)?;
+            self.spend_node()?;
             if divide {
                 out.push_div(line);
             } else {
@@ -1599,13 +1638,14 @@ impl Parser<'_> {
         self.check_depth(depth)?;
         match self.peek() {
             Some(Tok::Minus) => {
-                self.pos += 1;
+                self.advance()?;
                 self.factor(depth + 1, out)?;
+                self.spend_node()?;
                 out.push(Node::Neg);
                 Ok(())
             }
             Some(Tok::Plus) => {
-                self.pos += 1;
+                self.advance()?;
                 self.factor(depth + 1, out)
             }
             _ => self.power(depth, out),
@@ -1616,8 +1656,9 @@ impl Parser<'_> {
         self.check_depth(depth)?;
         self.primary(depth, out)?;
         if self.peek() == Some(&Tok::Caret) {
-            self.pos += 1;
+            self.advance()?;
             self.factor(depth + 1, out)?;
+            self.spend_node()?;
             out.push(Node::Pow);
         }
         Ok(())
@@ -1625,7 +1666,11 @@ impl Parser<'_> {
 
     fn primary(&mut self, depth: usize, out: &mut ParsedExpr) -> Result<(), CircuitError> {
         self.check_depth(depth)?;
-        match self.next("an expression")? {
+        let token = self.next("an expression")?;
+        if !matches!(token.0, Tok::LParen) {
+            self.spend_node()?;
+        }
+        match token {
             (Tok::Real(v), _) => out.push(Node::Num(v)),
             (Tok::Int(v), _) => out.push(Node::Num(v as f64)),
             (Tok::LParen, _) => {
@@ -1638,7 +1683,7 @@ impl Parser<'_> {
                     return Ok(());
                 }
                 // Inside a gate body: one of the gate's formal parameters.
-                if let Some(index) = self.param_scope.iter().position(|p| *p == name) {
+                if let Some(index) = self.param_scope.iter().flatten().position(|p| *p == name) {
                     out.push(Node::Ref(Formal(index)));
                     return Ok(());
                 }

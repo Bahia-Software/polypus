@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use polypus_circuit::ParameterizedCircuit;
+use polypus_circuit::{CircuitError, ParameterizedCircuit};
 
 // `ParameterizedCircuit::from_qasm2` parses arbitrary, untrusted OpenQASM 2.0.
 // Whatever the bytes, it must only ever return `Ok(circuit)` or a
@@ -13,7 +13,12 @@ use polypus_circuit::ParameterizedCircuit;
 // again and exporting that is byte-identical — the export is a fixed point,
 // `gate` declarations and calls of declared gates included. (The source and
 // the export need not be equal text: numbers are re-written in their shortest
-// round-trip form, and declarations nothing uses are not re-emitted.)
+// round-trip form, and declarations nothing uses are not re-emitted.) The only
+// export that may not import again is one longer than the importers' source
+// budget: a register broadcast written out statement by statement can outgrow
+// the program it came from.
+const MAX_SOURCE_BYTES: usize = 32 << 20;
+
 fuzz_target!(|data: &[u8]| {
     let src = String::from_utf8_lossy(data);
     let Ok(circuit) = ParameterizedCircuit::from_qasm2(&src) else {
@@ -22,6 +27,16 @@ fuzz_target!(|data: &[u8]| {
     let exported = circuit
         .to_qasm2_with_params(&[])
         .expect("an imported circuit must export");
+    if exported.len() > MAX_SOURCE_BYTES {
+        assert!(
+            matches!(
+                ParameterizedCircuit::from_qasm2(&exported),
+                Err(CircuitError::Parse { line: 1, .. })
+            ),
+            "an export over the source budget must be rejected for its size"
+        );
+        return;
+    }
     let reimported =
         ParameterizedCircuit::from_qasm2(&exported).expect("the export must import again");
     assert_eq!(
