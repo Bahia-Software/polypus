@@ -16,7 +16,7 @@ use crate::{
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::{sample_projected, Simulator, StatevectorSimulator};
+use polypus_sim::{sample_projected, Simulator, StatevectorSimulator, MAX_CLBITS};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -305,7 +305,7 @@ struct NativeSource<'a> {
 /// reject exactly the same circuits with the same message. It logs nothing:
 /// execution logs a rejection, the pre-check does not.
 fn native_source(circuit: &BoundCircuit) -> Result<NativeSource<'_>, BackendError> {
-    match circuit {
+    let source = match circuit {
         BoundCircuit::Native(cc) => Ok(NativeSource {
             circuit: Cow::Borrowed(cc),
             declared_clbits: cc.declared_clbits(),
@@ -327,6 +327,29 @@ fn native_source(circuit: &BoundCircuit) -> Result<NativeSource<'_>, BackendErro
              pass a polypus.Circuit or an OpenQASM 2.0 string, or select backend=\"aer\""
                 .to_string(),
         )),
+    }?;
+    check_counts_width(&source)?;
+    Ok(source)
+}
+
+/// Refuse, before anything is simulated, a measured circuit whose counts would
+/// be wider than [`MAX_CLBITS`] bits (issue #346): the simulator keys outcomes
+/// by a `usize`, and every distinct outcome becomes a `width`-byte bitstring,
+/// so a wide declared register (`creg c[65535];`) would otherwise cost memory
+/// in proportion to it. A measurement-free circuit is `num_qubits` wide, which
+/// the qubit ceiling already bounds.
+fn check_counts_width(source: &NativeSource<'_>) -> Result<(), BackendError> {
+    let circuit = source.circuit.as_ref();
+    if circuit.num_clbits() == 0 {
+        return Ok(());
+    }
+    match counts_width(circuit, source.declared_clbits) {
+        width if width > MAX_CLBITS => Err(BackendError::NativeCircuit(format!(
+            "the native statevector backend supports classical registers of at most \
+             {MAX_CLBITS} bits, but this circuit's is {width} bits wide; \
+             select backend=\"aer\" for a wider register"
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -362,12 +385,33 @@ fn format_counts(
     declared_clbits: Option<usize>,
     raw: HashMap<usize, u64>,
 ) -> HashMap<String, u64> {
-    let width = match concrete.num_clbits() {
+    let width = counts_width(concrete, declared_clbits);
+    raw.into_iter()
+        .map(|(state, count)| (bitstring(state, width), count))
+        .collect()
+}
+
+/// The width [`format_counts`] keys a circuit's counts at.
+fn counts_width(concrete: &ConcreteCircuit, declared_clbits: Option<usize>) -> usize {
+    match concrete.num_clbits() {
         0 => concrete.num_qubits,
         c => declared_clbits.map_or(c, |declared| declared.max(c)),
-    };
-    raw.into_iter()
-        .map(|(state, count)| (format!("{:0w$b}", state, w = width), count))
+    }
+}
+
+/// `state` as a `width`-character bitstring, most significant bit first. Built
+/// by hand rather than with `format!("{:0w$b}")`, whose width is limited to
+/// `u16::MAX`: bits above the key's own width read 0, at any `width`.
+fn bitstring(state: usize, width: usize) -> String {
+    (0..width)
+        .rev()
+        .map(|i| {
+            if i < MAX_CLBITS && (state >> i) & 1 == 1 {
+                '1'
+            } else {
+                '0'
+            }
+        })
         .collect()
 }
 
@@ -1334,28 +1378,91 @@ mod tests {
 
     /// `check_circuit` accepts and rejects exactly what execution does, with the
     /// same error, and simulates nothing.
-    /// Issue #345 (b): a valid program measuring into `c[70]` used to shift the
-    /// bit out of the `usize` key — wrong counts without overflow checks, a
-    /// panic with them. Both execution paths now return a typed error.
-    #[test]
-    fn a_cbit_beyond_the_counts_key_is_a_typed_error() {
-        let circuit = BoundCircuit::Qasm2(
-            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ncreg c[71];\n\
-             x q[0];\nmeasure q[0] -> c[70];\n"
-                .to_string(),
-        );
+    /// The native backend's verdict on `circuit` on all three paths — the
+    /// pre-check, the batch and the shot-distributed one — which must agree.
+    fn native_rejection(circuit: &BoundCircuit) -> String {
         let cfg = config_with(OptLevel::default());
         let backend = NativeStatevectorBackend::new(0);
-        let run = backend.run_circuits(std::slice::from_ref(&circuit), &cfg.run_params());
-        let distributed = backend.run_shots_distributed(&circuit, &[7, 5], &cfg.run_params());
-        for result in [run.map(|_| ()), distributed.map(|_| ())] {
-            match result {
-                Err(BackendError::NativeCircuit(m)) => {
-                    assert!(m.contains("classical bit 70"), "{m}")
-                }
+        let checked = NativeStatevectorBackend::check_circuit(circuit);
+        let run = backend.run_circuits(std::slice::from_ref(circuit), &cfg.run_params());
+        let distributed = backend.run_shots_distributed(circuit, &[7, 5], &cfg.run_params());
+        let messages: Vec<String> = [checked, run.map(|_| ()), distributed.map(|_| ())]
+            .into_iter()
+            .map(|result| match result {
+                Err(BackendError::NativeCircuit(m)) => m,
                 other => panic!("expected a NativeCircuit error, got {other:?}"),
-            }
+            })
+            .collect();
+        assert!(messages.iter().all(|m| *m == messages[0]), "{messages:?}");
+        messages[0].clone()
+    }
+
+    /// Issues #345 (b) and #346: a valid program measuring into `c[70]` used
+    /// to shift the bit out of the `usize` key (wrong counts without overflow
+    /// checks, a panic with them), and one declaring `creg c[65536]` panicked
+    /// formatting its counts. Both are typed errors now, before simulating.
+    #[test]
+    fn a_classical_register_wider_than_the_counts_key_is_a_typed_error() {
+        let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\n";
+        let cases = [
+            (
+                format!("{header}creg c[71];\nx q[0];\nmeasure q[0] -> c[70];\n"),
+                71,
+            ),
+            (
+                format!("{header}creg c[65536];\nx q[0];\nmeasure q[0] -> c[0];\n"),
+                65536,
+            ),
+        ];
+        for (qasm, width) in cases {
+            let message = native_rejection(&BoundCircuit::Qasm2(qasm));
+            assert!(
+                message.contains(&format!("is {width} bits wide")),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("at most {MAX_CLBITS} bits")),
+                "{message}"
+            );
         }
+        // A native circuit, with no declared register, the same.
+        let native = ParameterizedCircuit::new(1)
+            .x(0)
+            .measure(0, 70)
+            .assign_parameters(&[])
+            .unwrap();
+        let message = native_rejection(&BoundCircuit::Native(native));
+        assert!(message.contains("is 71 bits wide"), "{message}");
+    }
+
+    /// The widest register the counts key holds runs, with the measured bit in
+    /// its own place.
+    #[test]
+    fn a_classical_register_as_wide_as_the_counts_key_is_sampled_in_place() {
+        let qasm = format!(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ncreg c[{MAX_CLBITS}];\n\
+             x q[0];\nmeasure q[0] -> c[{}];\n",
+            MAX_CLBITS - 1
+        );
+        let cfg = config_with(OptLevel::default());
+        let counts = NativeStatevectorBackend::new(0)
+            .run_circuits(&[BoundCircuit::Qasm2(qasm)], &cfg.run_params())
+            .unwrap();
+        let key = format!("1{}", "0".repeat(MAX_CLBITS - 1));
+        assert_eq!(counts[0].len(), 1);
+        assert_eq!(counts[0].get(&key).copied(), Some(u64::from(cfg.shots)));
+    }
+
+    /// `bitstring` never panics on a width `format!` would refuse (`u16::MAX`
+    /// and above), and bits beyond the key read 0.
+    #[test]
+    fn bitstring_pads_any_width_without_panicking() {
+        assert_eq!(bitstring(0b101, 5), "00101");
+        assert_eq!(bitstring(usize::MAX, 2), "11");
+        let wide = bitstring(usize::MAX, 70_000);
+        assert_eq!(wide.len(), 70_000);
+        assert_eq!(wide.matches('1').count(), MAX_CLBITS);
+        assert!(wide.ends_with('1') && wide.starts_with('0'));
     }
 
     #[test]

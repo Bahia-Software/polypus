@@ -79,3 +79,19 @@ class TestRustOriginatedFailuresAreTyped:
         qc = polypus.Circuit(1).h(0).measure_all()
         with pytest.raises(ValueError):
             polypus.run_quantum_circuit(qc, shots=10, infrastructure="does-not-exist")
+
+    def test_wide_classical_register_raises_native_circuit_error(self):
+        """Issue #346: a ``creg`` of 65536 bits used to panic formatting the
+        counts (a ``PanicException``); the native backend now refuses any
+        register wider than its 64-bit counts key with a typed error, both as
+        an OpenQASM string and as an imported ``Circuit``."""
+        import polypus
+
+        qasm = (
+            'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[65536];\n'
+            "x q[0];\nmeasure q[0] -> c[0];\n"
+        )
+        kwargs = dict(shots=16, infrastructure="local", backend="polypus")
+        for circuit in (qasm, polypus.Circuit.from_qasm2(qasm)):
+            with pytest.raises(polypus.NativeCircuitError, match="65536 bits wide"):
+                polypus.run_quantum_circuit(circuit, **kwargs)

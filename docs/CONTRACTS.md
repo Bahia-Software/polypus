@@ -539,6 +539,14 @@ a circuit in the list is neither copied nor transpiled).
   `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
   verified; QMIO receives the declared width in all three program formats
   (the QIR export's `required_num_results`, issue #322).
+- The classical width is bounded. A circuit holds at most
+  `MAX_REGISTER_BITS` (1,000,000) classical bits: the importers reject a wider
+  declaration and the builder a `measure` into a bit at or beyond it
+  (`ValueError` in Python, issue #345). The native backend keys outcomes by a
+  64-bit word, so it refuses a **measured** circuit wider than
+  `polypus_sim::MAX_CLBITS` (64) bits with `NativeCircuitError` before
+  simulating, instead of returning wrong keys, panicking, or spending memory
+  in proportion to the width (issues #345, #346); Aer takes wider registers.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
