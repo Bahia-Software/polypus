@@ -549,3 +549,42 @@ fn c2_every_gate_emitted_qir_matches_the_native_gate() {
         assert_equiv_up_to_global_phase(3, std::slice::from_ref(&gate), &lowered);
     }
 }
+
+// ─────────────── Issue #345 · classical bits beyond the counts key ───────────────
+
+/// `qreg q[1]; creg c[71]; x q[0]; measure q[0] -> c[70];` used to shift the bit
+/// out of the `usize` key: a wrong key (64) without overflow checks, a panic
+/// with them. Both entry points now return a typed error instead.
+#[test]
+fn a_cbit_beyond_the_counts_key_is_a_typed_error() {
+    let cc = ConcreteCircuit::new(1, vec![G::X(0), G::Measure { qubit: 0, cbit: 70 }]);
+    let expected = SimError::ClbitOutOfRange {
+        cbit: 70,
+        max: polypus_sim::MAX_CLBITS,
+    };
+    let sim = StatevectorSimulator::new();
+    assert_eq!(sim.run_and_sample(&cc, SHOTS, 7), Err(expected.clone()));
+    let sv = sim.run(&cc).unwrap();
+    assert_eq!(
+        polypus_sim::sample_projected(&cc, &sv, SHOTS, 7),
+        Err(expected)
+    );
+}
+
+/// The widest classical bit the key holds still lands at its own position.
+#[test]
+fn the_last_cbit_the_counts_key_holds_is_sampled_in_place() {
+    let last = polypus_sim::MAX_CLBITS - 1;
+    let counts = sample(
+        1,
+        vec![
+            G::X(0),
+            G::Measure {
+                qubit: 0,
+                cbit: last,
+            },
+        ],
+        7,
+    );
+    assert_eq!(counts, HashMap::from([(1usize << last, SHOTS as u64)]));
+}

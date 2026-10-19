@@ -8,7 +8,7 @@ use crate::gate::{
     first_repeated_qubit, qubit_index_violation, GateInstruction, GateParam, MeasuredQubits,
 };
 use crate::qasm;
-use crate::qasm_import;
+use crate::qasm_import::{self, MAX_REGISTER_BITS};
 use crate::qir;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -344,7 +344,9 @@ impl ParameterizedCircuit {
     }
 
     /// Fallible version of [`push`](Self::push): append a raw
-    /// [`GateInstruction`], validating qubit indices and keeping `num_params`
+    /// [`GateInstruction`], validating qubit and classical bit indices (a
+    /// `cbit` must be below `MAX_REGISTER_BITS`, the bound the importers put
+    /// on declared classical bits) and keeping `num_params`
     /// in sync. Use this from host languages (e.g. Python bindings) where
     /// invalid input must surface as a recoverable error, not a panic.
     pub fn try_push(&mut self, gate: GateInstruction) -> Result<(), CircuitError> {
@@ -372,6 +374,14 @@ impl ParameterizedCircuit {
                 num_qubits: self.num_qubits,
             });
         }
+        // A measurement target within the classical bound, so `num_clbits` and
+        // every export stay finite and agree with what an importer accepts.
+        if let Some(cbit) = gate.max_cbit().filter(|&c| c >= MAX_REGISTER_BITS) {
+            return Err(CircuitError::ClbitOutOfRange {
+                cbit,
+                max: MAX_REGISTER_BITS,
+            });
+        }
         // A unitary never names the same qubit twice (a barrier may).
         if let Some(qubit) = first_repeated_qubit(gate.acts_on().qubits()) {
             return Err(CircuitError::IdenticalQubits { qubit });
@@ -396,9 +406,9 @@ impl ParameterizedCircuit {
     ///
     /// # Panics
     ///
-    /// Panics on out-of-range qubit indices, a two-qubit gate whose qubits
-    /// coincide (see type-level docs), or a non-finite fixed angle (`NaN` or
-    /// infinity). For a fallible variant, use [`try_push`](Self::try_push).
+    /// Panics on out-of-range qubit or classical bit indices, a two-qubit
+    /// gate whose qubits coincide (see type-level docs), or a non-finite fixed
+    /// angle (`NaN` or infinity). For a fallible variant, use [`try_push`](Self::try_push).
     pub fn push(mut self, gate: GateInstruction) -> Self {
         if let Err(e) = self.try_push(gate) {
             panic!("{e}");
@@ -1100,14 +1110,15 @@ fn clbits_width(declared: Option<usize>, implicit: usize) -> usize {
     declared.map_or(implicit, |declared| declared.max(implicit))
 }
 
-/// Shared classical-register sizing logic.
+/// Shared classical-register sizing logic. Saturates rather than overflows on a
+/// `cbit` of `usize::MAX`, which only direct `gates` assignment can carry.
 pub(crate) fn num_clbits(num_qubits: usize, gates: &[GateInstruction]) -> usize {
     let mut n = 0;
     for gate in gates {
         if matches!(gate, GateInstruction::MeasureAll) {
             n = n.max(num_qubits);
         } else if let Some(cbit) = gate.max_cbit() {
-            n = n.max(cbit + 1);
+            n = n.max(cbit.saturating_add(1));
         }
     }
     n

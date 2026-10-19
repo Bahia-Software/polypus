@@ -471,7 +471,10 @@ impl QuantumBackend for NativeStatevectorBackend {
             .enumerate()
             .map(|(i, &shots)| {
                 let seed = self.base_seed.wrapping_add(start).wrapping_add(i as u64);
-                let raw = sample_projected(concrete, &sv, shots as usize, seed);
+                let raw = sample_projected(concrete, &sv, shots as usize, seed).map_err(|e| {
+                    log::error!("native statevector sampling failed: {e}");
+                    BackendError::NativeCircuit(format!("native statevector sampling failed: {e}"))
+                })?;
                 Ok(format_counts(concrete, source.declared_clbits, raw))
             })
             .collect()
@@ -1331,6 +1334,30 @@ mod tests {
 
     /// `check_circuit` accepts and rejects exactly what execution does, with the
     /// same error, and simulates nothing.
+    /// Issue #345 (b): a valid program measuring into `c[70]` used to shift the
+    /// bit out of the `usize` key — wrong counts without overflow checks, a
+    /// panic with them. Both execution paths now return a typed error.
+    #[test]
+    fn a_cbit_beyond_the_counts_key_is_a_typed_error() {
+        let circuit = BoundCircuit::Qasm2(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ncreg c[71];\n\
+             x q[0];\nmeasure q[0] -> c[70];\n"
+                .to_string(),
+        );
+        let cfg = config_with(OptLevel::default());
+        let backend = NativeStatevectorBackend::new(0);
+        let run = backend.run_circuits(std::slice::from_ref(&circuit), &cfg.run_params());
+        let distributed = backend.run_shots_distributed(&circuit, &[7, 5], &cfg.run_params());
+        for result in [run.map(|_| ()), distributed.map(|_| ())] {
+            match result {
+                Err(BackendError::NativeCircuit(m)) => {
+                    assert!(m.contains("classical bit 70"), "{m}")
+                }
+                other => panic!("expected a NativeCircuit error, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn check_circuit_matches_execution() {
         let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\n";

@@ -303,15 +303,19 @@ impl StatevectorSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates any [`SimError`] from [`run`](Self::run).
+    /// Propagates any [`SimError`] from [`run`](Self::run), and returns
+    /// [`SimError::ClbitOutOfRange`] — before simulating — for a measurement
+    /// into a classical bit the counts key cannot hold (see
+    /// [`MAX_CLBITS`](crate::MAX_CLBITS)).
     pub fn run_and_sample(
         &self,
         circuit: &ConcreteCircuit,
         shots: usize,
         seed: u64,
     ) -> Result<HashMap<usize, u64>, SimError> {
+        check_clbits(circuit)?;
         let sv = self.run(circuit)?;
-        Ok(sample_projected(circuit, &sv, shots, seed))
+        sample_projected(circuit, &sv, shots, seed)
     }
 }
 
@@ -330,12 +334,19 @@ impl StatevectorSimulator {
 /// byte-identical to `run_and_sample`, which is what lets shot batches be
 /// distributed across replicas from a single evolution while preserving
 /// per-seed reproducibility.
+///
+/// # Errors
+///
+/// [`SimError::ClbitOutOfRange`] when a measurement targets a classical bit at
+/// or above [`MAX_CLBITS`](crate::MAX_CLBITS), checked before any shot is
+/// drawn.
 pub fn sample_projected(
     circuit: &ConcreteCircuit,
     sv: &Statevector,
     shots: usize,
     seed: u64,
-) -> HashMap<usize, u64> {
+) -> Result<HashMap<usize, u64>, SimError> {
+    check_clbits(circuit)?;
     let mut rng = SplitMix64::new(seed);
     let raw = sv.sample(shots, &mut rng);
 
@@ -353,7 +364,7 @@ pub fn sample_projected(
 
     // No measurements: report the full basis state directly.
     if measured.is_empty() {
-        return raw;
+        return Ok(raw);
     }
 
     // Project each sampled basis state onto the classical register. When
@@ -369,7 +380,24 @@ pub fn sample_projected(
         }
         *counts.entry(key).or_insert(0) += c;
     }
-    counts
+    Ok(counts)
+}
+
+/// Reject a measurement into a classical bit the `usize` counts key cannot
+/// hold. `MeasureAll` writes bit `q` for every qubit `q`, which the qubit
+/// ceiling keeps far below [`MAX_CLBITS`](crate::MAX_CLBITS).
+fn check_clbits(circuit: &ConcreteCircuit) -> Result<(), SimError> {
+    let offending = circuit.gates.iter().find_map(|gate| match gate {
+        GateInstruction::Measure { cbit, .. } if *cbit >= crate::MAX_CLBITS => Some(*cbit),
+        _ => None,
+    });
+    match offending {
+        Some(cbit) => Err(SimError::ClbitOutOfRange {
+            cbit,
+            max: crate::MAX_CLBITS,
+        }),
+        None => Ok(()),
+    }
 }
 
 impl Simulator for StatevectorSimulator {

@@ -40,6 +40,9 @@ pub enum CircuitError {
     },
     /// A gate addresses a qubit index `>= num_qubits`.
     QubitOutOfRange { qubit: usize, num_qubits: usize },
+    /// A measurement targets a classical bit index `>= max`, the bound on a
+    /// circuit's classical bits (the importers' `MAX_REGISTER_BITS`).
+    ClbitOutOfRange { cbit: usize, max: usize },
     /// A two-qubit gate was given the same qubit twice.
     IdenticalQubits { qubit: usize },
     /// A unitary gate acts on a qubit that was already measured, violating the
@@ -129,6 +132,10 @@ impl fmt::Display for CircuitError {
             CircuitError::QubitOutOfRange { qubit, num_qubits } => write!(
                 f,
                 "qubit index {qubit} out of range for circuit with {num_qubits} qubits"
+            ),
+            CircuitError::ClbitOutOfRange { cbit, max } => write!(
+                f,
+                "classical bit index {cbit} out of range: a circuit has at most {max} classical bits (MAX_REGISTER_BITS)"
             ),
             CircuitError::IdenticalQubits { qubit } => write!(
                 f,

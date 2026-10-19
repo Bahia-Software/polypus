@@ -54,6 +54,16 @@ pub enum SimError {
         /// The circuit's qubit count; valid indices are `0..num_qubits`.
         num_qubits: usize,
     },
+    /// A measurement targets a classical bit index `>= max`
+    /// ([`MAX_CLBITS`](crate::MAX_CLBITS)), which a sampled outcome's `usize`
+    /// key cannot represent. Rejected before sampling: shifting the bit in would
+    /// overflow (a panic with overflow checks, a silently wrong key without).
+    ClbitOutOfRange {
+        /// The offending classical bit index.
+        cbit: usize,
+        /// Valid indices are `0..max`.
+        max: usize,
+    },
     /// The caller asked for the simulation to stop before it finished, through
     /// the cancellation hook passed to
     /// [`Simulator::run_cancellable`](crate::Simulator::run_cancellable). The
@@ -87,6 +97,10 @@ impl fmt::Display for SimError {
             SimError::QubitIndexOutOfRange { qubit, num_qubits } => write!(
                 f,
                 "gate references qubit {qubit} but the circuit has only {num_qubits} qubit(s) (valid indices are 0..{num_qubits})"
+            ),
+            SimError::ClbitOutOfRange { cbit, max } => write!(
+                f,
+                "measurement targets classical bit {cbit} but the statevector backend keys counts on at most {max} classical bits (valid indices are 0..{max})"
             ),
             SimError::Cancelled => {
                 write!(f, "the simulation was cancelled before it completed")

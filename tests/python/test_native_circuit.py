@@ -107,6 +107,15 @@ class TestCircuitConstruction:
         with pytest.raises(ValueError, match="out of range"):
             polypus.Circuit(2).h(5)
 
+    def test_cbit_out_of_range_raises_valueerror(self):
+        """Issue #345: a classical bit index is bounded like a declared
+        register, so a huge one is rejected instead of exported or overflowed."""
+        import polypus
+
+        for cbit in (1_000_000, 1 << 40, 2**64 - 1):
+            with pytest.raises(ValueError, match="classical bit index"):
+                polypus.Circuit(1).measure(0, cbit)
+
     def test_identical_qubits_raises_valueerror(self):
         import polypus
 
