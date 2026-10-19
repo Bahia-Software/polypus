@@ -35,6 +35,11 @@
 //! `PolypusError` like any other (see `wrap_qiskit_error`). The classes below
 //! are raised for the Rust-originated runtime failures that previously
 //! *panicked*.
+//!
+//! Nothing here catches a panic: one that still happens (a bug, issue #355)
+//! crosses as `pyo3_runtime.PanicException`, a `BaseException` that neither
+//! `except Exception` nor `except PolypusError` catches. The fix for one is a
+//! `Result` at its source, never a `catch_unwind` at the boundary.
 
 use crate::infrastructure::BackendError as InfraBackendError;
 use crate::infrastructure::{DisplaySafePyErr, InterpreterUnavailable};

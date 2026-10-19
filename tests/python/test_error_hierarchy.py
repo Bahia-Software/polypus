@@ -95,3 +95,28 @@ class TestRustOriginatedFailuresAreTyped:
         for circuit in (qasm, polypus.Circuit.from_qasm2(qasm)):
             with pytest.raises(polypus.NativeCircuitError, match="65536 bits wide"):
                 polypus.run_quantum_circuit(circuit, **kwargs)
+
+    def test_measure_beyond_the_counts_key_raises_native_circuit_error(self):
+        """Issue #355: ``Circuit(1).measure(0, 70)`` on the native backend used
+        to panic shifting the bit into the counts key (a ``PanicException``,
+        not catchable as ``Exception``); it now raises a ``polypus.*Error``."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure(0, 70)
+        with pytest.raises(polypus.PolypusError) as caught:
+            polypus.run_quantum_circuit(
+                qc, shots=16, infrastructure="local", backend="polypus"
+            )
+        assert isinstance(caught.value, polypus.NativeCircuitError)
+        assert "71 bits wide" in str(caught.value)
+
+    def test_widest_supported_register_still_runs_on_native(self):
+        """The bound is the 64-bit key, not lower: ``measure(0, 63)`` runs and
+        reports the bit in its own place."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure(0, 63)
+        result = polypus.run_quantum_circuit(
+            qc, shots=16, infrastructure="local", backend="polypus"
+        )
+        assert result.counts[0] == {"1" + "0" * 63: 16}
