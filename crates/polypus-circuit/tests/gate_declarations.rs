@@ -683,3 +683,72 @@ fn call_expressions_belong_to_their_circuit() {
     };
     assert_eq!(bound_call.params(), [GateParam::Fixed(1.5)]);
 }
+
+// ─────────────────── Names that clash with the registers ───────────────────
+
+/// The expanded body of every instruction: a circuit's meaning, whatever its
+/// declarations are called.
+fn expanded(qc: &ParameterizedCircuit) -> Vec<GateInstruction> {
+    qc.gates()
+        .iter()
+        .flat_map(|gate| match gate {
+            GateInstruction::Custom(call) => call.expand(&[]).unwrap(),
+            other => vec![other.clone()],
+        })
+        .collect()
+}
+
+/// #352: OpenQASM 2.0 has one namespace, so a declaration named `c` or `q`
+/// clashes with the registers the export always calls `q` and `c`. It is
+/// renamed, its callers are printed to call the new name, and declarations
+/// that need neither stay verbatim. The export is a fixed point and imports
+/// to the same circuit.
+#[test]
+fn declarations_named_like_the_registers_are_renamed() {
+    let src =
+        format!("{HEADER}gate c a {{ h a; }}\nqreg q[1];\ncreg c[1];\nc q[0];\nmeasure q -> c;\n");
+    let imported = parse(&src);
+    let out = imported.to_qasm2_with_params(&[]).unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "{HEADER}gate c_1 a {{ h a; }}\nqreg q[1];\ncreg c[1];\nc_1 q[0];\nmeasure q -> c;\n"
+        )
+    );
+    let reimported = parse(&out);
+    assert_eq!(reimported.to_qasm2_with_params(&[]).unwrap(), out);
+    assert_eq!(expanded(&reimported), expanded(&imported));
+
+    let src = format!(
+        "{HEADER}gate k a {{  x a; }}\ngate q a {{ h a; }}\ngate g(theta) a,b {{ q a; k b; U(theta,0,pi) b; CX a,b; }}\nqreg q[2];\nk q[0];\ng(0.5) q[0],q[1];\n"
+    );
+    let imported = parse(&src);
+    let out = imported.to_qasm2_with_params(&[]).unwrap();
+    assert!(out.contains("gate k a {  x a; }\n"), "{out}");
+    assert!(out.contains("gate q_1 a { h a; }\n"), "{out}");
+    assert!(out.contains("gate g(theta) a,b { q_1 a; k b; "), "{out}");
+    assert!(!out.contains("gate q "), "{out}");
+    assert!(out.contains("g(0.5) q[0],q[1];\n"), "{out}");
+    let reimported = parse(&out);
+    assert_eq!(reimported.to_qasm2_with_params(&[]).unwrap(), out);
+    assert_eq!(expanded(&reimported), expanded(&imported));
+}
+
+/// Calls from two separate imports of one program hold equal definitions at
+/// different addresses; both are written with the declaration's new name.
+#[test]
+fn renamed_declarations_are_called_by_their_new_name_across_imports() {
+    let src =
+        format!("{HEADER}gate c a {{ h a; }}\ngate g a {{ c a; }}\nqreg q[1];\nc q[0];\ng q[0];\n");
+    let (first, second) = (parse(&src), parse(&src));
+    let mut combined = ParameterizedCircuit::new(1);
+    for gate in first.gates().iter().chain(second.gates()) {
+        combined.try_push(gate.clone()).unwrap();
+    }
+    let out = combined.to_qasm2_with_params(&[]).unwrap();
+    assert_eq!(out.matches("gate ").count(), 2, "{out}");
+    assert_eq!(out.matches("c_1 q[0];\n").count(), 2, "{out}");
+    assert_eq!(out.matches("g q[0];\n").count(), 2, "{out}");
+    assert!(out.contains("gate g a { c_1 a; }\n"), "{out}");
+    assert_eq!(expanded(&parse(&out)), expanded(&combined));
+}

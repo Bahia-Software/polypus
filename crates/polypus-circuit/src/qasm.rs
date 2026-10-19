@@ -8,8 +8,11 @@
 //! export loses no precision: `pi/2` is `1.5707963267948966`, which a backend
 //! reads as exactly the angle the circuit holds.
 //!
-//! A declaration imported from OpenQASM 2.0 is re-emitted as it was written.
-//! One imported from OpenQASM 3 is printed from its definition, on one line
+//! A declaration imported from OpenQASM 2.0 is re-emitted as it was written,
+//! unless it is named `q` or `c`, like the registers the export declares in
+//! OpenQASM 2.0's single namespace: then it is printed and renamed as below,
+//! and so is every declaration that calls it. One imported from OpenQASM 3
+//! is printed from its definition, on one line
 //! (`gate name(a,b) x,y { h x; cx x,y; }`), with `log` written as `ln` and
 //! `**` as `^`; its names are renamed where OpenQASM 2.0 cannot take them
 //! (see [`crate::naming`]), and one it cannot express (a body using
@@ -24,7 +27,7 @@ use crate::custom_gate::{BodyOp, GateDefinition};
 use crate::error::CircuitError;
 use crate::expr::{fmt_number, print, Dialect, ExprArena};
 use crate::gate::{GateInstruction, GateParam};
-use crate::naming::DefinitionNames;
+use crate::naming::{reserved, DefinitionNames};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -60,22 +63,30 @@ fn declared_gates<'c>(
     Ok(ordered)
 }
 
+/// The registers every OpenQASM 2.0 export declares (when non-empty).
+/// OpenQASM 2.0 has one namespace, so no declaration may take these names.
+const REGISTERS: [&str; 2] = ["q", "c"];
+
 /// The declarations an export writes, and the names it calls them by.
 struct Declarations<'c> {
     /// Imported from OpenQASM 2.0: re-emitted verbatim, under their names.
     verbatim: Vec<&'c GateDefinition>,
-    /// Imported from OpenQASM 3: printed from their definitions, callees
-    /// first, in order of first use.
+    /// Printed from their definitions, callees first: those imported from
+    /// OpenQASM 2.0 that cannot keep their name, in source order, then those
+    /// imported from OpenQASM 3, in order of first use.
     printed: Vec<&'c GateDefinition>,
     names: DefinitionNames,
 }
 
 impl<'c> Declarations<'c> {
     /// The declarations the calls in `gates` need. With none imported from
-    /// OpenQASM 3 (a declaration only calls gates of its own program), this
-    /// is exactly the verbatim path; otherwise the verbatim declarations keep
-    /// their names and the printed ones avoid them, the registers `q` and
-    /// `c`, and the reserved words and `qelib1.inc` gates.
+    /// OpenQASM 3 (a declaration only calls gates of its own program) and
+    /// none named `q` or `c`, this is exactly the verbatim path. An OpenQASM
+    /// 2.0 declaration named like a register (or a reserved word), and every
+    /// one whose text calls such a gate, is printed instead, so it can be
+    /// renamed. The verbatim declarations keep their names and the printed
+    /// ones avoid them, the registers `q` and `c`, and the reserved words and
+    /// `qelib1.inc` gates.
     fn new(gates: &'c [GateInstruction]) -> Result<Self, CircuitError> {
         // One pass over the instructions, allocating nothing without calls.
         let (mut qasm2, mut qasm3) = (Vec::new(), Vec::new());
@@ -88,15 +99,34 @@ impl<'c> Declarations<'c> {
                 }
             }
         }
-        let verbatim = declared_gates(qasm2.into_iter())?;
-        let printed = printed_order(qasm3.into_iter());
+        // Source order puts every callee before its callers, so one pass
+        // finds the callers of a renamed declaration. Names identify OpenQASM
+        // 2.0 declarations here: `declared_gates` rejects two under one name.
+        let mut verbatim = Vec::new();
+        let mut renamed: Vec<&GateDefinition> = Vec::new();
+        for definition in declared_gates(qasm2.into_iter())? {
+            let name = definition.name();
+            let clashes = REGISTERS.contains(&name) || reserved(name, Dialect::Qasm2);
+            if clashes
+                || definition
+                    .callees()
+                    .any(|callee| renamed.iter().any(|r| r.name() == callee.name()))
+            {
+                renamed.push(definition);
+            } else {
+                verbatim.push(definition);
+            }
+        }
+        let mut printed = renamed.clone();
+        printed.extend(printed_order(qasm3.into_iter()));
         let mut names = DefinitionNames::default();
         if !printed.is_empty() {
             let mut taken: HashSet<String> =
                 verbatim.iter().map(|d| d.name().to_string()).collect();
-            taken.extend(["q".to_string(), "c".to_string()]);
+            taken.extend(REGISTERS.map(String::from));
             names.name_gates(&printed, Dialect::Qasm2, &mut taken);
             names.name_formals(&printed, Dialect::Qasm2, &mut taken);
+            names.alias_qasm2(&renamed);
         }
         Ok(Declarations {
             verbatim,
