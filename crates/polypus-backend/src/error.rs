@@ -36,8 +36,10 @@ use crate::mem_budget::InsufficientMemory;
 /// Failure of a quantum-execution backend or of backend construction.
 ///
 /// `Clone`/`Eq` are intentionally omitted: [`BackendError::External`] carries a
-/// boxed [`Error`], which is neither `Clone` nor `Eq`.
+/// boxed [`Error`], which is neither `Clone` nor `Eq`. `#[non_exhaustive]`: new
+/// failure modes are added as variants, so a `match` needs a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BackendError {
     /// The requested infrastructure/backend name is not recognised. Surfaces as
     /// `ValueError` at the FFI edge (contract C-1, unknown infrastructure).

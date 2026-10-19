@@ -197,7 +197,7 @@ fn w_state_with_controlled_hadamard_and_toffoli() {
 fn bell_state_through_a_declared_gate() {
     let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\ngate bell a,b { h a; cx a,b; }\nqreg q[2];\nbell q[0],q[1];\n";
     let circuit = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(circuit.gates.len(), 1);
+    assert_eq!(circuit.gates().len(), 1);
     let a = run(circuit, &[]).amplitudes().to_vec();
     assert!(close(a[0], C64::new(FRAC_1_SQRT_2, 0.0)));
     assert!(close(a[3], C64::new(FRAC_1_SQRT_2, 0.0)));

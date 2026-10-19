@@ -305,7 +305,7 @@ fn unbound_expression_is_rejected() {
         }),
         Err(SimError::UnboundExpression)
     );
-    let hand_assembled = ConcreteCircuit::new(
+    let hand_assembled = ConcreteCircuit::new_unchecked(
         1,
         vec![
             G::Rz {
@@ -781,4 +781,85 @@ fn u0_is_the_identity() {
         },
     );
     assert_eq!(after_u0, before.amplitudes());
+}
+
+/// `GateInstruction` is `#[non_exhaustive]`, so `Statevector::apply` ends in a
+/// wildcard arm returning `UnsupportedInstruction`. This keeps the old
+/// compile-time guarantee as a test: the list below must name every kind
+/// (`kind_index` is an exhaustive match inside `polypus-circuit`), and the
+/// simulator must apply every one of them.
+#[test]
+fn every_instruction_is_supported() {
+    let declared = polypus_circuit::ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+         gate g(t) a,b { rz(t) a; cx a,b; }\nqreg q[2];\ng(0.3) q[1],q[0];\n",
+    )
+    .unwrap()
+    .gates()[0]
+        .clone();
+    let circuit = polypus_circuit::ParameterizedCircuit::new(5)
+        .h(0)
+        .x(1)
+        .y(2)
+        .z(0)
+        .s(1)
+        .t(2)
+        .sdg(0)
+        .tdg(1)
+        .id(2)
+        .rx(0, 0.25)
+        .ry(1, 0.5)
+        .rz(2, -1.5)
+        .u(0, 0.1, 0.2, 0.3)
+        .cx(0, 1)
+        .cz(1, 2)
+        .swap(0, 2)
+        .rzz(0, 2, 0.4)
+        .rxx(1, 2, 2.0)
+        .cp(0, 1, 0.75)
+        .sx(1)
+        .sxdg(2)
+        .cy(2, 0)
+        .ch(1, 2)
+        .csx(0, 2)
+        .ccx(2, 0, 1)
+        .cswap(1, 2, 0)
+        .crx(1, 0, 0.6)
+        .cry(2, 1, -0.6)
+        .crz(0, 2, 1.1)
+        .cu1(2, 1, 0.8)
+        .cu3(1, 0, 0.2, -0.4, 0.9)
+        .cu(0, 2, 0.3, 0.1, -0.1, 0.9)
+        .u0(3, 0.7)
+        .rccx(4, 0, 2)
+        .rc3x(3, 1, 4, 0)
+        .c3x(2, 4, 0, 3)
+        .c3sqrtx(4, 3, 1, 2)
+        .c4x(1, 4, 0, 3, 2)
+        .p(4, 0.2)
+        .u1(3, 0.45)
+        .u2(2, -0.2, 0.6)
+        .push(G::UGate {
+            qubit: 1,
+            theta: Fixed(0.1),
+            phi: Fixed(0.2),
+            lam: Fixed(-0.7),
+        })
+        .push(declared)
+        .barrier()
+        .measure(0, 0)
+        .measure_all();
+    let concrete = circuit.assign_parameters(&[]).unwrap();
+
+    let mut seen = [false; G::KINDS];
+    for gate in concrete.gates() {
+        seen[gate.kind_index()] = true;
+        let mut sv = Statevector::new(5).unwrap();
+        assert_eq!(sv.apply(gate), Ok(()), "{gate:?}");
+    }
+    let missing: Vec<usize> = (0..G::KINDS).filter(|&k| !seen[k]).collect();
+    assert!(
+        missing.is_empty(),
+        "instruction kinds not exercised: {missing:?}"
+    );
 }

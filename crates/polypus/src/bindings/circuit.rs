@@ -248,8 +248,8 @@ pub fn statevector<'py>(
     let concrete = qc.native().assign_parameters(&params).map_err(to_py_err)?;
     // Refuse a statevector the memory budget cannot hold before allocating it
     // (issue #215). Above the ceiling the simulator's `ValueError` stays the error.
-    if concrete.num_qubits <= polypus_sim::MAX_QUBITS {
-        check_statevector_fits(concrete.num_qubits)
+    if concrete.num_qubits() <= polypus_sim::MAX_QUBITS {
+        check_statevector_fits(concrete.num_qubits())
             .map_err(|e| crate::exceptions::insufficient_memory_to_pyerr(&e))?;
     }
     // The simulation is the expensive, pure-Rust part: release the GIL for it
@@ -447,13 +447,13 @@ impl Circuit {
     /// Number of qubits in the quantum register.
     #[getter]
     fn num_qubits(&self) -> usize {
-        self.inner.num_qubits
+        self.inner.num_qubits()
     }
 
     /// Number of free (trainable) parameters.
     #[getter]
     fn num_params(&self) -> usize {
-        self.inner.num_params
+        self.inner.num_params()
     }
 
     /// Size of the implicit classical register: the bits the measurements
@@ -1015,15 +1015,15 @@ impl Circuit {
     }
 
     fn __len__(&self) -> usize {
-        self.inner.gates.len()
+        self.inner.gates().len()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "Circuit(num_qubits={}, num_params={}, gates={})",
-            self.inner.num_qubits,
-            self.inner.num_params,
-            self.inner.gates.len()
+            self.inner.num_qubits(),
+            self.inner.num_params(),
+            self.inner.gates().len()
         )
     }
 }

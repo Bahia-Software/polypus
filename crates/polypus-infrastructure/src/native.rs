@@ -394,7 +394,7 @@ fn format_counts(
 /// The width [`format_counts`] keys a circuit's counts at.
 fn counts_width(concrete: &ConcreteCircuit, declared_clbits: Option<usize>) -> usize {
     match concrete.num_clbits() {
-        0 => concrete.num_qubits,
+        0 => concrete.num_qubits(),
         c => declared_clbits.map_or(c, |declared| declared.max(c)),
     }
 }
@@ -499,7 +499,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         // every batch's sampling.
         let source = self.concrete_circuit(qc, &opts)?;
         let concrete = source.circuit.as_ref();
-        self.check_memory(concrete.num_qubits)?;
+        self.check_memory(concrete.num_qubits())?;
         let sv = self.simulator.run(concrete).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
             BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
@@ -595,9 +595,11 @@ mod tests {
             circuit: &ConcreteCircuit,
             _opts: &TranspileOptions,
         ) -> ConcreteCircuit {
-            let mut out = circuit.clone();
-            out.gates.push(GateInstruction::Barrier(Vec::new()));
-            out
+            let mut gates = circuit.gates().to_vec();
+            gates.push(GateInstruction::Barrier(Vec::new()));
+            circuit
+                .try_with_gates(gates)
+                .expect("a trailing barrier keeps the circuit valid")
         }
     }
 
@@ -1288,7 +1290,7 @@ mod tests {
         // The last case really is the collapsed `MeasureAll` shape.
         let collapsed =
             ParameterizedCircuit::from_qasm2(&format!("{header}{}", cases[3].0)).unwrap();
-        assert_eq!(collapsed.gates.last(), Some(&GateInstruction::MeasureAll));
+        assert_eq!(collapsed.gates().last(), Some(&GateInstruction::MeasureAll));
     }
 
     /// A `Native` circuit has no declared registers: its counts keep the
@@ -1332,7 +1334,7 @@ mod tests {
                 circuit: &ConcreteCircuit,
                 _: &TranspileOptions,
             ) -> ConcreteCircuit {
-                ConcreteCircuit::new(circuit.num_qubits, circuit.gates.clone())
+                ConcreteCircuit::new(circuit.num_qubits(), circuit.gates().to_vec())
             }
         }
         let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n";

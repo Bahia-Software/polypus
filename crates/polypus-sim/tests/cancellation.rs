@@ -67,7 +67,7 @@ fn nan_terminated_circuit(gates: usize) -> ConcreteCircuit {
         qubit: 0,
         theta: Fixed(f64::NAN),
     });
-    ConcreteCircuit::new(N, instructions)
+    ConcreteCircuit::new_unchecked(N, instructions)
 }
 
 #[test]

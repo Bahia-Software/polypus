@@ -808,7 +808,7 @@ fn to_wire_circuit(bc: &BoundCircuit) -> Result<Circuit, BackendError> {
                     "the subprocess bridge sends circuits as OpenQASM 2.0, and this one cannot be written in it: {e}"
                 ))
             })?,
-            n_qubits: cc.num_qubits as u32,
+            n_qubits: cc.num_qubits() as u32,
         }),
         BoundCircuit::Qasm2(qasm) => Ok(Circuit {
             qasm: qasm.clone(),

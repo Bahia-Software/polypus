@@ -609,6 +609,13 @@ impl Statevector {
             GateInstruction::Barrier(_)
             | GateInstruction::Measure { .. }
             | GateInstruction::MeasureAll => {}
+            // `GateInstruction` is `#[non_exhaustive]`; `every_instruction_is_
+            // supported` in `tests/gate_matrices.rs` flags a gate missing here.
+            other => {
+                return Err(SimError::UnsupportedInstruction {
+                    instruction: format!("{other:?}"),
+                })
+            }
         }
         Ok(())
     }

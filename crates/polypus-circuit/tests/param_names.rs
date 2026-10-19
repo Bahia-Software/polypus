@@ -36,7 +36,7 @@ fn default_names_avoid_declared_gate_names() {
     let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
     let mut qc = ParameterizedCircuit::new(1).rx(0, Param(2));
     assert_eq!(names(&qc), ["theta_0", "theta_1", "theta_2"]);
-    qc.try_push(imported.gates[0].clone()).unwrap();
+    qc.try_push(imported.gates()[0].clone()).unwrap();
     assert_eq!(names(&qc), ["theta_0", "theta_1_2", "theta_2"]);
 }
 
@@ -62,10 +62,10 @@ fn names_are_deterministic_and_cloned() {
 fn pushed_gates_take_the_receiving_circuits_names() {
     let other = ParameterizedCircuit::new(1).ry(0, Param(0)).rz(0, Param(2));
     let mut qc = ParameterizedCircuit::new(1);
-    qc.try_push(other.gates[1].clone()).unwrap();
+    qc.try_push(other.gates()[1].clone()).unwrap();
     assert_eq!(names(&qc), names(&other));
     assert!(matches!(
-        qc.gates[0],
+        qc.gates()[0],
         GateInstruction::Rz {
             theta: Param(2),
             ..

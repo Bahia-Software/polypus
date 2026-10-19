@@ -184,7 +184,7 @@ fn c2_qir_u3_decomposition_matches_native() {
 
 #[test]
 fn c4_simulator_rejects_gate_after_measure() {
-    let cc = ConcreteCircuit::new(1, vec![G::Measure { qubit: 0, cbit: 0 }, G::X(0)]);
+    let cc = ConcreteCircuit::new_unchecked(1, vec![G::Measure { qubit: 0, cbit: 0 }, G::X(0)]);
     let err = StatevectorSimulator::new().run(&cc).unwrap_err();
     assert_eq!(err, SimError::GateAfterMeasure { qubit: 0 });
 }
@@ -198,7 +198,8 @@ fn c4_simulator_accepts_terminal_measurement() {
 
 #[test]
 fn c4_simulator_rejects_three_qubit_gate_on_measured_operand() {
-    let cc = ConcreteCircuit::new(3, vec![G::Measure { qubit: 1, cbit: 0 }, G::Ccx(0, 1, 2)]);
+    let cc =
+        ConcreteCircuit::new_unchecked(3, vec![G::Measure { qubit: 1, cbit: 0 }, G::Ccx(0, 1, 2)]);
     let err = StatevectorSimulator::new().run(&cc).unwrap_err();
     assert_eq!(err, SimError::GateAfterMeasure { qubit: 1 });
 }
@@ -400,8 +401,8 @@ fn declared_gate_call() -> G {
                qreg q[3];\ng(0.37) q[2],q[0],q[1];\n";
     polypus_circuit::ParameterizedCircuit::from_qasm2(src)
         .unwrap()
-        .gates
-        .remove(0)
+        .gates()[0]
+        .clone()
 }
 
 /// The simulator applies a call exactly as its expanded body, and the call
@@ -423,7 +424,7 @@ fn c2_simulator_applies_a_call_as_its_expanded_body() {
         }
     }
 
-    let cc = ConcreteCircuit::new(3, vec![G::Measure { qubit: 1, cbit: 0 }, call]);
+    let cc = ConcreteCircuit::new_unchecked(3, vec![G::Measure { qubit: 1, cbit: 0 }, call]);
     assert_eq!(
         StatevectorSimulator::new().run(&cc).unwrap_err(),
         SimError::GateAfterMeasure { qubit: 1 }

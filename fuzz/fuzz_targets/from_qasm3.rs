@@ -37,7 +37,7 @@ fuzz_target!(|data: &[u8]| {
         Err(e) => panic!("an imported circuit must export: {e}"),
     }
     for value in [0.0, 0.5, -1.25] {
-        let values = vec![value; circuit.num_params];
+        let values = vec![value; circuit.num_params()];
         if circuit.assign_parameters(&values).is_ok() {
             let _ = circuit.to_qasm3_with_params(&values);
             let _ = circuit.to_qasm2_with_params(&values);

@@ -87,82 +87,27 @@ fn declared_gate_call() -> GateInstruction {
                gate g(t) a,b { inner(t) b; cx a,b; }\n\
                qreg q[3];\ng(0.25) q[2],q[0];\n";
     let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(imported.gates.len(), 1);
-    imported.gates[0].clone()
-}
-
-/// Number of instruction kinds in [`GateInstruction`].
-const INSTRUCTION_KINDS: usize = 46;
-
-/// Every instruction kind, numbered `0..INSTRUCTION_KINDS`. The match is
-/// exhaustive, so adding a variant fails to build here until it is numbered;
-/// `c2_full_vocabulary_covers_every_instruction` then fails until
-/// `full_vocabulary` exercises it.
-fn instruction_kind(gate: &GateInstruction) -> usize {
-    use GateInstruction as G;
-    match gate {
-        G::H(_) => 0,
-        G::X(_) => 1,
-        G::Y(_) => 2,
-        G::Z(_) => 3,
-        G::S(_) => 4,
-        G::T(_) => 5,
-        G::Sdg(_) => 6,
-        G::Tdg(_) => 7,
-        G::Id(_) => 8,
-        G::Rx { .. } => 9,
-        G::Ry { .. } => 10,
-        G::Rz { .. } => 11,
-        G::Cx(..) => 12,
-        G::Cz(..) => 13,
-        G::Swap(..) => 14,
-        G::Rzz { .. } => 15,
-        G::Rxx { .. } => 16,
-        G::Cp { .. } => 17,
-        G::U { .. } => 18,
-        G::Sx(_) => 19,
-        G::Sxdg(_) => 20,
-        G::Cy(..) => 21,
-        G::Ch(..) => 22,
-        G::Csx(..) => 23,
-        G::Ccx(..) => 24,
-        G::Cswap(..) => 25,
-        G::Crx { .. } => 26,
-        G::Cry { .. } => 27,
-        G::Crz { .. } => 28,
-        G::Cu1 { .. } => 29,
-        G::Cu3 { .. } => 30,
-        G::Cu { .. } => 31,
-        G::Barrier(_) => 32,
-        G::Measure { .. } => 33,
-        G::MeasureAll => 34,
-        G::Custom(_) => 35,
-        G::U0 { .. } => 36,
-        G::Rccx(..) => 37,
-        G::Rc3x(..) => 38,
-        G::C3x(..) => 39,
-        G::C3sqrtx(..) => 40,
-        G::C4x(..) => 41,
-        G::P { .. } => 42,
-        G::U1 { .. } => 43,
-        G::U2 { .. } => 44,
-        G::UGate { .. } => 45,
-    }
+    assert_eq!(imported.gates().len(), 1);
+    imported.gates()[0].clone()
 }
 
 #[test]
 fn c2_full_vocabulary_covers_every_instruction() {
-    let mut seen = [false; INSTRUCTION_KINDS];
+    // `kind_index` is an exhaustive match inside `polypus-circuit` (where
+    // `#[non_exhaustive]` does not apply), so a new variant fails to build
+    // until it is numbered; this test then fails until `full_vocabulary`
+    // exercises it.
+    let mut seen = [false; GateInstruction::KINDS];
     // `MeasureAll` has its own round-trip case below: `full_vocabulary` keeps a
     // partial measurement so the importer does not collapse it.
     for gate in full_vocabulary()
-        .gates
+        .gates()
         .iter()
         .chain([&GateInstruction::MeasureAll])
     {
-        seen[instruction_kind(gate)] = true;
+        seen[gate.kind_index()] = true;
     }
-    let missing: Vec<usize> = (0..INSTRUCTION_KINDS).filter(|&k| !seen[k]).collect();
+    let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
     assert!(
         missing.is_empty(),
         "instruction kinds missing from full_vocabulary: {missing:?}"
@@ -187,7 +132,7 @@ fn c2_full_vocabulary_roundtrip_is_byte_stable() {
 
     // The imported instruction sequence reproduces the (bound) original.
     let bound = c.assign_parameters(&[0.4, -0.9]).unwrap();
-    assert_eq!(imported.gates, bound.gates);
+    assert_eq!(imported.gates(), bound.gates());
 }
 
 /// The whole vocabulary, gate by gate: each single-gate circuit is a fixed
@@ -270,7 +215,8 @@ fn c2_every_gate_roundtrips_individually() {
             "gate '{name}' is not a round-trip fixed point"
         );
         assert_eq!(
-            imported.gates, c.gates,
+            imported.gates(),
+            c.gates(),
             "gate '{name}' instruction sequence changed on round-trip"
         );
     }
@@ -330,7 +276,11 @@ fn c2_every_gate_statement_reemits_byte_identically() {
         let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
         let imported = ParameterizedCircuit::from_qasm2(&src)
             .unwrap_or_else(|e| panic!("{statement}: failed to parse: {e}"));
-        assert_eq!(imported.gates.len(), 1, "{statement}: not one instruction");
+        assert_eq!(
+            imported.gates().len(),
+            1,
+            "{statement}: not one instruction"
+        );
         assert_eq!(
             imported.to_qasm2_with_params(&[]).unwrap(),
             src,
@@ -567,22 +517,22 @@ fn c2_every_angled_gate_exports_expressions_by_value() {
     });
     let fixed = angled_vocabulary(|_, k| GateParam::Fixed(coefficient(k) * values[k % 2] - 0.5));
 
-    // Every kind that takes angles, in `instruction_kind`'s numbering (calls
+    // Every kind that takes angles, in `GateInstruction::kind_index`'s numbering (calls
     // of declared gates have their own tests).
     let kinds: BTreeSet<usize> = with_expressions
-        .gates
+        .gates()
         .iter()
-        .map(instruction_kind)
+        .map(GateInstruction::kind_index)
         .collect();
     let angled = BTreeSet::from([
         9, 10, 11, 15, 16, 17, 18, 26, 27, 28, 29, 30, 31, 36, 42, 43, 44, 45,
     ]);
     assert!(angled.is_subset(&kinds), "missing: {:?}", &angled - &kinds);
 
-    assert_eq!(with_expressions.num_params, 2);
+    assert_eq!(with_expressions.num_params(), 2);
     assert_eq!(
-        with_expressions.assign_parameters(&values).unwrap().gates,
-        fixed.gates
+        with_expressions.assign_parameters(&values).unwrap().gates(),
+        fixed.gates()
     );
     let qasm = with_expressions.to_qasm2_with_params(&values).unwrap();
     assert_eq!(qasm, fixed.to_qasm2_with_params(&[]).unwrap());
@@ -623,12 +573,12 @@ fn c2_exported_angles_read_back_exactly() {
     let original = angled_vocabulary(|_, k| GateParam::Fixed(angles[k % angles.len()]));
     let imported =
         ParameterizedCircuit::from_qasm2(&original.to_qasm2_with_params(&[]).unwrap()).unwrap();
-    assert_eq!(imported.gates, original.gates);
+    assert_eq!(imported.gates(), original.gates());
     // `==` takes `-0.0` for `0.0`; `Debug` prints every `f64` (its sign
     // included) as the shortest decimal that reads back as it.
     assert_eq!(
-        format!("{:?}", imported.gates),
-        format!("{:?}", original.gates)
+        format!("{:?}", imported.gates()),
+        format!("{:?}", original.gates())
     );
 }
 
@@ -640,7 +590,7 @@ fn c2_cu1_and_cp_keep_their_own_spelling() {
     let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncu1(0.5) q[0],q[1];\ncp(0.5) q[0],q[1];\n";
     let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
     assert_eq!(
-        imported.gates,
+        imported.gates(),
         [
             GateInstruction::Cu1 {
                 q0: 0,
@@ -666,7 +616,7 @@ fn c2_cp_imports_to_cp_instruction() {
         .to_qasm2_with_params(&[])
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
-    match imported.gates.as_slice() {
+    match imported.gates() {
         [GateInstruction::Cp {
             q0: 0,
             q1: 1,
@@ -679,7 +629,7 @@ fn c2_cp_imports_to_cp_instruction() {
 // ─────────────────── C-2 · OpenQASM 3 round-trip ──────────────────────────
 
 /// The gate an OpenQASM 3 export defines for an instruction kind
-/// `stdgates.inc` lacks (numbered as in [`instruction_kind`]).
+/// `stdgates.inc` lacks (numbered as in [`GateInstruction::kind_index`]).
 fn qasm3_helper(kind: usize) -> Option<&'static str> {
     Some(match kind {
         15 => "rzz",
@@ -706,7 +656,7 @@ fn qasm3_helper(kind: usize) -> Option<&'static str> {
 fn assert_reads_back(original: &[GateInstruction], imported: &[GateInstruction]) {
     assert_eq!(original.len(), imported.len());
     for (a, b) in original.iter().zip(imported) {
-        match (qasm3_helper(instruction_kind(a)), a, b) {
+        match (qasm3_helper(a.kind_index()), a, b) {
             (Some(name), _, GateInstruction::Custom(call)) => assert_eq!(call.name(), name),
             (None, GateInstruction::Custom(declared), GateInstruction::Custom(call)) => {
                 assert_eq!(call.name(), declared.name());
@@ -733,14 +683,14 @@ fn c2_full_vocabulary_qasm3_roundtrip_is_a_fixed_point() {
 
     let values = [0.4, -0.9];
     assert_reads_back(
-        &c.assign_parameters(&values).unwrap().gates,
-        &imported.assign_parameters(&values).unwrap().gates,
+        c.assign_parameters(&values).unwrap().gates(),
+        imported.assign_parameters(&values).unwrap().gates(),
     );
 
     // Bound first, the export has no inputs and is a fixed point too.
     let bound = c.to_qasm3_with_params(&values).unwrap();
     let reimported = ParameterizedCircuit::from_qasm3(&bound).unwrap();
-    assert_eq!(reimported.num_params, 0);
+    assert_eq!(reimported.num_params(), 0);
     assert_eq!(reimported.to_qasm3().unwrap(), bound);
 }
 
@@ -750,7 +700,7 @@ fn c2_every_gate_roundtrips_individually_through_qasm3() {
     let mut circuits: Vec<ParameterizedCircuit> = full_vocabulary()
         .assign_parameters(&[0.4, -0.9])
         .unwrap()
-        .gates
+        .into_gates()
         .into_iter()
         .filter(|g| {
             !matches!(
@@ -764,13 +714,13 @@ fn c2_every_gate_roundtrips_individually_through_qasm3() {
     circuits.push(ParameterizedCircuit::new(3).barrier_on(&[2, 0]));
     circuits.push(ParameterizedCircuit::new(2).h(0).measure(0, 0));
     circuits.push(ParameterizedCircuit::new(2).h(0).measure_all());
-    assert!(circuits.len() > INSTRUCTION_KINDS - 4);
+    assert!(circuits.len() > GateInstruction::KINDS - 4);
     for c in circuits {
         let qasm1 = c.to_qasm3().unwrap();
         let imported =
             ParameterizedCircuit::from_qasm3(&qasm1).unwrap_or_else(|e| panic!("{e}\n{qasm1}"));
         assert_eq!(imported.to_qasm3().unwrap(), qasm1, "not a fixed point");
-        assert_reads_back(&c.gates, &imported.gates);
+        assert_reads_back(c.gates(), imported.gates());
     }
 }
 
@@ -814,9 +764,13 @@ fn c2_every_stdgates_statement_reemits_byte_identically() {
         let src = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[5] q;\n{statement}\n");
         let imported = ParameterizedCircuit::from_qasm3(&src)
             .unwrap_or_else(|e| panic!("{statement}: failed to parse: {e}"));
-        assert_eq!(imported.gates.len(), 1, "{statement}: not one instruction");
+        assert_eq!(
+            imported.gates().len(),
+            1,
+            "{statement}: not one instruction"
+        );
         assert!(
-            !matches!(imported.gates[0], GateInstruction::Custom(_)),
+            !matches!(imported.gates()[0], GateInstruction::Custom(_)),
             "{statement}"
         );
         assert_eq!(imported.to_qasm3().unwrap(), src, "{statement}");
@@ -916,14 +870,17 @@ fn c4_three_qubit_gates_reject_any_measured_operand() {
             "builder, {gate:?}"
         );
 
-        let mut hand = ParameterizedCircuit::new(3);
-        hand.gates = vec![
-            GateInstruction::Measure {
-                qubit: measured,
-                cbit: 0,
-            },
-            gate.clone(),
-        ];
+        let hand = ParameterizedCircuit::from_parts_unchecked(
+            3,
+            0,
+            vec![
+                GateInstruction::Measure {
+                    qubit: measured,
+                    cbit: 0,
+                },
+                gate.clone(),
+            ],
+        );
         assert_eq!(
             hand.to_qir_with_params(&[]),
             Err(CircuitError::QubitAlreadyMeasured { qubit: offending }),
@@ -953,7 +910,7 @@ fn c4_barrier_and_remeasure_are_allowed_after_measure() {
         .barrier()
         .measure(0, 0)
         .measure_all();
-    assert_eq!(qc.num_qubits, 2);
+    assert_eq!(qc.num_qubits(), 2);
 }
 
 #[test]
@@ -974,11 +931,14 @@ fn c4_importer_rejects_gate_after_measure_with_line() {
 #[test]
 fn c4_qir_exporter_rejects_gate_after_measure() {
     // Hand-assembled (bypasses the builder's own check) to reach the exporter.
-    let mut qc = ParameterizedCircuit::new(1);
-    qc.gates = vec![
-        GateInstruction::Measure { qubit: 0, cbit: 0 },
-        GateInstruction::X(0),
-    ];
+    let qc = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::X(0),
+        ],
+    );
     let err = qc.to_qir_with_params(&[]).unwrap_err();
     assert_eq!(err, CircuitError::QubitAlreadyMeasured { qubit: 0 });
 }

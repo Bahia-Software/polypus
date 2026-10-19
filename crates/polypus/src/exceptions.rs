@@ -146,6 +146,9 @@ pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
         // `ValueError`/`TypeError`, a `KeyboardInterrupt`, or a `polypus.QmioError`
         // all re-raise as themselves).
         InfraBackendError::External(boxed) => external_to_pyerr(boxed),
+        // `BackendError` is `#[non_exhaustive]`: a variant this layer does not
+        // map yet is still a backend failure.
+        other => BackendError::new_err(other.to_string()),
     }
 }
 

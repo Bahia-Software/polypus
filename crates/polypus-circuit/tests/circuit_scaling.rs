@@ -56,7 +56,7 @@ fn best_build_time(num_gates: usize) -> Duration {
             let qc = build(num_gates);
             let elapsed = start.elapsed();
             // Consume the result so the build cannot be optimised away.
-            assert_eq!(qc.gates.len(), num_gates);
+            assert_eq!(qc.gates().len(), num_gates);
             elapsed
         })
         .min()

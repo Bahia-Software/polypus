@@ -180,7 +180,7 @@ fn id_is_dropped_at_the_qir_boundary_only() {
             "call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))",
         ]
     );
-    assert_eq!(qc.gates.len(), 4);
+    assert_eq!(qc.gates().len(), 4);
     let qasm = qc.to_qasm2_with_params(&[]).unwrap();
     assert!(qasm.contains("id q[1];\nid q[0];\n"), "{qasm}");
 }
@@ -213,7 +213,7 @@ fn three_qubit_gates_lower_to_the_base_set() {
     for call in &calls {
         assert!(base.iter().any(|b| call.contains(b)), "{call}");
     }
-    assert_eq!(qc.gates.len(), 2);
+    assert_eq!(qc.gates().len(), 2);
     let qasm = qc.to_qasm2_with_params(&[]).unwrap();
     assert!(qasm.ends_with("ccx q[0],q[1],q[2];\ncswap q[2],q[0],q[1];\n"));
 }

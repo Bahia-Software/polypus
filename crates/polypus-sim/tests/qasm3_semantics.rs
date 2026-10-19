@@ -57,7 +57,7 @@ fn unitary(n: usize, gates: &[G]) -> Matrix {
 
 /// The unitary of a circuit with no measurements.
 fn circuit_unitary(qc: &ParameterizedCircuit) -> Matrix {
-    unitary(qc.num_qubits, &qc.assign_parameters(&[]).unwrap().gates)
+    unitary(qc.num_qubits(), qc.assign_parameters(&[]).unwrap().gates())
 }
 
 fn assert_close(what: &str, got: &Matrix, want: &Matrix) {
@@ -270,7 +270,7 @@ fn qiskit_u(theta: f64, phi: f64, lam: f64) -> Matrix {
 fn read(n: usize, statement: &str) -> Matrix {
     let src = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[{n}] q;\n{statement}\n");
     let qc = ParameterizedCircuit::from_qasm3(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
-    assert_eq!(qc.gates.len(), 1, "{statement}");
+    assert_eq!(qc.gates().len(), 1, "{statement}");
     circuit_unitary(&qc)
 }
 
@@ -442,10 +442,7 @@ fn every_exported_definition_reproduces_its_instruction_exactly() {
         let native = ParameterizedCircuit::new(n).push(gate.clone());
         let exported = native.to_qasm3().unwrap();
         let read_back = ParameterizedCircuit::from_qasm3(&exported).unwrap();
-        assert!(
-            matches!(read_back.gates.as_slice(), [G::Custom(_)]),
-            "{gate:?}"
-        );
+        assert!(matches!(read_back.gates(), [G::Custom(_)]), "{gate:?}");
         assert_close(
             &format!("{gate:?}"),
             &circuit_unitary(&read_back),

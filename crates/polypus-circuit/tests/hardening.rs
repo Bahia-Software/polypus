@@ -72,7 +72,7 @@ fn moderately_nested_expression_still_parses() {
         ")".repeat(20)
     );
     let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
-    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(qc.gates().len(), 1);
 }
 
 // ─────────────────────────── register cap ───────────────────────────
@@ -120,7 +120,7 @@ fn register_size_near_usize_max_does_not_overflow() {
 fn register_at_a_reasonable_size_is_accepted() {
     let src = "OPENQASM 2.0;\nqreg q[1000];\ncreg c[1000];\nh q[0];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.num_qubits, 1000);
+    assert_eq!(qc.num_qubits(), 1000);
 }
 
 // ─────────────────────── huge integer literals ──────────────────────
@@ -135,7 +135,7 @@ fn integer_literals_beyond_usize_are_numbers_not_lexer_errors() {
     let qc =
         ParameterizedCircuit::from_qasm2(&format!("{HEADER}rz({huge}/{huge}) q[0];\n")).unwrap();
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [polypus_circuit::GateInstruction::Rz {
             qubit: 0,
             theta: polypus_circuit::GateParam::Fixed(1.0),
@@ -169,7 +169,7 @@ fn very_long_sums_and_products_evaluate_without_recursion() {
     let src = format!("{HEADER}rx({sum}) q[0];\n");
     let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [polypus_circuit::GateInstruction::Rx {
             qubit: 0,
             theta: polypus_circuit::GateParam::Fixed(terms as f64),
@@ -180,7 +180,7 @@ fn very_long_sums_and_products_evaluate_without_recursion() {
     let src =
         format!("OPENQASM 2.0;\ngate g(t) a {{ rz({product}) a; }}\nqreg q[1];\ng(1) q[0];\n");
     let qc = ParameterizedCircuit::from_qasm2(&src).unwrap();
-    let polypus_circuit::GateInstruction::Custom(call) = &qc.gates[0] else {
+    let polypus_circuit::GateInstruction::Custom(call) = &qc.gates()[0] else {
         panic!("expected a call");
     };
     assert_eq!(
@@ -217,7 +217,7 @@ fn tokens_are_bounded() {
         "OPENQASM 2.0;\nqreg {name}[1];\nh {name}[0];\n"
     ))
     .unwrap();
-    assert_eq!(qc.num_qubits, 1);
+    assert_eq!(qc.num_qubits(), 1);
     let number = "0".repeat(MAX_TOKEN_BYTES);
     assert!(ParameterizedCircuit::from_qasm2(&format!("{HEADER}rx({number}) q[0];\n")).is_ok());
     let string = "a".repeat(MAX_TOKEN_BYTES - 2);
@@ -279,7 +279,7 @@ fn barrier_operands_are_bounded() {
     let src = |barriers: &str| format!("OPENQASM 2.0;\nqreg q[1000000];\n{barriers}");
     let at = src(&"barrier q;\n".repeat(4));
     assert_eq!(
-        ParameterizedCircuit::from_qasm2(&at).unwrap().gates,
+        ParameterizedCircuit::from_qasm2(&at).unwrap().gates(),
         vec![polypus_circuit::GateInstruction::Barrier(vec![]); 4]
     );
     let (line, message) = parse_err(&format!("{at}barrier q[0];\n"));

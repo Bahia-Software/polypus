@@ -347,12 +347,12 @@ impl CustomGate {
     ///
     /// let src = "OPENQASM 2.0;\ngate g(t) a { rz(t/2) a; }\nqreg q[1];\ng(0) q[0];\n";
     /// let imported = ParameterizedCircuit::from_qasm2(src).unwrap();
-    /// let GateInstruction::Custom(call) = &imported.gates[0] else { unreachable!() };
+    /// let GateInstruction::Custom(call) = &imported.gates()[0] else { unreachable!() };
     ///
     /// let mut qc = ParameterizedCircuit::new(2);
     /// qc.try_push(GateInstruction::Custom(call.with_arguments(vec![Param(0)], vec![1]).unwrap()))
     ///     .unwrap();
-    /// assert_eq!(qc.num_params, 1);
+    /// assert_eq!(qc.num_params(), 1);
     /// assert!(qc.to_qasm2_with_params(&[0.5]).unwrap().contains("g(0.5) q[1];"));
     /// ```
     ///
