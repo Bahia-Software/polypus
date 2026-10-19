@@ -63,6 +63,8 @@ Changes on `main` since 0.7.2.
   (source, tokens, declarations, instructions after broadcasting, barrier
   operands, expression nodes) and no longer tokenizes the whole source up
   front: a few hundred bytes could take gigabytes (#343).
+- The OpenQASM 3 importer bounds the qubits all barriers list: a full-register
+  `barrier q;` counted as one instruction however large `q` was (#344).
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.

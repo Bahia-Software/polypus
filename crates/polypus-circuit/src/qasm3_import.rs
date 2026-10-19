@@ -53,8 +53,8 @@ use crate::expr::{
 };
 use crate::gate::{GateInstruction, GateParam};
 use crate::limits::{
-    check_declarations, check_instructions, check_source, check_token, spend_nodes,
-    MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION,
+    check_declarations, check_instructions, check_source, check_token, spend_barrier_operands,
+    spend_nodes, MAX_REGISTER_BITS, MAX_VALIDATED_EXPANSION,
 };
 use crate::qasm_import::{
     broadcast, builtin_gate, check_distinct, check_signature, check_terminal, err, normalize,
@@ -875,6 +875,9 @@ struct Parser<'s> {
     /// Body statements the calls of declared gates may still visit, at parse
     /// time (fixed angles) or at every binding (free angles).
     expansion_budget: usize,
+    /// Qubits the barriers so far list (see
+    /// [`MAX_BARRIER_OPERANDS`](crate::limits::MAX_BARRIER_OPERANDS)).
+    barrier_operands: usize,
 }
 
 /// Parse a complete program in the OpenQASM 3 profile. Entry point of
@@ -906,6 +909,7 @@ pub(crate) fn parse_qasm3(src: &str) -> Result<ParameterizedCircuit, CircuitErro
         measured: BTreeSet::new(),
         exprs: ExprArena::default(),
         expansion_budget: MAX_VALIDATED_EXPANSION,
+        barrier_operands: 0,
     };
     if parser.tokens.peek()? == Some(Tok::Ident("OPENQASM")) {
         parser.version()?;
@@ -1469,12 +1473,16 @@ impl<'s> Parser<'s> {
         Ok(())
     }
 
-    /// `barrier;` (every qubit) or `barrier <operands>;`.
+    /// `barrier;` (every qubit) or `barrier <operands>;`. The operands are
+    /// listed one by one until the circuit is assembled (`barrier q;` lists
+    /// every qubit of `q`), so they are spent from the program's budget.
     fn barrier_stmt(&mut self, line: usize) -> Result<(), CircuitError> {
         let mut indices = Vec::new();
         if !self.tokens.eat(";")? {
             loop {
-                indices.extend(self.operand(true)?.indices);
+                let operand = self.operand(true)?.indices;
+                spend_barrier_operands(&mut self.barrier_operands, operand.len(), line)?;
+                indices.extend(operand);
                 let token = self.tokens.next("',' or ';'")?;
                 match token.tok {
                     Tok::Punct(",") => continue,

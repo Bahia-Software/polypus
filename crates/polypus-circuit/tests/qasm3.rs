@@ -990,6 +990,26 @@ fn instructions_after_broadcasting_are_bounded() {
     );
 }
 
+/// The audit's input (#344): `barrier q;` lists every qubit of `q` until the
+/// circuit is assembled, so the qubits all barriers list are bounded; the
+/// fifth full barrier over a million qubits is rejected.
+#[test]
+fn barrier_operands_are_bounded() {
+    let src = |barriers: &str| format!("{HEADER}qubit[{MAX_REGISTER_BITS}] q;\n{barriers}");
+    let at = src(&"barrier q;\n".repeat(4));
+    assert_eq!(import(&at).gates, vec![G::Barrier(vec![]); 4]);
+    let (line, message) = rejected(&format!("{at}barrier q[0];\n"));
+    assert_eq!(line, 8);
+    assert!(
+        message.contains("more than MAX_BARRIER_OPERANDS (4000000) qubits"),
+        "{message}"
+    );
+    let (line, _) = rejected(&src(&"barrier q;\n".repeat(200)));
+    assert_eq!(line, 8);
+    // `barrier;` lists nothing.
+    assert_eq!(import(&src(&"barrier;\n".repeat(100))).gates.len(), 100);
+}
+
 /// Declarations whose expansion doubles at each level: `g<k>` visits
 /// 3·2^k − 2 statements.
 fn doubling(levels: usize) -> String {
@@ -1463,6 +1483,18 @@ fn the_export_stays_within_the_importers_budgets() {
     }
     assert!(qc.to_qasm3().is_ok());
     assert_eq!(export_limit(&qc.measure_all()), "MAX_INSTRUCTIONS");
+
+    // Barrier operands as the importer lists them: `barrier q;` is every
+    // qubit.
+    let mut qc = ParameterizedCircuit::new(MAX_REGISTER_BITS);
+    for _ in 0..4 {
+        qc = qc.barrier();
+    }
+    assert_eq!(
+        import(&qc.to_qasm3().unwrap()).gates,
+        vec![G::Barrier(vec![]); 4]
+    );
+    assert_eq!(export_limit(&qc.barrier()), "MAX_BARRIER_OPERANDS");
 
     // Expression nodes, one expression at a time: the largest expression the
     // OpenQASM 2.0 importer keeps in a gate body imports again; one more node
