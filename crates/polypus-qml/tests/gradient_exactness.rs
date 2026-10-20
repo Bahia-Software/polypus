@@ -168,6 +168,21 @@ fn stacked_iqp_encoders_around_an_ansatz_keep_the_gradient_exact() {
     assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
 }
 
+/// Data re-uploading is another encoder later in the layer list (design doc
+/// §6.1): the features come back as fixed angles between trainable layers,
+/// which untying must copy, not renumber.
+#[test]
+fn data_reuploading_keeps_the_gradient_exact() {
+    for readout in [raw_readout(&[1]), raw_readout(&[0, 1, 2, 3])] {
+        let model = encoded(4)
+            .hardware_efficient(1)
+            .angle_encoder(RotationAxis::Rx)
+            .hardware_efficient(1)
+            .readout(readout);
+        assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
+    }
+}
+
 // --- Parameters reused across qubit pairs (regression, plan §1.2). ------------
 
 #[test]
@@ -196,6 +211,23 @@ fn pooling_gradient_is_exact() {
             .readout(readout);
         assert_gradient_is_exact(&problem(model, Loss::SquaredError, &REAL_LABELS));
     }
+}
+
+/// A QCNN that re-uploads the data after pooling: shared parameters on both
+/// sides of a second encoder. An angle encoder needs a qubit per feature, so
+/// the data has two features (pooling leaves two of the four qubits active).
+#[test]
+fn reuploading_after_pooling_keeps_the_gradient_exact() {
+    let model = encoded(4)
+        .conv(ConvBlock::Basic)
+        .pool(PoolBlock::Basic)
+        .angle_encoder(RotationAxis::Ry)
+        .conv(ConvBlock::Cartan)
+        .readout(raw_readout(&[0, 1]));
+    let rows: Vec<Vec<f64>> = ROWS.iter().map(|r| r[..2].to_vec()).collect();
+    let data = Dataset::from_rows(&rows, &REAL_LABELS).unwrap();
+    let problem = QmlProblem::new(model.compile(2).unwrap(), data, Loss::SquaredError).unwrap();
+    assert_gradient_is_exact(&problem);
 }
 
 #[test]
