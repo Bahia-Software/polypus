@@ -569,7 +569,9 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
 /// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
 /// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
 /// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
-/// silently.
+/// silently. For the same reason `qmio` and registry-dispatched backends reject
+/// a `noise_model` and a non-default `sim_method`, and registry backends a
+/// non-default `backend` ([`reject_aer_only_args`]).
 ///
 /// `fusion` only applies to the native `"polypus"` backend (see
 /// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
@@ -673,7 +675,13 @@ fn build_backend_config(
         }),
         // QMIO is now dispatched through the runtime registry (it registers a
         // factory), so its config is a `Registered { name: "qmio", options }`.
-        "qmio" => build_qmio_registered(backend, options),
+        // `backend` picks its program format, so only the Aer arguments are
+        // checked.
+        "qmio" => {
+            let config = build_qmio_registered(backend, options)?;
+            reject_aer_only_args(infrastructure, sim_method, noise_model.as_ref())?;
+            Ok(config)
+        }
         // Any other name is dispatched through the runtime backend registry: the
         // built-in `"subprocess"` bridge, or a backend a Rust embedder registered
         // before this call. The caller-supplied `options` reach the factory via the
@@ -681,6 +689,15 @@ fn build_backend_config(
         other => {
             crate::infrastructure::register_builtin_backends();
             if crate::infrastructure::is_registered(other) {
+                reject_aer_only_args(other, sim_method, noise_model.as_ref())?;
+                // `Registered` carries only `options`, so `backend` would be
+                // dropped while `RunResult.backend` echoed it.
+                if backend != "aer" {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "the registered backend '{other}' does not accept backend=\"{backend}\"; \
+                         omit it and pass backend-specific settings through 'options'"
+                    )));
+                }
                 Ok(BackendConfig::Registered {
                     name: other.to_string(),
                     options: options.unwrap_or_default(),
@@ -693,6 +710,31 @@ fn build_backend_config(
             }
         }
     }
+}
+
+/// Reject the Aer-only arguments on an infrastructure that cannot honour them:
+/// QMIO (real hardware) and every registry-dispatched backend, whose
+/// `BackendConfig::Registered` has no field for either, so they would be
+/// dropped silently. `sim_method` is compared with the entry points' default,
+/// `"automatic"`, so a call that leaves it alone passes.
+fn reject_aer_only_args(
+    infrastructure: &str,
+    sim_method: &str,
+    noise_model: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    if noise_model.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the '{infrastructure}' infrastructure does not accept a noise_model; it applies \
+             only to Aer (infrastructure=\"local\" with backend=\"aer\")"
+        )));
+    }
+    if sim_method != "automatic" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the '{infrastructure}' infrastructure does not accept sim_method=\"{sim_method}\"; \
+             it applies only to Aer (infrastructure=\"local\" or \"cunqa\")"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the QMIO backend's registry config for the CESGA QMIO QPU.
@@ -2902,6 +2944,73 @@ mod tests {
             build_backend_config("cunqa", "aer", "automatic", None, 1, 2, None, None, None),
             Ok(BackendConfig::Cunqa { .. })
         ));
+    }
+
+    #[test]
+    fn build_backend_config_rejects_aer_only_args_on_a_registered_backend() {
+        // `subprocess` is a built-in registry backend; `Registered` has no field
+        // for these, so each must be an error naming the kwarg.
+        pyo3::Python::initialize();
+        let build = |backend: &str, sim_method: &str, noise: bool| {
+            let noise_model = noise.then(|| Python::attach(|py| py.None()));
+            build_backend_config(
+                "subprocess",
+                backend,
+                sim_method,
+                noise_model,
+                1,
+                2,
+                None,
+                None,
+                None,
+            )
+        };
+        assert!(build("aer", "automatic", false).is_ok());
+        for (backend, sim_method, noise, kwarg) in [
+            ("aer", "automatic", true, "noise_model"),
+            ("aer", "statevector", false, "sim_method"),
+            ("polypus", "automatic", false, "backend"),
+        ] {
+            let err = build(backend, sim_method, noise)
+                .expect_err("an argument the backend cannot honour must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(kwarg), "{kwarg}: {err}");
+            });
+        }
+    }
+
+    #[cfg(feature = "qmio")]
+    #[test]
+    fn build_backend_config_rejects_a_noise_model_and_sim_method_on_qmio() {
+        // Real hardware: a noise model or an Aer method would be dropped.
+        // `backend` stays the program format, so "qir" is accepted.
+        pyo3::Python::initialize();
+        let build = |sim_method: &str, noise: bool| {
+            let noise_model = noise.then(|| Python::attach(|py| py.None()));
+            build_backend_config(
+                "qmio",
+                "qir",
+                sim_method,
+                noise_model,
+                1,
+                2,
+                None,
+                None,
+                None,
+            )
+        };
+        assert!(build("automatic", false).is_ok());
+        for (sim_method, noise, kwarg) in [
+            ("automatic", true, "noise_model"),
+            ("density_matrix", false, "sim_method"),
+        ] {
+            let err = build(sim_method, noise).expect_err("must be rejected on qmio");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(err.to_string().contains(kwarg), "{kwarg}: {err}");
+            });
+        }
     }
 
     #[test]
