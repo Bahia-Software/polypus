@@ -104,7 +104,7 @@ Any other name raises `ValueError`. `population_size` must be at least 4 with ev
 
 All three have the same budget of `population_size × (generations + 1)` evaluations: the initial population plus `generations` full generations. `"rand1bin"` and `"shade"` keep their population, so they run `generations` generations. For `"lshade"`, `generations` sets that budget rather than the number of generations: its population shrinks as the budget is spent, reaching 4 at the end, so it runs more, smaller generations until the next one would not fit. With the defaults that is 275 generations instead of 100, the last ones of 4 candidates, using 5048 of the 5050 evaluations. The early stop still counts generations, so late in an L-SHADE run `patience` generations hold fewer evaluations.
 
-More, smaller batches mean more sequential rounds: with several QPUs, an L-SHADE batch smaller than `n_qpus` leaves some of them idle, and the run takes more rounds than one with a fixed population. With many QPUs, prefer `"shade"`, whose population stays fixed. A CUNQA walltime warning counts L-SHADE's real number of generations.
+More, smaller batches mean more sequential rounds: with several QPUs, an L-SHADE batch smaller than `n_qpus` leaves some of them idle, and the run takes more rounds than one with a fixed population. With many QPUs, prefer `"shade"`, whose population stays fixed; [Choosing an optimizer](#choosing-an-optimizer) measures the trade-off. A CUNQA walltime warning counts L-SHADE's real number of generations.
 
 ### Particle Swarm Optimization
 
@@ -163,14 +163,45 @@ The covariance matrix adaptation evolution strategy (Hansen's tutorial, arXiv:16
 
 A run also ends when its distribution degenerates: its spread collapses below `1e-12·sigma0` or grows beyond `1e4·sigma0`, its covariance becomes ill-conditioned (condition number above `1e14`), or a value is no longer finite. Either way the next restart starts if one is left; otherwise the optimisation stops with `converged=True`. If the generations run out first, `converged` is `False`. `iterations_run` counts the generations of all runs. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
-**Batch size and QPUs.** Each generation is one batch of `population_size` circuits, spread over the `n_qpus` QPUs. The default population is small, which suits a few QPUs. In the prototype benchmark behind this optimizer (QAOA MaxCut, 1500 to 3000 evaluations), CMA-ES with its default population and DE with `strategy="lshade"` both beat the classic DE by 2 to 3 points of approximation ratio, while CMA-ES forced to a population of 30 lost most of that advantage: for a fixed number of evaluations, a larger population leaves fewer generations to adapt. With a budget of 500 evaluations none of them did better than the classic DE. As a rule of thumb:
-
-- with few QPUs, use `polypus.CMAES()` with the default population;
-- with many QPUs, prefer `polypus.DE(strategy="shade")`, whose population stays fixed and can match `n_qpus`, or `strategy="lshade"`, which starts with large batches and shrinks them;
-- `restarts` doubles the population at each restart, so later runs fill more QPUs and explore multimodal landscapes better. All runs share `generations`, so keep `restarts` small unless `generations` is large.
-
-If you raise `population_size`, a multiple of `n_qpus` keeps every QPU busy.
+**Batch size and QPUs.** Each generation is one batch of `population_size` circuits, spread over the `n_qpus` QPUs. The default population is small, so a CMA-ES run takes many sequential batches and leaves QPUs idle when they outnumber it. Raising `population_size` to fill them did not pay off in the benchmark below, and neither did `restarts`; see [Choosing an optimizer](#choosing-an-optimizer). All runs share `generations`, so restarts trade generations of one run for runs with larger batches.
 
 With `infrastructure="cunqa"`, the walltime warning projects the first generation over `generations`. With `restarts`, it assumes the worst case, a restart after every generation until none are left. Because the population doubles at each restart, the projection can be well above the usual run time.
 
 **Reproducibility.** A seed reproduces a CMA-ES run exactly on the same machine and build. Across operating systems or CPU architectures it may not: CMA-ES's own steps use exponentials, logarithms and cosines from the platform's math library, whose last bit can differ, and a one-bit difference early on can lead a run to a different optimum. DE's steps use only basic arithmetic, so a DE run over a backend whose results do not depend on the platform is reproducible everywhere; the native simulator's `sin`/`cos` add the same caveat to every optimizer.
+
+## Choosing an optimizer
+
+[`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains QAOA for MaxCut on random 3-regular graphs of 10 nodes with each optimizer at the same evaluation budget. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
+
+Paired difference in approximation ratio from the classic DE (`rand1bin`), with its standard error, and the share of instances where the optimizer did better:
+
+| Optimizer | p = 3, 256 shots, 1500 evals | p = 3, 2^20 shots, 1500 evals | p = 5, 256 shots, 3000 evals | p = 3, 256 shots, 500 evals |
+|---|---|---|---|---|
+| `DE()` (ratio) | 0.862 | 0.860 | 0.871 | 0.843 |
+| `DE(strategy="shade")` | +0.001 ± 0.003 (50 %) | +0.006 ± 0.003 (67 %) | +0.015 ± 0.003 (80 %) | +0.006 ± 0.006 (57 %) |
+| `DE(strategy="lshade")` | **+0.017 ± 0.003 (90 %)** | **+0.030 ± 0.004 (97 %)** | **+0.037 ± 0.004 (93 %)** | +0.008 ± 0.005 (65 %) |
+| `CMAES()` | +0.012 ± 0.005 (67 %) | +0.020 ± 0.006 (70 %) | +0.016 ± 0.007 (63 %) | +0.002 ± 0.005 (60 %) |
+| `CMAES(population_size=30)` | −0.001 ± 0.004 (53 %) | −0.000 ± 0.004 (43 %) | +0.005 ± 0.005 (57 %) | +0.000 ± 0.004 (47 %) |
+| `CMAES(restarts=3)` | −0.005 ± 0.005 (30 %) | +0.003 ± 0.004 (57 %) | −0.003 ± 0.004 (57 %) | −0.005 ± 0.005 (53 %) |
+
+Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots:
+
+| Optimizer | Batches, 1500 evals | Batches, 3000 evals | Bias, p = 3 | Bias, p = 5 |
+|---|---|---|---|---|
+| `DE()` | 50 | 100 | +0.003 | +0.004 |
+| `DE(strategy="shade")` | 50 | 100 | +0.007 | +0.008 |
+| `DE(strategy="lshade")` | 115 | 232 | +0.009 | +0.011 |
+| `CMAES()` | 166 | 300 | +0.013 | +0.009 |
+| `CMAES(population_size=30)` | 50 | 100 | +0.006 | +0.007 |
+| `CMAES(restarts=3)` | 87 | 114 | +0.006 | +0.004 |
+
+What the data says:
+
+- **With a budget of 1500 evaluations or more, use `polypus.DE(strategy="lshade")`.** It had the best ratio in every scenario, beat the classic DE on 90 to 97 % of the instances, and its lead was largest with 10 parameters (p = 5).
+- **CMA-ES with its default population helps less than L-SHADE and is less consistent.** It gained 1.2 to 2.0 points over the classic DE but won only 63 to 70 % of the instances, and it took the most sequential batches, about three times the classic DE's.
+- **Don't enlarge CMA-ES's population to fill QPUs.** With a population of 30 it was no better than the classic DE: at a fixed budget, larger batches leave fewer generations to adapt. IPOP restarts did not help either at these budgets.
+- **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
+- **With 500 evaluations no optimizer was clearly better than the classic DE.**
+- **The reported `best_fitness` is optimistic under shot noise,** and more so for the adaptive optimizers, which pick their best from more noisy estimates: by up to 1.3 % of the maximum cut with 256 shots. Re-evaluate `best_params` with more shots when the value itself matters.
+
+These results cover QAOA MaxCut only, at 10 nodes and depth 3 to 5, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently. Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario LAYERS:SHOTS:BUDGET`, to check. The figures above come from that command at commit `1ea087b` (Polypus 0.7.2) on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30.
