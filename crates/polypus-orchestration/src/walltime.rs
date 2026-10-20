@@ -44,11 +44,22 @@ impl Method {
     /// The call pattern of this method's optimizer. DE and PSO score their initial
     /// population in one batch the size of a generation's, so it counts as one;
     /// a QNG iteration is a gradient batch plus a single-candidate batch.
+    ///
+    /// Every DE strategy makes one batch per generation. L-SHADE spends the
+    /// evaluation budget of `generations` full generations in more, smaller
+    /// ones; its schedule does not depend on fitness, so
+    /// [`DeStrategy::max_generations`](polypus_optimizers::DeStrategy::max_generations)
+    /// gives their exact number, from the schedule the optimizer itself steps.
+    /// None of its batches is larger than the first, so the projection stays an
+    /// upper bound.
     pub(crate) fn run_shape(&self) -> RunShape {
         match self {
             Method::De(cfg) => RunShape {
                 batches_per_generation: 1,
-                generations: u64::from(cfg.generations) + 1,
+                generations: cfg
+                    .strategy
+                    .max_generations(cfg.population_size, cfg.generations)
+                    + 1,
                 unit: "generations",
             },
             Method::Pso(cfg) => RunShape {
@@ -326,16 +337,35 @@ mod tests {
         assert_eq!(logged_for(run_id).len(), 1);
     }
 
-    #[test]
-    fn run_shape_follows_the_optimizer_call_pattern() {
-        use crate::{DeConfig, PsoConfig};
-        let de = Method::De(DeConfig {
-            generations: 100,
-            population_size: 10,
+    fn de(
+        strategy: polypus_optimizers::DeStrategy,
+        population_size: u32,
+        generations: u32,
+    ) -> Method {
+        Method::De(crate::DeConfig {
+            generations,
+            population_size,
             tolerance: 0.0,
             patience: 10,
-        });
-        assert_eq!(de.run_shape(), DE_100);
+            strategy,
+        })
+    }
+
+    #[test]
+    fn run_shape_follows_the_optimizer_call_pattern() {
+        use crate::PsoConfig;
+        use polypus_optimizers::DeStrategy;
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade] {
+            assert_eq!(de(strategy, 10, 100).run_shape(), DE_100, "{strategy}");
+        }
+        // L-SHADE spends the same 1010 evaluations in more, smaller generations.
+        let lshade = de(DeStrategy::LShade, 10, 100).run_shape();
+        assert_eq!(
+            lshade.generations,
+            DeStrategy::LShade.max_generations(10, 100) + 1
+        );
+        assert!(lshade.generations > DE_100.generations, "{lshade:?}");
+        assert_eq!(lshade.batches_per_generation, 1);
         let pso = Method::Pso(PsoConfig {
             generations: 7,
             population_size: 10,
@@ -346,6 +376,45 @@ mod tests {
             tolerance: 0.0,
         });
         assert_eq!(pso.run_shape().generations, 8);
+    }
+
+    /// Counts the batches it is handed; every candidate scores the same, so the
+    /// stagnation stop is the only thing that could end a run early.
+    struct CountingOracle(Arc<Mutex<u64>>);
+
+    impl EvaluationOracle for CountingOracle {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            *self.0.lock().unwrap() += 1;
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    /// `run_shape` counts exactly the batches each DE strategy sends when it does
+    /// not stop early, L-SHADE's longer run included.
+    #[test]
+    fn de_run_shape_counts_the_batches_the_optimizer_sends() {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        use polypus_optimizers::DeStrategy;
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            for (population_size, generations) in [(4, 12), (5, 10), (12, 0), (16, 25), (40, 30)] {
+                let method = Method::De(crate::DeConfig {
+                    generations,
+                    population_size,
+                    // Zero improvement is never below a zero tolerance.
+                    tolerance: 0.0,
+                    patience: 1,
+                    strategy,
+                });
+                let shape = method.run_shape();
+                let batches = Arc::new(Mutex::new(0));
+                let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
+                let outcome =
+                    dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3).ok();
+                let label = format!("{strategy} {population_size} × {generations}");
+                assert!(outcome.is_some_and(|o| !o.converged), "{label}");
+                assert_eq!(*batches.lock().unwrap(), shape.generations, "{label}");
+            }
+        }
     }
 
     #[test]

@@ -197,6 +197,24 @@ class TestTrainSeed:
         assert isinstance(r1.iterations_run, int)
         assert isinstance(r1.converged, bool)
 
+    @pytest.mark.parametrize("strategy", ["shade", "lshade"])
+    def test_same_seed_reproduces_adaptive_de(self, strategy):
+        import polypus
+
+        def method():
+            return polypus.DE(
+                generations=5, population_size=8, tolerance=1e-12, strategy=strategy
+            )
+
+        r1 = self._train(seed=2024, method=method(), ident="train_seed_strategy")
+        r2 = self._train(seed=2024, method=method(), ident="train_seed_strategy")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
     def test_no_seed_differs_across_calls(self):
         r1 = self._train(seed=None, ident="train_seed_none")
         r2 = self._train(seed=None, ident="train_seed_none")

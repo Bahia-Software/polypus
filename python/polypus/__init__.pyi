@@ -87,6 +87,9 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
 _Method = Union[DE, PSO, QNG]
+# `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
+# raises `ValueError`.
+_DeStrategy = Literal["rand1bin", "shade", "lshade"]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
@@ -122,6 +125,7 @@ class DE:
     tolerance: float
     patience: int
     seed: Optional[int]
+    strategy: _DeStrategy
     def __new__(
         cls,
         generations: int = 100,
@@ -129,6 +133,7 @@ class DE:
         tolerance: float = 0.01,
         patience: int = 20,
         seed: Optional[int] = None,
+        strategy: _DeStrategy = "rand1bin",
     ) -> DE: ...
 
 @final
