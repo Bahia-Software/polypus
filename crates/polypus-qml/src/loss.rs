@@ -7,10 +7,12 @@
 //! [`Decision`](crate::Decision) — the decision is a separate inference step.
 //!
 //! The optimizers *maximise*, so [`QmlProblem`](crate::QmlProblem) turns the
-//! mean loss into `fitness = −mean_loss`. C-5 requires finite fitness; every
-//! loss below is finite for finite inputs (`BinaryCrossEntropy` clamps its
-//! probability away from the `log` singularities), and non-finite predictions
-//! are already impossible upstream (the dataset and circuits reject them).
+//! mean loss into `fitness = −mean_loss`. [`Loss::Expectation`] has no label at
+//! all: it trains a model to maximise `⟨O₀⟩` itself. C-5 requires finite
+//! fitness; every loss below is finite for finite inputs (`BinaryCrossEntropy`
+//! clamps its probability away from the `log` singularities), and non-finite
+//! predictions are already impossible upstream (the dataset and circuits
+//! reject them).
 
 use crate::error::{QmlError, ValidationError};
 
@@ -41,6 +43,13 @@ pub enum Loss {
     /// `< num_classes` is checked separately by
     /// [`QmlProblem::new`](crate::QmlProblem::new), which knows `k`.
     CategoricalCrossEntropy,
+    /// No labels: the per-sample loss is `−⟨O₀⟩`, so the fitness is the mean
+    /// raw expectation `⟨O₀⟩` over the training samples, which the optimizers
+    /// maximise. The unsupervised counterpart of the losses above, for models
+    /// whose readout already is the quantity to optimise (a cost Hamiltonian
+    /// written as a weighted [`Observable`](crate::Observable): negate its
+    /// coefficients to minimise it). Any label is accepted and ignored.
+    Expectation,
 }
 
 impl Loss {
@@ -48,7 +57,8 @@ impl Loss {
     /// domain. `SquaredError` accepts any finite label (already guaranteed by
     /// the [`Dataset`](crate::Dataset)); `BinaryCrossEntropy` requires exactly
     /// `{0.0, 1.0}` and `Hinge` exactly `{−1.0, 1.0}`, otherwise
-    /// [`ValidationError::LabelDomain`].
+    /// [`ValidationError::LabelDomain`]. `Expectation` never reads the label,
+    /// so it accepts any.
     pub(crate) fn validate_label(&self, label: f64, sample: usize) -> Result<(), ValidationError> {
         let ok = match self {
             Loss::SquaredError => true,
@@ -59,6 +69,8 @@ impl Loss {
             // `k` — so `QmlProblem::new` checks it separately once it knows the
             // number of observables.
             Loss::CategoricalCrossEntropy => label >= 0.0 && label.fract() == 0.0,
+            // Unsupervised: the label is never read.
+            Loss::Expectation => true,
         };
         if ok {
             return Ok(());
@@ -68,6 +80,7 @@ impl Loss {
             Loss::BinaryCrossEntropy => "{0.0, 1.0}",
             Loss::Hinge => "{-1.0, 1.0}",
             Loss::CategoricalCrossEntropy => "a non-negative integer class index",
+            Loss::Expectation => "any value (it is ignored)",
         };
         Err(ValidationError::LabelDomain {
             loss: *self,
@@ -96,6 +109,8 @@ impl Loss {
             }
             Loss::Hinge => Ok((1.0 - label * prediction).max(0.0)),
             Loss::CategoricalCrossEntropy => Err(QmlError::CategoricalLossHasNoScalarForm),
+            // `fitness = −mean_loss = mean ⟨O₀⟩`.
+            Loss::Expectation => Ok(-prediction),
         }
     }
 
@@ -137,6 +152,7 @@ impl Loss {
                 0.0
             }),
             Loss::CategoricalCrossEntropy => Err(QmlError::CategoricalLossHasNoScalarForm),
+            Loss::Expectation => Ok(-1.0),
         }
     }
 }
@@ -418,5 +434,26 @@ mod tests {
         // pred = 0 → p = 0.5 → −ln(0.5) for either label.
         let l = Loss::BinaryCrossEntropy.evaluate(0.0, 1.0).unwrap();
         assert!((l - 0.5f64.ln().abs()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn expectation_accepts_and_ignores_any_label() {
+        for label in [0.0, -3.5, 7.0, 1e9] {
+            assert!(Loss::Expectation.validate_label(label, 0).is_ok());
+            assert_eq!(Loss::Expectation.evaluate(0.25, label).unwrap(), -0.25);
+            assert_eq!(Loss::Expectation.gradient(0.25, label).unwrap(), -1.0);
+        }
+    }
+
+    #[test]
+    fn expectation_gradient_matches_finite_difference() {
+        let h = 1e-6;
+        for prediction in [-0.9, -0.1, 0.0, 0.4, 0.95] {
+            let numeric = (Loss::Expectation.evaluate(prediction + h, 0.0).unwrap()
+                - Loss::Expectation.evaluate(prediction - h, 0.0).unwrap())
+                / (2.0 * h);
+            let analytic = Loss::Expectation.gradient(prediction, 0.0).unwrap();
+            assert!((numeric - analytic).abs() < 1e-8, "{prediction}");
+        }
     }
 }

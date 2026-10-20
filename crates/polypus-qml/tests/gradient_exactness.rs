@@ -230,6 +230,23 @@ fn reuploading_after_pooling_keeps_the_gradient_exact() {
     assert_gradient_is_exact(&problem);
 }
 
+/// Unsupervised: maximise a weighted observable (a small cost Hamiltonian).
+#[test]
+fn unsupervised_expectation_gradient_is_exact() {
+    let cost = Observable::new(vec![
+        (
+            0.7,
+            PauliString::new(vec![(0, Pauli::Z), (1, Pauli::Z)]).unwrap(),
+        ),
+        (-1.3, PauliString::new(vec![(2, Pauli::Z)]).unwrap()),
+    ])
+    .unwrap();
+    let model = encoded(4)
+        .conv(ConvBlock::Basic)
+        .readout(Readout::new(vec![cost], Decision::Raw).unwrap());
+    assert_gradient_is_exact(&problem(model, Loss::Expectation, &[0.0; 3]));
+}
+
 #[test]
 fn categorical_gradient_through_a_convolution_is_exact() {
     let model = encoded(4)

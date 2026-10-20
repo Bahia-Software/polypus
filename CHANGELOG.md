@@ -39,8 +39,9 @@ Changes on `main` since 0.7.2.
   datasets with deterministic splits and feature scaling; layered variational
   models (angle, amplitude, IQP and basis encoders, a hardware-efficient
   ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
-  argmax or raw decisions; and squared-error, binary and categorical
-  cross-entropy and hinge losses. It builds `polypus-circuit` circuits and
+  argmax or raw decisions; squared-error, binary and categorical
+  cross-entropy and hinge losses, and an unsupervised `Expectation` loss that
+  maximises the readout itself (no labels). It builds `polypus-circuit` circuits and
   turns measurement counts into a fitness, and into an exact parameter-shift
   gradient that stays exact when convolution and pooling reuse a parameter
   across gates, but never runs them. It is not yet reachable from Python.

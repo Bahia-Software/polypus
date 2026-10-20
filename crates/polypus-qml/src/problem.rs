@@ -2212,4 +2212,43 @@ mod tests {
             problem.bind_batch(&theta).unwrap()[1].gates()
         );
     }
+
+    // ── Unsupervised (Loss::Expectation) ─────────────────────────────────────
+
+    #[test]
+    fn expectation_fitness_is_the_mean_raw_expectation() {
+        let model = two_qubit_model(Decision::Raw);
+        // Any labels: they are ignored.
+        let problem = QmlProblem::new(model, dataset(&[3.0, -7.0]), Loss::Expectation).unwrap();
+        // ⟨Z₀⟩ = 0.5 and −0.25 (qubit 0 is the rightmost character).
+        let probabilities = vec![
+            probs(&[("00", 0.75), ("01", 0.25)]),
+            probs(&[("00", 0.375), ("01", 0.625)]),
+        ];
+        let fitness = problem.fitness_from_probabilities(&probabilities).unwrap();
+        assert!((fitness - (0.5 - 0.25) / 2.0).abs() < 1e-12, "{fitness}");
+    }
+
+    #[test]
+    fn expectation_pairs_with_scalar_decisions_only() {
+        assert!(QmlProblem::new(
+            two_qubit_model(Decision::Sign),
+            dataset(&[0.0, 0.0]),
+            Loss::Expectation
+        )
+        .is_ok());
+        let err = QmlProblem::new(
+            argmax_two_class_model(),
+            dataset(&[0.0, 1.0]),
+            Loss::Expectation,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::DecisionNotSupportedByLoss {
+                decision: Decision::Argmax,
+                loss: Loss::Expectation,
+            }
+        );
+    }
 }
