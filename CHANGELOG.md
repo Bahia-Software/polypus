@@ -109,6 +109,11 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- With `infrastructure="cunqa"`, a shot split that is uneven across the QPUs
+  (e.g. 10 shots on 3 QPUs) gives every replica its own QPU and seed: the
+  calls per batch size restarted at QPU 0 and the base seed, so two replicas
+  shared both and one QPU idled. CUNQA's `run_qcs` takes a `qpu_offset` kwarg
+  (C-1) (#370).
 - An expression id (`ExprId`) is a 64-bit checksum of the expression, resolved
   through the circuit and trusted only after the stored nodes compare equal;
   with the 32-bit checksum it had, a circuit could take a foreign id for a
