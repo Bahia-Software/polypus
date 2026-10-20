@@ -21,7 +21,7 @@ result.merged_counts  # e.g. {'00': 507, '11': 493}
 | `seed` | The effective seed. `None` only for `"qmio"`, which is real hardware. |
 | `id`, `backend`, `infrastructure` | The run manifest, for logging and replay. |
 
-Pass `seed=...` for reproducible shot noise on every simulated backend (native, Aer and CUNQA's simulated QPUs). `"qmio"` rejects an explicit seed.
+Pass `seed=...` for reproducible shot noise on every simulated backend (native, Aer and CUNQA's simulated QPUs). `"qmio"` rejects an explicit seed, and also a `noise_model` or a `sim_method` other than `"automatic"`: both apply only to Aer.
 
 ## Distributing shots across QPUs
 
