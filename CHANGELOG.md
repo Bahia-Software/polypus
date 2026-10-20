@@ -14,6 +14,13 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, an exact
+  gradient when it has one, and a full-dataset view under a minibatch); Adam
+  uses the exact gradient or a finite difference of the evaluation, and the
+  CUNQA walltime warning times its gradient too. With a minibatch, Adam tracks
+  its best on the full dataset, and the other optimizers' `best_fitness` is
+  re-scored on it at the end. Not yet reachable from Python.
 - The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native

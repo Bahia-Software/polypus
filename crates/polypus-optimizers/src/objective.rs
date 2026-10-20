@@ -74,3 +74,15 @@ pub trait GradientOracle: Send + Sync {
         (0..dims).map(|k| self.gradient(theta, k)).collect()
     }
 }
+
+/// A shared gradient oracle is a gradient oracle: one object can serve as both
+/// the [`EvaluationOracle`] and the [`GradientOracle`] of a run.
+impl<T: GradientOracle + ?Sized> GradientOracle for std::sync::Arc<T> {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        (**self).gradient(theta, param_index)
+    }
+
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        (**self).gradient_batch(theta, dims)
+    }
+}

@@ -788,7 +788,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
 - **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
   the best fitness at the end of each executed generation/iteration, so
   `fitness_history.len() == iterations_run` and `fitness_history.last()`
-  equals `best_fitness`. It is surfaced on the Python `TrainResult`.
+  equals `best_fitness` (the one exception, a minibatched run of a population
+  method or QNG, is under *Minibatches* below). It is surfaced on the Python
+  `TrainResult`.
 - **CMA-ES** (`AlgorithmCmaEs`, exposed as `polypus.CMAES`: Hansen's
   (μ/μ_w, λ)-CMA-ES with IPOP restarts).
   - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG
@@ -860,6 +862,26 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     reproducibility, every rejected configuration with no oracle call, the
     gradient length check, and the finite-difference stencil, its accuracy,
     its step validation and a broken wrapped oracle).
+  - In a training run the gradient comes from the run's `Oracles`
+    (`polypus-orchestration`): the exact one when the factory provides it (a
+    native QML model), otherwise a `FiniteDifferenceGradient` of the evaluation
+    oracle with `AdamConfig::finite_difference_step`.
+- **Minibatches (`batch_size`).** With a minibatch, `evaluate_batch` scores a
+  per-call subset of the training samples, and the run's `Oracles` also carry
+  `full_evaluation`, the same model on every sample. The search steers by the
+  subsets; what is reported is the full dataset:
+  - **Adam:** the minibatch drives only the gradient. The candidate it tracks
+    is scored on every sample, so `fitness_history` and `best_fitness` are
+    full-dataset values and every postcondition above holds.
+  - **DE, PSO, CMA-ES and QNG:** every evaluation is a minibatch estimate, so
+    after the run `best_fitness` is re-scored on every sample for the returned
+    `best_params`. `fitness_history` keeps the estimates the search used, so its
+    last entry need not equal `best_fitness`: the one exception to the
+    quality-trajectory rule.
+  - Enforced by the `adam_*` and `minibatched_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs`, the walltime watch of an
+    Adam iteration in `src/walltime.rs`, and the minibatch and factory tests in
+    `crates/polypus-evaluation/src/qml_oracle.rs`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

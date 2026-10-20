@@ -7,7 +7,7 @@ use polypus_infrastructure::{
     Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
 use polypus_optimizers::GradientOracle;
-use polypus_orchestration::{OracleFactory, Resources};
+use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use polypus_qml::{minibatch_indices, QmlError, QmlProblem};
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -326,6 +326,21 @@ impl QmlOracle {
     pub fn evaluate_full(&self, theta: &[f64]) -> Result<f64, EvaluationError> {
         let fitness = self.evaluate_samples(&[theta.to_vec()], self.window(), Samples::All)?;
         Ok(fitness[0])
+    }
+
+    /// [`evaluate_batch`](EvaluationOracle::evaluate_batch) on every training
+    /// sample, with the same failure discipline: what [`FullDataset`] serves.
+    fn evaluate_batch_full(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        if self.errors.failed() {
+            return vec![0.0; candidates.len()];
+        }
+        match self.evaluate_samples(candidates, self.window(), Samples::All) {
+            Ok(values) => values,
+            Err(e) => {
+                self.errors.record(Box::new(e), &self.config.id);
+                vec![0.0; candidates.len()]
+            }
+        }
     }
 
     /// The candidate window for this oracle's backend and training set.
@@ -706,13 +721,19 @@ pub struct QmlOracleFactory {
 }
 
 impl OracleFactory for QmlOracleFactory {
+    /// One [`QmlOracle`] in every role the run needs: the evaluation, the exact
+    /// gradient of a native source, and, with a minibatch, the same oracle on
+    /// every sample ([`FullDataset`]). Sharing one oracle keeps one minibatch
+    /// counter for the whole run.
     fn build(
         self,
         resources: &Resources,
         cancel: &CancelToken,
         errors: &OracleErrorSlot,
-    ) -> Box<dyn EvaluationOracle> {
-        Box::new(QmlOracle {
+    ) -> Oracles {
+        let native = matches!(self.source, QmlSource::Native { .. });
+        let minibatched = self.minibatch.is_some();
+        let oracle = Arc::new(QmlOracle {
             source: self.source,
             config: Arc::clone(&resources.config),
             backend: Arc::clone(&resources.backend),
@@ -720,7 +741,23 @@ impl OracleFactory for QmlOracleFactory {
             minibatch: self.minibatch,
             cancel: cancel.clone(),
             errors: errors.clone(),
-        })
+        });
+        Oracles {
+            evaluation: Box::new(Arc::clone(&oracle)),
+            gradient: native.then(|| Box::new(Arc::clone(&oracle)) as Box<dyn GradientOracle>),
+            full_evaluation: minibatched
+                .then(|| Box::new(FullDataset(Arc::clone(&oracle))) as Box<dyn EvaluationOracle>),
+        }
+    }
+}
+
+/// A [`QmlOracle`] scored on every training sample, whatever its minibatch: the
+/// `full_evaluation` of a minibatched run ([`Oracles`]).
+pub struct FullDataset(pub Arc<QmlOracle>);
+
+impl EvaluationOracle for FullDataset {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        self.0.evaluate_batch_full(candidates)
     }
 }
 
@@ -1571,5 +1608,60 @@ class Bound:
             .collect();
         let seen: Vec<i64> = objective.seen().iter().map(|&(_, label)| label).collect();
         assert_eq!(seen, [drawn.clone(), drawn.clone(), drawn].concat());
+    }
+
+    #[test]
+    fn the_factory_hands_out_each_role_the_source_has() {
+        use polypus_orchestration::Resources;
+        let problem = native_problem(4);
+        let theta = native_candidates(&problem, 1).remove(0);
+        let resources = |seed| {
+            Resources::new(
+                Arc::new(NativeStatevectorBackend::new(seed)),
+                None,
+                config(500),
+            )
+            .unwrap_or_else(|_| panic!("a native backend pairs with its default planner"))
+        };
+        let exact = |minibatch| QmlOracleFactory {
+            source: QmlSource::Native {
+                problem: Arc::clone(&problem),
+                exact: Some(Arc::new(NativeStatevectorBackend::new(0))),
+            },
+            minibatch,
+        };
+        let errors = OracleErrorSlot::new();
+        let cancel = CancelToken::default();
+
+        // Native, full batch: evaluation and exact gradient, no full view.
+        let oracles = exact(None).build(&resources(1), &cancel, &errors);
+        assert!(oracles.gradient.is_some());
+        assert!(oracles.full_evaluation.is_none());
+
+        // Native, minibatched: the full view scores every sample.
+        let oracles =
+            exact(Some(MinibatchConfig::new(2, 3))).build(&resources(1), &cancel, &errors);
+        let full = oracles
+            .full_evaluation
+            .expect("a minibatch comes with a full-dataset view");
+        let probabilities = exact_probabilities(problem.bind_batch(&theta).unwrap());
+        assert_eq!(
+            full.evaluate_batch(std::slice::from_ref(&theta)),
+            vec![problem.fitness_from_probabilities(&probabilities).unwrap()]
+        );
+        assert!(!errors.failed());
+
+        // Qiskit: no exact gradient (a finite difference is dispatch's job).
+        let stub = Stub::new();
+        let qiskit = QmlOracleFactory {
+            source: QmlSource::Qiskit {
+                training_circuits: stub.training_circuits(2),
+                objective: QmlObjective::Unsupervised(Arc::new(KeyOneObservable)),
+            },
+            minibatch: None,
+        }
+        .build(&resources(1), &cancel, &errors);
+        assert!(qiskit.gradient.is_none());
+        assert!(qiskit.full_evaluation.is_none());
     }
 }

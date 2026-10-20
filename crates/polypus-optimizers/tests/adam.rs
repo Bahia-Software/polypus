@@ -366,6 +366,36 @@ fn a_broken_oracle_behind_the_finite_difference_is_reported() {
     );
 }
 
+/// Both an oracle and its gradient, like a QML oracle with an exact gradient.
+struct BowlWithGradient;
+
+impl EvaluationOracle for BowlWithGradient {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        candidates.iter().map(|c| bowl(c)).collect()
+    }
+}
+
+impl GradientOracle for BowlWithGradient {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        bowl_gradient(theta)[param_index]
+    }
+}
+
+#[test]
+fn one_shared_object_can_be_both_the_oracle_and_the_gradient() {
+    let both = Arc::new(BowlWithGradient);
+    let outcome = AlgorithmAdam
+        .optimize(AlgorithmAdamArgs {
+            oracle: Box::new(Arc::clone(&both)),
+            gradient_oracle: Box::new(Arc::clone(&both)),
+            ..bowl_args(2).0
+        })
+        .unwrap();
+    for (x, t) in outcome.best_params.iter().zip(TARGET) {
+        assert!((x - t).abs() < 1e-3, "{:?}", outcome.best_params);
+    }
+}
+
 #[test]
 fn adam_trains_with_a_finite_difference_over_the_same_shared_oracle() {
     let oracle = Recorder::new(bowl);
