@@ -33,6 +33,15 @@ Changes on `main` since 0.7.2.
 - Native circuit drawings: `Circuit.draw()` (Unicode or ASCII text, or SVG),
   `print(circuit)` and SVG display in Jupyter; `draw_text`/`draw_svg` and
   `Display` in Rust. No new dependencies.
+- Adaptive Differential Evolution: `polypus.DE(strategy="shade")` (SHADE) and
+  `strategy="lshade"` (L-SHADE, whose population shrinks linearly towards 4).
+  For `"lshade"`, `generations` sets the evaluation budget, `population_size ×
+  (generations + 1)` as for the classic DE, and the run spends it in more,
+  smaller generations: more sequential rounds on several QPUs, where
+  `"shade"` suits better. The default, `strategy="rand1bin"`, is the classic
+  DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
+  (with `max_generations`) and
+  `AlgorithmDifferentialEvolution::optimize_with_strategy`.
 
 ### Changed
 - **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
@@ -86,6 +95,8 @@ Changes on `main` since 0.7.2.
   (contract C-1).
 - The QML candidate window also follows the backend's concurrency, within the
   memory bound.
+- **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
+  field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
