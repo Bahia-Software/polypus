@@ -6,10 +6,9 @@
 call against CUNQA's real signatures at one release tag and simulates each job
 with Aer. Pinned here: the ``qraise`` reservation, one ``run`` per QPU with the
 run options, ``gather``, the release with ``qdrop`` (also after a failure), the
-C-3 counts shape and the C-7 per-QPU seeds.
-
-The fake reports Aer's counts, so the key format of CUNQA itself (#253, #304) is
-only checked by ``test_cunqa_real.py`` on a real family.
+C-3 counts shape and the C-7 per-QPU seeds, and the C-3 keys the seal makes
+of what CUNQA 3.0.0 returns for a circuit without measurements (#253) and with
+several or wider classical registers (#304).
 """
 
 import pytest
@@ -17,7 +16,14 @@ import pytest
 pytest.importorskip("qiskit_aer")
 
 import polypus  # noqa: E402
-from fake_cunqa import SUPPORTED_TAGS, FakeCunqa  # noqa: E402
+from fake_cunqa import (  # noqa: E402
+    CIRCUIT_FORMS,
+    NO_COUNTS_ERROR,
+    SUPPORTED_TAGS,
+    WIDE_REGISTERS,
+    FakeCunqa,
+    circuit_in_form,
+)
 from qiskit import QuantumCircuit  # noqa: E402
 
 _MASK = 0x7FFFFFFFFFFFFFFF
@@ -187,15 +193,41 @@ def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch)
     assert sorted(run["options"]["seed"] for run in fake.runs) == [11, 12, 13]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#304: CUNQA separates classical registers with spaces in its "
-    "counts keys and the seal forwards them; C-3 keys have none",
-)
 def test_several_registers_give_one_key_without_spaces(monkeypatch):
+    # CUNQA 3.0.0 keys this "00 010" (#304).
     qasm = (
         'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\ncreg a[2];\ncreg b[3];\n'
         "x q[1];\nmeasure q[1] -> a[1];\n"
     )
     result = _run(FakeCunqa(), monkeypatch, qc=qasm, seed=1, shots=8)
     assert result.merged_counts == {"00010": 8}
+
+
+def test_fake_fails_a_circuit_without_measurements_like_cunqa():
+    # So the seal's read-out, not the fake, is what the next test pins.
+    fake = FakeCunqa()
+    family = fake.qraise(1, "00:10:00", family="f")
+    job = fake.run(QuantumCircuit(2), fake.get_QPUs(family=family)[0], shots=4)
+    with pytest.raises(RuntimeError) as error:
+        fake.gather([job])
+    assert str(error.value) == NO_COUNTS_ERROR
+
+
+@pytest.mark.parametrize("n_qpus", [1, 2])
+def test_circuit_without_measurements_reads_the_full_register(monkeypatch, n_qpus):
+    # #253
+    qc = polypus.Circuit(2).x(0)
+    result = _run(FakeCunqa(), monkeypatch, qc=qc, seed=3, shots=8, n_qpus=n_qpus)
+    assert len(result.counts) == n_qpus
+    assert result.merged_counts == {"01": 8}
+
+
+@pytest.mark.parametrize("form", CIRCUIT_FORMS)
+@pytest.mark.parametrize(
+    "name,qasm2,qasm3,key", WIDE_REGISTERS, ids=[c[0] for c in WIDE_REGISTERS]
+)
+def test_declared_classical_width_is_kept(monkeypatch, name, qasm2, qasm3, key, form):
+    # #304
+    qc = circuit_in_form(form, qasm2, qasm3)
+    result = _run(FakeCunqa(), monkeypatch, qc=qc, seed=5, shots=8)
+    assert result.merged_counts == {key: 8}

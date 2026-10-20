@@ -87,7 +87,8 @@ of counts (C-3, #206).
   files of that corpus, so these figures cannot be reproduced from a clone.
 - CUNQA receives the exported program as Aer does, so an imported circuit that
   declares a `creg` now reaches it with that `creg` even without measurements.
-  That path stays unverified (#218), with or without measurements.
+  Checked later on CUNQA 3.0.0 (#253, #304): the keys match Aer's once the
+  seal adds the full read-out and joins CUNQA's space-separated keys.
 - Breaking for Rust code: `ConcreteCircuit` literals no longer compile (use
   `new`), and `==` distinguishes a wider declared register. Python is
   unaffected except for the counts and exports of imported circuits.

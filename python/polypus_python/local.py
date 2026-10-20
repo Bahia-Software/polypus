@@ -292,6 +292,20 @@ def _with_full_readout(qc):
     return measured, [measured.find_bit(bit).index for bit in readout]
 
 
+def _c3_counts(raw, readout):
+    """The contract C-3 counts of a run of the circuit ``_with_full_readout``
+    returned, from its ``raw`` counts and ``readout`` bits.
+
+    Qiskit and CUNQA separate the bits of each ``ClassicalRegister`` with a
+    space when a circuit declares several; C-3 wants one flat bitstring. The
+    characters are already in clbit order, so dropping the spaces is enough. A
+    full read-out keeps only the bits of the register it added."""
+    flat = {key.replace(" ", ""): n for key, n in raw.items()}
+    if readout is None:
+        return flat
+    return dict(marginal_distribution(flat, readout))
+
+
 class Local(Infraestructure):
     """Local AerSimulator backend.
 
@@ -355,15 +369,7 @@ class Local(Infraestructure):
             result = sim.run(qcs, shots=shots).result()
         _raise_if_out_of_memory(result, max_memory_mb)
 
-        # Qiskit space-separates the keys per ClassicalRegister ("0 1 0") when a
-        # circuit declares several; contract C-3 wants one flat bitstring. The
-        # groups are already in clbit order, so dropping the spaces is enough.
-        # A full read-out keeps only the bits of the register it added.
-        counts = []
-        for i, (_, readout) in enumerate(prepared):
-            raw = result.get_counts(i)
-            if readout is None:
-                counts.append({key.replace(" ", ""): n for key, n in raw.items()})
-            else:
-                counts.append(dict(marginal_distribution(raw, readout)))
-        return counts
+        return [
+            _c3_counts(result.get_counts(i), readout)
+            for i, (_, readout) in enumerate(prepared)
+        ]

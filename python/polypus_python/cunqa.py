@@ -29,7 +29,7 @@ except ImportError:
     SUPPORTED_QISKIT_OPERATIONS = None
 
 from .infrastructure import Infraestructure  # noqa: E402
-from .local import _outside_basis  # noqa: E402
+from .local import _c3_counts, _outside_basis, _with_full_readout  # noqa: E402
 
 
 @lru_cache(maxsize=1)
@@ -105,24 +105,23 @@ class Cunqa(Infraestructure):
     def run_qcs(self, **args) -> object:
 
         family_id = args["family_id"]
-        # UNVERIFIED (issue #218): contract C-3 reads a circuit without
-        # measurements out on the full quantum register, and the local Aer path
-        # adds that read-out itself (`local._with_full_readout`) because Aer
-        # returns no counts for such a circuit. Whether CUNQA's QPUs return
-        # counts for it, and in which key format, cannot be checked without a
-        # CUNQA install, so this path forwards the circuit unchanged rather than
-        # guess; `local._with_full_readout` is the helper to reuse once it is
-        # known.
-        #
         # Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
         # currently consume QuantumCircuit objects, so parse here, then lower
         # what CUNQA's converter does not take.
-        qcs = [
-            _lower_to_cunqa_basis(
-                QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+        #
+        # Contract C-3 reads a circuit without measurements out on the full
+        # quantum register. CUNQA's vQPUs return no counts for one (CUNQA 3.0.0
+        # fails the job with "key 'counts' not found", #253), so the read-out
+        # is added here as on the local Aer path, after lowering.
+        prepared = [
+            _with_full_readout(
+                _lower_to_cunqa_basis(
+                    QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
+                )
             )
             for qc in args["qcs"]
         ]
+        qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
 
         seed = args.get("seed", None)
@@ -171,7 +170,7 @@ class Cunqa(Infraestructure):
                     # reason as local.py's mask) (contract C-7).
                     #
                     # Pinned against a fake CUNQA (tests/python/
-                    # test_cunqa_run_flow.py), not yet against a real one
+                    # test_cunqa_run_flow.py) and checked on CUNQA 3.0.0
                     # (tests/python/test_cunqa_real.py, opt-in).
                     qjob = run(
                         qc,
@@ -184,7 +183,13 @@ class Cunqa(Infraestructure):
                 qjobs.append(qjob)
 
             results = gather(qjobs)
-            counts = [result.counts for result in results]
-            return counts
+            # CUNQA splits the key per classical register with spaces (and,
+            # in 3.0.0, at the wrong positions: cut from the left in
+            # declaration order, so `creg a[2]; creg b[3];` gives "00 010"
+            # for "00010"); `_c3_counts` flattens it (#304).
+            return [
+                _c3_counts(result.counts, readout)
+                for result, (_, readout) in zip(results, prepared)
+            ]
         except Exception as e:
             raise e

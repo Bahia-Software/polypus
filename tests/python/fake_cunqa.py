@@ -15,10 +15,10 @@ No CUNQA is installed in CI. ``FakeCunqa`` stands in for the four functions
   (``seed`` -> ``seed_simulator``), and ``gather`` returns objects with a
   ``counts`` dict.
 
-What it cannot pin is CUNQA's own output: the counts are Aer's
-``get_counts()``, so the key format for circuits without measurements (#253)
-or with a wider ``creg`` (#304) is Aer's, not necessarily CUNQA's. Those cases
-are for ``test_cunqa_real.py`` on a real family.
+The output mimics what CUNQA 3.0.0 returned on a real family (#253, #304): a
+circuit without measurements fails the job, and the key of a circuit with
+several classical registers is cut with spaces by ``cunqa_keys``. The bits
+themselves are Aer's; ``test_cunqa_real.py`` checks them on a real family.
 """
 
 import inspect
@@ -34,6 +34,77 @@ SUPPORTED_TAGS = ["2.4.0", "3.0.0", "3.1.0"]
 
 # The run options the seal may send; anything else is a seal change to review.
 RUN_OPTIONS = {"shots", "transpile", "method", "seed"}
+
+
+NO_COUNTS_ERROR = (
+    "Error during simulation, please check availability of QPUs, run arguments "
+    "syntax and circuit syntax: [json.exception.out_of_range.403] key 'counts' "
+    "not found"
+)
+
+
+def cunqa_keys(counts, circuit):
+    """Aer's ``counts`` keyed as CUNQA 3.0.0's ``Result.counts`` keys them: the
+    flat bitstring, cut with spaces from the left by the register sizes in
+    declaration order when the circuit has several registers."""
+    sizes = [creg.size for creg in circuit.cregs]
+    flat = {key.replace(" ", ""): n for key, n in counts.items()}
+    if len(sizes) <= 1:
+        return flat
+    cuts = [0]
+    for size in sizes:
+        cuts.append(cuts[-1] + size)
+    return {
+        " ".join(key[i:j] for i, j in zip(cuts, cuts[1:])): n for key, n in flat.items()
+    }
+
+
+_QASM2_HEADER = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
+_QASM3_HEADER = 'OPENQASM 3.0;\ninclude "stdgates.inc";\n'
+
+# #304 cases, shared with test_cunqa_real.py: (name, OpenQASM 2 body,
+# OpenQASM 3 body, expected key).
+WIDE_REGISTERS = [
+    (
+        "wider_creg",
+        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+        "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
+        "010",
+    ),
+    (
+        "several_registers",
+        "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
+        "qubit[2] q;\nbit[2] a;\nbit[3] b;\nx q[1];\na[1] = measure q[1];\n",
+        "00010",
+    ),
+    (
+        "full_measurement_wider_creg",
+        "qreg q[2];\ncreg c[4];\nx q[1];\nmeasure q[0] -> c[0];\n"
+        "measure q[1] -> c[1];\n",
+        "qubit[2] q;\nbit[4] c;\nx q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+        "0010",
+    ),
+    (
+        "no_measurement_with_creg",
+        "qreg q[2];\ncreg c[3];\nx q[0];\n",
+        "qubit[2] q;\nbit[3] c;\nx q[0];\n",
+        "01",
+    ),
+]
+
+CIRCUIT_FORMS = ["qasm2_text", "from_qasm2", "from_qasm3"]
+
+
+def circuit_in_form(form, qasm2, qasm3):
+    """A ``WIDE_REGISTERS`` case as OpenQASM 2 text or an imported
+    ``polypus.Circuit``."""
+    import polypus
+
+    if form == "qasm2_text":
+        return _QASM2_HEADER + qasm2
+    if form == "from_qasm2":
+        return polypus.Circuit.from_qasm2(_QASM2_HEADER + qasm2)
+    return polypus.Circuit.from_qasm3(_QASM3_HEADER + qasm3)
 
 
 def signature(parameters: str) -> inspect.Signature:
@@ -113,16 +184,22 @@ class FakeCunqa:
         self.runs.append({"circuit": circuit, "qpu": qpu, "options": dict(options)})
         if self.run_error is not None:
             raise self.run_error
+        if not any(i.operation.name == "measure" for i in circuit.data):
+            # CUNQA 3.0.0 fails the job; `gather` raises it.
+            return types.SimpleNamespace(error=RuntimeError(NO_COUNTS_ERROR))
         simulator = AerSimulator(method=options.get("method", "automatic"))
         run_options = {"shots": options["shots"]}
         if seed is not None:
             run_options["seed_simulator"] = seed
         counts = simulator.run(circuit, **run_options).result().get_counts()
-        return types.SimpleNamespace(counts=dict(counts))
+        return types.SimpleNamespace(counts=cunqa_keys(counts, circuit), error=None)
 
     # cunqa.qjob.gather
     def gather(self, *args, **kwargs):
         a = self._bind("gather", args, kwargs)
+        for job in a["qjobs"]:
+            if job.error is not None:
+                raise job.error
         return [types.SimpleNamespace(counts=job.counts) for job in a["qjobs"]]
 
     # cunqa.qpu.qdrop

@@ -66,7 +66,7 @@ def _stub_cunqa(monkeypatch, operations):
 
     def fake_run(circuit, qpu, **kwargs):
         sent.append(circuit)
-        return types.SimpleNamespace(counts={"0": kwargs["shots"]})
+        return types.SimpleNamespace(counts={"0" * circuit.num_clbits: kwargs["shots"]})
 
     qpu = types.ModuleType("cunqa.qpu")
     qpu.get_QPUs = lambda **k: [object() for _ in range(16)]
@@ -124,7 +124,9 @@ def test_gate_cunqa_does_not_convert_is_lowered_to_an_equivalent_circuit(
     assert _names(lowered) <= CUNQA_OPERATIONS, sorted(
         _names(lowered) - CUNQA_OPERATIONS
     )
-    assert Operator(lowered).equiv(Operator(original)), case
+    # Without the full read-out the seal adds to an unmeasured circuit (C-3).
+    unitary = lowered.remove_final_measurements(inplace=False)
+    assert Operator(unitary).equiv(Operator(original)), case
     if not as_string:
         # The caller's circuit is never modified.
         assert original == QuantumCircuit.from_qasm_str(src)
@@ -163,7 +165,7 @@ def test_cunqa_without_the_operation_list_gets_the_circuit_unchanged(monkeypatch
     from qiskit import QuantumCircuit
 
     sent = _stub_cunqa(monkeypatch, None)
-    qc = QuantumCircuit.from_qasm_str(_program("ch"))
+    qc = QuantumCircuit.from_qasm_str(_program("ch", measure=True))
 
     _run_qcs([qc])
 
