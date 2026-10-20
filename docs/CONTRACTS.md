@@ -82,7 +82,7 @@ at backend construction), whose charset is constrained by C-9.
 | backend | kwargs (exact names) |
 |---|---|
 | local | `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
-| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
+| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `qpu_offset: int` (C-7, issue #370), `sim_method: str`, `seed: int` (optional, C-7) |
 
 `max_memory_mb` is sent by the local backend **only when the memory budget is a
 known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
@@ -91,6 +91,11 @@ never `0` (which Aer reads as "no limit"). `python/polypus_python/local.py` cons
 passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
 absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
 lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
+
+`qpu_offset` is where the call's circuits start among the CUNQA family's QPUs:
+circuit `i` runs on QPU `qpu_offset + i`. It is `0` except when a shot split
+across the QPUs is uneven, which the Rust side sends as one call per batch size,
+each with its first replica's index. The seal reads it with a default of `0`.
 
 `family_id` is the run id (`RunParams::id`, derived from
 `ExecutionConfig::id`), whose charset is constrained by C-9; only CUNQA receives
@@ -913,11 +918,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
     per-QPU offset so distributed shots aren't identical copies: the circuit
-    sent to QPU `i` of a `run_qcs` call runs with `seed + i`, masked to 63
-    bits. An uneven shot split (`shots` not a multiple of `n_qpus`) makes one
-    `run_qcs` call per batch size, and the offset restarts at 0 in each call,
-    so two replicas can share QPU 0 and its seed (#370; pinned as an expected
-    failure in `test_cunqa_run_flow.py`). **This path is verified against a fake CUNQA
+    sent to QPU `k` runs with `seed + k`, masked to 63 bits. With shots split
+    across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
+    QPU and seed even when the split is uneven (`shots` not a multiple of
+    `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
+    its first replica's index as `qpu_offset` (C-1; fixed in #370). **This path is verified against a fake CUNQA
     only**: `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts
     shape and reproducibility end to end, but has never run against a real
     CUNQA; `tests/python/test_cunqa_real.py` does, on demand (#357).

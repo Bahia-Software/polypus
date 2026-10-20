@@ -113,11 +113,32 @@ pub struct CunqaBackend {
     release: ReleaseFn,
 }
 
-impl QuantumBackend for CunqaBackend {
-    fn run_circuits(
+/// Groups consecutive replicas that request the same shot count, as
+/// `(first replica index, shots, replica count)`. The first index is the
+/// group's QPU and seed offset within the replicas (contract C-7).
+fn shot_groups(shot_batches: &[u32]) -> Vec<(usize, u32, usize)> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < shot_batches.len() {
+        let shots = shot_batches[i];
+        let mut j = i + 1;
+        while j < shot_batches.len() && shot_batches[j] == shots {
+            j += 1;
+        }
+        groups.push((i, shots, j - i));
+        i = j;
+    }
+    groups
+}
+
+impl CunqaBackend {
+    /// Runs `qcs` on QPUs `qpu_offset..qpu_offset + qcs.len()` of the family,
+    /// the circuit on QPU `k` with seed `seed + k` (contracts C-1, C-7).
+    fn submit(
         &self,
         qcs: &[BoundCircuit],
         config: &RunParams,
+        qpu_offset: usize,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
         // An empty batch is a valid request with no results, as on the native
         // backend; do not reach the seal with it.
@@ -150,6 +171,10 @@ impl QuantumBackend for CunqaBackend {
                 kwargs.set_item("family_id", &config.id).map_err(conv)?;
                 kwargs.set_item("qcs", qcs_pylist).map_err(conv)?;
                 kwargs.set_item("shots", config.shots).map_err(conv)?;
+                // Where this call's circuits start among the family's QPUs, so the
+                // replicas of an uneven shot split, sent as one call per batch size,
+                // still land on distinct QPUs with distinct seeds (#370).
+                kwargs.set_item("qpu_offset", qpu_offset).map_err(conv)?;
                 kwargs
                     .set_item("sim_method", &self.sim_method)
                     .map_err(conv)?;
@@ -179,6 +204,39 @@ impl QuantumBackend for CunqaBackend {
                 })
             },
         )
+    }
+}
+
+impl QuantumBackend for CunqaBackend {
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        self.submit(qcs, config, 0)
+    }
+
+    /// The default grouping (one call per batch size), with each call's QPU and
+    /// seed offset set to its first replica's index, so replica `i` runs on QPU
+    /// `i` with seed `seed + i` however the shots split (contract C-7).
+    fn run_shots_distributed(
+        &self,
+        qc: &BoundCircuit,
+        shot_batches: &[u32],
+        params: &RunParams,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let mut out = Vec::with_capacity(shot_batches.len());
+        for (start, shots, len) in shot_groups(shot_batches) {
+            if shots == 0 {
+                out.extend((0..len).map(|_| HashMap::new()));
+                continue;
+            }
+            let qcs: Vec<BoundCircuit> = (0..len).map(|_| qc.duplicate()).collect();
+            let mut cfg = params.clone();
+            cfg.shots = shots;
+            out.extend(self.submit(&qcs, &cfg, start)?);
+        }
+        Ok(out)
     }
 
     fn capabilities(&self) -> super::BackendCapabilities {
@@ -512,6 +570,14 @@ mod tests {
             Python::try_attach(|_py| ()).is_none(),
             "a seam must never initialize the interpreter"
         );
+    }
+
+    #[test]
+    fn shot_groups_give_each_batch_size_its_first_replica_index() {
+        assert_eq!(shot_groups(&[4, 3, 3]), vec![(0, 4, 1), (1, 3, 2)]);
+        assert_eq!(shot_groups(&[1, 1, 0]), vec![(0, 1, 2), (2, 0, 1)]);
+        assert_eq!(shot_groups(&[5, 5]), vec![(0, 5, 2)]);
+        assert!(shot_groups(&[]).is_empty());
     }
 
     /// Set if the release operation of the test below ever runs.

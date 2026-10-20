@@ -127,6 +127,12 @@ class Cunqa(Infraestructure):
 
         seed = args.get("seed", None)
 
+        # Where these circuits start among the family's QPUs: circuit `i` runs on
+        # QPU `qpu_offset + i` with seed `seed + qpu_offset + i`. The Rust side
+        # sends one call per batch size when the shots split unevenly across the
+        # QPUs, and this keeps every replica on its own QPU and seed (#370).
+        qpu_offset = args.get("qpu_offset", 0)
+
         # Simulation method for the vQPUs' Aer backend. The Rust side always
         # sends it (`CunqaBackend::run_circuits` sets kwargs["sim_method"]),
         # and CUNQA consumes it as the per-job `run_config["method"]`, whose
@@ -153,7 +159,8 @@ class Cunqa(Infraestructure):
                 run_kwargs["method"] = sim_method
 
             qjobs = []
-            for i in range(len(qcs)):
+            for i, qc in enumerate(qcs):
+                k = qpu_offset + i
                 if seed is not None:
                     # `seed` (not `seed_simulator`) is the kwarg CUNQA's own
                     # docs name (reference/api/run_configuration.html).
@@ -167,13 +174,13 @@ class Cunqa(Infraestructure):
                     # test_cunqa_run_flow.py), not yet against a real one
                     # (tests/python/test_cunqa_real.py, opt-in).
                     qjob = run(
-                        qcs[i],
-                        qpus[i],
-                        seed=(seed + i) & 0x7FFFFFFFFFFFFFFF,
+                        qc,
+                        qpus[k],
+                        seed=(seed + k) & 0x7FFFFFFFFFFFFFFF,
                         **run_kwargs,
                     )
                 else:
-                    qjob = run(qcs[i], qpus[i], **run_kwargs)
+                    qjob = run(qc, qpus[k], **run_kwargs)
                 qjobs.append(qjob)
 
             results = gather(qjobs)

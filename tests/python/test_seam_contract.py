@@ -336,7 +336,14 @@ def test_cunqa_disconnect_forwards_family_to_qdrop(monkeypatch):
 # The exact kwargs the Rust CUNQA backend sends to `run_qcs` (C-1 table), with a
 # seed. No `backend`: CUNQA picks no simulator class per job (the vQPU's class is
 # set at `qraise`, from `POLYPUS_CUNQA_BACKEND`).
-_CUNQA_REQUIRED_KWARGS = {"family_id", "qcs", "shots", "sim_method", "seed"}
+_CUNQA_REQUIRED_KWARGS = {
+    "family_id",
+    "qcs",
+    "shots",
+    "qpu_offset",
+    "sim_method",
+    "seed",
+}
 
 
 def _record_run_qcs(monkeypatch, **run_kwargs):
@@ -373,6 +380,7 @@ def test_cunqa_run_qcs_kwargs_are_the_c1_set(monkeypatch):
     assert set(seen["keys"]) == _CUNQA_REQUIRED_KWARGS
     assert seen["family_id"] == result.id
     assert seen["seed"] == 3
+    assert seen["qpu_offset"] == 0
 
 
 def _is_name(node, name):
