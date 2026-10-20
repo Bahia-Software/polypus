@@ -37,7 +37,8 @@ impl OptRng {
 /// Build the run RNG from an optional seed and hand it to `run`.
 ///
 /// Centralises the identical `seed → OptRng::from_seed → run` dispatch that
-/// every optimizer's `optimize` implementation performs (DE, PSO, and QNG),
+/// every optimizer's `optimize` implementation performs (DE, PSO, QNG and
+/// CMA-ES),
 /// keeping the seed-to-RNG wiring in one place next to [`OptRng`]. The closure
 /// receives the freshly built generator by mutable reference and returns the
 /// optimization outcome, which is passed straight through.
@@ -102,7 +103,7 @@ mod tests {
     }
 
     /// Pins the absolute seeded output of every sampling method the optimizers
-    /// draw from in `src/` (DE, PSO, QNG). The determinism tests above only
+    /// draw from in `src/` (DE, PSO, QNG, CMA-ES). The determinism tests above only
     /// compare one run against another, so a `rand` bump that changed the
     /// `StdRng` stream or a sampling algorithm would pass them silently; this
     /// one fails instead. Values captured with rand 0.9.4; `f64`s are compared
@@ -123,7 +124,8 @@ mod tests {
             ]
         );
 
-        // PSO: `random::<f64>()` for the r1/r2 weights.
+        // PSO: `random::<f64>()` for the r1/r2 weights; CMA-ES: the two
+        // uniforms of each Box-Muller normal.
         let unit: [u64; 3] = with_seeded_rng(Some(42), |rng| {
             std::array::from_fn(|_| rng.random::<f64>().to_bits())
         });
@@ -136,7 +138,8 @@ mod tests {
             ]
         );
 
-        // DE/PSO/QNG: `random_range` over an `f64` interval for initialisation.
+        // DE/PSO/QNG/CMA-ES: `random_range` over an `f64` interval for
+        // initialisation.
         let ranged: [u64; 3] = with_seeded_rng(Some(42), |rng| {
             std::array::from_fn(|_| rng.random_range(-1.5..2.5f64).to_bits())
         });

@@ -13,9 +13,9 @@ use std::fmt;
 /// input to a `PyValueError` instead of unwinding across the FFI boundary.
 ///
 /// A single shared enum (rather than one type per algorithm) matches the
-/// "one seam, one error type" shape of this crate: all three optimizers report
-/// the same three failure kinds, so per-algorithm types would only duplicate
-/// the same variants without tightening anything the seam cares about.
+/// "one seam, one error type" shape of this crate: the optimizers report the
+/// same few failure kinds, so per-algorithm types would only duplicate the
+/// same variants without tightening anything the seam cares about.
 ///
 /// Mirrors the hand-written style of `CircuitError`/`SimError` (no `thiserror`).
 /// `Eq` is intentionally omitted — [`OptimizerError::InvalidBounds`] carries
@@ -60,9 +60,12 @@ pub enum OptimizerError {
     /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
     /// report `-inf`), `finite_difference_step` (must be finite and `> 0`),
     /// `tikhonov_reg` (must be finite and `>= 0`) or `learning_rate` (must be
-    /// finite). Detected before any RNG draw or oracle call, so a bad config
-    /// maps to a `PyValueError` at the seam rather than producing a `NaN`/`inf`
-    /// result. (Empty or non-finite `bounds` keep their own
+    /// finite); or CMA-ES's `dimensions` (≥ 1), `generations` (≥ 1),
+    /// `sigma0` (finite, in `(0, 2π]`), `population_size` (≥ 2 when given) or
+    /// `restarts` (the largest population must fit in a `u32`). Detected
+    /// before any RNG draw or oracle call, so a bad config maps to a
+    /// `PyValueError` at the seam rather than producing a `NaN`/`inf` result.
+    /// (Empty or non-finite `bounds` keep their own
     /// [`InvalidBounds`](OptimizerError::InvalidBounds) variant.)
     InvalidConfig {
         /// The offending parameter's name.
