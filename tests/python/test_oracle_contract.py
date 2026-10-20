@@ -20,7 +20,8 @@ The end-to-end failure mode a user can still trigger is a **non-finite** value
 (a cost callback returning NaN/inf). This test drives it through
 ``polypus.train`` and locks in that it surfaces as a typed
 ``polypus.EvaluationError`` — never a ``pyo3_runtime.PanicException`` and never a
-silently-poisoned result.
+silently-poisoned result. Each test runs every DE ``strategy``: the adaptive
+ones evaluate their batches in their own loop.
 """
 
 import math
@@ -36,10 +37,14 @@ _DIMENSIONS = 1
 _NODES = 1
 _CORES_PER_QPU = 1
 _POPULATION = 4
+_STRATEGIES = ["rand1bin", "shade", "lshade"]
 
 
 class TestOracleContractC5:
-    def test_non_finite_value_raises_evaluation_error(self, parametrized_circuit):
+    @pytest.mark.parametrize("strategy", _STRATEGIES)
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, strategy
+    ):
         """A NaN expectation value → typed EvaluationError, not a silent result.
 
         The cost callback returns NaN for every bitstring, so a non-finite value
@@ -54,7 +59,12 @@ class TestOracleContractC5:
         with pytest.raises(polypus.EvaluationError):
             polypus.train(
                 parametrized_circuit,
-                polypus.DE(generations=2, population_size=_POPULATION, tolerance=0.5),
+                polypus.DE(
+                    generations=2,
+                    population_size=_POPULATION,
+                    tolerance=0.5,
+                    strategy=strategy,
+                ),
                 shots=_SHOTS,
                 n_qpus=_N_QPUS,
                 dimensions=_DIMENSIONS,
@@ -65,7 +75,10 @@ class TestOracleContractC5:
                 id="test_oracle_non_finite",
             )
 
-    def test_non_finite_value_is_never_a_panic_exception(self, parametrized_circuit):
+    @pytest.mark.parametrize("strategy", _STRATEGIES)
+    def test_non_finite_value_is_never_a_panic_exception(
+        self, parametrized_circuit, strategy
+    ):
         """Whatever the non-finite value does, the caller never sees PanicException.
 
         Same assertion style as test_seam_contract.py's
@@ -81,7 +94,12 @@ class TestOracleContractC5:
         try:
             polypus.train(
                 parametrized_circuit,
-                polypus.DE(generations=2, population_size=_POPULATION, tolerance=0.5),
+                polypus.DE(
+                    generations=2,
+                    population_size=_POPULATION,
+                    tolerance=0.5,
+                    strategy=strategy,
+                ),
                 shots=_SHOTS,
                 n_qpus=_N_QPUS,
                 dimensions=_DIMENSIONS,
@@ -99,8 +117,9 @@ class TestOracleContractC5:
         else:
             pytest.fail("expected the NaN expectation value to raise")
 
+    @pytest.mark.parametrize("strategy", _STRATEGIES)
     def test_correct_length_finite_path_still_trains(
-        self, parametrized_circuit, simple_expectation_fn
+        self, parametrized_circuit, simple_expectation_fn, strategy
     ):
         """Regression guard: the valid path (correct length, finite values) still
         trains successfully — the C-5 validation must not break test_vqc.py."""
@@ -108,7 +127,12 @@ class TestOracleContractC5:
 
         result = polypus.train(
             parametrized_circuit,
-            polypus.DE(generations=2, population_size=_POPULATION, tolerance=0.5),
+            polypus.DE(
+                generations=2,
+                population_size=_POPULATION,
+                tolerance=0.5,
+                strategy=strategy,
+            ),
             shots=_SHOTS,
             n_qpus=_N_QPUS,
             dimensions=_DIMENSIONS,
