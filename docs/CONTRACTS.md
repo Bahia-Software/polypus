@@ -781,7 +781,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     unwrapped in ℝ^d; each candidate is wrapped into `[0, 2π)` when handed to
     the oracle. Only the ranking of the fitness values (`NaN` last) reaches
     the search, so a strictly increasing transformation of the fitness
-    samples the same candidates.
+    samples the same candidates. The largest coordinate standard deviation
+    `σ·max√C_ii` is capped at `max(σ₀, π/2)`: a wider normal wraps to an
+    almost uniform distribution on the circle, where the step size would
+    drift without bound.
   - A run ends on fitness stagnation (the rule above, applied to that run's
     own best fitness) or on a degenerate distribution: a non-finite state, a
     covariance condition number above `1e14`, or a largest coordinate

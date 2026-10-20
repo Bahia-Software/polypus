@@ -20,7 +20,8 @@ pub struct CMAES {
     #[pyo3(get, set)]
     pub population_size: Option<u32>,
     /// Initial step size σ₀ in radians, finite and in `(0, 2π]`; every restart
-    /// starts from it again. Defaults to π/2.
+    /// starts from it again. Defaults to π/2. The spread of each angle stays
+    /// within `max(σ₀, π/2)` during the run.
     #[pyo3(get, set)]
     pub sigma0: f64,
     /// Minimum improvement of a run's best fitness over its last `patience`
