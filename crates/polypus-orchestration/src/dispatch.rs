@@ -18,6 +18,9 @@
 //! boxed by the oracle and recovered by the `polypus` edge via `downcast` to
 //! `EvaluationError`, keeping this crate free of `pyo3`.
 
+use polypus_optimizers::{
+    AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
+};
 use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs};
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
@@ -73,6 +76,22 @@ pub struct CmaesConfig {
     pub restarts: u32,
 }
 
+/// Adam configuration, mirroring the `polypus.Adam` object (see [`DeConfig`]).
+/// The gradient comes from the run's [`Oracles`]; when they carry no exact one,
+/// dispatch takes a central finite difference of the evaluation oracle with
+/// `finite_difference_step`.
+pub struct AdamConfig {
+    pub max_iters: u32,
+    pub learning_rate: f64,
+    pub beta1: f64,
+    pub beta2: f64,
+    pub epsilon: f64,
+    pub bounds: (f64, f64),
+    pub tolerance: f64,
+    pub patience: u32,
+    pub finite_difference_step: f64,
+}
+
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
 /// variance oracle (built from the Python callback at the binding boundary), so
 /// dispatch stays Python-free.
@@ -81,6 +100,36 @@ pub enum Method {
     Pso(PsoConfig),
     Qng(QngConfig, Box<dyn VarianceOracle>),
     Cmaes(CmaesConfig),
+    Adam(AdamConfig),
+}
+
+/// What a training run evaluates through: built by an
+/// [`OracleFactory`](crate::OracleFactory) and consumed by [`dispatch_optimizer`].
+///
+/// - `evaluation` scores candidates; it is what every optimizer searches with.
+/// - `gradient` is an exact fitness gradient, when the factory can compute one
+///   (a parameter shift). Only Adam reads it; without it, Adam differentiates
+///   `evaluation` by finite differences.
+pub struct Oracles {
+    pub evaluation: Box<dyn EvaluationOracle>,
+    pub gradient: Option<Box<dyn GradientOracle>>,
+}
+
+impl From<Box<dyn EvaluationOracle>> for Oracles {
+    /// An evaluation oracle alone: no exact gradient.
+    fn from(evaluation: Box<dyn EvaluationOracle>) -> Self {
+        Oracles {
+            evaluation,
+            gradient: None,
+        }
+    }
+}
+
+impl<O: EvaluationOracle + 'static> From<Box<O>> for Oracles {
+    fn from(evaluation: Box<O>) -> Self {
+        let evaluation: Box<dyn EvaluationOracle> = evaluation;
+        evaluation.into()
+    }
 }
 
 /// A training run's failure, in the order the binding must surface it.
@@ -198,12 +247,20 @@ fn describe(err: &BoxedError) -> String {
 /// every optimizer as before.
 pub fn dispatch_optimizer(
     method: Method,
-    oracle: Box<dyn EvaluationOracle>,
+    oracles: impl Into<Oracles>,
     dimensions: u32,
     errors: &OracleErrorSlot,
     seed: u64,
     initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OracleError> {
+    let Oracles {
+        evaluation: oracle,
+        gradient,
+    } = oracles.into();
+    let method = match method {
+        Method::Adam(cfg) => return dispatch_adam(cfg, oracle, gradient, dimensions, errors, seed),
+        other => other,
+    };
     let result = match method {
         Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
             cfg.strategy,
@@ -255,10 +312,63 @@ pub fn dispatch_optimizer(
             seed: Some(seed),
             initial_point,
         }),
+        // Routed to `dispatch_adam` above; total rather than a panic, which must
+        // never reach the FFI edge.
+        Method::Adam(_) => Err(OptimizerError::InvalidConfig {
+            parameter: "method",
+            reason: "Adam is dispatched separately".to_string(),
+        }),
     };
+    finish(result, errors)
+}
 
-    // An oracle failure recorded during the run is the root cause; surface it
-    // ahead of the optimizer's own (often downstream) error.
+/// Adam: the gradient is the exact one when the oracles carry it, otherwise a
+/// finite difference of `evaluation`, which also tracks the best solution.
+fn dispatch_adam(
+    cfg: AdamConfig,
+    evaluation: Box<dyn EvaluationOracle>,
+    gradient: Option<Box<dyn GradientOracle>>,
+    dimensions: u32,
+    errors: &OracleErrorSlot,
+    seed: u64,
+) -> Result<OptimizationOutcome, OracleError> {
+    let (gradient_oracle, tracking): (Box<dyn GradientOracle>, Box<dyn EvaluationOracle>) =
+        match gradient {
+            Some(gradient) => (gradient, evaluation),
+            None => {
+                // The finite difference and the tracking share one oracle.
+                let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
+                let difference = FiniteDifferenceGradient::new(
+                    Arc::clone(&evaluation),
+                    cfg.finite_difference_step,
+                )
+                .map_err(OracleError::Config)?;
+                (Box::new(difference), Box::new(evaluation))
+            }
+        };
+    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
+        oracle: tracking,
+        gradient_oracle,
+        max_iters: cfg.max_iters,
+        learning_rate: cfg.learning_rate,
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        epsilon: cfg.epsilon,
+        bounds: cfg.bounds,
+        dimensions,
+        tolerance: cfg.tolerance,
+        patience: cfg.patience,
+        seed: Some(seed),
+    });
+    finish(result, errors)
+}
+
+/// An oracle failure recorded during the run is the root cause; surface it
+/// ahead of the optimizer's own (often downstream) error.
+fn finish(
+    result: Result<OptimizationOutcome, OptimizerError>,
+    errors: &OracleErrorSlot,
+) -> Result<OptimizationOutcome, OracleError> {
     if let Some(eval_err) = errors.take() {
         return Err(OracleError::Evaluation(eval_err));
     }
@@ -657,5 +767,113 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    // ── Adam and the run's Oracles ────────────────────────────────────────────
+
+    fn adam_method(max_iters: u32) -> Method {
+        Method::Adam(AdamConfig {
+            max_iters,
+            learning_rate: 0.05,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (-2.0, 2.0),
+            tolerance: 0.0,
+            patience: 1_000,
+            finite_difference_step: 1e-4,
+        })
+    }
+
+    /// `quadratic`'s exact gradient, counting its calls.
+    struct QuadraticGradient(Arc<Mutex<usize>>);
+    impl GradientOracle for QuadraticGradient {
+        fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+            self.gradient_batch(theta, theta.len())[param_index]
+        }
+        fn gradient_batch(&self, theta: &[f64], _dims: usize) -> Vec<f64> {
+            *self.0.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+            theta.iter().map(|x| -2.0 * (x - 1.0)).collect()
+        }
+    }
+
+    fn recorder() -> (Box<RecordingQuadratic>, Arc<Mutex<Vec<usize>>>) {
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        (Box::new(RecordingQuadratic(Arc::clone(&sizes))), sizes)
+    }
+
+    fn sizes(log: &Arc<Mutex<Vec<usize>>>) -> Vec<usize> {
+        log.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn assert_near_the_optimum(outcome: &OptimizationOutcome) {
+        for x in &outcome.best_params {
+            assert!((x - 1.0).abs() < 1e-2, "{:?}", outcome.best_params);
+        }
+    }
+
+    #[test]
+    fn adam_without_an_exact_gradient_differentiates_the_evaluation_oracle() {
+        let (oracle, log) = recorder();
+        let outcome = dispatch_optimizer(
+            adam_method(300),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            1,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
+        assert_near_the_optimum(&outcome);
+        // Each iteration: one finite-difference stencil (2·dims candidates) and
+        // the single tracked candidate, on the same oracle.
+        let sizes = sizes(&log);
+        assert_eq!(sizes.len(), 2 * outcome.iterations_run);
+        assert!(
+            sizes.chunks_exact(2).all(|pair| pair == [6, 1]),
+            "{sizes:?}"
+        );
+    }
+
+    #[test]
+    fn adam_uses_the_exact_gradient_when_the_oracles_carry_one() {
+        let (oracle, log) = recorder();
+        let calls = Arc::new(Mutex::new(0));
+        let oracles = Oracles {
+            evaluation: oracle,
+            gradient: Some(Box::new(QuadraticGradient(Arc::clone(&calls)))),
+        };
+        let outcome = dispatch_optimizer(
+            adam_method(300),
+            oracles,
+            3,
+            &OracleErrorSlot::new(),
+            1,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
+        assert_near_the_optimum(&outcome);
+        assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
+        // No stencil: the evaluation oracle only tracks, one candidate a call.
+        assert!(sizes(&log).iter().all(|&n| n == 1));
+    }
+
+    #[test]
+    fn adam_rejects_a_bad_finite_difference_step_before_any_call() {
+        let (oracle, log) = recorder();
+        let method = match adam_method(10) {
+            Method::Adam(cfg) => Method::Adam(AdamConfig {
+                finite_difference_step: 0.0,
+                ..cfg
+            }),
+            other => other,
+        };
+        match dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "finite_difference_step")
+            }
+            _ => panic!("expected an InvalidConfig for the step"),
+        }
+        assert!(sizes(&log).is_empty());
     }
 }

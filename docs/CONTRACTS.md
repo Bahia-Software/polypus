@@ -892,6 +892,14 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     reproducibility, every rejected configuration with no oracle call, the
     gradient length check, and the finite-difference stencil, its accuracy,
     its step validation and a broken wrapped oracle).
+  - In a training run the gradient comes from the run's `Oracles`
+    (`polypus-orchestration`): the exact one when the factory provides it,
+    otherwise a `FiniteDifferenceGradient` of the evaluation oracle with
+    `AdamConfig::finite_difference_step`. Neither `VqcOracleFactory` nor
+    `QmlOracleFactory` provides one, so their runs take the finite difference.
+    Enforced by the `adam_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and the walltime watch of
+    an Adam iteration in `src/walltime.rs`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

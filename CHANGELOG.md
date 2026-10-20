@@ -14,6 +14,11 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
+  exact gradient when it has one); Adam uses the exact gradient or a finite
+  difference of the evaluation, and the CUNQA walltime warning times its
+  gradient too. Not yet reachable from Python.
 - Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
   same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
@@ -139,6 +144,10 @@ Changes on `main` since 0.7.2.
   `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
   `initial_point` as its last argument and `TrainFlow` has an `initial_point`
   field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
+  `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
+  `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
+  works, and `Method` has an `Adam` variant.
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
