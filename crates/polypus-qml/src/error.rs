@@ -486,10 +486,11 @@ pub enum QmlError {
         /// The number of counts maps supplied.
         got: usize,
     },
-    /// One per-sample entry of the `base_expectations` slice handed to
-    /// [`param_gradient_categorical`](crate::QmlProblem::param_gradient_categorical)
-    /// (or its exact mirror) carries a number of class expectations different
-    /// from the readout's observable count.
+    /// One per-sample entry of the base class expectations handed to the
+    /// categorical gradient helper carries a number of class expectations
+    /// different from the readout's observable count. The public
+    /// [`gradient_from_counts`](crate::QmlProblem::gradient_from_counts)
+    /// computes those expectations itself, so this only guards the helper.
     ///
     /// Distinct from [`CountsLengthMismatch`](Self::CountsLengthMismatch),
     /// which is about the *outer* length — how many samples the slice holds.
@@ -516,11 +517,21 @@ pub enum QmlError {
     /// instead by the free `categorical_cross_entropy`/
     /// `categorical_cross_entropy_gradient` functions. `QmlProblem` always
     /// routes the categorical loss to those *before* reaching the scalar
-    /// methods (see `fitness_from_counts`/`param_gradient`), so this should
+    /// methods (see `fitness_from_counts`/`gradient_from_counts`), so this should
     /// never actually surface — it is typed rather than assumed away with
     /// `unreachable!`, so an internal dispatch bug becomes a typed error
     /// instead of a panic crossing the FFI boundary.
     CategoricalLossHasNoScalarForm,
+    /// The model has no exact parameter-shift gradient: one of its instructions
+    /// is not a Pauli rotation yet takes an angle, uses an expression angle, or
+    /// is of a kind the gradient does not know. Raised by the gradient methods
+    /// of [`QmlProblem`](crate::QmlProblem) (and
+    /// [`num_gradient_circuits`](crate::QmlProblem::num_gradient_circuits), so a
+    /// caller can check up front); gradient-free training is unaffected.
+    NoExactGradient {
+        /// Which instruction (position and gate), and why.
+        reason: String,
+    },
 }
 
 impl fmt::Display for QmlError {
@@ -565,6 +576,10 @@ impl fmt::Display for QmlError {
                 f,
                 "internal error: CategoricalCrossEntropy has no scalar evaluate/gradient form; \
                  QmlProblem should always route it through the categorical path instead"
+            ),
+            QmlError::NoExactGradient { reason } => write!(
+                f,
+                "no exact parameter-shift gradient for this model: {reason}"
             ),
         }
     }
@@ -740,6 +755,11 @@ mod tests {
         assert!(QmlError::CategoricalLossHasNoScalarForm
             .to_string()
             .contains("scalar"));
+        let s = QmlError::NoExactGradient {
+            reason: "instruction 3 (Crx) takes an angle".to_string(),
+        }
+        .to_string();
+        assert!(s.contains("gradient") && s.contains("instruction 3 (Crx)"));
     }
 
     #[test]

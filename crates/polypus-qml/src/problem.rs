@@ -9,10 +9,22 @@
 //! this crate free of any execution dependency (design doc §1, D11). These two
 //! operations plus `num_params`/`num_circuits` are the QML side of contract
 //! C-10.
+//!
+//! The exact parameter-shift gradient has its own pair of operations:
+//! [`gradient_circuits`](QmlProblem::gradient_circuits) lists every circuit a
+//! gradient needs, and [`gradient_from_counts`](QmlProblem::gradient_from_counts)
+//! (or its exact twin) turns their results into `∂fitness/∂θ`. The convolution
+//! and pooling layers reuse one `θ` across several gates, where shifting that `θ`
+//! as a whole does **not** give the derivative; so the shift is applied to each
+//! *occurrence* of a parameter on its own, over an "untied" copy of every
+//! template in which each occurrence has its own index, and the occurrences of
+//! the same `θ` are summed (product rule).
 
 use std::collections::HashMap;
 
-use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
+use polypus_circuit::{
+    CircuitError, ConcreteCircuit, GateInstruction, GateParam, ParameterizedCircuit,
+};
 
 use crate::dataset::Dataset;
 use crate::error::{QmlError, ValidationError};
@@ -33,6 +45,11 @@ pub struct QmlProblem {
     loss: Loss,
     /// One template per training sample, in sample order.
     templates: Vec<ParameterizedCircuit>,
+    /// The same templates with every parameter occurrence untied, for the exact
+    /// gradient; or why this model has no exact gradient. Kept as a `Result`
+    /// rather than failing [`new`](Self::new): gradient-free optimizers never
+    /// need it, so a model the gradient cannot handle still trains with them.
+    untied: Result<Untied, QmlError>,
 }
 
 impl QmlProblem {
@@ -98,11 +115,13 @@ impl QmlProblem {
             templates.push(model.template_for(train.sample(i))?);
         }
 
+        let untied = Untied::from_templates(&templates);
         Ok(QmlProblem {
             model,
             train,
             loss,
             templates,
+            untied,
         })
     }
 
@@ -186,6 +205,17 @@ impl QmlProblem {
             train: self.train.select(indices)?,
             loss: self.loss,
             templates: indices.iter().map(|&i| self.templates[i].clone()).collect(),
+            untied: self
+                .untied
+                .as_ref()
+                .map_err(Clone::clone)
+                .map(|untied| Untied {
+                    templates: indices
+                        .iter()
+                        .map(|&i| untied.templates[i].clone())
+                        .collect(),
+                    owners: untied.owners.clone(),
+                }),
         })
     }
 
@@ -207,14 +237,14 @@ impl QmlProblem {
     /// order as [`bind_batch`](Self::bind_batch).
     ///
     /// This is the shared building block of both [`fitness_from_counts`] (which
-    /// composes a [`Loss`] over these) and [`param_gradient`] (which shifts
+    /// composes a [`Loss`] over these) and [`gradient_from_counts`] (which shifts
     /// them): every loss, and the exact parameter-shift gradient, operates on
     /// these raw expectations, never on the [`Decision`] output (design doc §8).
     /// The `counts` length is checked exactly as `fitness_from_counts` does,
     /// yielding [`QmlError::CountsLengthMismatch`] on a mismatch.
     ///
     /// [`fitness_from_counts`]: Self::fitness_from_counts
-    /// [`param_gradient`]: Self::param_gradient
+    /// [`gradient_from_counts`]: Self::gradient_from_counts
     pub fn expectations_from_counts(
         &self,
         counts: &[HashMap<String, u64>],
@@ -345,49 +375,149 @@ impl QmlProblem {
         Ok(-total / expectations.len() as f64)
     }
 
-    /// The exact parameter-shift gradient of the fitness with respect to **one**
-    /// trainable parameter (design doc §17).
+    /// How many circuits one exact gradient needs:
+    /// `num_circuits · (1 + 2·occurrences)`, where `occurrences` counts every
+    /// gate that reads a trainable parameter (a parameter reused by `k` gates
+    /// counts `k` times). Equal to `num_circuits · (1 + 2·num_params)` when no
+    /// parameter is reused.
     ///
-    /// "Exact" here means an exact mathematical identity in the noiseless limit;
-    /// every argument is built from finite-shot `counts`, so the returned value
-    /// is an unbiased *estimator* of the true gradient component, not a
-    /// noise-free number.
+    /// Fails with [`QmlError::NoExactGradient`] when the model has no exact
+    /// gradient, so a gradient-based caller can check it before training.
+    pub fn num_gradient_circuits(&self) -> Result<usize, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        Ok(self.num_circuits() * (1 + 2 * untied.owners.len()))
+    }
+
+    /// Every circuit the exact parameter-shift gradient at `theta` needs, in
+    /// the order [`gradient_from_counts`](Self::gradient_from_counts) reads them
+    /// back:
+    ///
+    /// 1. the base circuits, exactly as [`bind_batch`](Self::bind_batch) returns
+    ///    them (one per sample, sample-major);
+    /// 2. then, for each parameter occurrence `j` in gate order, the
+    ///    `num_circuits` circuits with only occurrence `j` shifted by `+π/2`,
+    ///    followed by the `num_circuits` circuits shifted by `−π/2`.
+    ///
+    /// Shifting one occurrence at a time is what makes the gradient exact for a
+    /// parameter that several gates share: the two-term rule holds for each gate
+    /// on its own (every trainable gate here is a Pauli rotation `exp(−iθP/2)`),
+    /// and the derivative of the shared parameter is the sum over its gates.
+    ///
+    /// A `theta` of the wrong length fails like [`bind_batch`](Self::bind_batch)
+    /// does; a model without an exact gradient fails with
+    /// [`QmlError::NoExactGradient`].
+    pub fn gradient_circuits(&self, theta: &[f64]) -> Result<Vec<ConcreteCircuit>, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        if theta.len() != self.num_params() {
+            return Err(QmlError::Circuit(CircuitError::WrongNumberOfParams {
+                expected: self.num_params(),
+                got: theta.len(),
+            }));
+        }
+        let mut circuits = Vec::with_capacity(self.num_gradient_circuits()?);
+        circuits.extend(self.bind_batch(theta)?);
+        // Each occurrence takes the value of the parameter it reads.
+        let expanded: Vec<f64> = untied.owners.iter().map(|&k| theta[k]).collect();
+        let shift = std::f64::consts::FRAC_PI_2;
+        for occurrence in 0..untied.owners.len() {
+            for delta in [shift, -shift] {
+                let mut shifted = expanded.clone();
+                shifted[occurrence] += delta;
+                for template in &untied.templates {
+                    circuits.push(template.assign_parameters(&shifted)?);
+                }
+            }
+        }
+        Ok(circuits)
+    }
+
+    /// The exact parameter-shift gradient `∂fitness/∂θ`, one component per
+    /// trainable parameter, from the measurement `counts` of
+    /// [`gradient_circuits`](Self::gradient_circuits), in that order.
+    ///
+    /// "Exact" means an exact identity in the noiseless limit; from finite-shot
+    /// `counts` the result is an unbiased *estimator* of the gradient. Every
+    /// loss takes this one entry point, the categorical one included, exactly as
+    /// [`fitness_from_counts`](Self::fitness_from_counts) does.
+    ///
+    /// A `counts` slice of the wrong length fails with
+    /// [`QmlError::CountsLengthMismatch`] (expected
+    /// [`num_gradient_circuits`](Self::num_gradient_circuits)); a model without
+    /// an exact gradient fails with [`QmlError::NoExactGradient`].
+    pub fn gradient_from_counts(
+        &self,
+        counts: &[HashMap<String, u64>],
+    ) -> Result<Vec<f64>, QmlError> {
+        self.gradient_from_weighted(counts)
+    }
+
+    /// The single implementation behind
+    /// [`gradient_from_counts`](Self::gradient_from_counts) and its exact mirror
+    /// [`gradient_from_probabilities`](Self::gradient_from_probabilities): base
+    /// expectations once, then each occurrence's chain-rule contribution
+    /// ([`param_gradient_weighted`](Self::param_gradient_weighted) or its
+    /// categorical twin), added to the parameter that occurrence reads.
+    fn gradient_from_weighted<W: BitstringWeight>(
+        &self,
+        weights: &[HashMap<String, W>],
+    ) -> Result<Vec<f64>, QmlError> {
+        let untied = self.untied.as_ref().map_err(Clone::clone)?;
+        let expected = self.num_gradient_circuits()?;
+        if weights.len() != expected {
+            return Err(QmlError::CountsLengthMismatch {
+                expected,
+                got: weights.len(),
+            });
+        }
+        let n = self.num_circuits();
+        let (base, shifted) = weights.split_at(n);
+        let categorical = self.loss == Loss::CategoricalCrossEntropy;
+        let base_scalar = if categorical {
+            Vec::new()
+        } else {
+            self.expectations_from_weighted(base)?
+        };
+        let base_per_class = if categorical {
+            self.expectations_per_class_from_weighted(base)?
+        } else {
+            Vec::new()
+        };
+        let mut gradient = vec![0.0; self.num_params()];
+        for (pair, &owner) in shifted.chunks_exact(2 * n).zip(&untied.owners) {
+            let (plus, minus) = pair.split_at(n);
+            gradient[owner] += if categorical {
+                self.param_gradient_categorical_weighted(&base_per_class, plus, minus)?
+            } else {
+                self.param_gradient_weighted(&base_scalar, plus, minus)?
+            };
+        }
+        Ok(gradient)
+    }
+
+    /// One parameter occurrence's contribution to `∂fitness/∂θ` (design doc
+    /// §17), the building block of
+    /// [`gradient_from_counts`](Self::gradient_from_counts).
     ///
     /// The fitness composes a nonlinear [`Loss`] over the raw per-sample
     /// expectations, so the shift rule cannot be applied to the aggregate
     /// fitness directly — it needs the chain rule. Given the base expectations
-    /// `⟨O_i⟩(θ)`, and the counts at `θ ± π/2·e_k` (the parameter shifted by
-    /// `±π/2`), this returns
+    /// `⟨O_i⟩(θ)`, and the weights with the occurrence shifted by `±π/2`, this
+    /// returns
     ///
-    /// `−(1/n) · Σᵢ Loss'(⟨O_i⟩, yᵢ) · (⟨O_i⟩(θ+) − ⟨O_i⟩(θ−)) / 2`
+    /// `−(1/n) · Σᵢ Loss'(⟨O_i⟩, yᵢ) · (⟨O_i⟩(+) − ⟨O_i⟩(−)) / 2`
     ///
-    /// where `(⟨O_i⟩(θ+) − ⟨O_i⟩(θ−))/2` is the parameter-shift derivative of
-    /// the raw expectation (exact for the `±1`-eigenvalue generators this crate
-    /// uses) and `Loss'` is `Loss::gradient`. The leading `−(1/n)` mirrors
-    /// `fitness_from_counts`' `−mean_loss` so the sign convention agrees: higher
-    /// fitness is better, and this is `∂fitness/∂θ_k` (the ascent direction).
+    /// where `(⟨O_i⟩(+) − ⟨O_i⟩(−))/2` is the parameter-shift derivative of the
+    /// raw expectation with respect to that one gate (exact for the
+    /// `±1`-eigenvalue generators this crate uses) and `Loss'` is
+    /// `Loss::gradient`. The leading `−(1/n)` mirrors `fitness_from_counts`'
+    /// `−mean_loss` so the sign convention agrees: higher fitness is better.
     ///
     /// Length validation, in this order, each against
-    /// [`num_circuits`](Self::num_circuits): `plus_counts`, then `minus_counts`,
-    /// then `base_expectations` — the first mismatch returns
+    /// [`num_circuits`](Self::num_circuits): `plus`, then `minus`, then
+    /// `base_expectations` — the first mismatch returns
     /// [`QmlError::CountsLengthMismatch`], deterministically, even if several
-    /// disagree at once.
-    pub fn param_gradient(
-        &self,
-        base_expectations: &[f64],
-        plus_counts: &[HashMap<String, u64>],
-        minus_counts: &[HashMap<String, u64>],
-    ) -> Result<f64, QmlError> {
-        self.param_gradient_weighted(base_expectations, plus_counts, minus_counts)
-    }
-
-    /// The single implementation behind
-    /// [`param_gradient`](Self::param_gradient) and its exact mirror
-    /// [`param_gradient_exact`](Self::param_gradient_exact), generic over the
-    /// per-sample weight type via [`BitstringWeight`]: the length validation, the
-    /// shift-rule chain and the `−mean` aggregation are written once, differing
-    /// only in whether the shifted expectations come from counts or exact
-    /// probabilities.
+    /// disagree at once. Generic over the per-sample weight type via
+    /// [`BitstringWeight`], so counts and exact probabilities share it.
     fn param_gradient_weighted<W: BitstringWeight>(
         &self,
         base_expectations: &[f64],
@@ -432,50 +562,31 @@ impl QmlProblem {
         Ok(-total / n as f64)
     }
 
-    /// The exact parameter-shift gradient of the **categorical** fitness with
-    /// respect to one trainable parameter (design doc §17): the multiclass
-    /// counterpart of [`param_gradient`](Self::param_gradient).
+    /// One parameter occurrence's contribution to the **categorical**
+    /// `∂fitness/∂θ` (design doc §17): the multiclass counterpart of
+    /// [`param_gradient_weighted`](Self::param_gradient_weighted).
     ///
     /// The fitness composes `CategoricalCrossEntropy` over the per-sample
     /// *vector* of class expectations, so the chain rule runs over every class:
     ///
-    /// `−(1/n) · Σᵢ Σⱼ CE'(z_i, yᵢ)[j] · (⟨O_j⟩(θ+) − ⟨O_j⟩(θ−)) / 2`
+    /// `−(1/n) · Σᵢ Σⱼ CE'(z_i, yᵢ)[j] · (⟨O_j⟩(+) − ⟨O_j⟩(−)) / 2`
     ///
     /// where `z_i = base_expectations[i]` is sample `i`'s full class-expectation
     /// vector, `CE'` is `categorical_cross_entropy_gradient` (a per-class
-    /// vector), and each `(⟨O_j⟩(θ+) − ⟨O_j⟩(θ−))/2` is the parameter-shift
-    /// derivative of class `j`'s raw expectation. The leading `−(1/n)` matches
-    /// [`fitness_from_counts`](Self::fitness_from_counts)'s `−mean_loss`, so the
-    /// sign convention agrees (this is `∂fitness/∂θ_k`, the ascent direction).
+    /// vector), and each `(⟨O_j⟩(+) − ⟨O_j⟩(−))/2` is the parameter-shift
+    /// derivative of class `j`'s raw expectation with respect to that one gate.
     ///
     /// Length validation, in this order, each against
-    /// [`num_circuits`](Self::num_circuits): `plus_counts`, then `minus_counts`,
-    /// then `base_expectations` — the same deterministic ordering as
-    /// [`param_gradient`](Self::param_gradient). Then, once those *outer*
-    /// lengths agree, the *inner* width of every `base_expectations[i]` is
-    /// checked against the readout's observable count, reporting the first
-    /// offending sample as
+    /// [`num_circuits`](Self::num_circuits): `plus`, then `minus`, then
+    /// `base_expectations` — the same deterministic ordering as
+    /// [`param_gradient_weighted`](Self::param_gradient_weighted). Then, once
+    /// those *outer* lengths agree, the *inner* width of every
+    /// `base_expectations[i]` is checked against the readout's observable count,
+    /// reporting the first offending sample as
     /// [`ClassCountMismatch`](crate::QmlError::ClassCountMismatch): the chain
     /// rule below zips `CE'` against the per-class shifts, so a vector of the
     /// wrong width would silently drop (or ignore) classes and return a
     /// plausible but wrong gradient.
-    pub fn param_gradient_categorical(
-        &self,
-        base_expectations: &[Vec<f64>],
-        plus_counts: &[HashMap<String, u64>],
-        minus_counts: &[HashMap<String, u64>],
-    ) -> Result<f64, QmlError> {
-        self.param_gradient_categorical_weighted(base_expectations, plus_counts, minus_counts)
-    }
-
-    /// The single implementation behind
-    /// [`param_gradient_categorical`](Self::param_gradient_categorical) and its
-    /// exact mirror
-    /// [`param_gradient_categorical_exact`](Self::param_gradient_categorical_exact),
-    /// generic over the per-sample weight type via [`BitstringWeight`]: the outer
-    /// and inner (class-count) length validation, the per-class chain rule and the
-    /// `−mean` aggregation are written once, differing only in whether the shifted
-    /// per-class expectations come from counts or exact probabilities.
     fn param_gradient_categorical_weighted<W: BitstringWeight>(
         &self,
         base_expectations: &[Vec<f64>],
@@ -576,39 +687,203 @@ impl QmlProblem {
         self.fitness_from_weighted(probabilities)
     }
 
-    /// Exact-mode mirror of [`param_gradient`](Self::param_gradient): the exact
-    /// parameter-shift gradient component from exact `probabilities`. Same
-    /// length-validation order (plus, minus, base) as its counterpart.
+    /// Exact-mode mirror of [`gradient_from_counts`](Self::gradient_from_counts):
+    /// `∂fitness/∂θ` from the exact `probabilities` of
+    /// [`gradient_circuits`](Self::gradient_circuits), in that order. Same
+    /// length validation and errors as its counterpart.
     ///
     /// Here "exact" is doubly so: the parameter-shift identity holds exactly in
     /// the noiseless limit, and the probabilities carry no shot noise, so the
-    /// returned value is the true gradient component rather than an estimator.
-    pub fn param_gradient_exact(
+    /// returned value is the true gradient rather than an estimator.
+    pub fn gradient_from_probabilities(
         &self,
-        base_expectations: &[f64],
-        plus_probs: &[HashMap<String, f64>],
-        minus_probs: &[HashMap<String, f64>],
-    ) -> Result<f64, QmlError> {
-        self.param_gradient_weighted(base_expectations, plus_probs, minus_probs)
+        probabilities: &[HashMap<String, f64>],
+    ) -> Result<Vec<f64>, QmlError> {
+        self.gradient_from_weighted(probabilities)
     }
+}
 
-    /// Exact-mode mirror of
-    /// [`param_gradient_categorical`](Self::param_gradient_categorical): the
-    /// exact parameter-shift gradient component of the categorical fitness from
-    /// exact `probabilities`. Same length-validation order as its counterpart:
-    /// `plus_probs`, then `minus_probs`, then `base_expectations` against
-    /// [`num_circuits`](Self::num_circuits), and finally the *inner* width of
-    /// every `base_expectations[i]` against the readout's observable count,
-    /// reporting the first offending sample as
-    /// [`ClassCountMismatch`](crate::QmlError::ClassCountMismatch).
-    pub fn param_gradient_categorical_exact(
-        &self,
-        base_expectations: &[Vec<f64>],
-        plus_probs: &[HashMap<String, f64>],
-        minus_probs: &[HashMap<String, f64>],
-    ) -> Result<f64, QmlError> {
-        self.param_gradient_categorical_weighted(base_expectations, plus_probs, minus_probs)
+/// Every training template with each trainable-parameter occurrence given its
+/// own index, for the per-occurrence parameter shift (see
+/// [`QmlProblem::gradient_circuits`]).
+#[derive(Debug, Clone)]
+struct Untied {
+    /// One untied template per training sample, in sample order. Occurrence `j`
+    /// is `Param(j)`, numbered in gate order.
+    templates: Vec<ParameterizedCircuit>,
+    /// `owners[j]` is the trainable parameter occurrence `j` reads. The same for
+    /// every sample: the trainable gates never depend on the data.
+    owners: Vec<usize>,
+}
+
+impl Untied {
+    /// Untie every template, or say why the model has no exact gradient.
+    fn from_templates(templates: &[ParameterizedCircuit]) -> Result<Untied, QmlError> {
+        let mut untied = Vec::with_capacity(templates.len());
+        let mut owners: Option<Vec<usize>> = None;
+        for (sample, template) in templates.iter().enumerate() {
+            let (circuit, sample_owners) = untie(template)?;
+            match &owners {
+                Some(first) if *first != sample_owners => {
+                    return Err(QmlError::NoExactGradient {
+                        reason: format!(
+                            "sample {sample} reads its trainable parameters through different \
+                             gates than sample 0"
+                        ),
+                    });
+                }
+                Some(_) => {}
+                None => owners = Some(sample_owners),
+            }
+            untied.push(circuit);
+        }
+        Ok(Untied {
+            templates: untied,
+            owners: owners.unwrap_or_default(),
+        })
     }
+}
+
+/// How the untying treats one kind of instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateClass {
+    /// `exp(−iθP/2)` for a Pauli string `P`: the two-term `±π/2` shift rule is
+    /// exact for it, so a trainable angle here is untied.
+    PauliRotation,
+    /// No angle at all: copied unchanged.
+    ParameterFree,
+    /// Takes an angle but is not a Pauli rotation (controlled rotations, phase
+    /// and `u` gates, custom gates): no layer of this crate emits one, so it is
+    /// rejected rather than given a gradient that might be wrong.
+    OtherAngle,
+    /// Not named below. Rejected.
+    Unknown,
+}
+
+/// Classify an instruction for [`untie`].
+///
+/// `GateInstruction` is `#[non_exhaustive]`, so this match needs a wildcard arm;
+/// it maps to [`GateClass::Unknown`], which [`untie`] rejects, so an instruction
+/// this list does not know never passes silently. Keep the list complete: the
+/// test `every_instruction_kind_is_classified` names one instruction of every
+/// kind (`GateInstruction::KINDS`) and fails as soon as `polypus-circuit` adds a
+/// kind that falls into the wildcard (contract C-2).
+fn classify(gate: &GateInstruction) -> GateClass {
+    use GateInstruction as G;
+    match gate {
+        G::Rx { .. } | G::Ry { .. } | G::Rz { .. } | G::Rxx { .. } | G::Rzz { .. } => {
+            GateClass::PauliRotation
+        }
+        G::H(_)
+        | G::X(_)
+        | G::Y(_)
+        | G::Z(_)
+        | G::S(_)
+        | G::T(_)
+        | G::Sdg(_)
+        | G::Tdg(_)
+        | G::Id(_)
+        | G::Sx(_)
+        | G::Sxdg(_)
+        | G::Cx(..)
+        | G::Cz(..)
+        | G::Swap(..)
+        | G::Cy(..)
+        | G::Ch(..)
+        | G::Csx(..)
+        | G::Ccx(..)
+        | G::Cswap(..)
+        | G::Rccx(..)
+        | G::Rc3x(..)
+        | G::C3x(..)
+        | G::C3sqrtx(..)
+        | G::C4x(..)
+        | G::Barrier(_)
+        | G::Measure { .. }
+        | G::MeasureAll => GateClass::ParameterFree,
+        G::Cp { .. }
+        | G::Crx { .. }
+        | G::Cry { .. }
+        | G::Crz { .. }
+        | G::Cu1 { .. }
+        | G::Cu3 { .. }
+        | G::Cu { .. }
+        | G::U { .. }
+        | G::UGate { .. }
+        | G::U0 { .. }
+        | G::P { .. }
+        | G::U1 { .. }
+        | G::U2 { .. }
+        | G::Custom(_) => GateClass::OtherAngle,
+        _ => GateClass::Unknown,
+    }
+}
+
+/// Copy `template` with every `Param(k)` occurrence renumbered `Param(j)` in
+/// gate order, returning the copy and `owners` (`owners[j] = k`).
+///
+/// Only Pauli rotations are untied; fixed angles (the encoders') are copied.
+/// Anything else that could carry an angle, an expression angle, or an
+/// instruction [`classify`] does not know, is a [`QmlError::NoExactGradient`].
+fn untie(template: &ParameterizedCircuit) -> Result<(ParameterizedCircuit, Vec<usize>), QmlError> {
+    use GateInstruction as G;
+    let mut untied = ParameterizedCircuit::new(template.num_qubits());
+    let mut owners = Vec::new();
+    for (position, gate) in template.gates().iter().enumerate() {
+        let rejected = |what: &str| QmlError::NoExactGradient {
+            reason: format!("instruction {position} ({gate:?}) {what}"),
+        };
+        let gate = match classify(gate) {
+            GateClass::ParameterFree => gate.clone(),
+            GateClass::OtherAngle => {
+                return Err(rejected(
+                    "takes an angle but is not a Pauli rotation, the only gates the exact \
+                     parameter shift supports",
+                ))
+            }
+            GateClass::Unknown => return Err(rejected("is not a known instruction kind")),
+            GateClass::PauliRotation => {
+                let mut fresh = |theta: &GateParam| match theta {
+                    GateParam::Fixed(_) => Ok(*theta),
+                    GateParam::Param(k) => {
+                        owners.push(*k);
+                        Ok(GateParam::Param(owners.len() - 1))
+                    }
+                    _ => Err(rejected(
+                        "has an expression angle; the exact parameter shift needs each \
+                         parameter used directly",
+                    )),
+                };
+                match gate {
+                    G::Rx { qubit, theta } => G::Rx {
+                        qubit: *qubit,
+                        theta: fresh(theta)?,
+                    },
+                    G::Ry { qubit, theta } => G::Ry {
+                        qubit: *qubit,
+                        theta: fresh(theta)?,
+                    },
+                    G::Rz { qubit, theta } => G::Rz {
+                        qubit: *qubit,
+                        theta: fresh(theta)?,
+                    },
+                    G::Rxx { q0, q1, theta } => G::Rxx {
+                        q0: *q0,
+                        q1: *q1,
+                        theta: fresh(theta)?,
+                    },
+                    G::Rzz { q0, q1, theta } => G::Rzz {
+                        q0: *q0,
+                        q1: *q1,
+                        theta: fresh(theta)?,
+                    },
+                    _ => return Err(rejected("is not a known instruction kind")),
+                }
+            }
+        };
+        untied.try_push(gate)?;
+    }
+    Ok((untied, owners))
 }
 
 #[cfg(test)]
@@ -870,7 +1145,7 @@ mod tests {
     fn param_gradient_matches_hand_computation() {
         // Two samples, ⟨Z₀⟩, SquaredError. Feed synthetic counts whose
         // (a−b)/(a+b) reproduce chosen exact expectations, then check
-        // param_gradient equals the by-hand chain-rule value.
+        // param_gradient_weighted equals the by-hand chain-rule value.
         //
         //   sample 0 (y=+1): base=0.5, plus=+1.0, minus=0.0
         //   sample 1 (y=−1): base=−0.5, plus=0.0, minus=+1.0
@@ -883,7 +1158,9 @@ mod tests {
         let base = vec![0.5, -0.5];
         let plus = vec![counts(&[("0", 1)]), counts(&[("0", 1), ("1", 1)])];
         let minus = vec![counts(&[("0", 1), ("1", 1)]), counts(&[("0", 1)])];
-        let grad = problem.param_gradient(&base, &plus, &minus).unwrap();
+        let grad = problem
+            .param_gradient_weighted(&base, &plus, &minus)
+            .unwrap();
         assert!((grad - 0.5).abs() < 1e-12, "grad={grad}");
     }
 
@@ -895,7 +1172,7 @@ mod tests {
 
         // plus wrong → reported first (expected 2, got 1).
         let err = problem
-            .param_gradient(&base_ok, &ok_pair[..1], &ok_pair)
+            .param_gradient_weighted(&base_ok, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -906,7 +1183,7 @@ mod tests {
         );
         // plus ok, minus wrong → reported next.
         let err = problem
-            .param_gradient(&base_ok, &ok_pair, &ok_pair[..1])
+            .param_gradient_weighted(&base_ok, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -917,7 +1194,7 @@ mod tests {
         );
         // plus/minus ok, base wrong → reported last.
         let err = problem
-            .param_gradient(&base_ok[..1], &ok_pair, &ok_pair)
+            .param_gradient_weighted(&base_ok[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -999,7 +1276,7 @@ mod tests {
         //   Σⱼ CE'·shift = 0.622459·1.0 + (−0.622459)·(−1.0) = 1.244918
         // grad = −(1/2)·(−0.755082 + 1.244918) = −0.244918
         let grad = problem
-            .param_gradient_categorical(&base, &plus, &minus)
+            .param_gradient_categorical_weighted(&base, &plus, &minus)
             .unwrap();
         assert!((grad + 0.244918).abs() < 1e-3, "grad={grad}");
     }
@@ -1012,7 +1289,7 @@ mod tests {
 
         // plus wrong → reported first.
         let err = problem
-            .param_gradient_categorical(&base_ok, &ok_pair[..1], &ok_pair)
+            .param_gradient_categorical_weighted(&base_ok, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1023,7 +1300,7 @@ mod tests {
         );
         // plus ok, minus wrong → reported next.
         let err = problem
-            .param_gradient_categorical(&base_ok, &ok_pair, &ok_pair[..1])
+            .param_gradient_categorical_weighted(&base_ok, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -1034,7 +1311,7 @@ mod tests {
         );
         // plus/minus ok, base wrong → reported last.
         let err = problem
-            .param_gradient_categorical(&base_ok[..1], &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_ok[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1055,7 +1332,7 @@ mod tests {
         // but wrong gradient, so this must be a typed error naming sample 1.
         let base_short = vec![vec![0.0, 0.0], vec![0.0]];
         let err = problem
-            .param_gradient_categorical(&base_short, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_short, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1070,7 +1347,7 @@ mod tests {
         // just because the `zip` truncates in the other direction.
         let base_long = vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0]];
         let err = problem
-            .param_gradient_categorical(&base_long, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_long, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1084,7 +1361,7 @@ mod tests {
         // The inner check runs *after* the outer ones: with plus (or minus, or
         // the outer base length) also wrong, the outer mismatch still wins.
         let err = problem
-            .param_gradient_categorical(&base_short, &ok_pair[..1], &ok_pair)
+            .param_gradient_categorical_weighted(&base_short, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1094,7 +1371,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical(&base_short, &ok_pair, &ok_pair[..1])
+            .param_gradient_categorical_weighted(&base_short, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -1104,7 +1381,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical(&base_short[..1], &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_short[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1117,7 +1394,7 @@ mod tests {
         // First offender wins: both samples are wrong, sample 0 is reported.
         let base_both = vec![vec![0.0], vec![0.0, 0.0, 0.0]];
         let err = problem
-            .param_gradient_categorical(&base_both, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_both, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1378,7 +1655,9 @@ mod tests {
         let base = vec![0.5, -0.5];
         let plus = vec![probs(&[("0", 1.0)]), probs(&[("0", 0.5), ("1", 0.5)])];
         let minus = vec![probs(&[("0", 0.5), ("1", 0.5)]), probs(&[("0", 1.0)])];
-        let grad = problem.param_gradient_exact(&base, &plus, &minus).unwrap();
+        let grad = problem
+            .param_gradient_weighted(&base, &plus, &minus)
+            .unwrap();
         assert!((grad - 0.5).abs() < 1e-12, "grad={grad}");
     }
 
@@ -1390,7 +1669,7 @@ mod tests {
 
         // plus wrong → reported first.
         let err = problem
-            .param_gradient_exact(&base_ok, &ok_pair[..1], &ok_pair)
+            .param_gradient_weighted(&base_ok, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1401,7 +1680,7 @@ mod tests {
         );
         // plus ok, minus wrong → reported next.
         let err = problem
-            .param_gradient_exact(&base_ok, &ok_pair, &ok_pair[..1])
+            .param_gradient_weighted(&base_ok, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -1412,7 +1691,7 @@ mod tests {
         );
         // plus/minus ok, base wrong → reported last.
         let err = problem
-            .param_gradient_exact(&base_ok[..1], &ok_pair, &ok_pair)
+            .param_gradient_weighted(&base_ok[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1446,7 +1725,7 @@ mod tests {
         let plus = vec![probs(&[("10", 1.0)]), probs(&[("10", 1.0)])];
         let minus = vec![probs(&[("01", 1.0)]), probs(&[("01", 1.0)])];
         let grad = problem
-            .param_gradient_categorical_exact(&base, &plus, &minus)
+            .param_gradient_categorical_weighted(&base, &plus, &minus)
             .unwrap();
         assert!((grad + 0.244918).abs() < 1e-3, "grad={grad}");
     }
@@ -1458,7 +1737,7 @@ mod tests {
         let base_ok = vec![vec![0.0, 0.0], vec![0.0, 0.0]];
 
         let err = problem
-            .param_gradient_categorical_exact(&base_ok, &ok_pair[..1], &ok_pair)
+            .param_gradient_categorical_weighted(&base_ok, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1468,7 +1747,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical_exact(&base_ok, &ok_pair, &ok_pair[..1])
+            .param_gradient_categorical_weighted(&base_ok, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -1478,7 +1757,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical_exact(&base_ok[..1], &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_ok[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1497,7 +1776,7 @@ mod tests {
 
         let base_short = vec![vec![0.0, 0.0], vec![0.0]];
         let err = problem
-            .param_gradient_categorical_exact(&base_short, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_short, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1511,7 +1790,7 @@ mod tests {
         // A longer inner vector fails too — the `zip` must not hide it.
         let base_long = vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0]];
         let err = problem
-            .param_gradient_categorical_exact(&base_long, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_long, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1524,7 +1803,7 @@ mod tests {
 
         // The inner check runs after all three outer ones.
         let err = problem
-            .param_gradient_categorical_exact(&base_short, &ok_pair[..1], &ok_pair)
+            .param_gradient_categorical_weighted(&base_short, &ok_pair[..1], &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1534,7 +1813,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical_exact(&base_short, &ok_pair, &ok_pair[..1])
+            .param_gradient_categorical_weighted(&base_short, &ok_pair, &ok_pair[..1])
             .unwrap_err();
         assert_eq!(
             err,
@@ -1544,7 +1823,7 @@ mod tests {
             }
         );
         let err = problem
-            .param_gradient_categorical_exact(&base_short[..1], &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_short[..1], &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1557,7 +1836,7 @@ mod tests {
         // First offender wins.
         let base_both = vec![vec![0.0], vec![0.0, 0.0, 0.0]];
         let err = problem
-            .param_gradient_categorical_exact(&base_both, &ok_pair, &ok_pair)
+            .param_gradient_categorical_weighted(&base_both, &ok_pair, &ok_pair)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1566,6 +1845,356 @@ mod tests {
                 expected: 2,
                 got: 1,
             }
+        );
+    }
+
+    // ── Exact gradient over untied templates ──────────────────────────────────
+
+    use crate::{ConvBlock, PoolBlock};
+    use polypus_circuit::Fixed;
+
+    /// One instruction of every kind, built like `polypus-sim`'s
+    /// `every_instruction_is_supported`.
+    fn one_instruction_of_every_kind() -> Vec<GateInstruction> {
+        let declared = ParameterizedCircuit::from_qasm2(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+             gate g(t) a,b { rz(t) a; cx a,b; }\nqreg q[2];\ng(0.3) q[1],q[0];\n",
+        )
+        .unwrap()
+        .gates()[0]
+            .clone();
+        ParameterizedCircuit::new(5)
+            .h(0)
+            .x(1)
+            .y(2)
+            .z(0)
+            .s(1)
+            .t(2)
+            .sdg(0)
+            .tdg(1)
+            .id(2)
+            .rx(0, 0.25)
+            .ry(1, 0.5)
+            .rz(2, -1.5)
+            .u(0, 0.1, 0.2, 0.3)
+            .cx(0, 1)
+            .cz(1, 2)
+            .swap(0, 2)
+            .rzz(0, 2, 0.4)
+            .rxx(1, 2, 2.0)
+            .cp(0, 1, 0.75)
+            .sx(1)
+            .sxdg(2)
+            .cy(2, 0)
+            .ch(1, 2)
+            .csx(0, 2)
+            .ccx(2, 0, 1)
+            .cswap(1, 2, 0)
+            .crx(1, 0, 0.6)
+            .cry(2, 1, -0.6)
+            .crz(0, 2, 1.1)
+            .cu1(2, 1, 0.8)
+            .cu3(1, 0, 0.2, -0.4, 0.9)
+            .cu(0, 2, 0.3, 0.1, -0.1, 0.9)
+            .u0(3, 0.7)
+            .rccx(4, 0, 2)
+            .rc3x(3, 1, 4, 0)
+            .c3x(2, 4, 0, 3)
+            .c3sqrtx(4, 3, 1, 2)
+            .c4x(1, 4, 0, 3, 2)
+            .p(4, 0.2)
+            .u1(3, 0.45)
+            .u2(2, -0.2, 0.6)
+            .push(GateInstruction::UGate {
+                qubit: 1,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: Fixed(-0.7),
+            })
+            .push(declared)
+            .barrier()
+            .measure(0, 0)
+            .measure_all()
+            .gates()
+            .to_vec()
+    }
+
+    /// `GateInstruction` is `#[non_exhaustive]`, so `classify` ends in a
+    /// wildcard arm. This keeps the closed list complete: it must name every
+    /// kind `polypus-circuit` has (`kind_index` is exhaustive inside that
+    /// crate), and only the five Pauli rotations may be untied. A new kind fails
+    /// here until it is classified (contract C-2).
+    #[test]
+    fn every_instruction_kind_is_classified() {
+        let mut seen = [false; GateInstruction::KINDS];
+        let mut pauli_rotations = Vec::new();
+        for gate in one_instruction_of_every_kind() {
+            seen[gate.kind_index()] = true;
+            let class = classify(&gate);
+            assert_ne!(class, GateClass::Unknown, "{gate:?} is not classified");
+            if class == GateClass::PauliRotation {
+                pauli_rotations.push(gate.kind_index());
+            }
+        }
+        let missing: Vec<usize> = (0..GateInstruction::KINDS).filter(|&k| !seen[k]).collect();
+        assert!(
+            missing.is_empty(),
+            "instruction kinds not exercised: {missing:?}"
+        );
+        pauli_rotations.sort_unstable();
+        let expected: Vec<usize> = [
+            GateInstruction::Rx {
+                qubit: 0,
+                theta: Fixed(0.0),
+            },
+            GateInstruction::Ry {
+                qubit: 0,
+                theta: Fixed(0.0),
+            },
+            GateInstruction::Rz {
+                qubit: 0,
+                theta: Fixed(0.0),
+            },
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 1,
+                theta: Fixed(0.0),
+            },
+            GateInstruction::Rxx {
+                q0: 0,
+                q1: 1,
+                theta: Fixed(0.0),
+            },
+        ]
+        .iter()
+        .map(GateInstruction::kind_index)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+        assert_eq!(pauli_rotations, expected);
+    }
+
+    #[test]
+    fn untie_renumbers_each_occurrence_and_copies_fixed_angles() {
+        let mut template = ParameterizedCircuit::new(2);
+        for gate in [
+            GateInstruction::Ry {
+                qubit: 0,
+                theta: Fixed(0.4),
+            },
+            GateInstruction::Ry {
+                qubit: 0,
+                theta: GateParam::Param(1),
+            },
+            GateInstruction::Ry {
+                qubit: 1,
+                theta: GateParam::Param(1),
+            },
+            GateInstruction::Cx(0, 1),
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Param(0),
+            },
+        ] {
+            template.try_push(gate).unwrap();
+        }
+        let (untied, owners) = untie(&template).unwrap();
+        assert_eq!(owners, vec![1, 1, 0]);
+        assert_eq!(untied.num_params(), 3);
+        assert_eq!(untied.gates()[0], template.gates()[0]);
+        assert_eq!(
+            untied.gates()[2],
+            GateInstruction::Ry {
+                qubit: 1,
+                theta: GateParam::Param(1)
+            }
+        );
+        assert_eq!(
+            untied.gates()[4],
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 1,
+                theta: GateParam::Param(2)
+            }
+        );
+    }
+
+    #[test]
+    fn untie_rejects_angle_gates_it_cannot_shift() {
+        // A trainable controlled rotation has no two-term shift rule.
+        let mut trainable = ParameterizedCircuit::new(2);
+        trainable
+            .try_push(GateInstruction::Crx {
+                control: 0,
+                target: 1,
+                theta: GateParam::Param(0),
+            })
+            .unwrap();
+        // Fail closed: even a fixed angle on a non-rotation is rejected, since no
+        // layer of this crate emits one.
+        let mut fixed = ParameterizedCircuit::new(2);
+        fixed
+            .try_push(GateInstruction::Cp {
+                q0: 0,
+                q1: 1,
+                theta: Fixed(0.3),
+            })
+            .unwrap();
+        for template in [trainable, fixed] {
+            match untie(&template).unwrap_err() {
+                QmlError::NoExactGradient { reason } => {
+                    assert!(reason.contains("instruction 0"), "{reason}");
+                    assert!(reason.contains("Pauli rotation"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?}"),
+            }
+        }
+    }
+
+    /// Models covering every layer that emits trainable gates, the shared
+    /// parameters of convolution and pooling included.
+    fn catalogue() -> Vec<QmlProblem> {
+        let z = |positions: &[usize]| {
+            let terms = positions.iter().map(|&p| (p, Pauli::Z)).collect();
+            Readout::new(
+                vec![Observable::new(vec![(1.0, PauliString::new(terms).unwrap())]).unwrap()],
+                Decision::Raw,
+            )
+            .unwrap()
+        };
+        let models = [
+            QuantumModel::new(4)
+                .angle_encoder(RotationAxis::Ry)
+                .hardware_efficient(2)
+                .readout(z(&[0, 1, 2, 3])),
+            QuantumModel::new(4)
+                .angle_encoder(RotationAxis::Ry)
+                .conv(ConvBlock::Basic)
+                .pool(PoolBlock::Basic)
+                .readout(z(&[0, 1])),
+            QuantumModel::new(4)
+                .angle_encoder(RotationAxis::Rx)
+                .conv(ConvBlock::Cartan)
+                .readout(z(&[1])),
+            QuantumModel::new(4)
+                .iqp_encoder()
+                .hardware_efficient(1)
+                .iqp_encoder()
+                .readout(z(&[0])),
+        ];
+        let rows: Vec<Vec<f64>> = vec![vec![0.4, 1.1, 0.7, 2.0], vec![1.3, 0.2, 2.2, 0.9]];
+        models
+            .into_iter()
+            .map(|model| {
+                let ds = Dataset::from_rows(&rows, &[0.5, -0.3]).unwrap();
+                QmlProblem::new(model.compile(4).unwrap(), ds, Loss::SquaredError).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn untied_templates_bind_like_the_originals() {
+        for problem in catalogue() {
+            let untied = problem.untied.as_ref().unwrap();
+            let theta: Vec<f64> = (0..problem.num_params())
+                .map(|i| 0.3 + 0.17 * i as f64)
+                .collect();
+            let expanded: Vec<f64> = untied.owners.iter().map(|&k| theta[k]).collect();
+            for (tied, untied) in problem.templates.iter().zip(&untied.templates) {
+                let a = tied.assign_parameters(&theta).unwrap();
+                let b = untied.assign_parameters(&expanded).unwrap();
+                assert_eq!(a.gates(), b.gates());
+                assert_eq!(a.num_qubits(), b.num_qubits());
+                assert_eq!(a.num_clbits(), b.num_clbits());
+            }
+        }
+    }
+
+    #[test]
+    fn shared_parameters_get_one_occurrence_per_gate() {
+        // Basic convolution over 4 qubits: 4 θ, reused by 3 pairs.
+        let problem = &catalogue()[1];
+        let owners = &problem.untied.as_ref().unwrap().owners;
+        assert!(owners.len() > problem.num_params(), "{owners:?}");
+        for k in 0..problem.num_params() {
+            assert!(owners.contains(&k), "θ[{k}] has no occurrence");
+        }
+        let n = problem.num_circuits();
+        assert_eq!(
+            problem.num_gradient_circuits().unwrap(),
+            n * (1 + 2 * owners.len())
+        );
+    }
+
+    #[test]
+    fn gradient_circuits_start_with_the_base_batch_and_check_theta() {
+        let problem = &catalogue()[0];
+        let theta: Vec<f64> = (0..problem.num_params()).map(|i| 0.1 * i as f64).collect();
+        let circuits = problem.gradient_circuits(&theta).unwrap();
+        assert_eq!(circuits.len(), problem.num_gradient_circuits().unwrap());
+        for (gradient, base) in circuits.iter().zip(problem.bind_batch(&theta).unwrap()) {
+            assert_eq!(gradient.gates(), base.gates());
+        }
+        let err = problem.gradient_circuits(&theta[1..]).unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::Circuit(CircuitError::WrongNumberOfParams {
+                expected: problem.num_params(),
+                got: problem.num_params() - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn gradient_from_counts_matches_gradient_from_probabilities() {
+        // Synthetic one-qubit weights in the gradient layout: the counts and
+        // the probabilities describe the same distributions, so both paths
+        // must give the same gradient.
+        let problem = one_qubit_z0_problem(&[1.0, -1.0]);
+        let total = problem.num_gradient_circuits().unwrap();
+        let counts: Vec<HashMap<String, u64>> = (0..total as u64)
+            .map(|i| counts(&[("0", 3 + i % 5), ("1", 1 + (7 * i) % 4)]))
+            .collect();
+        let probabilities: Vec<HashMap<String, f64>> = counts
+            .iter()
+            .map(|c| {
+                let sum = c.values().sum::<u64>() as f64;
+                c.iter()
+                    .map(|(k, &v)| (k.clone(), v as f64 / sum))
+                    .collect()
+            })
+            .collect();
+        let from_counts = problem.gradient_from_counts(&counts).unwrap();
+        let from_probabilities = problem.gradient_from_probabilities(&probabilities).unwrap();
+        assert_eq!(from_counts.len(), problem.num_params());
+        for (c, p) in from_counts.iter().zip(&from_probabilities) {
+            assert!(
+                (c - p).abs() < 1e-12,
+                "{from_counts:?} vs {from_probabilities:?}"
+            );
+        }
+        let err = problem.gradient_from_counts(&counts[1..]).unwrap_err();
+        assert_eq!(
+            err,
+            QmlError::CountsLengthMismatch {
+                expected: total,
+                got: total - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn subset_keeps_the_untied_templates() {
+        let problem = &catalogue()[1];
+        let occurrences = problem.untied.as_ref().unwrap().owners.len();
+        let sub = problem.subset(&[1]).unwrap();
+        assert_eq!(sub.num_gradient_circuits().unwrap(), 1 + 2 * occurrences);
+        let theta: Vec<f64> = (0..sub.num_params()).map(|i| 0.2 * i as f64).collect();
+        let circuits = sub.gradient_circuits(&theta).unwrap();
+        assert_eq!(
+            circuits[0].gates(),
+            problem.bind_batch(&theta).unwrap()[1].gates()
         );
     }
 }

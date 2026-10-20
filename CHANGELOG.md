@@ -20,8 +20,9 @@ Changes on `main` since 0.7.2.
   ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
   argmax or raw decisions; and squared-error, binary and categorical
   cross-entropy and hinge losses. It builds `polypus-circuit` circuits and
-  turns measurement counts into a fitness, but never runs them. It is not yet
-  reachable from Python.
+  turns measurement counts into a fitness, and into an exact parameter-shift
+  gradient that stays exact when convolution and pooling reuse a parameter
+  across gates, but never runs them. It is not yet reachable from Python.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with

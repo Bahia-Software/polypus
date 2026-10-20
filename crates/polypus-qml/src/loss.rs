@@ -102,7 +102,7 @@ impl Loss {
     /// The derivative of the per-sample loss with respect to `prediction`
     /// (`d loss / d ⟨O₀⟩`), the chain-rule factor a parameter-shift gradient
     /// multiplies against the shift of the raw expectation (design doc §17,
-    /// [`QmlProblem::param_gradient`](crate::QmlProblem::param_gradient)). Every
+    /// [`QmlProblem::gradient_from_counts`](crate::QmlProblem::gradient_from_counts)). Every
     /// scalar branch below is the analytic derivative of the matching arm of
     /// [`evaluate`](Self::evaluate) and is finite for finite inputs.
     ///
