@@ -1157,6 +1157,13 @@ fn extract_labels(y_train: &Bound<'_, PyAny>) -> PyResult<Vec<Label>> {
 /// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
 /// Any other value type is a `TypeError` naming the key; a non-empty `options` on
 /// `local`/`cunqa`, which would ignore it, is a `ValueError`.
+///
+/// With `infrastructure="qmio"` the QPU endpoint (`ZMQ_SERVER`, or the
+/// `endpoint` option) must be trusted: the ZeroMQ link is neither encrypted nor
+/// authenticated, and the 64 MiB reply cap is checked only after a reply has
+/// been received, so a hostile endpoint can make the process allocate as much
+/// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
+/// transport threat model" in `docs/backends.md`).
 #[pyfunction(signature=(qc, shots, infrastructure, n_qpus=1, nodes=1, cores_per_qpu=2, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
 pub fn run_quantum_circuit<'py>(
     qc: Bound<'py, PyAny>,
@@ -1358,6 +1365,13 @@ pub fn run_quantum_circuit<'py>(
 /// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
 /// Any other value type is a `TypeError` naming the key; a non-empty `options` on
 /// `local`/`cunqa`, which would ignore it, is a `ValueError`.
+///
+/// With `infrastructure="qmio"` the QPU endpoint (`ZMQ_SERVER`, or the
+/// `endpoint` option) must be trusted: the ZeroMQ link is neither encrypted nor
+/// authenticated, and the 64 MiB reply cap is checked only after a reply has
+/// been received, so a hostile endpoint can make the process allocate as much
+/// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
+/// transport threat model" in `docs/backends.md`).
 ///
 /// Example:
 ///
@@ -1641,6 +1655,13 @@ fn bind_feature_rows<'py>(
 /// `list`/`tuple` of `str` (e.g. `{"command": ["python3", "/my dir/worker.py"]}`).
 /// Any other value type is a `TypeError` naming the key; a non-empty `options` on
 /// `local`/`cunqa`, which would ignore it, is a `ValueError`.
+///
+/// With `infrastructure="qmio"` the QPU endpoint (`ZMQ_SERVER`, or the
+/// `endpoint` option) must be trusted: the ZeroMQ link is neither encrypted nor
+/// authenticated, and the 64 MiB reply cap is checked only after a reply has
+/// been received, so a hostile endpoint can make the process allocate as much
+/// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
+/// transport threat model" in `docs/backends.md`).
 ///
 /// Example (supervised binary classifier, parity read-out):
 ///

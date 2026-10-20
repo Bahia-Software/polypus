@@ -549,7 +549,10 @@ a circuit in the list is neither copied nor transpiled).
   backend agree on all three (issue #251; before it the native backend used
   `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
   verified; QMIO receives the declared width in all three program formats
-  (the QIR export's `required_num_results`, issue #322).
+  (the QIR export's `required_num_results`, issue #322). The QMIO reply parser
+  requires one key width per reply (and per merged register) but does not
+  compare it with the declared width until the QPU's key width is verified
+  (issue #78).
 - The classical width is bounded. A circuit holds at most
   `MAX_REGISTER_BITS` (1,000,000) classical bits: the importers reject a wider
   declaration and the builder a `measure` into a bit at or beyond it
