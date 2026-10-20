@@ -45,7 +45,7 @@ impl QmlProblem {
     ///    [`Decision::Argmax`], which no v1 loss supports
     ///    ([`ValidationError::DecisionNotSupportedByLoss`], design doc §8).
     /// 3. every label lies in the loss's domain
-    ///    ([`Loss::validate_label`] → [`ValidationError::LabelDomain`]).
+    ///    (`Loss::validate_label` → [`ValidationError::LabelDomain`]).
     ///
     /// The per-sample [`template_for`](CompiledModel::template_for) can only
     /// fail on a feature-count mismatch, already ruled out by check 1, so the
@@ -363,7 +363,7 @@ impl QmlProblem {
     ///
     /// where `(⟨O_i⟩(θ+) − ⟨O_i⟩(θ−))/2` is the parameter-shift derivative of
     /// the raw expectation (exact for the `±1`-eigenvalue generators this crate
-    /// uses) and `Loss'` is [`Loss::gradient`]. The leading `−(1/n)` mirrors
+    /// uses) and `Loss'` is `Loss::gradient`. The leading `−(1/n)` mirrors
     /// `fitness_from_counts`' `−mean_loss` so the sign convention agrees: higher
     /// fitness is better, and this is `∂fitness/∂θ_k` (the ascent direction).
     ///
@@ -442,7 +442,7 @@ impl QmlProblem {
     /// `−(1/n) · Σᵢ Σⱼ CE'(z_i, yᵢ)[j] · (⟨O_j⟩(θ+) − ⟨O_j⟩(θ−)) / 2`
     ///
     /// where `z_i = base_expectations[i]` is sample `i`'s full class-expectation
-    /// vector, `CE'` is [`categorical_cross_entropy_gradient`] (a per-class
+    /// vector, `CE'` is `categorical_cross_entropy_gradient` (a per-class
     /// vector), and each `(⟨O_j⟩(θ+) − ⟨O_j⟩(θ−))/2` is the parameter-shift
     /// derivative of class `j`'s raw expectation. The leading `−(1/n)` matches
     /// [`fitness_from_counts`](Self::fitness_from_counts)'s `−mean_loss`, so the

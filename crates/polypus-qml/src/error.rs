@@ -230,9 +230,9 @@ pub enum ValidationError {
         loss: Loss,
     },
     /// A categorical label is a valid non-negative integer (already checked by
-    /// [`Loss::validate_label`]) but names a class `≥ num_classes`. Raised by
+    /// `Loss::validate_label`) but names a class `≥ num_classes`. Raised by
     /// [`QmlProblem::new`](crate::QmlProblem::new), which knows the number of
-    /// observables (`= num_classes`) that [`Loss::validate_label`] does not.
+    /// observables (`= num_classes`) that `Loss::validate_label` does not.
     LabelClassOutOfRange {
         /// Index of the offending sample.
         sample: usize,
@@ -440,7 +440,7 @@ pub enum QmlError {
     },
     /// A counts map handed to the expectation estimator has keys whose width
     /// does not match, or a Pauli string references a position wider than the
-    /// keys carry (see [`expectation_from_counts`](crate::observables)).
+    /// keys carry (see `expectation_from_counts`).
     CountsWidthMismatch {
         /// The expected bitstring width.
         expected: usize,
@@ -455,7 +455,7 @@ pub enum QmlError {
     ///
     /// This is a unit variant: `emit` sees only the sample it is handed, not
     /// its index in the dataset, so it cannot report a `sample` position
-    /// without widening the [`LayerOps::emit`](crate::model) signature for this
+    /// without widening the `LayerOps::emit` signature for this
     /// single case.
     ZeroNormSample,
     /// A feature handed to the [`BasisEncoder`](crate::BasisEncoder) is neither
@@ -509,8 +509,8 @@ pub enum QmlError {
         /// The length of the offending sample's expectation vector.
         got: usize,
     },
-    /// [`Loss::evaluate`](crate::Loss::evaluate) or
-    /// [`Loss::gradient`](crate::Loss::gradient) was reached with
+    /// `Loss::evaluate` or
+    /// `Loss::gradient` was reached with
     /// `Loss::CategoricalCrossEntropy`, which has no scalar form: it scores a
     /// whole per-class expectation vector, not a single `⟨O₀⟩`, and is served
     /// instead by the free `categorical_cross_entropy`/

@@ -207,7 +207,7 @@ impl QuantumModel {
     /// may raise e.g. [`ValidationError::NotEnoughQubits`]), that the model
     /// reserved at least one trainable parameter
     /// ([`ValidationError::NoTrainableParams`]), and finally that the readout
-    /// resolves against the final active qubits (see [`resolve_readout`]).
+    /// resolves against the final active qubits (see `resolve_readout`).
     pub fn compile(self, num_features: usize) -> Result<CompiledModel, ValidationError> {
         if self.num_qubits < 1 {
             return Err(ValidationError::NoQubits);
@@ -486,8 +486,8 @@ impl CompiledModel {
     /// [`Decision`](crate::Decision) (design doc §7.1) — the inference-only
     /// counterpart of
     /// [`QmlProblem::predict_from_counts`](crate::QmlProblem::predict_from_counts),
-    /// usable directly on a `CompiledModel` (e.g. one loaded via
-    /// [`TrainedModel`]) without a `Dataset`/`Loss`.
+    /// usable directly on a `CompiledModel` (e.g. one loaded via the
+    /// `serde`-gated `TrainedModel`) without a `Dataset`/`Loss`.
     ///
     /// Not gated behind `serde`: inference from counts is useful whether or not
     /// the model was loaded from disk.

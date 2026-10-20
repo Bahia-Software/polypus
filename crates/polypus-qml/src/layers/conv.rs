@@ -30,9 +30,9 @@ pub enum ConvBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pairing {
-    /// `(0,1),(2,3),…` — [`even_pairs`](crate::layers::even_pairs).
+    /// `(0,1),(2,3),…` — `even_pairs`.
     EvenPairs,
-    /// `(1,2),(3,4),…` — [`odd_pairs`](crate::layers::odd_pairs).
+    /// `(1,2),(3,4),…` — `odd_pairs`.
     OddPairs,
     /// All [`EvenPairs`](Self::EvenPairs) followed by all
     /// [`OddPairs`](Self::OddPairs) — the Cong–Choi–Lukin pattern (the default).

@@ -17,7 +17,7 @@ use crate::observables::{BitstringWeight, Observable, ResolvedObservable};
 ///
 /// `Decision` never participates in the loss (design doc §8): it is an
 /// inference-time projection of the expectations, applied by
-/// [`ResolvedReadout::predict`].
+/// `ResolvedReadout::predict`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Decision {
@@ -41,7 +41,7 @@ pub struct Readout {
     ///
     /// Public and mutable, so a caller can break the count/decision pairing
     /// [`Readout::new`] checked. That is caught rather than trusted:
-    /// [`compile`](crate::QuantumModel::compile) re-runs [`Readout::validate`],
+    /// [`compile`](crate::QuantumModel::compile) re-runs `Readout::validate`,
     /// so a mutated (or deserialized) readout fails compilation with a typed
     /// [`ValidationError`] instead of panicking on `observables[0]` at the
     /// first `predict`.
@@ -62,10 +62,10 @@ impl Readout {
     /// a decision is trainable by the chosen loss is a separate check, made in
     /// [`QmlProblem::new`](crate::QmlProblem::new) where both coexist.)
     ///
-    /// Delegates to [`validate`](Self::validate), which
+    /// Delegates to `validate`, which
     /// [`compile`](crate::QuantumModel::compile) re-runs on the readout it is
     /// handed — one rule, checked in both places — and which also re-checks each
-    /// observable (see [`Observable::validate`]).
+    /// observable (see `Observable::validate`).
     pub fn new(observables: Vec<Observable>, decision: Decision) -> Result<Self, ValidationError> {
         let readout = Readout {
             observables,

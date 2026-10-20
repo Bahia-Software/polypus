@@ -27,7 +27,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 ///
 /// Takes no configuration in v1. Must be the **first** layer of a model — it
 /// prepares a state from `|0…0⟩`, so it cannot compose on top of earlier gates
-/// (see [`plan`](LayerOps::plan)). Consumes **no** trainable parameters: every
+/// (see `LayerOps::plan`). Consumes **no** trainable parameters: every
 /// angle is a [`Fixed`] value derived from the sample.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

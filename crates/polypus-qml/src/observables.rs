@@ -109,7 +109,7 @@ pub struct Observable {
     /// Public and mutable, so a caller can reintroduce a non-finite coefficient
     /// without passing through [`Observable::new`]'s validation. That is caught
     /// rather than trusted: [`compile`](crate::QuantumModel::compile) re-runs
-    /// [`Observable::validate`] on every observable it resolves, so a mutated
+    /// `Observable::validate` on every observable it resolves, so a mutated
     /// (or deserialized) observable fails compilation with a typed
     /// [`ValidationError`] instead of reaching inference. Prefer rebuilding the
     /// observable over mutating in place all the same.

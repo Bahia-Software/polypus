@@ -34,9 +34,9 @@ pub enum Loss {
     /// (design doc §17). Unlike the three losses above — which score the single
     /// raw expectation `⟨O₀⟩` — this one consumes the whole expectation vector
     /// `[⟨O₀⟩, …, ⟨O_{k−1}⟩]` and an integer class index `y ∈ {0, …, k−1}`, so
-    /// it is served by the free [`categorical_cross_entropy`] /
-    /// [`categorical_cross_entropy_gradient`] functions rather than the scalar
-    /// [`evaluate`](Self::evaluate) / [`gradient`](Self::gradient) methods.
+    /// it is served by the free `categorical_cross_entropy` /
+    /// `categorical_cross_entropy_gradient` functions rather than the scalar
+    /// `evaluate` / `gradient` methods.
     /// Requires a non-negative integer label (the class index); the upper bound
     /// `< num_classes` is checked separately by
     /// [`QmlProblem::new`](crate::QmlProblem::new), which knows `k`.

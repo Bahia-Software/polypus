@@ -117,7 +117,7 @@ impl Dataset {
     }
 
     /// Split into `(train, test)` by shuffling sample indices with a
-    /// [`SplitMix64`](crate::rng::SplitMix64) seeded with `seed`, then cutting.
+    /// `SplitMix64` seeded with `seed`, then cutting.
     ///
     /// `test_fraction` must lie in the **open** interval `(0.0, 1.0)`; the
     /// endpoints are rejected with [`ValidationError::InvalidTestFraction`]

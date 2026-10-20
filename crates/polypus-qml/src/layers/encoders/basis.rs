@@ -38,7 +38,7 @@ use crate::model::{LayerAllocation, LayerContext, LayerOps};
 /// first layer: an `X` conditioned on a *classical* feature is an ordinary
 /// unitary, well defined on whatever state precedes it, so it composes anywhere
 /// in the stack (the same reasoning as [`IqpEncoder`]'s). It therefore never
-/// consults [`LayerContext::layers_planned`].
+/// consults `LayerContext::layers_planned`.
 ///
 /// Surplus qubits (when `num_features < active.len()`) receive no gate at all,
 /// the same convention as [`AngleEncoder`].
