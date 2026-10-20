@@ -152,6 +152,7 @@ jobs:
           -p polypus-physics
           -p polypus-optimizers
           -p polypus-observable
+          -p polypus-qml
           -p polypus-backend
           -p polypus-backend-conformance
           -p polypus-subprocess-backend

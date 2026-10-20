@@ -55,7 +55,7 @@ The `publish-crates` job of `release.yml` publishes every workspace crate to
 crates.io on a `vX.Y.Z` tag push (not on manual runs), after the same gates as
 PyPI: the release gate, every wheel build and the wheel smoke tests.
 
-- **Which crates.** All thirteen workspace crates. `polypus-backend`,
+- **Which crates.** All fourteen workspace crates. `polypus-backend`,
   `polypus-subprocess-backend` and `polypus-backend-conformance` are needed by
   the others (`polypus-infrastructure` depends on the first two and
   dev-depends on the third, and crates.io requires dev-dependencies to exist),
@@ -67,7 +67,7 @@ PyPI: the release gate, every wheel build and the wheel smoke tests.
   (dev-dependencies included, ties broken alphabetically). Today:
   `polypus-circuit`, `polypus-logger`, `polypus-observable`, `polypus-backend`,
   `polypus-backend-conformance`, `polypus-optimizers`, `polypus-physics`,
-  `polypus-sim`, `polypus-subprocess-backend`, `polypus-infrastructure`,
+  `polypus-sim`, `polypus-qml`, `polypus-subprocess-backend`, `polypus-infrastructure`,
   `polypus-orchestration`, `polypus-evaluation`, `polypus`. Print the plan
   locally with `python .github/scripts/publish_crates.py --plan`.
 - **Secret.** A crates.io API token with the `publish-new` and

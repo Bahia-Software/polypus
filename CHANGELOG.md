@@ -14,6 +14,14 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
+  datasets with deterministic splits and feature scaling; layered variational
+  models (angle, amplitude, IQP and basis encoders, a hardware-efficient
+  ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
+  argmax or raw decisions; and squared-error, binary and categorical
+  cross-entropy and hinge losses. It builds `polypus-circuit` circuits and
+  turns measurement counts into a fitness, but never runs them. It is not yet
+  reachable from Python.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with

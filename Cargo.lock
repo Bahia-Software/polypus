@@ -925,6 +925,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "polypus-qml"
+version = "0.7.2"
+dependencies = [
+ "log",
+ "polypus-circuit",
+ "polypus-optimizers",
+ "polypus-sim",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "polypus-sim"
 version = "0.7.2"
 dependencies = [
