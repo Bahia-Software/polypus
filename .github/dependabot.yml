@@ -40,11 +40,11 @@ updates:
         patterns:
           - "*"
     ignore:
-      # uuid 1.27 declares rust-version 1.89, above our MSRV, so it breaks the
-      # `msrv` CI job (checked with --locked). Interim: the workspace now uses
-      # the MSRV-aware resolver (`resolver = "3"`), but Dependabot is not known
-      # to honour it (dependabot-core#5423). Drop this ignore once the MSRV is
-      # raised or a Dependabot PR confirms the resolver is respected (#276).
+      # uuid >=1.27 declares rust-version 1.89, above our MSRV, so it breaks
+      # the `msrv` CI job (checked with --locked). The workspace uses the
+      # MSRV-aware resolver (`resolver = "3"`), but Dependabot does not honour
+      # rust-version (dependabot-core#5423, still open). Drop this ignore when
+      # the workspace rust-version is raised to 1.89 or later (#276, #278).
       - dependency-name: "uuid"
         versions: [">=1.27"]
 
