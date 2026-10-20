@@ -200,10 +200,10 @@ fn counts_expectation_matches_exact_expectation() {
     let circuit = &circuits[0];
     let sv = StatevectorSimulator::new().run(circuit).unwrap();
 
-    let exact = sv.expectation_z(&[0]);
+    let exact = sv.expectation_z(&[0]).unwrap();
 
     let raw = sv.sample(200_000, &mut SplitMix64::new(0xC0FFEE));
-    let counts = to_bitstring_counts(raw, circuit.num_qubits);
+    let counts = to_bitstring_counts(raw, circuit.num_qubits());
     let estimate = problem.predict_from_counts(&counts).unwrap();
 
     assert!(
@@ -236,10 +236,10 @@ fn pooling_expectation_is_consistent_with_the_global_state() {
     let sv = StatevectorSimulator::new().run(circuit).unwrap();
 
     // The readout's logical position 0 → physical qubit 0 after pooling.
-    let exact = sv.expectation_z(&[0]);
+    let exact = sv.expectation_z(&[0]).unwrap();
 
     let raw = sv.sample(200_000, &mut SplitMix64::new(0xBADF00D));
-    let counts = to_bitstring_counts(raw, circuit.num_qubits);
+    let counts = to_bitstring_counts(raw, circuit.num_qubits());
     let estimate = problem.predict_from_counts(&counts).unwrap();
 
     assert!(
@@ -447,7 +447,7 @@ fn iqp_encoder_x_expectation_is_the_non_linear_closed_form() {
         // The compiled model inserts the X→Z basis change (an `H` on qubit 0)
         // before the measurement, so a `Z` expectation on the *simulated* state
         // is the `X` expectation of the encoded one.
-        let exact = sv.expectation_z(&[0]);
+        let exact = sv.expectation_z(&[0]).unwrap();
         let want = x[0].cos() * (x[0] * x[1]).cos();
         assert!(
             (exact - want).abs() < 1e-10,
@@ -460,7 +460,7 @@ fn iqp_encoder_x_expectation_is_the_non_linear_closed_form() {
         let bound = &problem.bind_batch(&theta).unwrap()[0];
         let sampled = StatevectorSimulator::new().run(bound).unwrap();
         let raw = sampled.sample(200_000, &mut SplitMix64::new(0xB0BACAFE));
-        let counts = to_bitstring_counts(raw, bound.num_qubits);
+        let counts = to_bitstring_counts(raw, bound.num_qubits());
         let estimate = problem.predict_from_counts(&counts).unwrap();
         assert!(
             (want - estimate).abs() < 0.01,

@@ -111,8 +111,8 @@ mod tests {
         let alloc = BasisEncoder.plan(&mut c).unwrap();
         let mut qc = ParameterizedCircuit::new(num_qubits);
         BasisEncoder.emit(&mut qc, &alloc, x).unwrap();
-        assert_eq!(qc.num_params, 0, "an encoder must bind no trainable θ");
-        qc.gates
+        assert_eq!(qc.num_params(), 0, "an encoder must bind no trainable θ");
+        qc.gates().to_vec()
     }
 
     #[test]
@@ -173,7 +173,7 @@ mod tests {
         let alloc = BasisEncoder.plan(&mut c).unwrap();
         let mut qc = ParameterizedCircuit::new(3);
         BasisEncoder.emit(&mut qc, &alloc, &[1.0]).unwrap();
-        assert_eq!(qc.gates, vec![GateInstruction::X(0)]);
+        assert_eq!(qc.gates(), vec![GateInstruction::X(0)]);
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
         };
         let mut qc = ParameterizedCircuit::new(4);
         BasisEncoder.emit(&mut qc, &alloc, &[0.0, 1.0]).unwrap();
-        assert_eq!(qc.gates, vec![GateInstruction::X(3)]);
+        assert_eq!(qc.gates(), vec![GateInstruction::X(3)]);
     }
 
     /// Emit `x` over 2 qubits and return the error, for the rejection cases.

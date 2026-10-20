@@ -194,7 +194,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         a.emit(&mut qc, &alloc, &[]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 ry(0, 0),
                 ry(1, 1),
@@ -203,7 +203,7 @@ mod tests {
                 GateInstruction::Cx(1, 2),
             ]
         );
-        assert_eq!(qc.num_params, 3);
+        assert_eq!(qc.num_params(), 3);
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         a.emit(&mut qc, &alloc, &[]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 ry(0, 0),
                 ry(1, 1),
@@ -240,7 +240,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         a.emit(&mut qc, &alloc, &[]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 ry(0, 0),
                 ry(1, 1),
@@ -267,7 +267,7 @@ mod tests {
         a.emit(&mut qc, &alloc, &[]).unwrap();
         // 1 qubit × 2 axes × (1 rep + final) = 4 rotations, no entangling gate.
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 GateInstruction::Ry {
                     qubit: 0,

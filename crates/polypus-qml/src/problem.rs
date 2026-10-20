@@ -1299,7 +1299,7 @@ mod tests {
         let mut rng = SplitMix64::new(0xC0FFEE_u64);
         for circuit in &circuits {
             let sv = sim.run(circuit).unwrap();
-            let width = circuit.num_qubits;
+            let width = circuit.num_qubits();
             // Exact probabilities, keyed exactly as the native backend does.
             let probs_map: HashMap<String, f64> = sv
                 .probabilities()

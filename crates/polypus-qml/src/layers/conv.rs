@@ -239,7 +239,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(2);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 ry(0, 0),
                 ry(1, 1),
@@ -258,7 +258,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(2);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 rxx(0, 1, 0),
                 GateInstruction::Sdg(0),
@@ -287,9 +287,9 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(4);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         // 3 pairs × 5 gates.
-        assert_eq!(qc.gates.len(), 15);
+        assert_eq!(qc.gates().len(), 15);
         // No Param index outside 0..4 is ever used — the pairs reuse the range.
-        assert_eq!(qc.num_params, 4);
+        assert_eq!(qc.num_params(), 4);
     }
 
     #[test]
@@ -304,8 +304,8 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(4);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         // 3 pairs × 7 gates.
-        assert_eq!(qc.gates.len(), 21);
-        assert_eq!(qc.num_params, 3);
+        assert_eq!(qc.gates().len(), 21);
+        assert_eq!(qc.num_params(), 3);
     }
 
     #[test]

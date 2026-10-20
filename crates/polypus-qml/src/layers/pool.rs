@@ -180,7 +180,7 @@ mod tests {
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         // EvenPositions: keep position 0 (physical 0), discard 1 (physical 1).
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 GateInstruction::Rz {
                     qubit: 1,
@@ -233,8 +233,8 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         // Only one block (4 gates); qubit 2 receives no gate.
-        assert_eq!(qc.gates.len(), 4);
-        assert!(qc.gates.iter().all(|g| !mentions(g, 2)));
+        assert_eq!(qc.gates().len(), 4);
+        assert!(qc.gates().iter().all(|g| !mentions(g, 2)));
     }
 
     /// Whether a gate touches `qubit` (enough for the leftover-untouched check).
@@ -260,8 +260,8 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(4);
         layer.emit(&mut qc, &alloc, &[]).unwrap();
         // 2 pairs × 4 gates.
-        assert_eq!(qc.gates.len(), 8);
-        assert_eq!(qc.num_params, 3);
+        assert_eq!(qc.gates().len(), 8);
+        assert_eq!(qc.num_params(), 3);
     }
 
     #[test]

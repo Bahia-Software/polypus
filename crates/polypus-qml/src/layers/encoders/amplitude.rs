@@ -219,7 +219,7 @@ mod tests {
         let alloc = enc.plan(&mut c).unwrap();
         let mut qc = ParameterizedCircuit::new(num_qubits);
         enc.emit(&mut qc, &alloc, x).unwrap();
-        qc.gates
+        qc.gates().to_vec()
     }
 
     // --- k = 1: hand-verifiable base cases (the sanity anchor) -------------

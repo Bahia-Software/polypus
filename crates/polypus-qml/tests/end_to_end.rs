@@ -57,7 +57,7 @@ impl EvaluationOracle for QmlTestOracle {
                             .simulator
                             .run_and_sample(circuit, self.shots, self.seed + i as u64)
                             .expect("statevector simulation succeeds");
-                        to_bitstring_counts(raw, circuit.num_qubits)
+                        to_bitstring_counts(raw, circuit.num_qubits())
                     })
                     .collect();
                 self.problem
@@ -151,7 +151,7 @@ fn native_training_reaches_perfect_train_accuracy() {
         let raw = simulator
             .run_and_sample(circuit, shots, sample_seed + i as u64)
             .expect("simulation succeeds");
-        let counts = to_bitstring_counts(raw, circuit.num_qubits);
+        let counts = to_bitstring_counts(raw, circuit.num_qubits());
         let prediction = problem.predict_from_counts(&counts).expect("prediction");
         if prediction == train.labels()[i] {
             correct += 1;

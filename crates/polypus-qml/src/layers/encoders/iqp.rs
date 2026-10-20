@@ -149,8 +149,8 @@ mod tests {
         let alloc = enc.plan(&mut c).unwrap();
         let mut qc = ParameterizedCircuit::new(num_qubits);
         enc.emit(&mut qc, &alloc, x).unwrap();
-        assert_eq!(qc.num_params, 0, "an encoder must bind no trainable θ");
-        qc.gates
+        assert_eq!(qc.num_params(), 0, "an encoder must bind no trainable θ");
+        qc.gates().to_vec()
     }
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(4);
         enc.emit(&mut qc, &alloc, &[0.3, 0.5]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 GateInstruction::H(1),
                 GateInstruction::H(3),

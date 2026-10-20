@@ -106,20 +106,21 @@ fn z_readout_qasm_is_unchanged() {
     let qasm = model
         .bind(&[0.5, 1.25], &[0.1, 0.2, 0.3, 0.4])
         .unwrap()
-        .to_qasm2();
+        .try_to_qasm2()
+        .unwrap();
 
     let expected = "\
 OPENQASM 2.0;
 include \"qelib1.inc\";
 qreg q[2];
 creg c[2];
-ry(0.500000000000) q[0];
-ry(1.250000000000) q[1];
-ry(0.100000000000) q[0];
-ry(0.200000000000) q[1];
+ry(0.5) q[0];
+ry(1.25) q[1];
+ry(0.1) q[0];
+ry(0.2) q[1];
 cx q[0],q[1];
-ry(0.300000000000) q[0];
-ry(0.400000000000) q[1];
+ry(0.3) q[0];
+ry(0.4) q[1];
 measure q -> c;
 ";
     assert_eq!(qasm, expected);

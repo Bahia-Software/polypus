@@ -726,18 +726,24 @@ mod tests {
         assert_eq!(model.num_features(), 2);
 
         let template = model.template_for(&[0.1, 0.2]).unwrap();
-        assert_eq!(template.num_params, 4);
+        assert_eq!(template.num_params(), 4);
         // Encoder rotations (Fixed), ansatz rotations (Param), one Cx, and the
         // terminal measure.
-        assert_eq!(*template.gates.last().unwrap(), GateInstruction::MeasureAll);
         assert_eq!(
-            polypus_circuit::terminal_measurement_violation(&template.gates),
+            *template.gates().last().unwrap(),
+            GateInstruction::MeasureAll
+        );
+        assert_eq!(
+            polypus_circuit::terminal_measurement_violation(template.gates()),
             None
         );
 
         let concrete = model.bind(&[0.1, 0.2], &[0.3, 0.4, 0.5, 0.6]).unwrap();
-        assert_eq!(concrete.num_qubits, 2);
-        assert_eq!(*concrete.gates.last().unwrap(), GateInstruction::MeasureAll);
+        assert_eq!(concrete.num_qubits(), 2);
+        assert_eq!(
+            *concrete.gates().last().unwrap(),
+            GateInstruction::MeasureAll
+        );
 
         // Wrong θ length surfaces as a wrapped CircuitError, not a panic.
         let err = model.bind(&[0.1, 0.2], &[0.3]).unwrap_err();
@@ -770,7 +776,7 @@ mod tests {
 
         // x = [1, 0]: the encoder flips qubit 0 only, and does so *after* the
         // angle encoder's rotations rather than replacing them.
-        let gates = model.template_for(&[1.0, 0.0]).unwrap().gates;
+        let gates = model.template_for(&[1.0, 0.0]).unwrap().gates().to_vec();
         assert_eq!(
             gates[..3],
             [
@@ -860,9 +866,12 @@ mod tests {
         let template = model.template_for(&[0.1, 0.2]).unwrap();
         // Nothing but the layer gates precedes the terminal measurement — in
         // particular no H/Sdg was inserted (real_amplitudes emits neither).
-        assert_eq!(*template.gates.last().unwrap(), GateInstruction::MeasureAll);
+        assert_eq!(
+            *template.gates().last().unwrap(),
+            GateInstruction::MeasureAll
+        );
         assert!(!template
-            .gates
+            .gates()
             .iter()
             .any(|g| matches!(g, GateInstruction::H(_) | GateInstruction::Sdg(_))));
     }
@@ -873,7 +882,7 @@ mod tests {
             compile_with_readout(readout_of(vec![single(0, Pauli::X)], Decision::Sign)).unwrap();
         // active == [0, 1], so logical position 0 is physical qubit 0.
         assert_eq!(model.basis_change, vec![(0, Pauli::X)]);
-        let g = model.template_for(&[0.1, 0.2]).unwrap().gates;
+        let g = model.template_for(&[0.1, 0.2]).unwrap().gates().to_vec();
         let n = g.len();
         assert_eq!(g[n - 2], GateInstruction::H(0));
         assert_eq!(g[n - 1], GateInstruction::MeasureAll);
@@ -884,7 +893,7 @@ mod tests {
         let model =
             compile_with_readout(readout_of(vec![single(1, Pauli::Y)], Decision::Sign)).unwrap();
         assert_eq!(model.basis_change, vec![(1, Pauli::Y)]);
-        let g = model.template_for(&[0.1, 0.2]).unwrap().gates;
+        let g = model.template_for(&[0.1, 0.2]).unwrap().gates().to_vec();
         let n = g.len();
         // Temporal order: Sdg first, then H, then the measurement.
         assert_eq!(g[n - 3], GateInstruction::Sdg(1));

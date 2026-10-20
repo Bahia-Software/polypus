@@ -162,7 +162,7 @@ fn every_template_is_terminal_c4() {
         for x in &samples {
             let template = model.template_for(x).unwrap();
             assert_eq!(
-                terminal_measurement_violation(&template.gates),
+                terminal_measurement_violation(template.gates()),
                 None,
                 "template must satisfy C-4 (terminal measurement)"
             );
@@ -179,7 +179,7 @@ fn bound_circuit_qasm_is_a_fixed_point_c2() {
             .collect();
         for x in &samples {
             let concrete = model.bind(x, &theta).unwrap();
-            let qasm1 = concrete.to_qasm2();
+            let qasm1 = concrete.try_to_qasm2().unwrap();
             let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
             let qasm2 = imported.to_qasm2_with_params(&[]).unwrap();
             assert_eq!(qasm1, qasm2, "QASM export must be a fixed point (C-2)");
@@ -194,7 +194,7 @@ fn num_params_matches_largest_param_index() {
         // first sample.
         let template = model.template_for(&samples[0]).unwrap();
         let mut max_index: Option<usize> = None;
-        for gate in &template.gates {
+        for gate in template.gates() {
             let theta = match gate {
                 GateInstruction::Rx { theta, .. }
                 | GateInstruction::Ry { theta, .. }
@@ -259,12 +259,12 @@ fn bind_batch_circuits_are_c4_clean_and_c2_valid_c10() {
         for concrete in &circuits {
             // C-4: terminal measurement.
             assert_eq!(
-                terminal_measurement_violation(&concrete.gates),
+                terminal_measurement_violation(concrete.gates()),
                 None,
                 "bind_batch circuit must satisfy C-4"
             );
             // C-2: QASM export is a fixed point.
-            let qasm1 = concrete.to_qasm2();
+            let qasm1 = concrete.try_to_qasm2().unwrap();
             let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
             let qasm2 = imported.to_qasm2_with_params(&[]).unwrap();
             assert_eq!(
@@ -281,7 +281,7 @@ fn fitness_from_counts_is_finite_c10() {
         let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
         // Synthetic counts (hand-built, no simulation): each circuit gets a
         // full-shot map over "0…0" and "0…01" of the circuit's register width.
-        let width = circuits[0].num_qubits;
+        let width = circuits[0].num_qubits();
         let zeros = "0".repeat(width);
         let one = format!("{}1", "0".repeat(width - 1));
         let counts: Vec<HashMap<String, u64>> = circuits
@@ -463,7 +463,7 @@ fn a_rounding_emptied_split_partition_cannot_reach_a_problem_c10() {
             "a QmlProblem always has at least one circuit (C-10)"
         );
         let circuits = problem.bind_batch(&theta(problem.num_params())).unwrap();
-        let width = circuits[0].num_qubits;
+        let width = circuits[0].num_qubits();
         let zeros = "0".repeat(width);
         let counts: Vec<HashMap<String, u64>> = circuits
             .iter()

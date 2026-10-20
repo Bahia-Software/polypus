@@ -117,7 +117,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         enc.emit(&mut qc, &alloc, &[0.1, 0.2, 0.3]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 GateInstruction::Ry {
                     qubit: 0,
@@ -133,7 +133,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(qc.num_params, 0);
+        assert_eq!(qc.num_params(), 0);
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(2);
         enc.emit(&mut qc, &alloc, &[0.5, 0.6]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![
                 GateInstruction::H(0),
                 GateInstruction::Rz {
@@ -182,7 +182,7 @@ mod tests {
         let mut qc = ParameterizedCircuit::new(3);
         enc.emit(&mut qc, &alloc, &[0.7]).unwrap();
         assert_eq!(
-            qc.gates,
+            qc.gates(),
             vec![GateInstruction::Ry {
                 qubit: 0,
                 theta: Fixed(0.7)
