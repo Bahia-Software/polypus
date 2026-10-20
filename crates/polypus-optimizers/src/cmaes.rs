@@ -40,6 +40,14 @@ use std::fmt;
 /// `[0, 2π)` and the returned `best_params` is the wrapped candidate the
 /// oracle scored.
 ///
+/// The largest coordinate standard deviation, `σ·max_i √C_ii`, is capped at
+/// `max(σ₀, π/2)` by shrinking σ after each update, like pycma's `maxstd`.
+/// A wider normal wraps to an almost uniform distribution on the circle, where
+/// the ranking no longer tells the search which way to move and the step-size
+/// adaptation drifts without bound. Without the cap, a run whose mean starts
+/// near a fitness minimum (where longer steps rank better) can grow σ past the
+/// period and wander uniformly until the stagnation stop ends it.
+///
 /// # Stopping and IPOP restarts
 ///
 /// A run (the first one, or a restart) ends when one of its stop criteria
@@ -155,7 +163,8 @@ pub struct AlgorithmCmaEsArgs {
     /// spread over the whole circle. Much larger values spread the samples
     /// over more than one turn, where the periodic fitness no longer tells
     /// the search which way to move, and runs stall more often before they
-    /// converge.
+    /// converge. The coordinate standard deviations never exceed
+    /// `max(sigma0, π/2)` during the run.
     pub sigma0: f64,
     /// Minimum improvement of a run's best fitness over its last
     /// [`patience`](Self::patience) generations below which the run ends
@@ -437,6 +446,9 @@ const TOL_X_UP: f64 = 1e4;
 /// ConditionCov: a run ends once the condition number of `C` exceeds this
 /// (Hansen's default; beyond it the decomposition loses all precision).
 const MAX_CONDITION: f64 = 1e14;
+/// The cap on the largest coordinate standard deviation, `σ·max_i √C_ii`,
+/// when `σ₀` is smaller: a quarter turn, so `m ± 2σ` already spans the circle.
+const MAX_SPREAD: f64 = FRAC_PI_2;
 
 /// Check every precondition of [`AlgorithmCmaEsArgs`] and return the run's
 /// batch schedule.
@@ -629,10 +641,13 @@ struct Distribution {
     /// The condition number of `C` at the last decomposition, when it was out
     /// of bounds.
     ill_conditioned: Option<f64>,
+    /// The cap on `σ·max_i √C_ii`: `max(σ₀, MAX_SPREAD)`.
+    max_spread: f64,
 }
 
 impl Distribution {
     /// A run's initial distribution: `N(mean, σ₀²·I)`, with zero paths.
+    /// `sigma` is σ₀.
     fn new(mean: Array1<f64>, sigma: f64) -> Self {
         let n = mean.len();
         Self {
@@ -647,6 +662,7 @@ impl Distribution {
             generation: 0,
             decomposed_at: 0,
             ill_conditioned: None,
+            max_spread: sigma.max(MAX_SPREAD),
         }
     }
 
@@ -727,6 +743,12 @@ impl Distribution {
 
         // σ ← σ·exp((c_σ/d_σ)·(‖p_σ‖/E‖N(0, I)‖ − 1)).
         self.sigma *= ((s.cs / s.ds) * (ps_norm / s.chi_n - 1.0)).exp();
+        // Cap the widest coordinate (`AlgorithmCmaEs`, `# Angles`). A non-finite
+        // spread is left to `degeneration`.
+        let spread = self.sigma * self.max_coordinate_std();
+        if spread > self.max_spread {
+            self.sigma *= self.max_spread / spread;
+        }
 
         self.generation += 1;
         if self.generation - self.decomposed_at >= s.eigen_gap {
@@ -766,6 +788,15 @@ impl Distribution {
         self.basis = eig.vectors;
     }
 
+    /// `max_i √C_ii`, the largest coordinate standard deviation per unit σ.
+    fn max_coordinate_std(&self) -> f64 {
+        self.cov
+            .diag()
+            .iter()
+            .fold(0.0_f64, |m, &c| m.max(c))
+            .sqrt()
+    }
+
     /// The first of Hansen's termination criteria that holds, if any.
     fn degeneration(&self, sigma0: f64) -> Option<StopReason> {
         let finite = self.sigma.is_finite()
@@ -783,13 +814,7 @@ impl Distribution {
             return Some(StopReason::IllConditioned(condition));
         }
         // σ·max_i √C_ii: the largest coordinate standard deviation.
-        let spread = self.sigma
-            * self
-                .cov
-                .diag()
-                .iter()
-                .fold(0.0_f64, |m, &c| m.max(c))
-                .sqrt();
+        let spread = self.sigma * self.max_coordinate_std();
         if spread < TOL_X * sigma0 {
             return Some(StopReason::Collapsed(spread));
         }
@@ -1135,6 +1160,41 @@ mod tests {
         let sphere = |x: &[f64]| -x.iter().map(|v| (v - 3.0).powi(2)).sum::<f64>();
         let (_, dist) = drive(sphere, &strategy, Array1::from_elem(4, 3.0), 1.0, 150, 5);
         assert!(dist.sigma < 1e-4, "sigma {}", dist.sigma);
+    }
+
+    #[test]
+    fn step_size_stays_within_a_quarter_turn_at_a_fitness_minimum() {
+        // Started at the minimum of the periodic sphere (the 0/2π seam), the
+        // longest steps rank best, so CSA grows σ every generation. The cap
+        // keeps σ·max√C_ii at π/2, and once the mean leaves the minimum the
+        // run converges to the maximum at π.
+        let strategy = Strategy::new(2, 6);
+        let sphere = |x: &[f64]| {
+            -x.iter()
+                .map(|v| (v - std::f64::consts::PI).powi(2))
+                .sum::<f64>()
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut dist = Distribution::new(Array1::zeros(2), 0.3);
+        let mut capped = false;
+        for _ in 0..200 {
+            let steps = dist.sample(&strategy, &mut rng);
+            let values: Vec<f64> = steps.iter().map(|y| sphere(&dist.candidate(y))).collect();
+            dist.update(&strategy, &steps, &ranking(&values));
+            let spread = dist.sigma * dist.max_coordinate_std();
+            assert!(spread <= FRAC_PI_2 * (1.0 + 1e-12), "spread {spread}");
+            capped |= spread > FRAC_PI_2 * (1.0 - 1e-12);
+        }
+        assert!(capped, "the run never reached the cap");
+        let x: Vec<f64> = dist.mean.iter().map(|&m| wrap_angle(m)).collect();
+        assert!(sphere(&x) > -1e-12, "mean {x:?}");
+
+        // A wider σ₀ is its own cap.
+        assert_eq!(Distribution::new(Array1::zeros(2), 3.0).max_spread, 3.0);
+        assert_eq!(
+            Distribution::new(Array1::zeros(2), 0.1).max_spread,
+            FRAC_PI_2
+        );
     }
 
     #[test]

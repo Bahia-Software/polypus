@@ -22,7 +22,9 @@ Changes on `main` since 0.7.2.
   `polypus-optimizers`, with its own symmetric eigensolver (no new
   dependency). A seeded run reproduces on the same platform only. With
   restarts, the CUNQA walltime warning assumes a restart after every
-  generation. See the training guide for when to prefer it over DE.
+  generation. The spread of each angle is capped at `max(sigma0, π/2)`, so
+  the step size cannot grow past the 2π period and stall the run (#382).
+  See the training guide for when to prefer it over DE.
 - CUNQA run-flow tests against a fake CUNQA SDK (`qraise`, `run`, `gather`,
   `qdrop`, C-3 counts, C-7 per-QPU seeds), and an opt-in test for a real CUNQA
   family, `POLYPUS_CUNQA_REAL=1 pytest tests/python/test_cunqa_real.py` (#357).

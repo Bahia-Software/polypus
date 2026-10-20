@@ -863,6 +863,28 @@ fn error_messages_name_the_rule() {
 }
 
 #[test]
+fn the_2d_sphere_converges_from_seeds_that_used_to_stall() {
+    // #382: of seeds 0..3000, these grew σ past the 2π period, sampled the
+    // circle uniformly and stopped on stagnation 32–65 generations in, far
+    // from the optimum. The cap on the coordinate spread keeps them on track
+    // (all 3000 converge; checked outside CI, where the full range is slow).
+    const STALLED: [u64; 43] = [
+        7, 427, 436, 437, 452, 489, 560, 591, 605, 650, 769, 785, 798, 839, 869, 899, 1052, 1139,
+        1159, 1352, 1399, 1525, 1551, 1622, 1840, 1913, 1980, 2239, 2259, 2274, 2314, 2376, 2394,
+        2438, 2452, 2592, 2656, 2659, 2830, 2885, 2959, 2962, 2998,
+    ];
+    for seed in STALLED {
+        let outcome = run(setup(sphere, 2, 300, seed).0);
+        assert!(
+            outcome.best_fitness > -1e-8,
+            "seed {seed}: {:e} after {} generations",
+            outcome.best_fitness,
+            outcome.iterations_run
+        );
+    }
+}
+
+#[test]
 fn unseeded_runs_work() {
     // `seed: None` draws from the thread RNG, like the other optimizers.
     let outcome = run(AlgorithmCmaEsArgs {
