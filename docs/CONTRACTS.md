@@ -724,8 +724,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   the best fitness at the end of each executed generation/iteration, so
   `fitness_history.len() == iterations_run` and `fitness_history.last()`
   equals `best_fitness`. It is surfaced on the Python `TrainResult`.
-- **CMA-ES** (`AlgorithmCmaEs`, Rust only for now: Hansen's (μ/μ_w, λ)-CMA-ES
-  with IPOP restarts).
+- **CMA-ES** (`AlgorithmCmaEs`, exposed as `polypus.CMAES`: Hansen's
+  (μ/μ_w, λ)-CMA-ES with IPOP restarts).
   - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG
     draw or oracle call: `dimensions >= 1` (unlike DE and PSO, which accept
     zero), `generations >= 1` (there is no initial batch), `sigma0` finite and
@@ -749,13 +749,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     all runs (never the unevaluated mean), and `fitness_history` is the best
     so far after each generation, across restarts.
   - `CmaEsBatchSchedule` bounds every batch's size before the run starts
-    (exact without restarts), for callers that budget the run.
+    (exact without restarts), for callers that budget the run. The CUNQA
+    walltime warning uses it: one batch per generation, and with restarts the
+    worst case of a restart after every generation
+    (`crates/polypus-orchestration/src/walltime.rs`).
   - Enforced by `crates/polypus-optimizers/tests/cmaes.rs`
     (`best_params_fitness_invariant_holds_across_seeds` checks every
     postcondition above against the batches the oracle saw, over 25 seeds with
     and without restarts; the stagnation, restart, batch-size, wrapping,
     invariance, non-finite, short-oracle and configuration tests) and the unit
-    tests in `crates/polypus-optimizers/src/cmaes.rs` and `src/linalg.rs`.
+    tests in `crates/polypus-optimizers/src/cmaes.rs` and `src/linalg.rs`;
+    through Python by `tests/python/test_cmaes.py` (configuration rejected
+    before any batch, batch sizes and restarts at the seam) and the CMA-ES
+    cases of `tests/python/test_oracle_contract.py`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -873,12 +879,16 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
   so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
   too, its reproducibility guarantee covers both the optimizer trajectory and
-  Aer's sampling.
+  Aer's sampling. A seeded `CMAES` run reproduces on the same platform and
+  build only: its steps call `exp`, `ln` and `cos` from the platform's math
+  library, which is not guaranteed correctly rounded, so its trajectory can
+  differ between platforms even over a platform-independent backend (DE's
+  steps are basic arithmetic only).
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
@@ -886,7 +896,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG` instance) or while drawing the random bytes of
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance) or while drawing the random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.

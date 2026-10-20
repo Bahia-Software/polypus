@@ -14,10 +14,15 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
-- Rust: CMA-ES in `polypus-optimizers` (`AlgorithmCmaEs`, `AlgorithmCmaEsArgs`
-  and `CmaEsBatchSchedule`): Hansen's (μ/μ_w, λ)-CMA-ES for periodic
-  parameters, with optional IPOP restarts that double the population, and its
-  own symmetric eigensolver (no new dependency). Not yet exposed to Python.
+- `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
+  tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
+  and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with
+  optional IPOP restarts that double the population. In Rust it is
+  `AlgorithmCmaEs`, with `AlgorithmCmaEsArgs` and `CmaEsBatchSchedule`, in
+  `polypus-optimizers`, with its own symmetric eigensolver (no new
+  dependency). A seeded run reproduces on the same platform only. With
+  restarts, the CUNQA walltime warning assumes a restart after every
+  generation. See the training guide for when to prefer it over DE.
 - CUNQA run-flow tests against a fake CUNQA SDK (`qraise`, `run`, `gather`,
   `qdrop`, C-3 counts, C-7 per-QPU seeds), and an opt-in test for a real CUNQA
   family, `POLYPUS_CUNQA_REAL=1 pytest tests/python/test_cunqa_real.py` (#357).

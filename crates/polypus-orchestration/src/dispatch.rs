@@ -6,7 +6,7 @@
 //! either the oracle's recorded failure or the optimizer's own config error).
 //! That triplication now lives here once:
 //! [`dispatch_optimizer`] takes a pyo3-free [`Method`] (the binding parses the
-//! `polypus.DE`/`PSO`/`QNG` object into it and builds the QNG variance oracle),
+//! `polypus.DE`/`PSO`/`QNG`/`CMAES` object into it and builds the QNG variance oracle),
 //! runs the matching optimizer, and returns an [`OracleError`] the binding
 //! converts back into a `PyErr`.
 //!
@@ -18,6 +18,7 @@
 //! boxed by the oracle and recovered by the `polypus` edge via `downcast` to
 //! `EvaluationError`, keeping this crate free of `pyo3`.
 
+use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs};
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
@@ -57,6 +58,18 @@ pub struct QngConfig {
     pub tikhonov_reg: f64,
 }
 
+/// CMA-ES configuration, mirroring the `polypus.CMAES` object (see
+/// [`DeConfig`]). `population_size: None` is Hansen's default λ for the run's
+/// `dimensions`.
+pub struct CmaesConfig {
+    pub generations: u32,
+    pub population_size: Option<u32>,
+    pub sigma0: f64,
+    pub tolerance: f64,
+    pub patience: u32,
+    pub restarts: u32,
+}
+
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
 /// variance oracle (built from the Python callback at the binding boundary), so
 /// dispatch stays Python-free.
@@ -64,6 +77,7 @@ pub enum Method {
     De(DeConfig),
     Pso(PsoConfig),
     Qng(QngConfig, Box<dyn VarianceOracle>),
+    Cmaes(CmaesConfig),
 }
 
 /// A training run's failure, in the order the binding must surface it.
@@ -215,6 +229,17 @@ pub fn dispatch_optimizer(
             dimensions,
             variance_oracle,
             tikhonov_reg: cfg.tikhonov_reg,
+            seed: Some(seed),
+        }),
+        Method::Cmaes(cfg) => AlgorithmCmaEs.optimize(AlgorithmCmaEsArgs {
+            oracle,
+            population_size: cfg.population_size,
+            generations: cfg.generations,
+            dimensions,
+            sigma0: cfg.sigma0,
+            tolerance: cfg.tolerance,
+            patience: cfg.patience,
+            restarts: cfg.restarts,
             seed: Some(seed),
         }),
     };
