@@ -25,7 +25,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | Parameter | Description |
 |---|---|
 | `qc` | Parameterized circuit: a `polypus.Circuit` with `polypus.Param(i)` angles, or a Qiskit `QuantumCircuit` |
-| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG` or `polypus.CMAES` |
+| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES` or `polypus.Adam` |
 | `shots` | Shots per circuit execution |
 | `n_qpus` | Number of QPUs the population is spread over |
 | `dimensions` | Number of variational parameters |
@@ -168,6 +168,37 @@ A run also ends when its distribution degenerates: its spread collapses below `1
 With `infrastructure="cunqa"`, the walltime warning projects the first generation over `generations`. With `restarts`, it assumes the worst case, a restart after every generation until none are left. Because the population doubles at each restart, the projection can be well above the usual run time.
 
 **Reproducibility.** A seed reproduces a CMA-ES run exactly on the same machine and build. Across operating systems or CPU architectures it may not: CMA-ES's own steps use exponentials, logarithms and cosines from the platform's math library, whose last bit can differ, and a one-bit difference early on can lead a run to a different optimum. DE's steps use only basic arithmetic, so a DE run over a backend whose results do not depend on the platform is reproducible everywhere; the native simulator's `sin`/`cos` add the same caveat to every optimizer.
+
+### Adam
+
+```python
+polypus.Adam(
+    max_iters=100,
+    learning_rate=0.05,
+    beta1=0.9,
+    beta2=0.999,
+    epsilon=1e-8,
+    bounds=(-math.pi, math.pi),
+    tolerance=0.01,
+    patience=20,
+    finite_difference_step=0.1,
+    seed=None,
+)
+```
+
+Adam (Kingma and Ba, arXiv:1412.6980) climbs the fitness along its gradient, with a step per parameter scaled by running averages of the gradient and of its square. `train` has no exact gradient, so each iteration estimates it by central differences: one batch of `2 × dimensions` circuits, `θ ± finite_difference_step` along each parameter, then one circuit for the updated parameters. Shot noise enters the estimate through the difference of two fitness values divided by `2 × finite_difference_step`, so a smaller step needs more shots.
+
+| Parameter | Description |
+|---|---|
+| `max_iters` | Iterations, each one gradient and one evaluation. At least 1 |
+| `learning_rate` | Step size, finite and `> 0`. The default `0.05` is sized for rotation angles in radians rather than network weights, so it is larger than deep learning's usual `0.001` |
+| `beta1`, `beta2` | Decay of the running averages of the gradient and of its square, in `[0, 1)` |
+| `epsilon` | Added to the denominator for numerical stability, finite and `> 0` |
+| `bounds` | Range the initial parameters are drawn from, finite with `lower < upper`. The run itself is not confined to it |
+| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` iterations, as with DE |
+| `finite_difference_step` | Step of the central difference, finite and `> 0` |
+
+`best_params` is the best evaluated point and `fitness_history` the best fitness after each iteration. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
 ## Choosing an optimizer
 

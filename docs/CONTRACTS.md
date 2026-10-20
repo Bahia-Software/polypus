@@ -832,8 +832,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     through Python by `tests/python/test_cmaes.py` (configuration rejected
     before any batch, batch sizes and restarts at the seam) and the CMA-ES
     cases of `tests/python/test_oracle_contract.py`.
-- **Adam** (`AlgorithmAdam`: Kingma and Ba's Adam with bias correction,
-  ascending the fitness) and its **`GradientOracle`**.
+- **Adam** (`AlgorithmAdam`, exposed as `polypus.Adam`: Kingma and Ba's Adam
+  with bias correction, ascending the fitness) and its **`GradientOracle`**.
   - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
     finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
     convention as `EvaluationOracle`). A wrong length is
@@ -865,7 +865,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - In a training run the gradient comes from the run's `Oracles`
     (`polypus-orchestration`): the exact one when the factory provides it (a
     native QML model), otherwise a `FiniteDifferenceGradient` of the evaluation
-    oracle with `AdamConfig::finite_difference_step`.
+    oracle with `AdamConfig::finite_difference_step`. Through Python,
+    `tests/python/test_adam.py` pins the batches at the seam (the stencil of
+    `2·dims` circuits, then the updated `θ`), the configuration rejected before
+    any batch, and both entry points; the Adam cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in either batch.
 - **Minibatches (`batch_size`).** With a minibatch, `evaluate_batch` scores a
   per-call subset of the training samples, and the run's `Oracles` also carry
   `full_evaluation`, the same model on every sample. The search steers by the
@@ -1014,7 +1018,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
   so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
@@ -1031,7 +1035,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance) or while drawing the random bytes of
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance) or while drawing the random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.

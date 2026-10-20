@@ -47,6 +47,7 @@ __all__ = [
     "PSO",
     "QNG",
     "CMAES",
+    "Adam",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -87,7 +88,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES]
+_Method = Union[DE, PSO, QNG, CMAES, Adam]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -204,6 +205,34 @@ class CMAES:
         restarts: int = 0,
         seed: Optional[int] = None,
     ) -> CMAES: ...
+
+@final
+class Adam:
+    max_iters: int
+    learning_rate: float
+    beta1: float
+    beta2: float
+    epsilon: float
+    bounds: tuple[float, float]
+    tolerance: float
+    patience: int
+    # Used only when the run has no exact gradient (`train`, Qiskit `qml.train`).
+    finite_difference_step: float
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 100,
+        learning_rate: float = 0.05,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+        # Default `(-pi, pi)` (bindings/adam.rs).
+        bounds: tuple[float, float] = ...,
+        tolerance: float = 0.01,
+        patience: int = 20,
+        finite_difference_step: float = 0.1,
+        seed: Optional[int] = None,
+    ) -> Adam: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 

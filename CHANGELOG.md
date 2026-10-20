@@ -14,13 +14,20 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
+  epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
+  finite_difference_step=0.1, seed=None)`, accepted by `train` and
+  `qml.train`: gradient ascent with Adam. Without an exact gradient (`train`
+  and Qiskit `qml.train`) each iteration takes a central finite difference of
+  the fitness, one batch of `2·dimensions` circuits, then scores the updated
+  parameters. Invalid settings raise `ValueError` before any circuit runs.
 - Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, an exact
   gradient when it has one, and a full-dataset view under a minibatch); Adam
   uses the exact gradient or a finite difference of the evaluation, and the
   CUNQA walltime warning times its gradient too. With a minibatch, Adam tracks
   its best on the full dataset, and the other optimizers' `best_fitness` is
-  re-scored on it at the end. Not yet reachable from Python.
+  re-scored on it at the end. Minibatches are not yet reachable from Python.
 - The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
@@ -34,7 +41,7 @@ Changes on `main` since 0.7.2.
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
   same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
   turns any `EvaluationOracle` into a `GradientOracle` by central differences,
-  in one batch per gradient. Not yet reachable from Python.
+  in one batch per gradient.
 - `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
   datasets with deterministic splits and feature scaling; layered variational
   models (angle, amplitude, IQP and basis encoders, a hardware-efficient
