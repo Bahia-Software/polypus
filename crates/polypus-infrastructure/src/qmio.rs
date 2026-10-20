@@ -294,6 +294,18 @@ impl std::error::Error for QmioError {}
 /// lock across an `.await`", which a `std::sync::Mutex` here would violate).
 /// On a network fault the socket is dropped and recreated (the "Lazy Pirate"
 /// pattern: a REQ socket is unusable after a failed `recv`).
+///
+/// # Trusted endpoint required
+///
+/// Point the backend only at an endpoint you trust, over a network you trust.
+/// The ZeroMQ link is neither encrypted nor authenticated, and the reply-size
+/// cap (`max_reply_bytes`, 64 MiB) is checked only
+/// after the whole reply has been received: a hostile or broken peer can make
+/// the process allocate as much memory as its frame headers announce before
+/// the cap rejects the reply. The reply *content* is validated (see the module's
+/// `## Security` section); its size in memory is not bounded. Off CESGA's
+/// private network, use a tunnel; see "QMIO transport threat model" in
+/// `docs/backends.md` (issue #210).
 pub struct QmioBackend {
     endpoint: String,
     program_format: QmioProgramFormat,
@@ -334,7 +346,8 @@ impl QmioBackend {
     /// Create a backend targeting `endpoint`.
     ///
     /// There is no default endpoint: an empty one fails with [`QmioError::Config`]
-    /// rather than connecting to a guessed host.
+    /// rather than connecting to a guessed host. The endpoint must be trusted;
+    /// see [the type-level docs](QmioBackend#trusted-endpoint-required).
     ///
     /// Timeouts and retry behaviour can be overridden via the `QMIO_RECV_TIMEOUT_MS`,
     /// `QMIO_MAX_RETRIES`, `QMIO_RETRY_BACKOFF_MS` and `QMIO_GLOBAL_TIMEOUT_MS`
@@ -929,7 +942,11 @@ fn counts_from_json(value: &serde_json::Value) -> Result<HashMap<String, u64>, Q
                 return Ok(map);
             }
         }
-        // Fall back to the first nested counts object.
+        // Fall back to the first nested counts object. Kept although the live
+        // schema is verified: removing it would reject replies it accepts today
+        // (counts under an unknown key), and since `as_counts_object` takes only
+        // binary keys of one width it can no longer mistake an integer metrics
+        // block for the counts, whatever the key order.
         for inner in obj.values() {
             if let Some(map) = as_counts_object(inner)? {
                 return Ok(map);

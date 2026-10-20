@@ -136,6 +136,10 @@ Changes on `main` since 0.7.2.
 - Backends report circuits OpenQASM 2.0 cannot express instead of panicking.
 - QMIO: reply bitstrings are validated and malformed `QMIO_*` tuning variables
   are rejected.
+- QMIO: the `QmioBackend`, `run_quantum_circuit`, `train` and `qml.train`
+  docs state that the endpoint must be trusted, since the 64 MiB reply cap
+  is checked only after the reply is received and does not bound memory
+  (#78).
 - Subprocess backend bounds the worker frame length.
 - The OpenQASM 2.0 importer enforces the OpenQASM 3 importer's size budgets
   (source, tokens, declarations, instructions after broadcasting, barrier
