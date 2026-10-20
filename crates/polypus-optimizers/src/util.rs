@@ -1,8 +1,9 @@
 //! Internal helpers shared by the population-based optimizers.
 //!
-//! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution)
-//! and [`AlgorithmPSO`](crate::AlgorithmPSO), not part of the crate's public
-//! API, so the module is `pub(crate)`-scoped. Each helper is a small,
+//! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution),
+//! [`AlgorithmPSO`](crate::AlgorithmPSO) and (the oracle length check and the
+//! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
+//! crate's public API, so the module is `pub(crate)`-scoped. Each helper is a small,
 //! single-purpose free function that used to be inlined (and duplicated) inside
 //! the optimizer loops. The behaviour is preserved exactly — same operation
 //! order, same comparators, same diagnostics — so the determinism the tests pin
@@ -96,29 +97,45 @@ pub(crate) fn population_converged(
 ///
 /// `tolerance` is therefore a *minimum cumulative fitness improvement* in the
 /// oracle's own fitness units, not a spread in parameter units.
+///
+/// This is the logging form DE calls; the rule itself is [`stagnated`], which
+/// CMA-ES applies to each of its restarts with its own log lines.
 pub(crate) fn fitness_stagnated(
     history: &[f64],
     tolerance: f64,
     patience: usize,
     generation: usize,
 ) -> bool {
-    // Need a full `patience`-wide window behind the current generation: with one
-    // entry per generation, `history.len() > patience` is exactly `generation >=
-    // patience` (`generation == history.len() - 1`).
-    if history.len() <= patience {
-        return false;
+    if let Some(improvement) = recent_improvement(history, patience) {
+        log::debug!(
+            "Generation {generation}: best-fitness improvement over last {patience} generations = {improvement:.6}"
+        );
     }
-    let current = history[history.len() - 1];
-    let past = history[history.len() - 1 - patience];
-    let improvement = current - past;
-    log::debug!(
-        "Generation {generation}: best-fitness improvement over last {patience} generations = {improvement:.6}"
-    );
-    let stagnated = improvement < tolerance;
+    let stagnated = stagnated(history, tolerance, patience);
     if stagnated {
         log::debug!("Stopping early at generation {generation} due to fitness stagnation");
     }
     stagnated
+}
+
+/// The stagnation rule of [`fitness_stagnated`], without its logging: `true`
+/// iff `history` holds a full `patience`-wide window and the best fitness
+/// improved by less than `tolerance` over it.
+pub(crate) fn stagnated(history: &[f64], tolerance: f64, patience: usize) -> bool {
+    recent_improvement(history, patience).is_some_and(|improvement| improvement < tolerance)
+}
+
+/// `history[g] - history[g - patience]` for the last generation `g`, or `None`
+/// while there is no full `patience`-wide window behind it: with one entry per
+/// generation, `history.len() > patience` is exactly `g >= patience`
+/// (`g == history.len() - 1`).
+pub(crate) fn recent_improvement(history: &[f64], patience: usize) -> Option<f64> {
+    if history.len() <= patience {
+        return None;
+    }
+    let current = history[history.len() - 1];
+    let past = history[history.len() - 1 - patience];
+    Some(current - past)
 }
 
 /// Validate that an oracle returned exactly one fitness value per candidate.
@@ -289,6 +306,37 @@ mod tests {
         // though the run improved a lot earlier.
         let history = [0.0, 5.0, 5.0005, 5.001];
         assert!(fitness_stagnated(&history, 0.01, 2, 3));
+    }
+
+    #[test]
+    fn stagnated_matches_fitness_stagnated() {
+        // The silent rule and DE's logging form agree on every window.
+        let histories: [&[f64]; 4] = [
+            &[0.0, 1.0, 2.0, 3.0],
+            &[3.0, 3.005, 3.01, 3.015, 3.02],
+            &[0.0, 1.0, 2.0, 3.0, 4.0],
+            &[0.0, 5.0, 5.0005, 5.001],
+        ];
+        for history in histories {
+            for patience in 0..6 {
+                for tolerance in [0.0, 0.01, 0.5, 100.0] {
+                    assert_eq!(
+                        stagnated(history, tolerance, patience),
+                        fitness_stagnated(history, tolerance, patience, history.len() - 1),
+                        "{history:?} patience {patience} tolerance {tolerance}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recent_improvement_needs_a_full_window() {
+        assert_eq!(recent_improvement(&[1.0, 2.0], 2), None);
+        assert_eq!(recent_improvement(&[1.0, 2.0, 4.0], 2), Some(3.0));
+        // patience 0 compares the last generation with itself.
+        assert_eq!(recent_improvement(&[1.0], 0), Some(0.0));
+        assert_eq!(recent_improvement(&[], 0), None);
     }
 
     #[test]

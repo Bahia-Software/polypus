@@ -761,6 +761,38 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   the best fitness at the end of each executed generation/iteration, so
   `fitness_history.len() == iterations_run` and `fitness_history.last()`
   equals `best_fitness`. It is surfaced on the Python `TrainResult`.
+- **CMA-ES** (`AlgorithmCmaEs`, Rust only for now: Hansen's (μ/μ_w, λ)-CMA-ES
+  with IPOP restarts).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG
+    draw or oracle call: `dimensions >= 1` (unlike DE and PSO, which accept
+    zero), `generations >= 1` (there is no initial batch), `sigma0` finite and
+    in `(0, 2π]`, `population_size >= 2` when given (`None` is Hansen's
+    `4 + ⌊3 ln d⌋`), and `population_size · 2^restarts` within `u32`.
+  - One `evaluate_batch` call of λ candidates per generation, its length
+    checked, and no separate initial batch. The mean and samples stay
+    unwrapped in ℝ^d; each candidate is wrapped into `[0, 2π)` when handed to
+    the oracle. Only the ranking of the fitness values (`NaN` last) reaches
+    the search, so a strictly increasing transformation of the fitness
+    samples the same candidates.
+  - A run ends on fitness stagnation (the rule above, applied to that run's
+    own best fitness) or on a degenerate distribution: a non-finite state, a
+    covariance condition number above `1e14`, or a largest coordinate
+    standard deviation `σ·max√C_ii` below `1e-12·σ₀` or above `1e4·σ₀`.
+    While restarts remain, the next run starts from a new uniform mean with
+    twice the population (IPOP); otherwise the optimisation stops with
+    `converged = true`. Without restarts this is DE's stop exactly. The
+    `generations` budget is shared by all runs.
+  - `best_params`/`best_fitness` are the best candidate the oracle scored over
+    all runs (never the unevaluated mean), and `fitness_history` is the best
+    so far after each generation, across restarts.
+  - `CmaEsBatchSchedule` bounds every batch's size before the run starts
+    (exact without restarts), for callers that budget the run.
+  - Enforced by `crates/polypus-optimizers/tests/cmaes.rs`
+    (`best_params_fitness_invariant_holds_across_seeds` checks every
+    postcondition above against the batches the oracle saw, over 25 seeds with
+    and without restarts; the stagnation, restart, batch-size, wrapping,
+    invariance, non-finite, short-oracle and configuration tests) and the unit
+    tests in `crates/polypus-optimizers/src/cmaes.rs` and `src/linalg.rs`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

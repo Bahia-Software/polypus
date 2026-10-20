@@ -9,6 +9,8 @@
 //!   classic DE/rand/1/bin, or the adaptive SHADE and L-SHADE ([`DeStrategy`])
 //! - [`AlgorithmPSO`] — Particle Swarm Optimization (PSO)
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
+//! - [`AlgorithmCmaEs`] — Covariance Matrix Adaptation Evolution Strategy
+//!   (CMA-ES), with optional IPOP restarts
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
 //! Python interpreter. They only depend on two input contracts:
@@ -71,6 +73,7 @@
 
 #![deny(clippy::all)]
 
+pub mod cmaes;
 pub mod differential_evolution;
 pub mod error;
 pub mod objective;
@@ -78,10 +81,12 @@ pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
 
+mod linalg;
 mod rng;
 mod shade;
 mod util;
 
+pub use cmaes::{AlgorithmCmaEs, AlgorithmCmaEsArgs, CmaEsBatchSchedule};
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
