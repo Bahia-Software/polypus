@@ -430,6 +430,7 @@ fn method_from_pyclass(
             population_size: de.population_size,
             tolerance: de.tolerance,
             patience: de.patience,
+            strategy: de.strategy,
         }));
     }
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -2603,6 +2604,40 @@ mod tests {
         assert_eq!(run(None, Some(55)), run(None, Some(55)));
         // Omitted seed ⇒ (almost surely) different outcomes.
         assert_ne!(run(None, None), run(None, None));
+    }
+
+    /// `polypus.DE(strategy=...)` rejects an unknown name with `ValueError`
+    /// when it is passed or set, before any run, and `method_from_pyclass`
+    /// hands the parsed strategy to dispatch.
+    #[test]
+    fn de_strategy_is_validated_and_reaches_the_method() {
+        use polypus_optimizers::DeStrategy;
+        Python::initialize();
+        Python::attach(|py| {
+            let err = DE::new(100, 50, 0.01, 20, None, "LSHADE")
+                .err()
+                .expect("an unknown strategy is rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(err.to_string().contains("\"lshade\""), "{err}");
+
+            let de = Py::new(py, DE::new(100, 50, 0.01, 20, None, "shade").unwrap()).unwrap();
+            let bound = de.bind(py);
+            assert!(bound.setattr("strategy", "jade").is_err());
+            assert_eq!(
+                bound
+                    .getattr("strategy")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "shade",
+                "a rejected name leaves the strategy unchanged"
+            );
+            bound.setattr("strategy", "lshade").unwrap();
+            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+                Ok(Method::De(cfg)) => assert_eq!(cfg.strategy, DeStrategy::LShade),
+                _ => panic!("a polypus.DE parses into Method::De"),
+            }
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────

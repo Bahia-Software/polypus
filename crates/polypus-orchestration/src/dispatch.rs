@@ -21,8 +21,8 @@
 use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs};
 use polypus_optimizers::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
-    Optimizer, OptimizerError, VarianceOracle,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
+    OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,9 @@ pub struct DeConfig {
     pub population_size: u32,
     pub tolerance: f64,
     pub patience: u32,
+    /// How trial vectors are built (`polypus.DE(strategy=...)`);
+    /// [`DeStrategy::Rand1Bin`] is the classic DE.
+    pub strategy: DeStrategy,
 }
 
 /// PSO configuration, mirroring the `polypus.PSO` object (see [`DeConfig`]).
@@ -197,8 +200,9 @@ pub fn dispatch_optimizer(
     seed: u64,
 ) -> Result<OptimizationOutcome, OracleError> {
     let result = match method {
-        Method::De(cfg) => {
-            AlgorithmDifferentialEvolution.optimize(AlgorithmDifferentialEvolutionArgs {
+        Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
+            cfg.strategy,
+            AlgorithmDifferentialEvolutionArgs {
                 oracle,
                 population_size: cfg.population_size,
                 generations: cfg.generations,
@@ -206,8 +210,8 @@ pub fn dispatch_optimizer(
                 tolerance: cfg.tolerance,
                 patience: cfg.patience,
                 seed: Some(seed),
-            })
-        }
+            },
+        ),
         Method::Pso(cfg) => AlgorithmPSO.optimize(AlgorithmPSOArgs {
             oracle,
             population_size: cfg.population_size,
@@ -448,5 +452,74 @@ mod tests {
             slot.take().is_none(),
             "only one error is ever stored, however many writers raced"
         );
+    }
+
+    /// Concave objective maximised at 1.0 that records every batch's size.
+    struct RecordingQuadratic(Arc<Mutex<Vec<usize>>>);
+    impl EvaluationOracle for RecordingQuadratic {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(candidates.len());
+            candidates
+                .iter()
+                .map(|c| -c.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>())
+                .collect()
+        }
+    }
+
+    fn de_method(strategy: DeStrategy) -> Method {
+        Method::De(DeConfig {
+            generations: 30,
+            population_size: 12,
+            tolerance: 0.0,
+            patience: 100,
+            strategy,
+        })
+    }
+
+    /// Dispatch a DE `strategy` and return the outcome plus every batch size.
+    fn dispatch_de(strategy: DeStrategy) -> (OptimizationOutcome, Vec<usize>) {
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let oracle = Box::new(RecordingQuadratic(Arc::clone(&sizes)));
+        let outcome =
+            match dispatch_optimizer(de_method(strategy), oracle, 3, &OracleErrorSlot::new(), 9) {
+                Ok(outcome) => outcome,
+                Err(_) => panic!("a valid DE configuration must run"),
+            };
+        let sizes = sizes.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        (outcome, sizes)
+    }
+
+    /// The default strategy is the classic DE: dispatch returns exactly what
+    /// `AlgorithmDifferentialEvolution::optimize` returns for the same seed.
+    #[test]
+    fn default_de_strategy_dispatches_the_classic_optimizer() {
+        let (dispatched, _) = dispatch_de(DeStrategy::default());
+        let direct = AlgorithmDifferentialEvolution
+            .optimize(AlgorithmDifferentialEvolutionArgs {
+                oracle: Box::new(RecordingQuadratic(Arc::default())),
+                population_size: 12,
+                generations: 30,
+                dimensions: 3,
+                tolerance: 0.0,
+                patience: 100,
+                seed: Some(9),
+            })
+            .expect("a valid DE configuration runs");
+        assert_eq!(dispatched, direct);
+    }
+
+    /// The configured strategy reaches the optimizer: L-SHADE's population, and
+    /// so its batches, shrink; SHADE's do not.
+    #[test]
+    fn de_strategy_reaches_the_optimizer() {
+        let (_, shade) = dispatch_de(DeStrategy::Shade);
+        assert!(shade.iter().all(|&n| n == 12), "{shade:?}");
+        let (outcome, lshade) = dispatch_de(DeStrategy::LShade);
+        assert_eq!(lshade.len(), outcome.iterations_run + 1);
+        assert_eq!(lshade[0], 12);
+        assert!(*lshade.last().unwrap() < 12, "{lshade:?}");
     }
 }
