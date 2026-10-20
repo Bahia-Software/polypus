@@ -844,12 +844,11 @@ third party can build against it. We treat it accordingly.
   will not. Pin a minor range (`polypus-backend = "0.8"`) and expect to review the
   changelog when the minor moves. We will keep additive changes additive: new trait
   methods ship with defaults (as `cancel` and `wants_cancel_watcher` did) rather than
-  as breaking additions. **Enum variants are the exception:** `BackendError` is
-  **not** `#[non_exhaustive]`, so a new variant breaks any implementer's or host's
-  *exhaustive* `match` on it and therefore ships only in a **minor** bump, never a
-  patch. `BackendError::InsufficientMemory` (issue #215) is such a change: it is
-  not part of any 0.7.x release and lands in **0.8.0**. Match `BackendError` with a
-  `_` arm if you need to be robust to future variants.
+  as breaking additions. From **0.8.0**, `BackendError` is `#[non_exhaustive]`
+  (#349): a `match` on it outside `polypus-backend` needs a `_` arm, and a new
+  variant is an additive change. Making it non-exhaustive was itself the breaking
+  change, so code written against 0.7.x that matched it exhaustively must add that
+  arm when moving to 0.8.
 - **Scope of the contract.** The stability commitment covers the `polypus-backend`
   surface: the `QuantumBackend` trait, its types, and the registry API
   (`register_backend`, `BackendBuildContext`, `BackendFactory`). The **subprocess

@@ -82,7 +82,7 @@ python -m mypy.stubtest polypus \
   --mypy-config-file tests/python/stubtest_mypy.ini
                                            # typing stubs vs the installed extension
                                            # (needs the wheel installed and mypy from
-                                           #  requirements-dev.txt, Python >= 3.10)
+                                           #  requirements-dev.txt)
 python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
 ```
 
