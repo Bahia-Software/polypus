@@ -14,6 +14,11 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
+  by a new `GradientOracle` contract (the fitness gradient, uphill), with the
+  same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
+  turns any `EvaluationOracle` into a `GradientOracle` by central differences,
+  in one batch per gradient. Not yet reachable from Python.
 - `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
   datasets with deterministic splits and feature scaling; layered variational
   models (angle, amplitude, IQP and basis encoders, a hardware-efficient

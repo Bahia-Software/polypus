@@ -818,6 +818,36 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     through Python by `tests/python/test_cmaes.py` (configuration rejected
     before any batch, batch sizes and restarts at the seam) and the CMA-ES
     cases of `tests/python/test_oracle_contract.py`.
+- **Adam** (`AlgorithmAdam`: Kingma and Ba's Adam with bias correction,
+  ascending the fitness) and its **`GradientOracle`**.
+  - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
+    finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
+    convention as `EvaluationOracle`). A wrong length is
+    `OptimizerError::OracleLengthMismatch`.
+  - Preconditions, each an error before any RNG draw or oracle call:
+    `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
+    `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`
+    (`InvalidConfig`), and `bounds` finite with `lb < ub` (`InvalidBounds`).
+  - The initial `θ` is drawn uniformly from `bounds` (and not wrapped
+    afterwards). Each iteration asks the gradient oracle once and scores the
+    updated `θ` in one `evaluate_batch` of one candidate, its length checked.
+    `best_params`/`best_fitness` are the best scored `θ`, `fitness_history` the
+    best so far after each iteration.
+  - A run ends on fitness stagnation, the rule above with `patience` counted in
+    iterations, and then reports `converged = true`.
+  - `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+    `GradientOracle` by central differences with a step `h` (finite and `> 0`):
+    one `evaluate_batch` of `2·dims` candidates,
+    `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`, per gradient. It approximates; an exact
+    gradient is its own `GradientOracle`. If the wrapped oracle returns the
+    wrong number of values the gradient is empty, so Adam reports the length
+    mismatch. An `Arc` of an oracle is an oracle, so one scorer can feed both.
+  - Enforced by `crates/polypus-optimizers/tests/adam.rs` (the C-5
+    postconditions against the batches the oracle saw over 25 seeds, one
+    gradient and one single-candidate batch per iteration, stagnation,
+    reproducibility, every rejected configuration with no oracle call, the
+    gradient length check, and the finite-difference stencil, its accuracy,
+    its step validation and a broken wrapped oracle).
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

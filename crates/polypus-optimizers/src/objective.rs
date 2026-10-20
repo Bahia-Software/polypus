@@ -22,6 +22,14 @@ pub trait EvaluationOracle: Send + Sync {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64>;
 }
 
+/// A shared oracle is an oracle: the same scorer can feed an optimizer and a
+/// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient) built over it.
+impl<T: EvaluationOracle + ?Sized> EvaluationOracle for std::sync::Arc<T> {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        (**self).evaluate_batch(candidates)
+    }
+}
+
 /// Diagonal of the Fubini–Study metric (quantum Fisher information matrix)
 /// consumed by [`AlgorithmQNG`](crate::AlgorithmQNG).
 ///
@@ -42,5 +50,27 @@ pub trait VarianceOracle: Send + Sync {
     /// the runtime once and evaluating every index in a tight loop.
     fn variance_diagonal(&self, theta: &[f64], dims: usize) -> Vec<f64> {
         (0..dims).map(|a| self.variance(theta, a)).collect()
+    }
+}
+
+/// Gradient of the fitness, consumed by [`AlgorithmAdam`](crate::AlgorithmAdam).
+///
+/// The sign convention is [`EvaluationOracle`]'s: higher fitness is better, so
+/// the gradient points uphill and an ascent step *adds* it. Like
+/// [`VarianceOracle`], it keeps the one extra quantity a gradient method needs
+/// behind a trait, so how it is computed (an exact parameter shift, a finite
+/// difference, an analytic formula) stays with the caller. Every component must
+/// be finite, as every fitness value must be.
+pub trait GradientOracle: Send + Sync {
+    /// `∂fitness/∂θ[param_index]` at `theta`.
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64;
+
+    /// All `dims` components at once, in parameter order.
+    ///
+    /// The default implementation loops over [`GradientOracle::gradient`].
+    /// Implementations that compute every component from one batch of circuits
+    /// (a parameter shift, a finite-difference stencil) should override it.
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        (0..dims).map(|k| self.gradient(theta, k)).collect()
     }
 }

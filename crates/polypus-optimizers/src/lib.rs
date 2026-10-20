@@ -11,9 +11,11 @@
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
 //! - [`AlgorithmCmaEs`] — Covariance Matrix Adaptation Evolution Strategy
 //!   (CMA-ES), with optional IPOP restarts
+//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation), gradient ascent
+//!   driven by a [`GradientOracle`]
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
-//! Python interpreter. They only depend on two input contracts:
+//! Python interpreter. They only depend on these input contracts:
 //!
 //! - [`EvaluationOracle`] maps a batch of parameter vectors to fitness values
 //!   (higher is better — the optimizers *maximise*). This is the single seam
@@ -22,6 +24,9 @@
 //! - [`VarianceOracle`] (QNG only) returns the diagonal elements of the
 //!   Fubini–Study metric (QFIM). It abstracts the one algorithm-specific
 //!   callback QNG needs, so no runtime detail leaks into this crate.
+//! - [`GradientOracle`] (Adam only) returns the fitness gradient. A caller with
+//!   an exact gradient (a parameter shift) implements it; any other caller
+//!   wraps its [`EvaluationOracle`] in a [`FiniteDifferenceGradient`].
 //!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
@@ -73,9 +78,11 @@
 
 #![deny(clippy::all)]
 
+pub mod adam;
 pub mod cmaes;
 pub mod differential_evolution;
 pub mod error;
+pub mod finite_difference;
 pub mod objective;
 pub mod outcome;
 pub mod pso;
@@ -86,12 +93,14 @@ mod rng;
 mod shade;
 mod util;
 
+pub use adam::{AlgorithmAdam, AlgorithmAdamArgs};
 pub use cmaes::{AlgorithmCmaEs, AlgorithmCmaEsArgs, CmaEsBatchSchedule};
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 pub use error::OptimizerError;
-pub use objective::{EvaluationOracle, VarianceOracle};
+pub use finite_difference::FiniteDifferenceGradient;
+pub use objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};
