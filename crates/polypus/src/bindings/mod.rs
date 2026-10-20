@@ -569,9 +569,10 @@ impl<'a, 'py> FromPyObject<'a, 'py> for OptionsArg {
 /// statevector simulator. CUNQA's QPUs always run Aer, with the simulator fixed
 /// when they are raised (`qraise`), so `cunqa` accepts only `"aer"` (default) or
 /// `"AerSimulator"` and rejects a `noise_model`: both would otherwise be dropped
-/// silently. For the same reason `qmio` and registry-dispatched backends reject
-/// a `noise_model` and a non-default `sim_method`, and registry backends a
-/// non-default `backend` ([`reject_aer_only_args`]).
+/// silently. For the same reason the native backend, `qmio` and
+/// registry-dispatched backends reject a `noise_model` and a non-default
+/// `sim_method` ([`reject_aer_only_args`] for the last two), and registry
+/// backends a non-default `backend`.
 ///
 /// `fusion` only applies to the native `"polypus"` backend (see
 /// [`BackendConfig::LocalNative`]), the only one that fuses gates. It is an
@@ -658,6 +659,15 @@ fn build_backend_config(
                         "the native 'polypus' backend is a noiseless statevector simulator \
                          and does not accept a noise_model; use backend=\"aer\"",
                     ));
+                }
+                // `LocalNative` has no simulation method to choose, so a
+                // non-default `sim_method` would be dropped silently (#334).
+                if sim_method != "automatic" {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "the native 'polypus' backend is a statevector simulator and does \
+                         not accept sim_method=\"{sim_method}\"; omit it, or use \
+                         backend=\"aer\""
+                    )));
                 }
                 Ok(BackendConfig::LocalNative {
                     fusion: fusion.unwrap_or(true),
@@ -3039,6 +3049,35 @@ mod tests {
                 "the message must name the offending kwarg: {err}"
             );
         });
+    }
+
+    #[test]
+    fn build_backend_config_rejects_a_sim_method_on_the_native_backend() {
+        // `LocalNative` has no field for `sim_method`, so anything but the
+        // default must be an error rather than silently ignored (#334), on
+        // every name of the native backend.
+        pyo3::Python::initialize();
+        for backend in ["polypus", "statevector", "polypus_statevector"] {
+            let err = build_backend_config(
+                "local",
+                backend,
+                "statevector",
+                None,
+                1,
+                2,
+                None,
+                None,
+                None,
+            )
+            .expect_err("a sim_method on the native backend must be rejected");
+            Python::attach(|py| {
+                assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+                assert!(
+                    err.to_string().contains("sim_method"),
+                    "the message must name the offending kwarg: {err}"
+                );
+            });
+        }
     }
 
     #[test]

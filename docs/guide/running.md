@@ -67,6 +67,7 @@ With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and
 
 - The native backend runs terminal-measurement circuits only: it rejects `reset`, a gate after a measurement and `if` (see [ADR 0001](../adr/0001-terminal-measurements.md)). It cannot run a Qiskit `QuantumCircuit`.
 - Aer runs all of those, but rejects gates outside its basis (such as `ch` or a declared `gate`) unless the circuit is transpiled first.
+- The native backend is a noiseless statevector simulator: it rejects a `noise_model` and a `sim_method` other than `"automatic"` with `ValueError`.
 
 `polypus.backend_compatibility` returns, per backend, the reasons it would reject a circuit. An empty list means the circuit runs. The check is structural: it runs nothing and does not check resources such as memory.
 
