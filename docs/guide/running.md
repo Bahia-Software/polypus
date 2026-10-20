@@ -69,11 +69,11 @@ With `infrastructure="local"`, `backend="aer"` (the default) runs Qiskit Aer and
 - Aer runs all of those, but rejects gates outside its basis (such as `ch` or a declared `gate`) unless the circuit is transpiled first.
 - The native backend is a noiseless statevector simulator: it rejects a `noise_model` and a `sim_method` other than `"automatic"` with `ValueError`.
 
-`polypus.backend_compatibility` returns, per backend, the reasons it would reject a circuit. An empty list means the circuit runs. The check is structural: it runs nothing and does not check resources such as memory.
+`polypus.backend_compatibility` returns, per backend (`aer`, `polypus`, `cunqa`, `qmio`), the reasons it would reject a circuit. An empty list means the circuit runs. It runs and connects to nothing. By default it is structural; with `resources=True` it also checks the native backend's qubit ceiling and memory budget.
 
 ```python
 report = polypus.backend_compatibility(qc)
-# e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+# e.g. {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."], ...}
 backend = "polypus" if not report["polypus"] else "aer"
 result = polypus.run_quantum_circuit(
     qc, shots=1000, infrastructure="local", backend=backend

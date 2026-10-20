@@ -14,6 +14,13 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
+  `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
+  does and converts it with CUNQA's own converter, without raising QPUs; the
+  QMIO entry reports a build without the `qmio` feature, a Qiskit circuit and a
+  program that is not a terminal-measurement circuit. The keyword-only
+  `resources=True` also checks the native qubit ceiling and memory budget, with
+  the message of the error the run raises.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with

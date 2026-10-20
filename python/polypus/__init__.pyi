@@ -106,6 +106,8 @@ class _CalibrationOutcome(TypedDict):
 class _CompatibilityReport(TypedDict):
     aer: list[str]
     polypus: list[str]
+    cunqa: list[str]
+    qmio: list[str]
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -484,4 +486,6 @@ def calibrate_parallel_threshold(force: bool = False) -> _CalibrationOutcome: ..
 def backend_cleanup_failures() -> int: ...
 def backend_compatibility(
     circuit: Union[Circuit, str, QuantumCircuit],
+    *,
+    resources: bool = False,
 ) -> _CompatibilityReport: ...
