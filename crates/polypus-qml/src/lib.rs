@@ -87,5 +87,5 @@ pub use loss::Loss;
 pub use model::TrainedModel;
 pub use model::{CompiledModel, QuantumModel};
 pub use observables::{Observable, Pauli, PauliString};
-pub use problem::QmlProblem;
+pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};

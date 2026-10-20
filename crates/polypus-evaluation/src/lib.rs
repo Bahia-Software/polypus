@@ -29,7 +29,7 @@ pub mod vqc_oracle;
 
 pub use error::EvaluationError;
 pub use py_callback_observable::PyCallbackObservable;
-pub use qml_oracle::{QmlObjective, QmlOracle, QmlOracleFactory};
+pub use qml_oracle::{MinibatchConfig, QmlObjective, QmlOracle, QmlOracleFactory, QmlSource};
 pub use supervised::{Label, PyLabelledCost, PySampleCost, SupervisedObjective};
 pub use variance_oracle::PyVarianceOracle;
 pub use vqc_oracle::{VqcOracle, VqcOracleFactory};
@@ -37,6 +37,8 @@ pub use vqc_oracle::{VqcOracle, VqcOracleFactory};
 /// Re-export the native cost-observable seam so `crate::CostObservable`
 /// resolves alongside the oracles that consume it.
 pub use polypus_observable::CostObservable;
+// The native QML problem's error, carried by `EvaluationError::Qml`.
+pub use polypus_qml::QmlError;
 
 use polypus_circuit::ParameterizedCircuit;
 use polypus_infrastructure::{attach_or, BoundCircuit, InterpreterUnavailable, QiskitCircuit};

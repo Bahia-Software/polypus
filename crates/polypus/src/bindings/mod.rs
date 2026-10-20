@@ -27,7 +27,7 @@ use qng::QNG;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
-    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, SupervisedObjective,
+    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, QmlSource, SupervisedObjective,
     VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::{random_id_bytes, random_seed};
@@ -1862,8 +1862,11 @@ pub fn qml_train<'py>(
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
         factory: QmlOracleFactory {
-            training_circuits: qcs,
-            objective,
+            source: QmlSource::Qiskit {
+                training_circuits: qcs,
+                objective,
+            },
+            minibatch: None,
         },
         method: method_enum,
         dimensions,

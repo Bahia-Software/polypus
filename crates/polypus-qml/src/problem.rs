@@ -153,15 +153,7 @@ impl QmlProblem {
     /// is validated once at construction time by the Python-facing boundary, not
     /// re-checked here on every call.
     pub fn minibatch_indices(&self, seed: u64, call_index: u64, batch_size: usize) -> Vec<usize> {
-        // Mixing constant: SplitMix64's own golden-ratio increment
-        // (0x9E3779B97F4A7C15), reused here to decorrelate `call_index` values
-        // without an O(call_index) fast-forward.
-        let mixed = seed ^ call_index.wrapping_mul(0x9E3779B97F4A7C15);
-        let mut rng = SplitMix64::new(mixed);
-        let mut indices: Vec<usize> = (0..self.num_circuits()).collect();
-        shuffle(&mut indices, &mut rng);
-        indices.truncate(batch_size);
-        indices
+        minibatch_indices(self.num_circuits(), seed, call_index, batch_size)
     }
 
     /// Build a smaller `QmlProblem` from the samples at `indices` (design doc
@@ -701,6 +693,29 @@ impl QmlProblem {
     ) -> Result<Vec<f64>, QmlError> {
         self.gradient_from_weighted(probabilities)
     }
+}
+
+/// Deterministic minibatch selection over `num_samples` samples: the first
+/// `batch_size` indices of a shuffle derived from `seed` and `call_index`
+/// (design doc §17). [`QmlProblem::minibatch_indices`] is this over the
+/// problem's samples; a caller that holds its samples elsewhere (the Qiskit
+/// form of `qml.train`) uses it directly, so both forms draw the same subsets.
+/// `batch_size` larger than `num_samples` yields every index.
+pub fn minibatch_indices(
+    num_samples: usize,
+    seed: u64,
+    call_index: u64,
+    batch_size: usize,
+) -> Vec<usize> {
+    // Mixing constant: SplitMix64's own golden-ratio increment
+    // (0x9E3779B97F4A7C15), reused here to decorrelate `call_index` values
+    // without an O(call_index) fast-forward.
+    let mixed = seed ^ call_index.wrapping_mul(0x9E3779B97F4A7C15);
+    let mut rng = SplitMix64::new(mixed);
+    let mut indices: Vec<usize> = (0..num_samples).collect();
+    shuffle(&mut indices, &mut rng);
+    indices.truncate(batch_size);
+    indices
 }
 
 /// Every training template with each trainable-parameter occurrence given its

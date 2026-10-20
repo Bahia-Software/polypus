@@ -14,6 +14,11 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
+  well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
+  per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
+  source, the exact parameter-shift gradient. Both sources share the
+  candidate windows. Not yet reachable from Python.
 - `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
   probabilities of each circuit, keyed like its counts, with no sampling and
   the same memory budget and windows as `run_circuits`. Only for a

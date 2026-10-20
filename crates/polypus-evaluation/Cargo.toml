@@ -19,6 +19,9 @@ polypus-orchestration = { workspace = true }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
 polypus-circuit = { workspace = true }
+# The native QML form: a `polypus-qml` problem binds its circuits and scores
+# their results (pure Rust, no PyO3).
+polypus-qml = { workspace = true }
 pyo3 = { workspace = true }
 log = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
