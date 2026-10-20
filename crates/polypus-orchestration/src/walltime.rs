@@ -5,14 +5,16 @@
 //! [`QuantumBackend::walltime`](polypus_infrastructure::QuantumBackend::walltime).
 //! [`TrainFlow`](crate::TrainFlow) then wraps its oracle in a [`WalltimeWatch`],
 //! which times the first generation, projects it over the optimizer's generation
-//! budget and logs one `warn` when the projection exceeds the walltime. Backends
+//! budget (for CMA-ES with IPOP restarts, whose batches grow, over the bound
+//! [`Method::growth`] gives) and logs one `warn` when the projection exceeds the
+//! walltime. Backends
 //! without a walltime get the bare oracle, so they pay nothing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use polypus_optimizers::EvaluationOracle;
+use polypus_optimizers::{CmaEsBatchSchedule, EvaluationOracle};
 
 use crate::dispatch::Method;
 
@@ -72,8 +74,62 @@ impl Method {
                 generations: u64::from(cfg.max_iters),
                 unit: "iterations",
             },
+            // One batch per generation and no initial batch; the generations of
+            // the first run and of every restart share the budget.
+            Method::Cmaes(cfg) => RunShape {
+                batches_per_generation: 1,
+                generations: u64::from(cfg.generations),
+                unit: "generations",
+            },
         }
     }
+
+    /// How much longer than [`run_shape`](Self::run_shape)'s generations at the
+    /// first generation's pace a run of `dimensions` parameters can take, when
+    /// its later batches can be larger than its first; `None` when they cannot.
+    ///
+    /// Only CMA-ES with IPOP restarts grows: each restart doubles the
+    /// population. When a restart fires depends on the search, so this takes
+    /// the closed-form bound of [`CmaEsBatchSchedule`]: every restart as early
+    /// as it can, one generation after the previous run started. That is an
+    /// honest upper bound, if a loose one when restarts come late, as they
+    /// usually do. Re-projecting at each restart instead would not be a bound
+    /// at all (a later restart can still double the batches again), and the
+    /// warning would come only once the larger batches had started rather
+    /// than after the first generation, when raising `walltime` is still
+    /// cheap. The bound also assumes a batch `k` times larger takes at most
+    /// `k` times as long, which holds when a backend spreads a batch over its
+    /// QPUs.
+    pub(crate) fn growth(&self, dimensions: u32) -> Option<Growth> {
+        let Method::Cmaes(cfg) = self else {
+            return None;
+        };
+        if cfg.restarts == 0 {
+            return None;
+        }
+        let schedule = CmaEsBatchSchedule::new(
+            dimensions,
+            cfg.population_size,
+            cfg.generations,
+            cfg.restarts,
+        );
+        let first = u64::from(schedule.initial_population()).max(1);
+        Some(Growth {
+            first_generations: schedule.max_evaluations().div_ceil(first),
+            restarts: cfg.restarts,
+        })
+    }
+}
+
+/// A run whose IPOP restarts can make its later batches larger than its first
+/// (see [`Method::growth`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Growth {
+    /// Upper bound on the run's work, in first generations: the most
+    /// candidates it can evaluate over the first generation's.
+    pub first_generations: u64,
+    /// The IPOP restarts allowed, each doubling the population.
+    pub restarts: u32,
 }
 
 /// An [`EvaluationOracle`] decorator that warns once when the run, extrapolated
@@ -87,6 +143,7 @@ pub(crate) struct WalltimeWatch<C: Clock> {
     inner: Box<dyn EvaluationOracle>,
     walltime: Duration,
     shape: RunShape,
+    growth: Option<Growth>,
     run_id: String,
     clock: C,
     done: AtomicBool,
@@ -113,11 +170,19 @@ impl<C: Clock> WalltimeWatch<C> {
             inner,
             walltime,
             shape,
+            growth: None,
             run_id: run_id.to_string(),
             clock,
             done: AtomicBool::new(false),
             state: Mutex::new(WatchState::default()),
         }
+    }
+
+    /// Project with `growth`'s bound instead of `shape`'s generations, for a run
+    /// whose later batches can be larger than its first.
+    pub(crate) fn with_growth(mut self, growth: Option<Growth>) -> Self {
+        self.growth = growth;
+        self
     }
 
     /// The projected duration that triggered the warning, if it fired.
@@ -137,11 +202,30 @@ impl<C: Clock> WalltimeWatch<C> {
             return;
         };
         let first = self.clock.now().saturating_duration_since(started);
+        let work = self
+            .growth
+            .map_or(self.shape.generations, |g| g.first_generations);
         let projected =
-            Duration::try_from_secs_f64(first.as_secs_f64() * self.shape.generations as f64)
-                .unwrap_or(Duration::MAX);
+            Duration::try_from_secs_f64(first.as_secs_f64() * work as f64).unwrap_or(Duration::MAX);
         if projected > self.walltime {
             state.warned = Some(projected);
+            if let Some(growth) = self.growth {
+                log::warn!(
+                    "run {}: the first of up to {} {} took {}; with up to {} IPOP restarts, \
+                     each doubling the population, the optimisation may take up to {}, \
+                     beyond the {} walltime; the QPUs are released when it runs out. \
+                     Raise `walltime` or lower the {} or the restarts.",
+                    self.run_id,
+                    self.shape.generations,
+                    self.shape.unit,
+                    hms(first),
+                    growth.restarts,
+                    hms(projected),
+                    hms(self.walltime),
+                    self.shape.unit,
+                );
+                return;
+            }
             log::warn!(
                 "run {}: the first of up to {} {} took {}, so the optimisation may take up \
                  to {}, beyond the {} walltime; the QPUs are released when it runs out. \
@@ -422,5 +506,257 @@ mod tests {
         assert_eq!(hms(Duration::from_secs(36_000)), "10:00:00");
         assert_eq!(hms(Duration::from_secs(172_861)), "48:01:01");
         assert_eq!(hms(Duration::from_millis(500)), "0:00:00");
+    }
+
+    fn cmaes(
+        population_size: Option<u32>,
+        generations: u32,
+        restarts: u32,
+        patience: u32,
+        tolerance: f64,
+    ) -> Method {
+        Method::Cmaes(crate::CmaesConfig {
+            generations,
+            population_size,
+            sigma0: std::f64::consts::FRAC_PI_2,
+            tolerance,
+            patience,
+            restarts,
+        })
+    }
+
+    /// Records every batch's size and scores each candidate with `fitness`.
+    struct SizeRecorder {
+        sizes: Arc<Mutex<Vec<u64>>>,
+        fitness: fn(&[f64]) -> f64,
+    }
+
+    impl EvaluationOracle for SizeRecorder {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            self.sizes.lock().unwrap().push(candidates.len() as u64);
+            candidates.iter().map(|c| (self.fitness)(c)).collect()
+        }
+    }
+
+    fn flat(_: &[f64]) -> f64 {
+        0.0
+    }
+
+    /// Periodic, maximised at the origin.
+    fn cosine(x: &[f64]) -> f64 {
+        x.iter().map(|v| v.cos() - 1.0).sum()
+    }
+
+    /// Dispatch `method` over `fitness` and return the outcome (`None` for a
+    /// failed run) and every batch size.
+    fn dispatch_cmaes(
+        method: Method,
+        dimensions: u32,
+        fitness: fn(&[f64]) -> f64,
+        seed: u64,
+    ) -> (Option<polypus_optimizers::OptimizationOutcome>, Vec<u64>) {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let oracle = Box::new(SizeRecorder {
+            sizes: Arc::clone(&sizes),
+            fitness,
+        });
+        let outcome =
+            dispatch_optimizer(method, oracle, dimensions, &OracleErrorSlot::new(), seed).ok();
+        let sizes = sizes.lock().unwrap().clone();
+        (outcome, sizes)
+    }
+
+    /// Dispatch hands every `CmaesConfig` field and the seed to CMA-ES: the
+    /// outcome is exactly the one `AlgorithmCmaEs::optimize` returns for the
+    /// same arguments, and `population_size: None` is Hansen's default λ.
+    #[test]
+    fn cmaes_dispatch_runs_the_configured_optimizer() {
+        use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs, Optimizer};
+        let method = Method::Cmaes(crate::CmaesConfig {
+            generations: 60,
+            population_size: Some(7),
+            sigma0: 1.0,
+            tolerance: 1e-6,
+            patience: 5,
+            restarts: 1,
+        });
+        let (dispatched, sizes) = dispatch_cmaes(method, 3, cosine, 21);
+        let dispatched = dispatched.expect("a valid CMA-ES configuration runs");
+        assert_eq!(sizes[0], 7);
+        let direct = AlgorithmCmaEs
+            .optimize(AlgorithmCmaEsArgs {
+                oracle: Box::new(SizeRecorder {
+                    sizes: Arc::default(),
+                    fitness: cosine,
+                }),
+                population_size: Some(7),
+                generations: 60,
+                dimensions: 3,
+                sigma0: 1.0,
+                tolerance: 1e-6,
+                patience: 5,
+                restarts: 1,
+                seed: Some(21),
+            })
+            .expect("a valid CMA-ES configuration runs");
+        assert_eq!(dispatched, direct);
+
+        let (_, sizes) = dispatch_cmaes(cmaes(None, 3, 0, 20, 0.0), 6, cosine, 1);
+        assert_eq!(sizes, vec![9; 3], "4 + ⌊3 ln 6⌋ = 9");
+    }
+
+    /// An invalid configuration reaches the optimizer's validation, which
+    /// rejects it before any batch.
+    #[test]
+    fn cmaes_dispatch_rejects_an_invalid_configuration_before_any_batch() {
+        for method in [
+            cmaes(Some(1), 10, 0, 20, 0.01),
+            cmaes(Some(8), 0, 0, 20, 0.01),
+            cmaes(Some(8), 10, 40, 20, 0.01),
+            Method::Cmaes(crate::CmaesConfig {
+                generations: 10,
+                population_size: None,
+                sigma0: 0.0,
+                tolerance: 0.01,
+                patience: 20,
+                restarts: 0,
+            }),
+        ] {
+            let (outcome, sizes) = dispatch_cmaes(method, 2, cosine, 1);
+            assert!(outcome.is_none());
+            assert!(sizes.is_empty(), "{sizes:?}");
+        }
+    }
+
+    /// Without restarts `run_shape` counts exactly the batches CMA-ES sends
+    /// when it does not stop early: one per generation, no initial batch, all
+    /// of the first population's size, and nothing grows.
+    #[test]
+    fn cmaes_run_shape_counts_the_batches_the_optimizer_sends() {
+        for (population_size, generations) in [(None, 1), (None, 25), (Some(2), 12), (Some(16), 30)]
+        {
+            // Zero improvement is never below a zero tolerance.
+            let method = cmaes(population_size, generations, 0, 1, 0.0);
+            let shape = method.run_shape();
+            assert_eq!(shape.batches_per_generation, 1);
+            assert_eq!(method.growth(2), None);
+            let (outcome, sizes) = dispatch_cmaes(method, 2, flat, 3);
+            let label = format!("{population_size:?} × {generations}");
+            assert!(outcome.is_some_and(|o| !o.converged), "{label}");
+            assert_eq!(sizes.len() as u64, shape.generations, "{label}");
+            let first = u64::from(population_size.unwrap_or(6));
+            assert!(sizes.iter().all(|&n| n == first), "{label}: {sizes:?}");
+        }
+    }
+
+    /// With IPOP restarts the batches grow, and `growth` bounds the work they
+    /// add: every run is checked against the schedule's per-generation bound
+    /// and the total against `first_generations` first batches. Patience 0
+    /// restarts after every generation, the worst case the bound assumes, so
+    /// there it is met exactly.
+    #[test]
+    fn cmaes_growth_bounds_the_batches_with_restarts() {
+        use polypus_optimizers::CmaEsBatchSchedule;
+        for (population_size, generations, restarts, patience) in [
+            (None, 4, 3, 0),
+            (Some(5), 3, 2, 0),
+            (Some(4), 40, 3, 2),
+            (None, 30, 5, 3),
+            (Some(6), 10, 4, 4),
+        ] {
+            let label = format!("{population_size:?} × {generations}, {restarts} restarts");
+            let method = cmaes(population_size, generations, restarts, patience, 1.0);
+            let shape = method.run_shape();
+            let growth = method.growth(2).expect("restarts can grow the batches");
+            assert_eq!(growth.restarts, restarts);
+            let (outcome, sizes) = dispatch_cmaes(method, 2, flat, 5);
+            assert!(outcome.is_some(), "{label}");
+            assert!(sizes.len() as u64 <= shape.generations, "{label}");
+            let schedule = CmaEsBatchSchedule::new(2, population_size, generations, restarts);
+            let first = u64::from(schedule.initial_population());
+            for (g, &n) in sizes.iter().enumerate() {
+                assert!(n <= schedule.max_batch_size(g as u32), "{label}: {sizes:?}");
+            }
+            let total: u64 = sizes.iter().sum();
+            assert!(total <= growth.first_generations * first, "{label}");
+            if patience == 0 && generations == restarts + 1 {
+                let worst: Vec<u64> = (0..generations).map(|g| first << g).collect();
+                assert_eq!(sizes, worst, "{label}");
+                assert_eq!(total, growth.first_generations * first, "{label}");
+            }
+        }
+    }
+
+    /// The watch projects a growing run with its bound, not its generations,
+    /// and says why.
+    #[test]
+    fn a_growing_run_is_projected_with_its_bound() {
+        let run_id = "walltime-watch-cmaes-restarts";
+        let method = cmaes(Some(10), 100, 2, 20, 0.01);
+        // 1 + 2 + 98 × 4 = 395 first generations of 1 min: 6:35:00 > 3 h, where
+        // 100 generations alone (1:40:00) would fit.
+        let growth = method.growth(4);
+        assert_eq!(
+            growth,
+            Some(Growth {
+                first_generations: 395,
+                restarts: 2
+            })
+        );
+        let (bare, _) = watch(
+            run_id,
+            Duration::from_secs(60),
+            Duration::from_secs(3 * 3600),
+            method.run_shape(),
+        );
+        let growing = bare.with_growth(growth);
+        growing.evaluate_batch(&vec![vec![0.0]; 10]);
+        assert_eq!(growing.warned(), Some(Duration::from_secs(395 * 60)));
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 100 generations took 0:01:00; with up to 2 \
+                 IPOP restarts, each doubling the population, the optimisation may take up \
+                 to 6:35:00, beyond the 3:00:00 walltime; the QPUs are released when it runs \
+                 out. Raise `walltime` or lower the generations or the restarts."
+            )]
+        );
+
+        let quiet = "walltime-watch-cmaes-no-restarts";
+        let method = cmaes(Some(10), 100, 0, 20, 0.01);
+        let (bare, _) = watch(
+            quiet,
+            Duration::from_secs(60),
+            Duration::from_secs(3 * 3600),
+            method.run_shape(),
+        );
+        let growing = bare.with_growth(method.growth(4));
+        growing.evaluate_batch(&vec![vec![0.0]; 10]);
+        assert_eq!(growing.warned(), None);
+        assert!(logged_for(quiet).is_empty());
+    }
+
+    #[test]
+    fn only_cmaes_restarts_grow_the_batches() {
+        let pso = Method::Pso(crate::PsoConfig {
+            generations: 7,
+            population_size: 10,
+            bounds: (0.0, 1.0),
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 0.0,
+        });
+        assert_eq!(pso.growth(3), None);
+        assert_eq!(cmaes(None, 50, 0, 20, 0.01).growth(3), None);
+        // λ₀ cancels out: the bound is Σ_g 2^min(g, restarts) first generations.
+        for population_size in [None, Some(2), Some(64)] {
+            let growth = cmaes(population_size, 50, 3, 20, 0.01).growth(3);
+            assert_eq!(
+                growth.map(|g| g.first_generations),
+                Some(1 + 2 + 4 + 47 * 8)
+            );
+        }
     }
 }

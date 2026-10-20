@@ -105,7 +105,7 @@ pub trait OracleFactory {
 pub struct TrainFlow<F: OracleFactory> {
     /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
     pub factory: F,
-    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG`
+    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG/CMAES`
     /// object; `Qng` carries its variance oracle).
     pub method: Method,
     /// Free-parameter count validated at the edge.
@@ -133,13 +133,16 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         let oracle = self.factory.build(resources, cancel, &self.errors);
         // Only a backend whose allocation expires (CUNQA) gets the overrun watch.
         let oracle: Box<dyn EvaluationOracle> = match resources.backend.walltime() {
-            Some(walltime) => Box::new(WalltimeWatch::new(
-                oracle,
-                walltime,
-                self.method.run_shape(),
-                &resources.config.id,
-                SystemClock,
-            )),
+            Some(walltime) => Box::new(
+                WalltimeWatch::new(
+                    oracle,
+                    walltime,
+                    self.method.run_shape(),
+                    &resources.config.id,
+                    SystemClock,
+                )
+                .with_growth(self.method.growth(self.dimensions)),
+            ),
             None => oracle,
         };
         dispatch_optimizer(

@@ -7,7 +7,7 @@
 #                              transport + quantum Hamiltonians as Pauli sums; no PyO3)
 #   - crates/polypus-sim     : pure-Rust statevector simulator consuming polypus-circuit's
 #                              ConcreteCircuit directly (no OpenQASM round-trip; no PyO3)
-#   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG) decoupled
+#   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
 #   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
 #                              diagonal costs) mapping measurement counts to expectation values

@@ -23,7 +23,7 @@
 //!
 //! ## Features
 //! - Run a quantum circuit on one or multiple QPUs.
-//! - Train variational quantum circuits using Differential Evolution, PSO or Quantum Natural Gradient.
+//! - Train variational quantum circuits using Differential Evolution, PSO, Quantum Natural Gradient or CMA-ES.
 //! - Unified `train()` API — swap optimizers by changing a single argument.
 //!
 //! ## Running a circuit
@@ -71,6 +71,14 @@
 //! # Quantum Natural Gradient
 //! result = polypus.train(
 //!     qc, polypus.QNG(variance_fn, max_iters=100, learning_rate=0.1),
+//!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
+//!     expectation_function=bitstring_to_obj,
+//!     infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
+//! )
+//!
+//! # CMA-ES, with up to 2 IPOP restarts that double the population
+//! result = polypus.train(
+//!     qc, polypus.CMAES(generations=100, restarts=2),
 //!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
 //!     expectation_function=bitstring_to_obj,
 //!     infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
@@ -131,7 +139,7 @@ pub use polypus_logger as logger;
 /// (re-export of the dependency-free `polypus-circuit` crate).
 pub use polypus_circuit as circuit;
 
-/// Pure-Rust variational optimizers (DE, PSO, QNG)
+/// Pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES)
 /// (re-export of the Python-free `polypus-optimizers` crate).
 pub use polypus_optimizers as optimizers;
 

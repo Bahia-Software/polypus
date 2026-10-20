@@ -46,6 +46,7 @@ __all__ = [
     "DE",
     "PSO",
     "QNG",
+    "CMAES",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -86,7 +87,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG]
+_Method = Union[DE, PSO, QNG, CMAES]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -181,6 +182,28 @@ class QNG:
         tikhonov_reg: float = 0.05,
         seed: Optional[int] = None,
     ) -> QNG: ...
+
+@final
+class CMAES:
+    generations: int
+    # `None`: Hansen's default `4 + floor(3 ln d)` for `d = dimensions`.
+    population_size: Optional[int]
+    sigma0: float
+    tolerance: float
+    patience: int
+    restarts: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        generations: int = 100,
+        population_size: Optional[int] = None,
+        # Default `pi / 2` (bindings/cmaes.rs).
+        sigma0: float = ...,
+        tolerance: float = 0.01,
+        patience: int = 20,
+        restarts: int = 0,
+        seed: Optional[int] = None,
+    ) -> CMAES: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
