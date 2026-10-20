@@ -24,7 +24,8 @@ What it checks, with the native backend as the reference for the keys:
   measures keeps the declared width, as text and as an imported
   ``polypus.Circuit`` (OpenQASM 2 and 3).
 
-Record the CUNQA version and the output in #253 / #304 when you run it.
+Record the CUNQA version and the output in the PR when you run it. Passed on
+CUNQA 3.0.0 with Qiskit 2.5.2 (#253, #304).
 """
 
 import os
@@ -36,9 +37,11 @@ if os.environ.get("POLYPUS_CUNQA_REAL") != "1":
         "real CUNQA test: set POLYPUS_CUNQA_REAL=1 on a CUNQA host",
         allow_module_level=True,
     )
-pytest.importorskip("cunqa")
+# Through the seal, which honours POLYPUS_CUNQA_PATH before importing cunqa.
+pytest.importorskip("polypus_python.cunqa")
 
 import polypus  # noqa: E402
+from fake_cunqa import CIRCUIT_FORMS, WIDE_REGISTERS, circuit_in_form  # noqa: E402
 
 pytestmark = pytest.mark.cunqa
 
@@ -50,38 +53,6 @@ _SETTINGS = dict(
     cores_per_qpu=int(os.environ.get("POLYPUS_CUNQA_CORES", "1")),
     walltime=os.environ.get("POLYPUS_CUNQA_WALLTIME", "00:20:00"),
 )
-
-_QASM2_HEADER = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
-_QASM3_HEADER = 'OPENQASM 3.0;\ninclude "stdgates.inc";\n'
-
-# #304 cases: (name, OpenQASM 2 body, OpenQASM 3 body, expected key).
-_WIDE_REGISTERS = [
-    (
-        "wider_creg",
-        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
-        "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
-        "010",
-    ),
-    (
-        "several_registers",
-        "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
-        "qubit[2] q;\nbit[2] a;\nbit[3] b;\nx q[1];\na[1] = measure q[1];\n",
-        "00010",
-    ),
-    (
-        "full_measurement_wider_creg",
-        "qreg q[2];\ncreg c[4];\nx q[1];\nmeasure q[0] -> c[0];\n"
-        "measure q[1] -> c[1];\n",
-        "qubit[2] q;\nbit[4] c;\nx q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
-        "0010",
-    ),
-    (
-        "no_measurement_with_creg",
-        "qreg q[2];\ncreg c[3];\nx q[0];\n",
-        "qubit[2] q;\nbit[3] c;\nx q[0];\n",
-        "01",
-    ),
-]
 
 
 def _cunqa(qc, n_qpus, **kwargs):
@@ -123,18 +94,13 @@ def test_circuit_without_measurements_reads_the_full_register(n_qpus):
 
 
 @pytest.mark.parametrize("n_qpus", [1, 2])
-@pytest.mark.parametrize("form", ["qasm2_text", "from_qasm2", "from_qasm3"])
+@pytest.mark.parametrize("form", CIRCUIT_FORMS)
 @pytest.mark.parametrize(
-    "name,qasm2,qasm3,key", _WIDE_REGISTERS, ids=[c[0] for c in _WIDE_REGISTERS]
+    "name,qasm2,qasm3,key", WIDE_REGISTERS, ids=[c[0] for c in WIDE_REGISTERS]
 )
 def test_declared_classical_width_is_kept(name, qasm2, qasm3, key, form, n_qpus):
     # #304
-    if form == "qasm2_text":
-        qc = _QASM2_HEADER + qasm2
-    elif form == "from_qasm2":
-        qc = polypus.Circuit.from_qasm2(_QASM2_HEADER + qasm2)
-    else:
-        qc = polypus.Circuit.from_qasm3(_QASM3_HEADER + qasm3)
+    qc = circuit_in_form(form, qasm2, qasm3)
     assert _native(qc).merged_counts == {key: _SHOTS}
     result = _cunqa(qc, n_qpus, seed=5)
     _assert_c3(result, n_qpus)

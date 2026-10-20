@@ -12,15 +12,10 @@ These exercise issue #34 / #56's acceptance criteria from Python:
   / seed, and the ``DE``/``PSO``/``QNG``/``CMAES`` ``seed`` field feeds the
   precedence.
 
-CUNQA's simulated QPUs (``infrastructure="cunqa"``) attempt the same kind of
-seed forwarding as Aer (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
-`local.rs`), but this is unverified, not just untested: the `cunqa` package
-isn't installed anywhere in this environment/CI, and reading the actual
-CESGA-Quantum-Spain/cunqa source at the version README.md pins turned up API
-mismatches predating this seed work (wrong import path, wrong kwarg names, a
-`QPU.run()` method that may not exist at that version) — see the CUNQA
-integration follow-up. There is no dedicated test here for the same reason
-QMIO's `real_qpu_smoke` test is marked `ignored`: no live infrastructure.
+CUNQA's simulated QPUs (``infrastructure="cunqa"``) get the same seed forwarding
+as Aer, offset per QPU. It is pinned against a fake CUNQA SDK in
+``test_cunqa_run_flow.py`` and was checked on a real CUNQA 3.0.0 family with
+the opt-in ``test_cunqa_real.py``; CI has no CUNQA, so there is no test here.
 
 The native backend is fully seeded by Polypus, so its reproducibility tests need
 no mocking; Aer is genuinely seeded too (via `seed_simulator`, forwarded across
