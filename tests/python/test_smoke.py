@@ -48,6 +48,11 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "CMAES")
 
+    def test_Adam_class_exists(self):
+        import polypus
+
+        assert hasattr(polypus, "Adam")
+
 
 class TestPolypusInstantiation:
     def test_DE_default_instantiation(self):
@@ -125,7 +130,17 @@ class TestPolypusModuleMetadata:
 
     @pytest.mark.parametrize(
         "name",
-        ["DE", "PSO", "QNG", "CMAES", "Circuit", "Param", "RunResult", "TrainResult"],
+        [
+            "DE",
+            "PSO",
+            "QNG",
+            "CMAES",
+            "Adam",
+            "Circuit",
+            "Param",
+            "RunResult",
+            "TrainResult",
+        ],
     )
     def test_class_module_is_polypus(self, name):
         import polypus

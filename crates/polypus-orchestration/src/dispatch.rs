@@ -6,9 +6,9 @@
 //! either the oracle's recorded failure or the optimizer's own config error).
 //! That triplication now lives here once:
 //! [`dispatch_optimizer`] takes a pyo3-free [`Method`] (the binding parses the
-//! `polypus.DE`/`PSO`/`QNG`/`CMAES` object into it and builds the QNG variance oracle),
-//! runs the matching optimizer, and returns an [`OracleError`] the binding
-//! converts back into a `PyErr`.
+//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam` object into it and builds the QNG
+//! variance oracle), runs the matching optimizer, and returns an
+//! [`OracleError`] the binding converts back into a `PyErr`.
 //!
 //! This crate is deliberately Python-free — the GIL is released by the caller
 //! (`py.detach(|| dispatch_optimizer(...))`) and re-acquired only inside

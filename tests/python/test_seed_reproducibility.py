@@ -9,7 +9,7 @@ These exercise issue #34 / #56's acceptance criteria from Python:
   are returned. A seed is rejected for ``infrastructure="qmio"`` (real hardware).
 * ``train`` / ``qml.train`` seed: same seed ⇒ identical outcome; no seed ⇒
   different outcome; the outcome now exposes fitness / iterations / convergence
-  / seed, and the ``DE``/``PSO``/``QNG``/``CMAES`` ``seed`` field feeds the
+  / seed, and the ``DE``/``PSO``/``QNG``/``CMAES``/``Adam`` ``seed`` field feeds the
   precedence.
 
 CUNQA's simulated QPUs (``infrastructure="cunqa"``) get the same seed forwarding
@@ -156,6 +156,15 @@ class TestOptimizerSeedField:
         cmaes.seed = 8
         assert cmaes.seed == 8
 
+    def test_adam_seed_field(self):
+        import polypus
+
+        assert polypus.Adam().seed is None
+        adam = polypus.Adam(seed=5)
+        assert adam.seed == 5
+        adam.seed = 8
+        assert adam.seed == 8
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # train — native backend is fully reproducible from a single seed
@@ -290,6 +299,32 @@ class TestTrainSeed:
         r3 = self._train(seed=777, method=self._cmaes(seed=1), ident="cmaes_field")
         assert r3.seed == 777
 
+    # Adam: the seed draws the initial θ; its finite-difference gradient then
+    # follows the seeded shots.
+    @staticmethod
+    def _adam(**kwargs):
+        import polypus
+
+        return polypus.Adam(max_iters=4, tolerance=1e-12, **kwargs)
+
+    def test_same_seed_reproduces_adam(self):
+        r1 = self._train(seed=2024, method=self._adam(), ident="train_seed_adam")
+        r2 = self._train(seed=2024, method=self._adam(), ident="train_seed_adam")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_adam_field_seed_is_used_and_the_kwarg_wins(self):
+        r1 = self._train(seed=None, method=self._adam(seed=99), ident="adam_field")
+        r2 = self._train(seed=None, method=self._adam(seed=99), ident="adam_field")
+        assert r1.seed == 99 and r2.seed == 99
+        assert r1.best_params == r2.best_params
+        r3 = self._train(seed=777, method=self._adam(seed=1), ident="adam_field")
+        assert r3.seed == 777
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # qml.train — optimizer RNG and Aer sampling are both seeded; mock the backend
@@ -372,6 +407,24 @@ class TestQmlTrainSeed:
 
         def method():
             return polypus.CMAES(generations=3, tolerance=1e-12)
+
+        r1 = self._qml_train(123, method())
+        r2 = self._qml_train(123, method())
+        assert r1.seed == 123 and r2.seed == 123
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.fitness_history == r2.fitness_history
+        r3 = self._qml_train(None, method())
+        assert r3.seed != 123
+        assert r3.best_params != r1.best_params
+
+    def test_same_seed_reproduces_adam(self, monkeypatch):
+        import polypus
+
+        self._patch_deterministic_backend(monkeypatch)
+
+        def method():
+            return polypus.Adam(max_iters=3, tolerance=1e-12)
 
         r1 = self._qml_train(123, method())
         r2 = self._qml_train(123, method())

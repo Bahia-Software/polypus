@@ -106,8 +106,8 @@ pub trait OracleFactory {
 pub struct TrainFlow<F: OracleFactory> {
     /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
     pub factory: F,
-    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG/CMAES`
-    /// object; `Qng` carries its variance oracle).
+    /// Chosen optimizer + its config (built at the edge from the
+    /// `polypus.DE/PSO/QNG/CMAES/Adam` object; `Qng` carries its variance oracle).
     pub method: Method,
     /// Free-parameter count validated at the edge.
     pub dimensions: u32,
