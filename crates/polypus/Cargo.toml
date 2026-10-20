@@ -5,6 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Rust-core quantum variational optimization framework with a Python (PyO3) interface: circuit simulation, VQC/QML training and population-based optimizers (DE, PSO, QNG, CMA-ES). Python users: `pip install polypus-quantum` (the module imports as `polypus`)."
+# crates.io landing metadata. The Rust crate is `polypus`; the same project on
+# PyPI is the `polypus-quantum` distribution (which imports as `polypus`), so a
+# reader arriving from either side can find the other — see the Homepage/README.
+homepage = "https://github.com/Bahia-Software/polypus"
+documentation = "https://bahia-software.github.io/polypus/"
+keywords = ["quantum", "simulator", "qaoa", "optimization", "pyo3"]
+categories = ["science", "simulation"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -14,10 +23,9 @@ crate-type = ["cdylib", "rlib"]
 [features]
 extension-module = ["pyo3/extension-module"]
 # Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ
-# stack. Uses the pure-Rust `zeromq` crate (no system libzmq required) plus
-# `serde-pickle` to speak the QMIO wire protocol (pickle over a ZMQ REQ socket).
-# `tokio/net` enables the runtime IO driver that the async `zeromq` sockets need.
-qmio = ["dep:zeromq", "dep:serde-pickle", "tokio/net"]
+# stack. The backend itself (ZeroMQ wire protocol, pickle serialisation) lives in
+# `polypus-infrastructure`; this just forwards the feature to it.
+qmio = ["polypus-infrastructure/qmio"]
 default = ["info-logs"]
 # Compile-time max log level, forwarded to the shared `polypus-logger` crate
 # (which in turn toggles the `log` crate's global `max_level_*` features).
@@ -32,35 +40,28 @@ trace-logs = ["polypus-logger/trace-logs"]
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
-polypus-qml = { workspace = true, features = ["serde"] }
 polypus-observable = { workspace = true }
+polypus-infrastructure = { workspace = true }
+polypus-orchestration = { workspace = true }
+polypus-evaluation = { workspace = true }
 polypus-logger = { workspace = true }
-# Was 0.24.2; moved to 0.25 only to unblock `numpy` below (rust-numpy versions
-# are pinned 1:1 to a pyo3 version, and 0.24 is unusable — see the note there).
-# The bump needs no source changes and clears neither of the pyo3 advisories
-# ignored in `deny.toml`; those still want >=0.26 / >=0.29.
-pyo3 = { version = "0.25", features = ["num-complex"] }
+# Must be >= 0.29: that release carries the fixes for RUSTSEC-2026-0176
+# (out-of-bounds read in PyList/PyTuple iterator `nth`/`skip`) and
+# RUSTSEC-2026-0177 (`PyCFunction::new_closure` without a `Sync` bound), so
+# `deny.toml` needs no ignore for either. Keep the same minor as
+# polypus-infrastructure and polypus-evaluation (one pyo3 in the graph), and
+# bump it together with `numpy` below.
+pyo3 = { workspace = true, features = ["num-complex"] }
 # Zero-copy handover of the `2^n` statevector amplitudes to Python as a
-# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`). Must
-# stay >= 0.25: rust-numpy 0.24.0 still carries the deprecated
-# `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc ICE on current
-# stable (1.96) and so breaks `cargo doc -D warnings` in CI. 0.25 removed it.
-numpy = "0.25"
-rand = { workspace = true }
-# Parallel aggregation in the Python-callback observable fallback (the native
-# observables' rayon usage lives in polypus-observable).
-rayon = "1"
-# `float_roundtrip` makes serde_json's parser reproduce f64 bit-for-bit (its
-# default parser trades last-ULP accuracy for speed); required so a saved
-# TrainedModel's θ reloads exactly and its predictions reproduce (C-7).
-serde_json = { version = "1.0", features = ["float_roundtrip"] }
+# `numpy.ndarray` of `complex128` (see `bindings::circuit::statevector`).
+# rust-numpy releases are pinned 1:1 to a pyo3 minor, so this must track the
+# pyo3 minor above. Never go back below 0.25: rust-numpy 0.24.0 still carries
+# the deprecated `ToPyArray::to_pyarray_bound`, whose doc link makes rustdoc
+# ICE on current stable (1.96) and so breaks `cargo doc -D warnings` in CI.
+numpy = { workspace = true }
 log = { workspace = true }
 uuid = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
-# --- optional, only compiled with `--features qmio` ---
-# Pure-Rust ZeroMQ (ZMTP 3.x, interoperable with pyzmq/libzmq); avoids a C
-# `libzmq` build dependency at the cost of an async (tokio) API.
-zeromq = { version = "0.6", optional = true }
-# Reads/writes Python's pickle format WITHOUT executing __reduce__/GLOBAL, so a
-# malicious peer cannot achieve RCE the way Python's `pickle.loads` allows.
-serde-pickle = { version = "1.2", optional = true }
+# Only for `rayon::current_num_threads()` in the calibration warning message
+# (crates/polypus/src/bindings/calibration.rs); the actual parallel kernels
+# live in polypus-sim/polypus-infrastructure, which depend on it themselves.
+rayon = { workspace = true }

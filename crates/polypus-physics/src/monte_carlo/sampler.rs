@@ -1,6 +1,6 @@
 //! Step-length sampling and position advancement helpers.
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Sample a step length from the exponential distribution
 /// `d = −λ · ln(ξ)`, with `ξ ~ Uniform(0, 1)` and `λ = 1/Σ_tot` the mean free
@@ -9,7 +9,7 @@ use rand::Rng;
 /// `mean_free_path_m` is `λ`. `ξ` is drawn from `[ε, 1)` (excluding 0) so that
 /// `ln(ξ)` is finite.
 pub fn sample_step_length(mean_free_path_m: f64, rng: &mut impl Rng) -> f64 {
-    let xi: f64 = rng.gen_range(f64::EPSILON..1.0);
+    let xi: f64 = rng.random_range(f64::EPSILON..1.0);
     -mean_free_path_m * xi.ln()
 }
 
@@ -38,6 +38,24 @@ mod tests {
         }
         let mean = sum / n as f64;
         assert!((mean - 1.0).abs() < 0.05);
+    }
+
+    /// Pins the absolute seeded output of the step-length sampler. The other
+    /// seeded tests only check statistics or compare two runs, so a `rand` bump
+    /// that changed the `StdRng` stream or `random_range` would pass them
+    /// silently. Values captured with rand 0.9.4, compared by bits.
+    #[test]
+    fn step_length_seeded_stream_is_pinned() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let steps: [u64; 3] = std::array::from_fn(|_| sample_step_length(0.5, &mut rng).to_bits());
+        assert_eq!(
+            steps,
+            [
+                4599448791712981353,
+                4599176389074138328,
+                4597307388416020275
+            ]
+        );
     }
 
     #[test]

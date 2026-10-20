@@ -9,32 +9,32 @@ use polypus_circuit::{
 fn test_parameterized_circuit_basic_creation() {
     let qc = ParameterizedCircuit::new(3);
 
-    assert_eq!(qc.num_qubits, 3);
-    assert_eq!(qc.num_params, 0);
-    assert_eq!(qc.gates.len(), 0);
+    assert_eq!(qc.num_qubits(), 3);
+    assert_eq!(qc.num_params(), 0);
+    assert_eq!(qc.gates().len(), 0);
 }
 
 #[test]
 fn test_parameterized_circuit_gate_basic_creation() {
     let qc = ParameterizedCircuit::new(2).h(0).cz(0, 1);
 
-    assert_eq!(qc.num_qubits, 2);
-    assert_eq!(qc.num_params, 0);
-    assert_eq!(qc.gates.len(), 2);
-    assert_eq!(qc.gates[0], GateInstruction::H(0));
-    assert_eq!(qc.gates[1], GateInstruction::Cz(0, 1));
+    assert_eq!(qc.num_qubits(), 2);
+    assert_eq!(qc.num_params(), 0);
+    assert_eq!(qc.gates().len(), 2);
+    assert_eq!(qc.gates()[0], GateInstruction::H(0));
+    assert_eq!(qc.gates()[1], GateInstruction::Cz(0, 1));
 }
 
 #[test]
 fn test_parameterized_circuit_gate_param_basic_creation() {
     let qc = ParameterizedCircuit::new(2).x(0).rx(0, GateParam::Param(3));
 
-    assert_eq!(qc.num_qubits, 2);
-    assert_eq!(qc.num_params, 4); // Param(3) means we have 4 parameters (0, 1, 2, 3)
-    assert_eq!(qc.gates.len(), 2);
-    assert_eq!(qc.gates[0], GateInstruction::X(0));
+    assert_eq!(qc.num_qubits(), 2);
+    assert_eq!(qc.num_params(), 4); // Param(3) means we have 4 parameters (0, 1, 2, 3)
+    assert_eq!(qc.gates().len(), 2);
+    assert_eq!(qc.gates()[0], GateInstruction::X(0));
     assert_eq!(
-        qc.gates[1],
+        qc.gates()[1],
         GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Param(3),
@@ -46,8 +46,8 @@ fn test_parameterized_circuit_gate_param_basic_creation() {
 fn test_parameterized_circuit_swap_builder_and_qasm() {
     let qc = ParameterizedCircuit::new(3).swap(0, 2);
 
-    assert_eq!(qc.gates.len(), 1);
-    assert_eq!(qc.gates[0], GateInstruction::Swap(0, 2));
+    assert_eq!(qc.gates().len(), 1);
+    assert_eq!(qc.gates()[0], GateInstruction::Swap(0, 2));
 
     let qasm = qc.to_qasm2_with_params(&[]).unwrap();
     assert!(qasm.contains("swap q[0],q[2];"));
@@ -84,26 +84,26 @@ fn test_parameterized_circuit_gate_assign_parameters() {
         .rz(0, Param(0))
         .ry(1, Param(1))
         .rzz(0, 1, Param(2));
-    assert_eq!(qc.num_params, 3);
+    assert_eq!(qc.num_params(), 3);
 
     let concrete_qc = qc.assign_parameters(&[0.1, 0.2, 0.3]).unwrap();
-    assert_eq!(concrete_qc.gates[0], GateInstruction::T(0));
+    assert_eq!(concrete_qc.gates()[0], GateInstruction::T(0));
     assert_eq!(
-        concrete_qc.gates[1],
+        concrete_qc.gates()[1],
         GateInstruction::Rz {
             qubit: 0,
             theta: GateParam::Fixed(0.1)
         }
     );
     assert_eq!(
-        concrete_qc.gates[2],
+        concrete_qc.gates()[2],
         GateInstruction::Ry {
             qubit: 1,
             theta: GateParam::Fixed(0.2)
         }
     );
     assert_eq!(
-        concrete_qc.gates[3],
+        concrete_qc.gates()[3],
         GateInstruction::Rzz {
             q0: 0,
             q1: 1,
@@ -115,7 +115,7 @@ fn test_parameterized_circuit_gate_assign_parameters() {
 #[test]
 fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params() {
     let qc = ParameterizedCircuit::new(2).rx(0, Param(0)).ry(1, Param(1));
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     let result = qc.assign_parameters(&[0.1]);
     assert_eq!(
@@ -129,12 +129,14 @@ fn test_parameterized_circuit_gate_assign_parameters_wrong_number_of_params() {
 
 #[test]
 fn test_parameterized_circuit_assign_parameters_param_index_out_of_bounds() {
-    let mut qc = ParameterizedCircuit::new(1);
-    qc.num_params = 1;
-    qc.gates = vec![GateInstruction::Rx {
-        qubit: 0,
-        theta: GateParam::Param(5),
-    }];
+    let qc = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        1,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(5),
+        }],
+    );
 
     let result = qc.assign_parameters(&[0.1]);
 
@@ -152,7 +154,7 @@ fn test_parameterized_circuit_assign_parameters_rejects_non_finite() {
     let qc = ParameterizedCircuit::new(2)
         .rx(0, Param(0))
         .u(1, Param(1), Param(2), Param(3));
-    assert_eq!(qc.num_params, 4);
+    assert_eq!(qc.num_params(), 4);
 
     // A caller-supplied non-finite value bound to a `Param` is rejected.
     assert_eq!(
@@ -370,19 +372,19 @@ fn test_parameterized_circuit_from_qasm2_unsupported_statement() {
 fn test_parameterized_circuit_barrier_creation() {
     let qc = ParameterizedCircuit::new(3).barrier().barrier_on(&[0, 2]);
 
-    assert_eq!(qc.gates.len(), 2);
-    assert_eq!(qc.gates[0], GateInstruction::Barrier(vec![]));
-    assert_eq!(qc.gates[1], GateInstruction::Barrier(vec![0, 2]));
+    assert_eq!(qc.gates().len(), 2);
+    assert_eq!(qc.gates()[0], GateInstruction::Barrier(vec![]));
+    assert_eq!(qc.gates()[1], GateInstruction::Barrier(vec![0, 2]));
 }
 
 #[test]
 fn test_parameterized_circuit_try_push_basic() {
     let mut qc = ParameterizedCircuit::new(2);
-    assert_eq!(qc.gates.len(), 0);
+    assert_eq!(qc.gates().len(), 0);
 
     let result = qc.try_push(GateInstruction::T(1));
-    assert_eq!(qc.gates[0], GateInstruction::T(1));
-    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(qc.gates()[0], GateInstruction::T(1));
+    assert_eq!(qc.gates().len(), 1);
     assert_eq!(result, Ok(()));
 }
 
@@ -408,6 +410,54 @@ fn test_parameterized_circuit_try_push_same_qubits() {
     assert_eq!(result, Err(CircuitError::IdenticalQubits { qubit: 0 }));
 }
 
+/// Issue #345: a classical bit index is bounded like a declared register
+/// (`MAX_REGISTER_BITS`), so `num_clbits` cannot overflow and no export can
+/// declare a `creg` an importer would refuse.
+#[test]
+fn test_parameterized_circuit_try_push_rejects_out_of_range_cbit() {
+    const MAX_REGISTER_BITS: usize = 1_000_000;
+    for cbit in [MAX_REGISTER_BITS, 1 << 40, usize::MAX] {
+        let mut qc = ParameterizedCircuit::new(1);
+        assert_eq!(
+            qc.try_push(GateInstruction::Measure { qubit: 0, cbit }),
+            Err(CircuitError::ClbitOutOfRange {
+                cbit,
+                max: MAX_REGISTER_BITS
+            })
+        );
+        assert!(
+            qc.gates().is_empty(),
+            "a rejected measurement is not appended"
+        );
+    }
+    let mut qc = ParameterizedCircuit::new(1);
+    let last = MAX_REGISTER_BITS - 1;
+    assert_eq!(
+        qc.try_push(GateInstruction::Measure {
+            qubit: 0,
+            cbit: last
+        }),
+        Ok(())
+    );
+    assert_eq!(qc.num_clbits(), MAX_REGISTER_BITS);
+}
+
+/// A `cbit` of `usize::MAX` in an unchecked circuit bypasses `try_push`;
+/// sizing the register saturates instead of overflowing.
+#[test]
+fn test_num_clbits_saturates_on_an_unchecked_cbit() {
+    let qc = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![GateInstruction::Measure {
+            qubit: 0,
+            cbit: usize::MAX,
+        }],
+    );
+    assert_eq!(qc.num_clbits(), usize::MAX);
+    assert_eq!(qc.clbits_width(), usize::MAX);
+}
+
 #[test]
 fn test_parameterized_circuit_try_push_track_params() {
     let mut qc = ParameterizedCircuit::new(2);
@@ -417,7 +467,7 @@ fn test_parameterized_circuit_try_push_track_params() {
     });
 
     assert_eq!(result, Ok(()));
-    assert_eq!(qc.num_params, 4);
+    assert_eq!(qc.num_params(), 4);
 }
 
 // Push-time C-4 state (contract C-4 enforced incrementally by `try_push`).
@@ -471,7 +521,7 @@ fn try_push_rejects_any_unitary_after_measure_all() {
     // Measurements and barriers still go through.
     assert_eq!(qc.try_push(GateInstruction::MeasureAll), Ok(()));
     assert_eq!(qc.try_push(GateInstruction::Barrier(vec![])), Ok(()));
-    assert_eq!(qc.gates.len(), 3);
+    assert_eq!(qc.gates().len(), 3);
 }
 
 /// A rejected push must leave the circuit — including the incremental C-4
@@ -506,7 +556,7 @@ fn try_push_rejections_do_not_disturb_the_measured_state() {
         }),
         Err(CircuitError::NonFiniteParam)
     );
-    assert_eq!(qc.gates.len(), 2);
+    assert_eq!(qc.gates().len(), 2);
 
     // Unmeasured qubits are still usable, and measuring one more is tracked.
     assert_eq!(qc.try_push(GateInstruction::Cx(0, 2)), Ok(()));
@@ -526,11 +576,14 @@ fn try_push_rejections_do_not_disturb_the_measured_state() {
 /// by the QASM importer) is still checked against its own measurements.
 #[test]
 fn try_push_derives_the_measured_state_from_existing_gates() {
-    let mut hand_assembled = ParameterizedCircuit::new(2);
-    hand_assembled.gates = vec![
-        GateInstruction::H(0),
-        GateInstruction::Measure { qubit: 0, cbit: 0 },
-    ];
+    let mut hand_assembled = ParameterizedCircuit::from_parts_unchecked(
+        2,
+        0,
+        vec![
+            GateInstruction::H(0),
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+        ],
+    );
     assert_eq!(
         hand_assembled.try_push(GateInstruction::X(0)),
         Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
@@ -542,7 +595,7 @@ fn try_push_derives_the_measured_state_from_existing_gates() {
         "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\nh q[0];\nmeasure q -> c;\n",
     )
     .unwrap();
-    assert_eq!(imported.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(imported.gates().last(), Some(&GateInstruction::MeasureAll));
     assert_eq!(
         imported.try_push(GateInstruction::H(1)),
         Err(CircuitError::QubitAlreadyMeasured { qubit: 1 })
@@ -553,8 +606,8 @@ fn try_push_derives_the_measured_state_from_existing_gates() {
 fn test_parameterized_circuit_push_basic() {
     let qc = ParameterizedCircuit::new(2).push(GateInstruction::H(1));
 
-    assert_eq!(qc.gates.len(), 1);
-    assert_eq!(qc.gates[0], GateInstruction::H(1));
+    assert_eq!(qc.gates().len(), 1);
+    assert_eq!(qc.gates()[0], GateInstruction::H(1));
 }
 
 #[test]
@@ -630,7 +683,63 @@ fn test_parameterized_circuit_try_push_rejects_non_finite() {
     );
 
     // Only the valid gate made it into the circuit.
-    assert_eq!(qc.gates.len(), 1);
+    assert_eq!(qc.gates().len(), 1);
+}
+
+/// A rejected push must not leak partial state: even when the valid slots of
+/// the rejected gate reference free parameters, `num_params` is unchanged.
+#[test]
+fn test_rejected_push_leaves_num_params_untouched() {
+    let mut qc = ParameterizedCircuit::new(1);
+    assert_eq!(
+        qc.try_push(GateInstruction::U {
+            qubit: 0,
+            theta: GateParam::Param(4),
+            phi: GateParam::Fixed(f64::NAN),
+            lam: GateParam::Param(7),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert_eq!(qc.num_params(), 0);
+    assert!(qc.gates().is_empty());
+
+    // Same for a structural rejection (out-of-range qubit) of a gate whose
+    // angle is a free parameter.
+    assert_eq!(
+        qc.try_push(GateInstruction::Rzz {
+            q0: 0,
+            q1: 3,
+            theta: GateParam::Param(2),
+        }),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 3,
+            num_qubits: 1
+        })
+    );
+    assert_eq!(qc.num_params(), 0);
+    assert!(qc.gates().is_empty());
+}
+
+/// Structural checks run in a fixed order for every arity: range before
+/// distinctness, each reporting the first offending operand in operand order.
+#[test]
+fn test_try_push_reports_range_before_repeated_qubits() {
+    let mut qc = ParameterizedCircuit::new(2);
+    // Both operands out of range (and equal): the range error wins.
+    assert_eq!(
+        qc.try_push(GateInstruction::Cx(5, 5)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 5,
+            num_qubits: 2
+        })
+    );
+    // In range but repeated.
+    assert_eq!(
+        qc.try_push(GateInstruction::Swap(1, 1)),
+        Err(CircuitError::IdenticalQubits { qubit: 1 })
+    );
+    // A barrier may repeat a qubit; it is not a unitary.
+    assert_eq!(qc.try_push(GateInstruction::Barrier(vec![1, 1])), Ok(()));
 }
 
 /// Regression for issue #38 (acceptance criterion): a non-finite angle must
@@ -650,11 +759,14 @@ fn test_export_rejects_non_finite_angle() {
     // Route 2: a circuit assembled by hand with a fixed non-finite angle,
     // bypassing the builder's construction-time guard — the exporter itself
     // still refuses it, so no `NaN`/`inf` literal is ever serialised.
-    let mut hand_assembled = ParameterizedCircuit::new(1);
-    hand_assembled.gates = vec![GateInstruction::Rx {
-        qubit: 0,
-        theta: GateParam::Fixed(f64::INFINITY),
-    }];
+    let hand_assembled = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::INFINITY),
+        }],
+    );
     assert_eq!(
         hand_assembled.to_qasm2_with_params(&[]),
         Err(CircuitError::NonFiniteParam)
@@ -662,37 +774,127 @@ fn test_export_rejects_non_finite_angle() {
 }
 
 // ConcreteCircuit
+
+/// #349: a concrete circuit is validated like a built one, so its invariants
+/// hold for every consumer.
+#[test]
+fn concrete_circuit_try_new_validates_like_the_builder() {
+    use GateInstruction as G;
+    let rx = |theta| G::Rx { qubit: 0, theta };
+    let cases = [
+        (
+            vec![G::H(2)],
+            CircuitError::QubitOutOfRange {
+                qubit: 2,
+                num_qubits: 2,
+            },
+        ),
+        (
+            vec![G::Cx(1, 1)],
+            CircuitError::IdenticalQubits { qubit: 1 },
+        ),
+        (
+            vec![G::Measure {
+                qubit: 0,
+                cbit: usize::MAX,
+            }],
+            CircuitError::ClbitOutOfRange {
+                cbit: usize::MAX,
+                max: 1_000_000, // `MAX_REGISTER_BITS`
+            },
+        ),
+        (
+            vec![G::Measure { qubit: 0, cbit: 0 }, G::X(0)],
+            CircuitError::QubitAlreadyMeasured { qubit: 0 },
+        ),
+        (
+            vec![rx(GateParam::Param(3))],
+            CircuitError::ParamIndexOutOfBounds {
+                index: 3,
+                num_params: 0,
+            },
+        ),
+        (
+            vec![rx(GateParam::Fixed(f64::NAN))],
+            CircuitError::NonFiniteParam,
+        ),
+    ];
+    for (gates, expected) in cases {
+        assert_eq!(
+            ConcreteCircuit::try_new(2, gates.clone()),
+            Err(expected),
+            "{gates:?}"
+        );
+    }
+
+    let gates = vec![
+        G::H(0),
+        G::Cx(0, 1),
+        rx(GateParam::Fixed(0.5)),
+        G::MeasureAll,
+    ];
+    let qc = ConcreteCircuit::try_new(2, gates.clone()).expect("a valid circuit");
+    assert_eq!(qc.num_qubits(), 2);
+    assert_eq!(qc.gates(), gates.as_slice());
+    assert_eq!(qc, ConcreteCircuit::new(2, gates.clone()));
+    assert_eq!(qc.into_gates(), gates);
+}
+
+#[test]
+#[should_panic(expected = "distinct qubits")]
+fn concrete_circuit_new_panics_on_invalid_gates() {
+    ConcreteCircuit::new(2, vec![GateInstruction::Cx(0, 0)]);
+}
+
+#[test]
+fn concrete_circuit_try_with_gates_keeps_the_declared_width_and_validates() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src)
+        .unwrap()
+        .assign_parameters(&[])
+        .unwrap();
+    let mut gates = qc.gates().to_vec();
+    gates.insert(0, GateInstruction::H(1));
+    let rewritten = qc.try_with_gates(gates).expect("still valid");
+    assert_eq!(rewritten.clbits_width(), 3);
+    assert_eq!(rewritten.num_qubits(), 2);
+    assert_eq!(
+        qc.try_with_gates(vec![GateInstruction::H(7)]),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 7,
+            num_qubits: 2
+        })
+    );
+}
+
 #[test]
 fn test_concrete_circuit_num_clbits_no_measurements() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![],
-    };
+    let qc = ConcreteCircuit::new(2, vec![]);
 
     assert_eq!(qc.num_clbits(), 0);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_single_measurement() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        2,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
             },
             GateInstruction::Measure { qubit: 0, cbit: 0 },
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 1);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_multiple_measurements() {
-    let qc = ConcreteCircuit {
-        num_qubits: 5,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        5,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
@@ -700,47 +902,44 @@ fn test_concrete_circuit_num_clbits_multiple_measurements() {
             GateInstruction::Measure { qubit: 0, cbit: 2 },
             GateInstruction::Measure { qubit: 4, cbit: 5 },
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 6);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_measure_all() {
-    let qc = ConcreteCircuit {
-        num_qubits: 5,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        5,
+        vec![
             GateInstruction::Rx {
                 qubit: 0,
                 theta: GateParam::Fixed(1.0),
             },
             GateInstruction::MeasureAll,
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 5);
 }
 
 #[test]
 fn test_concrete_circuit_num_clbits_measure_and_measure_all() {
-    let qc = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        3,
+        vec![
             GateInstruction::Measure { qubit: 0, cbit: 10 },
             GateInstruction::MeasureAll,
         ],
-    };
+    );
 
     assert_eq!(qc.num_clbits(), 11);
 }
 
 #[test]
 fn test_concrete_circuit_to_qasm2_basic() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![GateInstruction::H(0)],
-    };
-    let qasm = qc.to_qasm2();
+    let qc = ConcreteCircuit::new(2, vec![GateInstruction::H(0)]);
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -750,9 +949,9 @@ fn test_concrete_circuit_to_qasm2_basic() {
 
 #[test]
 fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
-    let qc = ConcreteCircuit {
-        num_qubits: 2,
-        gates: vec![
+    let qc = ConcreteCircuit::new(
+        2,
+        vec![
             GateInstruction::H(0),
             GateInstruction::Rx {
                 qubit: 0,
@@ -764,8 +963,8 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
             },
             GateInstruction::MeasureAll,
         ],
-    };
-    let qasm = qc.to_qasm2();
+    );
+    let qasm = qc.try_to_qasm2().unwrap();
 
     assert!(qasm.starts_with("OPENQASM 2.0;"));
     assert!(qasm.contains("qreg q[2];"));
@@ -782,14 +981,323 @@ fn test_concrete_circuit_to_qasm2_multiple_gates_measure() {
 
 #[test]
 #[should_panic]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn test_concrete_circuit_to_qasm2_panics_on_param() {
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Param(0),
         }],
-    };
+    );
 
     let _ = qc.to_qasm2();
+}
+
+// ── Tier-1 qelib1.inc gates: builder, validation and parameter binding ──────
+
+#[test]
+fn test_qelib1_builder_methods_push_one_instruction_each() {
+    use GateInstruction as G;
+    use GateParam::Fixed;
+    let qc = ParameterizedCircuit::new(3)
+        .sx(0)
+        .sxdg(1)
+        .cy(2, 0)
+        .ch(1, 2)
+        .csx(0, 1)
+        .ccx(2, 1, 0)
+        .cswap(0, 2, 1)
+        .crx(1, 0, 0.1)
+        .cry(2, 1, 0.2)
+        .crz(0, 2, 0.3)
+        .cu1(1, 2, 0.4)
+        .cu3(2, 0, 0.5, 0.6, 0.7)
+        .cu(0, 1, 0.8, 0.9, 1.0, 1.1);
+    assert_eq!(
+        qc.gates(),
+        [
+            G::Sx(0),
+            G::Sxdg(1),
+            G::Cy(2, 0),
+            G::Ch(1, 2),
+            G::Csx(0, 1),
+            G::Ccx(2, 1, 0),
+            G::Cswap(0, 2, 1),
+            G::Crx {
+                control: 1,
+                target: 0,
+                theta: Fixed(0.1)
+            },
+            G::Cry {
+                control: 2,
+                target: 1,
+                theta: Fixed(0.2)
+            },
+            G::Crz {
+                control: 0,
+                target: 2,
+                theta: Fixed(0.3)
+            },
+            G::Cu1 {
+                q0: 1,
+                q1: 2,
+                theta: Fixed(0.4)
+            },
+            G::Cu3 {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+            G::Cu {
+                control: 0,
+                target: 1,
+                theta: Fixed(0.8),
+                phi: Fixed(0.9),
+                lam: Fixed(1.0),
+                gamma: Fixed(1.1)
+            },
+        ]
+    );
+    assert_eq!(qc.num_params(), 0);
+}
+
+#[test]
+fn test_qelib1_param_tracking_covers_every_angle_slot() {
+    // The highest index anywhere in a gate — including `cu`'s fourth slot —
+    // sizes `num_params`.
+    assert_eq!(
+        ParameterizedCircuit::new(2)
+            .crx(0, 1, Param(3))
+            .num_params(),
+        4
+    );
+    assert_eq!(
+        ParameterizedCircuit::new(2)
+            .cu3(0, 1, 0.1, Param(1), 0.2)
+            .num_params(),
+        2
+    );
+    assert_eq!(
+        ParameterizedCircuit::new(2)
+            .cu(0, 1, 0.1, 0.2, 0.3, Param(6))
+            .num_params(),
+        7
+    );
+}
+
+#[test]
+fn test_try_push_validates_three_qubit_gates() {
+    let mut qc = ParameterizedCircuit::new(3);
+    assert_eq!(
+        qc.try_push(GateInstruction::Ccx(0, 1, 5)),
+        Err(CircuitError::QubitOutOfRange {
+            qubit: 5,
+            num_qubits: 3
+        })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Ccx(0, 2, 0)),
+        Err(CircuitError::IdenticalQubits { qubit: 0 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cswap(1, 2, 2)),
+        Err(CircuitError::IdenticalQubits { qubit: 2 })
+    );
+    assert_eq!(
+        qc.try_push(GateInstruction::Cu {
+            control: 0,
+            target: 1,
+            theta: GateParam::Fixed(0.1),
+            phi: GateParam::Fixed(0.2),
+            lam: GateParam::Fixed(0.3),
+            gamma: GateParam::Fixed(f64::NAN),
+        }),
+        Err(CircuitError::NonFiniteParam)
+    );
+    assert!(qc.gates().is_empty());
+    assert_eq!(qc.try_push(GateInstruction::Cswap(2, 0, 1)), Ok(()));
+}
+
+/// Parameter binding for every parameterised Tier-1 gate: binding free
+/// parameters yields exactly the circuit built with those angles fixed, both
+/// as instructions and as exported QASM. This is the binding path the
+/// orchestration benchmark measures.
+#[test]
+fn test_qelib1_bound_circuit_matches_fixed_angle_circuit() {
+    let values = [0.3, -1.2, 2.5, 0.7];
+    let parameterised = ParameterizedCircuit::new(3)
+        .crx(0, 1, Param(0))
+        .cry(2, 0, Param(1))
+        .crz(1, 2, Param(2))
+        .cu1(2, 1, Param(3))
+        .cu3(0, 2, Param(2), Param(0), Param(1))
+        .cu(1, 0, Param(3), Param(2), Param(1), Param(0));
+    let fixed = ParameterizedCircuit::new(3)
+        .crx(0, 1, values[0])
+        .cry(2, 0, values[1])
+        .crz(1, 2, values[2])
+        .cu1(2, 1, values[3])
+        .cu3(0, 2, values[2], values[0], values[1])
+        .cu(1, 0, values[3], values[2], values[1], values[0]);
+    assert_eq!(parameterised.num_params(), 4);
+
+    let bound = parameterised.assign_parameters(&values).unwrap();
+    assert_eq!(bound.gates(), fixed.gates());
+    assert_eq!(
+        parameterised.to_qasm2_with_params(&values).unwrap(),
+        fixed.to_qasm2_with_params(&[]).unwrap()
+    );
+    assert_eq!(
+        bound.try_to_qasm2().unwrap(),
+        fixed.to_qasm2_with_params(&[]).unwrap()
+    );
+}
+
+// Classical width
+
+/// Binding keeps the two widths apart: the declared one travels into the
+/// `ConcreteCircuit` (`clbits_width()`, `declared_clbits()`), while
+/// `num_clbits()` stays the implicit register the measurements need — 2 for
+/// `creg c[3]` written only at `c[1]`, and 0 for a program that declares
+/// `creg c[3]` and measures nothing. C-3's "no measurements ⇒ `num_qubits`-wide
+/// keys" and Python's `Circuit.num_clbits` read `num_clbits()`, so it must not
+/// pick up the declared width after binding; the tests of #311 check only the
+/// declared width.
+#[test]
+fn test_binding_keeps_the_declared_width_and_the_implicit_register() {
+    let qc = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nmeasure q[0] -> c[1];\n",
+    )
+    .unwrap();
+    assert_eq!((qc.clbits_width(), qc.num_clbits()), (3, 2));
+    let bound = qc.assign_parameters(&[]).unwrap();
+    assert_eq!((bound.clbits_width(), bound.num_clbits()), (3, 2));
+    assert_eq!(bound.declared_clbits(), Some(3));
+
+    let unmeasured = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nh q[0];\n",
+    )
+    .unwrap()
+    .assign_parameters(&[])
+    .unwrap();
+    assert_eq!((unmeasured.clbits_width(), unmeasured.num_clbits()), (3, 0));
+}
+
+/// A program that declares a `creg` and measures nothing is a different
+/// circuit from one that declares none: its export writes the register.
+#[test]
+fn test_an_unmeasured_declared_register_counts_for_eq() {
+    let declared = ParameterizedCircuit::from_qasm2(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\nh q[0];\n",
+    )
+    .unwrap();
+    let built = ParameterizedCircuit::new(2).h(0);
+    assert_eq!(declared.clbits_width(), 3);
+    assert_eq!(declared.num_clbits(), 0);
+    assert_ne!(declared, built);
+    assert_ne!(
+        declared.assign_parameters(&[]).unwrap(),
+        built.assign_parameters(&[]).unwrap()
+    );
+}
+
+/// The builder declares no classical bits, so its circuits compare as before
+/// the declared width existed: by instructions alone.
+#[test]
+fn test_builder_circuits_compare_as_before() {
+    let a = ParameterizedCircuit::new(2).h(0).measure(0, 1);
+    assert_eq!(a, ParameterizedCircuit::new(2).h(0).measure(0, 1));
+    assert_ne!(a, ParameterizedCircuit::new(2).h(0).measure(0, 0));
+    assert_eq!(
+        a.assign_parameters(&[]).unwrap(),
+        ParameterizedCircuit::new(2)
+            .h(0)
+            .measure(0, 1)
+            .assign_parameters(&[])
+            .unwrap()
+    );
+}
+
+/// Builder circuits — measured bit by bit, with `measure_all`, measured in
+/// part, unmeasured — export byte for byte what they did before the declared
+/// width was kept (`main` at 00ef078), in OpenQASM 2.0 and in the OpenQASM 3
+/// profile, from the parameterised and from the bound circuit.
+#[test]
+fn test_builder_exports_are_unchanged_by_the_classical_width() {
+    let cases = [
+        (
+            ParameterizedCircuit::new(2)
+                .h(0)
+                .cx(0, 1)
+                .measure(0, 0)
+                .measure(1, 1),
+            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n",
+        ),
+        (
+            ParameterizedCircuit::new(2).h(0).cx(0, 1).measure_all(),
+            "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q -> c;\n",
+            "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;\n",
+        ),
+        (
+            ParameterizedCircuit::new(3).x(0).measure(0, 1),
+            "qreg q[3];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[1];\n",
+            "qubit[3] q;\nbit[2] c;\nx q[0];\nc[1] = measure q[0];\n",
+        ),
+        (
+            ParameterizedCircuit::new(2).h(0).cx(0, 1),
+            "qreg q[2];\nh q[0];\ncx q[0],q[1];\n",
+            "qubit[2] q;\nh q[0];\ncx q[0], q[1];\n",
+        ),
+    ];
+    for (qc, qasm2, qasm3) in cases {
+        let qasm2 = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n{qasm2}");
+        let qasm3 = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n{qasm3}");
+        assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), qasm2);
+        assert_eq!(
+            qc.assign_parameters(&[]).unwrap().try_to_qasm2().unwrap(),
+            qasm2
+        );
+        assert_eq!(qc.to_qasm3().unwrap(), qasm3);
+        assert_eq!(qc.to_qasm3_with_params(&[]).unwrap(), qasm3);
+    }
+}
+
+/// #347: the C-4 cache follows the instruction list through every public path.
+/// Mutating `gates` directly is no longer possible from outside the crate (a
+/// `compile_fail` doctest on the field pins that); a measurement makes a later
+/// gate on the same qubit fail, and a circuit without one accepts it, whether
+/// the circuit was built, hand-assembled or cloned after its cache was derived.
+#[test]
+fn try_push_measured_cache_tracks_the_gates_it_was_derived_from() {
+    let mut built = ParameterizedCircuit::new(1).h(0);
+    built
+        .try_push(GateInstruction::Measure { qubit: 0, cbit: 0 })
+        .unwrap();
+    let mut cloned = built.clone();
+    for qc in [&mut built, &mut cloned] {
+        assert_eq!(
+            qc.try_push(GateInstruction::X(0)),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+        );
+    }
+
+    let mut hand = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        0,
+        vec![GateInstruction::Measure { qubit: 0, cbit: 0 }],
+    );
+    assert_eq!(
+        hand.try_push(GateInstruction::X(0)),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+
+    let mut empty = ParameterizedCircuit::from_parts_unchecked(1, 0, Vec::new());
+    assert_eq!(empty.try_push(GateInstruction::X(0)), Ok(()));
+    // The unmeasured prefix of a measured circuit.
+    let mut rebuilt = ParameterizedCircuit::from_parts_unchecked(1, 0, built.gates()[..1].to_vec());
+    assert_eq!(rebuilt.try_push(GateInstruction::X(0)), Ok(()));
 }

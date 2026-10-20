@@ -11,6 +11,7 @@ Aer-compatible counts, and that invalid combinations are rejected early.
 """
 
 import math
+import random
 
 import pytest
 
@@ -47,6 +48,21 @@ class TestRunQuantumCircuitBackends:
         )
         # X|0> = |1>: every shot reads "1".
         assert result.counts[0] == {"1": 256}
+
+    @pytest.mark.parametrize("backend", ["polypus", "aer"])
+    def test_distributed_counts_shape_is_the_same_on_every_backend(self, backend):
+        """n_qpus>1 keeps the n_qpus=1 shape on both local backends: ``counts``
+        is one dict per QPU replica, ``merged_counts`` their total (C-3, #211).
+        X|0> = |1> makes every count deterministic: 256 shots over 3 QPUs
+        apportion as 86/85/85."""
+        import polypus
+
+        qc = polypus.Circuit(1).x(0).measure_all()
+        result = polypus.run_quantum_circuit(
+            qc, shots=256, infrastructure="local", backend=backend, n_qpus=3
+        )
+        assert result.counts == [{"1": 86}, {"1": 85}, {"1": 85}]
+        assert result.merged_counts == {"1": 256}
 
     def test_default_backend_is_aer(self):
         import polypus
@@ -92,6 +108,57 @@ class TestRunQuantumCircuitBackends:
                 backend="polypus",
                 noise_model=object(),
             )
+
+    def test_native_backend_fusion_false_matches_fusion_true(self):
+        """`fusion=False` opts the native backend out of gate fusion (issues
+        #131/#132) for a strictly gate-by-gate simulation. Fusion only
+        changes performance, never the result: with the same seed, a circuit
+        shaped to trigger fusion (entangled, so not all outcomes are
+        possible) must produce byte-identical counts either way."""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        fused = polypus.run_quantum_circuit(
+            qc, shots=2000, infrastructure="local", backend="polypus", seed=99
+        )
+        unfused = polypus.run_quantum_circuit(
+            qc,
+            shots=2000,
+            infrastructure="local",
+            backend="polypus",
+            seed=99,
+            fusion=False,
+        )
+        assert fused.counts == unfused.counts
+
+    def test_fusion_true_rejected_on_non_native_backend(self):
+        """`fusion=True` asks for gate fusion, which only the native `polypus`
+        backend performs. Requesting it on Aer — a backend that cannot fuse —
+        is rejected with a ValueError rather than silently ignored, so it never
+        looks like it took effect. (Omitting `fusion` leaves Aer untouched;
+        that is the default and is covered throughout the rest of the suite.)"""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        with pytest.raises(ValueError, match="fusion=True applies only to"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="local", backend="aer", fusion=True
+            )
+
+    def test_fusion_false_accepted_on_non_native_backend(self):
+        """`fusion=False` ("do not fuse") is honourable on every backend — a
+        non-fusing backend already runs gate-by-gate — so passing it to Aer is
+        accepted, not rejected: it is a no-op there, not an unmeetable request
+        like `fusion=True`."""
+        import polypus
+
+        qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+        result = polypus.run_quantum_circuit(
+            qc, shots=100, infrastructure="local", backend="aer", fusion=False
+        )
+        # counts is one dict per circuit (C-3); the call was accepted, and shots
+        # are conserved.
+        assert sum(result.counts[0].values()) == 100
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +309,59 @@ class TestCunqaAllocationValidation:
             )
 
 
+class TestCunqaRejectsWhatItCannotHonour:
+    """CUNQA's QPUs run Aer with a simulator fixed when they are raised, so a
+    non-Aer ``backend`` or a ``noise_model`` is a ``ValueError`` at the edge.
+    The error comes before the seam, so these tests need no ``cunqa``."""
+
+    @pytest.mark.parametrize("backend", ["polypus", "foo"])
+    def test_non_aer_backend_rejected(self, backend):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="unknown cunqa backend"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", backend=backend
+            )
+
+    def test_noise_model_rejected(self):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="noise_model"):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="cunqa", noise_model=object()
+            )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"backend": "foo"}, "unknown cunqa backend"),
+            ({"noise_model": object()}, "noise_model"),
+        ],
+        ids=["backend", "noise_model"],
+    )
+    def test_rejected_in_train(self, simple_expectation_fn, kwargs, match):
+        """The same guard protects the train() entry point."""
+        import polypus
+
+        qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
+        with pytest.raises(ValueError, match=match):
+            polypus.train(
+                qc,
+                polypus.DE(generations=2, population_size=4),
+                shots=100,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="cunqa",
+                nodes=1,
+                cores_per_qpu=2,
+                id=f"test_train_cunqa_rejects_{next(iter(kwargs))}",
+                **kwargs,
+            )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +391,393 @@ class TestNativeVsAerEquivalence:
             pa = aer.get(k, 0) / shots
             pn = native.get(k, 0) / shots
             assert abs(pa - pn) < 0.05, f"{k}: aer={pa:.3f} native={pn:.3f}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Repeated measurements into one classical bit: last write wins (contract C-3)
+#
+# OpenQASM 2.0 register semantics — what Aer implements — let a later `measure`
+# into a classical bit overwrite the earlier one. The native backend used to OR
+# the writes together (issue #205), so a bit once set to 1 never went back to 0.
+# Aer and the native backend sample with different RNGs, so every circuit here
+# is deterministic per shot (X gates only, no superposition): `last write wins`
+# is then the only behaviour under comparison and the counts must be identical.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVIDENCE_QASM = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[1];
+x q[0];
+measure q[0] -> c[0];
+measure q[1] -> c[0];
+"""
+
+
+def _run_both(circuit, shots, n_qpus=1):
+    import polypus
+
+    return tuple(
+        polypus.run_quantum_circuit(
+            circuit,
+            shots=shots,
+            infrastructure="local",
+            backend=b,
+            seed=11,
+            n_qpus=n_qpus,
+        ).counts
+        for b in ("aer", "polypus")
+    )
+
+
+def _random_repeated_measure_circuit(seed):
+    """A seeded random circuit of X gates followed by measurements where at
+    least one classical bit is written more than once. Returns the circuit and
+    the bitstrings its register reads under last-write-wins and under OR."""
+    import polypus
+
+    rng = random.Random(seed)
+    n = rng.randint(2, 5)
+    m = rng.randint(1, n)
+    ones = {q for q in range(n) if rng.random() < 0.5}
+    # Every classical bit written at least once, plus at least `m` more writes:
+    # more writes than bits, so some bit is written twice.
+    writes = [(rng.randrange(n), c) for c in range(m)]
+    writes += [
+        (rng.randrange(n), rng.randrange(m)) for _ in range(rng.randint(m, 3 * m))
+    ]
+    rng.shuffle(writes)
+
+    qc = polypus.Circuit(n)
+    for q in sorted(ones):
+        qc.x(q)
+    last = [0] * m
+    ored = [0] * m
+    for q, c in writes:
+        qc.measure(q, c)
+        last[c] = int(q in ones)
+        ored[c] |= int(q in ones)
+
+    # Qiskit little-endian: classical bit 0 is the rightmost character.
+    def bitstring(bits):
+        return "".join(str(b) for b in reversed(bits))
+
+    return qc, bitstring(last), bitstring(ored)
+
+
+@pytest.mark.integration
+class TestLastMeasurementWins:
+    def test_evidence_circuit_matches_aer(self):
+        aer, native = _run_both(_EVIDENCE_QASM, shots=200)
+        assert aer == [{"0": 200}]
+        assert native == aer
+
+    def test_explicit_measure_after_measure_all_overwrites_it(self):
+        import polypus
+
+        # q0 = 1, q1 = 0; measure_all writes c = "01", then c[0] <- q1 = 0.
+        qc = polypus.Circuit(2).x(0).measure_all().measure(1, 0)
+        aer, native = _run_both(qc, shots=128)
+        assert aer == [{"00": 128}]
+        assert native == aer
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_random_repeated_measures_match_aer(self, seed):
+        qc, expected, _ = _random_repeated_measure_circuit(seed)
+        aer, native = _run_both(qc, shots=64)
+        assert aer == [{expected: 64}]
+        assert native == aer
+
+    def test_random_circuits_exercise_overwrites(self):
+        """Guard for the parametrized case above: some of its circuits must
+        overwrite a 1 with a 0, which OR-ing the writes gets wrong — otherwise
+        it could not tell last-write-wins from the old behaviour."""
+        assert any(
+            last != ored
+            for last, ored in (
+                _random_repeated_measure_circuit(s)[1:] for s in range(20)
+            )
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Circuits without measurements read the full register on every backend (#218)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_QASM_HEADER = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
+
+# (body, expected counts key). No circuit here contains a `measure`, so C-3's
+# full-register read-out applies: the key is `num_qubits` wide, qubit 0
+# rightmost, whatever classical registers are declared.
+_UNMEASURED = {
+    "no_creg": ("qreg q[2];\nx q[0];\n", "01"),
+    "creg_as_wide_as_qreg": ("qreg q[2];\ncreg c[2];\nx q[0];\n", "01"),
+    "creg_wider_than_qreg": ("qreg q[2];\ncreg c[3];\nx q[0];\n", "01"),
+    "creg_narrower_than_qreg": ("qreg q[3];\ncreg c[1];\nx q[0];\nx q[2];\n", "101"),
+    # A register already named like Qiskit's `measure_all` one must not collide
+    # with the register the Aer path adds.
+    "creg_named_meas": ("qreg q[2];\ncreg meas[2];\nx q[1];\n", "10"),
+    "two_qregs": ("qreg a[1];\nqreg b[2];\ncreg c[1];\nx b[1];\n", "100"),
+}
+
+
+# Measured, with a `creg` wider than the highest bit it writes (c[1] of c[3]).
+_WIDER_CREG_MEASURED = (
+    _QASM_HEADER + "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n"
+)
+
+# (body, expected counts key). Every circuit here is measured and declares more
+# classical bits than it writes, so C-3 keys it at the declared width: the sum
+# of all its `creg`s, unwritten bits reading 0 (issue #251).
+_WIDER_CREG_MEASURED_CASES = {
+    "write_c1_of_c3": (
+        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+        "010",
+    ),
+    "write_c0_of_c3": (
+        "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[0];\n",
+        "001",
+    ),
+    # The last register is never written; the width is still 2 + 3.
+    "two_cregs_last_unwritten": (
+        "qreg q[2];\ncreg a[2];\ncreg b[3];\nx q[1];\nmeasure q[1] -> a[1];\n",
+        "00010",
+    ),
+    # A full per-qubit measurement the importer collapses to `MeasureAll`.
+    "measure_all_shape_into_c4": (
+        "qreg q[2];\ncreg c[4];\nx q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        "0010",
+    ),
+}
+
+
+_QASM3_HEADER = 'OPENQASM 3.0;\ninclude "stdgates.inc";\n'
+
+# The OpenQASM 3 counterparts of `_WIDER_CREG_MEASURED_CASES`: the declared
+# width is the sum of the `bit` registers.
+_WIDER_BIT_MEASURED_CASES = {
+    "write_c1_of_c3": (
+        "qubit[2] q;\nbit[3] c;\nx q[0];\nc[1] = measure q[0];\n",
+        "010",
+    ),
+    "two_registers_last_unwritten": (
+        "qubit[2] q;\nbit[2] a;\nbit[3] b;\nx q[1];\na[1] = measure q[1];\n",
+        "00010",
+    ),
+    "measure_all_shape_into_c4": (
+        "qubit[2] q;\nbit[4] c;\nx q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n",
+        "0010",
+    ),
+}
+
+
+@pytest.mark.integration
+class TestUnmeasuredCircuitsReadTheFullRegister:
+    """Aer used to raise ``QiskitError: No counts for experiment`` for a
+    circuit without measurements, while the native backend returned the
+    full-register read-out that C-3 specifies. Both now return the same."""
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_key_is_num_qubits_wide(self, backend, case):
+        import polypus
+
+        body, key = _UNMEASURED[case]
+        result = polypus.run_quantum_circuit(
+            _QASM_HEADER + body, shots=200, infrastructure="local", backend=backend
+        )
+        assert result.counts == [{key: 200}]
+
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_aer_and_native_agree(self, case):
+        body, _ = _UNMEASURED[case]
+        aer, native = _run_both(_QASM_HEADER + body, shots=64)
+        assert aer == native
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_superposition_keys_and_shots(self, backend):
+        import polypus
+
+        qasm = _QASM_HEADER + "qreg q[2];\ncreg c[3];\nh q[0];\nx q[1];\n"
+        result = polypus.run_quantum_circuit(
+            qasm, shots=500, infrastructure="local", backend=backend, seed=3
+        )
+        (counts,) = result.counts
+        assert set(counts) == {"10", "11"}
+        assert sum(counts.values()) == 500
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_native_circuit_without_measurements(self, backend):
+        import polypus
+
+        qc = polypus.Circuit(3).x(0).x(1)
+        result = polypus.run_quantum_circuit(
+            qc, shots=100, infrastructure="local", backend=backend, n_qpus=3
+        )
+        assert result.counts == [{"011": 34}, {"011": 33}, {"011": 33}]
+
+    def test_aer_qiskit_circuit_is_not_mutated(self):
+        import polypus
+        from qiskit import ClassicalRegister, QuantumCircuit
+
+        qc = QuantumCircuit(2)
+        qc.add_register(ClassicalRegister(3, "c"))
+        qc.x(0)
+        before = (len(qc.data), [reg.name for reg in qc.cregs], qc.num_clbits)
+        result = polypus.run_quantum_circuit(
+            qc, shots=50, infrastructure="local", backend="aer"
+        )
+        assert result.counts == [{"01": 50}]
+        assert (len(qc.data), [reg.name for reg in qc.cregs], qc.num_clbits) == before
+
+    def test_aer_reads_a_measured_circuit_at_its_declared_clbit_width(self):
+        """Qiskit makes the key as wide as the classical bits the circuit
+        declares (``creg c[3]`` gives 3 characters), even when fewer are
+        written. The full read-out above applies only to circuits with no
+        measurement at all, so this circuit is left to Qiskit. C-3 adopts that
+        declared width (issue #251), and the native backend now answers
+        ``'010'`` too; see
+        ``test_measured_circuit_with_a_wider_creg_has_the_same_keys``."""
+        import polypus
+
+        result = polypus.run_quantum_circuit(
+            _WIDER_CREG_MEASURED, shots=20, infrastructure="local", backend="aer"
+        )
+        assert result.counts == [{"010": 20}]
+
+    def test_measured_circuit_with_a_wider_creg_has_the_same_keys(self):
+        aer, native = _run_both(_WIDER_CREG_MEASURED, shots=20)
+        assert aer == native
+
+
+@pytest.mark.integration
+class TestMeasuredCircuitsUseTheDeclaredClbitWidth:
+    """A measured OpenQASM program whose ``creg``s are wider than the bits it
+    writes is keyed at the declared width — the sum of its ``creg``s — on Aer
+    and on the native backend alike, one QPU or several, as text or imported
+    into a ``polypus.Circuit`` (C-3, issue #251). The native backend used
+    ``max(cbit) + 1`` instead, and an imported circuit lost the width."""
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_key_is_the_declared_width(self, case, backend, n_qpus):
+        import polypus
+
+        body, key = _WIDER_CREG_MEASURED_CASES[case]
+        result = polypus.run_quantum_circuit(
+            _QASM_HEADER + body,
+            shots=20,
+            infrastructure="local",
+            backend=backend,
+            n_qpus=n_qpus,
+        )
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_aer_and_native_agree(self, case, n_qpus):
+        body, _ = _WIDER_CREG_MEASURED_CASES[case]
+        aer, native = _run_both(_QASM_HEADER + body, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    def test_builder_circuit_keeps_its_implicit_width(self, backend, n_qpus):
+        """A ``polypus.Circuit`` declares no registers: its width is still
+        ``max(cbit) + 1``."""
+        import polypus
+
+        qc = polypus.Circuit(2).x(0).measure(0, 1)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
+        )
+        assert result.counts == [{"10": 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_imported_circuit_keeps_the_declared_width(self, case, backend, n_qpus):
+        """``Circuit.from_qasm2`` keeps the declared width through parameter
+        binding and the export Aer receives: the same keys as the source."""
+        import polypus
+
+        body, key = _WIDER_CREG_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
+        )
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_WIDER_BIT_MEASURED_CASES))
+    def test_qasm3_import_keeps_the_declared_width(self, case, backend, n_qpus):
+        """The same for ``Circuit.from_qasm3``: the width is the sum of the
+        program's ``bit`` registers."""
+        import polypus
+
+        body, key = _WIDER_BIT_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm3(_QASM3_HEADER + body)
+        result = polypus.run_quantum_circuit(
+            qc, shots=20, infrastructure="local", backend=backend, n_qpus=n_qpus
+        )
+        assert result.counts == [{key: 20 // n_qpus}] * n_qpus
+
+    def test_the_export_declares_the_width(self):
+        import polypus
+
+        qc = polypus.Circuit.from_qasm2(_WIDER_CREG_MEASURED)
+        assert "creg c[3];" in qc.to_qasm2()
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_CREG_MEASURED_CASES))
+    def test_imported_circuit_aer_and_native_agree(self, case, n_qpus):
+        """Guards against Aer and the native backend diverging on a circuit
+        imported with ``Circuit.from_qasm2``. It would also pass if both lost
+        the declared width (as they did before, both at ``max(cbit) + 1``);
+        what pins the width is
+        ``test_imported_circuit_keeps_the_declared_width``."""
+        import polypus
+
+        body, _ = _WIDER_CREG_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        aer, native = _run_both(qc, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("n_qpus", [1, 2])
+    @pytest.mark.parametrize("case", sorted(_WIDER_BIT_MEASURED_CASES))
+    def test_qasm3_import_aer_and_native_agree(self, case, n_qpus):
+        """The same guard for ``Circuit.from_qasm3``; what pins the width is
+        ``test_qasm3_import_keeps_the_declared_width``."""
+        import polypus
+
+        body, _ = _WIDER_BIT_MEASURED_CASES[case]
+        qc = polypus.Circuit.from_qasm3(_QASM3_HEADER + body)
+        aer, native = _run_both(qc, shots=20, n_qpus=n_qpus)
+        assert aer == native
+
+    @pytest.mark.parametrize("backend", ["aer", "polypus"])
+    @pytest.mark.parametrize("case", sorted(_UNMEASURED))
+    def test_imported_unmeasured_circuit_reads_the_full_register(self, case, backend):
+        """An imported circuit keeps its ``creg`` even without measurements
+        (the re-export declares it), and is still read out on the full quantum
+        register on both backends (C-3, issue #218)."""
+        import polypus
+
+        body, key = _UNMEASURED[case]
+        qc = polypus.Circuit.from_qasm2(_QASM_HEADER + body)
+        declared = sum(
+            int(line.split("[")[1].split("]")[0])
+            for line in body.splitlines()
+            if line.startswith("creg ")
+        )
+        if declared:
+            assert f"creg c[{declared}];" in qc.to_qasm2()
+        result = polypus.run_quantum_circuit(
+            qc, shots=30, infrastructure="local", backend=backend
+        )
+        assert result.counts == [{key: 30}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

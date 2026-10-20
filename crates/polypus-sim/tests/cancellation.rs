@@ -39,27 +39,35 @@ fn sequential_sim() -> StatevectorSimulator {
     StatevectorSimulator {
         max_qubits: MAX_QUBITS,
         parallel_threshold: MAX_QUBITS + 1,
+        fusion: true,
     }
 }
 
-/// `gates` cheap rotations, then one rotation by `NaN` — see the module docs for
-/// why the last gate is poisoned.
+/// `gates` cheap rotations — each isolated behind a `Barrier` — then one rotation
+/// by `NaN`. See the module docs for why the last gate is poisoned.
+///
+/// The barriers are load-bearing for *duration*, not correctness. Without them a
+/// run of same-qubit `Rx` gates is collapsed by the dense-gate fusion (issue
+/// #132) into one composed matrix per qubit — a handful of buffer passes total,
+/// far too fast to outlive a checkpoint. A `Barrier` is a hard boundary that
+/// flushes the open dense component, so each `Rx` again costs its own buffer
+/// pass: exactly the "one pass per gate" cost model these duration-tuned sizes
+/// assume. (The poisoned final `Rx` sits after the last barrier, so it is its own
+/// component and is still reached last.)
 fn nan_terminated_circuit(gates: usize) -> ConcreteCircuit {
-    let mut instructions = Vec::with_capacity(gates + 1);
+    let mut instructions = Vec::with_capacity(2 * gates + 1);
     for i in 0..gates {
         instructions.push(G::Rx {
             qubit: i % N,
             theta: Fixed(0.1),
         });
+        instructions.push(G::Barrier(Vec::new()));
     }
     instructions.push(G::Rx {
         qubit: 0,
         theta: Fixed(f64::NAN),
     });
-    ConcreteCircuit {
-        num_qubits: N,
-        gates: instructions,
-    }
+    ConcreteCircuit::new_unchecked(N, instructions)
 }
 
 #[test]
@@ -128,9 +136,9 @@ fn a_hook_that_never_cancels_lets_the_run_finish() {
 
 #[test]
 fn no_hook_is_exactly_run() {
-    let circuit = ConcreteCircuit {
-        num_qubits: 3,
-        gates: vec![
+    let circuit = ConcreteCircuit::new(
+        3,
+        vec![
             G::H(0),
             G::Cx(0, 1),
             G::Rx {
@@ -138,7 +146,7 @@ fn no_hook_is_exactly_run() {
                 theta: Fixed(0.7),
             },
         ],
-    };
+    );
     let sim = sequential_sim();
     let with_none = sim.run_cancellable(&circuit, None).unwrap();
     let plain = sim.run(&circuit).unwrap();

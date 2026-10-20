@@ -181,124 +181,81 @@ class TestTrainQNG:
         )
         assert len(result.best_params) == _DIMENSIONS
 
-
-class TestTrainAdam:
-    def test_train_returns_list(self, parametrized_circuit, simple_expectation_fn):
-        import polypus
-
-        result = polypus.train(
-            parametrized_circuit,
-            polypus.Adam(max_iters=3, learning_rate=0.1, bounds=(0.0, math.pi)),
-            shots=_SHOTS,
-            n_qpus=_N_QPUS,
-            dimensions=_DIMENSIONS,
-            expectation_function=simple_expectation_fn,
-            infrastructure="local",
-            nodes=_NODES,
-            cores_per_qpu=_CORES_PER_QPU,
-            id="test_adam",
-        )
-        assert isinstance(result.best_params, list)
-
-    def test_train_result_length(self, parametrized_circuit, simple_expectation_fn):
-        import polypus
-
-        result = polypus.train(
-            parametrized_circuit,
-            polypus.Adam(max_iters=3, bounds=(0.0, math.pi)),
-            shots=_SHOTS,
-            n_qpus=_N_QPUS,
-            dimensions=_DIMENSIONS,
-            expectation_function=simple_expectation_fn,
-            infrastructure="local",
-            nodes=_NODES,
-            cores_per_qpu=_CORES_PER_QPU,
-            id="test_adam_len",
-        )
-        assert len(result.best_params) == _DIMENSIONS
-
-
-class TestTrainFitnessHistory:
-    """`result.fitness_history` is the convergence curve of the run: one
-    best-fitness-so-far value per generation/iteration actually executed
-    (contract C-5). Checked on `polypus.train` — the generic entry point — for a
-    gradient-free (DE) and a gradient (Adam) optimizer, since each optimizer
-    tracks its own incumbent best."""
-
-    @staticmethod
-    def _assert_history(result):
-        assert isinstance(result.fitness_history, list)
-        assert all(isinstance(f, float) for f in result.fitness_history)
-        # One entry per iteration actually run, ending on the reported best.
-        assert len(result.fitness_history) == result.iterations_run
-        assert result.fitness_history[-1] == result.best_fitness
-        # Non-decreasing: every entry is the running best, never the fitness of
-        # that iteration's current candidate.
-        assert all(
-            b >= a for a, b in zip(result.fitness_history, result.fitness_history[1:])
-        )
-
-    def test_de_reports_one_fitness_per_generation(
-        self, parametrized_circuit, simple_expectation_fn
+    def test_qng_rejects_zero_max_iters(
+        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
     ):
+        # 0 iterations never evaluates the objective; the run must be rejected as
+        # a bad configuration (ValueError) rather than reporting best_fitness=-inf.
         import polypus
 
-        result = polypus.train(
-            parametrized_circuit,
-            # A tight tolerance keeps the population from collapsing early, so
-            # all 4 generations run and the curve has 4 points to compare.
-            polypus.DE(generations=4, population_size=4, tolerance=1e-9),
-            shots=_SHOTS,
-            n_qpus=_N_QPUS,
-            dimensions=_DIMENSIONS,
-            expectation_function=simple_expectation_fn,
-            infrastructure="local",
-            nodes=_NODES,
-            cores_per_qpu=_CORES_PER_QPU,
-            id="test_de_history",
-        )
-        assert result.iterations_run == 4
-        self._assert_history(result)
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=simple_variance_fn,
+                    max_iters=0,
+                    bounds=(0.0, math.pi),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_zero_iters",
+            )
 
-    def test_adam_reports_one_fitness_per_iteration(
-        self, parametrized_circuit, simple_expectation_fn
+    def test_qng_rejects_infinite_bounds(
+        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
     ):
+        # (0, +inf) satisfies lb < ub but is not a bounded sampling interval.
         import polypus
 
-        result = polypus.train(
-            parametrized_circuit,
-            polypus.Adam(max_iters=4, learning_rate=0.1, bounds=(0.0, math.pi)),
-            shots=_SHOTS,
-            n_qpus=_N_QPUS,
-            dimensions=_DIMENSIONS,
-            expectation_function=simple_expectation_fn,
-            infrastructure="local",
-            nodes=_NODES,
-            cores_per_qpu=_CORES_PER_QPU,
-            id="test_adam_history",
-        )
-        self._assert_history(result)
+        with pytest.raises(ValueError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=simple_variance_fn,
+                    max_iters=3,
+                    bounds=(0.0, math.inf),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_inf_bounds",
+            )
 
-    def test_repr_summarises_the_history_by_length(
-        self, parametrized_circuit, simple_expectation_fn
+    @pytest.mark.parametrize("bad_value", [-1.0, math.nan, math.inf])
+    def test_qng_rejects_invalid_variance(
+        self, parametrized_circuit, simple_expectation_fn, bad_value
     ):
-        # The repr reports the curve's length, not its contents: one float per
-        # iteration would dominate the line on a long run.
+        # A variance_function returning a negative, NaN or infinite value must
+        # surface as a typed polypus.EvaluationError, not silently corrupt the
+        # natural-gradient update (which divides by the QFIM diagonal).
         import polypus
 
-        result = polypus.train(
-            parametrized_circuit,
-            polypus.DE(generations=3, population_size=4, tolerance=1e-9),
-            shots=_SHOTS,
-            n_qpus=_N_QPUS,
-            dimensions=_DIMENSIONS,
-            expectation_function=simple_expectation_fn,
-            infrastructure="local",
-            nodes=_NODES,
-            cores_per_qpu=_CORES_PER_QPU,
-            id="test_de_history_repr",
-        )
-        assert "fitness_history=<3 values>" in repr(result)
+        with pytest.raises(polypus.EvaluationError):
+            polypus.train(
+                parametrized_circuit,
+                polypus.QNG(
+                    variance_function=lambda theta, a: bad_value,
+                    max_iters=3,
+                    bounds=(0.0, math.pi),
+                ),
+                shots=_SHOTS,
+                n_qpus=_N_QPUS,
+                dimensions=_DIMENSIONS,
+                expectation_function=simple_expectation_fn,
+                infrastructure="local",
+                nodes=_NODES,
+                cores_per_qpu=_CORES_PER_QPU,
+                id="test_qng_bad_variance",
+            )
 
 
 class TestTrainInvalidMethod:
@@ -364,52 +321,4 @@ class TestTrainInvalidConfig:
                 nodes=_NODES,
                 cores_per_qpu=_CORES_PER_QPU,
                 id="test_pso_bad_bounds",
-            )
-
-    def test_adam_zero_max_iters_raises_value_error(
-        self, parametrized_circuit, simple_expectation_fn
-    ):
-        # Adam is single-point with no pre-loop evaluation, so max_iters=0 never
-        # calls the oracle and cannot report a real best_fitness (C-5). The Rust
-        # optimizer rejects it with a typed OptimizerError that the binding maps
-        # to PyValueError, exactly like the PSO empty-bounds case above.
-        import polypus
-
-        with pytest.raises(ValueError):
-            polypus.train(
-                parametrized_circuit,
-                polypus.Adam(max_iters=0, learning_rate=0.1, bounds=(0.0, math.pi)),
-                shots=_SHOTS,
-                n_qpus=_N_QPUS,
-                dimensions=_DIMENSIONS,
-                expectation_function=simple_expectation_fn,
-                infrastructure="local",
-                nodes=_NODES,
-                cores_per_qpu=_CORES_PER_QPU,
-                id="test_adam_zero_max_iters",
-            )
-
-    def test_qng_zero_max_iters_raises_value_error(
-        self, parametrized_circuit, simple_expectation_fn, simple_variance_fn
-    ):
-        # QNG is single-point like Adam: max_iters=0 never evaluates the oracle,
-        # so it is rejected as a typed OptimizerError surfacing as ValueError.
-        import polypus
-
-        with pytest.raises(ValueError):
-            polypus.train(
-                parametrized_circuit,
-                polypus.QNG(
-                    variance_function=simple_variance_fn,
-                    max_iters=0,
-                    bounds=(0.0, math.pi),
-                ),
-                shots=_SHOTS,
-                n_qpus=_N_QPUS,
-                dimensions=_DIMENSIONS,
-                expectation_function=simple_expectation_fn,
-                infrastructure="local",
-                nodes=_NODES,
-                cores_per_qpu=_CORES_PER_QPU,
-                id="test_qng_zero_max_iters",
             )

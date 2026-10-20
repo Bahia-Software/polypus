@@ -6,50 +6,33 @@ use crate::error::OptimizerError;
 ///
 /// The optimizers return this native struct instead of a Python object; the
 /// conversion to whatever a caller needs (e.g. a Python list of the best
-/// parameters) is the caller's responsibility. Exposing fitness, the
-/// per-iteration fitness history, iteration count, and the convergence flag
-/// keeps the surface forward-compatible: new callers can read them without
-/// changing any optimizer signature.
+/// parameters) is the caller's responsibility. Exposing fitness, iteration
+/// count, and the convergence flag keeps the surface forward-compatible: new
+/// callers can read them without changing any optimizer signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptimizationOutcome {
     /// Best parameter vector found (the quantity every current caller uses).
     pub best_params: Vec<f64>,
     /// Fitness of [`OptimizationOutcome::best_params`] (higher is better).
     pub best_fitness: f64,
-    /// Best fitness found *so far*, one entry per generation/iteration actually
-    /// executed — so `fitness_history.len() == iterations_run`, on the
-    /// early-stopping paths included.
-    ///
-    /// **Monotonically non-decreasing** for every optimizer in this crate: each
-    /// entry is the same incumbent-best value the algorithm already tracks
-    /// internally (DE's/PSO's elitist champion, QNG's/Adam's `best_energy`), not
-    /// the fitness of that iteration's current candidate — which gradient ascent
-    /// over a rough landscape lets oscillate freely. The monotonicity is
-    /// structural, a property of taking the running maximum, so it holds
-    /// whatever the oracle returns (a shot estimate, a minibatch estimate); what
-    /// varies with the oracle is how noisy the *meaning* of each entry is, never
-    /// the shape of the sequence.
-    ///
-    /// The last entry is therefore always
-    /// [`best_fitness`](OptimizationOutcome::best_fitness) — both are read from
-    /// the same incumbent — and the vector is empty exactly when
-    /// `iterations_run == 0`. This is also what DE's fitness-stagnation early
-    /// stop is computed from (contract C-5).
-    pub fitness_history: Vec<f64>,
     /// Number of generations/iterations actually executed.
     ///
     /// Lower than the configured budget when an early-stopping criterion fired.
     pub iterations_run: usize,
     /// Whether the algorithm's convergence criterion was satisfied.
     ///
-    /// Every optimizer in this crate has an early-stopping test and can report
-    /// `true`: DE once its best fitness has stagnated (improved by less than
-    /// `tolerance`) over the last `patience` generations, PSO once its
-    /// population collapses below `tolerance` in every dimension, QNG and Adam
-    /// once the gradient norm stays below `tolerance` for `patience`
-    /// consecutive iterations. `false` means the run simply exhausted its
-    /// iteration budget without that criterion firing.
+    /// Optimizers without an early-stopping test (e.g. QNG) always report
+    /// `false` — they simply exhaust their iteration budget.
     pub converged: bool,
+    /// Best fitness recorded at the end of each generation/iteration, in order.
+    ///
+    /// One entry per executed generation, so `fitness_history.len() ==
+    /// iterations_run` and `fitness_history.last()` (when non-empty) equals
+    /// [`best_fitness`](OptimizationOutcome::best_fitness). This exposes the
+    /// optimizer's quality trajectory, which is what DE's fitness-stagnation
+    /// early stop is computed from (contract C-5). Empty only for a zero-budget
+    /// run (`generations`/`max_iters == 0`).
+    pub fitness_history: Vec<f64>,
 }
 
 /// Shared entry point for the variational optimizers in this crate.

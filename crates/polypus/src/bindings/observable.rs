@@ -140,6 +140,9 @@ impl Ising {
 /// Soundness: `fn` **must be pure** — a given bitstring must always map to the
 /// same value, since a cached value is reused forever. Memory grows with the
 /// number of distinct bitstrings ever seen (bounded by `2**num_qubits`).
+///
+/// With `qml.train(..., y_train=...)`, `fn` takes `(bitstring, label)` and the
+/// memo is keyed by both.
 #[pyclass(module = "polypus", name = "CachedCost", frozen)]
 pub struct CachedCost {
     pub(crate) cost_fn: Py<PyAny>,
@@ -147,7 +150,8 @@ pub struct CachedCost {
 
 #[pymethods]
 impl CachedCost {
-    /// Wrap a `bitstring -> float` callable. Raises `TypeError` if not callable.
+    /// Wrap a `bitstring -> float` callable (`(bitstring, label) -> float` for
+    /// supervised `qml.train`). Raises `TypeError` if not callable.
     #[new]
     fn new(cost_fn: Bound<'_, PyAny>) -> PyResult<Self> {
         if !cost_fn.is_callable() {
@@ -162,5 +166,35 @@ impl CachedCost {
 
     fn __repr__(&self) -> String {
         "CachedCost(<callable>)".to_string()
+    }
+}
+
+/// A per-sample score for `qml.train(..., y_train=...)`: `fn(counts, label) ->
+/// float` sees a sample's whole distribution (a `dict[str, int]` with sorted keys),
+/// so non-linear losses such as a log-likelihood can be expressed. Scores are
+/// maximised and must be finite. Requires `y_train`.
+#[pyclass(module = "polypus", name = "SampleCost", frozen)]
+pub struct SampleCost {
+    pub(crate) cost_fn: Py<PyAny>,
+}
+
+#[pymethods]
+impl SampleCost {
+    /// Wrap a `(counts, label) -> float` callable. Raises `TypeError` if not
+    /// callable.
+    #[new]
+    fn new(cost_fn: Bound<'_, PyAny>) -> PyResult<Self> {
+        if !cost_fn.is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "SampleCost expects a callable ((counts, label) -> float)",
+            ));
+        }
+        Ok(Self {
+            cost_fn: cost_fn.unbind(),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        "SampleCost(<callable>)".to_string()
     }
 }

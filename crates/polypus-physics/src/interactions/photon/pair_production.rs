@@ -22,10 +22,17 @@
 //! - The `Z(Z+1)` factor includes the nuclear field (`Z²`) plus an approximate
 //!   electron-field (triplet, `∝ Z`) contribution.
 //!
-//! This low-energy form is accurate up to `k ≈ 40` (`E ≈ 20 MeV`), covering the
-//! keV–MeV range of this crate; the high-energy Maximon branch (with Coulomb
-//! and screening corrections) is a future enhancement. Returns `0` below
-//! threshold.
+//! Returns `0` below threshold.
+//!
+//! This crate's photon interactions are designed and exercised at keV-scale
+//! energies, where pair production does not occur at all — hence the caveat
+//! below.
+//!
+//! **Known caveat:** this module has not been reviewed for correctness. The
+//! crate's current use cases stay at keV-scale photon energies, far below the
+//! 1.022 MeV pair-production threshold, so this channel never actually fires
+//! in practice today. Reviewing and, if needed, fixing this module is future
+//! work.
 
 use crate::constants::{
     CLASSICAL_ELECTRON_RADIUS_M as R_E, ELECTRON_MASS_MEV, FINE_STRUCTURE,

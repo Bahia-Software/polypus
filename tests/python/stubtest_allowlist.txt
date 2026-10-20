@@ -1,0 +1,8 @@
+# Allowlist for `python -m mypy.stubtest polypus` (see docs/CONTRIBUTING.md).
+# Keep it minimal: every entry needs a reason, and an entry must never hide a
+# real mismatch between a stub and the compiled extension.
+
+# The compiled extension module itself (`polypus/polypus*.so`). It is an
+# implementation detail: `polypus/__init__.py` re-exports its public API, which
+# `polypus/__init__.pyi` types, so it gets no stub of its own.
+polypus.polypus

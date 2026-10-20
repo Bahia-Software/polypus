@@ -1,6 +1,5 @@
 # Rust build output
 target/
-Cargo.lock
 
 # Python build artifacts
 dist/
@@ -14,13 +13,19 @@ __pycache__/
 
 # Benchmark results (generated at runtime)
 benchmarks/bench_*.csv
+benchmarks/bench_*/
+benchmarks/fusion_*.csv
+benchmarks/fusion_*.json
+benchmarks/fusion_*.out
 
 # Experiment outputs
 qaoa_results.csv
 examples/qaoa_results.csv
 examples/plots_maxcut/
+/crates/polypus-physics/graphics/
 qft_results.csv
 qft*.png
+results/
 
 # SLURM / qraise job artifacts
 slurm-*.out
@@ -30,9 +35,20 @@ qraise_*
 *.log
 logs/
 
+# Jupyter checkpoint dirs (tutorials/)
+.ipynb_checkpoints/
+
 CLAUDE.md
 AI_GUIDELINES.md
-.claude/
+.claude
 
-# QML crate design doc — draft, not ready to be tracked yet
+# Internal refactor plan + implementation prompt — kept on disk in docs/, never committed
+docs/REFACTOR_PLAN.md
+docs/IMPLEMENTATION_PROMPT.md
+
+# Internal notes (also blocked by .github/scripts/hygiene.py).
+CLAUDE_*.md
+AI_GUIDELINES*
+
+# QML crate design docs (docs/design/qml*.md) — drafts kept on disk, not tracked yet
 docs/design/

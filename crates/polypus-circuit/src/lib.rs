@@ -32,20 +32,32 @@
 //!
 //! // Bind (beta, gamma) and export.
 //! let qasm = qc.to_qasm2_with_params(&[0.8, 0.4]).unwrap();
-//! assert!(qasm.contains("rzz(0.400000000000) q[0],q[1];"));
+//! assert!(qasm.contains("rzz(0.4) q[0],q[1];"));
 //! assert!(qasm.ends_with("measure q -> c;\n"));
 //! ```
 
 mod circuit;
+mod custom_gate;
+pub mod draw;
 mod error;
+pub mod expr;
 mod gate;
+mod limits;
+mod naming;
 mod qasm;
+mod qasm3;
+mod qasm3_import;
 mod qasm_import;
 mod qir;
 pub mod templates;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
+pub use custom_gate::{CustomGate, GateDefinition};
 pub use error::CircuitError;
-pub use gate::{terminal_measurement_violation, GateInstruction, GateParam};
+pub use expr::{ExprId, ParamExpr};
+pub use gate::{
+    qubit_index_violation, repeated_qubit_violation, terminal_measurement_violation,
+    GateInstruction, GateParam,
+};
 // Variant re-exports so call sites can write `Param(0)` / `Fixed(0.5)` directly.
 pub use gate::GateParam::{Fixed, Param};

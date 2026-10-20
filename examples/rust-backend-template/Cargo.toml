@@ -1,0 +1,28 @@
+# A **standalone** example crate that lives OUTSIDE the Polypus workspace (note the
+# empty `[workspace]` table below, which detaches it). This is deliberate: it is the
+# truest test of the third-party story — a crate that depends on `polypus-backend`
+# and nothing of Polypus's internals, exactly as an external author's would. It path-
+# depends into the repo here only because it ships inside it; a real author would use
+# a version or git dependency.
+[package]
+name = "example-rust-backend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The only Polypus dependency a native (option-D) backend needs: the pyo3-free
+# contract. No Qiskit, no interpreter, no Polypus runtime.
+polypus-backend = { path = "../../crates/polypus-backend" }
+# Only to read a circuit's native gates / re-serialise it; a real wire backend that
+# consumes OpenQASM 2.0 text may not need even this.
+polypus-circuit = { path = "../../crates/polypus-circuit" }
+
+[dev-dependencies]
+# The conformance battery — a dev-dependency, used only by the test that certifies
+# this template against the documented semantics.
+polypus-backend-conformance = { path = "../../crates/polypus-backend-conformance" }
+
+# Detach from the Polypus workspace: this crate is its own workspace root, so it
+# behaves like an external consumer.
+[workspace]

@@ -8,13 +8,10 @@
 //! Python extension — evidence a future pure-Rust consumer can reuse them.
 
 use polypus_optimizers::{
-    linear_parameter_shift_gradient, AlgorithmAdam, AlgorithmAdamArgs,
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, GradientOracle,
-    OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, EvaluationOracle, OptimizationOutcome,
+    Optimizer, OptimizerError, VarianceOracle,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 /// Concave test objective: fitness `= -Σ(xᵢ - target)²`, maximised (value 0)
 /// exactly at `xᵢ = target`. The optimizers maximise, so this has a unique,
@@ -81,162 +78,12 @@ impl EvaluationOracle for ShortOracle {
     }
 }
 
-/// [`Multimodal`] wrapper that records every fitness it hands back, in call
-/// order. QNG and Adam evaluate exactly **one** candidate per iteration, so for
-/// them the recording is precisely the per-iteration *current-iterate* fitness —
-/// the sequence `fitness_history` deliberately does not carry (it carries the
-/// running best instead). Shared behind an `Arc` so the caller can still read the
-/// recording after the oracle has been moved into the optimizer; the blanket
-/// `impl EvaluationOracle for Arc<T>` makes that a `Box::new(Arc::clone(..))`.
-struct Recording {
-    inner: Multimodal,
-    seen: Mutex<Vec<f64>>,
-}
-
-impl Recording {
-    fn new(target: f64) -> Arc<Self> {
-        Arc::new(Recording {
-            inner: Multimodal { target },
-            seen: Mutex::new(Vec::new()),
-        })
-    }
-
-    /// The fitness values handed back so far, in order.
-    fn seen(&self) -> Vec<f64> {
-        self.seen
-            .lock()
-            .expect("recording mutex is not poisoned")
-            .clone()
-    }
-}
-
-impl EvaluationOracle for Recording {
-    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        let values = self.inner.evaluate_batch(candidates);
-        self.seen
-            .lock()
-            .expect("recording mutex is not poisoned")
-            .extend_from_slice(&values);
-        values
-    }
-}
-
 /// Constant diagonal QFIM, the simplest [`VarianceOracle`] for exercising QNG.
 struct ConstVariance(f64);
 
 impl VarianceOracle for ConstVariance {
     fn variance(&self, _theta: &[f64], _param_index: usize) -> f64 {
         self.0
-    }
-}
-
-/// Exact gradient of [`Quadratic`]: fitness `= −Σ(xᵢ − target)²`, so
-/// `∂fitness/∂xᵢ = −2(xᵢ − target)` (ascent sign, matching the oracle).
-struct QuadraticGradient {
-    target: f64,
-}
-
-impl GradientOracle for QuadraticGradient {
-    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
-        -2.0 * (theta[param_index] - self.target)
-    }
-}
-
-/// Exact gradient of [`Multimodal`]: fitness `= Σ(−(xᵢ − target)² + sin(5xᵢ))`,
-/// so `∂fitness/∂xᵢ = −2(xᵢ − target) + 5·cos(5xᵢ)`.
-struct MultimodalGradient {
-    target: f64,
-}
-
-impl GradientOracle for MultimodalGradient {
-    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
-        let x = theta[param_index];
-        -2.0 * (x - self.target) + 5.0 * (5.0 * x).cos()
-    }
-}
-
-/// Gradient oracle that violates the length contract: it returns one *fewer*
-/// component than `dims`. The [`GradientOracle`] analogue of [`ShortOracle`],
-/// used to prove QNG surfaces [`OptimizerError::OracleLengthMismatch`] instead
-/// of indexing the gradient out of bounds.
-struct ShortGradientOracle;
-
-impl GradientOracle for ShortGradientOracle {
-    fn gradient(&self, _theta: &[f64], _param_index: usize) -> f64 {
-        0.0
-    }
-    fn gradient_batch(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
-        vec![0.0; dims.saturating_sub(1)]
-    }
-}
-
-/// Gradient oracle with a **scripted** norm sequence, the stateful counterpart of
-/// the analytic oracles above: the `n`-th [`GradientOracle::gradient_batch`] call
-/// returns `[norms[n], 0, …, 0]`, whose L2 norm is exactly `norms[n]`. Once the
-/// script runs out the last entry repeats forever, so a run may outlive it.
-///
-/// This is what lets the `patience` tests drive the convergence check
-/// iteration-by-iteration — small, large, small, … — instead of hoping a smooth
-/// analytic landscape happens to produce the sequence under test. The counter is
-/// an [`AtomicUsize`] because [`GradientOracle`] is `Send + Sync`; QNG and Adam
-/// both call `gradient_batch` exactly once per iteration, so call index ==
-/// iteration index. [`gradient`](GradientOracle::gradient) is provided for
-/// completeness and does **not** advance the script.
-struct ScriptedGradient {
-    norms: Vec<f64>,
-    calls: AtomicUsize,
-}
-
-impl ScriptedGradient {
-    fn new(norms: &[f64]) -> Self {
-        assert!(
-            !norms.is_empty(),
-            "a scripted gradient needs at least one norm"
-        );
-        ScriptedGradient {
-            norms: norms.to_vec(),
-            calls: AtomicUsize::new(0),
-        }
-    }
-
-    /// The norm scheduled for call `index`, clamped to the last scripted entry.
-    fn norm_at(&self, index: usize) -> f64 {
-        self.norms[index.min(self.norms.len() - 1)]
-    }
-}
-
-impl GradientOracle for ScriptedGradient {
-    fn gradient(&self, _theta: &[f64], param_index: usize) -> f64 {
-        if param_index == 0 {
-            self.norm_at(self.calls.load(Ordering::SeqCst))
-        } else {
-            0.0
-        }
-    }
-
-    fn gradient_batch(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
-        let index = self.calls.fetch_add(1, Ordering::SeqCst);
-        let mut grad = vec![0.0; dims];
-        if dims > 0 {
-            grad[0] = self.norm_at(index);
-        }
-        grad
-    }
-}
-
-/// Fitness `= Σᵢ cos(θᵢ)`: a separable, raw-expectation-like objective for which
-/// the parameter-shift rule is *exact* in closed form (`∂/∂θᵢ = −sin(θᵢ)`, since
-/// `[cos(θ+π/2) − cos(θ−π/2)]/2 = −sin(θ)`). Used to check
-/// [`linear_parameter_shift_gradient`] against a known analytic gradient with no
-/// shot noise involved.
-struct CosSum;
-
-impl EvaluationOracle for CosSum {
-    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        candidates
-            .iter()
-            .map(|c| c.iter().map(|x| x.cos()).sum())
-            .collect()
     }
 }
 
@@ -300,15 +147,11 @@ fn qng_converges_to_known_optimum() {
     let outcome = AlgorithmQNG
         .optimize(AlgorithmQNGArgs {
             oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
             max_iters: 200,
             learning_rate: 0.1,
+            finite_difference_step: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 3,
-            // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
-            // exhausts its full iteration budget — the behaviour this test asserts.
-            tolerance: 0.0,
-            patience: 3,
             variance_oracle: Box::new(ConstVariance(1.0)),
             tikhonov_reg: 0.05,
             seed: Some(42),
@@ -323,44 +166,8 @@ fn qng_converges_to_known_optimum() {
     for x in &outcome.best_params {
         assert!((x - 1.0).abs() < 0.05, "param off target: {x}");
     }
-    // With tolerance 0.0 the gradient-norm early-stopping test never fires, so
-    // QNG runs the full iteration budget.
+    // QNG runs a fixed iteration budget with no early-stopping test.
     assert_eq!(outcome.iterations_run, 200);
-    assert!(!outcome.converged);
-}
-
-#[test]
-fn adam_converges_to_known_optimum() {
-    let outcome = AlgorithmAdam
-        .optimize(AlgorithmAdamArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-            max_iters: 400,
-            learning_rate: 0.05,
-            beta1: 0.9,
-            beta2: 0.999,
-            epsilon: 1e-8,
-            bounds: (0.0, 2.0),
-            dimensions: 3,
-            // A zero tolerance can never fire (‖∇‖ ≥ 0), so the run still
-            // exhausts its full iteration budget — the behaviour this test asserts.
-            tolerance: 0.0,
-            patience: 3,
-            seed: Some(42),
-        })
-        .expect("valid Adam args optimize successfully");
-
-    assert!(
-        outcome.best_fitness > -1e-3,
-        "fitness = {}",
-        outcome.best_fitness
-    );
-    for x in &outcome.best_params {
-        assert!((x - 1.0).abs() < 0.05, "param off target: {x}");
-    }
-    // With tolerance 0.0 the gradient-norm early-stopping test never fires, so
-    // Adam runs the full iteration budget.
-    assert_eq!(outcome.iterations_run, 400);
     assert!(!outcome.converged);
 }
 
@@ -383,13 +190,8 @@ fn de_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid DE args optimize successfully")
     };
-    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome,
-    // `fitness_history` included: a Vec<f64> compared for *exact* equality, so
-    // this also pins the whole convergence curve as bit-reproducible. The
-    // non-empty check keeps that half of the assertion from passing vacuously.
-    let outcome = make();
-    assert!(!outcome.fitness_history.is_empty());
-    assert_eq!(outcome, make());
+    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome.
+    assert_eq!(make(), make());
 }
 
 #[test]
@@ -410,37 +212,7 @@ fn pso_is_deterministic_for_a_fixed_seed() {
             })
             .expect("valid PSO args optimize successfully")
     };
-    // Same-seed equality covers `fitness_history` too (see the DE case).
-    let outcome = make();
-    assert!(!outcome.fitness_history.is_empty());
-    assert_eq!(outcome, make());
-}
-
-#[test]
-fn adam_is_deterministic_for_a_fixed_seed() {
-    let make = || {
-        AlgorithmAdam
-            .optimize(AlgorithmAdamArgs {
-                oracle: Box::new(Quadratic { target: 0.7 }),
-                gradient_oracle: Box::new(QuadraticGradient { target: 0.7 }),
-                max_iters: 50,
-                learning_rate: 0.05,
-                beta1: 0.9,
-                beta2: 0.999,
-                epsilon: 1e-8,
-                bounds: (0.0, 2.0),
-                dimensions: 4,
-                tolerance: 0.0,
-                patience: 3,
-                seed: Some(123),
-            })
-            .expect("valid Adam args optimize successfully")
-    };
-    // OptimizationOutcome derives PartialEq — same seed ⇒ identical outcome,
-    // `fitness_history` included (see the DE case).
-    let outcome = make();
-    assert!(!outcome.fitness_history.is_empty());
-    assert_eq!(outcome, make());
+    assert_eq!(make(), make());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,216 +333,6 @@ fn pso_early_stops_on_collapse_with_symmetric_bounds() {
     assert_eq!(outcome.iterations_run, make().iterations_run);
 }
 
-#[test]
-fn qng_early_stops_on_small_gradient() {
-    // A generous tolerance makes the gradient-norm test ‖∇fitness(θ)‖ < tolerance
-    // fire once QNG has descended close enough to the optimum, well before the
-    // iteration budget is exhausted. QuadraticGradient is exact, so the norm
-    // shrinks monotonically toward zero as θ → target — which also means the
-    // default `patience = 3` costs only the two extra iterations it takes to make
-    // the streak consecutive, never the stop itself.
-    let make = || {
-        AlgorithmQNG
-            .optimize(AlgorithmQNGArgs {
-                oracle: Box::new(Quadratic { target: 1.0 }),
-                gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-                max_iters: 500,
-                learning_rate: 0.1,
-                bounds: (0.0, 2.0),
-                dimensions: 3,
-                tolerance: 0.5,
-                patience: 3,
-                variance_oracle: Box::new(ConstVariance(1.0)),
-                tikhonov_reg: 0.05,
-                seed: Some(7),
-            })
-            .expect("valid QNG args optimize successfully")
-    };
-    let outcome = make();
-    assert!(outcome.converged, "expected early convergence");
-    assert!(
-        outcome.iterations_run < 500,
-        "iterations_run = {}",
-        outcome.iterations_run
-    );
-    // The recorded iteration count is identical across runs with the same seed.
-    assert_eq!(outcome.iterations_run, make().iterations_run);
-}
-
-#[test]
-fn adam_early_stops_on_small_gradient() {
-    // Mirror of `qng_early_stops_on_small_gradient`: a generous tolerance makes
-    // Adam's gradient-norm test fire before the iteration budget is exhausted,
-    // once the exact QuadraticGradient has shrunk near the optimum. The
-    // monotonically shrinking norm satisfies the default `patience = 3` a couple
-    // of iterations later, not never.
-    let make = || {
-        AlgorithmAdam
-            .optimize(AlgorithmAdamArgs {
-                oracle: Box::new(Quadratic { target: 1.0 }),
-                gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-                max_iters: 500,
-                learning_rate: 0.05,
-                beta1: 0.9,
-                beta2: 0.999,
-                epsilon: 1e-8,
-                bounds: (0.0, 2.0),
-                dimensions: 3,
-                tolerance: 0.5,
-                patience: 3,
-                seed: Some(7),
-            })
-            .expect("valid Adam args optimize successfully")
-    };
-    let outcome = make();
-    assert!(outcome.converged, "expected early convergence");
-    assert!(
-        outcome.iterations_run < 500,
-        "iterations_run = {}",
-        outcome.iterations_run
-    );
-    // The recorded iteration count is identical across runs with the same seed.
-    assert_eq!(outcome.iterations_run, make().iterations_run);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// `patience`: consecutive sub-tolerance iterations, not just one
-//
-// A single sub-tolerance gradient norm cannot be trusted, because the norm may
-// come from a minibatch that cancelled to exactly zero at a θ whose full-dataset
-// gradient is far from zero (the minibatch note beside C-5/C-7 in
-// `docs/CONTRACTS.md`). The optimizers cannot tell the two apart — `GradientOracle`
-// deliberately hides it — so they require `patience` *consecutive* iterations
-// below `tolerance`. These tests drive that rule directly with `ScriptedGradient`.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Run QNG over a scripted gradient-norm sequence, returning the outcome. All
-/// non-`patience` knobs are fixed so only the script and `patience` vary.
-fn qng_over_script(norms: &[f64], patience: usize, max_iters: u32) -> OptimizationOutcome {
-    AlgorithmQNG
-        .optimize(AlgorithmQNGArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(ScriptedGradient::new(norms)),
-            max_iters,
-            learning_rate: 0.1,
-            bounds: (0.0, 2.0),
-            dimensions: 3,
-            tolerance: 0.01,
-            patience,
-            variance_oracle: Box::new(ConstVariance(1.0)),
-            tikhonov_reg: 0.05,
-            seed: Some(7),
-        })
-        .expect("valid QNG args optimize successfully")
-}
-
-/// Adam mirror of [`qng_over_script`].
-fn adam_over_script(norms: &[f64], patience: usize, max_iters: u32) -> OptimizationOutcome {
-    AlgorithmAdam
-        .optimize(AlgorithmAdamArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(ScriptedGradient::new(norms)),
-            max_iters,
-            learning_rate: 0.05,
-            beta1: 0.9,
-            beta2: 0.999,
-            epsilon: 1e-8,
-            bounds: (0.0, 2.0),
-            dimensions: 3,
-            tolerance: 0.01,
-            patience,
-            seed: Some(7),
-        })
-        .expect("valid Adam args optimize successfully")
-}
-
-#[test]
-fn qng_patience_of_one_reproduces_the_single_iteration_rule() {
-    // `patience = 1` must be *exactly* the pre-`patience` behaviour — a design
-    // property of the field, not an accident of the counter's arithmetic. With a
-    // norm already below `tolerance` on the very first iteration, the run stops
-    // there, as the old `if grad_norm < tolerance { break }` did.
-    let outcome = qng_over_script(&[0.001], 1, 500);
-    assert!(outcome.converged, "expected convergence on iteration 1");
-    assert_eq!(outcome.iterations_run, 1);
-}
-
-#[test]
-fn qng_one_sub_tolerance_iteration_is_not_enough_beyond_patience_one() {
-    // The whole point of the fix: iteration 1 dips below `tolerance` (the shape a
-    // cancelling minibatch produces) and iteration 2 is back above it. With
-    // `patience = 3` the run must *not* stop on iteration 1 — it exhausts its
-    // budget, because the script never yields three consecutive small norms.
-    let outcome = qng_over_script(&[0.001, 5.0], 3, 6);
-    assert!(
-        !outcome.converged,
-        "a single sub-tolerance iteration must not report convergence"
-    );
-    assert_eq!(outcome.iterations_run, 6);
-}
-
-#[test]
-fn qng_patience_counts_consecutive_not_cumulative_sub_tolerance_iterations() {
-    // small, large, small, small → three sub-tolerance iterations in *total* but
-    // never three in a row, so the streak reset must keep `converged` false.
-    let interrupted = qng_over_script(&[0.001, 5.0, 0.001, 0.001], 3, 4);
-    assert!(
-        !interrupted.converged,
-        "three non-consecutive sub-tolerance iterations must not converge"
-    );
-    assert_eq!(interrupted.iterations_run, 4);
-
-    // The same prefix plus one more small iteration *does* reach three in a row,
-    // on iteration 5 — proving the counter resumed from 0 after the large norm
-    // rather than carrying the first small iteration over.
-    let sustained = qng_over_script(&[0.001, 5.0, 0.001, 0.001, 0.001], 3, 10);
-    assert!(
-        sustained.converged,
-        "expected convergence once 3 are consecutive"
-    );
-    assert_eq!(sustained.iterations_run, 5);
-}
-
-#[test]
-fn qng_converges_after_patience_consecutive_sub_tolerance_iterations() {
-    // Symmetric positive case: one large norm, then exactly `patience` small
-    // ones. The stop lands on the last of the three, never earlier.
-    let outcome = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
-    assert!(outcome.converged, "expected convergence on iteration 4");
-    assert_eq!(outcome.iterations_run, 4);
-
-    // With `patience = 2` the same script stops one iteration sooner, so the
-    // field really is what sets the streak length.
-    let impatient = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 2, 10);
-    assert!(impatient.converged);
-    assert_eq!(impatient.iterations_run, 3);
-}
-
-#[test]
-fn adam_patience_of_one_reproduces_the_single_iteration_rule() {
-    // Adam mirror: the rule lives in the shared convergence check, so both
-    // optimizers must honour `patience = 1` as the pre-`patience` behaviour.
-    let outcome = adam_over_script(&[0.001], 1, 500);
-    assert!(outcome.converged, "expected convergence on iteration 1");
-    assert_eq!(outcome.iterations_run, 1);
-}
-
-#[test]
-fn adam_converges_after_patience_consecutive_sub_tolerance_iterations() {
-    // Adam mirror of the positive case, including the reset: a lone small norm
-    // followed by a large one buys nothing.
-    let outcome = adam_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
-    assert!(outcome.converged, "expected convergence on iteration 4");
-    assert_eq!(outcome.iterations_run, 4);
-
-    let interrupted = adam_over_script(&[0.001, 5.0], 3, 6);
-    assert!(
-        !interrupted.converged,
-        "a single sub-tolerance iteration must not report convergence"
-    );
-    assert_eq!(interrupted.iterations_run, 6);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Edge cases
 // ─────────────────────────────────────────────────────────────────────────────
@@ -789,91 +351,6 @@ fn de_handles_zero_dimensions() {
         })
         .expect("valid DE args optimize successfully");
     assert!(outcome.best_params.is_empty());
-}
-
-#[test]
-fn pso_handles_zero_dimensions() {
-    // The same degenerate case as `de_handles_zero_dimensions`: `dimensions = 0`
-    // is a supported no-op, not a rejected precondition. PSO's per-dimension
-    // loops run zero times, `population_converged` reports that a zero-dimension
-    // population is never collapsed, and the run finishes successfully with an
-    // empty `best_params`. `CONTRACTS.md` therefore does not list
-    // `dimensions >= 1` among PSO's validated preconditions.
-    let outcome = AlgorithmPSO
-        .optimize(AlgorithmPSOArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            population_size: 10,
-            generations: 5,
-            dimensions: 0,
-            bounds: (-1.0, 1.0),
-            inertia_weight: 0.5,
-            cognitive_weight: 1.0,
-            social_weight: 1.0,
-            tolerance: 1e-9,
-            seed: Some(1),
-        })
-        .expect("valid PSO args optimize successfully");
-    assert!(outcome.best_params.is_empty());
-    // The C-5 postcondition still holds: `best_fitness` is the oracle's value
-    // for the (empty) `best_params`, not the `-inf` sentinel.
-    assert!(outcome.best_fitness.is_finite());
-}
-
-#[test]
-fn qng_handles_zero_dimensions() {
-    // As with DE/PSO, `dimensions = 0` is a supported no-op for QNG: the
-    // gradient, QFIM-diagonal and update loops all range over zero parameters,
-    // the empty-gradient early-stopping norm is a harmless `0.0`, and the run
-    // finishes successfully with an empty `best_params`. It is not a rejected
-    // precondition, so `CONTRACTS.md` does not list `dimensions >= 1` for QNG.
-    let outcome = AlgorithmQNG
-        .optimize(AlgorithmQNGArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-            max_iters: 5,
-            learning_rate: 0.1,
-            bounds: (0.0, 2.0),
-            dimensions: 0,
-            tolerance: 0.0,
-            patience: 3,
-            variance_oracle: Box::new(ConstVariance(1.0)),
-            tikhonov_reg: 0.05,
-            seed: Some(1),
-        })
-        .expect("valid QNG args optimize successfully");
-    assert!(outcome.best_params.is_empty());
-    // The single per-iteration oracle call still runs (on the empty θ), so
-    // `best_fitness` is a real oracle value, not the `-inf` sentinel (C-5).
-    assert!(outcome.best_fitness.is_finite());
-}
-
-#[test]
-fn adam_handles_zero_dimensions() {
-    // Identical degenerate case for Adam: the gradient, moment-update and
-    // parameter loops range over zero parameters, the empty-gradient norm is a
-    // harmless `0.0`, and the run finishes successfully with an empty
-    // `best_params`. Not a rejected precondition, so `CONTRACTS.md` does not
-    // list `dimensions >= 1` for Adam either.
-    let outcome = AlgorithmAdam
-        .optimize(AlgorithmAdamArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-            max_iters: 5,
-            learning_rate: 0.05,
-            beta1: 0.9,
-            beta2: 0.999,
-            epsilon: 1e-8,
-            bounds: (0.0, 2.0),
-            dimensions: 0,
-            tolerance: 0.0,
-            patience: 3,
-            seed: Some(1),
-        })
-        .expect("valid Adam args optimize successfully");
-    assert!(outcome.best_params.is_empty());
-    // The single per-iteration oracle call still runs (on the empty θ), so
-    // `best_fitness` is a real oracle value, not the `-inf` sentinel (C-5).
-    assert!(outcome.best_fitness.is_finite());
 }
 
 #[test]
@@ -1013,13 +490,11 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
     let outcome = AlgorithmQNG
         .optimize(AlgorithmQNGArgs {
             oracle: Box::new(Quadratic { target: 1.0 }),
-            gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
             max_iters: 1,
             learning_rate: 0.1,
+            finite_difference_step: 0.1,
             bounds: (0.0, 2.0),
             dimensions: 2,
-            tolerance: 0.0,
-            patience: 3,
             variance_oracle: Box::new(ConstVariance(0.0)),
             tikhonov_reg: 0.05,
             seed: Some(1),
@@ -1031,21 +506,17 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
 }
 
 #[test]
-fn qng_short_gradient_oracle_returns_error_not_panic() {
-    // QNG now assembles its update from `gradient_oracle.gradient_batch(θ, dims)`
-    // and indexes it positionally per parameter. A gradient oracle that returns
-    // fewer than `dims` components (here dims−1 = 1) would make that indexing
-    // panic — it must surface a typed error instead. The fitness `oracle` is
-    // irrelevant: the gradient step runs (and fails the length check) first.
+fn qng_short_oracle_returns_error_not_panic() {
+    // The gradient batch submits 2·dims = 4 shifted candidates; ShortOracle
+    // returns 3, so the positional indexing in the gradient assembly would panic
+    // — it must return a typed error instead.
     let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
-        oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(ShortGradientOracle),
+        oracle: Box::new(ShortOracle),
         max_iters: 5,
         learning_rate: 0.1,
+        finite_difference_step: 0.1,
         bounds: (0.0, 2.0),
         dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -1054,8 +525,8 @@ fn qng_short_gradient_oracle_returns_error_not_panic() {
         matches!(
             result,
             Err(OptimizerError::OracleLengthMismatch {
-                expected: 2,
-                got: 1
+                expected: 4,
+                got: 3
             })
         ),
         "expected OracleLengthMismatch, got {result:?}"
@@ -1088,18 +559,46 @@ fn pso_rejects_empty_bounds() {
 }
 
 #[test]
+fn pso_rejects_non_finite_bounds() {
+    // An ordered but unbounded interval (an infinite endpoint) or a `NaN`
+    // endpoint previously slipped past the ordering-only check and panicked
+    // inside the uniform sampler; all must now return a typed error before any
+    // RNG draw.
+    for bounds in [
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 1.0),
+        (f64::NAN, 1.0),
+    ] {
+        let result = AlgorithmPSO.optimize(AlgorithmPSOArgs {
+            oracle: Box::new(Quadratic { target: 1.0 }),
+            population_size: 10,
+            generations: 5,
+            dimensions: 2,
+            bounds,
+            inertia_weight: 0.5,
+            cognitive_weight: 1.0,
+            social_weight: 1.0,
+            tolerance: 1e-9,
+            seed: Some(1),
+        });
+        assert!(
+            matches!(result, Err(OptimizerError::InvalidBounds { .. })),
+            "bounds {bounds:?} should be rejected, got {result:?}"
+        );
+    }
+}
+
+#[test]
 fn qng_rejects_empty_bounds() {
     // QNG draws θ from [lb, ub) exactly like PSO, so an empty interval is the
     // same panic risk and must likewise return a typed error, not panic.
     let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
         oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
         max_iters: 5,
         learning_rate: 0.1,
+        finite_difference_step: 0.1,
         bounds: (1.0, 1.0),
         dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
@@ -1108,157 +607,6 @@ fn qng_rejects_empty_bounds() {
         matches!(result, Err(OptimizerError::InvalidBounds { .. })),
         "empty QNG bounds should be rejected, got {result:?}"
     );
-}
-
-#[test]
-fn qng_rejects_zero_max_iters() {
-    // Precondition: max_iters >= 1. QNG is single-point with no pre-loop
-    // evaluation, so a zero-iteration run never calls the oracle; it would
-    // otherwise return the unevaluated random initial θ paired with the -inf
-    // sentinel best_fitness, violating the C-5 postcondition. Must be a typed
-    // error surfaced before any RNG draw or oracle call.
-    let result = AlgorithmQNG.optimize(AlgorithmQNGArgs {
-        oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-        max_iters: 0,
-        learning_rate: 0.1,
-        bounds: (0.0, 2.0),
-        dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
-        variance_oracle: Box::new(ConstVariance(1.0)),
-        tikhonov_reg: 0.05,
-        seed: Some(1),
-    });
-    assert!(
-        matches!(result, Err(OptimizerError::ZeroMaxIters)),
-        "zero QNG max_iters should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn adam_short_gradient_oracle_returns_error_not_panic() {
-    // Adam assembles its update from `gradient_oracle.gradient_batch(θ, dims)`
-    // and indexes it positionally per parameter, exactly like QNG. A gradient
-    // oracle returning fewer than `dims` components (here dims−1 = 1) would make
-    // that indexing panic — it must surface a typed error instead. The fitness
-    // `oracle` is irrelevant: the gradient step runs (and fails the length
-    // check) first.
-    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
-        oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(ShortGradientOracle),
-        max_iters: 5,
-        learning_rate: 0.05,
-        beta1: 0.9,
-        beta2: 0.999,
-        epsilon: 1e-8,
-        bounds: (0.0, 2.0),
-        dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
-        seed: Some(1),
-    });
-    assert!(
-        matches!(
-            result,
-            Err(OptimizerError::OracleLengthMismatch {
-                expected: 2,
-                got: 1
-            })
-        ),
-        "expected OracleLengthMismatch, got {result:?}"
-    );
-}
-
-#[test]
-fn adam_rejects_empty_bounds() {
-    // Adam draws θ from [lb, ub) exactly like QNG/PSO, so an empty interval is
-    // the same panic risk and must likewise return a typed error, not panic.
-    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
-        oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-        max_iters: 5,
-        learning_rate: 0.05,
-        beta1: 0.9,
-        beta2: 0.999,
-        epsilon: 1e-8,
-        bounds: (1.0, 1.0),
-        dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
-        seed: Some(1),
-    });
-    assert!(
-        matches!(result, Err(OptimizerError::InvalidBounds { .. })),
-        "empty Adam bounds should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn adam_rejects_zero_max_iters() {
-    // Precondition: max_iters >= 1. Adam is single-point with no pre-loop
-    // evaluation, so a zero-iteration run never calls the oracle; it would
-    // otherwise return the unevaluated random initial θ paired with the -inf
-    // sentinel best_fitness, violating the C-5 postcondition. Must be a typed
-    // error surfaced before any RNG draw or oracle call.
-    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
-        oracle: Box::new(Quadratic { target: 1.0 }),
-        gradient_oracle: Box::new(QuadraticGradient { target: 1.0 }),
-        max_iters: 0,
-        learning_rate: 0.05,
-        beta1: 0.9,
-        beta2: 0.999,
-        epsilon: 1e-8,
-        bounds: (0.0, 2.0),
-        dimensions: 2,
-        tolerance: 0.0,
-        patience: 3,
-        seed: Some(1),
-    });
-    assert!(
-        matches!(result, Err(OptimizerError::ZeroMaxIters)),
-        "zero Adam max_iters should be rejected, got {result:?}"
-    );
-}
-
-#[test]
-fn linear_parameter_shift_short_oracle_returns_error_not_panic() {
-    // `linear_parameter_shift_gradient` submits `2 * dims` shifted candidates and
-    // reads the ±π/2 pair of each parameter positionally out of the result, so an
-    // oracle returning fewer values would make that indexing panic. It is a
-    // public free function over the public `EvaluationOracle` trait — any caller
-    // can hand it any implementation, a wrapped Python callback included — so it
-    // must length-check like every optimizer does instead of trusting its two
-    // in-tree callers to behave.
-    let theta = vec![0.3, -1.1, 2.0];
-    let dims = theta.len();
-    let result = linear_parameter_shift_gradient(&ShortOracle, &theta, dims);
-    assert_eq!(
-        result,
-        Err(OptimizerError::OracleLengthMismatch {
-            expected: 2 * dims,
-            got: 2 * dims - 1
-        }),
-        "expected OracleLengthMismatch, got {result:?}"
-    );
-}
-
-#[test]
-fn linear_parameter_shift_matches_analytic_gradient() {
-    // For CosSum (fitness = Σ cos θᵢ) the parameter-shift rule is exact in
-    // closed form: ∂/∂θᵢ = −sin θᵢ, and [cos(θ+π/2) − cos(θ−π/2)]/2 = −sin θ.
-    // No shot noise is involved (the oracle is analytic), so equality is tight.
-    let theta = vec![0.3, -1.1, 2.0, 0.0];
-    let grad = linear_parameter_shift_gradient(&CosSum, &theta, theta.len())
-        .expect("CosSum returns one value per candidate");
-    assert_eq!(grad.len(), theta.len());
-    for (i, &g) in grad.iter().enumerate() {
-        let expected = -theta[i].sin();
-        assert!(
-            (g - expected).abs() < 1e-12,
-            "param {i}: parameter-shift {g} vs analytic {expected}"
-        );
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1373,13 +721,11 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
         let outcome = AlgorithmQNG
             .optimize(AlgorithmQNGArgs {
                 oracle: Box::new(Multimodal { target: 1.0 }),
-                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
                 max_iters: 120,
                 learning_rate: 0.1,
+                finite_difference_step: 0.1,
                 bounds: (0.0, 2.0),
                 dimensions: 4,
-                tolerance: 0.0,
-                patience: 3,
                 variance_oracle: Box::new(ConstVariance(1.0)),
                 tikhonov_reg: 0.05,
                 seed: Some(seed),
@@ -1392,285 +738,4 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
             &Multimodal { target: 1.0 },
         );
     }
-}
-
-#[test]
-fn adam_best_params_fitness_invariant_holds_across_seeds() {
-    // Adam updates best_params/best_fitness atomically from the same evaluation,
-    // so this should pass — asserted here so all four optimizers are covered on
-    // the rough Multimodal surface where a desynced champion would diverge.
-    for seed in 0..20 {
-        let outcome = AlgorithmAdam
-            .optimize(AlgorithmAdamArgs {
-                oracle: Box::new(Multimodal { target: 1.0 }),
-                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
-                max_iters: 120,
-                learning_rate: 0.05,
-                beta1: 0.9,
-                beta2: 0.999,
-                epsilon: 1e-8,
-                bounds: (0.0, 2.0),
-                dimensions: 4,
-                tolerance: 0.0,
-                patience: 3,
-                seed: Some(seed),
-            })
-            .expect("valid Adam args optimize successfully");
-        assert_reported_fitness_matches_params(
-            "adam/multimodal",
-            seed,
-            &outcome,
-            &Multimodal { target: 1.0 },
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// C-5 `fitness_history`: one incumbent-best fitness per iteration actually run
-//
-// Three guarantees, asserted for all four optimizers: the length equals
-// `iterations_run` (early-stopping paths included), the last entry equals the
-// reported `best_fitness`, and the sequence never decreases. The rough
-// `Multimodal` surface is used throughout: it is where an implementation that
-// recorded the *current* candidate's fitness instead of the running best would
-// visibly dip (pinned directly by the two `..._is_the_incumbent_best_...` tests
-// below), so these are discriminating checks rather than tautologies.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Assert the three C-5 `fitness_history` guarantees on one outcome.
-fn assert_fitness_history_tracks_the_run(label: &str, outcome: &OptimizationOutcome) {
-    assert_eq!(
-        outcome.fitness_history.len(),
-        outcome.iterations_run,
-        "{label}: {} history entries for {} iterations run",
-        outcome.fitness_history.len(),
-        outcome.iterations_run,
-    );
-    let last = *outcome
-        .fitness_history
-        .last()
-        .expect("a run of at least one iteration records at least one fitness");
-    assert_eq!(
-        last, outcome.best_fitness,
-        "{label}: history ends at {last} but best_fitness is {}",
-        outcome.best_fitness,
-    );
-    for (i, w) in outcome.fitness_history.windows(2).enumerate() {
-        assert!(
-            w[1] >= w[0],
-            "{label}: history decreased at iteration {}: {} → {}",
-            i + 1,
-            w[0],
-            w[1],
-        );
-    }
-}
-
-#[test]
-fn de_fitness_history_tracks_every_generation() {
-    for seed in 0..5 {
-        let outcome = AlgorithmDifferentialEvolution
-            .optimize(AlgorithmDifferentialEvolutionArgs {
-                oracle: Box::new(Multimodal { target: 1.0 }),
-                population_size: 20,
-                generations: 60,
-                dimensions: 3,
-                tolerance: 1e-12,
-                // At least as large as `generations`, so the fitness-stagnation
-                // window never fills inside the budget and the run really does
-                // record all 60 generations.
-                patience: 60,
-                seed: Some(seed),
-            })
-            .expect("valid DE args optimize successfully");
-        assert_eq!(outcome.iterations_run, 60);
-        assert_fitness_history_tracks_the_run("de/multimodal", &outcome);
-    }
-}
-
-#[test]
-fn pso_fitness_history_tracks_every_generation() {
-    for seed in 0..5 {
-        let outcome = AlgorithmPSO
-            .optimize(AlgorithmPSOArgs {
-                oracle: Box::new(Multimodal { target: 1.0 }),
-                population_size: 20,
-                generations: 60,
-                dimensions: 3,
-                bounds: (-std::f64::consts::PI, std::f64::consts::PI),
-                inertia_weight: 0.5,
-                cognitive_weight: 1.0,
-                social_weight: 1.0,
-                tolerance: 1e-12,
-                seed: Some(seed),
-            })
-            .expect("valid PSO args optimize successfully");
-        assert_eq!(outcome.iterations_run, 60);
-        assert_fitness_history_tracks_the_run("pso/multimodal", &outcome);
-    }
-}
-
-#[test]
-fn qng_fitness_history_tracks_every_iteration() {
-    for seed in 0..5 {
-        let outcome = AlgorithmQNG
-            .optimize(AlgorithmQNGArgs {
-                oracle: Box::new(Multimodal { target: 1.0 }),
-                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
-                max_iters: 60,
-                learning_rate: 0.1,
-                bounds: (0.0, 2.0),
-                dimensions: 3,
-                // A zero tolerance can never fire, so all 60 iterations run.
-                tolerance: 0.0,
-                patience: 3,
-                variance_oracle: Box::new(ConstVariance(1.0)),
-                tikhonov_reg: 0.05,
-                seed: Some(seed),
-            })
-            .expect("valid QNG args optimize successfully");
-        assert_eq!(outcome.iterations_run, 60);
-        assert_fitness_history_tracks_the_run("qng/multimodal", &outcome);
-    }
-}
-
-#[test]
-fn adam_fitness_history_tracks_every_iteration() {
-    for seed in 0..5 {
-        let outcome = AlgorithmAdam
-            .optimize(AlgorithmAdamArgs {
-                oracle: Box::new(Multimodal { target: 1.0 }),
-                gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
-                max_iters: 60,
-                learning_rate: 0.05,
-                beta1: 0.9,
-                beta2: 0.999,
-                epsilon: 1e-8,
-                bounds: (0.0, 2.0),
-                dimensions: 3,
-                tolerance: 0.0,
-                patience: 3,
-                seed: Some(seed),
-            })
-            .expect("valid Adam args optimize successfully");
-        assert_eq!(outcome.iterations_run, 60);
-        assert_fitness_history_tracks_the_run("adam/multimodal", &outcome);
-    }
-}
-
-#[test]
-fn qng_fitness_history_is_the_incumbent_best_not_the_current_iterate() {
-    // Gradient ascent has no monotonicity guarantee: on the rippled Multimodal
-    // surface a QNG step overshoots and the *current* iterate's fitness falls.
-    // The recorded oracle calls prove that happens here — so recording `energy`
-    // instead of `best_energy` would produce a decreasing history — while the
-    // history itself stays non-decreasing.
-    let recorder = Recording::new(1.0);
-    let outcome = AlgorithmQNG
-        .optimize(AlgorithmQNGArgs {
-            oracle: Box::new(Arc::clone(&recorder)),
-            gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
-            max_iters: 40,
-            learning_rate: 0.1,
-            bounds: (0.0, 2.0),
-            dimensions: 3,
-            tolerance: 0.0,
-            patience: 3,
-            variance_oracle: Box::new(ConstVariance(1.0)),
-            tikhonov_reg: 0.05,
-            seed: Some(7),
-        })
-        .expect("valid QNG args optimize successfully");
-
-    // QNG evaluates exactly one candidate per iteration.
-    let current = recorder.seen();
-    assert_eq!(current.len(), outcome.iterations_run);
-    assert!(
-        current.windows(2).any(|w| w[1] < w[0]),
-        "the current-iterate fitness never dipped, so this test would not \
-         discriminate: {current:?}"
-    );
-    assert_fitness_history_tracks_the_run("qng/multimodal/recorded", &outcome);
-}
-
-#[test]
-fn adam_fitness_history_is_the_incumbent_best_not_the_current_iterate() {
-    // Adam mirror of the QNG case: the rule lives in each loop separately, so
-    // both need the discriminating check, not just one.
-    let recorder = Recording::new(1.0);
-    let outcome = AlgorithmAdam
-        .optimize(AlgorithmAdamArgs {
-            oracle: Box::new(Arc::clone(&recorder)),
-            gradient_oracle: Box::new(MultimodalGradient { target: 1.0 }),
-            max_iters: 40,
-            learning_rate: 0.05,
-            beta1: 0.9,
-            beta2: 0.999,
-            epsilon: 1e-8,
-            bounds: (0.0, 2.0),
-            dimensions: 3,
-            tolerance: 0.0,
-            patience: 3,
-            seed: Some(7),
-        })
-        .expect("valid Adam args optimize successfully");
-
-    let current = recorder.seen();
-    assert_eq!(current.len(), outcome.iterations_run);
-    assert!(
-        current.windows(2).any(|w| w[1] < w[0]),
-        "the current-iterate fitness never dipped, so this test would not \
-         discriminate: {current:?}"
-    );
-    assert_fitness_history_tracks_the_run("adam/multimodal/recorded", &outcome);
-}
-
-#[test]
-fn fitness_history_length_survives_every_early_stopping_path() {
-    // The push must happen *before* each loop's `break`, or an early-stopped run
-    // records one entry too few. All four early-stopping paths are exercised:
-    // DE's fitness stagnation, PSO's population collapse, and QNG's/Adam's
-    // `patience` streak.
-    let de = AlgorithmDifferentialEvolution
-        .optimize(AlgorithmDifferentialEvolutionArgs {
-            oracle: Box::new(Quadratic { target: 1.0 }),
-            population_size: 30,
-            generations: 500,
-            tolerance: 0.5,
-            patience: 5,
-            dimensions: 3,
-            seed: Some(7),
-        })
-        .expect("valid DE args optimize successfully");
-    assert!(de.converged && de.iterations_run < 500);
-    assert_fitness_history_tracks_the_run("de/early-stop", &de);
-
-    let pso = AlgorithmPSO
-        .optimize(AlgorithmPSOArgs {
-            oracle: Box::new(Quadratic { target: 0.0 }),
-            population_size: 40,
-            generations: 2000,
-            dimensions: 3,
-            bounds: (-std::f64::consts::PI, std::f64::consts::PI),
-            inertia_weight: 0.5,
-            cognitive_weight: 1.0,
-            social_weight: 1.0,
-            tolerance: 0.05,
-            seed: Some(42),
-        })
-        .expect("valid PSO args optimize successfully");
-    assert!(pso.converged && pso.iterations_run < 2000);
-    assert_fitness_history_tracks_the_run("pso/early-stop", &pso);
-
-    // Scripted norms stop the gradient optimizers on iteration 4 (one large norm
-    // then `patience = 3` small ones), so the history must hold exactly 4 entries.
-    let qng = qng_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
-    assert!(qng.converged);
-    assert_eq!(qng.iterations_run, 4);
-    assert_fitness_history_tracks_the_run("qng/early-stop", &qng);
-
-    let adam = adam_over_script(&[5.0, 0.001, 0.001, 0.001], 3, 10);
-    assert!(adam.converged);
-    assert_eq!(adam.iterations_run, 4);
-    assert_fitness_history_tracks_the_run("adam/early-stop", &adam);
 }

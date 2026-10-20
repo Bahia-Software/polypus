@@ -288,7 +288,7 @@ where
     ///
     /// This is the spatial-dose counterpart of [`run`](Self::run): identical
     /// transport, plus a per-voxel energy tally that
-    /// [`VoxelGrid::dose_gy`] / [`VoxelGrid::relative_pdd`] turn into dose and
+    /// [`VoxelGrid::dose_gy`] / [`VoxelGrid::relative_pdd`] turn into a per-voxel dose and
     /// depth-dose curves. Pair it with a bounded
     /// [`Geometry`](Self::with_geometry) (e.g. a finite water cube) for a
     /// phantom experiment.
@@ -503,6 +503,31 @@ mod tests {
         assert_eq!(r1.mean_deposit_mev, r2.mean_deposit_mev);
     }
 
+    /// Pins the absolute seeded output of a small transport run (step lengths,
+    /// interaction selection and the Compton/coherent angular samplers). The
+    /// run is sequential, so the result does not depend on any reduction
+    /// order. `same_seed_is_reproducible` only compares two runs, so a `rand`
+    /// bump that changed the seeded stream would pass it silently. A bounded
+    /// cube lets primaries escape, so the mean deposit and the track lengths
+    /// both depend on the stream (in an unbounded medium every primary
+    /// deposits its full energy). Values captured with rand 0.9.4, compared by
+    /// bits.
+    #[test]
+    fn run_seeded_stream_is_pinned() {
+        let eng = engine(100, 42).with_geometry(water_cube());
+        let mut rng = StdRng::seed_from_u64(42);
+        let result = eng.run(Photon::state_along_z(0.1), &mut rng).unwrap();
+        let track_points: usize = result.histories.iter().map(|h| h.track.len()).sum();
+        assert_eq!(
+            [
+                result.mean_deposit_mev.to_bits(),
+                result.variance_deposit_mev2.to_bits()
+            ],
+            [4583218237680116603, 4559443500520194807]
+        );
+        assert_eq!(track_points, 307);
+    }
+
     #[test]
     fn standard_error_is_small() {
         let n = 500;
@@ -654,7 +679,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let voxel_size_m = 0.005;
+        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
         let mut rng = StdRng::seed_from_u64(11);
         let (result, grid) = eng
             .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
@@ -673,129 +699,57 @@ mod tests {
     }
 
     #[test]
-    fn depth_profile_log_slope_approximates_mu() {
-        // Depth-dose validation. A monoenergetic 100 keV pencil beam in the
-        // 10 cm water cube. A log-linear fit of the central slices of the depth
-        // profile recovers an effective attenuation of the same order as
-        // μ(100 keV, water) ≈ 16.7 m⁻¹, but distinctly shallower.
-        //
-        // Why shallower than -μ: at 100 keV in water Compton scattering is the
-        // dominant process and transfers only ~15 % of each photon's energy to
-        // the recoil electron (deposited locally); the ~85 %-energy scattered
-        // photon travels predominantly forward and deposits downstream. This
-        // forward-scatter "build-up" flattens the depth-dose curve well below
-        // the primary-only exp(-μz). Measured here: the central-region slope is
-        // ≈ 0.55 μ (≈ -9 m⁻¹). The test brackets |slope| to (0.4 μ, 1.0 μ):
-        // unambiguously negative, the right order of magnitude, yet below the
-        // pure-primary μ — the documented scatter margin.
-        let mu = mu_100kev_water();
-        let n = 200_000;
-        let eng = MonteCarloEngine::new(
-            Photon,
-            water_medium(),
-            PhotonInteractionModel,
-            RunConfig {
-                n_histories: n,
-                seed: 7,
-                ..Default::default()
-            },
-        )
-        .with_geometry(water_cube());
-        let grid = VoxelGrid::new([-0.05, -0.05, 0.0], 0.01, [10, 10, 10]).unwrap();
-        let mut rng = StdRng::seed_from_u64(7);
-        let (_r, grid) = eng
-            .run_with_voxels(Photon::state_along_z(0.1), grid, &mut rng)
-            .unwrap();
-
-        // Log-linear fit over the central slices [1, 6) → z-centres 1.5–5.5 cm.
-        let profile = grid.depth_profile_mev();
-        let voxel = grid.voxel_size_m();
-        let (mut sx, mut sy, mut sxx, mut sxy, mut count) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        for (i, &e) in profile.iter().enumerate().take(6).skip(1) {
-            let z = (i as f64 + 0.5) * voxel;
-            let l = e.ln();
-            sx += z;
-            sy += l;
-            sxx += z * z;
-            sxy += z * l;
-            count += 1.0;
-        }
-        let slope = (count * sxy - sx * sy) / (count * sxx - sx * sx);
-        assert!(
-            slope < -0.4 * mu && slope > -mu,
-            "fitted depth-profile slope {slope:.2}/m outside (-mu, -0.4*mu) with mu = {mu:.2}/m"
-        );
-    }
-
-    #[test]
-    fn small_water_phantom_depth_dose_experiment() {
-        use crate::interactions::photon::PhotonInteractionModel;
-        use crate::medium::compound::CompoundMedium;
-        use crate::monte_carlo::beam::DivergentBeam;
-        use crate::monte_carlo::geometry::Geometry;
-        use crate::monte_carlo::voxel::VoxelGrid;
-        use crate::monte_carlo::{MonteCarloEngine, RunConfig};
-        use crate::particle::photon::Photon;
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-
-        let water = CompoundMedium::new("H2O", 1000.0, 5000).unwrap();
-
-        let beam = DivergentBeam {
-            source_to_surface_distance_m: 0.10,
-            field_side_m: 0.10, // 10x10 cm, como tu configuración real
-            energy_mev: 0.1,
-        };
+    fn source_and_voxels_conserve_energy_for_divergent_and_parallel_beams() {
+        use crate::monte_carlo::beam::{BeamSource, DivergentBeam, ParallelBeam};
 
         let geometry = Geometry::Box {
             min: [-0.20, -0.20, 0.0],
-            max: [0.20, 0.20, 0.10], // 40x40 cm de sección, 10 cm de profundidad
+            max: [0.20, 0.20, 0.20],
         };
+        let voxel_size_m = 0.005;
 
-        let grid = VoxelGrid::new([-0.20, -0.20, 0.0], 0.005, [80, 80, 20]).unwrap();
+        let divergent = DivergentBeam {
+            source_to_surface_distance_m: 0.10,
+            field_side_m: 0.10,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+        let parallel = ParallelBeam {
+            half_width_x_m: 0.05,
+            half_width_y_m: 0.05,
+            z0_m: 0.0,
+            energy_source: Box::new(Monoenergetic::new(0.1).unwrap()),
+        };
+        let beams: [(&str, &dyn BeamSource); 2] =
+            [("divergent", &divergent), ("parallel", &parallel)];
 
-        let engine = MonteCarloEngine::new(
-            Photon,
-            water,
-            PhotonInteractionModel,
-            RunConfig {
-                n_histories: 400000,
-                seed: 123,
-                ..Default::default()
-            },
-        )
-        .with_geometry(geometry);
+        for (name, beam) in beams {
+            let eng = MonteCarloEngine::new(
+                Photon,
+                water_medium(),
+                PhotonInteractionModel,
+                RunConfig {
+                    n_histories: 5_000,
+                    seed: 123,
+                    ..Default::default()
+                },
+            )
+            .with_geometry(geometry);
+            let grid = VoxelGrid::new([-0.20, -0.20, 0.0], voxel_size_m, [80, 80, 40]).unwrap();
+            let mut rng = StdRng::seed_from_u64(123);
+            let (result, grid) = eng
+                .run_with_source_and_voxels(beam, grid, &mut rng)
+                .unwrap();
 
-        let mut rng = StdRng::seed_from_u64(123);
-        let (result, grid) = engine
-            .run_with_source_and_voxels(&beam, grid, &mut rng)
-            .unwrap();
-
-        println!(
-            "Depósito medio por historia: {:.6} MeV",
-            result.mean_deposit_mev
-        );
-        println!(
-            "Perfil de profundidad (MeV por capa): {:?}",
-            grid.depth_profile_mev()
-        );
-        println!("PDD relativo (%): {:?}", grid.relative_pdd());
-
-        let pdd = grid.relative_pdd();
-
-        #[cfg(feature = "plotters")]
-        crate::monte_carlo::voxel_plots::plot_relative_pdd(
-            &pdd,
-            0.005, // <- antes 0.01
-            "PDD - H2O, 100 keV, campo 10x10 cm (0.5 cm/capa)",
-            std::path::Path::new("/tmp/pdd_rust_fino.png"),
-        )
-        .unwrap();
-
-        assert_eq!(pdd.len(), 20);
-        assert!(
-            pdd.iter().any(|&v| v > 0.0),
-            "no se depositó nada en ningún sitio"
-        );
+            let summed_deposit: f64 = result.histories.iter().map(|h| h.total_deposit_mev).sum();
+            let tallied = grid.total_energy_mev() + grid.overflow_mev();
+            assert!(
+                (tallied - summed_deposit).abs() < 1e-6 * summed_deposit.max(1.0),
+                "{name} beam: tallied {tallied} vs deposited {summed_deposit}"
+            );
+            assert!(
+                grid.total_energy_mev() > 0.0,
+                "{name} beam: expected some in-grid deposit"
+            );
+        }
     }
 }

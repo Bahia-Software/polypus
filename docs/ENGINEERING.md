@@ -16,19 +16,26 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has six crates:
+with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` crate is excluded):
 
 | Crate | Role | PyO3? |
 |---|---|---|
-| `polypus-circuit` | Circuit IR + OpenQASM 2.0 import/export + QIR export | No |
+| `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
-| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG) behind evaluation oracles | No |
+| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES) behind evaluation oracles | No |
+| `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
+| `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
+| `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
+| `polypus-infrastructure` | The concrete execution backends (`local`/Aer, `cunqa`, `qmio`, `native`), the `Infrastructure` factory (which routes unknown names through the registry and registers the built-in `subprocess`/`qmio` backends), the Qiskit boundary (`QiskitCircuit`, `to_py_object`) and the construction-time `ExecutionConfig`; re-exports the `polypus-backend` contract | GIL only |
+| `polypus-orchestration` | Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the `Flow` trait + **all** flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory` seam, `dispatch_optimizer` and the type-erased `OracleErrorSlot` | No |
+| `polypus-evaluation` | Candidate evaluation: the oracles (`VqcOracle`, `QmlOracle`) and the `OracleFactory` implementations that build them (`VqcOracleFactory`, `QmlOracleFactory`), plus `PyVarianceOracle`, `PyCallbackObservable`, the supervised QML objectives (`SupervisedObjective`: `PyLabelledCost`, `PySampleCost`; see `docs/adr/0002-qml-supervised-labels.md`), `CircuitSource` and `EvaluationError` | GIL only |
 | `polypus-logger` | `log::Log` sink shared by the workspace; installed only by the app layer | No |
-| `polypus` | The library + Python extension module; orchestration and infrastructures (`local`, `cunqa`, `qmio`, `native`) | **Yes** |
+| `polypus` | The library + Python extension module; the FFI edge — `#[pyclass]`es, kwarg parsing, and error→`PyErr` conversion | **Yes** |
 
-Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in
-`packages/polypus_python/pyproject.toml`), **CUNQA** (distributed QPUs over
+Interoperability: **Qiskit ≥ 2.0** and **qiskit-aer ≥ 0.17** (pinned in the root
+`pyproject.toml`, `[project] dependencies`), **CUNQA** (distributed QPUs over
 SLURM) and **QMIO** (CESGA's real QPU). Formats: OpenQASM 2.0 and QIR (LLVM IR
 `.ll`, plus bitcode `.bc` assembled by the **external** `llvm-as` tool — that
 boundary stays out-of-process and explicit; see
@@ -36,12 +43,40 @@ boundary stays out-of-process and explicit; see
 
 ## 2. Workspace boundaries
 
-- `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`
-  and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or
-  Python**. Do not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python
-  types into them.
-- Only the `polypus` crate may depend on `pyo3` and contain `#[pyclass]` /
-  `#[pymethods]` / `#[pyfunction]`.
+- `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
+  `polypus-observable`, `polypus-backend`, `polypus-backend-conformance`,
+  `polypus-subprocess-backend` and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
+  not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python types into them.
+  `polypus-backend` is the strictest of these: it is the public backend contract, so
+  its **whole dependency tree must stay PyO3-free** (a third party implements a
+  backend against it without pulling the interpreter) — a Python/provider failure
+  crosses it type-erased in `BackendError::External`, and the concrete backends live
+  one layer up in `polypus-infrastructure`. `polypus-subprocess-backend` is pure Rust
+  too and stays PyO3-free **by construction**: it reaches a provider's Python SDK by
+  running it in a separate process, not by embedding the interpreter (its own tests
+  spawn a `python3` worker as a subprocess, which is not a link-time dependency).
+- `polypus-infrastructure` may depend on `pyo3` for the GIL and for carrying a
+  `PyErr` verbatim (its Aer/CUNQA/QMIO seams call into Python), but it defines
+  **no** `#[pyclass]` and **no** `From<_> for PyErr`: turning a `BackendError`
+  into a typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::backend_error_to_pyerr`).
+- `polypus-orchestration` is **`pyo3`-free at the source level**: it must not name
+  `pyo3`, `Python`, `PyErr` or the GIL (its `Cargo.toml` has no `pyo3`). It still
+  links libpython *transitively* through `polypus-infrastructure`, so its tests
+  run in the same job as `polypus`, not the pure-Rust group. A real oracle
+  failure reaches it **type-erased** as a `Box<dyn Error + Send>` in the
+  `OracleErrorSlot`; the `polypus` edge downcasts it back to the concrete
+  `EvaluationError` to re-raise (plan §10.1). It owns **every** `Flow`, including
+  the training flow (`TrainFlow`): a training flow's `pyo3`-touching oracle is
+  built through an `OracleFactory` implemented in `polypus-evaluation`, so the
+  *order* lives here with the scheduler while only its assembly stays behind the GIL.
+- `polypus-evaluation` may depend on `pyo3` (Qiskit binding under the GIL, Python
+  callbacks) like `polypus-infrastructure`, but likewise defines **no**
+  `#[pyclass]` and **no** `From<_> for PyErr`: turning an `EvaluationError` into a
+  typed `polypus.*` exception is the edge's job
+  (`polypus::exceptions::evaluation_error_to_pyerr`).
+- Only the `polypus` crate may contain `#[pyclass]` / `#[pymethods]` /
+  `#[pyfunction]`, own the exception hierarchy, and convert errors to `PyErr`.
 - The optimizers are decoupled from circuits and Python via the
   `EvaluationOracle` / `VarianceOracle` traits (contract C-5). A new optimizer
   is implemented against those oracles; it must **not** call Python or know
@@ -56,33 +91,115 @@ boundary stays out-of-process and explicit; see
   performance property of the project and must not regress.
 - **Never** hold the GIL while waiting (`block_on`, join) on workers that
   themselves need to acquire it: release it first with
-  `Python::with_gil(|py| py.allow_threads(...))`. Ignoring this deadlocks
-  (documented in `crates/polypus/src/evaluation/qml_oracle.rs`).
-- **Releasing the GIL does not by itself process signals.** `allow_threads`
+  `Python::attach(|py| py.detach(...))`. Ignoring this deadlocks: the waiting
+  thread holds the GIL that every worker is blocked trying to acquire. This is
+  why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
+  `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
+  below it (the Aer and CUNQA backends, Python cost callbacks) attach on their
+  own, on whichever thread evaluates them. Each of those attaches is a *fresh*
+  one (`detach` resets the thread's attachment), so each goes through
+  `attach_or` and turns an unreachable interpreter into the typed
+  `InterpreterUnavailable` error, never a panic or a hang (§9). The one attach
+  that cannot fail this way, `BackendConfig::clone` with a noise model, is never
+  called while detached.
+- **Releasing the GIL does not by itself process signals.** `detach`
   lets other Python threads run, but a pending SIGINT (Ctrl+C) is turned into a
   `KeyboardInterrupt` only when the **main thread** runs Python bytecode or when
   `PyErr_CheckSignals` is called explicitly. Long-running Rust work is otherwise
   deaf to Ctrl+C until it returns. So a GIL-free loop that must stay
   interruptible has to call `py.check_signals()` at a safe boundary: the
   optimizer entry points (`train` / `qml.train`) release the GIL around the
-  whole `optimize()` call **and** call `py.check_signals()` at each per-batch
-  Python touchpoint (`run_and_evaluate`, plus once on the main thread after the
-  QML workers join, since `PyErr_CheckSignals` is a no-op off the main thread).
+  whole `optimize()` call, and the `Planner` runs a **host-interrupt check**
+  between execution waves (inside `execute`) — the one place that boundary now
+  lives, so both the VQC and QML oracles stay interruptible without their own
+  signal loop.
+  - **The `Planner` itself no longer names `py.check_signals()` — it moved to the
+    edge.** The planner and all its types now live in the pyo3-free
+    `polypus-backend` crate, so between waves it calls a small injected guard, the
+    `Interrupt` trait, carried (optionally) on the `CancelToken`
+    (`CancelToken::poll_interrupt`). The one implementation that actually calls
+    `py.check_signals()` is `SignalInterrupt` in
+    `crates/polypus/src/bindings/mod.rs` (the edge). It runs while the thread is
+    detached, so it attaches through `attach_or` rather than `Python::attach`
+    and aborts the run with `InterpreterUnavailable` (raised as
+    `KeyboardInterrupt`, like every other site reached while detached) when the
+    interpreter cannot be reached — see below and §9. `train`, `qml.train` and
+    `run_quantum_circuit` build a guarded token with it and drive the run
+    through `Scheduler::run_cancellable`. A pure-Rust caller uses a guard-less
+    token (`Scheduler::run`) and the check is a no-op — which is why `run` is
+    documented as **not** interruptible and is never used on a Python-facing
+    path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
   `expectation_function` / variance callback — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
-  **original** exception (`EvaluationError::Python` carries it verbatim), never
-  swallowed into a panic by an `.expect()` (that would surface as an opaque
-  `PanicException`; see §9 and `OracleErrorSlot` in
-  `crates/polypus/src/evaluation/mod.rs`).
+  **original** exception. The interrupt travels type-erased through the pyo3-free
+  layers, boxed in `BackendError::External` as a `DisplaySafePyErr` (§9), and
+  the edge downcasts it back and re-raises it verbatim (`external_to_pyerr`); a
+  callback exception rides in `EvaluationError::Python` /
+  `ObservableError::External` the same way. It is
+  never swallowed into a panic by an `.expect()` (that would surface as an opaque
+  `PanicException`; see §9 and `OracleErrorSlot` in `polypus-orchestration`).
+- **How many waves that boundary produces is backend- *and* batch-dependent
+  (issue #147).** `SequentialPlanner::execute` sizes each wave from
+  `backend.capabilities_for(tasks).max_concurrency`, a **batch-aware** companion
+  to the frozen, argument-free `QuantumBackend::capabilities()`. The native and
+  local backends cap their real concurrency by a statevector memory budget scaled
+  by the batch's *widest* circuit (`mem_budget::max_statevector_concurrency`);
+  they override `capabilities_for` to expose that cap **only when the whole batch
+  cannot be held in the budget at once** — the high-qubit regime — so a high-qubit
+  batch is split into several waves and the between-wave interrupt check (the
+  edge's `SignalInterrupt`, above) runs **once per wave**: a whole training
+  generation is no longer one uninterruptible call. When
+  the batch fits (the common low-qubit case) they report an unbounded wave, so the
+  whole population still reaches the backend as a **single** call (Aer
+  parallelises the experiments internally; splitting would only add per-call
+  overhead — pinned by `tests/python/test_qml_concurrency.py`). The "does it fit"
+  test (`wave_concurrency`) is made against the **pure** memory limit — how many
+  statevectors the budget holds, with the thread count removed — *not* the
+  thread-capped cap: a thread-based gate (`cap >= cores`) degenerates on a
+  single-core allocation (a common SLURM/container case, or `RAYON_NUM_THREADS=1`),
+  where the cap always equals the core count regardless of qubit count and would
+  wrongly report one uninterruptible wave for a memory-heavy batch (issue #147's
+  single-thread case). Backends whose cap is static (CUNQA at `n_qpus`, QMIO at 1)
+  do not override it and inherit the default, which delegates to `capabilities()`
+  ignoring the batch, so their behaviour is unchanged.
+  - **`capabilities_for` is fallible, so a Ctrl+C during width-reading is not
+    swallowed.** It runs at the top of every `execute` — for training, once per
+    generation on the optimizer thread, with the GIL released. `LocalBackend` sizes
+    waves from every circuit's width, including a `Qiskit` circuit's `num_qubits`,
+    which it reads via `getattr` under the GIL exactly as `run_circuits` does — so a
+    high-qubit Qiskit population (a Qiskit-templated ansatz on `backend="aer"`, the
+    common QML case) is still wave-split for interruptibility. That `getattr` runs
+    Python bytecode, which CPython can abort with a `KeyboardInterrupt` for a
+    pending Ctrl+C; mapping *that* to "width unknown" (an `.ok()` that discards it)
+    clears the signal before the planner's between-wave interrupt check can see
+    it, which made `qml.train` unresponsive to Ctrl+C on constrained runners
+    (issue #147 follow-up). So `capabilities_for` returns
+    `Result<BackendCapabilities, InfrastructureError>`: a `KeyboardInterrupt` from
+    the read is propagated verbatim (boxed in `BackendError::External` inside
+    `InfrastructureError::Backend`, re-raised by the edge), and only a genuine
+    non-interrupt failure (a missing attribute,
+    which a real `QuantumCircuit` never has) falls back to "width unknown". The
+    default impl and the native backend read widths GIL-free and never error (they
+    return `Ok`); the call site in `execute` propagates with `?`, the same way it
+    already handles `run_circuits`' errors.
+  - **Why a new method rather than changing `capabilities()`.** The
+    argument-free `capabilities()` is called *without* a batch by
+    `Resources::new` (to validate the planner/backend pairing up front) and is
+    overridden by test mocks; its signature and meaning are load-bearing outside
+    this crate, so the fix is strictly additive — `capabilities_for(&[CircuitTask])
+    -> Result<BackendCapabilities, InfrastructureError>`, taking the planner's
+    borrowed task slice (each `CircuitTask` already holds a `&BoundCircuit`) so
+    sizing a wave clones no circuit. The override reuses the *exact* cap arithmetic each backend's
+    `run_circuits` already applies internally, so the wave size the planner picks
+    matches the memory bound the backend would enforce anyway — and collapses to a
+    single wave whenever the batch fits in the budget.
 - The same discipline applies to `run_quantum_circuit`: it releases the GIL
-  around the whole `algorithm.run(args)` call and each orchestration variant
-  calls `py.check_signals()` at its per-circuit / pre-result-conversion
-  boundary — the single `Python::with_gil` block where `AlgorithmSingleRun`
-  and `DistributeByShotsRun` reacquire the GIL to build the return value, as
-  the first statement before constructing any Python object. A pending Ctrl+C
-  surfaces there as a `KeyboardInterrupt` propagated verbatim through the
-  function's `Result`, never swallowed or retyped.
+  around the whole `scheduler.run_cancellable(flow, &token)` call, where `token`
+  carries the edge's `SignalInterrupt` guard; the `Planner` runs that guard between
+  execution waves (in `execute`), and the counts are converted to a Python object
+  back at the edge — GIL re-acquired — only after the run returns. A pending Ctrl+C surfaces there as a `KeyboardInterrupt`
+  propagated verbatim through the function's `Result`, never swallowed or retyped.
 - `statevector` follows the same rule at a smaller scale: it releases the GIL
   around the `StatevectorSimulator::run_cancellable` call (parameter binding
   stays on the GIL side — it is O(gates) and allocates nothing of size `2^n`),
@@ -95,9 +212,15 @@ boundary stays out-of-process and explicit; see
   loop takes an `Option<&mut dyn FnMut() -> bool>` and polls it periodically;
   `true` abandons the run with `SimError::Cancelled`. It knows nothing about
   *why* — a signal, a deadline, a cancel button all look the same to it. Only
-  `statevector` fills that hook with `Python::with_gil(|py| py.check_signals())`
-  (re-entrant from inside `allow_threads`, the same guarantee `cunqa.rs`'s
-  `Drop` relies on — see §9). Two rules make it work:
+  `statevector` fills that hook with a `py.check_signals()` call. The hook runs
+  inside `detach`, and `detach` resets the thread's attachment, so attaching
+  there is a *fresh* attach, not a reuse: `Python::attach` could panic, hang, or
+  attach to a finalizing interpreter, if the interpreter were shutting down. It
+  attaches through `attach_or` instead and treats an unreachable interpreter as
+  a cancellation, raised as the same `KeyboardInterrupt` ("the run was aborted:
+  …", from `InterpreterUnavailable`) that the planner's between-wave guard
+  (`SignalInterrupt`) gets for the same event, since in both cases the run is
+  aborted rather than given invalid input — see §9. Two rules make it work:
   - **Throttle inside the pure crate, not at the Python boundary.** The hook is
     called at most once per ~25ms of wall clock (with the clock itself read once
     per ~64k amplitude updates), so its frequency is decoupled from gate cost —
@@ -118,7 +241,7 @@ boundary stays out-of-process and explicit; see
     `Cancelled` — never `PyValueError::new_err(e.to_string())`, which would
     downgrade a `KeyboardInterrupt` into a bogus `ValueError`. Same problem, and
     the same answer, as `OracleErrorSlot` in
-    `crates/polypus/src/evaluation/mod.rs`; no shared slot is needed here
+    `crates/polypus-orchestration/src/dispatch.rs`; no shared slot is needed here
     because `statevector` is single-shot and the hook runs on the calling
     thread. What is *not* interruptible is `Statevector::new`'s `2^n`
     allocation — one `vec![]` with nowhere to put a checkpoint — which is why
@@ -127,11 +250,21 @@ boundary stays out-of-process and explicit; see
 - Preserve concurrent execution: candidates that bind/evaluate truly in
   parallel. If you add a path that runs circuits from worker threads, keep
   this guarantee.
-- The Rust test suite is **Python-runtime-free by design** — it proves
-  GIL-freedom. Python is needed only at build/link time for PyO3; Qiskit and
-  Aer are required only by the Python test suite (`tests/python/`). CI encodes
-  this split (`.github/workflows/ci.yml`); don't add a Rust test that needs a
-  live Python runtime.
+- The Rust test suite needs **no installed Python package**: Qiskit, Aer,
+  `polypus_python` and `cunqa` are required only by the Python test suite
+  (`tests/python/`), and CI's Rust job installs none of them
+  (`.github/workflows/ci.yml`). The pure crates' tests (circuit, sim, physics,
+  optimizers, observable, backend, …) don't touch Python at all; that is what
+  proves GIL-freedom. The PyO3-touching crates (`polypus-infrastructure`,
+  `polypus-evaluation`, `polypus`) may start a **bare** embedded interpreter
+  with `Python::initialize()` when the behaviour under test exists only at the
+  FFI edge: exception classes, `Python` tokens, attach and detach, a Python
+  callback built in-test. A test that must run with *no* interpreter (e.g.
+  what happens when it is unavailable) runs in a fresh child process, since
+  initialization cannot be undone (`run_in_fresh_process` in
+  `polypus-infrastructure/src/attach.rs`). A test that would need a package
+  belongs in `tests/python/`, or must skip cleanly when the package is absent,
+  as `polypus-infrastructure/tests/conformance.rs` does.
 
 ## 4. Numerical and quantum correctness
 
@@ -163,10 +296,46 @@ boundary stays out-of-process and explicit; see
   `polypus.Circuit` itself stays unbounded on purpose: it is backend-agnostic
   IR, and CUNQA/QMIO/Aer have their own, different capacities — the ceiling is
   enforced where it applies, not in the IR.
+- **Memory budget (issue #215):** below the ceiling, what bounds a run is the
+  memory actually available. `polypus_backend::mem_budget` resolves one byte
+  budget — a valid `POLYPUS_MEM_BUDGET` (`32G`, `512M`, `1048576`; base 1024; an
+  invalid value is logged once with `log::warn!` and ignored, never dropped
+  silently), else the minimum of `MemAvailable` and the cgroup v2/v1 limit of the
+  process and its ancestors minus a reserve (`clamp(10 %, 512 MiB, 50 %)` of that
+  limit), else a 16 GiB fallback when nothing can be detected — and uses it twice:
+  to **throttle** how many statevectors run at once (`max_statevector_concurrency`,
+  counts unchanged), and to **refuse** up front a single statevector that cannot
+  fit (`check_fits` → `BackendError::InsufficientMemory` →
+  `polypus.InsufficientMemoryError`) instead of letting the OOM-killer end the
+  process. The Rust refusal applies where the memory is the dense `16 · 2^n`
+  model — the native backend, `polypus.statevector`, Aer's `statevector` method.
+  Aer's other methods (`automatic` may pick `stabilizer` for a Clifford circuit;
+  `density_matrix` is `16 · 4^n`) are not refused in Rust, which would reject
+  circuits that run: the local backend passes the budget to Aer as
+  `max_memory_mb` instead, Aer validates against the method it picks, and
+  `python/polypus_python/local.py` raises its refusal as the same class (contract C-1).
+  The refusal never uses the fallback (it is a guess, not a limit). The
+  detected limit is read once per process (`OnceLock`), the variable on every
+  call. The model is `16 · 2^n` bytes (`BYTES_PER_AMPLITUDE`), which is the native
+  backend's real peak because shot sampling (`Statevector::sample`) needs only
+  `O(shots)` extra memory, not a `2^n` CDF. Its parsers and `resolve_budget` are
+  pure (they take text / values), so tests never touch `/proc` or the environment
+  — `set_var` in a multithreaded test binary is racy and `unsafe` is off-limits
+  (§5). Several processes sharing one cgroup (MPI ranks of a job step) each see
+  the whole limit and must set `POLYPUS_MEM_BUDGET` per process.
 - **Reproducibility:** the RNG is seedable (`rng.rs` in `polypus-sim` and in
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting
   results, unseeded RNG, parallelism that changes reduction order, etc.
+- **Angle expressions** (`polypus_circuit::expr`) are evaluated exactly as
+  written: the same floating-point operations in source order, with no
+  reassociation and no folding of constant subexpressions (only an expression
+  without free parameters is evaluated at once, to a fixed angle; contract
+  C-2). The evaluation order is therefore deterministic; the elementary
+  functions (`sin`, `exp`, …) are the platform's, so their last bit may differ
+  between platforms. Expressions are stored flat (postfix) and never walked
+  recursively, so their depth cannot overflow the stack; construction bounds
+  their size and their nesting as written.
 - In numeric tests, compare with a tolerance (epsilon), not exact float
   equality — **except** the QASM round-trip, which is byte-identical
   (contract C-2).
@@ -177,12 +346,34 @@ boundary stays out-of-process and explicit; see
 
 - `unsafe` is allowed **only** in the `polypus-sim` kernels
   (`crates/polypus-sim/src/kernels.rs`), where raw-pointer access to the
-  statevector is performance-critical.
+  statevector is performance-critical, and in the one **signed-off exception**
+  below.
 - **Every** `unsafe` block keeps its `// SAFETY: ...` comment justifying the
   invariants (indices `< 2^n = data.len()`; the amplitude pair does not
   alias). Do not weaken those invariants.
 - Adding `unsafe` anywhere else requires a benchmark that justifies it, the
   same `// SAFETY:` documentation, and explicit maintainer sign-off in the PR.
+- **Signed-off exception — `polypus-subprocess-backend`'s `pre_exec`.** The
+  subprocess bridge holds exactly one `unsafe` block, in `Worker::spawn`
+  (`crates/polypus-subprocess-backend/src/lib.rs`): `Command::pre_exec`, used to
+  arm the `PR_SET_PDEATHSIG` orphan guard on the worker child so it cannot outlive
+  a hard kill of the host process (a real HPC requirement — an orphaned worker
+  would hold a SLURM node/QPU). This one is **not** a performance optimisation, so
+  the "benchmark that justifies it" rule does not apply; it is unavoidable because
+  `Command::pre_exec` is an `unsafe fn` in std with no safe equivalent, and
+  `PR_SET_PDEATHSIG` resets across `fork` so it can only be armed in the child,
+  between fork and exec — which is exactly what `pre_exec` is for. The block's body
+  is itself safe: it calls `nix`'s audited `set_pdeathsig` and `getppid` wrappers
+  (async-signal-safe `prctl(2)` / `getppid(2)`) and captures only a `Copy` pid, with
+  no allocation, locks or logging between fork and exec. It is not hand-written FFI
+  and carries the mandated `// SAFETY:` comment. The `getppid` check makes the child
+  exit before `exec` rather than run as an orphan if the parent died before the
+  signal was armed. The kernel binds the signal to the *forking thread*, so the fork
+  happens on a dedicated long-lived spawner thread (`Worker::spawn_detached`) that
+  outlives the worker. Everything else the bridge needs from POSIX — notably `kill`
+  for out-of-band cancellation — goes through `nix`'s safe wrappers with no
+  `unsafe`. Do not add a second `unsafe` block to this crate without the same
+  sign-off.
 - Let the compiler prove `Send`/`Sync`; never force them with `unsafe impl`.
 
 ## 6. Feature hygiene
@@ -203,13 +394,50 @@ boundary stays out-of-process and explicit; see
 Contract C-2 owns the gate vocabulary and the byte-identical round-trip.
 Additionally:
 
-- Exported OpenQASM 2.0 uses standard `qelib1.inc` names and must remain
-  accepted by Qiskit (`QuantumCircuit.from_qasm_str`) and Aer.
-- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output.
-  Canonicalizations performed on import: `u`/`p`/`u1`/`u2` → `u3`, `swap` →
-  its standard 3×`cx` decomposition, multiple `qreg`/`creg` declarations
-  flattened into one index space, constant parameter expressions (e.g.
-  `pi/2`) evaluated.
+- Exported OpenQASM 2.0 uses standard `qelib1.inc` names (plus the `gate`
+  declarations of any declared gate it calls: verbatim for one imported from
+  OpenQASM 2.0, printed from its definition for one imported from OpenQASM 3)
+  and must remain accepted by Qiskit (`QuantumCircuit.from_qasm_str`). Aer runs
+  it directly as long as every instruction is in Aer's basis; `ch`, `u0`,
+  `rccx`, `rc3x`, `c3sqrtx` and every declared gate are not (`c3x` and `c4x`
+  parse as Qiskit's `mcx`, which is) and Aer never unrolls them by itself, so
+  `Local.run_qcs` (`python/polypus_python/local.py`) lowers a circuit that holds one
+  just before `AerSimulator.run`, with the synthesis and basis-translation
+  passes of `transpile(qc, AerSimulator(), optimization_level=0)` (same
+  circuit, without the layout stage, a fixed cost on every lowered call that
+  also caps the width at the target's qubit count) — the third lowering
+  boundary of C-2, invisible to the exported QASM. `Cunqa.run_qcs`
+  (`python/polypus_python/cunqa.py`) does the same for CUNQA, whose converter takes only the names in its
+  `cunqa.circuit.ir.SUPPORTED_QISKIT_OPERATIONS` (`mcx` included among those it
+  lacks): the fourth boundary, with `basis_gates` = the standard gates in that
+  list; with a CUNQA that does not publish the list, circuits go unchanged. Whether an instruction is "outside the basis" is decided on
+  the names Qiskit parsed (`rc3x` is `rcccx`, `c3sqrtx` is `c3sx`) against the
+  *default* `AerSimulator()` target, control-flow bodies included, never the
+  target of the configured `sim_method` or `noise_model`; a circuit already in
+  the basis is passed to Aer as it is, neither copied nor transpiled. An
+  OpenQASM text (how a `polypus.Circuit` reaches `run_qcs`) that needed
+  lowering keeps its lowered circuit in a bounded, thread-safe LRU cache keyed
+  by the text (`_LOWERED_QASM`): running the same program again, or on several
+  QPUs, neither re-parses nor re-lowers it. That matters for declared gates,
+  whose definitions are rebuilt and unrolled on every parse at a cost that
+  grows quickly with their size. The kept circuit is shared and never
+  modified; texts already in the basis and `QuantumCircuit` inputs (mutable)
+  are not cached.
+- `from_qasm2` accepts both Polypus output and `qiskit.qasm2.dumps` output,
+  `gate` declarations included. Canonicalizations performed on import: the
+  builtins `U` → `u` and `CX` → `cx` (Qiskit's own names for them), multiple
+  `qreg`/`creg` declarations flattened into one index space, constant
+  parameter expressions (e.g. `pi/2`) evaluated. Nothing is decomposed or
+  re-spelled otherwise (C-2): `p`, `u1`, `u2`, `u`, `u3` all stay as written.
+- Exported OpenQASM 3 is the canonical form of the profile (contract C-10)
+  and must remain accepted by Qiskit's `qasm3.loads` (`qiskit-qasm3-import`,
+  a test-only dependency); `from_qasm3` accepts `qiskit.qasm3.dumps` output.
+  Both are tested for the pinned versions in `requirements-dev.txt`, not
+  promised for others. Canonicalizations on import: `U` → `u`, `CX` → `cx`,
+  `phase` → `p`, `cphase` → `cp`; registers flattened; constant expressions
+  evaluated. Qiskit's exporter drops the global phase of the circuit and of
+  every gate definition it writes (`sxdg` becomes `s; h; s`), so amplitudes
+  match the original Qiskit circuit only up to that dropped phase.
 - Parse errors carry the **1-based line number** (`CircuitError::Parse` on
   the Rust side, `ValueError` once across the Python boundary).
 
@@ -225,6 +453,11 @@ Additionally:
   from a QPU, backend or network peer must treat that data as **untrusted**
   and must not use a deserializer capable of executing code. Do not introduce
   dependencies that reintroduce a deserialization-RCE surface.
+- **Unauthenticated transport:** the QMIO ZeroMQ link is neither encrypted nor
+  authenticated, and the backend has no default endpoint. The assumed threat model
+  and the decision to rely on the private network (or a tunnel) are in
+  [`backends.md`](backends.md#qmio-transport-threat-model). Do not reintroduce a
+  hard-coded endpoint fallback.
 - The `zeromq` crate was chosen because it is **pure Rust** (no C `libzmq`
   build dependency, at the cost of an async tokio API). Do not replace it
   with a C binding without an explicit trade-off discussion with the
@@ -248,7 +481,29 @@ In the `polypus` crate this means every path reachable from a `#[pyfunction]` /
 crate's `QmioError`) mapped to the `polypus::exceptions` Python hierarchy — even
 where the failure is "unlikely". A Python exception raised by the
 `polypus_python` seam is carried verbatim and re-raised with its original type,
-so contract C-1's `ValueError`/`TypeError` failure modes are preserved.
+so contract C-1's `ValueError`/`TypeError` failure modes are preserved —
+**except an exception raised by Qiskit** (issue #218): one whose class, or any
+class in its MRO, is defined in a `qiskit*` module is raised as
+`polypus.BackendError`, with the Qiskit class's qualified name and message as
+its message and the original chained as `__cause__`. A Qiskit failure while
+composing or binding the user's Qiskit circuits before any backend runs
+(`qml.train`, `qml.predict`, the oracles' parameter binding) follows the same
+rule but becomes `polypus.EvaluationError`. In both cases a Qiskit class that is
+also a `ValueError`, `TypeError` or `KeyboardInterrupt` keeps its class, and an
+exception raised by a user callback is never retyped. The rule lives in one
+helper, `polypus::exceptions::wrap_qiskit_error`, and detection reads class
+names only, so Qiskit is never imported for it.
+
+Argument-conversion errors are PyO3's, not ours. When a `#[pyfunction]` /
+`#[pymethods]` argument fails to convert, the caller gets the conversion's own
+exception (for an angle, `TypeError: angle must be a number, polypus.Param or
+polypus.ParamExpr`), and since PyO3 0.29 the argument is named in an exception note
+(`__notes__ == ["while processing 'theta'"]`) rather than in the message
+(PyO3 ≤ 0.25 raised `argument 'theta': …`). Notes need Python ≥ 3.11, so on
+3.10 the argument name is not reported at all. This is accepted, not a
+contract; `test_argument_conversion_error_format` in
+`tests/python/test_native_circuit.py` pins it so the next PyO3 bump cannot
+change it silently.
 
 **`Drop` must be panic-free.** No `Drop` impl may panic under any circumstance:
 a panic while another panic is already unwinding aborts the whole process,
@@ -259,9 +514,96 @@ propagates the error. Because a per-instance flag is worthless once the instance
 is gone, the failure is *also* recorded in process-wide state that a higher
 layer can inspect (the `backend_cleanup_failures()` counter, exposed to Python).
 Acquiring the GIL inside a `Drop` is allowed only when it is explicitly safe
-against re-entrancy (PyO3 0.24's `Python::with_gil` is re-entrant) and cannot
-propagate a panic through the in-progress unwind; keep the fallible operation
-behind a `Result`-returning helper so the `Drop` body only logs and counts.
+against re-entrancy and cannot propagate a panic through the in-progress unwind.
+Attaching reuses an existing attachment only when the thread is *already*
+attached — never inside `detach`, which resets it. A fresh `Python::attach`
+**panics** during a GC traversal and before the interpreter is initialized, and
+once the interpreter has started shutting down it either panics or attaches to
+the finalizing interpreter, which can hang the thread. This happens on every
+Python version: CPython clears its `initialized` flag right after marking itself
+finalizing, so to PyO3 a shutting-down interpreter looks uninitialized, and
+`Python::try_attach` reports it as unavailable. The only gap left is a
+check-then-attach race, which PyO3 documents as best effort. So a `Drop`, and
+any code that runs while detached (see "Code reached while detached" below),
+attaches through the shared helpers in
+`crates/polypus-infrastructure/src/attach.rs`: `attach_or` for callbacks,
+choosing explicitly what an unreachable interpreter means, and
+`attach_for_cleanup` for cleanup, which also formats a Python exception while
+still attached (with a fixed fallback if even that fails, as `to_string()` would
+panic). That matters because formatting a bare `PyErr` (`Display`, `Debug`,
+`to_string()`) attaches again with `Python::attach`, so a bare `PyErr` that is
+formatted after the attached closure returns, while detached or at shutdown,
+reintroduces the panic (see the next paragraph). `CunqaBackend` is the reference
+use: its release operation receives the `Python` token, and `close` is the one
+place that attaches. An `attach` inside the release operation then reuses that
+attachment without re-checking the interpreter, as long as it stays on the same
+thread and outside a `detach`; detaching inside it would make the next attach a
+fresh one, with the same hazards as above. Keep the fallible operation behind a
+`Result`-returning helper so the `Drop` body only logs and counts.
+
+**Code reached while detached attaches fallibly.** Everything the scheduler
+reaches inside `py.detach` that needs Python attaches with `attach_or`: the Aer
+and CUNQA `run_circuits`, `LocalBackend::capabilities_for`, CUNQA's `raise_qpus`
+(it fails before anything is asked of SLURM), the noise-model clone in
+`Infrastructure::create_backend` (only when there is a noise model), the Qiskit
+parameter binding, `PyCallbackObservable`, the supervised objectives,
+`PyVarianceOracle` and the planner's between-wave guard (`SignalInterrupt`). The
+`attach_or` "unavailable" branch of each of these sites returns
+`polypus_infrastructure::InterpreterUnavailable` (in `attach.rs`), an error that
+holds nothing from Python and so can be formatted, logged or dropped anywhere.
+It is boxed in `BackendError::External` (`From` impls exist for `BackendError`,
+`InfrastructureError` and `EvaluationError`) or in `ObservableError::External`,
+never added as a variant: none of those enums is `#[non_exhaustive]`, and
+`BackendError` is the third-party backend contract. A site whose signature
+cannot fail (`VarianceOracle`) records it in the run's `OracleErrorSlot` and
+returns its finite sentinel, as it does for a callback error. The FFI edge
+downcasts it after `DisplaySafePyErr` and raises `KeyboardInterrupt` ("the run
+was aborted: …"), the class `BackendError::Aborted` and a Ctrl+C get: the run is
+abandoned and its result could not reach Python anyway (contract C-1, failure
+modes). Outside the scheduler, `statevector`'s cancellation hook also attaches
+with `attach_or`, but its "unavailable" branch cancels the simulation instead;
+`cancellation_error` then raises the same `KeyboardInterrupt`. A Qiskit circuit
+is held as `Arc<Py<PyAny>>` inside `QiskitCircuit`, so `duplicate()`, which the
+planner calls per wave while detached, shares it without attaching. Dropping a
+`Py` while detached is safe because PyO3 defers the reference-count decrement to
+its reference pool; never enable `pyo3_disable_reference_pool`, which turns that
+drop into an abort. A `Clone` that must attach cannot report failure, so
+`BackendConfig::clone` (which clones a noise model) is called only while
+attached, and nothing reached while detached may start calling it. Likewise
+`OracleErrorSlot::record` formats the error before taking its mutex: formatting
+a `DisplaySafePyErr` attaches, and a thread holding the interpreter may be
+waiting on that mutex in `failed()`.
+
+To test an "unavailable" branch, use a process that never initialized Python
+(`run_in_fresh_process` in `attach.rs`; initialization cannot be undone) when
+the code needs no Python object. When it needs one (a user callback, a Qiskit
+circuit), building it initializes the interpreter, so run the code from inside
+a GC traversal instead, where PyO3 forbids attaching and `try_attach` returns
+`None` deterministically (`test_support::run_while_attaching_is_forbidden` in
+`polypus-evaluation`), and check that it did not call the object.
+`tests/python/test_interpreter_shutdown.py` covers a real interpreter shutdown
+end to end.
+
+**An error that may hold a `PyErr` is formatted only if its `Display` is
+attach-safe.** The pyo3-free layers log errors with `{e}` while the thread is
+detached (the planner's cancellation path, `OracleErrorSlot::record`; the whole
+scheduler runs inside `py.detach`), and a run still in flight on a daemon thread
+when the interpreter shuts down would panic there if the error held a bare
+`PyErr`. So a Python exception that travels through code that may format it
+while detached is never carried as a bare `PyErr`: it is carried as
+`polypus_infrastructure::DisplaySafePyErr` (in `attach.rs`), whose `Display`
+and `Debug` attach through `attach_or`. With the interpreter available its text
+is the `PyErr`'s; without it, a fixed fallback (`DisplaySafePyErr::UNAVAILABLE`).
+It is the only authorized carrier of a Python exception
+(`InterpreterUnavailable`, above, carries none): `seam_error` boxes it into
+`BackendError::External`, a callback observable into
+`ObservableError::External`, and `EvaluationError::Python` / `Qiskit` hold one.
+The FFI edge (`polypus::exceptions`) downcasts only to it to recover a Python
+exception, and re-raises the original `PyErr` (`into_inner`); a bare `PyErr`
+boxed by mistake is mapped like any other provider error, losing its class, so a
+C-1 test that exercises that path fails instead of passing silently. Formatting
+a bare `PyErr` remains fine where the thread is known to be attached, inside an
+`attach` closure (as the backends' `log::error!` calls next to `seam_error` do).
 
 **Ownership and types.** Prefer borrowing over cloning; avoid unnecessary
 `.clone()`. In signatures accept `&str` over `&String` and `&[T]` over
@@ -305,8 +647,9 @@ it into an unrelated diff. `cargo deny check` gates licenses and advisories.
 - [ ] If it touches the simulator: statevector normalized, gates unitary, and
       parallel == sequential with tests? (§4)
 - [ ] Deterministic given a seed? (§4)
-- [ ] Any new `unsafe`? Only in `sim/kernels.rs`, with `// SAFETY:` and a
-      benchmark that justifies it. (§5)
+- [ ] Any new `unsafe`? Only in `sim/kernels.rs` (with `// SAFETY:` and a
+      benchmark) or the signed-off `pre_exec` exception in
+      `polypus-subprocess-backend`; anything else needs the same sign-off. (§5)
 - [ ] If it touches circuits: byte-identical round-trip and Qiskit
       compatibility preserved? (§7, contract C-2)
 - [ ] Heavy dependencies behind an opt-in feature? Default build lean? (§6)

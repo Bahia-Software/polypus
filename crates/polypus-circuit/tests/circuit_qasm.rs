@@ -27,7 +27,7 @@ qreg q[2];
 creg c[2];
 h q[0];
 cx q[0],q[1];
-rz(0.250000000000) q[1];
+rz(0.25) q[1];
 measure q[0] -> c[0];
 measure q[1] -> c[1];
 ";
@@ -72,14 +72,14 @@ s q[1];
 t q[2];
 sdg q[0];
 tdg q[1];
-rx(0.100000000000) q[0];
-ry(0.200000000000) q[1];
-rz(0.300000000000) q[2];
+rx(0.1) q[0];
+ry(0.2) q[1];
+rz(0.3) q[2];
 cx q[0],q[1];
 cz q[1],q[2];
-rzz(0.400000000000) q[0],q[1];
-rxx(0.500000000000) q[1],q[2];
-u3(0.600000000000,0.700000000000,0.800000000000) q[0];
+rzz(0.4) q[0],q[1];
+rxx(0.5) q[1],q[2];
+u3(0.6,0.7,0.8) q[0];
 barrier q;
 barrier q[0],q[2];
 measure q[0] -> c[0];
@@ -108,12 +108,12 @@ fn assign_parameters_substitutes_values() {
         .ry(1, Param(1))
         .rz(0, 0.5); // fixed angle must survive binding untouched
 
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     let bound = qc.assign_parameters(&[1.0, 2.0]).unwrap();
-    assert_eq!(bound.num_qubits, 2);
+    assert_eq!(bound.num_qubits(), 2);
     assert_eq!(
-        bound.gates,
+        bound.gates(),
         vec![
             GateInstruction::Rx {
                 qubit: 0,
@@ -140,9 +140,9 @@ fn assign_parameters_reuses_same_param_index() {
         .assign_parameters(&[0.7])
         .unwrap();
 
-    let qasm = bound.to_qasm2();
-    assert!(qasm.contains("rzz(0.700000000000) q[0],q[1];"));
-    assert_eq!(qasm.matches("0.700000000000").count(), 3);
+    let qasm = bound.try_to_qasm2().unwrap();
+    assert!(qasm.contains("rzz(0.7) q[0],q[1];"));
+    assert_eq!(qasm.matches("0.7").count(), 3);
 }
 
 #[test]
@@ -154,7 +154,11 @@ fn to_qasm2_with_params_matches_assign_then_serialize() {
         .measure_all();
 
     let direct = qc.to_qasm2_with_params(&[0.3, 0.9]).unwrap();
-    let two_step = qc.assign_parameters(&[0.3, 0.9]).unwrap().to_qasm2();
+    let two_step = qc
+        .assign_parameters(&[0.3, 0.9])
+        .unwrap()
+        .try_to_qasm2()
+        .unwrap();
     assert_eq!(direct, two_step);
 }
 
@@ -164,7 +168,7 @@ fn u_gate_binds_all_three_angles() {
         .u(0, Param(0), 0.5, Param(1))
         .to_qasm2_with_params(&[0.1, 0.9])
         .unwrap();
-    assert!(qasm.contains("u3(0.100000000000,0.500000000000,0.900000000000) q[0];"));
+    assert!(qasm.contains("u3(0.1,0.5,0.9) q[0];"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +178,7 @@ fn u_gate_binds_all_three_angles() {
 #[test]
 fn wrong_number_of_params_is_rejected() {
     let qc = ParameterizedCircuit::new(1).rx(0, Param(0)).ry(0, Param(1));
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_params(), 2);
 
     assert_eq!(
         qc.assign_parameters(&[0.1]),
@@ -195,12 +199,14 @@ fn wrong_number_of_params_is_rejected() {
 #[test]
 fn param_index_out_of_bounds_is_rejected() {
     // Assemble manually so num_params and gate indices disagree.
-    let mut qc = ParameterizedCircuit::new(1);
-    qc.num_params = 1;
-    qc.gates = vec![GateInstruction::Rx {
-        qubit: 0,
-        theta: GateParam::Param(5),
-    }];
+    let qc = ParameterizedCircuit::from_parts_unchecked(
+        1,
+        1,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Param(5),
+        }],
+    );
     assert_eq!(
         qc.assign_parameters(&[0.1]),
         Err(CircuitError::ParamIndexOutOfBounds {
@@ -280,29 +286,31 @@ fn num_clbits_reflects_measurements() {
 
 #[test]
 #[should_panic(expected = "unbound Param")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_panics_on_unbound_param() {
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new_unchecked(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Param(0),
         }],
-    };
+    );
     let _ = qc.to_qasm2();
 }
 
 #[test]
 #[should_panic(expected = "non-finite")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // exporter still refuses a non-finite fixed angle rather than serialising it.
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new_unchecked(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Fixed(f64::NAN),
         }],
-    };
+    );
     let _ = qc.to_qasm2();
 }
 
@@ -327,8 +335,8 @@ fn qaoa_maxcut_4_qubits() {
     }
     let qc = qc.measure_all();
 
-    assert_eq!(qc.num_qubits, 4);
-    assert_eq!(qc.num_params, 2);
+    assert_eq!(qc.num_qubits(), 4);
+    assert_eq!(qc.num_params(), 2);
     assert_eq!(qc.num_clbits(), 4);
 
     let qasm = qc.to_qasm2_with_params(&[gamma, beta]).unwrap();
@@ -342,14 +350,14 @@ h q[0];
 h q[1];
 h q[2];
 h q[3];
-rzz(0.400000000000) q[0],q[1];
-rzz(0.400000000000) q[1],q[2];
-rzz(0.400000000000) q[2],q[3];
-rzz(0.400000000000) q[3],q[0];
-rx(0.800000000000) q[0];
-rx(0.800000000000) q[1];
-rx(0.800000000000) q[2];
-rx(0.800000000000) q[3];
+rzz(0.4) q[0],q[1];
+rzz(0.4) q[1],q[2];
+rzz(0.4) q[2],q[3];
+rzz(0.4) q[3],q[0];
+rx(0.8) q[0];
+rx(0.8) q[1];
+rx(0.8) q[2];
+rx(0.8) q[3];
 measure q -> c;
 ";
     assert_eq!(qasm, expected);

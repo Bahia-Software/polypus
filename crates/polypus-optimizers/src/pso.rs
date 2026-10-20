@@ -6,7 +6,7 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
 use ndarray::Array2;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Particle Swarm Optimization optimizer.
 pub struct AlgorithmPSO;
@@ -31,7 +31,7 @@ pub struct AlgorithmPSOArgs {
     pub cognitive_weight: f64,
     pub social_weight: f64,
     pub tolerance: f64,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }
@@ -71,11 +71,13 @@ impl AlgorithmPSO {
         let dims = dimensions as usize;
         let (lb, ub) = bounds;
         // Precondition (documented on the struct): positions are drawn from the
-        // half-open interval [lb, ub), which is empty when `lb >= ub` and panics
-        // inside the uniform sampler. Reject before any RNG draw or oracle call.
-        // Requiring `partial_cmp` to be `Some(Less)` also rejects a non-finite
-        // bound (`NaN`), which compares as `None` and can never be an interval.
-        if !matches!(lb.partial_cmp(&ub), Some(std::cmp::Ordering::Less)) {
+        // half-open interval [lb, ub); reject an empty or unbounded interval
+        // before any RNG draw or oracle call. `lb >= ub` covers the empty case;
+        // the finiteness checks reject `NaN` (which fails every comparison) and
+        // an infinite bound (which would make `random_range` draw from an unbounded
+        // interval — a panic in the `Uniform` sampler, either for the position
+        // draw or for the derived infinite `vel_range` velocity draw).
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
         let max_vel = (ub - lb) * 0.2;
@@ -85,7 +87,7 @@ impl AlgorithmPSO {
         let mut positions = Array2::<f64>::zeros((popsize, dims));
         for mut row in positions.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(lb..ub);
+                *e = rng.random_range(lb..ub);
             }
         }
 
@@ -93,7 +95,7 @@ impl AlgorithmPSO {
         let mut velocities = Array2::<f64>::zeros((popsize, dims));
         for mut row in velocities.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(-vel_range..vel_range);
+                *e = rng.random_range(-vel_range..vel_range);
             }
         }
 
@@ -108,9 +110,8 @@ impl AlgorithmPSO {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
-        // One incumbent-best entry per generation actually run (C-5). Pushed
-        // unconditionally below, so it stays in step with `iterations_run` even
-        // when the collapse `break` cuts the loop short.
+        // Global best fitness at the end of each generation (see
+        // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
@@ -122,8 +123,8 @@ impl AlgorithmPSO {
 
             for i in 0..popsize {
                 for d in 0..dims {
-                    let r1: f64 = rng.gen();
-                    let r2: f64 = rng.gen();
+                    let r1: f64 = rng.random();
+                    let r2: f64 = rng.random();
                     let new_vel = inertia_weight * velocities[[i, d]]
                         + cognitive_weight
                             * r1
@@ -155,12 +156,10 @@ impl AlgorithmPSO {
             global_best_idx = argmax(&personal_best_fitness);
             global_best_pos = personal_best_positions.row(global_best_idx).to_vec();
 
-            // The global best *is* the incumbent best: a personal best only ever
-            // improves, so this maximum is non-decreasing across generations.
-            fitness_history.push(personal_best_fitness[global_best_idx]);
-
             positions = new_positions;
             velocities = new_velocities;
+
+            fitness_history.push(personal_best_fitness[global_best_idx]);
 
             if population_converged(&positions, tolerance, generation) {
                 converged = true;
@@ -171,9 +170,9 @@ impl AlgorithmPSO {
         Ok(OptimizationOutcome {
             best_fitness: personal_best_fitness[global_best_idx],
             best_params: global_best_pos,
-            fitness_history,
             iterations_run,
             converged,
+            fitness_history,
         })
     }
 }

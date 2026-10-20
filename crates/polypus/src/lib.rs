@@ -5,6 +5,14 @@
 //! Polypus is a distributed quantum computing library designed to optimize the execution of quantum algorithms by distributing computation
 //! across available hardware resources. The core is written in Rust; Python bindings are provided via PyO3.
 //!
+//! ## Installation — same project, three names
+//!
+//! `pip install polypus-quantum` · `import polypus` · `cargo add polypus`.
+//!
+//! The name `polypus` on PyPI is taken by an unrelated project, so the Python
+//! distribution is published as `polypus-quantum`; the Python import name and
+//! this Rust crate both stay `polypus`.
+//!
 //! Polypus is agnostic to the underlying hardware infrastructure. Currently three
 //! `infrastructure` values are supported:
 //! - **local**: Runs on local infrastructure. Defaults to Qiskit AerSimulator
@@ -15,7 +23,7 @@
 //!
 //! ## Features
 //! - Run a quantum circuit on one or multiple QPUs.
-//! - Train variational quantum circuits using Differential Evolution, PSO or Quantum Natural Gradient.
+//! - Train variational quantum circuits using Differential Evolution, PSO, Quantum Natural Gradient or CMA-ES.
 //! - Unified `train()` API — swap optimizers by changing a single argument.
 //!
 //! ## Running a circuit
@@ -29,10 +37,12 @@
 //! result = polypus.run_quantum_circuit(qc, shots=1000, infrastructure="local", n_qpus=10)
 //! ```
 //!
-//! Both calls return a `RunResult`: `result.counts` holds the payload (a
-//! `list[dict]` for a single QPU, a merged `dict` for `n_qpus > 1`), plus
-//! `result.id` / `result.seed` / `result.backend` / `result.infrastructure`
-//! for logging and replay. Pass `seed=...` for reproducible shot noise on
+//! Both calls return a `RunResult` with the same shape whatever `n_qpus` is:
+//! `result.counts` is always a `list[dict]`, one dict per QPU (so
+//! `result.counts[0]` works for any `n_qpus`), and `result.merged_counts` is their
+//! total as one `dict` over all `shots`. `result.id` / `result.seed` /
+//! `result.backend` / `result.infrastructure` carry the manifest for logging and
+//! replay. Pass `seed=...` for reproducible shot noise on
 //! every simulated backend (native, Aer, CUNQA); `result.seed` reports the
 //! effective seed (`None` only for the `"qmio"` infrastructure, real hardware
 //! that cannot be seeded).
@@ -65,15 +75,21 @@
 //!     expectation_function=bitstring_to_obj,
 //!     infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 //! )
+//!
+//! # CMA-ES, with up to 2 IPOP restarts that double the population
+//! result = polypus.train(
+//!     qc, polypus.CMAES(generations=100, restarts=2),
+//!     shots=N_SHOTS, n_qpus=N_QPUS, dimensions=2*layers,
+//!     expectation_function=bitstring_to_obj,
+//!     infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
+//! )
 //! ```
 //!
 //! `train()` returns a `TrainResult` exposing `result.best_params`
-//! (`list[float]`) plus `result.best_fitness`, `result.fitness_history`
-//! (`list[float]`, the best fitness per iteration run — the convergence curve),
-//! `result.iterations_run`, `result.converged`, and the effective `result.seed`
-//! — the full optimization outcome, not just the parameters. Pass `seed=...`
-//! (or set it on the optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a
-//! run.
+//! (`list[float]`) plus `result.best_fitness`, `result.iterations_run`,
+//! `result.converged`, and the effective `result.seed` — the full optimization
+//! outcome, not just the parameters. Pass `seed=...` (or set it on the
+//! optimizer, e.g. `polypus.DE(..., seed=42)`) to reproduce a run.
 //!
 //! # Authors
 //! Diego Beltrán Fernández Prada (<diego.fernandez@bahiasoftware.es>), Víctor Sóñora Pombo, Sergio Figueiras Gómez, Miguel Boubeta Martínez, Galicia Supercomputing Center (CESGA)
@@ -83,11 +99,33 @@
 
 pub mod algorithms;
 mod bindings;
-pub mod evaluation;
 /// Custom Python exception hierarchy raised across the FFI boundary.
 pub mod exceptions;
-pub mod infrastructure;
-pub mod utils;
+
+/// Candidate evaluation (oracles): `VqcOracle`, `QmlOracle`, `PyVarianceOracle`,
+/// `PyCallbackObservable`, `CircuitSource` and `EvaluationError` (re-export of the
+/// `polypus-evaluation` crate). The alias keeps every existing
+/// `crate::evaluation::…` path resolving; turning an `EvaluationError` into a typed
+/// `polypus.*` exception stays at the edge — see `exceptions::evaluation_error_to_pyerr`.
+pub use polypus_evaluation as evaluation;
+
+/// Quantum-execution backends, the `Planner`, circuit/config types and the
+/// backend-layer error (re-export of the `polypus-infrastructure` crate).
+///
+/// Extracted into its own crate so the GIL-touching backend layer no longer sits
+/// inside the FFI edge; the alias keeps every existing `polypus::infrastructure::…`
+/// / `crate::infrastructure::…` path resolving. The one thing that stays at the
+/// edge is turning a [`infrastructure::BackendError`] into a typed `polypus.*`
+/// exception — see `exceptions::backend_error_to_pyerr`.
+pub use polypus_infrastructure as infrastructure;
+
+/// Flow orchestration (policy): `Resources`, the monomorphic `Scheduler`, the
+/// `Flow` trait + all flows (`RunCircuitFlow`, `TrainFlow`) with the `OracleFactory`
+/// seam, and `dispatch_optimizer` + the type-erased `OracleErrorSlot` (re-export of
+/// the pyo3-free `polypus-orchestration` crate). A real oracle failure reaches it as
+/// a `Box<dyn Error + Send>`; this edge downcasts it back to the concrete
+/// `EvaluationError` to re-raise.
+pub use polypus_orchestration as orchestration;
 
 /// Process-wide logging sink (builder + `log::Log` implementation).
 ///
@@ -101,7 +139,7 @@ pub use polypus_logger as logger;
 /// (re-export of the dependency-free `polypus-circuit` crate).
 pub use polypus_circuit as circuit;
 
-/// Pure-Rust variational optimizers (DE, PSO, QNG)
+/// Pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES)
 /// (re-export of the Python-free `polypus-optimizers` crate).
 pub use polypus_optimizers as optimizers;
 

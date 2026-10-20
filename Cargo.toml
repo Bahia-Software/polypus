@@ -7,52 +7,114 @@
 #                              transport + quantum Hamiltonians as Pauli sums; no PyO3)
 #   - crates/polypus-sim     : pure-Rust statevector simulator consuming polypus-circuit's
 #                              ConcreteCircuit directly (no OpenQASM round-trip; no PyO3)
-#   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG) decoupled
+#   - crates/polypus-optimizers : pure-Rust variational optimizers (DE, PSO, QNG, CMA-ES) decoupled
 #                              from circuits and Python via EvaluationOracle/VarianceOracle
+#   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising and other
+#                              diagonal costs) mapping measurement counts to expectation values
+#   - crates/polypus-backend : the pyo3-free QuantumBackend contract a third party implements,
+#                              plus the runtime backend registry (register_backend) — no PyO3
+#   - crates/polypus-backend-conformance : a reusable conformance battery a backend author runs
+#                              against their QuantumBackend to certify the documented semantics — no PyO3
+#   - crates/polypus-subprocess-backend : pyo3-free QuantumBackend bridging to a provider's
+#                              Python SDK in its own subprocess over a versioned JSON protocol;
+#                              the built-in "subprocess" backend — the interpreter runs in the child
+#   - crates/polypus-infrastructure : execution backends (local Aer, native, CUNQA, QMIO) and
+#                              the Planner that sizes/runs circuit waves — how a circuit runs (PyO3)
+#   - crates/polypus-orchestration : Flow/Scheduler/Resources policy + optimizer dispatch —
+#                              how a flow is orchestrated (pure Rust, deliberately pyo3-free)
+#   - crates/polypus-evaluation : the oracles (VqcOracle, QmlOracle, variance) and their
+#                              OracleFactory assembly — how a candidate is evaluated (PyO3)
 #   - crates/polypus-logger  : pure-Rust logging sink (a `log::Log` implementation) shared by
 #                              the whole workspace; libraries emit via the `log` facade, only
 #                              the app layer installs it (no PyO3)
-#   - crates/polypus-observable : pure-Rust, GIL-free cost observables (QUBO/Ising) evaluated
-#                              over measurement counts, parallelized with rayon (no PyO3)
-#   - crates/polypus-qml     : pure-Rust quantum machine learning (datasets, layered variational
-#                              models, Pauli readout, losses); produces polypus-circuit circuits,
-#                              execution and optimizers stay decoupled (no PyO3)
-#   - crates/polypus         : the Polypus library and Python extension module (PyO3)
+#   - crates/polypus         : the Polypus Python extension module and PyO3 edge (bindings,
+#                              typed exception hierarchy, workspace re-exports)
 [workspace]
-members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-logger", "crates/polypus-qml"]
+members = ["crates/polypus", "crates/polypus-circuit", "crates/polypus-physics", "crates/polypus-sim", "crates/polypus-optimizers", "crates/polypus-observable", "crates/polypus-backend", "crates/polypus-backend-conformance", "crates/polypus-subprocess-backend", "crates/polypus-infrastructure", "crates/polypus-orchestration", "crates/polypus-evaluation", "crates/polypus-logger"]
 # The `fuzz/` crate is a cargo-fuzz target: it needs a nightly toolchain and
 # `cargo-fuzz`, and is built on its own — never by `cargo build/test --workspace`.
 exclude = ["fuzz"]
-resolver = "2"
+# Resolver 3 is MSRV-aware: `cargo update` prefers dependency versions whose
+# `rust-version` fits the workspace `rust-version` below, so it does not pick a
+# release that would break the `msrv` CI job (e.g. uuid 1.27 needs rustc 1.89).
+resolver = "3"
 
 # Shared package metadata, inherited by member crates via `<key>.workspace = true`.
 [workspace.package]
-version = "0.6.0"
+version = "0.7.2"
 edition = "2021"
 # MSRV, guarded by the `msrv` CI job. Currently set by the dependency tree
 # (the qmio feature pulls `saa`, which uses edition 2024 → Cargo 1.85); the
 # workspace's own code needs far less. Bump deliberately when a dep requires it.
 rust-version = "1.85"
-authors = ["Diego Beltran Fernandez Prada <diego.fernandez@bahiasoftware.es>", "Victor Soñora Pombo", "Sergio Figueiras Gomez", "Miguel Boubeta Martinez", "Galicia Supercomputing Center (CESGA)"]
+authors = ["Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es>", "Víctor Sóñora Pombo", "Sergio Figueiras Gómez", "Miguel Boubeta Martínez", "Kevin Pérez González", "Uxía Sendón Caamaño", "Galicia Supercomputing Center (CESGA)"]
 # SPDX identifier (required by cargo-deny and crates.io). The full licence
-# text, including the "or subsequent versions approved by the European
-# Commission" clause, lives in the LICENSE file at the repo root.
+# text lives in LICENSE; the licence notice (including the "or subsequent
+# versions approved by the European Commission" clause) and third-party data
+# attributions live in NOTICE. Each crate symlinks both so they ship in every
+# published .crate (EUPL-1.2 Art. 5 requires a copy with every distribution).
 license = "EUPL-1.2"
+# Source repository, inherited by each member crate via `repository.workspace = true`.
+repository = "https://github.com/Bahia-Software/polypus"
 
 [workspace.dependencies]
-polypus-circuit    = { path = "crates/polypus-circuit", version = "0.6.0" }
-polypus-physics    = { path = "crates/polypus-physics", version = "0.6.0" }
-polypus-sim        = { path = "crates/polypus-sim", version = "0.6.0" }
-polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.6.0" }
-polypus-observable = { path = "crates/polypus-observable", version = "0.6.0" }
-polypus-logger     = { path = "crates/polypus-logger", version = "0.6.0" }
-polypus-qml        = { path = "crates/polypus-qml", version = "0.6.0" }
+polypus-circuit    = { path = "crates/polypus-circuit", version = "0.7.2" }
+polypus-backend    = { path = "crates/polypus-backend", version = "0.7.2" }
+polypus-backend-conformance = { path = "crates/polypus-backend-conformance", version = "0.7.2" }
+polypus-physics    = { path = "crates/polypus-physics", version = "0.7.2" }
+polypus-sim        = { path = "crates/polypus-sim", version = "0.7.2" }
+polypus-optimizers = { path = "crates/polypus-optimizers", version = "0.7.2" }
+polypus-observable = { path = "crates/polypus-observable", version = "0.7.2" }
+polypus-subprocess-backend = { path = "crates/polypus-subprocess-backend", version = "0.7.2" }
+polypus-infrastructure = { path = "crates/polypus-infrastructure", version = "0.7.2" }
+polypus-orchestration = { path = "crates/polypus-orchestration", version = "0.7.2" }
+polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.2" }
+polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
 
 # Shared external dependencies pinned once for the whole workspace.
 # `log` is the logging facade every crate emits through; the concrete sink lives
 # in `polypus-logger`, which additionally enables its `std` feature.
 log                = "0.4"
-# UUID v4 for run-id uniqueness (bindings layer); `v4` pulls the RNG feature.
-uuid               = { version = "1", features = ["v4"] }
-# RNG shared by `polypus` and `polypus-optimizers`; keep default features.
-rand               = "0.8"
+# UUID v4 run-id suffix (bindings layer), built from bytes `polypus-infrastructure`
+# draws fallibly: no `v4` feature, so `Uuid::new_v4` (panics if `getrandom` fails,
+# #264) is absent by default; `zeromq` (`qmio`) re-enables it, clippy.toml forbids it.
+uuid               = "1"
+# RNG shared by `polypus-infrastructure`, `polypus-optimizers`, `polypus-physics`
+# and the `polypus-observable` tests; keep default features.
+rand               = "0.10"
+# The subprocess bridge's wire protocol: length-prefixed JSON over the worker's
+# stdin/stdout (see `polypus-subprocess-backend`). `serde`/`serde_json` are
+# pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
+# `PR_SET_PDEATHSIG` orphan guard and `kill` for out-of-band cancellation) in
+# audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+nix                = { version = "0.31", features = ["signal", "process"] }
+# PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
+# `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
+# 1:1 to a pyo3 minor, so bump `numpy` together with `pyo3`. Features (e.g.
+# `num-complex`, `extension-module`) are added per crate.
+pyo3               = "0.29"
+numpy              = "0.29"
+# Data parallelism (the sim's gate kernels, the observables' aggregation, the
+# native backend's population parallelism).
+rayon              = "1"
+# Complex amplitudes of the statevector; pyo3's `num-complex` feature converts
+# the same type, so both must stay on one major.
+num-complex        = "0.4"
+ndarray            = "0.17"
+
+# Release profile posture — set explicitly rather than left to Cargo's defaults.
+#
+# Memory safety must not depend on a debug build. Qubit-index and operand
+# validation is enforced by real `Result`-returning checks
+# (`polypus_sim::Statevector::apply` + `polypus_circuit::qubit_index_violation`
+# / `repeated_qubit_violation`), backed by O(1) `assert!`s in the statevector
+# kernels — never by `debug_assert!`s — so `debug-assertions` stays off in
+# release, keeping those hot kernels at full speed. `overflow-checks`
+# is turned ON: shot-count and index arithmetic must trap on overflow rather than
+# silently wrap, in release as well as debug (the kernels' index math is bitwise,
+# so this does not touch their inner loops).
+[profile.release]
+overflow-checks = true
+debug-assertions = false

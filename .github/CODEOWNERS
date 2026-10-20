@@ -1,0 +1,28 @@
+# Code owners. The last matching pattern takes precedence.
+# Owners must have write access to the repository.
+
+# Default: the two maintainers with the most history across the whole tree.
+*                          @DBFerPra @KevinPGBahia
+
+# Rust workspace and the Python package (PyO3 bindings + polypus package).
+/crates/                   @DBFerPra @KevinPGBahia
+/python/                   @DBFerPra @KevinPGBahia
+/tests/                    @DBFerPra @KevinPGBahia
+
+# Documentation and governance files.
+/docs/                     @DBFerPra @KevinPGBahia
+/SECURITY.md               @DBFerPra
+/.github/CODEOWNERS      @DBFerPra
+
+# CI and release automation, including the PyPI publish in release.yml.
+# Restricted to the repository admin.
+/.github/                  @DBFerPra
+/install.sh                @DBFerPra
+
+# Dependency manifests, lockfile and supply-chain policy.
+/Cargo.toml                @DBFerPra
+/Cargo.lock                @DBFerPra
+/pyproject.toml            @DBFerPra
+/requirements-dev.txt      @DBFerPra
+/requirements-examples.txt @DBFerPra
+/deny.toml                 @DBFerPra

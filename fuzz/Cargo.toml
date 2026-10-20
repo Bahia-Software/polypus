@@ -6,6 +6,7 @@
 # dependencies (libfuzzer-sys) are confined here.
 #
 # Run:  cargo +nightly fuzz run from_qasm2 -- -max_total_time=60
+#       cargo +nightly fuzz run from_qasm3 -- -max_total_time=60
 [package]
 name = "polypus-circuit-fuzz"
 version = "0.0.0"
@@ -22,6 +23,13 @@ polypus-circuit = { path = "../crates/polypus-circuit" }
 [[bin]]
 name = "from_qasm2"
 path = "fuzz_targets/from_qasm2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "from_qasm3"
+path = "fuzz_targets/from_qasm3.rs"
 test = false
 doc = false
 bench = false

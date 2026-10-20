@@ -3,7 +3,7 @@
 //! The decisive property verified here: binding a native circuit template
 //! (`CircuitSource::Native`) NEVER touches Python. These tests run in a plain
 //! `cargo test` binary where no Python interpreter has been initialised —
-//! if `bind` (or QASM generation) acquired the GIL, `Python::with_gil` would
+//! if `bind` (or QASM generation) acquired the GIL, `Python::attach` would
 //! panic ("the Python interpreter is not initialized"). Passing tests are
 //! therefore proof of GIL-freedom, not just a convention.
 
@@ -41,13 +41,13 @@ fn native_bind_requires_no_python_interpreter() {
         // A native template binds to the native variant; serialising it to
         // OpenQASM 2.0 is pure Rust, so this still needs no interpreter.
         BoundCircuit::Native(circuit) => {
-            let qasm = circuit.to_qasm2();
+            let qasm = circuit.try_to_qasm2().unwrap();
             assert!(qasm.starts_with("OPENQASM 2.0;"));
-            assert!(qasm.contains("rzz(0.400000000000) q[0],q[1];"));
-            assert!(qasm.contains("rx(0.800000000000) q[3];"));
+            assert!(qasm.contains("rzz(0.4) q[0],q[1];"));
+            assert!(qasm.contains("rx(0.8) q[3];"));
             assert!(qasm.ends_with("measure q -> c;\n"));
         }
-        BoundCircuit::Qasm2(_) | BoundCircuit::Qiskit(_) => {
+        BoundCircuit::Qasm2(_) | BoundCircuit::Foreign(_) => {
             panic!("native template must bind to the native variant")
         }
     }
@@ -69,7 +69,7 @@ fn native_bind_is_threadsafe_without_gil() {
                     let BoundCircuit::Native(circuit) = bound else {
                         panic!("expected native circuit");
                     };
-                    assert!(circuit.to_qasm2().starts_with("OPENQASM 2.0;"));
+                    assert!(circuit.try_to_qasm2().unwrap().starts_with("OPENQASM 2.0;"));
                 }
             })
         })

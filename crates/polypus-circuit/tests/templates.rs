@@ -1,7 +1,8 @@
 //! Integration tests for polypus-circuit circuit templates.
 
+use polypus_circuit::templates::MAX_QFT_QUBITS;
 use polypus_circuit::templates::{qft, qft_with_options};
-use polypus_circuit::{GateInstruction, GateParam};
+use polypus_circuit::{CircuitError, GateInstruction, GateParam};
 use std::f64::consts::PI;
 
 /// Controlled-phase angle used by the QFT between target `j` and control `k`.
@@ -15,15 +16,15 @@ fn cp(k: usize, j: usize, sign: f64) -> GateInstruction {
 
 #[test]
 fn qft_three_qubits_matches_qiskit_convention() {
-    let qc = qft(3);
+    let qc = qft(3).unwrap();
 
     // No free parameters, no measurements: directly exportable / composable.
-    assert_eq!(qc.num_qubits, 3);
-    assert_eq!(qc.num_params, 0);
+    assert_eq!(qc.num_qubits(), 3);
+    assert_eq!(qc.num_params(), 0);
     assert_eq!(qc.num_clbits(), 0);
 
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         vec![
             GateInstruction::H(2),
             cp(1, 2, 1.0), // π/2
@@ -38,11 +39,11 @@ fn qft_three_qubits_matches_qiskit_convention() {
 
 #[test]
 fn qft_inverse_is_the_adjoint_of_the_forward() {
-    let inv = qft_with_options(3, true, true);
+    let inv = qft_with_options(3, true, true).unwrap();
 
     // Reverse of the forward circuit, phases negated, swaps first.
     assert_eq!(
-        inv.gates,
+        inv.gates(),
         vec![
             GateInstruction::Swap(0, 2),
             GateInstruction::H(0),
@@ -57,33 +58,57 @@ fn qft_inverse_is_the_adjoint_of_the_forward() {
 
 #[test]
 fn qft_without_swaps_omits_the_swap_network() {
-    let qc = qft_with_options(3, false, false);
+    let qc = qft_with_options(3, false, false).unwrap();
     assert!(!qc
-        .gates
+        .gates()
         .iter()
         .any(|g| matches!(g, GateInstruction::Swap(..))));
     // Same rotation block as the default, just without the trailing swap.
-    assert_eq!(qc.gates.len(), 6);
+    assert_eq!(qc.gates().len(), 6);
 }
 
 #[test]
 fn qft_single_qubit_is_a_lone_hadamard() {
-    let qc = qft(1);
-    assert_eq!(qc.gates, vec![GateInstruction::H(0)]);
+    let qc = qft(1).unwrap();
+    assert_eq!(qc.gates(), vec![GateInstruction::H(0)]);
 }
 
 #[test]
 fn qft_zero_qubits_is_empty() {
-    let qc = qft(0);
-    assert_eq!(qc.num_qubits, 0);
-    assert!(qc.gates.is_empty());
+    let qc = qft(0).unwrap();
+    assert_eq!(qc.num_qubits(), 0);
+    assert!(qc.gates().is_empty());
 }
 
 #[test]
 fn qft_exports_to_qasm() {
-    let qasm = qft(3).measure_all().to_qasm2_with_params(&[]).unwrap();
+    let qasm = qft(3)
+        .unwrap()
+        .measure_all()
+        .to_qasm2_with_params(&[])
+        .unwrap();
     assert!(qasm.contains("h q[2];"));
-    assert!(qasm.contains("cp(1.570796326795) q[1],q[2];"));
+    assert!(qasm.contains("cp(1.5707963267948966) q[1],q[2];"));
     assert!(qasm.contains("swap q[0],q[2];"));
     assert!(qasm.contains("measure q -> c;"));
+}
+
+/// Its gate count grows quadratically: a QFT larger than the importers read
+/// back is an error, not an allocation that exhausts memory (#356).
+#[test]
+fn qft_beyond_max_qft_qubits_is_an_error() {
+    assert_eq!(MAX_QFT_QUBITS, 2827);
+    for inverse in [false, true] {
+        let err = qft_with_options(MAX_QFT_QUBITS + 1, inverse, true).unwrap_err();
+        assert_eq!(
+            err,
+            CircuitError::TemplateTooLarge {
+                template: "qft",
+                num_qubits: MAX_QFT_QUBITS + 1,
+                max_qubits: MAX_QFT_QUBITS,
+            }
+        );
+    }
+    assert!(qft(100_000).is_err());
+    assert!(qft(usize::MAX).is_err());
 }

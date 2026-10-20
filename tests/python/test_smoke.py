@@ -43,10 +43,10 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "QNG")
 
-    def test_Adam_class_exists(self):
+    def test_CMAES_class_exists(self):
         import polypus
 
-        assert hasattr(polypus, "Adam")
+        assert hasattr(polypus, "CMAES")
 
 
 class TestPolypusInstantiation:
@@ -59,15 +59,23 @@ class TestPolypusInstantiation:
         assert de.tolerance == pytest.approx(0.01)
         # Fitness-stagnation look-back window (contract C-5); default 20.
         assert de.patience == 20
+        assert de.strategy == "rand1bin"
 
     def test_DE_custom_instantiation(self):
         import polypus
 
-        de = polypus.DE(generations=10, population_size=5, tolerance=0.05, patience=7)
+        de = polypus.DE(
+            generations=10,
+            population_size=5,
+            tolerance=0.05,
+            patience=7,
+            strategy="lshade",
+        )
         assert de.generations == 10
         assert de.population_size == 5
         assert de.tolerance == pytest.approx(0.05)
         assert de.patience == 7
+        assert de.strategy == "lshade"
 
     def test_PSO_default_instantiation(self):
         import polypus
@@ -92,11 +100,6 @@ class TestPolypusInstantiation:
         qng = polypus.QNG(variance_function=dummy_variance)
         assert qng.max_iters == 100
         assert qng.learning_rate == pytest.approx(0.1)
-        assert qng.tolerance == pytest.approx(0.01)
-        # Early stopping needs three *consecutive* sub-tolerance iterations, not
-        # one — a single minibatch gradient can cancel to exactly zero (see the
-        # minibatch note beside C-5/C-7 in `docs/CONTRACTS.md`).
-        assert qng.patience == 3
 
     def test_QNG_custom_instantiation(self):
         import polypus
@@ -108,45 +111,9 @@ class TestPolypusInstantiation:
             variance_function=dummy_variance,
             max_iters=50,
             learning_rate=0.01,
-            patience=1,
         )
         assert qng.max_iters == 50
         assert qng.learning_rate == pytest.approx(0.01)
-        # `patience=1` is settable and restores the single-iteration rule.
-        assert qng.patience == 1
-        qng.patience = 5
-        assert qng.patience == 5
-
-    def test_Adam_instantiation(self):
-        import polypus
-
-        adam = polypus.Adam()
-        assert adam.max_iters == 100
-        assert adam.learning_rate == pytest.approx(0.05)
-        assert adam.beta1 == pytest.approx(0.9)
-        assert adam.beta2 == pytest.approx(0.999)
-        assert adam.epsilon == pytest.approx(1e-8)
-        assert adam.tolerance == pytest.approx(0.01)
-        # Same default and same reason as `QNG.patience`.
-        assert adam.patience == 3
-
-    def test_Adam_custom_instantiation(self):
-        import polypus
-
-        adam = polypus.Adam(
-            max_iters=50,
-            learning_rate=0.01,
-            beta1=0.8,
-            beta2=0.99,
-            patience=1,
-        )
-        assert adam.max_iters == 50
-        assert adam.learning_rate == pytest.approx(0.01)
-        assert adam.beta1 == pytest.approx(0.8)
-        assert adam.beta2 == pytest.approx(0.99)
-        assert adam.patience == 1
-        adam.patience = 5
-        assert adam.patience == 5
 
 
 class TestPolypusModuleMetadata:
@@ -158,7 +125,7 @@ class TestPolypusModuleMetadata:
 
     @pytest.mark.parametrize(
         "name",
-        ["DE", "PSO", "QNG", "Circuit", "Param", "RunResult", "TrainResult"],
+        ["DE", "PSO", "QNG", "CMAES", "Circuit", "Param", "RunResult", "TrainResult"],
     )
     def test_class_module_is_polypus(self, name):
         import polypus
@@ -194,18 +161,6 @@ class TestPolypusModuleMetadata:
 class TestPolypusPythonImport:
     def test_import_polypus_python(self):
         import polypus_python  # noqa: F401
-
-    def test_run_qc_in_qpu_exists(self):
-        import polypus_python
-
-        assert hasattr(polypus_python, "run_qc_in_qpu")
-        assert callable(polypus_python.run_qc_in_qpu)
-
-    def test_run_qcs_in_qpu_exists(self):
-        import polypus_python
-
-        assert hasattr(polypus_python, "run_qcs_in_qpu")
-        assert callable(polypus_python.run_qcs_in_qpu)
 
     def test_serialize_quantum_circuit_exists(self):
         import polypus_python

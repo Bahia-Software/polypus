@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description       = "Pure-Rust statevector simulator for Polypus circuits: consumes polypus-circuit's ConcreteCircuit directly (no OpenQASM round-trip), GIL-free, with optional rayon parallelism. No Python."
 
 [lib]
@@ -12,15 +13,34 @@ name = "polypus_sim"
 
 [dependencies]
 polypus-circuit = { workspace = true }
-num-complex     = "0.4"
-rayon           = { version = "1", optional = true }
+num-complex     = { workspace = true }
+rayon           = { workspace = true, optional = true }
 # Logging *facade* only (no sink): orchestration-level diagnostics are emitted
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.
 log             = { workspace = true }
+# On-disk persistence of the calibrated gate-parallel threshold (see
+# `calibration`). Deliberately pulled in *only* under the `parallel` feature —
+# there is nothing to calibrate without the rayon kernels — so the default build
+# gains no serde dependency. `serde`/`serde_json` come from the workspace table;
+# `dirs`/`directories` is intentionally *not* added
+# (the cache directory is resolved by hand from XDG_CACHE_HOME/HOME).
+serde           = { workspace = true, optional = true }
+serde_json      = { workspace = true, optional = true }
+# Advisory lock around the calibration cache's read-merge-write, so concurrent
+# calibrations (SLURM ranks on a shared $HOME) cannot lose each other's entries.
+# `fs4` wraps flock(2)/LockFileEx behind a safe API on Linux, macOS and Windows
+# alike — no `cfg` branching and no new `unsafe` here. Chosen over `fd-lock`
+# because its `rustix 1`/`windows-sys 0.61` deps are the versions already in the
+# lock file (no duplicate), and std's `File::lock` needs Rust 1.89 (> MSRV 1.85).
+# Crate-local, not in `[workspace.dependencies]`: nothing else uses it. Only
+# under `parallel`, like serde: the cache it guards only exists there.
+fs4             = { version = "1.1", optional = true }
 
 [features]
 default  = []
 # Opt-in data-parallel gate kernels (rayon). Results are identical to the
 # sequential path; only large circuits (see DEFAULT_PARALLEL_THRESHOLD) use it.
-parallel = ["dep:rayon"]
+# The serde and fs4 deps are for the calibration cache, which only exists with
+# `parallel`.
+parallel = ["dep:rayon", "dep:serde", "dep:serde_json", "dep:fs4"]

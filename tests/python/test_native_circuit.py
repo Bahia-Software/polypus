@@ -10,6 +10,7 @@ works end-to-end through the same entry points as Qiskit circuits:
 """
 
 import math
+import sys
 
 import pytest
 
@@ -53,7 +54,7 @@ class TestCircuitConstruction:
 
         qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
         qasm = qc.to_qasm2([math.pi])
-        assert f"ry({math.pi:.12f}) q[0];" in qasm
+        assert f"ry({math.pi!r}) q[0];" in qasm
 
     def test_qiskit_parses_generated_qasm(self):
         import polypus
@@ -106,6 +107,15 @@ class TestCircuitConstruction:
         with pytest.raises(ValueError, match="out of range"):
             polypus.Circuit(2).h(5)
 
+    def test_cbit_out_of_range_raises_valueerror(self):
+        """Issue #345: a classical bit index is bounded like a declared
+        register, so a huge one is rejected instead of exported or overflowed."""
+        import polypus
+
+        for cbit in (1_000_000, 1 << 40, 2**64 - 1):
+            with pytest.raises(ValueError, match="classical bit index"):
+                polypus.Circuit(1).measure(0, cbit)
+
     def test_identical_qubits_raises_valueerror(self):
         import polypus
 
@@ -124,6 +134,24 @@ class TestCircuitConstruction:
 
         with pytest.raises(TypeError):
             polypus.Circuit(1).rx(0, "not-an-angle")
+
+    def test_argument_conversion_error_format(self):
+        # Pins PyO3's argument-conversion error format (docs/ENGINEERING.md §9)
+        # so a PyO3 bump cannot change it silently. Since PyO3 0.29 the message
+        # is the conversion's own, and the argument is named in a note, which
+        # only Python >= 3.11 supports; PyO3 <= 0.25 prefixed the message with
+        # "argument 'theta': " instead, on every Python version.
+        import polypus
+
+        with pytest.raises(TypeError) as excinfo:
+            polypus.Circuit(1).rx(0, "not-an-angle")
+        assert str(excinfo.value) == (
+            "angle must be a number, polypus.Param or polypus.ParamExpr"
+        )
+        if sys.version_info >= (3, 11):
+            assert excinfo.value.__notes__ == ["while processing 'theta'"]
+        else:
+            assert not hasattr(excinfo.value, "__notes__")
 
     def test_param_repr_and_index(self):
         import polypus
@@ -164,9 +192,11 @@ class TestRunNativeCircuit:
         result = polypus.run_quantum_circuit(
             native_bell_circuit, shots=400, infrastructure="local", n_qpus=4
         )
-        assert isinstance(result.counts, dict)
-        assert set(result.counts.keys()).issubset({"00", "11"})
-        assert sum(result.counts.values()) == 400
+        # One dict per QPU replica, plus their merged total (C-3, issue #211).
+        assert isinstance(result.counts, list) and len(result.counts) == 4
+        assert [sum(c.values()) for c in result.counts] == [100, 100, 100, 100]
+        assert set(result.merged_counts.keys()).issubset({"00", "11"})
+        assert sum(result.merged_counts.values()) == 400
 
     def test_qasm_string_input(self, native_bell_circuit):
         import polypus
@@ -266,18 +296,6 @@ class TestTrainNativeCircuit:
             polypus.QNG(simple_variance_fn, max_iters=2, bounds=(0.0, math.pi)),
             expectation_function=simple_expectation_fn,
             id="test_native_qng",
-            **_TRAIN_KW,
-        )
-        assert isinstance(result.best_params, list) and len(result.best_params) == 1
-
-    def test_train_adam(self, native_parametrized_circuit, simple_expectation_fn):
-        import polypus
-
-        result = polypus.train(
-            native_parametrized_circuit,
-            polypus.Adam(max_iters=2, bounds=(0.0, math.pi)),
-            expectation_function=simple_expectation_fn,
-            id="test_native_adam",
             **_TRAIN_KW,
         )
         assert isinstance(result.best_params, list) and len(result.best_params) == 1

@@ -3,25 +3,95 @@ requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "polypus"
-# Floor set by the runtime deps of polypus_python (qiskit>=2.0 needs >=3.9).
+# PyPI distribution name. The import name stays `polypus` (see
+# `[tool.maturin] module-name` below) — the name `polypus` on PyPI is taken by
+# an unrelated project, so the distribution is published as `polypus-quantum`.
+name = "polypus-quantum"
+description = "Distributed quantum computing — Rust core, Python bindings, one API across simulators and real QPUs."
+readme = "README.md"
+# CPython 3.10–3.13: the versions wheels are built and tested for (3.9 is EOL).
 # CI tests the floor and the latest supported version.
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+license = "EUPL-1.2"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "Diego Beltrán Fernández Prada", email = "diego.fernandez@bahiasoftware.es" },
+    { name = "Víctor Sóñora Pombo" },
+    { name = "Sergio Figueiras Gómez" },
+    { name = "Miguel Boubeta Martínez" },
+    { name = "Kevin Pérez González" },
+    { name = "Uxía Sendón Caamaño" },
+    { name = "Galicia Supercomputing Center (CESGA)" },
+]
+keywords = ["quantum", "quantum-computing", "vqc", "qml", "qaoa", "qiskit", "simulator", "optimization"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+# Runtime deps of the bundled `polypus_python` helpers (Qiskit/Aer execution
+# seam). The Rust core needs none of these, but the wheel ships the helpers, so
+# they are declared here. CUNQA (supported range `>=2.4,<4`) is not on PyPI and
+# is installed on the cluster, so it is not declared; see the README.
+# Upper bounds: the newest majors/minors the seam is verified on (contract C-10
+# in docs/CONTRACTS.md); widen them only once the tests pass on the new release.
+dependencies = [
+    "qiskit>=2.0,<3",
+    "qiskit-aer>=0.17,<0.18",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Bahia-Software/polypus"
+Repository = "https://github.com/Bahia-Software/polypus"
+Documentation = "https://bahia-software.github.io/polypus/"
+Issues = "https://github.com/Bahia-Software/polypus/issues"
+# Cross-reference to the Rust side: this wheel imports as `polypus`, and the same
+# project is published on crates.io as the `polypus` crate (`cargo add polypus`).
+"Rust crate (crates.io)" = "https://crates.io/crates/polypus"
+
 [tool.maturin]
 features = ["extension-module"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
+# Keep the import name `polypus` even though the distribution is `polypus-quantum`
+# (matches the crate's `[lib] name` and the `#[pymodule] fn polypus`). Without
+# this, maturin would expect the module to be `polypus_quantum` and `import
+# polypus` would break.
+module-name = "polypus"
+# Mixed Rust/Python layout: ship a hand-written `polypus/__init__.py` instead of
+# the wrapper maturin auto-generates. It re-exports the extension unchanged and
+# adds lazy auto-calibration of the gate-parallel threshold at import (issue
+# #176), so `pip install polypus-quantum` users — who have no `install.sh`
+# post-install hook — get a machine-tuned threshold with no manual step. With a
+# python source root present, maturin places the compiled extension at
+# `polypus/polypus*.so` next to that `__init__.py`, which does `from .polypus
+# import *` exactly as the generated wrapper did.
+python-source = "python"
+# Ship the pure-Python helper package as a second, real top-level package
+# `polypus_python` next to `polypus`. The extension imports it by that name at
+# its execution seams (`PyModule::import(py, "polypus_python")`), and users
+# import `polypus_python.qaoa_utils` etc. directly, so it must be a real
+# top-level package (not a `polypus` submodule or a sys.modules alias). Living
+# under `python-source` puts it in the wheel and the sdist, and also on the path
+# of an editable install (`maturin develop` / `pip install -e .`), whose `.pth`
+# points at `python/` — so helper edits take effect without a rebuild.
+python-packages = ["polypus_python"]
 
 # Python lint + formatting for the whole repo (packages, tests, benchmarks,
 # examples). CI runs `ruff check` and `ruff format --check`.
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Pin the rule set explicitly (pycodestyle errors E4/E7/E9 + pyflakes F, plus
@@ -36,6 +106,12 @@ select = ["E4", "E7", "E9", "F", "I"]
 "**/__init__.py" = ["F401"]
 # Tests import qiskit after a pytest.importorskip guard.
 "tests/**" = ["E402"]
+
+[tool.ruff.lint.isort]
+# Pin `polypus_python` (under `python/`) third-party, like `polypus`, so the
+# two stay in one import section in the files that import both, whatever ruff
+# infers about first-party source roots.
+known-third-party = ["polypus_python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

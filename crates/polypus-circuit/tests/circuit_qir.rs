@@ -167,6 +167,57 @@ fn barrier_is_dropped() {
     assert_eq!(call_lines(&ir).len(), 2); // only h and cnot
 }
 
+/// `id` has no QIS intrinsic: the QIR lowering drops it, while the circuit
+/// (and its OpenQASM export) keeps it.
+#[test]
+fn id_is_dropped_at_the_qir_boundary_only() {
+    let qc = ParameterizedCircuit::new(2).h(0).id(1).id(0).cx(0, 1);
+    let ir = qc.to_qir_with_params(&[]).unwrap();
+    assert_eq!(
+        call_lines(&ir),
+        [
+            "call void @__quantum__qis__h__body(%Qubit* null)",
+            "call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))",
+        ]
+    );
+    assert_eq!(qc.gates().len(), 4);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.contains("id q[1];\nid q[0];\n"), "{qasm}");
+}
+
+/// `cu1` lowers exactly like `cp` (the same operator), and neither leaves the
+/// base intrinsic set. (Unitary equivalence with the native gates, for the
+/// whole vocabulary, is checked in `polypus-sim`'s contract tests.)
+#[test]
+fn cu1_lowers_like_cp() {
+    let cu1 = ParameterizedCircuit::new(2)
+        .cu1(1, 0, 0.8)
+        .to_qir_with_params(&[])
+        .unwrap();
+    let cp = ParameterizedCircuit::new(2)
+        .cp(1, 0, 0.8)
+        .to_qir_with_params(&[])
+        .unwrap();
+    assert_eq!(call_lines(&cu1), call_lines(&cp));
+}
+
+/// `ccx` has no QIR base intrinsic: it lowers to the exact 15-gate
+/// h/t/t†/cnot decomposition; `cswap` wraps it in two cnots. The circuit and
+/// its OpenQASM export keep each as one instruction.
+#[test]
+fn three_qubit_gates_lower_to_the_base_set() {
+    let qc = ParameterizedCircuit::new(3).ccx(0, 1, 2).cswap(2, 0, 1);
+    let calls = call_lines(&qc.to_qir_with_params(&[]).unwrap());
+    assert_eq!(calls.len(), 15 + 17);
+    let base = ["h__body", "t__body", "t__adj", "cnot__body"];
+    for call in &calls {
+        assert!(base.iter().any(|b| call.contains(b)), "{call}");
+    }
+    assert_eq!(qc.gates().len(), 2);
+    let qasm = qc.to_qasm2_with_params(&[]).unwrap();
+    assert!(qasm.ends_with("ccx q[0],q[1],q[2];\ncswap q[2],q[0],q[1];\n"));
+}
+
 #[test]
 fn no_measurement_has_no_recording_or_irreversible_attribute() {
     let ir = ParameterizedCircuit::new(1)
@@ -255,27 +306,55 @@ fn declarations_are_emitted_once_and_sorted() {
     );
 }
 
-/// Concrete circuits expose `to_qir()` directly (no params), mirroring
-/// `to_qasm2()`.
+/// Concrete circuits expose `try_to_qir()` directly (no params), mirroring
+/// `try_to_qasm2()`; the deprecated `to_qir()` returns the same module.
 #[test]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_to_qir_matches_parameterized() {
     let pc = ParameterizedCircuit::new(1).rx(0, 0.5).measure(0, 0);
     let concrete = pc.assign_parameters(&[]).unwrap();
-    assert_eq!(concrete.to_qir(), pc.to_qir_with_params(&[]).unwrap());
+    let expected = pc.to_qir_with_params(&[]).unwrap();
+    assert_eq!(concrete.try_to_qir().unwrap(), expected);
+    assert_eq!(concrete.to_qir(), expected);
+}
+
+/// #350: the fallible export reports what the panicking one panics on.
+#[test]
+fn concrete_circuit_try_to_qir_returns_the_error() {
+    let after_measure = ConcreteCircuit::new_unchecked(
+        1,
+        vec![
+            GateInstruction::Measure { qubit: 0, cbit: 0 },
+            GateInstruction::X(0),
+        ],
+    );
+    assert_eq!(
+        after_measure.try_to_qir(),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+    let non_finite = ConcreteCircuit::new_unchecked(
+        1,
+        vec![GateInstruction::Rx {
+            qubit: 0,
+            theta: GateParam::Fixed(f64::NAN),
+        }],
+    );
+    assert_eq!(non_finite.try_to_qir(), Err(CircuitError::NonFiniteParam));
 }
 
 #[test]
 #[should_panic(expected = "non-finite")]
+#[allow(deprecated)] // exercises the panicking export on purpose
 fn concrete_circuit_to_qir_panics_on_non_finite_fixed_angle() {
     // A hand-assembled ConcreteCircuit bypasses the builder's validation; the
     // QIR exporter still refuses a non-finite fixed angle rather than emitting it.
-    let qc = ConcreteCircuit {
-        num_qubits: 1,
-        gates: vec![GateInstruction::Rx {
+    let qc = ConcreteCircuit::new(
+        1,
+        vec![GateInstruction::Rx {
             qubit: 0,
             theta: GateParam::Fixed(f64::INFINITY),
         }],
-    };
+    );
     let _ = qc.to_qir();
 }
 
@@ -366,4 +445,94 @@ fn qir_base_profile_module_is_valid_llvm() {
         "llvm-as rejected the emitted QIR:\n{}\n--- IR ---\n{ir}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The QIR module of `body` (the lines of `@main` before `ret`) with these
+/// declarations and attributes — the layout every export writes.
+fn qir_module(body: &str, decls: &str, attributes: &str) -> String {
+    format!(
+        "; ModuleID = 'polypus'\nsource_filename = \"polypus\"\n\n%Qubit = type opaque\n%Result = type opaque\n\ndefine void @main() #0 {{\nentry:\n{body}  ret void\n}}\n\n{decls}\n{attributes}\n!llvm.module.flags = !{{!0, !1, !2, !3}}\n\n!0 = !{{i32 1, !\"qir_major_version\", i32 1}}\n!1 = !{{i32 7, !\"qir_minor_version\", i32 0}}\n!2 = !{{i32 1, !\"dynamic_qubit_management\", i1 false}}\n!3 = !{{i32 1, !\"dynamic_result_management\", i1 false}}\n"
+    )
+}
+
+/// Builder circuits export the QIR they did before the declared width was
+/// kept (`main` at 00ef078), byte for byte: `required_num_results` is what the
+/// measurements need — 2 for one written at `c[1]`, 0 without measurements.
+#[test]
+fn builder_qir_is_unchanged_by_the_classical_width() {
+    let partial = ParameterizedCircuit::new(3).x(0).measure(0, 1);
+    let expected = qir_module(
+        "  call void @__quantum__qis__x__body(%Qubit* null)\n  call void @__quantum__qis__mz__body(%Qubit* null, %Result* inttoptr (i64 1 to %Result*))\n  call void @__quantum__rt__array_record_output(i64 1, i8* null)\n  call void @__quantum__rt__result_record_output(%Result* inttoptr (i64 1 to %Result*), i8* null)\n",
+        "declare void @__quantum__qis__mz__body(%Qubit*, %Result*) #1\ndeclare void @__quantum__qis__x__body(%Qubit*)\ndeclare void @__quantum__rt__array_record_output(i64, i8*)\ndeclare void @__quantum__rt__result_record_output(%Result*, i8*)\n",
+        "attributes #0 = { \"entry_point\" \"output_labeling_schema\" \"qir_profiles\"=\"base_profile\" \"required_num_qubits\"=\"3\" \"required_num_results\"=\"2\" }\nattributes #1 = { \"irreversible\" }\n",
+    );
+    assert_eq!(partial.to_qir_with_params(&[]).unwrap(), expected);
+    assert_eq!(
+        partial
+            .assign_parameters(&[])
+            .unwrap()
+            .try_to_qir()
+            .unwrap(),
+        expected
+    );
+
+    let unmeasured = ParameterizedCircuit::new(2).h(0).cx(0, 1);
+    let expected = qir_module(
+        "  call void @__quantum__qis__h__body(%Qubit* null)\n  call void @__quantum__qis__cnot__body(%Qubit* null, %Qubit* inttoptr (i64 1 to %Qubit*))\n",
+        "declare void @__quantum__qis__cnot__body(%Qubit*, %Qubit*)\ndeclare void @__quantum__qis__h__body(%Qubit*)\n",
+        "attributes #0 = { \"entry_point\" \"output_labeling_schema\" \"qir_profiles\"=\"base_profile\" \"required_num_qubits\"=\"2\" \"required_num_results\"=\"0\" }\n",
+    );
+    assert_eq!(unmeasured.to_qir_with_params(&[]).unwrap(), expected);
+    assert_eq!(
+        unmeasured
+            .assign_parameters(&[])
+            .unwrap()
+            .try_to_qir()
+            .unwrap(),
+        expected
+    );
+
+    for qc in [
+        ParameterizedCircuit::new(2)
+            .h(0)
+            .cx(0, 1)
+            .measure(0, 0)
+            .measure(1, 1),
+        ParameterizedCircuit::new(2).h(0).cx(0, 1).measure_all(),
+    ] {
+        let ir = qc.to_qir_with_params(&[]).unwrap();
+        assert!(ir.contains("\"required_num_results\"=\"2\" }\n"), "{ir}");
+        assert_eq!(ir, qc.assign_parameters(&[]).unwrap().try_to_qir().unwrap());
+    }
+}
+
+/// An imported program's QIR declares the classical width the program does
+/// (issue #322; `required_num_results` used to be `max(cbit) + 1`): `creg c[3]`
+/// written only at `c[1]` needs 3 results, and so does a program that declares
+/// `creg c[3]` and measures nothing — no `mz` is emitted, the results are
+/// declared all the same, as the exported `creg c[3]` is. So
+/// `required_num_results` may exceed the results recorded: 3 declared, 1 and 0
+/// recorded.
+#[test]
+fn qir_declares_the_imported_classical_width() {
+    let header = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[3];\n";
+    for (body, measures) in [
+        ("x q[0];\nmeasure q[0] -> c[1];\n", true),
+        ("x q[0];\n", false),
+    ] {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{header}{body}")).unwrap();
+        for ir in [
+            qc.to_qir_with_params(&[]).unwrap(),
+            qc.assign_parameters(&[]).unwrap().try_to_qir().unwrap(),
+        ] {
+            assert!(ir.contains("\"required_num_results\"=\"3\""), "{ir}");
+            assert_eq!(ir.contains("__quantum__qis__mz__body"), measures, "{ir}");
+            assert_eq!(
+                ir.matches("call void @__quantum__rt__result_record_output")
+                    .count(),
+                usize::from(measures),
+                "{ir}"
+            );
+        }
+    }
 }

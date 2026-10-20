@@ -1,0 +1,464 @@
+//! [`Flow`] — a unit of orchestratable work — and the flows that implement it:
+//! [`RunCircuitFlow`] (run a batch of circuits) and [`TrainFlow`] (variational
+//! training). A training flow needs a candidate-scoring oracle, but building that
+//! oracle is `pyo3`-touching domain work; so [`TrainFlow`] carries an
+//! [`OracleFactory`] — implemented in `polypus-evaluation` — and asks it to build
+//! the oracle at run time, keeping this crate `pyo3`-free while every *order* lives
+//! here with the [`Scheduler`](crate::Scheduler) that runs it.
+
+use polypus_infrastructure::{BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError};
+use polypus_optimizers::{EvaluationOracle, OptimizationOutcome};
+
+use crate::dispatch::{dispatch_optimizer, Method, OracleError, OracleErrorSlot};
+use crate::scheduler::Resources;
+use crate::walltime::{SystemClock, WalltimeWatch};
+
+/// A unit of orchestratable work run by [`Scheduler::run`](crate::Scheduler::run).
+///
+/// `Scheduler::run` is **monomorphic** over `Flow` (never `dyn Flow`, plan §10.8),
+/// so each flow keeps its own associated `Output`/`Error` types rather than being
+/// erased behind a trait object.
+pub trait Flow {
+    /// What a successful run produces (e.g. counts, or an optimization outcome).
+    type Output;
+    /// How a run fails.
+    type Error;
+    /// Run to completion against `resources`, honouring `cancel` at wave
+    /// boundaries. Takes `self` by value: a flow is consumed by its single run.
+    fn run(self, resources: &Resources, cancel: &CancelToken) -> Result<Self::Output, Self::Error>;
+}
+
+/// Runs a batch of bound circuits through the resources' planner and returns the
+/// counts — one [`Counts`] per circuit, in input order, or, when the planner splits
+/// one circuit's shots across replicas, one per replica in apportionment order
+/// (contract C-3). It calls [`Planner::execute_replicas`](polypus_infrastructure::Planner::execute_replicas),
+/// so the per-replica breakdown reaches the edge unmerged; the merged total is
+/// computed there.
+///
+/// The single-vs-distributed decision is **which planner is in
+/// [`Resources`]** (chosen by the `polypus` edge when it parses kwargs), not this
+/// flow. Converting the counts to a Python object stays at the edge, so this flow
+/// — and the whole crate — needs no `pyo3`.
+pub struct RunCircuitFlow {
+    /// The bound (parameter-free) circuits to run.
+    pub circuits: Vec<BoundCircuit>,
+    /// Shots per circuit.
+    pub shots: u32,
+}
+
+impl Flow for RunCircuitFlow {
+    type Output = Vec<Counts>;
+    type Error = InfrastructureError;
+
+    fn run(
+        self,
+        resources: &Resources,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Counts>, InfrastructureError> {
+        let tasks: Vec<CircuitTask> = self
+            .circuits
+            .iter()
+            .map(|circuit| CircuitTask {
+                circuit,
+                shots: self.shots,
+            })
+            .collect();
+        resources.planner.execute_replicas(
+            resources.backend.as_ref(),
+            &tasks,
+            &resources.config,
+            cancel,
+        )
+    }
+}
+
+/// Builds the candidate-scoring oracle a [`TrainFlow`] optimizes.
+///
+/// This is the seam that lets the training *order* live here with the
+/// [`Scheduler`](crate::Scheduler) while the `pyo3`-touching work of assembling the
+/// oracle (binding circuit templates, wiring observables) stays in
+/// `polypus-evaluation`. [`TrainFlow`] holds a factory; when the scheduler runs the
+/// flow, it hands the factory the run's [`Resources`], the per-run [`CancelToken`]
+/// and the shared [`OracleErrorSlot`], and the factory returns the ready oracle.
+///
+/// `build` consumes the factory (`self`) — a flow builds its oracle exactly once —
+/// and [`TrainFlow`] is generic over the concrete factory (never `dyn`), so the
+/// flow keeps the factory's auto-derived thread markers and the `polypus` edge can
+/// move it across `py.detach` without this crate ever naming `pyo3`.
+pub trait OracleFactory {
+    /// Assemble the oracle from the run context. Called once, inside
+    /// [`Flow::run`] — after the [`Scheduler`](crate::Scheduler) has created the
+    /// [`CancelToken`], so the oracle captures the exact token this run cancels on.
+    fn build(
+        self,
+        resources: &Resources,
+        cancel: &CancelToken,
+        errors: &OracleErrorSlot,
+    ) -> Box<dyn EvaluationOracle>;
+}
+
+/// Variational training as a [`Flow`]: build the oracle from an [`OracleFactory`],
+/// then drive `dispatch_optimizer`. One flow for every training mode (VQC, QML, …)
+/// — the mode is entirely in *which* factory it carries, so this crate needs no
+/// `pyo3` and no knowledge of circuit templates or observables. Replaces the former
+/// per-mode `TrainVqcFlow`/`TrainQmlFlow` that lived in `polypus-evaluation`.
+pub struct TrainFlow<F: OracleFactory> {
+    /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
+    pub factory: F,
+    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG/CMAES`
+    /// object; `Qng` carries its variance oracle).
+    pub method: Method,
+    /// Free-parameter count validated at the edge.
+    pub dimensions: u32,
+    /// Optimizer RNG seed (contract C-7).
+    pub seed: u64,
+    /// Shared failure slot: the oracle records into it, `dispatch_optimizer` takes
+    /// it, and the edge downcasts + re-raises.
+    pub errors: OracleErrorSlot,
+}
+
+impl<F: OracleFactory> Flow for TrainFlow<F> {
+    type Output = OptimizationOutcome;
+    type Error = OracleError;
+
+    fn run(
+        self,
+        resources: &Resources,
+        cancel: &CancelToken,
+    ) -> Result<OptimizationOutcome, OracleError> {
+        // Build the oracle now (not at the edge): only here do the run's `Resources`
+        // and the per-run `CancelToken` both exist, so the oracle captures the exact
+        // token this run cancels on — while the *order* still lives with the
+        // scheduler that runs it.
+        let oracle = self.factory.build(resources, cancel, &self.errors);
+        // Only a backend whose allocation expires (CUNQA) gets the overrun watch.
+        let oracle: Box<dyn EvaluationOracle> = match resources.backend.walltime() {
+            Some(walltime) => Box::new(
+                WalltimeWatch::new(
+                    oracle,
+                    walltime,
+                    self.method.run_shape(),
+                    &resources.config.id,
+                    SystemClock,
+                )
+                .with_growth(self.method.growth(self.dimensions)),
+            ),
+            None => oracle,
+        };
+        dispatch_optimizer(
+            self.method,
+            oracle,
+            self.dimensions,
+            &self.errors,
+            self.seed,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Resources, Scheduler};
+    use polypus_infrastructure::{
+        BackendError, OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn config() -> RunParams {
+        RunParams {
+            id: "flow-test".to_string(),
+            shots: 500,
+            opt_level: OptLevel::default(),
+            seed: Some(2024),
+        }
+    }
+
+    /// A backend `RunCircuitFlow` hands to the planner. `EchoPlanner` ignores it,
+    /// so it only needs to exist and pair (its default capabilities do).
+    struct StubBackend;
+    impl QuantumBackend for StubBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            _config: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Ok(qcs.iter().map(|_| HashMap::new()).collect())
+        }
+    }
+
+    /// A GIL-free planner that returns one counts map per task, keyed by input
+    /// index and valued by the task's shots — so we can assert `RunCircuitFlow`
+    /// built the right tasks, in order, with the flow's shots. Using it (rather
+    /// than a real planner) keeps the test — and this crate — free of the
+    /// interpreter its between-wave `check_signals` would need.
+    struct EchoPlanner;
+    impl Planner for EchoPlanner {
+        fn requirements(&self) -> PlannerRequirements {
+            PlannerRequirements {
+                needs_shot_distribution: false,
+                min_concurrency: 1,
+            }
+        }
+        fn execute(
+            &self,
+            _backend: &dyn QuantumBackend,
+            tasks: &[CircuitTask<'_>],
+            _config: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            Ok(tasks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| HashMap::from([(format!("task{i}"), u64::from(t.shots))]))
+                .collect())
+        }
+    }
+
+    /// The scheduler runs a `RunCircuitFlow`: it builds one task per circuit with
+    /// the flow's shots, delegates to the resources' planner, and returns its
+    /// counts one-per-circuit in input order — the machinery the `polypus` edge
+    /// will use in Phase 6.
+    #[test]
+    fn scheduler_runs_a_run_circuit_flow_in_order() {
+        let resources = Resources::new(
+            Arc::new(StubBackend),
+            Some(Arc::new(EchoPlanner)),
+            Arc::new(config()),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+
+        let circuits = vec![
+            BoundCircuit::Qasm2("a".to_string()),
+            BoundCircuit::Qasm2("b".to_string()),
+            BoundCircuit::Qasm2("c".to_string()),
+        ];
+        let counts = scheduler
+            .run(RunCircuitFlow {
+                circuits,
+                shots: 500,
+            })
+            .expect("the flow must run");
+
+        // One counts map per circuit, in order, each carrying the flow's shots.
+        assert_eq!(counts.len(), 3);
+        for (i, c) in counts.iter().enumerate() {
+            assert_eq!(c.get(&format!("task{i}")), Some(&500));
+        }
+        scheduler.close();
+    }
+
+    /// A planner whose `execute` and `execute_replicas` answer differently (merged
+    /// vs. per-replica), so a test can tell which one `RunCircuitFlow` called.
+    struct ReplicaPlanner;
+    impl Planner for ReplicaPlanner {
+        fn requirements(&self) -> PlannerRequirements {
+            PlannerRequirements {
+                needs_shot_distribution: false,
+                min_concurrency: 1,
+            }
+        }
+        fn execute(
+            &self,
+            _backend: &dyn QuantumBackend,
+            _tasks: &[CircuitTask<'_>],
+            _config: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            Ok(vec![HashMap::from([("0".to_string(), 500)])])
+        }
+        fn execute_replicas(
+            &self,
+            _backend: &dyn QuantumBackend,
+            _tasks: &[CircuitTask<'_>],
+            _config: &RunParams,
+            _cancel: &CancelToken,
+        ) -> Result<Vec<Counts>, InfrastructureError> {
+            Ok(vec![
+                HashMap::from([("0".to_string(), 250)]),
+                HashMap::from([("0".to_string(), 250)]),
+            ])
+        }
+    }
+
+    /// `RunCircuitFlow` returns the planner's *per-replica* counts, not its merged
+    /// total, so `run_quantum_circuit(n_qpus > 1)` can expose one dict per replica
+    /// (issue #211, contract C-3).
+    #[test]
+    fn run_circuit_flow_returns_the_per_replica_counts() {
+        let resources = Resources::new(
+            Arc::new(StubBackend),
+            Some(Arc::new(ReplicaPlanner)),
+            Arc::new(config()),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+        let counts = scheduler
+            .run(RunCircuitFlow {
+                circuits: vec![BoundCircuit::Qasm2("a".to_string())],
+                shots: 500,
+            })
+            .expect("the flow must run");
+        assert_eq!(counts.len(), 2);
+        assert!(counts.iter().all(|c| c.get("0") == Some(&250)));
+        scheduler.close();
+    }
+
+    /// A stub oracle: every candidate scores `0.0`. It ignores the backend/planner
+    /// entirely, so the optimizer runs without touching the (unused) `Resources`.
+    struct StubOracle;
+    impl EvaluationOracle for StubOracle {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    /// An `OracleFactory` that flips a shared flag when consumed, then returns a
+    /// `StubOracle` — so the test can prove the flow built its oracle *through the
+    /// factory* rather than receiving it pre-built from the edge.
+    struct StubFactory(Arc<std::sync::atomic::AtomicBool>);
+    impl OracleFactory for StubFactory {
+        fn build(
+            self,
+            _resources: &Resources,
+            _cancel: &CancelToken,
+            _errors: &OracleErrorSlot,
+        ) -> Box<dyn EvaluationOracle> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::new(StubOracle)
+        }
+    }
+
+    /// `TrainFlow` builds its oracle through the [`OracleFactory`] and optimizes it:
+    /// the factory is consumed exactly once, at run time (not at the edge), and the
+    /// run returns the optimizer's outcome over that oracle — the seam the `polypus`
+    /// edge relies on.
+    #[test]
+    fn train_flow_builds_its_oracle_through_the_factory() {
+        use crate::DeConfig;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let built = Arc::new(AtomicBool::new(false));
+        let resources = Resources::new(
+            Arc::new(StubBackend),
+            Some(Arc::new(EchoPlanner)),
+            Arc::new(config()),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+
+        let flow = TrainFlow {
+            factory: StubFactory(Arc::clone(&built)),
+            method: Method::De(DeConfig {
+                generations: 2,
+                population_size: 6,
+                tolerance: 0.0,
+                patience: 10,
+                strategy: polypus_optimizers::DeStrategy::Rand1Bin,
+            }),
+            dimensions: 3,
+            seed: 7,
+            errors: OracleErrorSlot::new(),
+        };
+        // `OracleError` does not implement `Debug`, so match rather than
+        // `.expect`.
+        let outcome = match scheduler.run(flow) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("the train flow must run"),
+        };
+
+        // The factory was consumed by the flow, at run time.
+        assert!(built.load(Ordering::SeqCst));
+        // The optimizer saw the stub oracle: every candidate scores 0.0.
+        assert_eq!(outcome.best_fitness, 0.0);
+        scheduler.close();
+    }
+
+    /// A backend whose allocation expires after `walltime` (CUNQA-like) or never.
+    struct ExpiringBackend(Option<std::time::Duration>);
+    impl QuantumBackend for ExpiringBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            _config: &RunParams,
+        ) -> Result<Vec<Counts>, BackendError> {
+            Ok(qcs.iter().map(|_| HashMap::new()).collect())
+        }
+        fn walltime(&self) -> Option<std::time::Duration> {
+            self.0
+        }
+    }
+
+    /// Every batch takes a millisecond of real time.
+    struct SleepyOracle;
+    impl EvaluationOracle for SleepyOracle {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    struct SleepyFactory;
+    impl OracleFactory for SleepyFactory {
+        fn build(
+            self,
+            _resources: &Resources,
+            _cancel: &CancelToken,
+            _errors: &OracleErrorSlot,
+        ) -> Box<dyn EvaluationOracle> {
+            Box::new(SleepyOracle)
+        }
+    }
+
+    /// Train over `backend` and return the warnings logged for the run.
+    fn train_and_collect_warnings(
+        run_id: &str,
+        walltime: Option<std::time::Duration>,
+    ) -> Vec<String> {
+        use crate::test_log::logged_for;
+        let resources = Resources::new(
+            Arc::new(ExpiringBackend(walltime)),
+            Some(Arc::new(EchoPlanner)),
+            Arc::new(RunParams {
+                id: run_id.to_string(),
+                ..config()
+            }),
+        )
+        .unwrap();
+        let scheduler = Scheduler::ephemeral(resources);
+        let flow = TrainFlow {
+            factory: SleepyFactory,
+            method: Method::De(crate::DeConfig {
+                generations: 3,
+                population_size: 6,
+                tolerance: 0.0,
+                patience: 10,
+                strategy: polypus_optimizers::DeStrategy::Rand1Bin,
+            }),
+            dimensions: 2,
+            seed: 7,
+            errors: OracleErrorSlot::new(),
+        };
+        assert!(scheduler.run(flow).is_ok(), "the train flow must run");
+        scheduler.close();
+        logged_for(run_id)
+    }
+
+    /// A backend with a walltime the run cannot meet gets exactly one warning.
+    #[test]
+    fn train_flow_warns_when_the_run_outlives_the_backend_walltime() {
+        let warnings = train_and_collect_warnings(
+            "flow-walltime-exceeded",
+            Some(std::time::Duration::from_nanos(1)),
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("walltime"), "{warnings:?}");
+    }
+
+    /// Without a walltime (native, local, QMIO) the oracle is not watched at all.
+    #[test]
+    fn train_flow_does_not_watch_a_backend_without_walltime() {
+        assert!(train_and_collect_warnings("flow-walltime-none", None).is_empty());
+    }
+}

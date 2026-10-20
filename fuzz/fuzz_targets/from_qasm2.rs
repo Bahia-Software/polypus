@@ -1,14 +1,47 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use polypus_circuit::ParameterizedCircuit;
+use polypus_circuit::{CircuitError, ParameterizedCircuit};
 
 // `ParameterizedCircuit::from_qasm2` parses arbitrary, untrusted OpenQASM 2.0.
 // Whatever the bytes, it must only ever return `Ok(circuit)` or a
 // `CircuitError` — never panic, never overflow the stack (Fase 1.1), and never
 // allocate without bound (Fase 1.2). Arbitrary bytes are decoded lossily so the
 // lexer also sees non-ASCII and replacement characters.
+//
+// Whatever it accepts must also round-trip (contract C-2): the export imports
+// again and exporting that is byte-identical — the export is a fixed point,
+// `gate` declarations and calls of declared gates included. (The source and
+// the export need not be equal text: numbers are re-written in their shortest
+// round-trip form, and declarations nothing uses are not re-emitted.) The only
+// export that may not import again is one longer than the importers' source
+// budget: a register broadcast written out statement by statement can outgrow
+// the program it came from.
+const MAX_SOURCE_BYTES: usize = 32 << 20;
+
 fuzz_target!(|data: &[u8]| {
     let src = String::from_utf8_lossy(data);
-    let _ = ParameterizedCircuit::from_qasm2(&src);
+    let Ok(circuit) = ParameterizedCircuit::from_qasm2(&src) else {
+        return;
+    };
+    let exported = circuit
+        .to_qasm2_with_params(&[])
+        .expect("an imported circuit must export");
+    if exported.len() > MAX_SOURCE_BYTES {
+        assert!(
+            matches!(
+                ParameterizedCircuit::from_qasm2(&exported),
+                Err(CircuitError::Parse { line: 1, .. })
+            ),
+            "an export over the source budget must be rejected for its size"
+        );
+        return;
+    }
+    let reimported =
+        ParameterizedCircuit::from_qasm2(&exported).expect("the export must import again");
+    assert_eq!(
+        reimported.to_qasm2_with_params(&[]).unwrap(),
+        exported,
+        "export is not a fixed point"
+    );
 });

@@ -5,15 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description       = "Pure-Rust particle-physics simulation layer for Polypus: classical Monte Carlo transport and quantum Hamiltonian definitions as Pauli sums. No Python, no external physics framework."
 
 [lib]
 name = "polypus_physics"
 
 [dependencies]
-rand    = { version = "0.8", features = ["std_rng"] }
-ndarray = "0.16"
-serde   = { version = "1.0", features = ["derive"], optional = true }
+rand    = { workspace = true, features = ["std_rng"] }
+ndarray = { workspace = true }
+serde   = { workspace = true, optional = true }
 # Logging *facade* only (no sink): Monte Carlo run diagnostics are emitted
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.

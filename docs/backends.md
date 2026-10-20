@@ -1,0 +1,870 @@
+# Writing a Polypus backend
+
+A **backend** is what actually executes quantum circuits: the local statevector
+simulator, Qiskit Aer, CUNQA, the CESGA QMIO QPU — or *your* hardware. Every
+algorithm in Polypus (circuit runs, VQC/QML training) talks to a backend only
+through one small, stable trait, so adding a new one never touches algorithm code.
+
+This document is the contract for backend authors. It grows one section per
+delivery phase; this first section covers **implementing the trait against the
+`polypus-backend` crate** (the pure-Rust path, and the one third parties should
+target).
+
+> Status: the pyo3-free `polypus-backend` crate exists as of the backend-extraction
+> work (issue #191). The runtime **registry** (use a backend by name without editing
+> Polypus) and the **subprocess bridge** for Python SDKs landed next (issue #194) and
+> have their own sections below: [Registering a backend from Rust](#registering-a-backend-from-rust)
+> and [The Python subprocess bridge](#the-python-subprocess-bridge). Finally, two
+> copy-me [reference templates](#reference-templates) and a
+> [conformance battery](#testing-your-backend-the-conformance-battery) (issue #199) let
+> you write a backend and verify it against this contract.
+
+## The one crate you depend on: `polypus-backend`
+
+`polypus-backend` is deliberately tiny and **carries no PyO3, no Qiskit and no
+Python runtime**. Its whole dependency tree is `polypus-circuit` (the native
+circuit IR) and `polypus-observable` (the cost-observable seam). That is the
+point: you can write and ship a Polypus backend without pulling the interpreter or
+any of Polypus's execution machinery into your build.
+
+```toml
+[dependencies]
+polypus-backend = "0.8"   # inherits the Polypus workspace version
+polypus-circuit = "0.8"   # only if you construct native circuits yourself
+```
+
+Everything you implement or name lives in this crate:
+
+| Item | Role |
+|------|------|
+| `QuantumBackend` | the trait you implement |
+| `BoundCircuit` | a fully bound circuit you receive (`Native`, `Qasm2`, `Foreign`) |
+| `RunParams` | the per-call parameters (`id`, `shots`, `seed`, `opt_level`) |
+| `Counts` | `HashMap<String, u64>` — one bitstring→count map per circuit |
+| `BackendError` | how you report failure |
+| `BackendCapabilities` | what a `Planner` may assume about you |
+| `Transpiler` / `OptLevel` / `TranspileOptions` | optional GIL-free circuit rewriting |
+| `Planner`, `SequentialPlanner`, `ShotDistributingPlanner` | how batches are run over you |
+
+## The trait
+
+```rust
+pub trait QuantumBackend: Send + Sync {
+    fn run_circuits(
+        &self,
+        qcs: &[BoundCircuit],
+        params: &RunParams,
+    ) -> Result<Vec<HashMap<String, u64>>, BackendError>;
+
+    // Everything below has a default — override only what you need.
+    fn run_shots_distributed(&self, qc: &BoundCircuit, shot_batches: &[u32], params: &RunParams)
+        -> Result<Vec<HashMap<String, u64>>, BackendError> { /* replicate + forward */ }
+    fn close(&self) {}
+    fn cancel(&self) {}
+    fn capabilities(&self) -> BackendCapabilities { /* unbounded, shot-dist supported */ }
+    fn capabilities_for(&self, tasks: &[CircuitTask<'_>])
+        -> Result<BackendCapabilities, InfrastructureError> { /* = capabilities() */ }
+    fn default_planner(&self) -> Arc<dyn Planner> { /* SequentialPlanner */ }
+}
+```
+
+**The only method you must write is `run_circuits`.** It receives a slice of bound
+circuits and the per-call `RunParams`, and returns one measurement-count map per
+circuit, in the same order. That is enough to be usable by every algorithm.
+
+A complete, dependency-free example lives in
+[`crates/polypus-backend/tests/third_party_backend.rs`](../crates/polypus-backend/tests/third_party_backend.rs);
+it implements `run_circuits` in a dozen lines and drives it through the shipped
+planners.
+
+### Circuits you receive: `BoundCircuit`
+
+```rust
+pub enum BoundCircuit {
+    Native(ConcreteCircuit),          // polypus-circuit's native IR — no GIL
+    Qasm2(String),                    // an OpenQASM 2.0 program
+    Foreign(Box<dyn ForeignCircuit>), // an opaque provider-native object
+}
+```
+
+- **`Native`** and **`Qasm2`** are the provider-agnostic representations. A
+  pure-Rust backend consumes these directly — `ConcreteCircuit` exposes the gates,
+  and `Qasm2` is text you can parse or forward. Both are GIL-free.
+- **`Foreign`** is an escape hatch for a provider-native object (Polypus uses it to
+  carry a Qiskit `QuantumCircuit` to Aer/CUNQA without `polypus-backend` ever
+  knowing what Qiskit is). If you don't ship such objects, you never produce a
+  `Foreign`; if you receive one you don't recognise, reject it with
+  `BackendError::UnsupportedCircuit`. `BoundCircuit::native_qubit_width()` reads a
+  circuit's width GIL-free for `Native`/`Qasm2` and returns `None` for `Foreign`.
+
+### Parameters you read: `RunParams`
+
+```rust
+pub struct RunParams { pub id: String, pub shots: u32, pub seed: Option<u64>, pub opt_level: OptLevel }
+```
+
+These are the *only* fields any backend reads per call. Provider-specific
+construction inputs (a noise model, a node count) belong in your own constructor,
+not here — this keeps the per-call surface minimal and pyo3-free. `seed` is
+`Some` whenever a seed-consuming backend runs (contract C-7); honour it if you
+sample shots yourself, and fall back to your own default on `None`.
+
+### Reporting failure: `BackendError`
+
+Never panic across the boundary — return a `BackendError`:
+
+- `UnsupportedCircuit(String)` — a representation you cannot run.
+- `InvalidResults(String)` — your own results violated the contract (the shipped
+  `validate_run_results` checks this for you: one non-empty map per circuit, counts
+  summing to the requested shots, bitstring keys).
+- `NativeCircuit(String)` / `Conversion(String)` — a parse/build/convert failure.
+- `Unresponsive(String)` — **your backend stopped responding mid-call** (crashed,
+  was killed, or hung past a deadline). Distinct from a clean error so a caller may
+  choose to retry with a fresh worker. This is the variant a subprocess/remote
+  backend maps a dead or wedged worker to.
+- `Aborted(String)` — **your call was aborted by an external signal** (a terminal
+  Ctrl+C, say) and should be treated as a *cancellation*. If your backend can detect
+  that its in-flight call was interrupted, return this and you get the same
+  consistent classification as Polypus's own backends: the FFI edge raises
+  `KeyboardInterrupt`, exactly like a between-wave cooperative cancel. Distinct from
+  `Unresponsive` (a failure) — this is the expected end of an interrupted run.
+- `InsufficientMemory(InsufficientMemory)` — **a statevector you would allocate
+  does not fit in the memory budget** (issue #215). Return it *before* starting,
+  so the caller gets `polypus.InsufficientMemoryError` instead of an OOM-killed
+  process: `polypus_backend::check_statevector_fits(num_qubits)?` does the check
+  against the same budget the built-in backends use (`POLYPUS_MEM_BUDGET`, else the
+  detected RAM/cgroup limit minus a reserve) and never refuses when no limit could
+  be detected; `mem_budget::check_fits(n, budget)` takes the budget explicitly.
+  Only meaningful for a dense `16 · 2^n`-byte simulation. *New in 0.8.0 — a
+  breaking addition for exhaustive matches; see
+  [Stability commitment](#stability-commitment).*
+- `External(Box<dyn Error + Send + Sync>)` — **your own error type, type-erased.**
+  This is how a provider error crosses the contract without `polypus-backend` naming
+  it. Box whatever `std::error::Error + Send + Sync` you like; the Polypus FFI edge
+  recovers it (Polypus's own Python backends box a Python exception here as a
+  `polypus_infrastructure::DisplaySafePyErr` — via `seam_error` — and the edge
+  re-raises the original verbatim, except an exception raised by Qiskit, which
+  becomes a `polypus.BackendError` chaining the original as `__cause__`; contract
+  C-1, issue #218). Box a Python exception only as `DisplaySafePyErr`, never as a
+  bare `PyErr`: the box may be formatted while the thread is detached, where a
+  bare `PyErr` can panic at interpreter shutdown, and the edge does not recover a
+  bare one (it becomes a plain `polypus.BackendError`). A Rust host embedding
+  Polypus downcasts it back to your type.
+
+### Capabilities and wave sizing
+
+A `Planner` runs your circuits in *waves* and asks `capabilities()` how many it may
+run concurrently (`usize::MAX` = the whole batch at once; CUNQA reports `n_qpus`;
+QMIO reports `1`). Override `capabilities()` only if you have a real cap. If your
+cap depends on the *specific batch* (e.g. a statevector memory budget scaled by the
+widest circuit), override `capabilities_for` instead and leave `capabilities()`
+alone — it is a frozen seam paired against planners up front.
+
+The built-in native and local backends do exactly that with
+`max_statevector_concurrency(widest_qubits, threads)` / `wave_concurrency`, which
+read the **active memory budget**: `POLYPUS_MEM_BUDGET` when valid (a byte count
+with an optional base-1024 `K`/`M`/`G`/`T` suffix — `32G`, `512M`), else the
+detected `MemAvailable`/cgroup limit minus a reserve, else a 16 GiB fallback
+(`mem_budget::active_budget()` reports the value and its `BudgetSource`). The cap
+throttles only; refusing a statevector that cannot fit even alone is
+`check_statevector_fits` (see `InsufficientMemory` above). Who refuses what, among
+the built-in backends: native, `polypus.statevector` and Aer with
+`sim_method="statevector"` refuse in Rust on the `16 · 2^n` model; Aer with any
+other method receives the known budget as `max_memory_mb` and refuses by itself
+for the method it picks (raised as the same `polypus.InsufficientMemoryError`);
+nothing is refused against the fallback. A backend whose memory is not a dense
+statevector should likewise defer to its own validation rather than call
+`check_statevector_fits`.
+
+### Allocation walltime
+
+A backend whose execution units expire overrides `walltime()` to return how long
+they live. CUNQA returns the `walltime` its QPUs were raised with (`HH:MM:SS`,
+default `10:00:00`); SLURM releases them when it runs out, even mid-run. Every other
+built-in backend keeps the default `None`.
+
+When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
+times the first generation (the initial population for DE and PSO, the first
+iteration for QNG), multiplies it by the generation budget and logs one `warn` if
+the projection exceeds the walltime:
+
+```text
+run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
+may take up to 3:22:00, beyond the 3:00:00 walltime; the QPUs are released when it
+runs out. Raise `walltime` or lower the generations.
+```
+
+The projection is an upper bound, since early stopping only shortens a run. Nothing
+is enforced, and backends that return `None` are not timed at all.
+
+### Cancellation
+
+Three things interact, by design:
+
+1. **Between waves (cooperative).** A wave (one `run_circuits` call) is *atomic*.
+   The `Planner` checks a `CancelToken` and runs a host-interrupt guard *between*
+   waves, so a Ctrl+C or a cooperative cancel takes effect at the next wave
+   boundary. You get this for free.
+2. **A call aborted by a signal → `BackendError::Aborted`.** If your backend can
+   tell that its in-flight call was interrupted by an external signal — the clearest
+   case is a subprocess worker that catches a terminal Ctrl+C delivered to the
+   process group and stops — return
+   [`BackendError::Aborted(msg)`](#reporting-failure-backenderror). It is classified
+   as a *cancellation whatever its source*: the FFI edge raises `KeyboardInterrupt`
+   from it, exactly as it does for a between-wave cooperative cancel. This is what
+   makes an interrupt observed *inside* a blocked call surface to Python identically
+   to one observed between waves.
+3. **Programmatic abort of a blocked call — `fn cancel(&self)`.** If a single
+   `run_circuits` call can block for a long time on an external resource (a
+   subprocess worker parked in `recv()`, a cloud session), override `fn cancel(&self)`
+   *and* `fn wants_cancel_watcher(&self) -> bool { true }`. `cancel` is invoked **from
+   another thread** while your call is blocked, and should signal that resource so the
+   blocked call unblocks and returns (typically `Aborted`). Polling a token from
+   inside the blocked call cannot work — the thread never reaches a poll point — which
+   is why this is a separate, asynchronous hook. Both default to no-op/`false`, so the
+   four built-in backends spawn no watcher thread and are unchanged.
+
+   > **What triggers `cancel()` today.** The watcher lives in
+   > `Scheduler::run_cancellable` and fires when the run's `CancelToken` is
+   > **explicitly cancelled** — i.e. someone holding the token calls `.cancel()` from
+   > another thread. That is a **programmatic** path, available to a Rust embedder.
+   > **Polypus does not currently expose a cancellation handle from Python**, so a
+   > `pip install polypus` user cannot trigger this path; it is groundwork for a
+   > future Python cancel API, not a user-facing feature of this phase.
+   >
+   > The watcher deliberately does **not** try to detect a raw Ctrl+C itself: the
+   > host-interrupt guard is CPython's `PyErr_CheckSignals`, which is a guaranteed
+   > no-op on any non-main thread, and the watcher runs on a spawned thread. A
+   > terminal Ctrl+C instead reaches a subprocess backend directly through the OS
+   > process group (mechanism 2 above) and comes back as `Aborted` →
+   > `KeyboardInterrupt`.
+
+## Registering a backend from Rust
+
+Implementing `QuantumBackend` makes your backend *usable*; the **runtime registry**
+makes Polypus able to build it **by name**, so a backend that lives entirely outside
+this repository can be selected exactly like a built-in — without editing any
+`match` in Polypus.
+
+This is the story for a **Rust embedder**: someone who compiles their own binary
+that links Polypus. You register your backend once at startup:
+
+```rust
+use std::sync::Arc;
+use polypus_backend::{register_backend, BackendBuildContext, BackendError, QuantumBackend};
+
+// Your backend implements QuantumBackend (see above).
+register_backend("acme-qpu", |ctx: &BackendBuildContext| {
+    let endpoint = ctx.option_str("endpoint")?.unwrap_or("tcp://localhost:9000");
+    Ok(Arc::new(AcmeBackend::connect(endpoint)?) as Arc<dyn QuantumBackend>)
+});
+```
+
+After that, any name-driven construction path builds it — including Polypus's own
+`Infrastructure::create_backend`, which routes a name it does not recognise to the
+registry. From Python that means `infrastructure="acme-qpu"` (see the `options`
+kwarg below) just works.
+
+**What the factory receives.** A `BackendBuildContext` carries the pyo3-free,
+provider-agnostic construction inputs — `id`, `shots`, `n_qpus`, `seed`,
+`opt_level` — plus an `options: HashMap<String, OptionValue>` bag for whatever
+provider-specific configuration you need (an endpoint, credentials env names, a
+device id, an argv). Each value is an `OptionValue`: `Str(String)` or
+`List(Vec<String>)`. Strings and string lists keep the registry free of any
+provider-type coupling; read what you need and ignore the rest:
+
+- `ctx.option_str("key")?` → `Option<&str>`
+- `ctx.option_list("key")?` → `Option<&[String]>`
+
+Both return `Ok(None)` **only** for an absent key — the one case to fall back to
+your default. A value of the other shape (a list where you read a string, or the
+reverse) is a `BackendError::Conversion` naming the key; propagate it with `?`
+rather than defaulting, so a configuration mistake surfaces as
+`polypus.BackendError` instead of being silently ignored. An unknown name yields
+`BackendError::UnknownInfrastructure` (a clean `ValueError` at the FFI edge), never a
+panic or a silent fallthrough.
+
+> **Migrating from `option()` (breaking change since v0.7.2).** `BackendBuildContext::option` is
+> gone and `options` is now `HashMap<String, OptionValue>`
+> ([ADR 0005](adr/0005-registry-option-values.md)). Replace
+> `ctx.option("k")` with `ctx.option_str("k")?` (the factory already returns a
+> `Result`), and wrap values when building a context or a
+> `BackendConfig::Registered` by hand: `OptionValue::from("…")`,
+> `OptionValue::from(vec![…])`. Python callers passing string values need no
+> change.
+
+**Last registration wins.** Re-registering a name replaces the previous factory, so
+an embedder can deliberately override a built-in (e.g. swap Polypus's `"subprocess"`
+bridge for their own).
+
+> **This avoids editing our repository, but not recompiling *yours*.** Rust has no
+> runtime plugin loading here: your backend is compiled into your binary. The
+> registry removes the need to add a `match` arm to Polypus; it does not remove the
+> `cargo build` of the binary that embeds it. That is the deliberate scope of the
+> Rust story.
+
+### Why an explicit call (and not `inventory`/`linkme`)
+
+We chose an explicit `register_backend(...)` call over link-time static collection
+(the `inventory` / `linkme` crates, where a backend self-registers via a `static`
+that a collector gathers with no explicit call). The trade-offs we weighed:
+
+| | Explicit `register_backend` (chosen) | `inventory`/`linkme` |
+|---|---|---|
+| Startup wiring | one call before use (an ordering requirement) | none — linking is enough |
+| Failure mode | a missed call → clear `UnknownInfrastructure` | a static stripped by `--gc-sections`/LTO → "compiles but not found", hard to debug |
+| Magic / portability | none; plain Rust, all platforms | linker-section machinery, platform quirks, an extra dependency |
+| `#[cfg(feature)]` backends | composes cleanly | interacts awkwardly |
+
+For "I compile my own binary", an explicit call in `main`/setup is idiomatic and has
+no surprising failure modes, so it was the better default. (If you *want*
+auto-registration, you can still layer `inventory` on top in your own crate and have
+its collected entries call `register_backend` — Polypus does not need to know.)
+
+## The Python subprocess bridge
+
+The registry's Rust story needs a Rust backend. The **majority case is Python**: a
+provider ships a Python SDK, and the user did `pip install polypus`. The
+`polypus-subprocess-backend` crate is the answer — a built-in backend, registered
+under the name **`"subprocess"`**, that runs the provider's SDK **in its own
+subprocess** and talks to it over a small, versioned protocol. The interpreter runs
+in the child, never embedded in ours: the bridge crate is **pyo3-free** (enforced in
+CI). Use it when a provider only offers a Python SDK with no documented wire
+protocol; if the provider *does* expose a documented network protocol, a pure-Rust
+backend against that protocol (like QMIO) is preferable.
+
+### Using it from Python
+
+```python
+import polypus
+
+polypus.run_quantum_circuit(
+    qc,
+    shots=1024,
+    infrastructure="subprocess",
+    options={
+        # Required: the worker command. A list of strings is the exact argv -- the
+        # form that can carry a space inside an argument; a plain string is split
+        # on whitespace (no quotes, no escapes).
+        "command": ["python3", "/path/to/my worker.py"],
+        # Optional:
+        "recv_timeout_ms": "600000",  # read timeout; default 300000 (5 min)
+        "max_frame_bytes": "134217728",  # largest reply frame; default 67108864 (64 MiB)
+        "arm_pdeathsig": "true",  # orphan guard (Linux); default true
+        "cwd": "/path/to/workdir",  # worker working directory
+    },
+)
+```
+
+The `options` dict is the same one every entry point (`run_quantum_circuit`,
+`train`, `qml.train`) now accepts, and is how any registered backend receives its
+configuration. Each value is a `str` or a `list`/`tuple` of `str`; anything else
+(`int`, `bool`, `float`, `None`, a `dict`, a list holding a non-`str`) is a
+`TypeError` naming the key, e.g. `options['recv_timeout_ms'] must be a str or a
+list of str, got int` — pass numbers as strings. `local` and `cunqa` take no
+`options` and reject a non-empty dict with `ValueError`.
+
+**The `command` option has two forms:**
+
+- **List of strings** — the exact argv, e.g.
+  `["python3", "/path with spaces/worker.py"]` (a tuple works too). Use this
+  whenever the interpreter or any argument contains whitespace. An empty list or an
+  empty `argv[0]` is rejected with a `BackendError`.
+- **Plain string** — split on whitespace into argv. There is **no quote or escape
+  handling**: `python3 "a b.py"` yields the arguments `"a` and `b.py"`. Fine for
+  simple paths; switch to the list form for anything else.
+
+Every other subprocess option is a string; a list there is a `BackendError`.
+
+> **Migration note.** Between v0.7.2 and this change, `main` briefly accepted the
+> argv as a JSON array *inside the string* (`json.dumps([...])`). That form was
+> never released and is gone: a string starting with `[` is now split on whitespace
+> like any other. Pass the list itself instead
+> ([ADR 0005](adr/0005-registry-option-values.md)).
+
+### Writing the worker
+
+Copy [`crates/polypus-subprocess-backend/python/worker_template.py`](../crates/polypus-subprocess-backend/python/worker_template.py)
+and replace one function, `execute_circuits(circuits, shots, seed)`, with a call
+into your SDK. Everything else — the framing, the handshake, the SIGINT-driven abort
+— is the stable contract and should be left as-is.
+
+**Protocol, version 1.** Each message is one frame:
+
+```text
+frame = u32 little-endian length  ||  UTF-8 JSON payload
+```
+
+stdout carries protocol frames **only** (log to stderr — mixing corrupts the
+stream; see [Polluted stdout](#polluted-stdout-and-the-frame-size-cap)). On spawn the
+bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"ready","protocol":1}`; a version mismatch is refused. Then, per run:
+
+| direction | frame |
+|---|---|
+| bridge → worker | `{"op":"run","id","circuits":[{"qasm","n_qubits"},…],"shots","seed"?}` |
+| worker → bridge | `{"op":"result","id","counts":[{bitstring:count,…},…]}` |
+| worker → bridge | `{"op":"aborted","id","reason"}` — an in-flight run was cancelled |
+| worker → bridge | `{"op":"error","id","message"}` — a clean, in-band failure |
+| bridge → worker | `{"op":"shutdown"}` |
+
+Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
+cross a process boundary and is rejected before it reaches the worker). Return one
+counts map per circuit, in order.
+
+### Polluted stdout and the frame-size cap
+
+The bridge reads the 4-byte length off the worker's stdout before it reads the
+payload, so it must not trust it blindly. Many SDKs print a banner when imported;
+those bytes are read as a length (`"Hell"` is 1,819,043,144 bytes). Two checks run
+on every header, before any buffer is allocated:
+
+- **Text header.** A header made only of printable ASCII (plus tab, CR, LF) is
+  refused as non-protocol output. An honest frame cannot look like that: below
+  16 MiB the top byte of the length is zero. The error quotes
+  the bytes and says the worker, or a library it imports, is writing to stdout:
+
+  ```text
+  subprocess bridge protocol error: the worker's stdout does not carry a protocol
+  frame: its first 4 bytes read as the text "Hell". The worker, or a library it
+  imports, is writing non-protocol output (a banner, a print()) to stdout; ...
+  ```
+
+- **Size cap.** A frame longer than `max_frame_bytes` (option `max_frame_bytes`,
+  default 64 MiB, a positive integer in bytes) is refused with an error naming the
+  limit. A counts payload is far below the default; raise it only for a worker that
+  really returns more.
+
+Either way the call fails at once with a `polypus.BackendError` (a protocol error,
+not the `Unresponsive` timeout), the worker is killed, and a later call fails fast.
+The fix on the worker side is to keep stdout for frames: send logs and prints to
+stderr, and make sure the SDK does not print to stdout on import.
+
+### Liveness: how a hung worker is detected
+
+Every read is bounded by `recv_timeout` (option `recv_timeout_ms`, default 5 min). A
+worker that is *dead* is detected immediately as EOF; a worker that is *alive but
+wedged* — a deadlocked SDK, a mute QPU that never replies — trips the timeout. **Both
+map to `BackendError::Unresponsive`** (a `polypus.BackendError` at the edge), never
+an infinite block.
+
+> **Sizing the timeout.** It is a single knob serving two ends: it must exceed the
+> longest a legitimate call can take, yet a genuine hang is only detected once it
+> elapses. Set it from your workload — a fast simulator can use seconds; a real QPU
+> queue may need many minutes. (We deliberately chose a plain read timeout over a
+> heartbeat: for an opaque SDK call, a worker-side heartbeat thread keeps beating
+> even while the SDK blocks on a mute QPU, so it would *not* detect that failure,
+> whereas the timeout does.)
+
+### Orphans, and the `PR_SET_PDEATHSIG` caveat
+
+The worker is spawned with `PR_SET_PDEATHSIG` armed, so the kernel kills it if the
+Rust process dies — no orphaned workers. **This is Linux-only** (`prctl(2)`). It is
+sufficient for CESGA (all Linux).
+
+**The signal is bound to a thread, not to the process.** `prctl(2)` delivers
+`PR_SET_PDEATHSIG` when the *thread that created the child* terminates, not when the
+whole process does. Forking the worker from whichever thread called the constructor
+would therefore kill a healthy worker the moment that thread ended — a thread-pool
+task or a Python `threading.Thread` that builds the backend and returns. The bridge
+avoids this by forking the worker from its own dedicated, long-lived thread
+(`polypus-subprocess-spawner`), which stays parked for as long as the backend lives
+and is released when the backend is dropped (after the worker has been killed and
+reaped). You can therefore build a backend from any thread, however short-lived.
+
+**Parent already dead.** The kernel only arms the signal from the moment of the
+`prctl` call; if the parent died just before it, the child has been reparented and
+nothing will ever fire. After arming, the child therefore compares `getppid()` with
+the pid it expects (the Rust process) and exits before `exec` instead of running as
+an unguarded orphan. Because the worker is forked from the spawner thread — which
+cannot end while it is inside the spawn — this race only occurs if the *whole
+process* dies during the spawn, and then there is no parent left to see anything. If
+a parent that is still alive does observe a mismatch, the spawn fails with an
+explicit error ("the parent process changed before PR_SET_PDEATHSIG was armed;
+worker not launched"); that is the secondary, diagnostic effect, not the main one.
+
+On a non-Linux host the guard is simply not in effect; the portable fallback is the
+bridge's own teardown — `close()` and the `Worker`'s `Drop` kill and reap the child —
+which covers a clean exit but not a hard crash of the parent. If you run this off
+Linux and need crash-proof orphan cleanup, wrap the run in your platform's
+job-object / process-group equivalent.
+
+### Running under SLURM
+
+The worker is an **ordinary child process inside your job step**: it shares the
+job's cgroup, so it shares the step's `--mem` and CPU allocation with the Rust
+process. There is no separate reservation. Therefore:
+
+- **Request resources for both.** Size `--mem` and `--cpus-per-task` to cover the
+  Rust process *and* the worker's SDK (Qiskit/CUDA/etc. can be memory-hungry). A
+  worker OOM-killed by the cgroup surfaces as `Unresponsive` (EOF), so under-sizing
+  looks like a flaky backend.
+- **Always pass them explicitly.** Submit with explicit `--cpus-per-task` and
+  `--mem`; do not rely on defaults. When the job ends, `proctrack/cgroup` reaps the
+  worker with the step, so no orphan leaks even without the `PR_SET_PDEATHSIG` guard.
+
+### IPC overhead
+
+The Fase-2 spike measured the round trip at ~15 µs with a *minimal* payload. This
+phase measured a deliberately **large, realistic** payload —
+`cargo run -p polypus-subprocess-backend --release --bin payload_overhead` — with
+100 circuits × 1024 distinct bitstrings × 100 000 shots (≈102 400 count entries,
+≈3.2 MiB decoded): **p50 ≈ 42 ms** end-to-end (dominated by the Python worker
+building and serialising the dict, not the Rust framing). That is well under a real
+QPU's hundreds-of-ms-to-seconds latency, and realistic counts (sparse, far fewer
+distinct bitstrings) are far smaller. JSON framing is not the bottleneck.
+
+### Cancellation
+
+Two paths reach the worker, and both end the run as `KeyboardInterrupt`:
+
+- **Terminal Ctrl+C (the everyday case).** A SIGINT from the terminal is delivered
+  to the whole foreground **process group**, so it reaches the worker directly,
+  independently of any `CancelToken`. The worker's handler aborts the in-flight run
+  and replies `aborted`; the bridge maps that to `BackendError::Aborted`, which the
+  FFI edge raises as `KeyboardInterrupt`. This works for a `pip install polypus`
+  user today.
+- **Programmatic cancel (Rust embedder / future work).** `SubprocessBackend` sets
+  `wants_cancel_watcher() == true`, so a cancellable run spawns the planner watcher
+  (see [Cancellation](#cancellation) above). If someone holding the run's
+  `CancelToken` calls `.cancel()` from another thread, the watcher calls `cancel()`,
+  which sends the worker `SIGINT` via `nix::sys::signal::kill` (no `unsafe`); the
+  worker aborts, replies `aborted`, and stays alive and reusable, and the run ends as
+  `Cancelled` (→ `KeyboardInterrupt`). **Polypus does not yet expose a cancellation
+  handle from Python**, so this path is only reachable from Rust today.
+
+## Reference templates
+
+Two copy-me starting points ship in `examples/`, each a **standalone crate outside
+the workspace** (their own `[workspace]`), so they depend on `polypus-backend` exactly
+as your crate would. Both are certified by the conformance battery (below).
+
+- **[`examples/rust-backend-template`](../examples/rust-backend-template)** — the
+  *native / wire-protocol* path (option D, the one QMIO uses). One `src/lib.rs` of
+  ~150 lines, pyo3-free: it serialises each circuit, calls one `transport` function
+  (the single thing you replace with your device's protocol), classifies failures,
+  self-checks the results, and registers itself. Run its battery with
+  `cd examples/rust-backend-template && cargo test`.
+- **[`examples/python-backend-template`](../examples/python-backend-template)** — the
+  *subprocess bridge* path, for a provider that only ships a Python SDK. Its
+  [`worker.py`](../examples/python-backend-template/worker.py) is
+  `worker_template.py` with the one `execute_circuits` function filled in; the framing
+  and handshake are copied verbatim (they are the frozen protocol). Run its battery —
+  which spawns the worker through the real bridge — with
+  `cd examples/python-backend-template && cargo test` (needs a `python3`).
+
+## Testing your backend: the conformance battery
+
+`polypus-backend-conformance` is a reusable test battery that certifies a
+`QuantumBackend` against the semantics documented above. It depends only on
+`polypus-backend` (and `polypus-circuit`, to build its probe circuits), so it is as
+pyo3-free as the contract — add it as a dev-dependency and nothing else:
+
+```toml
+[dev-dependencies]
+polypus-backend-conformance = "0.8"
+```
+
+```rust
+use std::sync::Arc;
+use polypus_backend::QuantumBackend;
+use polypus_backend_conformance::{Conformance, Fault};
+
+let report = Conformance::new("my-backend", || Ok(Arc::new(MyBackend::new()) as Arc<dyn QuantumBackend>))
+    .shots(1024)
+    // Supply a factory for each fault your backend can be driven into:
+    .fault(Fault::Unresponsive, || Ok(Arc::new(MyBackend::rigged_dead()) as _))
+    .fault(Fault::CleanError,   || Ok(Arc::new(MyBackend::rigged_error()) as _))
+    .fault(Fault::Aborted,      || Ok(Arc::new(MyBackend::rigged_slow()) as _))
+    .run();
+
+println!("{report}");
+report.assert_conformant(); // panics with the full report if any check FAILED
+```
+
+### What it checks
+
+**Behaviour** (needs only a healthy backend): results satisfy
+[`validate_run_results`](#reporting-failure-backenderror) over both the native and
+OpenQASM 2.0 representations (count, non-empty, shot conservation C-3, bitstring
+keys); batch order is preserved; an empty batch returns no maps; a batch larger than
+`max_concurrency` runs correctly in waves; shot distribution conserves the total,
+including a zero-shot replica; a backend declaring a *finite* `max_concurrency` runs a
+full wave of that size.
+
+**Error classification** (needs the backend driven into each fault): an unrecognised
+`Foreign` circuit → `UnsupportedCircuit`; a dead/hung backend → `Unresponsive`; an
+out-of-band cancelled call → `Aborted`; a clean provider failure → a definitive error
+(neither `Unresponsive` nor `Aborted`).
+
+### Skips are honest, not passes
+
+The battery cannot force a live QPU to hang, so each error-classification check runs
+**only** against a backend *you* rig into that state via `.fault(...)`. A fault you do
+not supply is **skipped, not passed**, and the report says so. A skip does not break
+conformance (`assert_conformant` only fails on a `FAIL`): a backend that genuinely
+cannot enter a fault — a synchronous in-process simulator cannot "stop responding" —
+should show that check skipped, never fake a pass. So "passes the battery" always
+comes with an exact statement of what was and was not exercised.
+
+### A backend whose healthy instance needs hardware
+
+If your backend has no simulator mode (like QMIO), its behavioural checks cannot run
+without a device, but its error classification still can — against a mock or
+unreachable endpoint. Use `Conformance::run_error_classification()`, which runs only
+the foreign-rejection and fault checks and skips the behavioural group.
+
+## Conformance of the built-in backends
+
+We ran the battery against Polypus's own four backends
+([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs)),
+so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
+**every failure is documented here before any fix**. The behavioural checks pass for
+every runnable backend; the interesting results are all in error classification, and
+they trace exactly the **recoverable-vs-fatal** split between the Rust-native backends
+(which fail *in Rust* with a typed variant) and the seal-delegating backends (which
+have no failure variants of their own).
+
+> **These results are a one-off manual run, not a continuous CI guard.** Only the
+> pure-Rust `native_backend_conforms` test runs on every build; the Local, CUNQA and
+> QMIO tests are `#[ignore]`d (they need Aer / SLURM / the qmio feature, and Aer is
+> fragile off the main thread). The table below is the record of running them by hand
+> for this phase — re-run them (commands are on each test) when touching a backend;
+> do not read them as verified on each build.
+
+| Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
+|---|---|---|---|---|---|---|
+| **Native** | full battery | ✅ pass | n/a (skip) | n/a (skip) | n/a (skip) | ✅ pass |
+| **Local (Aer)** | full battery (Aer present) | ✅ pass | n/a (skip) | n/a (skip) | ✅ `External` | ✅ pass |
+| **CUNQA** | env-gated (needs SLURM) | not run here | n/a | n/a | (as Local) | (as Local) |
+| **QMIO** | error-classification only (unreachable endpoint) | needs hardware | n/a (see below) | n/a | ✅ `External` | ✅ `UnsupportedCircuit` |
+
+### Native — fully conformant
+
+The pure-Rust statevector backend passes every behavioural check and rejects a
+`Foreign` circuit with `UnsupportedCircuit`. It has **no** `Unresponsive`, `Aborted`,
+or clean-provider-error path: a synchronous CPU simulation cannot stop responding, be
+signalled mid-call, or report a provider failure on a valid circuit. Those three
+classification checks are therefore **skipped** (not applicable), and nothing fails.
+This is the shape a self-contained in-process backend should have.
+
+### Local (Aer) and CUNQA — seal-delegating
+
+Both hand the whole call to the in-process `polypus_python` seal (contract C-1). Two
+consequences the battery makes concrete:
+
+- **No `Unresponsive`/`Aborted` path.** Unlike a subprocess or wire backend, these run
+  the provider *inside our own process*. A dead interpreter is not a recoverable
+  "backend stopped responding" — it is a crash of the host process — and there is no
+  in-flight call to signal, so neither variant is reachable. The battery skips both.
+  This is the recoverable-vs-fatal distinction the phase set out to surface: a
+  crash/hang is *retryable* only when the backend is isolated (subprocess/wire); an
+  in-process seal cannot offer that, by construction.
+- **Clean provider error → `External`.** An Aer failure (the battery rigs one with a
+  bogus `sim_method`) surfaces as a Python exception, boxed into `External`. This
+  check passes. At the FFI edge a Qiskit/Aer exception is raised as
+  `polypus.BackendError` with the original as `__cause__`, and any other exception
+  verbatim (contract C-1; before issue #218 Qiskit's escaped the `polypus` hierarchy).
+
+Findings (LOCAL-1, LOCAL-2 and QMIO-1 are fixed):
+
+- **LOCAL-1 — an empty batch raised (fixed).** `LocalBackend::run_circuits(&[])` used
+  to fail with `ValueError: not enough values to unpack (expected 2, got 0)` from the
+  seal. `LocalBackend` and `CunqaBackend` now short-circuit an empty batch to
+  `Ok(vec![])`, as the native backend does (issue #229).
+- **LOCAL-2 — unread `run_qcs` kwargs (a C-1 contract violation; fixed).**
+  `LocalBackend` sent `backend` and `id` to the seal's `run_qcs`, and `CunqaBackend`
+  sent `backend`, but neither seal read them (the local one hard-codes
+  `AerSimulator`). Contract C-1 states that every kwarg the Rust side sends **must be
+  consumed** — the same class of break as the historical `cores_per_qpu` one. Rust no
+  longer sends the three, and `LocalBackend`, `CunqaBackend` and their
+  `BackendConfig` variants lost the `backend` field (issue #230).
+  `tests/python/test_seam_contract.py` now checks that each seal reads every kwarg
+  Rust sends.
+
+CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
+row is by analysis: it shares the seal-delegation profile above.
+
+**Circuits without measurements (issue #218, fixed for Local).** Aer returns no counts
+for a circuit with no `measure` instruction, so the Local backend used to fail with
+`QiskitError: No counts for experiment` where the native backend returned the
+full-register read-out contract C-3 specifies. The seal now adds that read-out itself
+(on a copy, into a register of its own), so both backends return the same
+`num_qubits`-wide keys whatever classical registers the circuit declares. The CUNQA
+path is **not verified**: whether CUNQA's QPUs return counts for such a circuit, and in
+which key format, cannot be checked without a CUNQA install, so it forwards the circuit
+unchanged.
+
+### Which built-in backend can run a circuit: `polypus.backend_compatibility`
+
+The native backend runs terminal-measurement circuits only (contract C-4,
+[ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
+mid-circuit measurement, `if`), and only Aer runs a Qiskit `QuantumCircuit`. Aer does
+not unroll instructions outside its basis (`ch`, `u0`, `rccx`, declared gates, …), but
+the local backend lowers them with `qiskit.transpile` before running, so they are
+not a reason to prefer one backend. `polypus.backend_compatibility`
+reports what each backend rejects before a run, for a `polypus.Circuit`, an OpenQASM
+2.0 string or a Qiskit `QuantumCircuit`:
+
+```python
+import polypus
+
+qasm = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[1];
+creg c[1];
+x q[0];
+reset q[0];
+measure q[0] -> c[0];
+"""
+report = polypus.backend_compatibility(qasm)
+# {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+backend = "polypus" if not report["polypus"] else "aer"
+result = polypus.run_quantum_circuit(
+    qasm, shots=1000, infrastructure="local", backend=backend
+)
+```
+
+Each value lists the reasons that backend would reject the circuit; an empty list
+means it accepts it. The native entry is decided by the backend's own first step
+(`NativeStatevectorBackend::check_circuit`: the OpenQASM importer, or the Qiskit-circuit
+guard) and quotes the message a run would raise; for a Qiskit circuit it also lists the
+dynamic features found in it. The Aer entry parses with the parser the Aer path uses (a
+parse failure is its reason; so is Qiskit Aer not being installed) and rejects no
+instruction, because the local backend lowers what is outside Aer's basis before
+running it. For a Qiskit `QuantumCircuit` it follows that lowering step: a circuit whose
+instructions are all in the default `AerSimulator()`'s basis is accepted untouched, and
+one with an instruction outside it (control-flow bodies included) goes through the same
+rewrite the run uses (`polypus_python.local._rewrite_into_aer_basis`), so one that it
+cannot lower (an opaque instruction without a definition, a `box`) is rejected with
+the `polypus.BackendError` message the run would raise. Checking a circuit outside the
+basis therefore costs the rewrite the run would pay; one in the basis is not rewritten.
+Like the run, it lowers against the basis of the default `AerSimulator()` whatever
+`sim_method` or `noise_model` the run is given: either one narrows the simulator's
+target (a `noise_model` to `cx`, `id`, `rz`, `sx` and the gates it names), not what
+Aer runs, so neither changes the lowering. A `box` is refused with one fixed message,
+the same in the check and the run. A circuit with free parameters, a `polypus.Circuit`
+or a Qiskit `QuantumCircuit`, is rejected by the run with a `ValueError` ("unbound
+parameters") before any backend sees it, and both entries give that message. The check is **structural**: it runs and connects to nothing,
+and does not check resources (the qubit ceiling, memory), so an accepted circuit can
+still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
+which runs every circuit it classifies to confirm the verdict.
+
+### QMIO — native wire backend
+
+QMIO speaks pickle-over-ZeroMQ from Rust, so it *does* fail in Rust with a typed
+`QmioError`.
+
+**Tuning variables.** Timeouts and retries are read from the environment when the backend
+is constructed:
+
+| Variable | Default | Valid values |
+|---|---|---|
+| `QMIO_RECV_TIMEOUT_MS` | `300000` | integer ≥ 1 |
+| `QMIO_MAX_RETRIES` | `3` | integer ≥ 0 (`0` = no retries) |
+| `QMIO_RETRY_BACKOFF_MS` | `100` | integer ≥ 0 (`0` = no delay) |
+| `QMIO_GLOBAL_TIMEOUT_MS` | `(retries + 1) · 3 · recv timeout` + backoff sum | integer ≥ 1 |
+
+An unset variable uses its default. A variable that is set but is not a non-negative
+integer (`QMIO_RECV_TIMEOUT_MS=3000O`), or is `0` for a timeout, fails construction with
+`polypus.QmioError` naming the variable and the rejected value — it is never replaced by
+the default. This matches the registry `options` path, which also rejects malformed numeric
+options.
+
+**Endpoint.** QMIO has no default endpoint. From Python it is read from `ZMQ_SERVER`, and
+`options={"endpoint": "tcp://qmio.example:5556"}` overrides it; from Rust it is the
+`endpoint` registry option (or the argument to `QmioBackend::new`). With none of these, or
+with an empty value, building the backend fails with `polypus.QmioError` (`QmioError::Config`
+in Rust). Up to 0.7 an unset endpoint silently fell back to a hard-coded private address.
+
+#### QMIO transport threat model
+
+The ZeroMQ link to QMIO uses the ZMTP `NULL` mechanism: no encryption and no
+authentication in either direction. The pinned `zeromq` 0.6.0 crate implements only `NULL`
+(it recognises the `CURVE` name in a peer's greeting but has no `CURVE` handshake or API),
+so the backend cannot do better without a different client or an upstream change.
+
+**Assumption.** The client and the QMIO server sit on CESGA's private HPC network, and
+everyone with access to that network is trusted.
+
+**What an attacker on that network can do.** Read the circuits and the results; impersonate
+the server (Polypus does not authenticate it) and return fabricated counts, which pass
+the schema checks if they are well-formed; drop or delay replies; announce a huge frame
+and make the client allocate it before the size cap runs (see `## Security` in
+`qmio.rs`).
+
+**What the client still guarantees.** A hostile reply cannot execute code (`serde-pickle`
+never runs `__reduce__`/`GLOBAL`), cannot crash the process with malformed data (schema
+checks, depth-limited conversion, typed errors), and is never resent blindly after a
+send (`ResultUnknown`). With no endpoint configured the backend refuses to build instead
+of connecting to a guessed host.
+
+**Decision.** Accept the risk inside the trusted network; no transport security in
+Polypus. Off that network, carry the traffic over a tunnel (SSH port forwarding or
+WireGuard) and point the endpoint at the local end, e.g.
+`ssh -N -L 5556:<qmio-host>:5556 <login-node>` with `ZMQ_SERVER=tcp://127.0.0.1:5556`.
+`CURVE` would need server-side keys from CESGA and a client that implements it; it is
+reconsidered if either changes.
+
+Run against an unreachable endpoint:
+
+- **Clean error → `External`.** A wire failure (connect/timeout) is boxed into
+  `External` (a `QmioError`), which the edge re-raises as the typed `polypus.QmioError`.
+  This check passes.
+- **`Unresponsive` is not applicable — by design.** A QMIO timeout *is* "wedged past a
+  deadline", which the contract lists under `Unresponsive`. But QMIO exhausts its **own**
+  internal retries (`QMIO_MAX_RETRIES`) before returning, so by the time it fails the
+  outcome is *definitive*, not retryable — `External` is the honest classification, and
+  the battery's `Unresponsive` check is simply not supplied for QMIO (skip). This is a
+  deliberate reading of recoverable-vs-fatal, not a defect.
+- **A `Foreign` circuit → `UnsupportedCircuit`.** `QmioBackend::run_circuits` maps
+  `QmioError::UnsupportedCircuit` (a Qiskit circuit, which QMIO cannot serialize without the
+  interpreter) to `BackendError::UnsupportedCircuit`; every other `QmioError` stays
+  `External`. The edge raises it as `polypus.NativeCircuitError`, like the native backend.
+  This check passes. It was finding **QMIO-1**: the circuit used to arrive as
+  `External`, a `polypus.QmioError`. The Python entry points reject a Qiskit circuit for
+  `infrastructure="qmio"` with a `ValueError` before the backend runs, so this class is seen by
+  Rust callers of the backend.
+
+### Status of the findings
+
+LOCAL-1 (issue #229), LOCAL-2 (issue #230) and QMIO-1 (issue #231) are fixed; no
+conformance finding is open.
+
+## Stability commitment
+
+`polypus-backend` is a **public contract**: the whole reason it exists is that a
+third party can build against it. We treat it accordingly.
+
+- **Versioning.** `polypus-backend` inherits the unified Polypus workspace version
+  (`version.workspace = true`, currently **0.7.x**, pre-1.0). It is not versioned
+  independently: a given Polypus release and its backend contract move together, so
+  `polypus-backend = "0.8"` and `polypus = "0.8"` are always compatible.
+- **Pre-1.0 semantics (SemVer).** While pre-1.0, a **minor** bump (0.7 → 0.8) may
+  make breaking changes to the trait or its types; **patch** bumps (0.7.1 → 0.7.2)
+  will not. Pin a minor range (`polypus-backend = "0.8"`) and expect to review the
+  changelog when the minor moves. We will keep additive changes additive: new trait
+  methods ship with defaults (as `cancel` and `wants_cancel_watcher` did) rather than
+  as breaking additions. From **0.8.0**, `BackendError` is `#[non_exhaustive]`
+  (#349): a `match` on it outside `polypus-backend` needs a `_` arm, and a new
+  variant is an additive change. Making it non-exhaustive was itself the breaking
+  change, so code written against 0.7.x that matched it exhaustively must add that
+  arm when moving to 0.8.
+- **Scope of the contract.** The stability commitment covers the `polypus-backend`
+  surface: the `QuantumBackend` trait, its types, and the registry API
+  (`register_backend`, `BackendBuildContext`, `BackendFactory`). The **subprocess
+  bridge protocol** (version 1, above) is a second stable contract: the frame shapes
+  are versioned by the `protocol` field, and a breaking change bumps that version
+  (workers declare the version they speak in their `ready` handshake). The
+  `polypus-subprocess-backend` crate inherits the same workspace version. The
+  **conformance battery's API** (`Conformance`, `Fault`, `Report`, `Check`, `Status`
+  in `polypus-backend-conformance`) is likewise a surface third parties build tests
+  against, and follows the same pre-1.0 SemVer discipline.
+- **crates.io.** `polypus-backend`, `polypus-subprocess-backend` and
+  `polypus-backend-conformance` are published to crates.io with every Polypus release
+  from 0.8.0 on, together with the other workspace crates
+  ([RELEASING.md](RELEASING.md#cratesio)); the snippets above assume 0.8. They are not
+  on crates.io for 0.7.x: until 0.8.0 is out, depend on them by git
+  (`polypus-backend = { git = "https://github.com/Bahia-Software/polypus" }`).
+
+When the contract reaches 1.0, this section will state the post-1.0 SemVer guarantee
+(breaking changes only on a major bump).

@@ -210,7 +210,7 @@ impl CostObservable for QuboObservable {
         counts: &[HashMap<String, u64>],
     ) -> Result<Vec<f64>, ObservableError> {
         // Embarrassingly parallel over candidates; `collect` short-circuits on
-        // the first error. The optimizer already runs under `allow_threads`, so
+        // the first error. The optimizer already runs under `detach`, so
         // this whole path holds no GIL.
         counts.par_iter().map(|c| self.expectation_one(c)).collect()
     }
@@ -222,6 +222,15 @@ mod tests {
 
     fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn native_reducer_defaults_to_portable() {
+        // The native QUBO evaluator is pure Rust with no host-process dependency, so
+        // it keeps the trait default `Portable` — the other half of the locality
+        // contract pinned by the callback observable's `Local` test.
+        let obs = QuboObservable::new(1, vec![(0, 1.0)], vec![], 0.0, 1.0).unwrap();
+        assert_eq!(obs.locality(), crate::ReducerLocality::Portable);
     }
 
     #[test]

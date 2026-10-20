@@ -15,6 +15,7 @@ fn full_vocabulary_circuit() -> ParameterizedCircuit {
         .t(2)
         .sdg(0)
         .tdg(1)
+        .id(2)
         .rx(0, 0.25)
         .ry(1, Param(0))
         .rz(2, -1.5)
@@ -56,7 +57,7 @@ fn roundtrip_measure_all_collapses_back() {
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm1).unwrap();
     // `measure q -> c;` must come back as a single MeasureAll, not 4 Measures.
-    assert_eq!(imported.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(imported.gates().last(), Some(&GateInstruction::MeasureAll));
     assert_eq!(imported.to_qasm2_with_params(&[]).unwrap(), qasm1);
 }
 
@@ -66,11 +67,11 @@ fn roundtrip_preserves_structure_and_counts() {
     let qasm = original.to_qasm2_with_params(&[0.75, -0.4]).unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
 
-    assert_eq!(imported.num_qubits, original.num_qubits);
+    assert_eq!(imported.num_qubits(), original.num_qubits());
     assert_eq!(imported.num_clbits(), original.num_clbits());
     // QASM 2.0 is parameter-free: the import is fully concrete.
-    assert_eq!(imported.num_params, 0);
-    assert_eq!(imported.gates.len(), original.gates.len());
+    assert_eq!(imported.num_params(), 0);
+    assert_eq!(imported.gates().len(), original.gates().len());
 }
 
 #[test]
@@ -80,13 +81,13 @@ fn imported_angles_match_bound_values() {
         .to_qasm2_with_params(&[std::f64::consts::PI])
         .unwrap();
     let imported = ParameterizedCircuit::from_qasm2(&qasm).unwrap();
-    match &imported.gates[0] {
+    match &imported.gates()[0] {
         GateInstruction::Ry {
             qubit: 0,
             theta: GateParam::Fixed(v),
         } => {
-            // 12 decimal places of precision survive the round-trip.
-            assert!((v - std::f64::consts::PI).abs() < 1e-11);
+            // The angle survives the round trip exactly.
+            assert_eq!(v.to_bits(), std::f64::consts::PI.to_bits());
         }
         other => panic!("expected Ry, got {other:?}"),
     }
@@ -115,11 +116,13 @@ measure q[1] -> meas[1];
 measure q[2] -> meas[2];
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.num_qubits, 3);
+    assert_eq!(qc.num_qubits(), 3);
     assert_eq!(qc.num_clbits(), 3);
 
-    // swap → native Swap; id dropped; explicit full barrier → whole-register
-    // form; 3 contiguous measures → MeasureAll.
+    // `u` and `p` keep their own spelling (not rewritten to `u3`); swap →
+    // native Swap; id kept one-to-one (it counts towards gate count and depth);
+    // explicit full barrier → whole-register form; 3 contiguous measures →
+    // MeasureAll.
     let expected = [
         GateInstruction::H(0),
         GateInstruction::Rzz {
@@ -131,23 +134,22 @@ measure q[2] -> meas[2];
             qubit: 2,
             theta: GateParam::Fixed(0.8),
         },
-        GateInstruction::U {
+        GateInstruction::UGate {
             qubit: 0,
             theta: GateParam::Fixed(0.1),
             phi: GateParam::Fixed(0.2),
             lam: GateParam::Fixed(0.3),
         },
-        GateInstruction::U {
+        GateInstruction::P {
             qubit: 1,
-            theta: GateParam::Fixed(0.0),
-            phi: GateParam::Fixed(0.0),
             lam: GateParam::Fixed(0.5),
         },
         GateInstruction::Swap(0, 2),
+        GateInstruction::Id(1),
         GateInstruction::Barrier(Vec::new()),
         GateInstruction::MeasureAll,
     ];
-    assert_eq!(qc.gates, expected);
+    assert_eq!(qc.gates(), expected);
 }
 
 #[test]
@@ -162,18 +164,18 @@ measure q -> c;
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
     let h_count = qc
-        .gates
+        .gates()
         .iter()
         .filter(|g| matches!(g, GateInstruction::H(_)))
         .count();
     assert_eq!(h_count, 3);
     for q in 0..3 {
-        assert!(qc.gates.contains(&GateInstruction::Rx {
+        assert!(qc.gates().contains(&GateInstruction::Rx {
             qubit: q,
             theta: GateParam::Fixed(std::f64::consts::FRAC_PI_2),
         }));
     }
-    assert_eq!(qc.gates.last(), Some(&GateInstruction::MeasureAll));
+    assert_eq!(qc.gates().last(), Some(&GateInstruction::MeasureAll));
 }
 
 #[test]
@@ -189,10 +191,10 @@ cx a[0],b[1];
 measure b[1] -> c[3];
 "#;
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.num_qubits, 4);
+    assert_eq!(qc.num_qubits(), 4);
     // a = [0,1], b = [2,3]
     assert_eq!(
-        qc.gates,
+        qc.gates(),
         [
             GateInstruction::X(1),
             GateInstruction::X(2),
@@ -238,11 +240,11 @@ rx(2^3) q[0];
             other => panic!("unexpected gate {other:?}"),
         }
     };
-    assert!((angle(&qc.gates[0]) - PI / 2.0).abs() < 1e-15);
-    assert!((angle(&qc.gates[1]) + PI / 4.0).abs() < 1e-15);
-    assert!((angle(&qc.gates[2]) - 2.0 * PI).abs() < 1e-15);
-    assert!((angle(&qc.gates[3]) - 1.5e-3).abs() < 1e-18);
-    match &qc.gates[3] {
+    assert!((angle(&qc.gates()[0]) - PI / 2.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[1]) + PI / 4.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[2]) - 2.0 * PI).abs() < 1e-15);
+    assert!((angle(&qc.gates()[3]) - 1.5e-3).abs() < 1e-18);
+    match &qc.gates()[3] {
         GateInstruction::U {
             phi: GateParam::Fixed(phi),
             lam: GateParam::Fixed(lam),
@@ -253,14 +255,14 @@ rx(2^3) q[0];
         }
         other => panic!("expected U, got {other:?}"),
     }
-    assert!((angle(&qc.gates[4]) - 8.0).abs() < 1e-15);
+    assert!((angle(&qc.gates()[4]) - 8.0).abs() < 1e-15);
 }
 
 #[test]
 fn skips_comments_and_blank_lines() {
     let src = "// leading comment\nOPENQASM 2.0;\n\ninclude \"qelib1.inc\"; // trailing\n// gate-less\nqreg q[1];\nh q[0];\n";
     let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
-    assert_eq!(qc.gates, [GateInstruction::H(0)]);
+    assert_eq!(qc.gates(), [GateInstruction::H(0)]);
 }
 
 // ───────────────────────────── Error cases ────────────────────────────────
@@ -296,9 +298,9 @@ fn rejects_unsupported_gate_with_line_number() {
 }
 
 #[test]
-fn rejects_custom_gate_definitions() {
-    let src = "OPENQASM 2.0;\nqreg q[1];\ngate mygate a { h a; }\n";
-    assert_parse_err(src, "custom gate definitions", 3);
+fn rejects_opaque_declarations_by_name() {
+    let src = "OPENQASM 2.0;\nqreg q[1];\nopaque magic(t) a;\n";
+    assert_parse_err(src, "opaque gate 'magic' has no definition", 3);
 }
 
 #[test]
@@ -350,6 +352,36 @@ fn rejects_reset_and_if() {
     assert_parse_err(src, "'if'", 4);
 }
 
+/// The known limitations are reported by name, with the reason, rather than as
+/// a generic failure.
+#[test]
+fn known_limitations_have_actionable_errors() {
+    // Classical control: names the construct and the terminal-measurement model.
+    let src = "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nif (c==1) x q[0];\n";
+    assert_parse_err(src, "classical control", 4);
+    assert_parse_err(src, "contract C-4", 4);
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nreset q[0];\n",
+        "known limitation",
+        3,
+    );
+    // An arbitrary-control multi-controlled gate without a declaration...
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[4];\nmcx q[0],q[1],q[2],q[3];\n",
+        "multi-controlled gates with an arbitrary number of controls",
+        3,
+    );
+    // ... is fine when the program declares it (Qiskit's exporter does).
+    let declared = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\ngate mcx q0,q1,q2,q3 { h q3; ccx q0,q1,q2; h q3; }\nqreg q[4];\nmcx q[0],q[1],q[2],q[3];\n";
+    assert!(ParameterizedCircuit::from_qasm2(declared).is_ok());
+    // Any other unknown name says it is neither built in nor declared.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nfoo q[0];\n",
+        "neither a qelib1.inc gate nor declared with a `gate` block",
+        3,
+    );
+}
+
 #[test]
 fn rejects_division_by_zero_in_parameter() {
     let src = "OPENQASM 2.0;\nqreg q[1];\nrx(1/0) q[0];\n";
@@ -376,6 +408,348 @@ fn rejects_truncated_input() {
     ));
 }
 
+// ───────────────────── `id` is an instruction, not a no-op ────────────────
+
+/// Regression: `id` used to be dropped at parse time, which silently changed
+/// the gate count and depth of the imported circuit relative to the source
+/// (and to what Qiskit reports for the same file).
+#[test]
+fn id_is_preserved_and_roundtrips_byte_identically() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\nh q[0];\nid q[1];\nid q[0];\ncx q[0],q[1];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(
+        qc.gates(),
+        [
+            GateInstruction::H(0),
+            GateInstruction::Id(1),
+            GateInstruction::Id(0),
+            GateInstruction::Cx(0, 1),
+        ]
+    );
+    assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), src);
+}
+
+#[test]
+fn id_broadcasts_over_a_register() {
+    let src = "OPENQASM 2.0;\nqreg q[3];\nid q;\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    assert_eq!(
+        qc.gates(),
+        [
+            GateInstruction::Id(0),
+            GateInstruction::Id(1),
+            GateInstruction::Id(2)
+        ]
+    );
+}
+
+#[test]
+fn id_rejects_wrong_arity_parameters_and_range() {
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[2];\nid q[0],q[1];\n",
+        "gate 'id' expects 1 argument(s), found 2",
+        3,
+    );
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[1];\nid(0.5) q[0];\n",
+        "gate 'id' expects 0 parameter(s), found 1",
+        3,
+    );
+    assert_parse_err("OPENQASM 2.0;\nqreg q[2];\nid q[2];\n", "out of range", 3);
+}
+
+// ─────────────────── Every spelling is kept as written ────────────────────
+
+/// `p`, `u1`, `u2`, `u` and `u3` are one family, but each spelling is its own
+/// instruction and is re-emitted as written — nothing is rewritten to `u3`.
+/// Only the language builtins `U`/`CX` change spelling, to `u`/`cx`, which is
+/// what Qiskit calls them too.
+#[test]
+fn single_qubit_spellings_are_kept_as_written() {
+    let src = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\n\
+               p(0.1) q[0];\nu1(0.2) q[0];\n\
+               u2(0.3,0.4) q[0];\n\
+               u(0.5,0.6,0.7) q[0];\n\
+               u3(0.5,0.6,0.7) q[0];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    use GateParam::Fixed;
+    assert_eq!(
+        qc.gates(),
+        [
+            GateInstruction::P {
+                qubit: 0,
+                lam: Fixed(0.1)
+            },
+            GateInstruction::U1 {
+                qubit: 0,
+                lam: Fixed(0.2)
+            },
+            GateInstruction::U2 {
+                qubit: 0,
+                phi: Fixed(0.3),
+                lam: Fixed(0.4)
+            },
+            GateInstruction::UGate {
+                qubit: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+            GateInstruction::U {
+                qubit: 0,
+                theta: Fixed(0.5),
+                phi: Fixed(0.6),
+                lam: Fixed(0.7)
+            },
+        ]
+    );
+    assert_eq!(qc.to_qasm2_with_params(&[]).unwrap(), src);
+
+    let builtins = "OPENQASM 2.0;\nqreg q[2];\nU(0.1,0.2,0.3) q[0];\nCX q[0],q[1];\n";
+    let out = ParameterizedCircuit::from_qasm2(builtins)
+        .unwrap()
+        .to_qasm2_with_params(&[])
+        .unwrap();
+    assert!(
+        out.ends_with("u(0.1,0.2,0.3) q[0];\ncx q[0],q[1];\n"),
+        "{out}"
+    );
+}
+
+// ─────────────── Tier-1 qelib1.inc gates: one-to-one import ───────────────
+
+/// Each gate imports into its own instruction with the operands in source
+/// order (control(s) first) and the angles in source order. The operands are
+/// deliberately not ascending, so a swapped control/target shows up.
+#[test]
+fn qelib1_gates_import_with_their_operand_and_parameter_order() {
+    use GateInstruction as G;
+    use GateParam::Fixed;
+    let cases: Vec<(&str, GateInstruction)> = vec![
+        ("sx q[2];", G::Sx(2)),
+        ("sxdg q[1];", G::Sxdg(1)),
+        ("cy q[2],q[0];", G::Cy(2, 0)),
+        ("ch q[1],q[0];", G::Ch(1, 0)),
+        ("csx q[2],q[1];", G::Csx(2, 1)),
+        ("ccx q[2],q[0],q[1];", G::Ccx(2, 0, 1)),
+        ("cswap q[1],q[2],q[0];", G::Cswap(1, 2, 0)),
+        (
+            "crx(0.5) q[2],q[0];",
+            G::Crx {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.5),
+            },
+        ),
+        (
+            "cry(-0.5) q[1],q[0];",
+            G::Cry {
+                control: 1,
+                target: 0,
+                theta: Fixed(-0.5),
+            },
+        ),
+        (
+            "crz(pi/4) q[0],q[2];",
+            G::Crz {
+                control: 0,
+                target: 2,
+                theta: Fixed(std::f64::consts::FRAC_PI_4),
+            },
+        ),
+        (
+            "cu1(0.25) q[2],q[1];",
+            G::Cu1 {
+                q0: 2,
+                q1: 1,
+                theta: Fixed(0.25),
+            },
+        ),
+        (
+            "cu3(0.1,0.2,0.3) q[1],q[2];",
+            G::Cu3 {
+                control: 1,
+                target: 2,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: Fixed(0.3),
+            },
+        ),
+        (
+            "cu(0.1,0.2,0.3,0.4) q[2],q[0];",
+            G::Cu {
+                control: 2,
+                target: 0,
+                theta: Fixed(0.1),
+                phi: Fixed(0.2),
+                lam: Fixed(0.3),
+                gamma: Fixed(0.4),
+            },
+        ),
+    ];
+    for (statement, expected) in cases {
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{statement}\n");
+        let qc =
+            ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
+        assert_eq!(qc.gates(), [expected], "{statement}");
+    }
+}
+
+/// (name, parameters, qubits) of every gate added for the benchmark suites
+/// (Tier 1, then the multi-qubit `qelib1.inc` gates), for the signature checks.
+const TIER1_SIGNATURES: [(&str, usize, usize); 19] = [
+    ("sx", 0, 1),
+    ("sxdg", 0, 1),
+    ("cy", 0, 2),
+    ("ch", 0, 2),
+    ("csx", 0, 2),
+    ("ccx", 0, 3),
+    ("cswap", 0, 3),
+    ("crx", 1, 2),
+    ("cry", 1, 2),
+    ("crz", 1, 2),
+    ("cu1", 1, 2),
+    ("cu3", 3, 2),
+    ("cu", 4, 2),
+    ("u0", 1, 1),
+    ("rccx", 0, 3),
+    ("rc3x", 0, 4),
+    ("c3x", 0, 4),
+    ("c3sqrtx", 0, 4),
+    ("c4x", 0, 5),
+];
+
+/// The multi-qubit qelib1.inc gates import one-to-one, operands in source order.
+#[test]
+fn multi_qubit_qelib1_gates_import_with_their_operand_order() {
+    use GateInstruction as G;
+    let cases: Vec<(&str, GateInstruction)> = vec![
+        (
+            "u0(2) q[4];",
+            G::U0 {
+                qubit: 4,
+                gamma: GateParam::Fixed(2.0),
+            },
+        ),
+        ("rccx q[4],q[0],q[2];", G::Rccx(4, 0, 2)),
+        ("rc3x q[3],q[1],q[4],q[0];", G::Rc3x(3, 1, 4, 0)),
+        ("c3x q[2],q[4],q[0],q[3];", G::C3x(2, 4, 0, 3)),
+        ("c3sqrtx q[4],q[3],q[1],q[2];", G::C3sqrtx(4, 3, 1, 2)),
+        ("c4x q[1],q[4],q[0],q[3],q[2];", G::C4x(1, 4, 0, 3, 2)),
+    ];
+    for (statement, expected) in cases {
+        let src = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[5];\n{statement}\n");
+        let qc =
+            ParameterizedCircuit::from_qasm2(&src).unwrap_or_else(|e| panic!("{statement}: {e}"));
+        assert_eq!(qc.gates(), [expected], "{statement}");
+    }
+    // Repeated operands are rejected at any arity.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[5];\nc4x q[0],q[1],q[2],q[1],q[4];\n",
+        "5-qubit gate requires distinct qubits, got (0, 1, 2, 1, 4)",
+        3,
+    );
+}
+
+/// Render a gate application with `params` angles on the qubits `operands`.
+fn application(name: &str, params: usize, operands: impl IntoIterator<Item = usize>) -> String {
+    let angles: Vec<String> = (0..params).map(|i| format!("0.{}", i + 1)).collect();
+    let angle_list = if params == 0 {
+        String::new()
+    } else {
+        format!("({})", angles.join(","))
+    };
+    let operands: Vec<String> = operands.into_iter().map(|q| format!("q[{q}]")).collect();
+    format!("{name}{angle_list} {};", operands.join(","))
+}
+
+#[test]
+fn qelib1_gates_reject_wrong_argument_and_parameter_counts() {
+    for (name, params, qubits) in TIER1_SIGNATURES {
+        // One argument too many (and, for multi-qubit gates, one too few).
+        let mut wrong_arities = vec![qubits + 1];
+        if qubits > 1 {
+            wrong_arities.push(qubits - 1);
+        }
+        for wrong in wrong_arities {
+            let src = format!(
+                "OPENQASM 2.0;\nqreg q[8];\n{}\n",
+                application(name, params, 0..wrong)
+            );
+            assert_parse_err(
+                &src,
+                &format!("gate '{name}' expects {qubits} argument(s), found {wrong}"),
+                3,
+            );
+        }
+        // One parameter too many (and one too few for parameterised gates).
+        let mut wrong_counts = vec![params + 1];
+        if params > 0 {
+            wrong_counts.push(params - 1);
+        }
+        for wrong in wrong_counts {
+            let src = format!(
+                "OPENQASM 2.0;\nqreg q[8];\n{}\n",
+                application(name, wrong, 0..qubits)
+            );
+            assert_parse_err(
+                &src,
+                &format!("gate '{name}' expects {params} parameter(s), found {wrong}"),
+                3,
+            );
+        }
+    }
+}
+
+#[test]
+fn qelib1_gates_reject_out_of_range_qubits() {
+    for (name, params, qubits) in TIER1_SIGNATURES {
+        // A `qubits`-wide register; the last operand is one past its end.
+        let statement = application(name, params, (0..qubits - 1).chain([qubits]));
+        let src = format!("OPENQASM 2.0;\nqreg q[{qubits}];\n{statement}\n");
+        assert_parse_err(&src, "out of range", 3);
+    }
+}
+
+#[test]
+fn three_qubit_gates_reject_repeated_operands() {
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[3];\nccx q[0],q[1],q[0];\n",
+        "three-qubit gate requires distinct qubits, got (0, 1, 0)",
+        3,
+    );
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg q[3];\ncswap q[2],q[1],q[1];\n",
+        "three-qubit gate requires distinct qubits, got (2, 1, 1)",
+        3,
+    );
+}
+
+/// OpenQASM 2.0 broadcasting for a three-qubit gate over mixed register and
+/// single-bit arguments: `ccx a,b,c[0];` is `ccx a[k],b[k],c[0];` for each k —
+/// the same expansion Qiskit's loader produces.
+#[test]
+fn three_qubit_gates_broadcast_over_registers() {
+    let src = "OPENQASM 2.0;\nqreg a[2];\nqreg b[2];\nqreg c[1];\nccx a,b,c[0];\ncswap c[0],a,b;\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    // a = q[0..2], b = q[2..4], c = q[4]
+    assert_eq!(
+        qc.gates(),
+        [
+            GateInstruction::Ccx(0, 2, 4),
+            GateInstruction::Ccx(1, 3, 4),
+            GateInstruction::Cswap(4, 0, 2),
+            GateInstruction::Cswap(4, 1, 3),
+        ]
+    );
+    // Registers of different sizes cannot broadcast together.
+    assert_parse_err(
+        "OPENQASM 2.0;\nqreg a[2];\nqreg b[3];\nqreg c[1];\nccx a,b,c[0];\n",
+        "register size mismatch",
+        5,
+    );
+}
+
 // ─────────────────────── Imported circuits are usable ─────────────────────
 
 /// An imported circuit must behave like any other ParameterizedCircuit:
@@ -392,6 +766,151 @@ fn imported_circuit_is_a_first_class_citizen() {
         .rz(1, 0.5) // keep building on top of the import
         .measure_all();
     let out = qc.to_qasm2_with_params(&[]).unwrap();
-    assert!(out.contains("rz(0.500000000000) q[1];"));
+    assert!(out.contains("rz(0.5) q[1];"));
     assert!(out.ends_with("measure q -> c;\n"));
+}
+
+// ─────────────────────── Declared classical width ─────────────────────────
+
+const HEADER: &str = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n";
+
+/// The importer records the classical bits a program declares: one `creg`'s
+/// size, the sum of several, and `None` when there is no `creg` at all —
+/// whatever the measurements write.
+#[test]
+fn declared_clbits_is_the_sum_of_the_cregs() {
+    let cases = [
+        ("qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[1];\n", Some(3)),
+        ("qreg q[2];\ncreg c[3];\nx q[0];\n", Some(3)),
+        (
+            "qreg q[2];\ncreg a[2];\ncreg b[3];\nmeasure q[1] -> a[1];\n",
+            Some(5),
+        ),
+        // Collapsed by the importer to `MeasureAll` (two clbits written).
+        (
+            "qreg q[2];\ncreg c[4];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            Some(4),
+        ),
+        ("qreg q[2];\nx q[0];\n", None),
+    ];
+    for (body, declared) in cases {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{HEADER}{body}")).unwrap();
+        assert_eq!(qc.declared_clbits(), declared, "{body:?}");
+    }
+}
+
+/// A circuit from the builder has an implicit classical register: no declared
+/// width, measured or not.
+#[test]
+fn builder_circuits_declare_no_clbits() {
+    assert_eq!(ParameterizedCircuit::new(3).declared_clbits(), None);
+    assert_eq!(
+        ParameterizedCircuit::new(3)
+            .x(0)
+            .measure(0, 4)
+            .declared_clbits(),
+        None
+    );
+}
+
+/// The export writes the declared width (contract C-2): `creg c[3]` written up
+/// to `c[1]` exports `creg c[3]`, unmeasured trailing bit included, so the
+/// program a backend receives keys its counts as the source does on Aer
+/// (C-3). The same through binding, and a program without measurements keeps
+/// its `creg`. The export is a fixed point.
+#[test]
+fn the_export_keeps_the_declared_width() {
+    let cases = [
+        (
+            "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+            "qreg q[2];\ncreg c[3];\nx q[0];\nmeasure q[0] -> c[1];\n",
+        ),
+        (
+            "qreg q[2];\ncreg a[1];\ncreg b[2];\nmeasure q[1] -> a[0];\n",
+            "qreg q[2];\ncreg c[3];\nmeasure q[1] -> c[0];\n",
+        ),
+        // Collapsed to `MeasureAll`, which no longer fills the register.
+        (
+            "qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+            "qreg q[2];\ncreg c[3];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+        ),
+        (
+            "qreg q[2];\ncreg c[3];\nx q[0];\n",
+            "qreg q[2];\ncreg c[3];\nx q[0];\n",
+        ),
+    ];
+    for (body, exported) in cases {
+        let qc = ParameterizedCircuit::from_qasm2(&format!("{HEADER}{body}")).unwrap();
+        let out = qc.to_qasm2_with_params(&[]).unwrap();
+        assert_eq!(out, format!("{HEADER}{exported}"), "{body:?}");
+        let bound = qc.assign_parameters(&[]).unwrap();
+        assert_eq!(bound.try_to_qasm2().unwrap(), out, "{body:?}");
+        assert_eq!(bound.clbits_width(), 3, "{body:?}");
+        let again = ParameterizedCircuit::from_qasm2(&out).unwrap();
+        assert_eq!(again.to_qasm2_with_params(&[]).unwrap(), out, "{body:?}");
+    }
+}
+
+/// A circuit whose measurements reach past the declared registers (only
+/// possible when built on top of an import) is as wide as they need.
+#[test]
+fn the_width_is_never_narrower_than_the_measurements() {
+    let src = format!("{HEADER}qreg q[3];\ncreg c[1];\nmeasure q[0] -> c[0];\n");
+    let qc = ParameterizedCircuit::from_qasm2(&src)
+        .unwrap()
+        .measure(2, 2);
+    assert_eq!(qc.clbits_width(), 3);
+    assert!(qc.to_qasm2_with_params(&[]).unwrap().contains("creg c[3];"));
+}
+
+/// `==` compares the classical width a program has (declared or implicit),
+/// since every export writes it, while `clone` and builder methods keep it.
+#[test]
+fn declared_width_is_part_of_eq_and_kept_by_clone() {
+    let body = "x q[0];\nmeasure q[0] -> c[1];\n";
+    let import = |creg: usize| {
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[{creg}];\n{body}"))
+            .unwrap()
+    };
+    let (narrow, wide) = (import(2), import(7));
+    assert_eq!(narrow.declared_clbits(), Some(2));
+    assert_eq!(wide.declared_clbits(), Some(7));
+    assert_ne!(narrow, wide);
+    assert_ne!(
+        narrow.assign_parameters(&[]).unwrap(),
+        wide.assign_parameters(&[]).unwrap()
+    );
+    // A declared register no wider than the measurements is the implicit one.
+    let built = ParameterizedCircuit::new(2).x(0).measure(0, 1);
+    assert_eq!(narrow, built);
+    assert_eq!(
+        narrow.assign_parameters(&[]).unwrap(),
+        built.assign_parameters(&[]).unwrap()
+    );
+
+    assert_eq!(wide.clone().declared_clbits(), Some(7));
+    assert_eq!(wide.h(1).declared_clbits(), Some(7));
+}
+
+/// A measurement within the declared registers leaves their width; one past
+/// them widens it (see `the_width_is_never_narrower_than_the_measurements`).
+#[test]
+fn a_measurement_within_the_declared_width_keeps_it() {
+    let qc =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[2];\ncreg c[6];\nh q[0];\n"))
+            .unwrap()
+            .measure(1, 4);
+    assert_eq!((qc.clbits_width(), qc.num_clbits()), (6, 5));
+    assert_eq!(qc.assign_parameters(&[]).unwrap().clbits_width(), 6);
+}
+
+/// A zero-size register is a parse error, so an imported program never
+/// declares an empty classical register: `declared_clbits` is `None` or at
+/// least 1.
+#[test]
+fn a_zero_size_creg_is_rejected() {
+    let err =
+        ParameterizedCircuit::from_qasm2(&format!("{HEADER}qreg q[1];\ncreg c[0];\n")).unwrap_err();
+    assert!(matches!(err, CircuitError::Parse { .. }), "{err:?}");
+    assert!(err.to_string().contains("register 'c' has size 0"), "{err}");
 }

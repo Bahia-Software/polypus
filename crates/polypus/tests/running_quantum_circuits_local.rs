@@ -1,41 +1,16 @@
-use polypus::algorithms::{
-    AlgorithmAdam, AlgorithmArgs, AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG,
-    AlgorithmSingleRun, DistributeByShotsRun,
-};
+use polypus::algorithms::{AlgorithmDifferentialEvolution, AlgorithmPSO, AlgorithmQNG};
 use polypus::circuit::ParameterizedCircuit;
 use polypus::infrastructure::{
-    BackendConfig, BackendError, BoundCircuit, ExecutionConfig, Infrastructure, OptLevel,
+    merge_counts, BackendError, BoundCircuit, Infrastructure, InfrastructureError,
+    NativeStatevectorBackend, OptLevel, QuantumBackend, RunParams, ShotDistributingPlanner,
 };
-use polypus::AlgorithmTrait;
-use pyo3::prelude::*;
+use polypus::orchestration::{Resources, RunCircuitFlow, Scheduler};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AlgorithmTrait metadata — name() and description() are pure Rust, no Python
+// Optimizer metadata — name()/description() are inherent pure-Rust methods
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn single_run_name() {
-    assert_eq!(AlgorithmSingleRun.name(), "Single Run Algorithm");
-}
-
-#[test]
-fn single_run_description_is_non_empty() {
-    assert!(!AlgorithmSingleRun.description().is_empty());
-}
-
-#[test]
-fn distribute_by_shots_name() {
-    assert_eq!(
-        DistributeByShotsRun.name(),
-        "Distribute By Shots Run Algorithm"
-    );
-}
-
-#[test]
-fn distribute_by_shots_description_is_non_empty() {
-    assert!(!DistributeByShotsRun.description().is_empty());
-}
 
 #[test]
 fn differential_evolution_name() {
@@ -68,16 +43,6 @@ fn qng_name() {
 #[test]
 fn qng_description_is_non_empty() {
     assert!(!AlgorithmQNG.description().is_empty());
-}
-
-#[test]
-fn adam_name() {
-    assert_eq!(AlgorithmAdam.name(), "Adam");
-}
-
-#[test]
-fn adam_description_is_non_empty() {
-    assert!(!AlgorithmAdam.description().is_empty());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,17 +78,16 @@ fn infrastructure_from_str_unknown_is_typed_error() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DistributeByShotsRun — shot conservation (contract C-3)
+// Shot distribution (contract C-3) through the Phase-6 orchestration path:
+// `Scheduler::run(RunCircuitFlow)` over a `ShotDistributingPlanner`, exactly as
+// `run_quantum_circuit(n_qpus > 1)` builds it at the edge.
 //
-// The native (pure-Rust) statevector backend is used so the orchestration path
-// runs without a live Python runtime or Qiskit; `DistributeByShotsRun::run`
-// still builds a `PyDict` for its return value, so the interpreter is
-// initialised with `prepare_freethreaded_python()` — the same pattern used by
-// the qmio backend's tests.
+// The native (pure-Rust) statevector backend is used so this runs without a live
+// Python runtime or Qiskit; the planner re-acquires the GIL only for its
+// between-wave `check_signals`, so the interpreter is initialised with
+// `Python::initialize()` (the same pattern the qmio tests use).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A native Bell `BoundCircuit`, for assembling `AlgorithmArgs` with any number
-/// of circuits.
 fn native_bell_circuit() -> BoundCircuit {
     let bell = ParameterizedCircuit::new(2)
         .h(0)
@@ -134,84 +98,54 @@ fn native_bell_circuit() -> BoundCircuit {
     BoundCircuit::Native(bell)
 }
 
-/// Build `AlgorithmArgs` on the pure-Rust backend with an explicit circuit list
-/// (so the degenerate `qcs` lengths can be exercised).
-fn native_args(shots: u32, n_qpus: u32, id: &str, qcs: Vec<BoundCircuit>) -> AlgorithmArgs {
-    AlgorithmArgs {
-        config: ExecutionConfig {
-            id: id.to_string(),
-            shots,
-            n_qpus,
-            infrastructure: "local".to_string(),
-            backend_config: BackendConfig::LocalNative,
-            opt_level: OptLevel::default(),
-            // Fixed seed: these tests assert only shot conservation, and a fixed
-            // seed keeps the native backend's sampling deterministic across runs.
-            seed: Some(7),
-        },
-        qcs,
+fn native_params(shots: u32, id: &str) -> RunParams {
+    RunParams {
+        id: id.to_string(),
+        shots,
+        opt_level: OptLevel::default(),
+        // Fixed seed: these tests assert only shot conservation, and a fixed seed
+        // keeps the native backend's sampling deterministic across runs.
+        seed: Some(7),
     }
 }
 
-/// Build `AlgorithmArgs` for a single native Bell circuit on the pure-Rust backend.
-fn native_bell_args(shots: u32, n_qpus: u32, id: &str) -> AlgorithmArgs {
-    native_args(shots, n_qpus, id, vec![native_bell_circuit()])
-}
-
-/// Run the distribute-by-shots algorithm and return the merged counts.
-fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64> {
-    pyo3::prepare_freethreaded_python();
-    let result = DistributeByShotsRun
-        .run(native_bell_args(shots, n_qpus, id))
+/// Distribute `shots` of a Bell circuit across `n_qpus` on the native backend,
+/// driving the real `Scheduler`/`RunCircuitFlow` path, and return the per-replica
+/// counts exactly as the edge receives them.
+fn distributed_replicas(shots: u32, n_qpus: u32, id: &str) -> Vec<HashMap<String, u64>> {
+    pyo3::Python::initialize();
+    let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
+    let resources = Resources::new(
+        backend,
+        Some(Arc::new(ShotDistributingPlanner::new(n_qpus))),
+        Arc::new(native_params(shots, id)),
+    )
+    .expect("the native backend supports shot distribution");
+    let scheduler = Scheduler::ephemeral(resources);
+    let replicas = scheduler
+        .run(RunCircuitFlow {
+            circuits: vec![native_bell_circuit()],
+            shots,
+        })
         .expect("distribute-by-shots must succeed on the native backend");
-    Python::with_gil(|py| {
-        result
-            .extract::<HashMap<String, u64>>(py)
-            .expect("distribute-by-shots must return a dict[str, int]")
-    })
+    // `RunCircuitFlow` hands back one map per replica, unmerged (issue #211).
+    assert_eq!(
+        replicas.len(),
+        n_qpus as usize,
+        "one counts map per replica"
+    );
+    replicas
 }
 
-#[test]
-fn distribute_rejects_empty_qcs() {
-    // Defect #1: an empty `qcs` used to panic on `args.qcs[0]`. It must now be a
-    // typed error (ValueError across the FFI, contract C-1), never a panic.
-    pyo3::prepare_freethreaded_python();
-    let err = DistributeByShotsRun
-        .run(native_args(100, 2, "empty", vec![]))
-        .expect_err("empty qcs must be a typed error, not a panic");
-    Python::with_gil(|py| {
-        assert!(
-            err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
-            "empty qcs must surface as a ValueError"
-        );
-    });
-}
-
-#[test]
-fn distribute_rejects_multiple_qcs() {
-    // Defect #2: extra circuits used to be silently ignored (only `qcs[0]` ran).
-    // More than one circuit must now be an explicit typed error.
-    pyo3::prepare_freethreaded_python();
-    let err = DistributeByShotsRun
-        .run(native_args(
-            100,
-            2,
-            "multi",
-            vec![native_bell_circuit(), native_bell_circuit()],
-        ))
-        .expect_err("more than one circuit must be a typed error, not silently truncated");
-    Python::with_gil(|py| {
-        assert!(
-            err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
-            "extra circuits must surface as a ValueError"
-        );
-    });
+/// [`distributed_replicas`], merged key by key into the circuit's total — the
+/// `RunResult.merged_counts` the edge builds.
+fn distributed_counts(shots: u32, n_qpus: u32, id: &str) -> HashMap<String, u64> {
+    merge_counts(&distributed_replicas(shots, n_qpus, id))
 }
 
 #[test]
 fn distribute_conserves_shots_when_not_divisible() {
-    // 1000 shots over 3 QPUs: remainder 1. The old `shots /= n_qpus` executed
-    // only 999 shots; the total must now be conserved exactly.
+    // 1000 shots over 3 QPUs: remainder 1. The total must be conserved exactly.
     let counts = distributed_counts(1000, 3, "c3-uneven");
     let total: u64 = counts.values().sum();
     assert_eq!(
@@ -225,9 +159,8 @@ fn distribute_conserves_shots_when_not_divisible() {
 
 #[test]
 fn distribute_conserves_shots_when_fewer_shots_than_qpus() {
-    // 5 shots over 8 QPUs: base 0, remainder 5. The old logic executed 0 shots
-    // (5 / 8 == 0); the total must now be exactly 5, spread one-per-QPU over the
-    // first 5 QPUs.
+    // 5 shots over 8 QPUs: base 0, remainder 5 — spread one-per-QPU over the first
+    // 5 replicas, total exactly 5.
     let counts = distributed_counts(5, 8, "c3-degenerate");
     let total: u64 = counts.values().sum();
     assert_eq!(total, 5, "shots must be conserved when shots < n_qpus");
@@ -235,8 +168,85 @@ fn distribute_conserves_shots_when_fewer_shots_than_qpus() {
 
 #[test]
 fn distribute_conserves_shots_when_divisible() {
-    // Exact division still holds (regression guard for the even case).
     let counts = distributed_counts(400, 4, "c3-even");
     let total: u64 = counts.values().sum();
     assert_eq!(total, 400);
+}
+
+#[test]
+fn distribute_returns_each_replica_with_its_apportioned_shots() {
+    // 5 shots over 8 QPUs apportion as [1, 1, 1, 1, 1, 0, 0, 0]: the list keeps
+    // all 8 replicas, in order, with the zero-shot ones as empty maps.
+    let replicas = distributed_replicas(5, 8, "c3-replicas");
+    let sums: Vec<u64> = replicas.iter().map(|r| r.values().sum()).collect();
+    assert_eq!(sums, vec![1, 1, 1, 1, 1, 0, 0, 0]);
+    assert!(replicas[5..].iter().all(HashMap::is_empty));
+}
+
+#[test]
+fn distribute_rejects_empty_circuits() {
+    // The shot-distributing planner operates on exactly one circuit; zero is a
+    // typed error (surfaced as a ValueError at the FFI edge via
+    // `backend_error_to_pyerr`), never a silent no-op. Like the "multiple" case
+    // below, the `run_quantum_circuit` edge only ever passes one circuit, so this
+    // guards the planner's `tasks.len() != 1` check directly for the zero case
+    // (issue #162 — this guard already handled zero correctly but was untested).
+    pyo3::Python::initialize();
+    let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
+    let resources = Resources::new(
+        backend,
+        Some(Arc::new(ShotDistributingPlanner::new(2))),
+        Arc::new(native_params(100, "empty")),
+    )
+    .unwrap();
+    let scheduler = Scheduler::ephemeral(resources);
+    let err = scheduler
+        .run(RunCircuitFlow {
+            circuits: vec![],
+            shots: 100,
+        })
+        .expect_err("zero circuits must be a typed error, not a silent no-op");
+    assert!(
+        matches!(
+            err,
+            InfrastructureError::Backend(BackendError::InvalidCircuitCount {
+                expected: 1,
+                got: 0
+            })
+        ),
+        "expected InvalidCircuitCount, got {err:?}"
+    );
+}
+
+#[test]
+fn distribute_rejects_multiple_circuits() {
+    // The shot-distributing planner operates on exactly one circuit; more than one
+    // is a typed error (surfaced as a ValueError at the FFI edge), never a silent
+    // truncation. The `run_quantum_circuit` edge only ever passes one circuit, so
+    // this guards the planner directly.
+    pyo3::Python::initialize();
+    let backend: Arc<dyn QuantumBackend> = Arc::new(NativeStatevectorBackend::new(7));
+    let resources = Resources::new(
+        backend,
+        Some(Arc::new(ShotDistributingPlanner::new(2))),
+        Arc::new(native_params(100, "multi")),
+    )
+    .unwrap();
+    let scheduler = Scheduler::ephemeral(resources);
+    let err = scheduler
+        .run(RunCircuitFlow {
+            circuits: vec![native_bell_circuit(), native_bell_circuit()],
+            shots: 100,
+        })
+        .expect_err("more than one circuit must be a typed error, not silently truncated");
+    assert!(
+        matches!(
+            err,
+            InfrastructureError::Backend(BackendError::InvalidCircuitCount {
+                expected: 1,
+                got: 2
+            })
+        ),
+        "expected InvalidCircuitCount, got {err:?}"
+    );
 }

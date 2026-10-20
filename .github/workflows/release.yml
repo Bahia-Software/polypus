@@ -1,0 +1,406 @@
+# Build the `polypus-quantum` distribution (the `polypus` PyO3 extension plus the
+# bundled `polypus_python` helpers) for every supported platform and publish it
+# to PyPI via Trusted Publishing (OIDC — no API tokens stored in the repo). On a
+# tag, the Rust crates are also published to crates.io (`publish-crates`, with
+# the CARGO_REGISTRY_TOKEN secret).
+#
+#   • Push a tag `vX.Y.Z`   → build everything and publish to PyPI and crates.io.
+#   • Either way the `gate` job runs first (tag ↔ Cargo.toml version, green
+#     ci.yml for the commit) — see its comment for what is enforced when.
+#   • Manual "Run workflow" → build everything; the `target` input picks the index
+#                             (testpypi = default dry run, or pypi).
+#
+# One-time setup on PyPI/TestPyPI (Trusted Publisher, "pending publisher" is fine
+# before the first release):
+#   Project: polypus-quantum   Owner: Bahia-Software   Repo: polypus
+#   Workflow: release.yml
+#   Environment: `pypi` for PyPI, `testpypi` for TestPyPI (must match below).
+#
+# No abi3 is used, so wheels are built per CPython version (3.10–3.13).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to"
+        type: choice
+        default: testpypi
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Release gate ────────────────────────────────────────────────────────────
+  # Refuse to publish anything that was not verified. Every build job needs this
+  # job, so a release that would be refused aborts before spending build minutes
+  # (publish-* and the post-publish checks inherit it through their `needs`).
+  #
+  #   1. Tag ↔ version. On a tag push the tag must be exactly `vX.Y.Z` (so a
+  #      malformed tag like `v.0.5.0` is rejected) and equal `v` + the
+  #      `[workspace.package].version` in the root Cargo.toml — the single source
+  #      of truth (docs/CONTRIBUTING.md). A manual run has no tag: skipped.
+  #   2. Green CI for this exact commit. ci.yml never runs on a tag push, so we
+  #      ask the Actions API for a successful ci.yml run whose head_sha is the
+  #      commit this workflow builds (`github.sha`, the one every build job checks
+  #      out). Only `push` runs count — ci.yml runs on push to main, and those
+  #      test that commit itself; a `pull_request` run reports the PR head as
+  #      head_sha but tests the merge ref, i.e. a different tree. The per-workflow
+  #      runs endpoint is used instead of the commit's check-runs because
+  #      check-runs mix jobs from every workflow (this one, docs.yml, …) and
+  #      carry no workflow identity, so filtering them would mean hard-coding
+  #      ci.yml job names. If ci.yml is still running for the commit (tag pushed
+  #      right after the merge) we wait for it; a cancelled/failed run fails the
+  #      gate — re-run ci.yml, then re-run this workflow.
+  #      Enforced for a tag push and a manual run with target=pypi. A TestPyPI
+  #      dry run only warns, so branches that never ran ci.yml on push can
+  #      still be dry-run (and the query itself is exercised on every dry run).
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read   # checkout
+      actions: read    # list ci.yml runs for the commit
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: version
+        name: Read workspace version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not read an X.Y.Z version from Cargo.toml (got '$version')"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Tag matches Cargo.toml version
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            echo "::notice::Not a tag push ($GITHUB_EVENT_NAME on $GITHUB_REF): tag/version check does not apply"
+            exit 0
+          fi
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          if [[ "$TAG" != "v$VERSION" ]]; then
+            echo "::error::Tag '$TAG' does not match Cargo.toml [workspace.package].version '$VERSION' (expected 'v$VERSION')"
+            exit 1
+          fi
+          echo "Tag $TAG matches Cargo.toml version $VERSION"
+      - name: ci.yml is green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          ENFORCE: ${{ github.event_name == 'push' || inputs.target == 'pypi' }}
+        run: |
+          deadline=$((SECONDS + 30 * 60))
+          while :; do
+            # Plain assignment so an API error (e.g. missing permission) fails
+            # the step, even on a dry run.
+            counts=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+              --jq '[([.workflow_runs[] | select(.conclusion == "success")] | length),
+                     ([.workflow_runs[] | select(.status != "completed")] | length)] | @tsv')
+            read -r ok pending <<< "$counts"
+            if (( ok > 0 )); then
+              echo "ci.yml has a successful push run for $SHA"
+              exit 0
+            fi
+            if (( pending == 0 || SECONDS >= deadline )); then
+              break
+            fi
+            echo "ci.yml still running for $SHA; waiting..."
+            sleep 30
+          done
+          msg="No successful ci.yml push run for $SHA (pending runs: $pending)"
+          if [[ "$ENFORCE" == true ]]; then
+            echo "::error::$msg — refusing to publish to PyPI"
+            exit 1
+          fi
+          echo "::warning::$msg — TestPyPI dry run, continuing"
+
+  # Linux: manylinux wheels for x86_64 and aarch64, one job per arch. The
+  # interpreters are listed explicitly: CPython 3.10–3.13, the same range as
+  # macos, windows and `requires-python`. ci.yml runs the full test suite at
+  # the floor and ceiling of that range (3.10 and 3.13, on Linux x86_64); every
+  # built wheel is then smoke-tested by the `smoke` job below. `--find-interpreter` is
+  # NOT used: the container also ships 3.14, 3.14t (free-threaded) and PyPy,
+  # which lie outside that range and would be published untested (they were
+  # for 0.7.1). On aarch64 (cross-compiled) maturin resolves `pythonX.Y` from
+  # its bundled sysconfig. The check step fails the job if the built set ever
+  # drifts from that list.
+  linux:
+    name: wheels (linux ${{ matrix.target }})
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          # Features come from the root pyproject `[tool.maturin]`, whose
+          # `python-packages` ships `polypus_python` in every wheel.
+          args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
+          manylinux: auto
+      - name: Check built interpreters
+        run: |
+          ls dist
+          # Wheel name: {dist}-{version}-{python tag}-{abi tag}-{platform}.whl;
+          # keep "{python tag}-{abi tag}" for any interpreter (cp310-cp310,
+          # cp314-cp314t, pp311-pypy311_pp73, …).
+          shopt -s nullglob
+          got=$(for w in dist/*.whl; do basename "$w" .whl; done \
+            | sed -E 's/^.*-([^-]+-[^-]+)-[^-]+$/\1/' | sort | tr '\n' ' ')
+          want="cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 "
+          if [[ "$got" != "$want" ]]; then
+            echo "::error::Built wheels '$got' differ from the expected '$want'"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  # macOS: Apple Silicon only (macos-14). GitHub is retiring the Intel `macos-13`
+  # runners, which left the Intel jobs queued indefinitely ("waiting for a runner"),
+  # so they are dropped — Intel-mac users can build from the sdist.
+  macos:
+    name: wheels (macos-arm64 py${{ matrix.python-version }})
+    needs: gate
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-macos-arm64-${{ matrix.python-version }}
+          path: dist
+
+  # Windows: x64, per-version wheels.
+  windows:
+    name: wheels (windows py${{ matrix.python-version }})
+    needs: gate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          args: --release --out dist --interpreter python
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-windows-${{ matrix.python-version }}
+          path: dist
+
+  # Source distribution (also carries the bundled polypus_python + vendored crates).
+  sdist:
+    name: sdist
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-sdist
+          path: dist
+
+  # ── Pre-publish wheel smoke test ────────────────────────────────────────────
+  # ci.yml runs the test suite on Linux x86_64 only, so every built wheel is
+  # installed on its own platform and interpreter before anything is published:
+  # `import polypus` plus the README Bell circuit on the local simulator. pip
+  # picks the wheel matching the running interpreter from the downloaded set
+  # (no match fails the job), then installs it with its runtime deps from PyPI.
+  smoke:
+    name: smoke (${{ matrix.platform }} py${{ matrix.python-version }})
+    needs: [linux, macos, windows]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        platform: [linux-x86_64, linux-aarch64, macos-arm64, windows]
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            artifacts: wheels-linux-x86_64
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifacts: wheels-linux-aarch64
+          - platform: macos-arm64
+            os: macos-14
+            artifacts: wheels-macos-arm64-*
+          - platform: windows
+            os: windows-latest
+            artifacts: wheels-windows-*
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Importing polypus would otherwise calibrate the machine (#176).
+      POLYPUS_NO_AUTOCALIBRATE: "1"
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ matrix.artifacts }}
+          merge-multiple: true
+          path: dist
+      - name: Install the matching wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip download --no-index --no-deps --find-links dist --dest picked polypus-quantum
+          ls picked
+          python -m pip install picked/*.whl
+      - name: Import and run the README Bell example
+        run: |
+          python - <<'PY'
+          import polypus
+          print("polypus", polypus.__version__)
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+          counts = result.counts[0]
+          print("counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) == {"00", "11"}, counts
+          PY
+
+  # Publish to PyPI on a version tag, or a manual run with target=pypi.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [linux, macos, windows, sdist, smoke]
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/polypus-quantum
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2, tip of release/v1
+        with:
+          skip-existing: true
+
+  # Manual dry run: publish to TestPyPI (the default target for a manual run).
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [linux, macos, windows, sdist, smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/polypus-quantum
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2, tip of release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  # Publish the Rust crates to crates.io on a version tag, behind the same gates
+  # as PyPI. Every workspace crate is published, in dependency order (dev-deps
+  # included), by .github/scripts/publish_crates.py; versions already on
+  # crates.io are skipped, so "Re-run failed jobs" resumes a partial publish.
+  # Needs the CARGO_REGISTRY_TOKEN secret (repository or `crates-io`
+  # environment); the token is only exposed to the publish step.
+  publish-crates:
+    name: Publish to crates.io
+    needs: [gate, linux, macos, windows, sdist, smoke]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/polypus
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `cargo publish` verifies each crate by building it; the PyO3 crates'
+      # build scripts need an interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Publish plan
+        run: python .github/scripts/publish_crates.py --plan
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "::error::The CARGO_REGISTRY_TOKEN secret is not set"
+            exit 1
+          fi
+          python .github/scripts/publish_crates.py
+
+  # ── Post-publish clean-room smoke test ──────────────────────────────────────
+  # Guarantee `pip install polypus-quantum` works for someone with NO relation to
+  # CESGA (no Rust, no ZeroMQ, no CESGA env), for both the wheel and the sdist
+  # (Spack/EasyBuild). The actual checks live in the reusable `_verify-pypi.yml`,
+  # so the on-release run here and the scheduled/on-demand run (verify-pypi.yml)
+  # can never drift apart. Runs on every real release; red here is the alarm that
+  # the published package is broken for outsiders.
+  # The version comes from the gate, which already read (and, on a tag push,
+  # checked) it.
+  verify-clean-install:
+    name: Verify clean-room PyPI install
+    needs: [gate, publish-pypi]
+    uses: ./.github/workflows/_verify-pypi.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}

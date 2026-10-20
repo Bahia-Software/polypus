@@ -1,0 +1,20 @@
+# A **standalone** example crate (detached from the Polypus workspace via the empty
+# `[workspace]` table) that certifies the filled-in Python worker (`worker.py`) against
+# the conformance battery, driving it through the real subprocess bridge. It holds no
+# library or binary of its own — only the test — so the Polypus dependencies are all
+# dev-dependencies.
+[package]
+name = "example-python-backend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+# The bridge that runs `worker.py` in its own process and speaks protocol v1.
+polypus-subprocess-backend = { path = "../../crates/polypus-subprocess-backend" }
+# The contract types the test names, and the battery it runs.
+polypus-backend = { path = "../../crates/polypus-backend" }
+polypus-backend-conformance = { path = "../../crates/polypus-backend-conformance" }
+
+# Detach from the Polypus workspace: this crate is its own workspace root.
+[workspace]

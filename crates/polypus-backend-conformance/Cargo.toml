@@ -1,0 +1,18 @@
+[package]
+name = "polypus-backend-conformance"
+description = "A reusable conformance test battery for polypus-backend QuantumBackend implementations: run it against your backend and get a pass/fail/skip report over the documented execution semantics (error classification, shot conservation, batching/waves, concurrency, result validation) — pyo3-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The contract under test — the *only* Polypus dependency, so the suite is as
+# pyo3-free as the backends it certifies. A third party depends on this crate
+# alongside `polypus-backend` and nothing else.
+polypus-backend = { workspace = true }
+# Used only to *build the circuits* the battery feeds a backend (a Bell pair, an
+# all-ones deterministic circuit, mixed widths). No PyO3.
+polypus-circuit = { workspace = true }

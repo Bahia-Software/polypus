@@ -1,73 +1,41 @@
 //! Quantum Natural Gradient (QNG) optimizer.
 
 use crate::error::OptimizerError;
-use crate::objective::{EvaluationOracle, GradientOracle, VarianceOracle};
+use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_oracle_len, patience_converged};
-use rand::Rng;
+use crate::util::check_oracle_len;
+use rand::{Rng, RngExt};
 
 /// Quantum Natural Gradient optimizer.
 pub struct AlgorithmQNG;
 
 /// Arguments for the Quantum Natural Gradient optimizer.
 ///
-/// The algorithm is completely decoupled from circuits and infrastructure: the
-/// fitness gradient is delegated to
-/// [`gradient_oracle`](AlgorithmQNGArgs::gradient_oracle), the fitness itself
-/// (for best-solution tracking) to [`oracle`](AlgorithmQNGArgs::oracle), and the
-/// QFIM diagonal to [`variance_oracle`](AlgorithmQNGArgs::variance_oracle). Each
-/// stays a separate contract because the gradient, the raw fitness and
-/// `Var[H_a | θ]` are distinct mathematical quantities, not one circuit-execution
-/// concern.
+/// The algorithm is completely decoupled from circuits and infrastructure:
+/// gradient circuit evaluation is delegated to
+/// [`oracle`](AlgorithmQNGArgs::oracle) and the QFIM diagonal to
+/// [`variance_oracle`](AlgorithmQNGArgs::variance_oracle). The latter stays a
+/// separate contract because computing `Var[H_a | θ]` is an algorithm-specific
+/// mathematical concept, not a circuit-execution concern.
 ///
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); the initial `θ` is drawn
-/// uniformly from it. `max_iters >= 1`: QNG is single-point with no pre-loop
-/// evaluation, so a zero-iteration run never calls the oracle and cannot report
-/// a real `best_fitness` (C-5).
+/// uniformly from it.
 pub struct AlgorithmQNGArgs {
-    /// Oracle that maps parameter vectors → fitness values (used for tracking
-    /// the best solution across iterations).
+    /// Oracle that maps parameter vectors → fitness values (used for gradient + energy eval).
     pub oracle: Box<dyn EvaluationOracle>,
-    /// Exact fitness gradient `∇fitness(θ)` (parameter-shift). Its ascent-sign
-    /// convention matches [`oracle`](AlgorithmQNGArgs::oracle): higher fitness is
-    /// better, so this points uphill and the QNG update *adds* it.
-    pub gradient_oracle: Box<dyn GradientOracle>,
     pub max_iters: u32,
     pub learning_rate: f64,
+    pub finite_difference_step: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
-    /// Early-stopping tolerance on the gradient norm. After each full iteration
-    /// the L2 norm `‖∇fitness(θ)‖` of that iteration's gradient is compared
-    /// against this value. Mirrors the `tolerance` field DE/PSO use for their
-    /// population-collapse test, but the stop needs
-    /// [`patience`](AlgorithmQNGArgs::patience) *consecutive* iterations below it,
-    /// not just one.
-    pub tolerance: f64,
-    /// Number of **consecutive** iterations whose gradient norm must stay below
-    /// [`tolerance`](AlgorithmQNGArgs::tolerance) before the run stops early with
-    /// `converged = true`. The counter increments on each sub-tolerance iteration
-    /// and resets to `0` on any iteration that is not, so three iterations below
-    /// the tolerance scattered among larger ones never trigger a stop with
-    /// `patience = 3`. `patience = 1` is exactly the single-iteration rule; `0`
-    /// behaves like `1`, since the streak is only tested after an iteration that
-    /// was itself below the tolerance.
-    ///
-    /// Why it is not `1`: the norm handed to the optimizer may be a *minibatch*
-    /// gradient (the [`GradientOracle`] contract deliberately hides whether it
-    /// is), and a minibatch can cancel to exactly zero at a `θ` whose
-    /// full-dataset gradient is far from zero — see the minibatch note beside
-    /// C-5/C-7 in `docs/CONTRACTS.md`. Requiring several consecutive
-    /// sub-tolerance iterations makes that coincidence far less likely; it does
-    /// not make it impossible.
-    pub patience: usize,
     /// Returns `Var[H_a | θ]`, the diagonal QFIM element for parameter index `a`.
     pub variance_oracle: Box<dyn VarianceOracle>,
     /// Tikhonov regularisation added to each QFIM element to avoid near-zero division.
     pub tikhonov_reg: f64,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }
@@ -75,6 +43,51 @@ pub struct AlgorithmQNGArgs {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Estimate the gradient of **−E(θ)** with a **central finite-difference**
+/// stencil, using the caller-supplied step `h` (`finite_difference_step`).
+///
+/// This is an *approximation* whose accuracy depends on `h`; it is deliberately
+/// **not** the parameter-shift rule, which would use a fixed ±π/2 shift and
+/// yield an exact analytic gradient with no step to tune. The tunable step is
+/// exactly what makes this a finite difference — see
+/// [`AlgorithmQNGArgs::finite_difference_step`].
+///
+/// Builds a flat list of 2·dims shifted candidates and submits them to the
+/// oracle in one batch call, then assembles the gradient from the results.
+/// Returns [`OptimizerError::OracleLengthMismatch`] if the oracle does not
+/// return exactly one value per shifted candidate (2·dims), since the assembly
+/// below indexes the result positionally.
+fn central_difference_gradient(
+    oracle: &dyn EvaluationOracle,
+    theta: &[f64],
+    h: f64,
+) -> Result<Vec<f64>, OptimizerError> {
+    let dims = theta.len();
+    // Layout: [θ+h·e₀, θ−h·e₀, θ+h·e₁, θ−h·e₁, …]
+    let candidates: Vec<Vec<f64>> = (0..dims)
+        .flat_map(|i| {
+            let mut tp = theta.to_vec();
+            let mut tm = theta.to_vec();
+            tp[i] += h;
+            tm[i] -= h;
+            [tp, tm]
+        })
+        .collect();
+
+    let expectations = oracle.evaluate_batch(&candidates);
+    check_oracle_len(candidates.len(), expectations.len())?;
+
+    // grad[i] = [E(θ−h·eᵢ) − E(θ+h·eᵢ)] / (2h)  →  ∇(−E); the update descends
+    // this (θ ← θ − η·G⁻¹·∇(−E)), i.e. ascends E, maximising the expectation.
+    let mut grad = vec![0.0f64; dims];
+    for i in 0..dims {
+        let e_plus = expectations[2 * i];
+        let e_minus = expectations[2 * i + 1];
+        grad[i] = (e_minus - e_plus) / (2.0 * h);
+    }
+    Ok(grad)
+}
 
 /// Compute the diagonal of the Fubini–Study metric (QFIM) via `variance_oracle`,
 /// adding the Tikhonov regularisation term to every element.
@@ -89,12 +102,18 @@ fn compute_qfim_diagonal(
     theta: &[f64],
     dims: usize,
     tikhonov_reg: f64,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, OptimizerError> {
     let mut diag = variance_oracle.variance_diagonal(theta, dims);
+    // The QNG update indexes `qfim_diag[0..dims]` positionally, so a diagonal of
+    // the wrong length would panic out of bounds deep in the loop. Reject it as a
+    // length-contract violation instead. Only a custom Rust `VarianceOracle` can
+    // trip this — the Python `PyVarianceOracle` maps over `0..dims` by
+    // construction — but the check keeps the trait contract honest.
+    check_oracle_len(dims, diag.len())?;
     for v in diag.iter_mut() {
         *v += tikhonov_reg;
     }
-    diag
+    Ok(diag)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,9 +130,8 @@ impl AlgorithmQNG {
     pub fn description(&self) -> String {
         String::from(
             "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
-             optimizer. The exact fitness gradient (parameter-shift) is preconditioned by the \
-             diagonal Fubini-Study metric (QFIM). Stops early once the gradient norm has \
-             stayed below the configured tolerance for `patience` consecutive iterations.",
+             optimizer. Gradients are estimated via a central finite-difference stencil and \
+             preconditioned by the diagonal Fubini-Study metric (QFIM).",
         )
     }
 
@@ -123,68 +141,81 @@ impl AlgorithmQNG {
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmQNGArgs {
             oracle,
-            gradient_oracle,
             max_iters,
             learning_rate,
+            finite_difference_step,
             bounds,
             dimensions,
-            tolerance,
-            patience,
             variance_oracle,
             tikhonov_reg,
             seed: _,
         } = args;
 
         let dims = dimensions as usize;
-        let (lb, ub) = bounds;
-        // Reject before any RNG draw or oracle call. `max_iters == 0` never
-        // enters the loop below, so it would return the unevaluated random
-        // initial θ with the `-inf` sentinel best_fitness — a C-5 postcondition
-        // violation (best_fitness must be the oracle's value for best_params).
-        // QNG is single-point: unlike DE/PSO it has no initial-population
-        // evaluation to fall back on, so zero iterations cannot yield a real
-        // best_fitness and must be rejected.
+
+        // Validate the scalar configuration before any RNG draw or oracle call,
+        // so a bad config surfaces a typed error at the seam instead of a silent
+        // `-inf` outcome, a `NaN`/`inf` update, or a panic in the sampler.
         if max_iters == 0 {
-            return Err(OptimizerError::ZeroMaxIters);
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "max_iters",
+                reason: "must be at least 1 (0 iterations never evaluates the objective)"
+                    .to_string(),
+            });
         }
-        // θ is drawn from the half-open interval [lb, ub), which is empty when
-        // `lb >= ub` and panics inside the sampler. Reject before any RNG draw
-        // or oracle call, as PSO does; requiring `partial_cmp` to be
-        // `Some(Less)` also rejects a non-finite (`NaN`) bound.
-        if !matches!(lb.partial_cmp(&ub), Some(std::cmp::Ordering::Less)) {
+        if !finite_difference_step.is_finite() || finite_difference_step <= 0.0 {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "finite_difference_step",
+                reason: format!("must be finite and > 0, got {finite_difference_step}"),
+            });
+        }
+        if !tikhonov_reg.is_finite() || tikhonov_reg < 0.0 {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "tikhonov_reg",
+                reason: format!("must be finite and >= 0, got {tikhonov_reg}"),
+            });
+        }
+        if !learning_rate.is_finite() {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "learning_rate",
+                reason: format!("must be finite, got {learning_rate}"),
+            });
+        }
+
+        let (lb, ub) = bounds;
+        // θ is drawn from the half-open interval [lb, ub); reject an empty or
+        // unbounded interval before the sampler sees it. `lb >= ub` covers the
+        // empty case; the finiteness checks reject `NaN` (which fails every
+        // comparison) and an infinite bound (which would make `random_range` draw
+        // from an unbounded interval — a panic in the `Uniform` sampler).
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
 
         // Initialise θ uniformly in [lb, ub)
-        let mut theta: Vec<f64> = (0..dims).map(|_| rng.gen_range(lb..ub)).collect();
+        let mut theta: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;
-        let mut converged = false;
-        // One incumbent-best entry per iteration actually run (C-5). Pushed
-        // unconditionally below, so it stays in step with `iterations_run` even
-        // when the `patience` streak cuts the loop short.
+        // Best energy at the end of each iteration (see
+        // `OptimizationOutcome::fitness_history`).
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
-        // Consecutive iterations whose gradient norm stayed below `tolerance`.
-        let mut below_tolerance_streak = 0usize;
 
         for iteration in 0..max_iters as usize {
             iterations_run = iteration + 1;
 
-            // ── 1. Exact fitness gradient via parameter-shift ────────────────
-            //    `gradient_oracle` returns ∇fitness directly (ascent sign), one
-            //    value per parameter; check the length as any oracle output is.
-            let grad = gradient_oracle.gradient_batch(&theta, dims);
-            check_oracle_len(dims, grad.len())?;
+            // ── 1. Gradient of −E via central finite differences ─────────────
+            let grad =
+                central_difference_gradient(oracle.as_ref(), &theta, finite_difference_step)?;
 
             // ── 2. Diagonal QFIM with Tikhonov regularisation ────────────────
             let qfim_diag =
-                compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg);
+                compute_qfim_diagonal(variance_oracle.as_ref(), &theta, dims, tikhonov_reg)?;
 
-            // ── 3. QNG update: θ ← θ + η · G⁻¹ · ∇fitness ────────────────────
-            //    `grad` is ∇fitness (uphill), so ascend it to maximise fitness.
+            // ── 3. QNG update: θ ← θ − η · G⁻¹ · ∇(−E) ─────────────────────
+            //    Equivalent to θ ← θ + η · G⁻¹ · ∇E  (maximise expectation)
             for i in 0..dims {
-                theta[i] += learning_rate * grad[i] / qfim_diag[i];
+                theta[i] -= learning_rate * grad[i] / qfim_diag[i];
             }
 
             // ── 4. Evaluate energy and track best solution ────────────────────
@@ -197,31 +228,17 @@ impl AlgorithmQNG {
                 best_energy = energy;
                 best_theta = theta.clone();
             }
-            // Record the running best, *not* this iteration's `energy`: gradient
-            // ascent has no monotonicity guarantee, so a step that overshoots a
-            // ripple would put a dip in the history. `best_energy` after the
-            // update above keeps the sequence non-decreasing by construction and
-            // makes the last entry the reported `best_fitness`.
-            fitness_history.push(best_energy);
 
-            // ── 5. Early stopping on the gradient norm ────────────────────────
-            //    Decide after the full iteration's work (the same placement as
-            //    DE/PSO's population_converged test). A *single* sub-tolerance
-            //    iteration is not enough: `patience` consecutive ones are, and
-            //    any iteration above the tolerance clears the streak. See the
-            //    `patience` doc-comment for why one iteration cannot be trusted.
-            if patience_converged(&grad, tolerance, patience, &mut below_tolerance_streak) {
-                converged = true;
-                break;
-            }
+            fitness_history.push(best_energy);
         }
 
         Ok(OptimizationOutcome {
             best_params: best_theta,
             best_fitness: best_energy,
-            fitness_history,
             iterations_run,
-            converged,
+            // QNG runs a fixed iteration budget; it has no early-stopping test.
+            converged: false,
+            fitness_history,
         })
     }
 }

@@ -1,0 +1,295 @@
+//! Error types for the execution-backend layer — **pyo3-free**.
+//!
+//! # Granularity
+//!
+//! Two hand-written enums, no `thiserror`, matching the workspace's per-crate
+//! `error.rs` style (`polypus-circuit`, `polypus-optimizers`): [`BackendError`]
+//! (backend construction, circuit execution, data conversion) and
+//! [`InfrastructureError`] (a [`Planner`](crate::Planner) running circuits on a
+//! backend).
+//!
+//! # No PyO3, and no `From<_> for PyErr`
+//!
+//! This crate carries **no** PyO3 dependency, so — unlike the pre-extraction
+//! `polypus-infrastructure::BackendError` — there is no `Seam(PyErr)` variant.
+//! A failure that originated in Python (or in any provider SDK) crosses this
+//! boundary type-erased in [`BackendError::External`], a
+//! `Box<dyn std::error::Error + Send + Sync>`. The Polypus Python backends box a
+//! Python exception there as `polypus_infrastructure::DisplaySafePyErr`, and the
+//! Polypus FFI edge (`polypus::exceptions`) recovers only that Python-exception
+//! carrier and re-raises the `PyErr` it holds with its original class, as the
+//! old `Seam` variant did — except an exception the edge identifies as raised
+//! by the circuit SDK behind the Python backends, which it raises as
+//! `polypus.BackendError` chaining the original (contract C-1, issue #218). A
+//! bare `PyErr` boxed there is not recovered with its class. The difference
+//! from `Seam` is that the boxing is generic, so a third-party backend boxes
+//! *its own* error type here without this crate ever naming it. Mapping either
+//! enum to a Python exception stays the sole responsibility of the FFI edge.
+
+use std::error::Error;
+use std::fmt;
+
+use polypus_observable::ObservableError;
+
+use crate::mem_budget::InsufficientMemory;
+
+/// Failure of a quantum-execution backend or of backend construction.
+///
+/// `Clone`/`Eq` are intentionally omitted: [`BackendError::External`] carries a
+/// boxed [`Error`], which is neither `Clone` nor `Eq`. `#[non_exhaustive]`: new
+/// failure modes are added as variants, so a `match` needs a wildcard arm.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BackendError {
+    /// The requested infrastructure/backend name is not recognised. Surfaces as
+    /// `ValueError` at the FFI edge (contract C-1, unknown infrastructure).
+    UnknownInfrastructure {
+        /// The rejected infrastructure string.
+        name: String,
+    },
+    /// An algorithm was handed a number of circuits it cannot operate on
+    /// (e.g. a shot-distributing planner requires exactly one circuit). Surfaces
+    /// as `ValueError`.
+    InvalidCircuitCount {
+        /// The exact number of circuits the algorithm requires.
+        expected: usize,
+        /// The number of circuits actually supplied.
+        got: usize,
+    },
+    /// A backend was asked to run a circuit representation it cannot execute
+    /// (e.g. a [`Foreign`](crate::BoundCircuit::Foreign) provider object on a
+    /// GIL-free backend).
+    UnsupportedCircuit(String),
+    /// A backend returned measurement results that violate the execution
+    /// contract: the wrong number of count maps, an empty map, a shot total that
+    /// does not match the request (contract C-3), or a malformed non-bitstring
+    /// key. Surfaced here rather than silently reduced downstream.
+    InvalidResults(String),
+    /// A native (pure-Rust) circuit failed to parse or to simulate.
+    NativeCircuit(String),
+    /// A CUNQA-specific failure originating in the Rust layer (family-handle
+    /// extraction, allocation bookkeeping).
+    Cunqa(String),
+    /// Converting data across a boundary failed (building kwargs, converting
+    /// counts, serialising a payload, …).
+    Conversion(String),
+    /// A backend stopped responding mid-call — it crashed, was killed, or hung
+    /// (e.g. a subprocess worker that died with a pending request, or one still
+    /// alive but wedged past its liveness deadline). This is the Fase-2 finding
+    /// made explicit: distinct from a clean provider error in
+    /// [`External`](Self::External), because the caller may choose to *retry with
+    /// a fresh worker* rather than treat it as a definitive failure.
+    Unresponsive(String),
+    /// The backend call was **aborted by an external signal** (a terminal Ctrl+C
+    /// delivered to the process group, or any other interrupt the backend observed)
+    /// and must be treated as a *cancellation*, whatever its source.
+    ///
+    /// This is distinct from [`Unresponsive`](Self::Unresponsive) (the backend
+    /// *failed*) and from [`External`](Self::External) (a clean provider error): it
+    /// is the cooperative, expected end of an interrupted run. The FFI edge maps it
+    /// to `KeyboardInterrupt`, the same class a between-wave `check_signals` cancel
+    /// produces, so an interrupt observed *inside* a blocked backend call surfaces
+    /// identically to one observed between waves — regardless of which thread saw it.
+    ///
+    /// A third-party backend that can tell its call was interrupted (e.g. a
+    /// subprocess worker that caught SIGINT and replied "aborted") returns this to
+    /// get that consistent classification for free.
+    Aborted(String),
+    /// A statevector the backend would have to allocate does not fit in the
+    /// memory budget (issue #215): the run is refused **before** anything starts,
+    /// instead of being killed by the out-of-memory killer with no error and no
+    /// partial results. Only raised against a *known* limit — an explicit
+    /// `POLYPUS_MEM_BUDGET` or the detected RAM/cgroup limit, never the blind
+    /// fallback (see [`check_fits`](crate::mem_budget::check_fits)).
+    ///
+    /// Surfaces as `polypus.InsufficientMemoryError` (a `polypus.BackendError`) at
+    /// the FFI edge. A third-party backend that allocates dense statevectors can
+    /// return it via [`check_statevector_fits`](crate::mem_budget::check_statevector_fits)
+    /// and `?` (there is a `From<InsufficientMemory>`).
+    InsufficientMemory(InsufficientMemory),
+    /// Any provider-specific failure, type-erased.
+    ///
+    /// The Polypus Python backends box a Python exception here as
+    /// `polypus_infrastructure::DisplaySafePyErr`, the only Python-exception
+    /// carrier the FFI edge recovers, so it can re-raise the original Python
+    /// exception (keeping its `ValueError`/`TypeError`/`KeyboardInterrupt`
+    /// class; an exception of the circuit SDK behind those backends is raised as
+    /// `polypus.BackendError` with the original as its cause — contract C-1); a
+    /// bare `PyErr` boxed here does not keep its class. The QMIO backend boxes
+    /// its own `QmioError`; a third-party backend boxes whatever error type it
+    /// likes. This is what keeps `polypus-backend` free of any provider or PyO3
+    /// coupling in its error surface.
+    External(Box<dyn Error + Send + Sync>),
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::UnknownInfrastructure { name } => {
+                write!(f, "unknown infrastructure '{name}'")
+            }
+            BackendError::InvalidCircuitCount { expected, got } => {
+                write!(f, "expected exactly {expected} circuit(s), got {got}")
+            }
+            BackendError::UnsupportedCircuit(m) => write!(f, "{m}"),
+            BackendError::InvalidResults(m) => write!(f, "backend returned invalid results: {m}"),
+            BackendError::NativeCircuit(m) => write!(f, "{m}"),
+            BackendError::Cunqa(m) => write!(f, "CUNQA backend error: {m}"),
+            BackendError::Conversion(m) => write!(f, "data conversion failed: {m}"),
+            BackendError::Unresponsive(m) => write!(f, "the backend stopped responding: {m}"),
+            BackendError::Aborted(m) => write!(f, "the backend call was aborted: {m}"),
+            BackendError::InsufficientMemory(e) => write!(f, "{e}"),
+            BackendError::External(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for BackendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            BackendError::External(err) => Some(err.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<InsufficientMemory> for BackendError {
+    fn from(err: InsufficientMemory) -> Self {
+        BackendError::InsufficientMemory(err)
+    }
+}
+
+/// A failure while a [`Planner`](crate::Planner) executes circuits on a backend:
+/// the backend itself failed, a cost-observable failed while reducing counts to
+/// expectations, the run was cooperatively cancelled, or the planner/backend
+/// pairing is invalid.
+///
+/// **pyo3-free.** The pre-extraction type had a `Python(PyErr)` variant carrying
+/// the `KeyboardInterrupt` from the between-wave `check_signals`. That signal
+/// check is now injected via the [`Interrupt`](crate::Interrupt) guard on the
+/// [`CancelToken`](crate::CancelToken); a pending interrupt arrives here as
+/// [`Backend`](Self::Backend)`(`[`BackendError::External`]`(boxed DisplaySafePyErr))`
+/// and is re-raised verbatim at the FFI edge — so no PyO3 type appears on this
+/// enum.
+///
+/// `Clone`/`Eq` are omitted: [`Backend`](Self::Backend) may carry an
+/// [`External`](BackendError::External) box.
+#[derive(Debug)]
+pub enum InfrastructureError {
+    /// The execution backend failed.
+    Backend(BackendError),
+    /// A native cost-observable failed while reducing counts to expectations.
+    Observable(ObservableError),
+    /// The run was cooperatively cancelled between waves via the planner's
+    /// [`CancelToken`](crate::CancelToken): a wave is atomic, so cancellation
+    /// takes effect at the next wave boundary, never mid-wave. Surfaces as a
+    /// `KeyboardInterrupt` at the FFI edge, the same class a SIGINT would.
+    Cancelled,
+    /// A [`Planner`](crate::Planner)'s requirements are not met by the backend it
+    /// was paired with (e.g. shot distribution requested from a backend that does
+    /// not support it). A configuration error, checked up front. Surfaces as a
+    /// `ValueError`.
+    IncompatiblePlanner(String),
+}
+
+impl fmt::Display for InfrastructureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InfrastructureError::Backend(err) => write!(f, "{err}"),
+            InfrastructureError::Observable(err) => {
+                write!(f, "expectation evaluation failed: {err}")
+            }
+            InfrastructureError::Cancelled => write!(f, "the run was cancelled"),
+            InfrastructureError::IncompatiblePlanner(m) => {
+                write!(f, "planner is incompatible with the backend: {m}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InfrastructureError {}
+
+impl From<BackendError> for InfrastructureError {
+    fn from(err: BackendError) -> Self {
+        InfrastructureError::Backend(err)
+    }
+}
+
+impl From<ObservableError> for InfrastructureError {
+    fn from(err: ObservableError) -> Self {
+        InfrastructureError::Observable(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_carries_the_variant_context() {
+        assert_eq!(
+            BackendError::Conversion("boom".to_string()).to_string(),
+            "data conversion failed: boom"
+        );
+        assert_eq!(
+            BackendError::Cunqa("boom".to_string()).to_string(),
+            "CUNQA backend error: boom"
+        );
+        assert_eq!(
+            BackendError::UnsupportedCircuit("boom".to_string()).to_string(),
+            "boom"
+        );
+        assert_eq!(
+            BackendError::Unresponsive("worker died (signal 9)".to_string()).to_string(),
+            "the backend stopped responding: worker died (signal 9)"
+        );
+        assert_eq!(
+            BackendError::Aborted("Ctrl+C".to_string()).to_string(),
+            "the backend call was aborted: Ctrl+C"
+        );
+    }
+
+    /// The `External` box round-trips: a boxed error Displays through and can be
+    /// downcast back to its concrete type (the pattern the FFI edge uses to
+    /// recover its carrier, `DisplaySafePyErr`).
+    #[test]
+    fn external_is_transparent_and_downcastable() {
+        #[derive(Debug)]
+        struct Provider(&'static str);
+        impl fmt::Display for Provider {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "provider says {}", self.0)
+            }
+        }
+        impl std::error::Error for Provider {}
+
+        let err = BackendError::External(Box::new(Provider("nope")));
+        assert_eq!(err.to_string(), "provider says nope");
+        // The box is reachable through `source()` and downcasts to its concrete
+        // type.
+        let source = std::error::Error::source(&err).expect("External has a source");
+        assert!(source.downcast_ref::<Provider>().is_some());
+    }
+
+    #[test]
+    fn insufficient_memory_converts_and_displays_the_refusal() {
+        use crate::mem_budget::{check_fits, BudgetSource, MemBudget};
+        let refusal = check_fits(
+            20,
+            MemBudget {
+                bytes: 1 << 20,
+                source: BudgetSource::Explicit,
+            },
+        )
+        .unwrap_err();
+        let err: BackendError = refusal.clone().into();
+        assert!(matches!(&err, BackendError::InsufficientMemory(e) if *e == refusal));
+        assert_eq!(err.to_string(), refusal.to_string());
+    }
+
+    #[test]
+    fn backend_error_converts_into_infrastructure_error() {
+        let infra: InfrastructureError = BackendError::Cunqa("x".to_string()).into();
+        assert!(matches!(infra, InfrastructureError::Backend(_)));
+    }
+}

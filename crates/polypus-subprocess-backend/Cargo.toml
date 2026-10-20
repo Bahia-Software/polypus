@@ -1,0 +1,27 @@
+[package]
+name = "polypus-subprocess-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A pyo3-free QuantumBackend that bridges to a provider's Python SDK running in its own subprocess, over a versioned length-prefixed JSON protocol. Lets a third-party Python backend be used from Polypus without embedding the interpreter (no PyO3)."
+
+# Deliberately pyo3-free (verified in CI with `cargo tree`): the whole point of the
+# subprocess bridge is that the provider's interpreter runs in ITS OWN process, never
+# embedded in ours. This crate depends only on the pyo3-free backend contract, serde
+# for the wire protocol, and `nix` for the POSIX process controls (the `PR_SET_PDEATHSIG`
+# orphan guard and `kill` for out-of-band cancellation) — audited safe wrappers, so the
+# crate carries no hand-written FFI `unsafe` (the sole `unsafe` is std's `pre_exec`; see
+# `Worker::spawn` and docs/ENGINEERING.md §5).
+[dependencies]
+polypus-backend = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true }
+log = { workspace = true }
+
+# Tests build native circuits (to serialise to QASM2) and drive the shipped planners.
+[dev-dependencies]
+polypus-circuit = { workspace = true }

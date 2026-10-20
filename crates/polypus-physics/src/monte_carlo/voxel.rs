@@ -1,29 +1,11 @@
 //! Regular 3-D voxel grid for spatial energy-deposition tallies.
 //!
-//! A [`VoxelGrid`] partitions a rectangular region into cubic voxels and
-//! accumulates the energy deposited in each one. It converts that tally into an
-//! absorbed dose in **gray** (J/kg) and collapses it into a depth-dose profile
-//! (the percentage depth dose, PDD).
+//! A [`VoxelGrid`] partitions a rectangular region into cubic voxels.
+//! The percentage depth dose, PDD, is the energy deposited per depth slice,
+//! restricted to a small window around the beam's central axis — the same
+//! quantity a real point-like dosimeter would measure by scanning along the
+//! central axis of a water phantom.
 //!
-//! # Local-deposition model (valid at ~100 keV)
-//!
-//! The engine deposits the full energy of each photon interaction **locally**,
-//! at the interaction point, instead of transporting the liberated electron.
-//! At 100 keV the continuous-slowing-down range of a water electron is below
-//! ~0.2 mm — far smaller than the 1 cm voxels used here — so essentially no
-//! energy leaks between voxels and the collision kerma equals the absorbed
-//! dose. Local deposition is therefore correct at this energy. (Electron
-//! transport, which matters for the surface build-up region at higher
-//! energies, is a deliberate future enhancement.)
-//!
-//! # Absolute vs. relative dose
-//!
-//! Fixing the voxel size fixes the voxel mass, so the **dose per voxel in gray
-//! is unambiguous** (unlike a point beam with no cross-sectional area). The
-//! absolute value returned by [`VoxelGrid::dose_gy`] is "per the `N` simulated
-//! histories"; to compare against a reference Monte Carlo, normalize by the
-//! number of primaries or use the dimensionless relative PDD
-//! ([`VoxelGrid::relative_pdd`]).
 
 use crate::constants::MEV_TO_JOULE;
 use crate::error::PhysicsError;
@@ -161,24 +143,6 @@ impl VoxelGrid {
         }
     }
 
-    /// Depth-dose profile: deposited energy summed over `x` and `y` for each
-    /// `z`-slice (MeV), length `nz`.
-    ///
-    /// Collapsing the transverse plane makes the profile robust to a pencil
-    /// beam that happens to travel along a voxel edge in `x`/`y`. Because whole
-    /// `z`-slices are contiguous in the linear layout, each slice is a simple
-    /// contiguous-range sum.
-    pub fn depth_profile_mev(&self) -> Vec<f64> {
-        let [nx, ny, nz] = self.dims;
-        let slice_len = nx * ny;
-        (0..nz)
-            .map(|iz| {
-                let start = iz * slice_len;
-                self.energy_mev[start..start + slice_len].iter().sum()
-            })
-            .collect()
-    }
-
     /// Mass of a single voxel in `medium` (kg): `ρ · voxel_size³`.
     ///
     /// A 1 cm³ voxel of water (`ρ = 1000 kg/m³`) has mass
@@ -200,28 +164,41 @@ impl VoxelGrid {
             .collect()
     }
 
-    /// Depth-dose curve in gray: absorbed dose per `z`-slice, length `nz`.
+    /// Depth-dose profile (MeV), length `nz`: deposited energy summed per
+    /// `z`-slice, restricted to a square window around the central axis
+    /// (x=0, y=0).
     ///
-    /// A slice contains `nx · ny` voxels, so its mass is
-    /// `ρ · (nx · ny) · voxel_size³`; the slice dose is the slice's deposited
-    /// energy (in joules) divided by that mass.
-    pub fn depth_dose_gy(&self, medium: &dyn Medium) -> Vec<f64> {
-        let [nx, ny, _nz] = self.dims;
-        let slice_mass = medium.density_kg_m3() * (nx * ny) as f64 * self.voxel_size_m.powi(3);
-        self.depth_profile_mev()
-            .iter()
-            .map(|&e| e * MEV_TO_JOULE / slice_mass)
-            .collect()
+    /// `half_window_voxels` is how many voxels to include on each side of the
+    /// central voxel along x and y (`0` measures a single 1-voxel-wide column,
+    /// `1` a 3×3-voxel window, etc.). Assumes the axis runs through the
+    /// geometric centre of the grid's x-y extent.
+    pub fn depth_profile_mev(&self, half_window_voxels: usize) -> Vec<f64> {
+        let [nx, ny, nz] = self.dims;
+        let center_ix = nx / 2;
+        let center_iy = ny / 2;
+        let ix_lo = center_ix.saturating_sub(half_window_voxels);
+        let ix_hi = (center_ix + half_window_voxels).min(nx.saturating_sub(1));
+        let iy_lo = center_iy.saturating_sub(half_window_voxels);
+        let iy_hi = (center_iy + half_window_voxels).min(ny.saturating_sub(1));
+
+        let mut profile = vec![0.0; nz];
+        for (iz, slot) in profile.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for ix in ix_lo..=ix_hi {
+                for iy in iy_lo..=iy_hi {
+                    sum += self.energy_mev[ix + nx * (iy + ny * iz)];
+                }
+            }
+            *slot = sum;
+        }
+        profile
     }
 
-    /// Relative percentage depth dose (dimensionless): the depth profile
-    /// normalized to its maximum, length `nz`.
-    ///
-    /// This is the curve compared directly against a reference Monte Carlo,
-    /// since it cancels the absolute (per-history) normalization. Returns all
-    /// zeros if no energy was deposited.
-    pub fn relative_pdd(&self) -> Vec<f64> {
-        let profile = self.depth_profile_mev();
+    /// Relative percentage depth dose (dimensionless): the central-axis depth
+    /// profile ([`depth_profile_mev`](Self::depth_profile_mev)) normalized to
+    /// its own maximum, length `nz`.
+    pub fn relative_pdd(&self, half_window_voxels: usize) -> Vec<f64> {
+        let profile = self.depth_profile_mev(half_window_voxels);
         let max = profile.iter().copied().fold(0.0_f64, f64::max);
         if max <= 0.0 {
             return vec![0.0; profile.len()];
@@ -297,20 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn depth_profile_collapses_transverse_plane() {
-        let mut g = experiment_grid();
-        // Two deposits in slice z = 2, at different (x, y); one in slice z = 5.
-        g.score(Position([-0.04, -0.04, 0.025]), 1.0);
-        g.score(Position([0.04, 0.04, 0.025]), 2.0);
-        g.score(Position([0.0, 0.0, 0.055]), 4.0);
-        let profile = g.depth_profile_mev();
-        assert_eq!(profile.len(), 10);
-        assert!((profile[2] - 3.0).abs() < 1e-12);
-        assert!((profile[5] - 4.0).abs() < 1e-12);
-        assert_eq!(profile[0], 0.0);
-    }
-
-    #[test]
     fn voxel_mass_of_one_cubic_cm_water_is_one_gram() {
         let g = experiment_grid();
         let water = HomogeneousMedium::water();
@@ -332,9 +295,9 @@ mod tests {
     #[test]
     fn relative_pdd_is_normalized_to_unity() {
         let mut g = experiment_grid();
-        g.score(Position([0.0, 0.0, 0.005]), 5.0); // slice 0
-        g.score(Position([0.0, 0.0, 0.025]), 2.0); // slice 2
-        let pdd = g.relative_pdd();
+        g.score(Position([0.0, 0.0, 0.005]), 5.0); // slice 0, on axis
+        g.score(Position([0.0, 0.0, 0.025]), 2.0); // slice 2, on axis
+        let pdd = g.relative_pdd(0);
         assert!((pdd[0] - 1.0).abs() < 1e-12);
         assert!((pdd[2] - 0.4).abs() < 1e-12);
     }
@@ -342,6 +305,19 @@ mod tests {
     #[test]
     fn relative_pdd_is_all_zero_for_empty_grid() {
         let g = experiment_grid();
-        assert!(g.relative_pdd().iter().all(|&v| v == 0.0));
+        assert!(g.relative_pdd(0).iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn depth_profile_restricts_to_central_axis_window() {
+        let mut g = experiment_grid();
+        g.score(Position([0.0, 0.0, 0.005]), 5.0); // on axis, slice 0
+        g.score(Position([0.045, 0.045, 0.005]), 3.0); // far corner, same slice
+        let profile = g.depth_profile_mev(1);
+        assert!(
+            (profile[0] - 5.0).abs() < 1e-9,
+            "expected only the on-axis deposit to count, got {}",
+            profile[0]
+        );
     }
 }

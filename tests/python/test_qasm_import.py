@@ -42,7 +42,7 @@ class TestQasmImport:
         qasm = polypus.Circuit(1).ry(0, polypus.Param(0)).to_qasm2([math.pi])
         imported = polypus.Circuit.from_qasm2(qasm)
         assert imported.num_params == 0
-        assert f"ry({math.pi:.12f})" in imported.to_qasm2()
+        assert f"ry({math.pi!r})" in imported.to_qasm2()
 
     def test_imports_qiskit_dumps_output(self):
         import polypus
@@ -60,14 +60,60 @@ class TestQasmImport:
         back = QuantumCircuit.from_qasm_str(imported.to_qasm2())
         assert back.num_qubits == 2
 
+    def test_id_is_preserved_not_dropped(self):
+        """`id` counts towards gate count and depth, so it must survive
+        import and export one-to-one (it used to be dropped at parse time)."""
+        import polypus
+        from qiskit import QuantumCircuit
+
+        src = (
+            'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\n'
+            "h q[0];\nid q[1];\nid q[0];\ncx q[0],q[1];\n"
+        )
+        imported = polypus.Circuit.from_qasm2(src)
+        assert len(imported) == 4
+        assert imported.to_qasm2() == src
+        reference = QuantumCircuit.from_qasm_str(src)
+        back = QuantumCircuit.from_qasm_str(imported.to_qasm2())
+        assert back.count_ops() == reference.count_ops()
+        assert back.depth() == reference.depth()
+
+    def test_id_builder_method(self):
+        import polypus
+
+        qc = polypus.Circuit(2).id(1)
+        assert len(qc) == 1
+        assert "id q[1];" in qc.to_qasm2()
+
     def test_imported_circuit_extends_with_builder(self):
         import polypus
 
         qasm = polypus.Circuit(2).h(0).cx(0, 1).to_qasm2()
         qc = polypus.Circuit.from_qasm2(qasm).rz(1, 0.5).measure_all()
         out = qc.to_qasm2()
-        assert "rz(0.500000000000) q[1];" in out
+        assert "rz(0.5) q[1];" in out
         assert out.endswith("measure q -> c;\n")
+
+    def test_clbits_width_is_the_declared_width(self):
+        """`clbits_width` is the width an imported program declares, as Qiskit's
+        `num_clbits`; `num_clbits` stays the implicit register (issue #323)."""
+        import polypus
+        from qiskit import QuantumCircuit
+
+        qasm2 = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\ncreg c[3];\n'
+        qasm3 = 'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[3] c;\n'
+        for qc, implicit in (
+            (polypus.Circuit.from_qasm2(qasm2 + "measure q[0] -> c[1];\n"), 2),
+            (polypus.Circuit.from_qasm2(qasm2 + "h q[0];\n"), 0),
+            (polypus.Circuit.from_qasm3(qasm3 + "c[1] = measure q[0];\n"), 2),
+            (polypus.Circuit.from_qasm3(qasm3 + "h q[0];\n"), 0),
+        ):
+            assert (qc.clbits_width, qc.num_clbits) == (3, implicit)
+            assert QuantumCircuit.from_qasm_str(qc.to_qasm2()).num_clbits == 3
+
+        built = polypus.Circuit(3).x(0).measure(0, 1)
+        assert (built.clbits_width, built.num_clbits) == (2, 2)
+        assert polypus.Circuit(2).h(0).clbits_width == 0
 
     def test_parse_error_carries_line_number(self):
         import polypus

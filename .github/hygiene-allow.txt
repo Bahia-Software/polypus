@@ -1,0 +1,16 @@
+# Exceptions for .github/scripts/hygiene.py. One entry per line:
+#   RULE<TAB>PATTERN<TAB># reason
+# PATTERN matches the whole repo-relative path; `*` and `?` stay within one
+# path component and a `**` component spans any number of them. Keep entries
+# narrow and give a reason. Every change to this file needs human review.
+# forbidden-name, notebook-output, version-mismatch and submodule admit no
+# exceptions.
+
+file-size	reference-data/endf-epdl-2023/ZA??????.txt	# ENDF/B-VIII.1 EPDL tables used by polypus-physics (see PROVENANCE.md)
+cluster-path	tests/python/test_cunqa_config.py	# Regression test asserting a cluster path is absent from the source
+cluster-path	.github/scripts/hygiene.py	# Rule definitions contain the patterns themselves
+private-ipv4	.github/scripts/hygiene.py	# Rule definitions list the RFC 1918 networks
+cluster-path	crates/polypus-sim/src/calibration.rs	# Unit test uses a synthetic home-directory cache path
+ignored-file	crates/polypus-physics/examples/results/depth_dose_100kev_water.csv	# Versioned reference output of a physics example
+ignored-file	crates/polypus-physics/examples/results/depth_dose_100kvp_kramers_water.csv	# Versioned reference output of a physics example
+ignored-file	crates/polypus-physics/examples/results/mass_attenuation_water.csv	# Versioned reference output of a physics example

@@ -15,7 +15,7 @@ use crate::medium::compound::PhotonChannel;
 use crate::medium::Medium;
 use crate::particle::photon::Photon;
 use crate::particle::ParticleState;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Photon interaction model over an arbitrary [`Medium`].
 ///
@@ -90,7 +90,7 @@ impl InteractionModel for PhotonInteractionModel {
             });
         }
 
-        let u: f64 = rng.gen_range(0.0..total);
+        let u: f64 = rng.random_range(0.0..total);
         if u < tau {
             let (deposit, secondaries) = photoelectric::sample(state);
             Ok(InteractionEvent::Absorbed {

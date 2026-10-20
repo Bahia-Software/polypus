@@ -1,0 +1,51 @@
+[package]
+name = "polypus-infrastructure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Execution-backend layer for Polypus: quantum circuit backends (native statevector, local, CUNQA, CESGA QMIO QPU) and the Planner that decides how a circuit runs."
+
+[features]
+# Real CESGA QMIO QPU backend. Opt-in so the default build never pulls a ZeroMQ
+# stack; forwarded from `polypus`'s own `qmio` feature. Mirrors the backend's
+# dependency set in `polypus/Cargo.toml`.
+qmio = ["dep:zeromq", "dep:serde-pickle", "dep:serde_json", "dep:tokio"]
+
+[dependencies]
+# The pyo3-free backend contract this crate implements and re-exports. Third
+# parties depend on `polypus-backend` alone; this crate adds the four concrete
+# Polypus backends, the `Infrastructure` factory and the Qiskit/ZeroMQ machinery.
+polypus-backend = { workspace = true }
+polypus-circuit = { workspace = true }
+polypus-sim = { workspace = true, features = ["parallel"] }
+polypus-observable = { workspace = true }
+# PyO3 for the GIL-touching backends (Aer/CUNQA/QMIO seams) and for carrying a
+# `PyErr` verbatim in `BackendError::Seam`. This crate never defines the
+# extension module, so it does not enable `pyo3/extension-module`; the top-level
+# `polypus` cdylib turns that on, and feature unification applies it here too.
+pyo3 = { workspace = true }
+rand = { workspace = true }
+# Across-circuit population parallelism in the native statevector backend.
+rayon = { workspace = true }
+log = { workspace = true }
+# --- optional, only compiled with `--features qmio` ---
+zeromq = { version = "0.6", optional = true }
+serde-pickle = { version = "1.2", optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"], optional = true }
+
+# The subprocess bridge, registered as the built-in `"subprocess"` backend by
+# `register_builtin_backends`. Pyo3-free, so it does not widen this crate's FFI
+# edge. Unix-only: it drives a worker via POSIX process controls (fork/exec
+# `pre_exec`, `SIGINT`), so it is not pulled into the Windows extension-module
+# build — where the `"subprocess"` backend is simply not registered.
+[target.'cfg(unix)'.dependencies]
+polypus-subprocess-backend = { workspace = true }
+
+[dev-dependencies]
+# The conformance battery, used by `tests/conformance.rs` to certify the four
+# built-in backends against the documented semantics. Pyo3-free dev-only dependency.
+polypus-backend-conformance = { workspace = true }

@@ -8,6 +8,8 @@ contributions alike. Two companion documents complete the picture:
 
 ## Setting up
 
+> Same project, three names — `pip install polypus-quantum` · `import polypus` · `cargo add polypus`. The PyPI name `polypus` is taken, so the distribution is `polypus-quantum`; the import name and the Rust crate both stay `polypus`.
+
 The interactive installer handles dependencies, the wheel build and the test
 suite:
 
@@ -16,13 +18,51 @@ bash install.sh            # guided
 bash install.sh --yes      # non-interactive (CI)
 ```
 
-Manual route: `pip install -r requirements-dev.txt`, then
-`python -m build packages/polypus_python/ && pip install packages/polypus_python/`,
-then `maturin develop --release --features extension-module`.
+Development route — an editable install of both packages (`polypus` and the
+`polypus_python` helpers, which live side by side under `python/`):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```bash
+maturin develop --release
+```
+
+Edits to any `.py` file under `python/` take effect on the next import, with no
+rebuild. After a Rust change, run `maturin develop --release` again; it rebuilds
+the extension incrementally and drops it in place next to
+`python/polypus/__init__.py` (git-ignored). Keep `--release`, matching the
+wheel CI tests: several Python tests time real simulations.
+
+Wheel route — what `install.sh`, CI and users get (one wheel carries both the
+`polypus` extension and the `polypus_python` helpers):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```bash
+maturin build --release --out dist
+```
+
+```bash
+pip install --force-reinstall dist/polypus_quantum-*.whl
+```
+
+`--force-reinstall` makes pip replace an already-installed wheel that has the
+same version after a rebuild; it also replaces an editable install.
 
 **Toolchain:** the Minimum Supported Rust Version is declared as
 `rust-version` in the workspace `Cargo.toml` — that field is the single place
-it lives (Cargo enforces it and Clippy picks it up automatically).
+it lives (Cargo enforces it and Clippy picks it up automatically). The
+workspace uses the MSRV-aware resolver (`resolver = "3"`), so `cargo update`
+avoids dependency releases that need a newer Rust than `rust-version`; the
+`msrv` CI job still builds with `--locked` and catches anything that slips
+through. Dependabot is not known to honour that resolver, so
+`.github/dependabot.yml` carries an interim `ignore` for `uuid`; remove it when
+the MSRV is raised or once a Dependabot PR confirms the resolver is respected
+(#276).
 
 ## Running the checks
 
@@ -32,9 +72,18 @@ Everything CI runs, you can run locally:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                     # all crates, no hand-maintained list
+                                           # (polypus-subprocess-backend's tests spawn a Python
+                                           #  worker; they skip gracefully if python3 is absent)
 cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
 cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs the extension installed
+pytest tests/python                        # needs polypus installed (see Setting up)
+python -m mypy.stubtest polypus \
+  --allowlist tests/python/stubtest_allowlist.txt \
+  --mypy-config-file tests/python/stubtest_mypy.ini
+                                           # typing stubs vs the installed extension
+                                           # (needs the wheel installed and mypy from
+                                           #  requirements-dev.txt)
+python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
 ```
 
 A green run is a **precondition** for opening a PR, not something to fix
@@ -51,6 +100,49 @@ Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,
 `bench_native_vs_qiskit.py`, `bench_batching.py`) and include the numbers in
 the PR description.
+
+## Repository hygiene
+
+`.github/workflows/hygiene.yml` runs `.github/scripts/hygiene.py` (standard
+library only, Python ≥ 3.9) on every pull request and push to `main`. It
+rejects:
+
+- internal notes and local tool configuration that `.gitignore` already
+  excludes, and any file added although a versioned `.gitignore` ignores it;
+- infrastructure data and credentials on added lines: cluster file-system
+  paths, login-node names, private IPv4 addresses, private-key headers and
+  GitHub tokens;
+- notebooks under `tutorials/` with outputs or execution counts;
+- blobs larger than 1 MiB;
+- a `CITATION.cff` version different from `Cargo.toml` (contract C-6);
+- submodules.
+
+Run it before pushing:
+
+```bash
+python .github/scripts/hygiene.py --base origin/main
+```
+
+It analyses **commits** — the net diff between the merge base and `HEAD` —
+not uncommitted changes, so commit first. Renamed files are analysed as new
+files. Exit code 0 means clean, 1 violations, 2 a configuration or execution
+error. The output names the file, line and rule, never the matched text.
+
+A notebook with outputs is fixed with `nbstripout <notebook>`, then commit the
+result; `nbstripout --install` once per clone prevents it.
+
+Legitimate exceptions go in `.github/hygiene-allow.txt`, one per line as
+`RULE<TAB>PATTERN<TAB># reason`: one rule, the narrowest path or glob, and a
+reason. Forbidden names, notebooks, versions and submodules admit none.
+Changes to the allow list, the script, the workflow or the policy-relevant
+`.gitignore` files need explicit human review.
+
+Maintainers also run private patterns, stored as a repository secret, on each
+push to `main`; pull requests never receive that secret, so a green PR means
+the public rules passed. A post-merge finding cannot undo the publication.
+The check covers the net diff only, not every intermediate commit nor the
+existing history, and does not replace checking your own changes before
+pushing.
 
 ## Lint policy
 
@@ -88,8 +180,10 @@ for days.
 
 ## Adding things that have a defined shape
 
-- **A gate**: four places (QASM export, QASM import, simulator, QIR) plus a row
-  in the vocabulary equivalence test — see contract C-2.
+- **A gate**: six places (OpenQASM 2.0 export and import, OpenQASM 3 export,
+  simulator, QIR export, Python bindings and their `.pyi` stub), the
+  OpenQASM 3 importer if `stdgates.inc` names the gate, plus a row in the
+  vocabulary equivalence test — see contract C-2.
 - **A backend/provider**: one `BackendConfig` variant + one `QuantumBackend`
   impl + a contract entry + a seam test. Algorithms must not change.
 - **An optimizer**: implement `Optimizer` against `EvaluationOracle`; respect
@@ -110,7 +204,7 @@ security impact, do **not** open a public issue — follow
 ## License
 
 Polypus is licensed under the **European Union Public Licence (EUPL),
-version 1.2** — see the [`LICENSE`](../LICENSE) file and the `license` field in
+version 1.2** — see the [`LICENSE`](../LICENSE) and [`NOTICE`](../NOTICE) files and the `license` field in
 the workspace `Cargo.toml`. By submitting a contribution you agree that it is
 your own work (or you have the right to submit it) and that it is provided
 under the project license.
@@ -120,7 +214,7 @@ under the project license.
 Single source of truth: the workspace `Cargo.toml` version (SemVer). Release
 tags must match it exactly (`vX.Y.Z`), and every release updates
 [`CHANGELOG.md`](../CHANGELOG.md). The short checklist lives in
-[`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+[`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development
 

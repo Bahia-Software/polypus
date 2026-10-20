@@ -1,6 +1,6 @@
 name: Docs
 
-# Build the rustdoc for the `polypus` crate and publish it to GitHub Pages.
+# Build the rustdoc for the workspace crates and publish it to GitHub Pages.
 # Docs are no longer committed under docs/ — they are generated here on every
 # push to main and deployed as a Pages artifact.
 on:
@@ -32,23 +32,23 @@ jobs:
     name: build rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3's build script needs to locate a Python interpreter to compile the
       # `polypus` crate (same reason the clippy/test jobs in ci.yml set it up).
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Only the `polypus` crate is documented (matches the old ALL_CRATES).
-      # -D warnings turns broken intra-doc links into build failures instead of
-      # silently shipping them.
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every workspace crate (`fuzz/` is excluded from the workspace);
+      # --no-deps leaves out third-party crates. -D warnings turns broken
+      # intra-doc links into build failures instead of silently shipping them.
       - name: Build docs
-        run: cargo doc --no-deps -p polypus
+        run: cargo doc --locked --no-deps --workspace
         env:
           RUSTDOCFLAGS: "-D warnings"
-      # Redirect the Pages root to the crate index (same behavior as the old
-      # committed docs/index.html).
+      # Redirect the Pages root to the `polypus` crate; its sidebar lists the
+      # other workspace crates.
       - name: Write redirect index
         run: |
           cat > target/doc/index.html <<'EOF'
@@ -63,7 +63,7 @@ jobs:
             </body>
           </html>
           EOF
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: target/doc
 
@@ -77,4 +77,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

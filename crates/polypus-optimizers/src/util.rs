@@ -1,15 +1,13 @@
-//! Internal helpers shared by the optimizers.
+//! Internal helpers shared by the population-based optimizers.
 //!
-//! These are implementation details of the crate's optimizers —
-//! [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution) and
-//! [`AlgorithmPSO`](crate::AlgorithmPSO) for the population-based convergence
-//! test, [`AlgorithmQNG`](crate::AlgorithmQNG) and [`AlgorithmAdam`](crate::AlgorithmAdam)
-//! for the gradient-norm one — not part of the crate's public API, so the module
-//! is `pub(crate)`-scoped. Each helper is a small, single-purpose free function
-//! that used to be inlined (and duplicated) inside the optimizer loops. The
-//! behaviour is preserved exactly — same operation order, same comparators, same
-//! diagnostics — so the determinism the tests pin (`tests/optimizers.rs`) is
-//! unaffected.
+//! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution),
+//! [`AlgorithmPSO`](crate::AlgorithmPSO) and (the oracle length check and the
+//! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
+//! crate's public API, so the module is `pub(crate)`-scoped. Each helper is a small,
+//! single-purpose free function that used to be inlined (and duplicated) inside
+//! the optimizer loops. The behaviour is preserved exactly — same operation
+//! order, same comparators, same diagnostics — so the determinism the tests pin
+//! (`tests/optimizers.rs`) is unaffected.
 
 use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
@@ -72,43 +70,6 @@ pub(crate) fn population_converged(
     converged
 }
 
-/// Gradient-norm early-stopping test shared by QNG and Adam.
-///
-/// The single-point counterpart of [`population_converged`]: instead of a
-/// population collapsing in every dimension, the convergence signal is the L2
-/// norm `‖∇fitness(θ)‖` of the iteration's gradient dropping below the absolute
-/// threshold `tolerance`. Returns `true` — the loop should stop with
-/// `converged = true` — only once that has held for `patience` **consecutive**
-/// iterations; a single sub-tolerance iteration is deliberately not enough,
-/// since a minibatch gradient can cancel to exactly zero at a `θ` whose
-/// full-dataset gradient is far from zero (see the minibatch note beside
-/// C-5/C-7 in `docs/CONTRACTS.md`).
-///
-/// `below_tolerance_streak` is the caller's persistent counter, threaded by
-/// `&mut` across iterations: it is incremented on each sub-tolerance iteration
-/// and reset to `0` on any iteration that is not, so the required iterations
-/// must be *consecutive*. The gradient norm is computed here rather than by the
-/// caller so the whole rule — norm, streak bookkeeping and the `>= patience`
-/// decision — lives in one place; `CONTRACTS.md` states QNG and Adam behave
-/// identically precisely because it does. `patience = 0` behaves like `1`: the
-/// streak is only ever tested right after being incremented, so it is always
-/// `>= 1` at the comparison.
-pub(crate) fn patience_converged(
-    grad: &[f64],
-    tolerance: f64,
-    patience: usize,
-    below_tolerance_streak: &mut usize,
-) -> bool {
-    let grad_norm = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
-    if grad_norm < tolerance {
-        *below_tolerance_streak += 1;
-        *below_tolerance_streak >= patience
-    } else {
-        *below_tolerance_streak = 0;
-        false
-    }
-}
-
 /// Fitness-stagnation early-stopping test used by Differential Evolution.
 ///
 /// The optimizers *maximise* (higher fitness is better) and DE's best fitness
@@ -136,45 +97,56 @@ pub(crate) fn patience_converged(
 ///
 /// `tolerance` is therefore a *minimum cumulative fitness improvement* in the
 /// oracle's own fitness units, not a spread in parameter units.
+///
+/// This is the logging form DE calls; the rule itself is [`stagnated`], which
+/// CMA-ES applies to each of its restarts with its own log lines.
 pub(crate) fn fitness_stagnated(
     history: &[f64],
     tolerance: f64,
     patience: usize,
     generation: usize,
 ) -> bool {
-    // Need a full `patience`-wide window behind the current generation: with one
-    // entry per generation, `history.len() > patience` is exactly `generation >=
-    // patience` (`generation == history.len() - 1`).
-    if history.len() <= patience {
-        return false;
+    if let Some(improvement) = recent_improvement(history, patience) {
+        log::debug!(
+            "Generation {generation}: best-fitness improvement over last {patience} generations = {improvement:.6}"
+        );
     }
-    let current = history[history.len() - 1];
-    let past = history[history.len() - 1 - patience];
-    let improvement = current - past;
-    log::debug!(
-        "Generation {generation}: best-fitness improvement over last {patience} generations = {improvement:.6}"
-    );
-    let stagnated = improvement < tolerance;
+    let stagnated = stagnated(history, tolerance, patience);
     if stagnated {
         log::debug!("Stopping early at generation {generation} due to fitness stagnation");
     }
     stagnated
 }
 
+/// The stagnation rule of [`fitness_stagnated`], without its logging: `true`
+/// iff `history` holds a full `patience`-wide window and the best fitness
+/// improved by less than `tolerance` over it.
+pub(crate) fn stagnated(history: &[f64], tolerance: f64, patience: usize) -> bool {
+    recent_improvement(history, patience).is_some_and(|improvement| improvement < tolerance)
+}
+
+/// `history[g] - history[g - patience]` for the last generation `g`, or `None`
+/// while there is no full `patience`-wide window behind it: with one entry per
+/// generation, `history.len() > patience` is exactly `g >= patience`
+/// (`g == history.len() - 1`).
+pub(crate) fn recent_improvement(history: &[f64], patience: usize) -> Option<f64> {
+    if history.len() <= patience {
+        return None;
+    }
+    let current = history[history.len() - 1];
+    let past = history[history.len() - 1 - patience];
+    Some(current - past)
+}
+
 /// Validate that an oracle returned exactly one fitness value per candidate.
 ///
-/// Every optimizer — and every helper built on the oracle traits, such as
-/// [`linear_parameter_shift_gradient`](crate::linear_parameter_shift_gradient),
-/// whose per-parameter ±π/2 pair makes the expected length `2 * dims` — calls
-/// [`EvaluationOracle::evaluate_batch`](crate::EvaluationOracle::evaluate_batch)
+/// Every optimizer calls [`EvaluationOracle::evaluate_batch`](crate::EvaluationOracle::evaluate_batch)
 /// and then indexes the returned slice positionally; a short (or long) return
 /// would otherwise panic with an out-of-bounds index deep inside the loop.
 /// Checking the length immediately after each batch call — for *any* oracle,
 /// Python-backed or not — turns that into the typed
 /// [`OptimizerError::OracleLengthMismatch`] the FFI seam maps to a
-/// `PyValueError` (or, where a [`GradientOracle`](crate::GradientOracle) that
-/// delegates to that helper records the error instead of returning it, to the
-/// bindings' evaluation exception).
+/// `PyValueError`.
 pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), OptimizerError> {
     if expected == got {
         Ok(())
@@ -303,68 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn patience_converged_streak_fires_exactly_at_patience() {
-        // A gradient whose norm is below tolerance every call: the streak must
-        // accumulate and fire on exactly the `patience`-th consecutive call —
-        // not before, not after.
-        let below = [0.0, 0.0];
-        let mut streak = 0usize;
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
-        assert!(patience_converged(&below, 1e-6, 3, &mut streak)); // streak 3 → fire
-        assert_eq!(streak, 3);
-    }
-
-    #[test]
-    fn patience_converged_above_tolerance_resets_streak_mid_run() {
-        // An iteration above tolerance resets the streak to 0 even partway
-        // through a run, so the `patience` consecutive iterations must restart.
-        let below = [0.0, 0.0];
-        let above = [1.0, 0.0];
-        let mut streak = 0usize;
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
-        assert!(!patience_converged(&above, 1e-6, 3, &mut streak)); // reset → 0
-        assert_eq!(streak, 0);
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 1 again
-        assert!(!patience_converged(&below, 1e-6, 3, &mut streak)); // streak 2
-        assert!(patience_converged(&below, 1e-6, 3, &mut streak)); // streak 3 → fire
-    }
-
-    #[test]
-    fn patience_converged_patience_one_fires_immediately() {
-        // `patience = 1` reproduces the pre-`patience` single-iteration rule:
-        // the first sub-tolerance iteration fires.
-        let below = [0.0, 0.0];
-        let mut streak = 0usize;
-        assert!(patience_converged(&below, 1e-6, 1, &mut streak));
-        assert_eq!(streak, 1);
-    }
-
-    #[test]
-    fn patience_converged_streak_persists_across_calls() {
-        // Passing the same `&mut usize` on successive calls (as the optimizer
-        // loop does) must carry the streak forward rather than starting over.
-        let below = [0.0];
-        let mut streak = 0usize;
-        assert!(!patience_converged(&below, 1e-6, 2, &mut streak));
-        assert_eq!(streak, 1);
-        assert!(patience_converged(&below, 1e-6, 2, &mut streak));
-        assert_eq!(streak, 2);
-    }
-
-    #[test]
-    fn patience_converged_norm_is_l2_over_all_components() {
-        // The norm absorbed into the helper is the L2 norm over every gradient
-        // component: a vector each of whose components is individually below
-        // tolerance can still have a norm above it, so no stop.
-        let grad = [0.4, 0.4, 0.4]; // ‖·‖ ≈ 0.69 > 0.5, though each |g| < 0.5
-        let mut streak = 0usize;
-        assert!(!patience_converged(&grad, 0.5, 1, &mut streak));
-        assert_eq!(streak, 0);
-    }
-
-    #[test]
     fn fitness_stagnated_false_before_patience_window_filled() {
         // Fewer than `patience + 1` generations of history → no full window to
         // look back over, so it can never fire regardless of the values.
@@ -396,6 +306,37 @@ mod tests {
         // though the run improved a lot earlier.
         let history = [0.0, 5.0, 5.0005, 5.001];
         assert!(fitness_stagnated(&history, 0.01, 2, 3));
+    }
+
+    #[test]
+    fn stagnated_matches_fitness_stagnated() {
+        // The silent rule and DE's logging form agree on every window.
+        let histories: [&[f64]; 4] = [
+            &[0.0, 1.0, 2.0, 3.0],
+            &[3.0, 3.005, 3.01, 3.015, 3.02],
+            &[0.0, 1.0, 2.0, 3.0, 4.0],
+            &[0.0, 5.0, 5.0005, 5.001],
+        ];
+        for history in histories {
+            for patience in 0..6 {
+                for tolerance in [0.0, 0.01, 0.5, 100.0] {
+                    assert_eq!(
+                        stagnated(history, tolerance, patience),
+                        fitness_stagnated(history, tolerance, patience, history.len() - 1),
+                        "{history:?} patience {patience} tolerance {tolerance}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recent_improvement_needs_a_full_window() {
+        assert_eq!(recent_improvement(&[1.0, 2.0], 2), None);
+        assert_eq!(recent_improvement(&[1.0, 2.0, 4.0], 2), Some(3.0));
+        // patience 0 compares the last generation with itself.
+        assert_eq!(recent_improvement(&[1.0], 0), Some(0.0));
+        assert_eq!(recent_improvement(&[], 0), None);
     }
 
     #[test]

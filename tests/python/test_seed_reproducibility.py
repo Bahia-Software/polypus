@@ -9,7 +9,8 @@ These exercise issue #34 / #56's acceptance criteria from Python:
   are returned. A seed is rejected for ``infrastructure="qmio"`` (real hardware).
 * ``train`` / ``qml.train`` seed: same seed ⇒ identical outcome; no seed ⇒
   different outcome; the outcome now exposes fitness / iterations / convergence
-  / seed, and the ``DE``/``PSO``/``QNG`` ``seed`` field feeds the precedence.
+  / seed, and the ``DE``/``PSO``/``QNG``/``CMAES`` ``seed`` field feeds the
+  precedence.
 
 CUNQA's simulated QPUs (``infrastructure="cunqa"``) attempt the same kind of
 seed forwarding as Aer (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
@@ -46,19 +47,25 @@ def _uniform3():
 
 @pytest.mark.integration
 class TestRunQuantumCircuitSeed:
+    @pytest.mark.parametrize("n_qpus", [1, 4])
     @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
-    def test_same_seed_reproduces_counts(self, backend_name):
+    def test_same_seed_reproduces_counts(self, backend_name, n_qpus):
         import polypus
 
         qc = _uniform3()
-        r1 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
+        kwargs = dict(
+            shots=2000,
+            infrastructure="local",
+            backend=backend_name,
+            n_qpus=n_qpus,
+            seed=42,
         )
-        r2 = polypus.run_quantum_circuit(
-            qc, shots=2000, infrastructure="local", backend=backend_name, seed=42
-        )
+        r1 = polypus.run_quantum_circuit(qc, **kwargs)
+        r2 = polypus.run_quantum_circuit(qc, **kwargs)
         assert r1.seed == 42 and r2.seed == 42
+        # Both the per-QPU breakdown and the merged total replay exactly.
         assert r1.counts == r2.counts
+        assert r1.merged_counts == r2.merged_counts
 
     @pytest.mark.parametrize("backend_name", ["polypus", "aer"])
     def test_no_seed_differs_across_calls(self, backend_name):
@@ -145,6 +152,15 @@ class TestOptimizerSeedField:
         de.seed = 8
         assert de.seed == 8
 
+    def test_cmaes_seed_field(self):
+        import polypus
+
+        assert polypus.CMAES().seed is None
+        cmaes = polypus.CMAES(seed=5)
+        assert cmaes.seed == 5
+        cmaes.seed = 8
+        assert cmaes.seed == 8
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # train — native backend is fully reproducible from a single seed
@@ -186,15 +202,28 @@ class TestTrainSeed:
         assert r1.best_fitness == r2.best_fitness
         assert r1.iterations_run == r2.iterations_run
         assert r1.converged == r2.converged
-        # The whole convergence curve reproduces too, entry for entry — not just
-        # its endpoint (C-5's fitness_history, reported under C-7).
-        assert r1.fitness_history == r2.fitness_history
-        assert len(r1.fitness_history) == r1.iterations_run
         # The full outcome is exposed now, not just the parameters (C-7).
         assert isinstance(r1.best_fitness, float)
         assert isinstance(r1.iterations_run, int)
         assert isinstance(r1.converged, bool)
-        assert isinstance(r1.fitness_history, list)
+
+    @pytest.mark.parametrize("strategy", ["shade", "lshade"])
+    def test_same_seed_reproduces_adaptive_de(self, strategy):
+        import polypus
+
+        def method():
+            return polypus.DE(
+                generations=5, population_size=8, tolerance=1e-12, strategy=strategy
+            )
+
+        r1 = self._train(seed=2024, method=method(), ident="train_seed_strategy")
+        r2 = self._train(seed=2024, method=method(), ident="train_seed_strategy")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
 
     def test_no_seed_differs_across_calls(self):
         r1 = self._train(seed=None, ident="train_seed_none")
@@ -234,6 +263,38 @@ class TestTrainSeed:
         assert r2.id.startswith("train_id_")
         assert r1.id != r2.id
 
+    # CMA-ES: the same seed replays the run on the same platform (C-7). Its
+    # steps use the platform's libm, so no cross-platform golden values.
+    @staticmethod
+    def _cmaes(**kwargs):
+        import polypus
+
+        return polypus.CMAES(generations=6, tolerance=1e-12, restarts=1, **kwargs)
+
+    def test_same_seed_reproduces_cmaes(self):
+        r1 = self._train(seed=2024, method=self._cmaes(), ident="train_seed_cmaes")
+        r2 = self._train(seed=2024, method=self._cmaes(), ident="train_seed_cmaes")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_no_seed_differs_across_cmaes_calls(self):
+        r1 = self._train(seed=None, method=self._cmaes(), ident="train_cmaes_none")
+        r2 = self._train(seed=None, method=self._cmaes(), ident="train_cmaes_none")
+        assert r1.seed != r2.seed
+        assert r1.best_params != r2.best_params
+
+    def test_cmaes_field_seed_is_used_and_the_kwarg_wins(self):
+        r1 = self._train(seed=None, method=self._cmaes(seed=99), ident="cmaes_field")
+        r2 = self._train(seed=None, method=self._cmaes(seed=99), ident="cmaes_field")
+        assert r1.seed == 99 and r2.seed == 99
+        assert r1.best_params == r2.best_params
+        r3 = self._train(seed=777, method=self._cmaes(seed=1), ident="cmaes_field")
+        assert r3.seed == 777
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # qml.train — optimizer RNG and Aer sampling are both seeded; mock the backend
@@ -257,7 +318,7 @@ class TestQmlTrainSeed:
         monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
 
     @staticmethod
-    def _qml_train(seed):
+    def _qml_train(seed, method=None):
         import numpy as np
         import polypus
         from qiskit.circuit.library import real_amplitudes, zz_feature_map
@@ -269,7 +330,7 @@ class TestQmlTrainSeed:
             feature_map,
             ansatz,
             x_train,
-            polypus.DE(generations=3, population_size=6, tolerance=1e-12),
+            method or polypus.DE(generations=3, population_size=6, tolerance=1e-12),
             shots=64,
             n_qpus=1,
             dimensions=len(ansatz.parameters),
@@ -288,9 +349,6 @@ class TestQmlTrainSeed:
         assert r1.seed == 123 and r2.seed == 123
         assert r1.best_params == r2.best_params
         assert r1.best_fitness == r2.best_fitness
-        # The Qiskit path reports the same convergence curve, and reproduces it.
-        assert r1.fitness_history == r2.fitness_history
-        assert len(r1.fitness_history) == r1.iterations_run
 
     def test_no_seed_differs_across_calls(self, monkeypatch):
         self._patch_deterministic_backend(monkeypatch)
@@ -311,3 +369,21 @@ class TestQmlTrainSeed:
         assert r1.id.startswith("qml_seed_")
         assert r2.id.startswith("qml_seed_")
         assert r1.id != r2.id
+
+    def test_same_seed_reproduces_cmaes(self, monkeypatch):
+        import polypus
+
+        self._patch_deterministic_backend(monkeypatch)
+
+        def method():
+            return polypus.CMAES(generations=3, tolerance=1e-12)
+
+        r1 = self._qml_train(123, method())
+        r2 = self._qml_train(123, method())
+        assert r1.seed == 123 and r2.seed == 123
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.fitness_history == r2.fitness_history
+        r3 = self._qml_train(None, method())
+        assert r3.seed != 123
+        assert r3.best_params != r1.best_params

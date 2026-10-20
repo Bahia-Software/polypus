@@ -5,10 +5,12 @@
 //! This crate holds the parameter-optimization loops used to train variational
 //! quantum circuits:
 //!
-//! - [`AlgorithmDifferentialEvolution`] — Differential Evolution (DE)
+//! - [`AlgorithmDifferentialEvolution`] — Differential Evolution (DE): the
+//!   classic DE/rand/1/bin, or the adaptive SHADE and L-SHADE ([`DeStrategy`])
 //! - [`AlgorithmPSO`] — Particle Swarm Optimization (PSO)
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
-//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation)
+//! - [`AlgorithmCmaEs`] — Covariance Matrix Adaptation Evolution Strategy
+//!   (CMA-ES), with optional IPOP restarts
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
 //! Python interpreter. They only depend on two input contracts:
@@ -20,13 +22,6 @@
 //! - [`VarianceOracle`] (QNG only) returns the diagonal elements of the
 //!   Fubini–Study metric (QFIM). It abstracts the one algorithm-specific
 //!   callback QNG needs, so no runtime detail leaks into this crate.
-//! - [`GradientOracle`] (QNG and Adam) returns the exact gradient of the fitness
-//!   with respect to each parameter (parameter-shift, in the noiseless limit).
-//!   Both gradient optimizers use it in place of a finite-difference stencil;
-//!   like [`VarianceOracle`], the caller guarantees the value is the true
-//!   gradient of whatever its companion [`EvaluationOracle`] scores. The free
-//!   function [`linear_parameter_shift_gradient`] builds it for any oracle whose
-//!   fitness is linear in the shifted expectations (no nonlinear loss on top).
 //!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
@@ -34,7 +29,7 @@
 //! ## Determinism
 //!
 //! Every optimizer accepts an optional `seed`. With `None` (the default used
-//! by the Polypus Python bindings) it draws from [`rand::thread_rng`], exactly
+//! by the Polypus Python bindings) it draws from [`rand::rng`], exactly
 //! as before. With `Some(seed)` the run is fully reproducible, which is what
 //! the unit tests rely on.
 //!
@@ -74,16 +69,11 @@
 //! for x in &outcome.best_params {
 //!     assert!((x - 1.0).abs() < 0.1);
 //! }
-//!
-//! // The convergence curve: the incumbent best fitness of every generation
-//! // actually run, ending on the reported `best_fitness`.
-//! assert_eq!(outcome.fitness_history.len(), outcome.iterations_run);
-//! assert_eq!(outcome.fitness_history.last().copied(), Some(outcome.best_fitness));
 //! ```
 
 #![deny(clippy::all)]
 
-pub mod adam;
+pub mod cmaes;
 pub mod differential_evolution;
 pub mod error;
 pub mod objective;
@@ -91,17 +81,17 @@ pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
 
+mod linalg;
 mod rng;
+mod shade;
 mod util;
 
-pub use adam::{AlgorithmAdam, AlgorithmAdamArgs};
+pub use cmaes::{AlgorithmCmaEs, AlgorithmCmaEsArgs, CmaEsBatchSchedule};
 pub use differential_evolution::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
+    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 pub use error::OptimizerError;
-pub use objective::{
-    linear_parameter_shift_gradient, EvaluationOracle, GradientOracle, VarianceOracle,
-};
+pub use objective::{EvaluationOracle, VarianceOracle};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};

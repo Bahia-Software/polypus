@@ -4,13 +4,139 @@ use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
+use crate::shade;
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
 use ndarray::{Array1, Array2};
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::IndexedRandom, Rng, RngExt};
 use std::f64::consts::PI;
+use std::fmt;
+use std::str::FromStr;
 
 /// Differential Evolution optimizer.
+///
+/// [`Optimizer::optimize`] runs the classic DE/rand/1/bin
+/// ([`DeStrategy::Rand1Bin`]);
+/// [`optimize_with_strategy`](Self::optimize_with_strategy) also runs the
+/// adaptive SHADE and L-SHADE strategies.
 pub struct AlgorithmDifferentialEvolution;
+
+/// How Differential Evolution builds its trial vectors.
+///
+/// Every strategy takes the same [`AlgorithmDifferentialEvolutionArgs`] and
+/// shares the rest of the run: angles initialised in `[0, 2π)`, trial vectors
+/// wrapped back into it with `rem_euclid(2π)`, one oracle batch per
+/// generation, the evaluation budget `population_size × (generations + 1)`
+/// (the initial population plus `generations` full generations), the
+/// fitness-stagnation early stop, and the postconditions of contract C-5. The
+/// strategies differ in mutation and parameter control:
+///
+/// - [`Rand1Bin`](Self::Rand1Bin), the default: DE/rand/1/bin with fixed
+///   `F = 0.8` and `CR = 0.7`.
+/// - [`Shade`](Self::Shade): SHADE (Tanabe & Fukunaga, CEC 2013):
+///   current-to-pbest/1 mutation with an archive of replaced parents, and `F`
+///   and `CR` drawn per individual from a memory of the values that produced
+///   improvements.
+/// - [`LShade`](Self::LShade): L-SHADE (Tanabe & Fukunaga, CEC 2014): SHADE
+///   plus a population that shrinks after every generation, linearly in the
+///   evaluations spent, from `population_size` to 4 as the budget runs out.
+///   For L-SHADE `generations` therefore sets the evaluation budget rather
+///   than the number of generations: it spends the budget in more, smaller
+///   batches, stopping when the next would not fit.
+///   [`max_generations`](Self::max_generations) says how many.
+///
+/// `Rand1Bin` and `Shade` keep their population, so they run exactly
+/// `generations` generations unless they stop early.
+///
+/// The names `polypus.DE(strategy=...)` accepts are [`as_str`](Self::as_str)
+/// and parse back with [`FromStr`]:
+///
+/// ```
+/// use polypus_optimizers::DeStrategy;
+///
+/// assert_eq!("lshade".parse::<DeStrategy>(), Ok(DeStrategy::LShade));
+/// assert_eq!(DeStrategy::default().as_str(), "rand1bin");
+/// assert!("LSHADE".parse::<DeStrategy>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DeStrategy {
+    /// DE/rand/1/bin with `F = 0.8` and `CR = 0.7`.
+    #[default]
+    Rand1Bin,
+    /// SHADE: success-history adaptive DE with a fixed population.
+    Shade,
+    /// L-SHADE: SHADE with linear population size reduction.
+    LShade,
+}
+
+impl DeStrategy {
+    /// The strategy's name, as `polypus.DE(strategy=...)` takes it:
+    /// `"rand1bin"`, `"shade"` or `"lshade"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeStrategy::Rand1Bin => "rand1bin",
+            DeStrategy::Shade => "shade",
+            DeStrategy::LShade => "lshade",
+        }
+    }
+
+    /// How many generations, one oracle batch each after the initial
+    /// population's, a run with these arguments makes unless the
+    /// fitness-stagnation stop ends it sooner.
+    ///
+    /// For [`Rand1Bin`](Self::Rand1Bin) and [`Shade`](Self::Shade) that is
+    /// `generations`. [`LShade`](Self::LShade) spends the same budget,
+    /// `population_size × (generations + 1)` evaluations, with a shrinking
+    /// population, so it runs more generations. Its schedule depends on these
+    /// two numbers alone, never on fitness, and this counts it by stepping the
+    /// same schedule the optimizer follows, so the two cannot disagree. A
+    /// `population_size` below 4, which every strategy rejects, gives a
+    /// meaningless count.
+    ///
+    /// ```
+    /// use polypus_optimizers::DeStrategy;
+    ///
+    /// assert_eq!(DeStrategy::Shade.max_generations(50, 100), 100);
+    /// assert!(DeStrategy::LShade.max_generations(50, 100) > 100);
+    /// // Four members cannot shrink, so they run the plain 100 generations.
+    /// assert_eq!(DeStrategy::LShade.max_generations(4, 100), 100);
+    /// ```
+    pub fn max_generations(self, population_size: u32, generations: u32) -> u64 {
+        match self {
+            DeStrategy::Rand1Bin | DeStrategy::Shade => u64::from(generations),
+            DeStrategy::LShade => shade::Schedule::new(
+                shade::Variant::LShade,
+                population_size as usize,
+                generations,
+            )
+            .generations(),
+        }
+    }
+}
+
+impl fmt::Display for DeStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DeStrategy {
+    type Err = OptimizerError;
+
+    /// Parse one of the names [`as_str`](Self::as_str) returns. Matching is
+    /// exact; any other string is [`OptimizerError::InvalidConfig`] for
+    /// `strategy`, which the Python binding raises as `ValueError`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "rand1bin" => Ok(DeStrategy::Rand1Bin),
+            "shade" => Ok(DeStrategy::Shade),
+            "lshade" => Ok(DeStrategy::LShade),
+            other => Err(OptimizerError::InvalidConfig {
+                parameter: "strategy",
+                reason: format!("must be \"rand1bin\", \"shade\" or \"lshade\", got {other:?}"),
+            }),
+        }
+    }
+}
 
 /// Arguments for the Differential Evolution optimizer.
 ///
@@ -25,6 +151,10 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
     pub population_size: u32,
+    /// Generations to run, one oracle batch each after the initial
+    /// population's: the evaluation budget is `population_size ×
+    /// (generations + 1)`. [`DeStrategy::LShade`] spends that budget in more,
+    /// smaller generations (see [`DeStrategy::max_generations`]).
     pub generations: u32,
     pub dimensions: u32,
     /// Minimum cumulative improvement of the **best fitness** over the last
@@ -40,7 +170,7 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// `patience`, so a larger value makes the optimizer more patient (runs
     /// longer before giving up). The Python `DE` binding defaults it to 20.
     pub patience: u32,
-    /// Optional RNG seed. `None` (the default) uses [`rand::thread_rng`];
+    /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
 }
@@ -57,8 +187,68 @@ impl AlgorithmDifferentialEvolution {
     }
 
     /// The smallest valid `population_size`: each trial mutation samples 3
-    /// *distinct* other members, so at least 4 members are required.
-    const MIN_POPULATION: usize = 4;
+    /// *distinct* other members, so at least 4 members are required. Every
+    /// strategy shares it; 4 is also the size L-SHADE shrinks towards.
+    pub(crate) const MIN_POPULATION: usize = 4;
+
+    /// Run Differential Evolution with the given `strategy`.
+    ///
+    /// [`DeStrategy::Rand1Bin`] is exactly [`Optimizer::optimize`]: the same
+    /// code, RNG draws and outcome for a given seed. [`DeStrategy::Shade`] and
+    /// [`DeStrategy::LShade`] take the same arguments and return the same
+    /// errors (a `population_size` below 4, an oracle that returns the wrong
+    /// number of values); see [`DeStrategy`] for what they change, including
+    /// L-SHADE's use of `generations` as an evaluation budget.
+    ///
+    /// ```
+    /// use polypus_optimizers::{
+    ///     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
+    ///     EvaluationOracle,
+    /// };
+    ///
+    /// // Fitness = -Σ(xᵢ - 1)² is maximised (value 0) at xᵢ = 1.
+    /// struct Sphere;
+    /// impl EvaluationOracle for Sphere {
+    ///     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+    ///         candidates
+    ///             .iter()
+    ///             .map(|c| -c.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>())
+    ///             .collect()
+    ///     }
+    /// }
+    ///
+    /// let outcome = AlgorithmDifferentialEvolution
+    ///     .optimize_with_strategy(
+    ///         DeStrategy::LShade,
+    ///         AlgorithmDifferentialEvolutionArgs {
+    ///             oracle: Box::new(Sphere),
+    ///             population_size: 40,
+    ///             generations: 200,
+    ///             dimensions: 2,
+    ///             tolerance: 1e-6,
+    ///             patience: 20,
+    ///             seed: Some(7),
+    ///         },
+    ///     )
+    ///     .expect("valid arguments optimize successfully");
+    ///
+    /// assert!(outcome.best_fitness > -1e-2, "fitness = {}", outcome.best_fitness);
+    /// ```
+    pub fn optimize_with_strategy(
+        &self,
+        strategy: DeStrategy,
+        args: AlgorithmDifferentialEvolutionArgs,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        match strategy {
+            DeStrategy::Rand1Bin => self.optimize(args),
+            DeStrategy::Shade => with_seeded_rng(args.seed, |rng| {
+                shade::run_with_rng(args, shade::Variant::Shade, rng)
+            }),
+            DeStrategy::LShade => with_seeded_rng(args.seed, |rng| {
+                shade::run_with_rng(args, shade::Variant::LShade, rng)
+            }),
+        }
+    }
 
     fn run_with_rng<R: Rng>(
         args: AlgorithmDifferentialEvolutionArgs,
@@ -94,7 +284,7 @@ impl AlgorithmDifferentialEvolution {
         let mut pop = Array2::<f64>::zeros((popsize, dims));
         for mut row in pop.outer_iter_mut() {
             for e in row.iter_mut() {
-                *e = rng.gen_range(0.0..2.0 * PI);
+                *e = rng.random_range(0.0..2.0 * PI);
             }
         }
 
@@ -107,10 +297,8 @@ impl AlgorithmDifferentialEvolution {
 
         let mut iterations_run = 0usize;
         let mut converged = false;
-        // One incumbent-best entry per generation actually run (C-5). Pushed
-        // unconditionally below, so it stays in step with `iterations_run` even
-        // when the stagnation `break` cuts the loop short. Drives the
-        // fitness-stagnation early stop below and is reported in the outcome.
+        // Best fitness at the end of each generation; drives the fitness-
+        // stagnation early stop and is reported in the outcome.
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_gen);
 
         for generation in 0..max_gen {
@@ -120,13 +308,13 @@ impl AlgorithmDifferentialEvolution {
             let mut trials: Vec<Array1<f64>> = Vec::with_capacity(popsize);
             for i in 0..popsize {
                 let ids: Vec<usize> = (0..popsize).filter(|&j| j != i).collect();
-                let sel: Vec<usize> = ids.choose_multiple(rng, 3).cloned().collect();
+                let sel: Vec<usize> = ids.sample(rng, 3).cloned().collect();
                 let c1 = pop.row(sel[0]).to_owned();
                 let c2 = pop.row(sel[1]).to_owned();
                 let c3 = pop.row(sel[2]).to_owned();
                 let mut mutant = &c1 + 0.8 * (&c2 - &c3);
                 mutant.mapv_inplace(|x| x.rem_euclid(2.0 * PI));
-                let cross: Array1<bool> = Array1::from_shape_fn(dims, |_| rng.gen_bool(0.7));
+                let cross: Array1<bool> = Array1::from_shape_fn(dims, |_| rng.random_bool(0.7));
                 let trial = cross
                     .iter()
                     .zip(mutant.iter())
@@ -162,9 +350,7 @@ impl AlgorithmDifferentialEvolution {
             best_idx = argmax(&fitness);
             best = pop.row(best_idx).to_vec();
 
-            // The champion's fitness *is* the incumbent best: selection above
-            // only ever raises a slot's fitness, so this maximum is
-            // non-decreasing across generations. Record it and stop once it has
+            // Record this generation's best and stop once the best fitness has
             // stagnated (improved by < tolerance over the last `patience`
             // generations). This replaces the former population-std collapse
             // test, which on QAOA-like landscapes fired within a handful of
@@ -182,9 +368,9 @@ impl AlgorithmDifferentialEvolution {
         Ok(OptimizationOutcome {
             best_fitness: fitness[best_idx],
             best_params: best,
-            fitness_history,
             iterations_run,
             converged,
+            fitness_history,
         })
     }
 }

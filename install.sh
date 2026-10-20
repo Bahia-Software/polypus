@@ -2,6 +2,11 @@
 # install.sh — Build and install polypus (Rust extension + Python wrapper),
 #              then optionally run the test suite and benchmark to verify the installation.
 #
+# Same project, three names: the PyPI distribution is `polypus-quantum`
+# (pip install polypus-quantum), the Python import name is `polypus`, and the
+# Rust crate is `polypus` (cargo add polypus). This script builds and installs
+# the `polypus-quantum` wheel from source; you then `import polypus`.
+#
 # Usage:
 #   ./install.sh              # interactive prompts (when run from a terminal)
 #   ./install.sh --yes        # accept all defaults, no prompts  (CI / scripts)
@@ -23,6 +28,9 @@ warn()    { echo -e "${YELLOW}[polypus]${NC} $*"; }
 error()   { echo -e "${RED}[polypus]${NC} $*" >&2; exit 1; }
 
 # ── Interactive helpers ───────────────────────────────────────────────────────
+# lower STR   — lowercase STR (portable: macOS ships bash 3.2, which lacks ${var,,})
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # ask_yn VAR "Question?" "y|n"   — sets VAR to y or n
 ask_yn() {
     local var="$1" question="$2" default="$3"
@@ -30,7 +38,7 @@ ask_yn() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} ${question} [${hint}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             y|yes) eval "$var='y'"; return ;;
             n|no)  eval "$var='n'"; return ;;
             *) echo "    Please answer y or n." ;;
@@ -44,7 +52,7 @@ ask_build() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} Build mode (release/dev) [${BOLD}${default}${NC}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             release|dev) eval "$var='$ans'"; return ;;
             *) echo "    Please answer: release or dev." ;;
         esac
@@ -57,7 +65,7 @@ ask_tests() {
     while true; do
         read -r -p "$(echo -e "  ${CYAN}?${NC} Run tests after install? (all/smoke/none) [${BOLD}${default}${NC}] ")" ans
         ans="${ans:-$default}"
-        case "${ans,,}" in
+        case "$(lower "$ans")" in
             all|smoke|none) eval "$var='$ans'"; return ;;
             *) echo "    Please answer: all, smoke, or none." ;;
         esac
@@ -136,7 +144,7 @@ if [[ $YES == 0 ]] && [[ -t 0 ]]; then
     echo ""
     read -r -p "$(echo -e "  ${CYAN}?${NC} Proceed? [${BOLD}Y${NC}/n] ")" confirm
     confirm="${confirm:-y}"
-    [[ "${confirm,,}" == "n" || "${confirm,,}" == "no" ]] && { echo "Aborted."; exit 0; }
+    [[ "$(lower "$confirm")" == "n" || "$(lower "$confirm")" == "no" ]] && { echo "Aborted."; exit 0; }
     echo ""
 else
     echo ""
@@ -182,32 +190,29 @@ if [[ "$INSTALL_EXAMPLES" == "y" ]]; then
     success "Example dependencies installed."
 fi
 
-# ── 5. Build polypus_python wheel ────────────────────────────────────────────
-info "Building polypus_python wheel..."
-python -m build packages/polypus_python/ --wheel --no-isolation \
-    || error "Failed to build polypus_python wheel."
-
-WHEEL=$(ls -t packages/polypus_python/dist/polypus_python-*.whl | head -1)
-[[ -f "$WHEEL" ]] || error "Wheel not found after build."
-success "Built: $(basename "$WHEEL")"
-
-# ── 6. Install polypus_python ────────────────────────────────────────────────
-info "Installing polypus_python..."
-pip install --quiet --force-reinstall "$WHEEL" \
-    || error "Failed to install polypus_python."
-success "polypus_python installed."
-
-# ── 7. Build and install polypus Rust extension ──────────────────────────────
+# ── 5. Build & install polypus (Rust extension + bundled polypus_python) ──────
+# A single maturin wheel now contains BOTH the `polypus` extension and the
+# pure-Python `polypus_python` helpers (both live under `python/`, the maturin
+# python-source), so one build+install provides both import names. This builds
+# a regular wheel; for an editable dev install see docs/CONTRIBUTING.md.
 MATURIN_FLAGS="--features extension-module"
 # Opt-in CESGA QMIO QPU backend (pure-Rust ZeroMQ; no system libzmq needed).
 [[ $WITH_QMIO == 1 ]] && MATURIN_FLAGS="--features extension-module,qmio"
 [[ "$BUILD_MODE" == "release" ]] && MATURIN_FLAGS="--release $MATURIN_FLAGS"
-info "Building polypus Rust extension (maturin develop ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
-python -m maturin develop $MATURIN_FLAGS \
-    || error "maturin develop failed."
-success "polypus Rust extension installed."
+info "Building polypus wheel (maturin build ${BUILD_MODE}$([[ $WITH_QMIO == 1 ]] && echo ', qmio'))..."
+python -m maturin build $MATURIN_FLAGS --out dist \
+    || error "maturin build failed."
 
-# ── 8. Verify the Python environment sees both packages ──────────────────────
+WHEEL=$(ls -t dist/polypus_quantum-*.whl | head -1)
+[[ -f "$WHEEL" ]] || error "Wheel not found after build."
+success "Built: $(basename "$WHEEL")"
+
+info "Installing $(basename "$WHEEL")..."
+pip install --quiet --force-reinstall "$WHEEL" \
+    || error "Failed to install polypus-quantum."
+success "polypus-quantum installed (polypus + polypus_python)."
+
+# ── 6. Verify the Python environment sees both packages ──────────────────────
 info "Verifying installed packages..."
 python -c "
 import polypus, polypus_python
@@ -220,7 +225,33 @@ print('  polypus_python: OK')
 " || error "Installation verification failed."
 success "All symbols present."
 
-# ── 9. Tests ─────────────────────────────────────────────────────────────────
+# ── 6b. Calibrate gate-parallelism threshold (release builds only) ────────────
+# The native statevector simulator switches its gate kernels to the rayon
+# parallel path at a machine-specific qubit count. Measure it once now (well
+# under a second) and cache it on disk, so every later run reads the cached
+# value instead of the hardware-oblivious default. Only release builds are
+# perf-representative, so debug builds are left to the runtime default. Fails
+# safe: a read-only cache dir (container/CI) is reported, never fatal — the
+# Rust side returns cache_written=False rather than raising, and the `if`
+# guard keeps `set -e` from aborting the install on any unexpected error.
+if [[ "$BUILD_MODE" == "release" ]]; then
+    info "Calibrating gate-parallelism threshold for this machine..."
+    if python -c "
+import polypus
+r = polypus.calibrate_parallel_threshold(force=True)
+where = r['cache_path'] if r['cache_written'] else 'not persisted (cache dir not writable)'
+print(f\"  threshold={r['threshold']} qubits, threads={r['num_threads']}, \"
+      f\"measured in {r['duration_secs']:.2f}s, cache: {where}\")
+"; then
+        success "Gate-parallelism threshold calibrated."
+    else
+        warn "Calibration step failed; the simulator will fall back to its default threshold."
+    fi
+else
+    info "Skipping gate-parallelism calibration (dev build is not perf-representative)."
+fi
+
+# ── 7. Tests ─────────────────────────────────────────────────────────────────
 if [[ "$RUN_TESTS" != "none" ]]; then
     # Ensure pytest is available
     if ! python -m pytest --version &>/dev/null; then
@@ -239,11 +270,14 @@ if [[ "$RUN_TESTS" != "none" ]]; then
         info "Running Rust tests..."
         PYTHON_LIBDIR=$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
         export LD_LIBRARY_PATH="${PYTHON_LIBDIR}:${LD_LIBRARY_PATH:-}"
+        # macOS's dyld ignores LD_LIBRARY_PATH. Use the *fallback* path so libpython is
+        # found without the Python lib dir (e.g. conda's) shadowing system libraries.
+        [[ "$(uname -s)" == "Darwin" ]] && export DYLD_FALLBACK_LIBRARY_PATH="${PYTHON_LIBDIR}:${DYLD_FALLBACK_LIBRARY_PATH:-$HOME/lib:/usr/local/lib:/usr/lib}"
         cargo test
     fi
 fi
 
-# ── 10. Benchmark ────────────────────────────────────────────────────────────
+# ── 8. Benchmark ────────────────────────────────────────────────────────────
 if [[ "$RUN_BENCHMARK" == "y" ]]; then
     echo ""
     info "Running system benchmark (--quick mode)..."

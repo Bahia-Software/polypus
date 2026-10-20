@@ -1,7 +1,25 @@
 """Shared pytest fixtures for polypus tests."""
 
-import pytest
-from qiskit.circuit import ParameterVector, QuantumCircuit
+import os
+
+# Auto-calibration (issue #176) runs once per process, on the first native
+# statevector run (#351). In the test-runner process that would measure and write
+# the *real* user cache from whichever test runs first, making the suite
+# non-hermetic and order-dependent. Disable it here so the parent process is
+# deterministic; the auto-calibration behaviour itself is exercised in isolated
+# child interpreters by ``test_autocalibrate.py`` (which set the env explicitly
+# per case).
+os.environ.setdefault("POLYPUS_NO_AUTOCALIBRATE", "1")
+
+import pytest  # noqa: E402
+from qiskit.circuit import ParameterVector, QuantumCircuit  # noqa: E402
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "cunqa: needs a real CUNQA install and SLURM (opt-in: POLYPUS_CUNQA_REAL=1)",
+    )
 
 
 @pytest.fixture

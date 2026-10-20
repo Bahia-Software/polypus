@@ -1,0 +1,255 @@
+//! # polypus-infrastructure
+//!
+//! The concrete Polypus execution backends and the factory that builds them. The
+//! provider-agnostic, **pyo3-free** contract they implement — the
+//! [`QuantumBackend`] trait, [`BoundCircuit`], [`RunParams`], the error types, the
+//! [`Planner`], the transpiler seam and the memory budget — lives in the
+//! `polypus-backend` crate and is re-exported here, so every existing
+//! `polypus_infrastructure::…` / `crate::…` import keeps resolving.
+//!
+//! What this crate adds on top of `polypus-backend`:
+//!
+//! - the four backends: [`NativeStatevectorBackend`], [`LocalBackend`],
+//!   [`CunqaBackend`] and (behind `--features qmio`) `QmioBackend`;
+//! - the [`Infrastructure`] factory ([`Infrastructure::create_backend`]);
+//! - the Qiskit boundary ([`QiskitCircuit`], [`to_py_object`]) — where PyO3
+//!   re-enters after the clean contract — and the construction-time
+//!   [`ExecutionConfig`]/[`BackendConfig`];
+//! - the process-wide backend-cleanup failure counter exposed to Python;
+//! - [`attach_or`] / [`attach_for_cleanup`], for attaching to the interpreter
+//!   from `Drop` or from code that runs while detached, [`InterpreterUnavailable`],
+//!   the error such code returns when it cannot attach, and [`DisplaySafePyErr`],
+//!   the carrier for a Python exception that may be formatted while detached
+//!   (see [`attach`]).
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+pub mod attach;
+pub mod circuit;
+pub mod cunqa;
+pub mod error;
+pub mod execution_config;
+pub mod local;
+pub mod native;
+#[cfg(feature = "qmio")]
+pub mod qmio;
+pub mod transpiler;
+
+// --- re-export the pyo3-free contract so downstream import paths are unchanged ---
+pub use polypus_backend::{
+    check_statevector_fits, create_registered_backend, is_registered, max_statevector_concurrency,
+    merge_counts, register_backend, registered_names, validate_run_results, wave_concurrency,
+    BackendBuildContext, BackendCapabilities, BackendError, BackendFactory, BoundCircuit,
+    BudgetSource, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
+    InfrastructureError, InsufficientMemory, Interrupt, MemBudget, OptLevel, OptionValue, Planner,
+    PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
+    TranspileOptions, Transpiler,
+};
+
+// --- this crate's own additions ---
+pub use attach::{
+    attach_for_cleanup, attach_or, CleanupError, DisplaySafePyErr, InterpreterUnavailable,
+};
+pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
+pub use cunqa::{validate_walltime, CunqaBackend, InvalidWalltime, DEFAULT_WALLTIME};
+pub use error::EntropyError;
+pub use execution_config::{BackendConfig, ExecutionConfig};
+pub use local::LocalBackend;
+pub use native::NativeStatevectorBackend;
+#[cfg(feature = "qmio")]
+pub use qmio::QmioBackend;
+
+/// Process-wide count of backend cleanup (`close`/`Drop`) failures.
+///
+/// A `Drop` must never panic, so a failed teardown is logged and counted here
+/// rather than propagated. A per-instance flag would be useless — nobody holds
+/// the instance once `Drop` returns — so the consultable state lives in this
+/// process-wide counter, exposed to Python as `polypus.backend_cleanup_failures()`.
+static CLEANUP_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Record that a backend's resource cleanup failed. Called from `close`/`Drop`.
+pub fn record_cleanup_failure() {
+    CLEANUP_FAILURES.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Number of backend cleanup failures recorded so far this process (diagnostic).
+pub fn cleanup_failure_count() -> u64 {
+    CLEANUP_FAILURES.load(Ordering::SeqCst)
+}
+
+/// Register the backends Polypus ships through the runtime registry, once per
+/// process. Idempotent (a `Once` guard), and called at the top of
+/// [`Infrastructure::create_backend`] so a name-driven build always finds them.
+///
+/// - `"subprocess"` — the Python subprocess bridge (`polypus-subprocess-backend`),
+///   always available (pyo3-free).
+/// - `"qmio"` — the CESGA QMIO QPU, only with `--features qmio`; without it, the
+///   name stays unregistered and selecting it yields the actionable
+///   "requires --features qmio" error at the edge.
+///
+/// A third party's own `register_backend(...)` call composes with these: last
+/// registration wins, so an embedder can even override a built-in name.
+pub fn register_builtin_backends() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Never clobber a name an embedder already registered: registering is
+        // last-wins, so an embedder who registered their own `"subprocess"` (or
+        // `"qmio"`) *before* the first `create_backend` keeps it. Only fill in a name
+        // that is still free.
+        //
+        // The subprocess bridge is Unix-only (POSIX process controls), so on
+        // non-Unix (Windows) the `"subprocess"` name is simply never registered and
+        // resolves to `UnknownInfrastructure` like any other unknown backend.
+        #[cfg(unix)]
+        if !is_registered(polypus_subprocess_backend::BACKEND_NAME) {
+            polypus_subprocess_backend::register();
+        }
+        #[cfg(feature = "qmio")]
+        if !is_registered("qmio") {
+            register_backend("qmio", qmio::qmio_factory);
+        }
+    });
+}
+
+/// Supported quantum execution infrastructures.
+#[derive(Debug)]
+pub enum Infrastructure {
+    Local,
+    Cunqa,
+    /// CESGA QMIO real QPU (see `QmioBackend`). The variant always exists so
+    /// that selecting `"qmio"` produces a clear "requires `--features qmio`"
+    /// error rather than an `Unknown infrastructure` panic when the feature is
+    /// disabled; the backend itself is only built with the feature on.
+    Qmio,
+}
+
+impl Infrastructure {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Result<Self, BackendError> {
+        match s {
+            "local" => Ok(Infrastructure::Local),
+            "cunqa" => Ok(Infrastructure::Cunqa),
+            "qmio" => Ok(Infrastructure::Qmio),
+            other => Err(BackendError::UnknownInfrastructure {
+                name: other.to_string(),
+            }),
+        }
+    }
+
+    /// Instantiate the appropriate backend for the given execution config.
+    ///
+    /// Dispatch is driven solely by [`ExecutionConfig::backend_config`], so the
+    /// chosen backend and its parameters can never desync. Adding a new backend
+    /// (IBM, IQM, …) means adding one arm here and implementing
+    /// [`QuantumBackend`] for the new type — no algorithm code changes.
+    pub fn create_backend(
+        config: &ExecutionConfig,
+    ) -> Result<Arc<dyn QuantumBackend>, BackendError> {
+        // Ensure Polypus's registry-migrated backends (subprocess, qmio) — and any
+        // the embedder registered before us — are discoverable by name.
+        register_builtin_backends();
+        match &config.backend_config {
+            BackendConfig::Local {
+                sim_method,
+                noise_model,
+            } => {
+                // This can run while detached (inside `run_quantum_circuit`'s
+                // `detach`), so only a noise model, the one Python object here,
+                // is attached for, and fallibly (docs/ENGINEERING.md §9).
+                let noise_model = match noise_model {
+                    Some(nm) => Some(attach_or(
+                        || Err(InterpreterUnavailable),
+                        |py| Ok(nm.clone_ref(py)),
+                    )?),
+                    None => None,
+                };
+                Ok(Arc::new(LocalBackend::new(sim_method.clone(), noise_model)))
+            }
+            BackendConfig::Cunqa {
+                sim_method,
+                nodes,
+                cores_per_qpu,
+                walltime,
+            } => Ok(Arc::new(CunqaBackend::new(
+                config.n_qpus,
+                *nodes,
+                &config.id,
+                *cores_per_qpu,
+                walltime,
+                sim_method.clone(),
+            )?)),
+            // The Python-facing layer resolves a concrete seed whenever the
+            // native backend runs; the entropy fallback here only guards a
+            // directly-built config that left `seed` unset (e.g. tests), so
+            // an omitted seed still yields independent noise. An unreadable OS
+            // entropy source is an `Err` (`EntropyError` boxed in
+            // `BackendError::External`), never a panic.
+            BackendConfig::LocalNative { fusion } => {
+                let seed = match config.seed {
+                    Some(seed) => seed,
+                    None => execution_config::random_seed()?,
+                };
+                Ok(Arc::new(
+                    NativeStatevectorBackend::new(seed).with_fusion(*fusion),
+                ))
+            }
+            // A registry-dispatched backend (QMIO, the subprocess bridge, or a
+            // third party's own). The typed construction fields are gone; the factory
+            // reads its configuration from the pyo3-free `BackendBuildContext`. A
+            // QMIO wire error still crosses the contract type-erased in
+            // `BackendError::External` (the factory boxes it), and the FFI edge
+            // downcasts it back to raise the typed `polypus.QmioError`.
+            BackendConfig::Registered { name, options } => {
+                let ctx = BackendBuildContext {
+                    id: config.id.clone(),
+                    shots: config.shots,
+                    n_qpus: config.n_qpus,
+                    seed: config.seed,
+                    opt_level: config.opt_level,
+                    options: options.clone(),
+                };
+                create_registered_backend(name, &ctx)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::Python;
+
+    /// Building an Aer backend with no noise model needs no Python object, so it
+    /// does not attach: it succeeds even when the interpreter cannot be reached
+    /// (it runs inside `detach` for `run_quantum_circuit`). Only a `noise_model`
+    /// is attached for, through `attach_or`. Runs in a fresh process that never
+    /// initializes Python.
+    #[test]
+    fn create_backend_without_a_noise_model_does_not_attach() {
+        if !attach::is_fresh_process() {
+            attach::run_in_fresh_process(
+                "tests::create_backend_without_a_noise_model_does_not_attach",
+            );
+            return;
+        }
+        let config = ExecutionConfig {
+            id: "no-interpreter".to_string(),
+            shots: 8,
+            n_qpus: 1,
+            infrastructure: "local".to_string(),
+            backend_config: BackendConfig::Local {
+                sim_method: "statevector".to_string(),
+                noise_model: None,
+            },
+            opt_level: OptLevel::default(),
+            seed: Some(1),
+        };
+        assert!(Infrastructure::create_backend(&config).is_ok());
+        assert!(
+            Python::try_attach(|_py| ()).is_none(),
+            "building the backend must not initialize the interpreter"
+        );
+    }
+}

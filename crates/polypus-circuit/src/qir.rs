@@ -19,9 +19,20 @@
 //!
 //! - `rzz(θ)` → `cnot; rz(θ); cnot`
 //! - `rxx(θ)` → `h h; cnot; rz(θ); cnot; h h`
-//! - `cp(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
+//! - `cp(θ)` / `cu1(θ)` → `rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1`
 //! - `u3(θ,φ,λ)` → `rz(λ); ry(θ); rz(φ)` (ZYZ Euler decomposition)
+//! - `sx` / `sxdg` → `rx(±π/2)`
+//! - `cy`, `ch`, `csx`, `crx`, `cry`, `crz`, `cu3`, `cu` → the standard
+//!   `cnot`-based constructions (see each arm of [`write_qir`])
+//! - `ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` → their exact
+//!   `qelib1.inc` definitions ([`GateInstruction::lowering`]; e.g. `ccx` is the
+//!   15-gate `h`/`t`/`t†`/`cnot` circuit), each part lowered in turn
+//! - a call of a declared gate → its expanded body, each gate lowered in turn
 //! - `barrier` is dropped (QIR has no barrier; it is only a scheduling hint).
+//! - `id` and `u0` are dropped (the identity has no intrinsic and no effect).
+//!
+//! These rewrites are a *lowering* step confined to this module: they never
+//! change the circuit itself, nor what the OpenQASM exporter emits for it.
 //!
 //! ## Angle encoding
 //!
@@ -41,11 +52,16 @@
 //! by one `__quantum__rt__result_record_output` per measured result.
 
 use crate::error::CircuitError;
+use crate::expr::ExprArena;
 use crate::gate::{GateInstruction, GateParam};
 use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::FRAC_PI_2;
 use std::fmt::Write;
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// QIR major version reported in the module flags.
 const QIR_MAJOR_VERSION: i32 = 1;
@@ -137,13 +153,46 @@ impl QirWriter {
         self.decls
             .insert(format!("declare void @{intrinsic}(%Qubit*, %Qubit*)"));
     }
+
+    /// `cp(θ)` (= `cu1(θ)`) = diag(1,1,1,e^{iθ}), up to global phase:
+    ///   rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1
+    /// (`cz; rz(θ); cz` is wrong: all-diagonal, cz² = I, collapses to rz(θ) —
+    /// see contract C-2 / audit item C3.)
+    fn cp(&mut self, theta: f64, q0: usize, q1: usize) {
+        self.rot(RZ, theta / 2.0, q0);
+        self.gate2(CNOT, q0, q1);
+        self.rot(RZ, -theta / 2.0, q1);
+        self.gate2(CNOT, q0, q1);
+        self.rot(RZ, theta / 2.0, q1);
+    }
+
+    /// Controlled `u3(θ,φ,λ)`, the `qelib1.inc` construction with each `u1`/`u3`
+    /// rewritten to `rz`/`ry` (their global phases are global here: every one
+    /// of them is applied unconditionally):
+    ///   rz((λ+φ)/2) c; rz((λ−φ)/2) t; cnot c,t; rz(−(φ+λ)/2) t; ry(−θ/2) t;
+    ///   cnot c,t; ry(θ/2) t; rz(φ) t
+    fn cu3(&mut self, (theta, phi, lam): (f64, f64, f64), c: usize, t: usize) {
+        self.rot(RZ, (lam + phi) / 2.0, c);
+        self.rot(RZ, (lam - phi) / 2.0, t);
+        self.gate2(CNOT, c, t);
+        self.rot(RZ, -(phi + lam) / 2.0, t);
+        self.rot(RY, -theta / 2.0, t);
+        self.gate2(CNOT, c, t);
+        self.rot(RY, theta / 2.0, t);
+        self.rot(RZ, phi, t);
+    }
 }
 
 /// Serialize a gate sequence to a complete QIR Base Profile LLVM IR module.
 ///
-/// `params` supplies values for any unresolved [`GateParam::Param`]; pass an
-/// empty slice for fully concrete circuits. `num_clbits` is the size of the
-/// implicit classical register (reported as `required_num_results`).
+/// `params` supplies values for any unresolved [`GateParam::Param`], and
+/// `exprs` holds the expressions of any [`GateParam::Expr`], evaluated with
+/// them; pass an empty slice and arena for fully concrete circuits.
+/// `num_clbits` is the circuit's classical width, declared or implicit
+/// (reported as `required_num_results`). It may exceed the results the module
+/// records: declared bits no measurement writes, or every bit of a circuit
+/// without measurements, as with a partial measurement (one written at `c[1]`
+/// declares 2 results and records 1).
 ///
 /// # Errors
 ///
@@ -158,96 +207,262 @@ pub(crate) fn write_qir(
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<String, CircuitError> {
     // Contract C-4: reject a gate acting on an already-measured qubit rather
     // than deferring/reordering it past the measurement below.
     if let Some(qubit) = crate::gate::terminal_measurement_violation(gates) {
         return Err(CircuitError::QubitAlreadyMeasured { qubit });
     }
+    write_qir_module(num_qubits, num_clbits, gates, params, exprs)
+}
 
-    let angle = |p: &GateParam| -> Result<f64, CircuitError> { p.resolve(params) };
+/// Where [`lower`] resolves angles: the parameter values, the circuit's
+/// expressions, and scratch space to evaluate them.
+struct Angles<'a> {
+    params: &'a [f64],
+    exprs: &'a ExprArena,
+    stack: Vec<f64>,
+}
 
+impl Angles<'_> {
+    fn of(&mut self, p: &GateParam) -> Result<f64, CircuitError> {
+        p.resolve(self.params, self.exprs, &mut self.stack)
+    }
+}
+
+/// Lower one instruction to QIR base-profile calls into `w`. Measurements are
+/// only recorded in `measurements`: they are emitted after every unitary.
+fn lower(
+    w: &mut QirWriter,
+    measurements: &mut BTreeMap<usize, usize>,
+    num_qubits: usize,
+    gate: &GateInstruction,
+    angles: &mut Angles<'_>,
+) -> Result<(), CircuitError> {
+    let mut angle = |p: &GateParam| angles.of(p);
+    match gate {
+        GateInstruction::H(q) => w.gate1(H, *q),
+        GateInstruction::X(q) => w.gate1(X, *q),
+        GateInstruction::Y(q) => w.gate1(Y, *q),
+        GateInstruction::Z(q) => w.gate1(Z, *q),
+        GateInstruction::S(q) => w.gate1(S, *q),
+        GateInstruction::T(q) => w.gate1(T, *q),
+        GateInstruction::Sdg(q) => w.gate1(S_ADJ, *q),
+        GateInstruction::Tdg(q) => w.gate1(T_ADJ, *q),
+        // The identity has no QIS intrinsic and no effect: dropped here, at
+        // the QIR lowering boundary only (it stays in the circuit and in
+        // the OpenQASM export).
+        GateInstruction::Id(_) => {}
+        GateInstruction::Rx { qubit, theta } => w.rot(RX, angle(theta)?, *qubit),
+        GateInstruction::Ry { qubit, theta } => w.rot(RY, angle(theta)?, *qubit),
+        GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),
+        GateInstruction::Cx(c, t) => w.gate2(CNOT, *c, *t),
+        GateInstruction::Cz(c, t) => w.gate2(CZ, *c, *t),
+        // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
+        GateInstruction::Swap(q0, q1) => {
+            w.gate2(CNOT, *q0, *q1);
+            w.gate2(CNOT, *q1, *q0);
+            w.gate2(CNOT, *q0, *q1);
+        }
+        // rzz(θ) = cnot · rz(θ) · cnot
+        GateInstruction::Rzz { q0, q1, theta } => {
+            let t = angle(theta)?;
+            w.gate2(CNOT, *q0, *q1);
+            w.rot(RZ, t, *q1);
+            w.gate2(CNOT, *q0, *q1);
+        }
+        // rxx(θ) = (h⊗h) · cnot · rz(θ) · cnot · (h⊗h)
+        GateInstruction::Rxx { q0, q1, theta } => {
+            let t = angle(theta)?;
+            w.gate1(H, *q0);
+            w.gate1(H, *q1);
+            w.gate2(CNOT, *q0, *q1);
+            w.rot(RZ, t, *q1);
+            w.gate2(CNOT, *q0, *q1);
+            w.gate1(H, *q0);
+            w.gate1(H, *q1);
+        }
+        // cp(θ) and its `cu1` spelling: see `QirWriter::cp`.
+        GateInstruction::Cp { q0, q1, theta } | GateInstruction::Cu1 { q0, q1, theta } => {
+            w.cp(angle(theta)?, *q0, *q1)
+        }
+        // √X = e^{iπ/4}·rx(π/2) and √X† = e^{−iπ/4}·rx(−π/2).
+        GateInstruction::Sx(q) => w.rot(RX, FRAC_PI_2, *q),
+        GateInstruction::Sxdg(q) => w.rot(RX, -FRAC_PI_2, *q),
+        // cy c,t = s† t; cnot c,t; s t (exact).
+        GateInstruction::Cy(c, t) => {
+            w.gate1(S_ADJ, *t);
+            w.gate2(CNOT, *c, *t);
+            w.gate1(S, *t);
+        }
+        // ch c,t = s t; h t; t t; cnot c,t; t† t; h t; s† t (exact).
+        GateInstruction::Ch(c, t) => {
+            w.gate1(S, *t);
+            w.gate1(H, *t);
+            w.gate1(T, *t);
+            w.gate2(CNOT, *c, *t);
+            w.gate1(T_ADJ, *t);
+            w.gate1(H, *t);
+            w.gate1(S_ADJ, *t);
+        }
+        // csx c,t = h t; cp(π/2) c,t; h t.
+        GateInstruction::Csx(c, t) => {
+            w.gate1(H, *t);
+            w.cp(FRAC_PI_2, *c, *t);
+            w.gate1(H, *t);
+        }
+        // The composite qelib1.inc gates have no base-profile intrinsic: each is
+        // lowered to its exact qelib1.inc definition (`GateInstruction::lowering`),
+        // every part lowered in turn.
+        GateInstruction::Ccx(..)
+        | GateInstruction::Cswap(..)
+        | GateInstruction::Rccx(..)
+        | GateInstruction::Rc3x(..)
+        | GateInstruction::C3x(..)
+        | GateInstruction::C3sqrtx(..)
+        | GateInstruction::C4x(..) => {
+            for part in gate.lowering().into_iter().flatten() {
+                lower(w, measurements, num_qubits, &part, angles)?;
+            }
+        }
+        // `u0(γ)` is the identity (an idle marker): dropped like `id`.
+        GateInstruction::U0 { gamma, .. } => {
+            angle(gamma)?;
+        }
+        // crx(θ) c,t = s t; cnot c,t; ry(−θ/2) t; cnot c,t; ry(θ/2) t; s† t.
+        GateInstruction::Crx {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.gate1(S, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, th / 2.0, *target);
+            w.gate1(S_ADJ, *target);
+        }
+        // cry(θ) c,t = ry(θ/2) t; cnot c,t; ry(−θ/2) t; cnot c,t (exact).
+        GateInstruction::Cry {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.rot(RY, th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RY, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+        }
+        // crz(θ) c,t = rz(θ/2) t; cnot c,t; rz(−θ/2) t; cnot c,t (exact).
+        GateInstruction::Crz {
+            control,
+            target,
+            theta,
+        } => {
+            let th = angle(theta)?;
+            w.rot(RZ, th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+            w.rot(RZ, -th / 2.0, *target);
+            w.gate2(CNOT, *control, *target);
+        }
+        GateInstruction::Cu3 {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+        } => w.cu3((angle(theta)?, angle(phi)?, angle(lam)?), *control, *target),
+        // cu(θ,φ,λ,γ): the phase γ on the controlled branch is a relative
+        // phase between the control's states, i.e. `p(γ)` on the control
+        // (`rz(γ)` up to global phase), then cu3(θ,φ,λ).
+        GateInstruction::Cu {
+            control,
+            target,
+            theta,
+            phi,
+            lam,
+            gamma,
+        } => {
+            let angles = (angle(theta)?, angle(phi)?, angle(lam)?);
+            w.rot(RZ, angle(gamma)?, *control);
+            w.cu3(angles, *control, *target);
+        }
+        // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
+        // left-to-right that is rz(λ), ry(θ), rz(φ). `u` is the same operator.
+        GateInstruction::U {
+            qubit,
+            theta,
+            phi,
+            lam,
+        }
+        | GateInstruction::UGate {
+            qubit,
+            theta,
+            phi,
+            lam,
+        } => {
+            let (th, ph, la) = (angle(theta)?, angle(phi)?, angle(lam)?);
+            w.rot(RZ, la, *qubit);
+            w.rot(RY, th, *qubit);
+            w.rot(RZ, ph, *qubit);
+        }
+        // u2(φ,λ) = u3(π/2,φ,λ).
+        GateInstruction::U2 { qubit, phi, lam } => {
+            let (ph, la) = (angle(phi)?, angle(lam)?);
+            w.rot(RZ, la, *qubit);
+            w.rot(RY, FRAC_PI_2, *qubit);
+            w.rot(RZ, ph, *qubit);
+        }
+        // p(λ) = u1(λ) = diag(1, e^{iλ}) = e^{iλ/2}·rz(λ).
+        GateInstruction::P { qubit, lam } | GateInstruction::U1 { qubit, lam } => {
+            w.rot(RZ, angle(lam)?, *qubit)
+        }
+        // Barriers are scheduling hints with no QIR representation.
+        GateInstruction::Barrier(_) => {}
+        GateInstruction::Measure { qubit, cbit } => {
+            measurements.insert(*cbit, *qubit);
+        }
+        GateInstruction::MeasureAll => {
+            for q in 0..num_qubits {
+                measurements.insert(q, q);
+            }
+        }
+        // A call of a declared gate: expanded into built-in instructions
+        // here, at the QIR lowering boundary, each lowered like any other.
+        GateInstruction::Custom(call) => {
+            let expanded = call.expand_with(angles.params, angles.exprs, &mut angles.stack)?;
+            for expanded in expanded {
+                lower(w, measurements, num_qubits, &expanded, angles)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serialize a gate sequence to a complete QIR Base Profile LLVM IR module
+/// (the body of [`write_qir`] after its C-4 check).
+fn write_qir_module(
+    num_qubits: usize,
+    num_clbits: usize,
+    gates: &[GateInstruction],
+    params: &[f64],
+    exprs: &ExprArena,
+) -> Result<String, CircuitError> {
     let mut w = QirWriter::new();
+    let mut angles = Angles {
+        params,
+        exprs,
+        stack: Vec::new(),
+    };
     // Deferred measurements: result (classical bit) -> measured qubit.
     // A BTreeMap keeps results in ascending order and collapses any repeated
     // measurement of the same classical bit to its last assignment.
     let mut measurements: BTreeMap<usize, usize> = BTreeMap::new();
-
     for gate in gates {
-        match gate {
-            GateInstruction::H(q) => w.gate1(H, *q),
-            GateInstruction::X(q) => w.gate1(X, *q),
-            GateInstruction::Y(q) => w.gate1(Y, *q),
-            GateInstruction::Z(q) => w.gate1(Z, *q),
-            GateInstruction::S(q) => w.gate1(S, *q),
-            GateInstruction::T(q) => w.gate1(T, *q),
-            GateInstruction::Sdg(q) => w.gate1(S_ADJ, *q),
-            GateInstruction::Tdg(q) => w.gate1(T_ADJ, *q),
-            GateInstruction::Rx { qubit, theta } => w.rot(RX, angle(theta)?, *qubit),
-            GateInstruction::Ry { qubit, theta } => w.rot(RY, angle(theta)?, *qubit),
-            GateInstruction::Rz { qubit, theta } => w.rot(RZ, angle(theta)?, *qubit),
-            GateInstruction::Cx(c, t) => w.gate2(CNOT, *c, *t),
-            GateInstruction::Cz(c, t) => w.gate2(CZ, *c, *t),
-            // swap a,b = cnot a,b; cnot b,a; cnot a,b (no swap intrinsic in QIR base).
-            GateInstruction::Swap(q0, q1) => {
-                w.gate2(CNOT, *q0, *q1);
-                w.gate2(CNOT, *q1, *q0);
-                w.gate2(CNOT, *q0, *q1);
-            }
-            // rzz(θ) = cnot · rz(θ) · cnot
-            GateInstruction::Rzz { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t, *q1);
-                w.gate2(CNOT, *q0, *q1);
-            }
-            // rxx(θ) = (h⊗h) · cnot · rz(θ) · cnot · (h⊗h)
-            GateInstruction::Rxx { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.gate1(H, *q0);
-                w.gate1(H, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.gate1(H, *q0);
-                w.gate1(H, *q1);
-            }
-            // cp(θ) = diag(1,1,1,e^{iθ}), up to global phase:
-            //   rz(θ/2) q0; cnot; rz(−θ/2) q1; cnot; rz(θ/2) q1
-            // (`cz; rz(θ); cz` is wrong: all-diagonal, cz² = I, collapses to
-            // rz(θ) — see contract C-2 / audit item C3.)
-            GateInstruction::Cp { q0, q1, theta } => {
-                let t = angle(theta)?;
-                w.rot(RZ, t / 2.0, *q0);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, -t / 2.0, *q1);
-                w.gate2(CNOT, *q0, *q1);
-                w.rot(RZ, t / 2.0, *q1);
-            }
-            // u3(θ,φ,λ) = rz(φ) · ry(θ) · rz(λ) up to global phase; applied
-            // left-to-right that is rz(λ), ry(θ), rz(φ).
-            GateInstruction::U {
-                qubit,
-                theta,
-                phi,
-                lam,
-            } => {
-                let (th, ph, la) = (angle(theta)?, angle(phi)?, angle(lam)?);
-                w.rot(RZ, la, *qubit);
-                w.rot(RY, th, *qubit);
-                w.rot(RZ, ph, *qubit);
-            }
-            // Barriers are scheduling hints with no QIR representation.
-            GateInstruction::Barrier(_) => {}
-            GateInstruction::Measure { qubit, cbit } => {
-                measurements.insert(*cbit, *qubit);
-            }
-            GateInstruction::MeasureAll => {
-                for q in 0..num_qubits {
-                    measurements.insert(q, q);
-                }
-            }
-        }
+        lower(&mut w, &mut measurements, num_qubits, gate, &mut angles)?;
     }
 
     // Measurements come after every unitary (Base Profile: terminal).
@@ -328,22 +543,50 @@ pub(crate) fn write_qir(
     Ok(out)
 }
 
+/// Longest `llvm-as` may take to assemble a module before it is killed.
+const ASSEMBLY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Serialize a gate sequence to LLVM bitcode (`.bc`) by first emitting QIR
 /// text and assembling it with `llvm-as`.
 ///
 /// This keeps the crate dependency-free: no direct LLVM bindings are linked.
-/// Instead, the standard LLVM assembler must be available on `PATH`.
+/// Instead, the standard LLVM assembler must be available on `PATH`. It is
+/// killed after [`ASSEMBLY_TIMEOUT`], and always reaped.
 pub(crate) fn write_qir_bitcode(
     num_qubits: usize,
     num_clbits: usize,
     gates: &[GateInstruction],
     params: &[f64],
+    exprs: &ExprArena,
 ) -> Result<Vec<u8>, CircuitError> {
-    let ir = write_qir(num_qubits, num_clbits, gates, params)?;
-    assemble_qir_bitcode_with("llvm-as", &ir)
+    let ir = write_qir(num_qubits, num_clbits, gates, params, exprs)?;
+    assemble_qir_bitcode_with("llvm-as", ir, ASSEMBLY_TIMEOUT)
 }
 
-fn assemble_qir_bitcode_with(tool: &str, ir: &str) -> Result<Vec<u8>, CircuitError> {
+/// Run `work` on a thread of its own; its result arrives on the channel. The
+/// thread is never joined, so a pipe that stays open cannot block the caller.
+fn background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+}
+
+/// Assemble `ir` with `tool`. Its stdin is fed, and its stdout and stderr
+/// drained, on threads of their own, so no pipe can block another, and every
+/// wait is bounded by `timeout`. The tool is reaped on every path: it exits,
+/// or it is killed and waited for.
+fn assemble_qir_bitcode_with(
+    tool: &str,
+    ir: String,
+    timeout: Duration,
+) -> Result<Vec<u8>, CircuitError> {
+    let failed = |message: String| CircuitError::QirAssemblyFailed {
+        tool: tool.to_string(),
+        message,
+    };
+    let deadline = Instant::now() + timeout;
     let mut child = Command::new(tool)
         .args(["-o", "-", "-"])
         .stdin(Stdio::piped())
@@ -356,43 +599,64 @@ fn assemble_qir_bitcode_with(tool: &str, ir: &str) -> Result<Vec<u8>, CircuitErr
                     tool: tool.to_string(),
                 }
             } else {
-                CircuitError::QirAssemblyFailed {
-                    tool: tool.to_string(),
-                    message: e.to_string(),
-                }
+                failed(e.to_string())
             }
         })?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(ir.as_bytes())
-            .map_err(|e| CircuitError::QirAssemblyFailed {
-                tool: tool.to_string(),
-                message: format!("failed to write QIR to stdin: {e}"),
-            })?;
-    }
+    let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    // Dropping stdin once written closes it: the tool sees the end of input.
+    let written = background(move || stdin.map_or(Ok(()), |mut s| s.write_all(ir.as_bytes())));
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        background(move || {
+            let mut bytes = Vec::new();
+            pipe.map_or(Ok(()), |mut p| p.read_to_end(&mut bytes).map(drop))
+                .map(|()| bytes)
+        })
+    };
+    let stdout = drain(stdout.map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(stderr.map(|p| Box::new(p) as Box<dyn Read + Send>));
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CircuitError::QirAssemblyFailed {
-            tool: tool.to_string(),
-            message: e.to_string(),
-        })?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed(match outcome {
+                    Err(e) => e.to_string(),
+                    _ => format!("timed out after {} s", timeout.as_secs_f64()),
+                }));
+            }
+        }
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // The tool has exited, so its pipes close unless something it started
+    // keeps them open: wait for them until the deadline only.
+    let receive = |receiver: &Receiver<std::io::Result<Vec<u8>>>, pipe: &str| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(result) => result.map_err(|e| failed(format!("failed to read its {pipe}: {e}"))),
+            Err(_) => Err(failed(format!("its {pipe} stayed open after it exited"))),
+        }
+    };
+    if !status.success() {
+        let stderr = receive(&stderr, "stderr").unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         let suffix = if stderr.is_empty() {
             String::new()
         } else {
             format!(": {stderr}")
         };
-        return Err(CircuitError::QirAssemblyFailed {
-            tool: tool.to_string(),
-            message: format!("non-zero exit status {}{suffix}", output.status),
-        });
+        return Err(failed(format!("non-zero exit status {status}{suffix}")));
     }
-
-    Ok(output.stdout)
+    let left = deadline.saturating_duration_since(Instant::now());
+    match written.recv_timeout(left) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(failed(format!("failed to write QIR to stdin: {e}"))),
+        Err(_) => return Err(failed("its stdin stayed open after it exited".into())),
+    }
+    receive(&stdout, "stdout")
 }
 
 #[cfg(test)]
@@ -425,7 +689,7 @@ mod tests {
             GateInstruction::Cx(0, 1),
             GateInstruction::MeasureAll,
         ];
-        let ir = write_qir(2, 2, &gates, &[]).unwrap();
+        let ir = write_qir(2, 2, &gates, &[], &ExprArena::EMPTY).unwrap();
 
         assert!(ir.contains("define void @main() #0 {"));
         assert!(ir.contains("call void @__quantum__qis__h__body(%Qubit* null)"));
@@ -445,7 +709,7 @@ mod tests {
     #[test]
     fn no_measurement_omits_recording_and_irreversible_attr() {
         let gates = vec![GateInstruction::H(0)];
-        let ir = write_qir(1, 0, &gates, &[]).unwrap();
+        let ir = write_qir(1, 0, &gates, &[], &ExprArena::EMPTY).unwrap();
         assert!(!ir.contains("record_output"));
         assert!(!ir.contains("attributes #1"));
         assert!(!ir.contains("mz__body"));
@@ -456,9 +720,81 @@ mod tests {
     fn missing_assembler_reports_tool_not_found() {
         let err = assemble_qir_bitcode_with(
             "polypus-llvm-as-does-not-exist",
-            "define void @main() {\nentry:\n  ret void\n}\n",
+            "define void @main() {\nentry:\n  ret void\n}\n".into(),
+            ASSEMBLY_TIMEOUT,
         )
         .unwrap_err();
         assert!(matches!(err, CircuitError::QirAssemblyToolNotFound { .. }));
+    }
+
+    /// Fake assemblers that misbehave (#356): each is a shell script that
+    /// records its pid, so the test can check it was reaped. One test, so
+    /// that no other test forks while a script is being written.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_assembler_is_always_reaped_and_bounded_in_time() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("polypus-fake-llvm-as-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho $$ > '{}.pid'\n{body}\n", path.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let reaped = |tool: &std::path::Path| {
+            let pid = std::fs::read_to_string(tool.with_extension("pid")).unwrap();
+            !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists()
+        };
+        let tools = [
+            ("hangs", fake("hangs", "exec sleep 60")),
+            ("closes", fake("closes", "exec 0<&-\nexit 0")),
+            (
+                "closes_and_hangs",
+                fake("closes_and_hangs", "exec 0<&-\nexec sleep 60"),
+            ),
+            ("fails", fake("fails", "echo broken >&2\nexit 3")),
+            ("echoes", fake("echoes", "exec cat")),
+        ];
+        // More than a pipe buffer holds, so writing it blocks until it is read.
+        let ir = "x".repeat(1 << 20);
+        let assemble = |tool: &std::path::Path| {
+            let started = Instant::now();
+            let result = assemble_qir_bitcode_with(
+                tool.to_str().unwrap(),
+                ir.clone(),
+                Duration::from_millis(500),
+            );
+            assert!(started.elapsed() < Duration::from_secs(10), "{tool:?}");
+            result
+        };
+        for (name, tool) in &tools {
+            let result = assemble(tool);
+            let message = match &result {
+                Err(CircuitError::QirAssemblyFailed { message, .. }) => message.as_str(),
+                Ok(bytes) => {
+                    assert_eq!(*name, "echoes");
+                    assert_eq!(bytes.len(), ir.len());
+                    ""
+                }
+                Err(other) => panic!("{name}: {other:?}"),
+            };
+            match *name {
+                "hangs" | "closes_and_hangs" => assert!(message.contains("timed out"), "{message}"),
+                "closes" => assert!(
+                    message.contains("failed to write QIR to stdin"),
+                    "{message}"
+                ),
+                "fails" => assert!(message.contains("broken"), "{message}"),
+                _ => {}
+            }
+            assert!(reaped(tool), "{name} was not reaped");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

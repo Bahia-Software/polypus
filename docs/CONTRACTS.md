@@ -20,28 +20,26 @@ Rules of the road:
 
 | Contract | Seam | Enforcing test | Status | Known break (audit) |
 |---|---|---|---|---|
-| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` | ✅ present | `disconnect` now forwards `family` to `qdrop` (C1 fixed) |
-| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-3 | Measurement counts format | shot-conservation + last-write-wins | ✅ present | shots dropped on uneven distribution (C6) |
+| C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
+| C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `hygiene.yml` version step | ✅ present | tag/Cargo diverged at 0.6.0 |
-| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34) |
-| C-8 | qml.train row/dimension symmetry | `tests/python/test_qml_train_validation.py` | ✅ present | silent row truncation / late Qiskit error (#79) |
-| C-9 | `id` charset (train/qml.train) | `tests/python/test_id_validation.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
-| C-10 | QML problem ↔ oracle | `polypus-qml` `tests/contracts.rs` + `NativeQmlOracle` test in `polypus` | ✅ present | — |
+| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
+| C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
+| C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
+| C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
 
-⏳ contracts are specified but not yet mechanically enforced; treat them as
-review-enforced until the test lands. Each known break has a public issue
-labelled `audit-2026-07`.
-<!-- TODO(maintainers): create those issues and link them here; flip ⏳ to ✅
-     as each test merges. -->
+✅ means the listed test enforces the contract; a ⏳ contract would be
+specified but only review-enforced until its test lands (none today). Known
+breaks link their issue where one was filed.
 
 ---
 
 ## C-1 · Rust → Python execution seam (`polypus_python`)
 
-The Rust orchestration layer (`crates/polypus/src/infrastructure/*.rs`) calls
+The Rust infrastructure layer (`crates/polypus-infrastructure/src/*.rs`) calls
 exactly three functions of the `polypus_python` package. Their names, argument
 names and return shapes are frozen by this contract; the two sides must never
 be changed independently.
@@ -53,22 +51,65 @@ be changed independently.
 | `"local"` | — | the string `"local"` |
 | `"cunqa"` | `n: int` (QPUs), `t: str` (SLURM walltime `"HH:MM:SS"`), `n_nodes: int`, `family_name: str`, `cores_per_qpu: int` | CUNQA *family* handle (opaque object) |
 
+`t` comes from the user-facing `walltime` kwarg (default `"10:00:00"`). The edge accepts only `HH:MM:SS` — `HH` one or more digits (`48:00:00` is valid), `MM` and `SS` two digits below 60, total above zero; SLURM's `D-HH:MM:SS` is rejected — and raises `ValueError` before this call is made. `local` and `qmio` ignore it. `tests/python/test_cunqa_walltime.py` pins that the value arrives as `t`.
+
 Every kwarg the Rust side sends **must be consumed** by the Python side;
 silently ignoring one (as happened with `cores_per_qpu`) is a contract
 violation.
 
-`family_name` is `ExecutionConfig::id`, whose charset is constrained by C-9.
+The CUNQA seal translates these into `cunqa.qpu.qraise(n, t, quantum_comm=False,
+co_located=True, n_nodes=..., family=..., cores_per_qpu=...)`, plus `backend`
+when `POLYPUS_CUNQA_BACKEND` is set. `qraise` has no `**kwargs`, so a name it
+does not know raises `TypeError`. **Supported CUNQA: `>=2.4,<4`.** The argument
+is `cores_per_qpu` from 2.4.0 (checked at 2.4.0, 3.0.0 and 3.1.0); CUNQA 2.3.0
+spells it `cores`, so **2.3 is not supported** and a reservation against it fails
+with `TypeError: qraise() got an unexpected keyword argument 'cores_per_qpu'`.
+`tests/python/test_cunqa_contract.py` binds the kwargs the seal sends against the
+`qraise`, `get_QPUs`, `run`, `gather` and `qdrop` signatures extracted from those
+four tags (`tests/python/data/cunqa/`, regenerated by `extract_signatures.py`).
+It checks the call shapes only. `tests/python/test_cunqa_run_flow.py` drives
+the whole run flow (`run_quantum_circuit`/`train` → `CunqaBackend` → seal) against
+`tests/python/fake_cunqa.py`, a stateful fake bound to the same signatures that
+simulates each job with Aer (#357). Neither has been run against a real CUNQA;
+`tests/python/test_cunqa_real.py` is the opt-in test for a real family
+(`POLYPUS_CUNQA_REAL=1`, never in CI).
+
+`family_name` is the run id (`RunParams::id`, derived from `ExecutionConfig::id`
+at backend construction), whose charset is constrained by C-9.
 
 ### `run_qcs(infrastructure: str, **kwargs)`
 
 | backend | kwargs (exact names) |
 |---|---|
-| local | `id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `noise_model` (optional), `seed: int` (optional, C-7) |
-| cunqa | `family_id: str`, `backend: str`, `qcs: list`, `shots: int`, `sim_method: str`, `seed: int` (optional, C-7) |
+| local | `qcs: list`, `shots: int`, `sim_method: str`, `max_parallel_experiments: int`, `noise_model` (optional), `seed: int` (optional, C-7), `max_memory_mb: int` (optional, issue #215) |
+| cunqa | `family_id: str`, `qcs: list`, `shots: int`, `qpu_offset: int` (C-7, issue #370), `sim_method: str`, `seed: int` (optional, C-7) |
 
-`id` / `family_id` are `ExecutionConfig::id`, whose charset is constrained by
-C-9. `qcs` elements are either Qiskit `QuantumCircuit` objects or OpenQASM 2.0
-strings; the Python side parses strings (`QuantumCircuit.from_qasm_str`).
+`max_memory_mb` is sent by the local backend **only when the memory budget is a
+known limit** (a valid `POLYPUS_MEM_BUDGET`, or the detected RAM/cgroup limit minus
+the reserve) and is omitted for the blind fallback; it is the budget in whole MiB,
+never `0` (which Aer reads as "no limit"). `python/polypus_python/local.py` consumes it by
+passing it to `AerSimulator(max_memory_mb=...)`, and passes nothing when it is
+absent, so a direct caller keeps Aer's default. An experiment Aer then refuses for
+lack of memory is raised as `polypus.InsufficientMemoryError` (see Failure modes).
+
+`qpu_offset` is where the call's circuits start among the CUNQA family's QPUs:
+circuit `i` runs on QPU `qpu_offset + i`. It is `0` except when a shot split
+across the QPUs is uneven, which the Rust side sends as one call per batch size,
+each with its first replica's index. The seal reads it with a default of `0`.
+
+`family_id` is the run id (`RunParams::id`, derived from
+`ExecutionConfig::id`), whose charset is constrained by C-9; only CUNQA receives
+it, as the name of the family to run on. The local seal receives no run id: it
+creates nothing named after the run, and the id reaches the caller in
+`RunResult.id`. Neither seal receives a `backend` kwarg: the local seal always
+runs Aer's `AerSimulator` (the caller's `backend="aer"` / `"polypus"` choice is
+resolved on the Rust side before any seam call), and CUNQA picks no simulator
+class per job (the vQPU's is set at `qraise`, from `POLYPUS_CUNQA_BACKEND`).
+`tests/python/test_seam_contract.py` pins the exact kwarg set each backend sends
+and checks, by reading the seal's source, that `Local.run_qcs` and
+`Cunqa.run_qcs` read every one of them. `qcs` elements are
+either Qiskit `QuantumCircuit` objects or OpenQASM 2.0 strings; the Python side
+parses strings (`QuantumCircuit.from_qasm_str`).
 Returns `list[dict[str, int]]` — **one dict per circuit, in submission
 order** (see C-3 for the dict format).
 
@@ -81,17 +122,29 @@ Rust side never sends — so a `KeyError` fired before `qdrop` ran and the QPU
 allocation leaked. The Python side was corrected to read `family`; the Rust
 side was already canonical.)*
 
-### `expectation_values(counts: list[dict], fn) -> list[float]`
+### `expectation_values(counts, fn)` — *no longer part of this seam*
 
-Returns exactly `len(counts)` finite floats, in order.
+*Historical: this was once the fourth seam function — the Rust layer handed the
+counts back to Python to reduce them to expectation values. Expectation
+computation is now **native**: `polypus-observable` evaluates declarative
+QUBO/Ising costs, and `polypus-evaluation`'s `PyCallbackObservable` calls a user
+callback once per unique bitstring in a single GIL section and aggregates in
+Rust. The Rust layer no longer calls `expectation_values` across the seam, so it
+is not frozen by this contract. The function still lives in
+`python/polypus_python/qaoa_utils.py` for Python-side use.*
 
-### Failure modes (all four functions)
+### Failure modes (all three functions)
 
 - An unknown `infrastructure` value raises `ValueError` — never falls through
   to a default.
 - An **unexpected** kwarg raises `TypeError` (the mirror of the
   "must-be-consumed" rule above: neither side silently drops or invents args).
 - A missing **required** kwarg raises `TypeError`.
+
+No backend binds parameters on this seam, so `run_quantum_circuit` rejects a
+circuit with free parameters (a `polypus.Circuit` or a Qiskit `QuantumCircuit`)
+with `ValueError` ("unbound parameters") before calling it; an unbound
+`QuantumCircuit` no longer reaches Aer to fail there (issue #308).
 
 A failure **must never** cross the seam as a `pyo3_runtime.PanicException` or a
 process abort (it used to: the Rust side `unwrap()`/`panic!`-ed on these calls).
@@ -100,13 +153,85 @@ The Rust orchestration layer now returns a typed `Result` on every path:
 - A Python exception raised *by the seam function itself* (the three failure
   modes above, or any runtime error inside `run_qcs`) is **re-raised verbatim**,
   preserving its original type — so the `ValueError`/`TypeError` guarantees
-  above hold unchanged.
+  above hold unchanged — **except an exception raised by Qiskit** (issue #218):
+  one whose class, or any class in its MRO, is defined in a `qiskit*` module
+  (`qiskit.exceptions.QiskitError`, `qiskit_aer.AerError`,
+  `qiskit.qasm2.QASM2ParseError`, …) is raised as `polypus.BackendError`, whose
+  message starts with the Qiskit class's qualified name followed by its message,
+  with the original exception chained as `__cause__` (its traceback is kept).
+  Detection reads class names only, so Qiskit is never imported for it. A Qiskit
+  class that is also a `ValueError`, `TypeError` or `KeyboardInterrupt` is still
+  re-raised verbatim: the typed failure modes above, and cancellation, win.
+  The rule lives in one helper, `polypus::exceptions::wrap_qiskit_error`
+  (`qiskit_error_to_pyerr` on this seam).
+- The same rule covers the Qiskit calls Polypus makes on the user's Qiskit
+  circuits **outside** this seam, before any backend runs: `qml.train` /
+  `qml.predict` composing `feature_map` with `ansatz` and binding each row and
+  the weights, and the VQC/QML oracles binding candidate parameters
+  (`assign_parameters_qiskit`, which reports a failure of that call as
+  `EvaluationError::Qiskit`). There a Qiskit exception is raised as
+  **`polypus.EvaluationError`** (`qiskit_error_to_evaluation_error`) — no backend
+  is involved yet — again with `module.Class: message` and `__cause__`, and with
+  `ValueError`/`TypeError`/`KeyboardInterrupt` kept as they are. An exception
+  raised by the user's `expectation_function` (or variance callback) is **never**
+  retyped, even when its class is a Qiskit one: it travels in
+  `EvaluationError::Python` and re-raises verbatim.
+- **How the exception travels.** Between the seam and the FFI edge it crosses
+  pyo3-free layers (the planner, `OracleErrorSlot`) that may format it while the
+  thread is detached, so it is carried as
+  `polypus_infrastructure::DisplaySafePyErr`, never as a bare `PyErr`:
+  `seam_error` boxes it into `BackendError::External`, a callback observable
+  into `ObservableError::External`, and `EvaluationError::Python` / `Qiskit`
+  hold one. Its `Display`/`Debug` never panic, even once the interpreter is
+  unavailable (ENGINEERING.md §9). The edge (`external_to_pyerr`,
+  `observable_error_to_pyerr`, `evaluation_error_to_pyerr`) downcasts only to
+  that carrier and re-raises the original `PyErr` it holds, so the class rules
+  above apply to the original exception; a bare `PyErr` in an `External` box is
+  not recovered and surfaces as `polypus.BackendError` (or
+  `polypus.EvaluationError` from an observable) with its message.
+- **The interpreter is unavailable.** With the interpreter unavailable (it is
+  finalizing, say, while a run is still going on a daemon thread), the code a
+  run reaches inside `detach` that needs Python (the Aer/CUNQA seam calls, the
+  Qiskit binding, the user's callbacks, the between-wave interrupt guard)
+  returns a typed error, `polypus_infrastructure::InterpreterUnavailable`, that
+  the edge raises as `KeyboardInterrupt` ("the run was aborted: …", the class an
+  interrupted run gets); never a panic. It travels boxed in the same `External`
+  variants and is downcast after `DisplaySafePyErr`, so a seam exception keeps
+  its class (ENGINEERING.md §9). `polypus.statevector`, cancelled by its
+  interrupt hook for the same reason, raises the same `KeyboardInterrupt`.
 - A failure originating *in the Rust layer* (backend construction, a native
   circuit that will not parse/simulate, the QMIO network path, a data
-  conversion) raises a class from the `polypus` exception hierarchy:
-  `PolypusError` (base) → `BackendError` → {`CunqaError`, `QmioError`,
-  `NativeCircuitError`}, and `PolypusError` → `EvaluationError`. Catching
+  conversion, a statevector that does not fit in the memory budget) raises a
+  class from the `polypus` exception hierarchy: `PolypusError` (base) →
+  `BackendError` → {`CunqaError`, `QmioError`, `NativeCircuitError`,
+  `InsufficientMemoryError`}, and `PolypusError` → `EvaluationError`. Catching
   `polypus.PolypusError` catches them all.
+- **`InsufficientMemoryError`** (issue #215): a circuit that does not fit in the
+  memory budget — `POLYPUS_MEM_BUDGET` when it is valid (e.g. `32G`), else the
+  detected RAM/cgroup limit minus a safety reserve — is refused *before* it runs,
+  on every local path:
+  - the native backend, `polypus.statevector`, and the local/Aer backend with
+    `sim_method="statevector"` refuse in Rust on the `16 · 2^n`-byte statevector
+    model, before anything is converted or allocated;
+  - the local/Aer backend with **any other** `sim_method` (`automatic`, the
+    default; `density_matrix`; `matrix_product_state`; …) passes the budget to Aer
+    as `max_memory_mb` (above), so Aer validates each experiment for the method it
+    actually picks — a large Clifford circuit that `automatic` runs on `stabilizer`
+    still fits, while a non-Clifford one, or a `density_matrix` run (`16 · 4^n`),
+    is refused. `python/polypus_python/local.py` raises Aer's refusal (an unsuccessful
+    experiment whose `status` contains "insufficient memory") as
+    `polypus.InsufficientMemoryError`, which crosses back through `seam_error` /
+    `external_to_pyerr` verbatim, keeping its class.
+
+  The message names the circuit (qubit count, or its index for Aer), the required
+  and budgeted sizes, where the budget came from, and how to override it with
+  `POLYPUS_MEM_BUDGET`. It is never raised against the blind 16 GiB fallback used
+  when no limit can be detected (macOS, Windows): the Rust check skips it and
+  `max_memory_mb` is not sent. A circuit above `polypus_sim::MAX_QUBITS` keeps its
+  `ValueError` (native `statevector`) / `NativeCircuitError` (native backend),
+  checked first. This replaces the old failure mode, in which such a run was
+  started and the process killed by the out-of-memory killer with no Python
+  exception at all.
 
 `disconnect_from_infrastructure` runs from `CunqaBackend`'s `Drop`, which **must
 never panic**: a release failure is logged (`log::error!`) and recorded in the
@@ -117,7 +242,63 @@ about *which kwarg* the Python side reads.
 **Enforcing test:** `tests/python/test_seam_contract.py` — runs in CI without
 SLURM by monkeypatching the `polypus_python` seam (`run_qcs`) to force a
 failure, asserting it surfaces as a typed Python exception (never a
-`PanicException`) with the C-1 type preserved.
+`PanicException`) with the C-1 type preserved. For Qiskit exceptions (issue
+#218): `test_seam_qiskit_error_becomes_backend_error` (`QiskitError`,
+`QASM2ParseError`, `AerError`, a user subclass; class name, message and
+`__cause__`), `test_seam_non_qiskit_error_is_reraised_verbatim`,
+`test_seam_qiskit_error_that_is_also_a_c1_type_is_preserved`, and, without
+monkeypatching, `test_real_aer_error_reaches_the_caller_as_polypus_error` and
+`test_real_qasm_parse_error_reaches_the_caller_as_polypus_error`; plus the
+`qiskit_*` / `non_qiskit_python_errors_are_reraised_verbatim` unit tests in
+`crates/polypus/src/exceptions.rs`. Outside the seam:
+`tests/python/test_qml_error_propagation.py` (`qml.train`/`qml.predict` composing
+and binding, both oracles' binding, all real Qiskit failures; the guards
+`test_qiskit_class_raised_by_a_user_callback_stays_verbatim` and
+`test_qiskit_value_and_type_errors_keep_their_class`), the
+`qiskit_binding_error_maps_to_evaluation_error_with_its_cause`,
+`qiskit_variant_keeps_non_qiskit_and_c1_typed_errors` and
+`python_variant_stays_verbatim_even_for_a_qiskit_class` unit tests in
+`crates/polypus/src/exceptions.rs`, and
+`a_failing_binding_call_is_the_qiskit_variant` in
+`crates/polypus-evaluation/src/lib.rs`.
+The `DisplaySafePyErr` carrier: `display_safe_py_err_reraises_the_original_exception`,
+`bare_py_err_in_external_is_not_reraised_verbatim` and
+`bare_py_err_in_observable_external_is_not_reraised_verbatim` in
+`crates/polypus/src/exceptions.rs`;
+`display_safe_py_err_formats_like_the_py_err_and_round_trips` and
+`display_safe_py_err_formats_without_an_interpreter` in
+`crates/polypus-infrastructure/src/attach.rs`;
+`python_carrying_errors_format_without_an_interpreter` in
+`crates/polypus-evaluation/src/error.rs`; and
+`a_raising_callback_is_boxed_as_a_display_safe_py_err` in
+`crates/polypus-evaluation/src/py_callback_observable.rs`.
+An unavailable interpreter: `tests/python/test_interpreter_shutdown.py`
+(`test_a_training_run_on_a_daemon_thread_survives_shutdown`,
+`test_a_run_started_while_finalizing_aborts_as_keyboard_interrupt`; a real
+shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
+`interpreter_unavailable_maps_to_keyboard_interrupt_on_the_evaluation_path` and
+`interpreter_unavailable_maps_to_keyboard_interrupt` in
+`crates/polypus/src/exceptions.rs`;
+`interpreter_unavailable_is_an_error_carried_in_external` in
+`crates/polypus-infrastructure/src/attach.rs`; the
+`seams_fail_typed_without_an_interpreter` tests in `local.rs` and `cunqa.rs`,
+`create_backend_without_a_noise_model_does_not_attach` in `lib.rs` and
+`duplicate_shares_the_object_without_attaching` in `circuit.rs` (same crate);
+`python_carrying_errors_format_without_an_interpreter` and the
+`*_when_attaching_is_forbidden` tests in `crates/polypus-evaluation/src/`
+(`create_backend_with_a_noise_model_fails_typed_when_attaching_is_forbidden`
+among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
+`statevector_cancellation_raises_keyboard_interrupt` in
+`crates/polypus/src/bindings/mod.rs`.
+The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
+is pinned by `test_local_run_qcs_kwargs_*` in the same file.
+`InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
+class hierarchy; subprocess runs with `POLYPUS_MEM_BUDGET` set on the native
+backend, `polypus.statevector` and Aer — `statevector`, `automatic` non-Clifford
+and `density_matrix` refused, a 26-qubit Clifford GHZ on `automatic` still run;
+`local.py` consuming `max_memory_mb`; and the "insufficient memory" status text of
+the installed Aer) and by `assert_maps_to` in `crates/polypus/src/exceptions.rs`
+(the Rust → Python class mapping).
 
 ---
 
@@ -126,15 +307,96 @@ failure, asserting it surfaces as a typed Python exception (never a
 The circuit vocabulary is:
 
 ```
-h  x  y  z  s  t  sdg  tdg  rx  ry  rz  cx  cz  swap  rzz  rxx  cp  u3(u/p/u1/u2 canonicalised)
+h  x  y  z  s  t  sdg  tdg  id  u0  sx  sxdg  rx  ry  rz  p  u1  u2  u  u3  (U → u)
+cx  (CX → cx)  cz  cy  ch  csx  swap  rzz  rxx  cp  cu1  crx  cry  crz  cu3  cu
+ccx  cswap  rccx  rc3x  c3x  c3sqrtx  c4x
+calls of gates declared with `gate` blocks
 barrier  measure  measure_all
 ```
 
-**Invariant:** the four consumers/producers of this vocabulary — the OpenQASM
-2.0 exporter (`qasm.rs`), the OpenQASM importer (`qasm_import.rs`), the native
-simulator (`polypus-sim`) and the QIR exporter (`qir.rs`) — must all support
-the **full set**, with **identical unitary semantics** (the native simulator is
-the reference; QIR decompositions may differ only by a global phase).
+This is all of Qiskit's `qelib1.inc`. Gates outside it (`ryy`, `rzx`, `ecr`,
+`iswap`, `xx_plus_yy`, `mcx`, …) reach Polypus the way Qiskit's exporter writes
+them — declared with `gate` blocks — and are handled as declared gates. The
+OpenQASM 3 profile (C-10) reads and writes the same vocabulary: `stdgates.inc`
+names a subset of it, and the rest is written through gate definitions.
+
+**One instruction per statement, re-emitted under the same name.** The
+importer never decomposes: a `ccx` statement is one `Ccx` instruction and is
+exported as `ccx` again, with its operands in the same order, so a benchmark
+file reaches a backend (e.g. Aer, through the exporter) as the same program —
+same gate count, same depth, same instruction names. The only spelling changes
+are the language builtins `U` → `u` and `CX` → `cx`, which Qiskit names `u`
+and `cx` itself, so no Qiskit consumer can tell them apart; the OpenQASM 3
+profile also reads `phase` as `p` and `cphase` as `cp`, and writes `u` as the
+builtin `U` (C-10). An instruction `stdgates.inc` lacks is written in OpenQASM
+3 as a call of a gate the output defines with the same matrix, under the
+instruction's name, and reads back as that declared gate (a declared gate is
+never recognised as a built-in). Decomposition is allowed at exactly four
+*lowering* boundaries, all confined to their module and invisible to the
+OpenQASM exporters: the native simulator, for gates without a dedicated
+kernel (`ccx`, `cswap`, `rccx`, `rc3x`, `c3x`, `c3sqrtx`, `c4x` — through their
+exact `qelib1.inc` definitions, `GateInstruction::lowering` — and calls of
+declared gates); the QIR exporter, for gates without a base-profile
+intrinsic; and the Aer path (`python/polypus_python/local.py`), for what is outside
+Aer's basis (`ch`, `rccx`, `rc3x`, `c3sqrtx`, `u0` and calls of declared gates;
+`c3x` and `c4x` parse as Qiskit's `mcx`, which Aer runs); and the CUNQA path
+(`python/polypus_python/cunqa.py`), for what CUNQA's circuit converter does not take
+(the names outside its `SUPPORTED_QISKIT_OPERATIONS`: the same gates, plus
+`mcx`). Those two lower the Qiskit circuit just before handing it to the
+backend, rewriting only (synthesis and basis translation, as
+`qiskit.transpile(..., optimization_level=0)` does) and only when the circuit
+holds such an instruction — a circuit already in the basis is handed over as
+it is — and never touch the exported QASM. The Aer path lowers into the
+default `AerSimulator()`'s basis whatever the run's `sim_method` or
+`noise_model`, which narrow the simulator's target but not what Aer runs. It
+may reuse the lowered circuit of an OpenQASM text it lowered before (the parse
+is deterministic, so it is the circuit lowering that text afresh gives); the
+caller's circuit is never modified.
+
+`cu1` and `cp` are the same operator but distinct instructions: each keeps its
+own spelling through import and export (neither is normalised into the other).
+Likewise `p`/`u1` (one operator), and `u`/`u3` (one operator) with `u2`: every
+spelling is its own instruction, re-emitted as written.
+
+`id` is an instruction like any other, never a no-op to drop: it is imported,
+exported and round-tripped one-to-one, so the gate count and depth of an
+imported circuit match the source program (and what Qiskit computes for it).
+Only the QIR lowering drops it (there is no identity intrinsic); the simulator
+applies it as the identity. As a unitary it is subject to C-4.
+
+**Declared gates.** A `gate` declaration, in OpenQASM 2.0 or in the
+OpenQASM 3 profile, is kept as a definition (a template over its formal
+arguments, plus its source text) and each call of it is *one* instruction,
+`GateInstruction::Custom`, a unitary on all its qubits for C-4. A call's angles may be free parameters or expressions
+of them (`CustomGate::with_arguments`); such a call is checked through its whole
+body, nested declarations included, whenever its parameters are bound —
+binding and the exports that take parameter values report `NonFiniteParam` or
+`DivisionByZero` there — just as a call with fixed angles is checked when it is
+created. The OpenQASM 2.0 exporter re-emits an OpenQASM 2.0 declaration
+verbatim (only line endings normalised: every run of carriage returns before a
+line feed dropped, so CRLF becomes LF) plus the call — never the expanded body —
+so a backend that parses the export builds the same program as from the
+original file; every other export prints a definition from its body (C-10).
+Canonical OpenQASM 2.0 form: the declarations the circuit reaches (directly or
+through other declarations) are emitted right after the include — first those
+imported from OpenQASM 2.0, in source order, then those imported from
+OpenQASM 3, printed, callees first in order of first use; unreachable
+declarations are not re-emitted. Expansion into built-in
+instructions is a lowering step of the simulator, the QIR exporter and the Aer
+path only.
+Redeclaring a gate, or declaring one with a `qelib1.inc` name (always provided),
+is rejected; so is recursion (a body may only call earlier declarations), and
+so is naming a gate, parameter or argument `pi`, `sin`, `cos`, `tan`, `exp`,
+`ln` or `sqrt` (keywords of the expression grammar, not identifiers).
+
+**Invariant:** the consumers/producers of this vocabulary — the OpenQASM 2.0
+exporter (`qasm.rs`) and importer (`qasm_import.rs`), the OpenQASM 3 exporter
+(`qasm3.rs`) and importer (`qasm3_import.rs`, whose vocabulary is
+`stdgates.inc`'s), the native simulator (`polypus-sim`) and the QIR exporter
+(`qir.rs`) — must all support the **full set**, with **identical unitary
+semantics** (the native simulator is the reference; QIR decompositions may
+differ only by a global phase; the OpenQASM 3 definitions may not differ at
+all, under the profile's Qiskit phase conventions).
 
 Corollaries:
 
@@ -144,29 +406,161 @@ Corollaries:
   `to_qasm2(from_qasm2(to_qasm2(c)))` is **byte-identical** to `to_qasm2(c)`
   — i.e. output is a fixed point, without assuming arbitrary hand-written input
   is preserved byte-for-byte. Semantically, `from_qasm2(to_qasm2(c))` always
-  reproduces the same instruction sequence and parameters as `c`.
-- Adding a gate is a **five-place change** plus a row in the equivalence test —
-  the OpenQASM exporter (`qasm.rs`), the importer (`qasm_import.rs`), the native
-  simulator (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
-  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method).
-  A PR adding it in fewer places must be rejected.
+  reproduces the same instruction sequence and parameters as `c`, angles
+  bit-for-bit: an angle is written as the shortest decimal that reads back as
+  the same binary64, in the number format of the OpenQASM 3 profile (C-10), so
+  a backend receives exactly the circuit's angles (`pi/2` is
+  `1.5707963267948966`; rounded, it is not a Clifford angle to Aer, which then
+  simulates with a statevector instead of the stabilizer method). Conversely,
+  a single gate statement already in canonical form (a `q` register, angles in
+  that format, canonical spelling) is re-emitted byte-identically:
+  `to_qasm2(from_qasm2(s)) == s`. The OpenQASM 3 export has the same
+  fixed-point guarantee, `to_qasm3(from_qasm3(to_qasm3(c))) == to_qasm3(c)`,
+  for its own canonical form (C-10).
+- **Classical width.** A circuit has one classical register, `c`, as wide as
+  `clbits_width()`: the classical bits the imported program declares (all its
+  `creg`s, or its `bit` registers in OpenQASM 3, flattened in declaration
+  order), or the implicit register its measurements need (`num_clbits()`:
+  `max(cbit) + 1`, `num_qubits` with `measure_all`) if that is wider or
+  nothing was declared. Binding keeps it, and the OpenQASM 2.0 and 3 exports
+  write it as `creg c[n];` / `bit[n] c;` (C-10) — also for a program that
+  declares a register and measures nothing. So `to_qasm2(from_qasm2(s))`
+  declares as many classical bits as `s` (`creg a[2]; creg b[1];` becomes
+  `creg c[3];`), and `==` compares this width: a declared width no larger than
+  the measurements' is the same as declaring none. A circuit from the builder
+  declares none, so it exports exactly the register its measurements need, and
+  none without measurements. A full measurement into a register wider than
+  `num_qubits` is written bit by bit (`measure q[i] -> c[i];`), since
+  `measure q -> c;` needs equal sizes. The QIR export declares it as
+  `required_num_results` and records only the measured results, so it may
+  declare results it never records, as a partial measurement already does
+  (one written at `c[1]` declares 2 and records 1); QMIO's `openqasm`, `qir`
+  and `qir_bitcode` formats thus submit the same width (issue #322).
+  Rationale: `docs/adr/0006-declared-classical-registers.md`.
+- Adding a gate is a **six-place change** plus a row in the equivalence test —
+  the OpenQASM 2.0 exporter (`qasm.rs`), the OpenQASM 2.0 importer
+  (`qasm_import.rs`), the OpenQASM 3 exporter (`qasm3.rs`: the gate's
+  `stdgates.inc` name, or a definition in its `HELPER_PROGRAM` whose matrix
+  `crates/polypus-sim/tests/qasm3_semantics.rs` checks), the native simulator
+  (`polypus-sim`), the QIR exporter (`qir.rs`) and the Python bindings
+  (`crates/polypus/src/bindings/circuit.rs`, which expose the builder method,
+  and its stub in `python/polypus/__init__.pyi`); the OpenQASM 3 importer
+  (`qasm3_import.rs`) too, if `stdgates.inc` names the gate. This is on top of
+  the IR variant (`gate.rs`) and its builder method (`circuit.rs`), after which
+  the compiler flags the text drawer (`draw.rs`). A PR adding it in fewer
+  places must be rejected.
 - **Non-finite parameters are rejected uniformly.** A `NaN` or infinite angle
   is never a valid parameter value: circuit construction and parameter binding
-  reject it (`CircuitError::NonFiniteParam`), the OpenQASM importer rejects it
+  reject it (`CircuitError::NonFiniteParam`), the OpenQASM importers reject it
   at parse time (`CircuitError::Parse`), the QASM and QIR exporters refuse to
   serialise it, and the simulator rejects it (`SimError::NonFiniteAmplitude`).
   No producer may emit, and no consumer may accept, a non-finite parameter.
+- **Angle expressions exist only before binding.** An angle may be an
+  expression of the circuit's free parameters (`GateParam::Expr`, stored in
+  its circuit by `ParameterizedCircuit::add_expr`; a bare parameter stays
+  `Param` and a constant expression becomes `Fixed`). `assign_parameters`
+  evaluates every expression, so the OpenQASM 2.0 and QIR exporters see them
+  only through `to_qasm2_with_params` / `to_qir_with_params`, which evaluate
+  them with the given values, and the simulator only receives bound circuits
+  (an expression left in a hand-assembled `ConcreteCircuit` is
+  `SimError::UnboundExpression`). Evaluation performs exactly the written
+  operations, in source order, without reassociation. The rule above applies
+  to what an expression takes in and to its final value: a non-finite number
+  in the expression, a non-finite value bound to a parameter it uses, or a
+  non-finite result is `NonFiniteParam`, and a division by zero is
+  `CircuitError::DivisionByZero`. An infinite intermediate whose result is
+  finite (`1/exp(x)` for a large `x`) is accepted. An expression id means
+  something only in the circuit that issued it; any other circuit rejects it
+  (`CircuitError::UnknownExpression`).
 
-**Enforcing test:** parametric round-trip test over the whole vocabulary in
-`crates/polypus-circuit/tests/contracts.rs`, plus the QIR-vs-simulator
-unitary-equivalence test in `crates/polypus-sim/tests/contracts.rs`.
+**Enforcing test:** parametric round-trip tests over the whole vocabulary in
+`crates/polypus-circuit/tests/contracts.rs` (export → import → export per gate
+and for a circuit using every instruction kind — an exhaustive match fails the
+build when a new variant is not covered — plus canonical statement → import →
+export byte identity per gate, `cu1`/`cp` spelling preservation, every
+angled gate exported with expressions as with their values, every angled
+gate's angles read back bit-for-bit, and the classical width:
+`c2_declared_classical_width_round_trips` and
+`c2_qasm3_declared_classical_width_round_trips`); the classical width of
+imported and built circuits through binding, export and `==` in
+`test_binding_keeps_the_declared_width_and_the_implicit_register`,
+`test_an_unmeasured_declared_register_counts_for_eq`,
+`test_builder_circuits_compare_as_before` and
+`test_builder_exports_are_unchanged_by_the_classical_width` (builder exports
+byte-identical to before) in `crates/polypus-circuit/tests/circuit.rs`, and
+`builder_qir_is_unchanged_by_the_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs`; the
+table ↔ exporter spelling check in `qasm_import.rs`'s unit tests; the
+QIR-vs-simulator unitary-equivalence test in
+`crates/polypus-sim/tests/contracts.rs`, which parses the QIR actually emitted
+for every gate and compares it with the native gate up to global phase; and,
+for expressions, `crates/polypus-circuit/tests/expressions.rs` (binding
+semantics, the non-finite and division-by-zero rules, ids foreign to a
+circuit, bounds), the calls-with-free-parameters tests in
+`crates/polypus-circuit/tests/gate_declarations.rs`, and
+`unbound_expression_is_rejected` in
+`crates/polypus-sim/tests/gate_matrices.rs`. For OpenQASM 3: the `c2_*qasm3*`
+tests of `crates/polypus-circuit/tests/contracts.rs` (the whole vocabulary,
+gate by gate, `stdgates.inc` statements byte-identical, the fuzz corpus), and
+`crates/polypus-sim/tests/qasm3_semantics.rs` (every definition the export
+writes, against its instruction, as full matrices).
+The Aer lowering boundary is enforced in Python by
+`tests/python/test_local_aer_lowering.py` (every out-of-basis gate and a
+declared gate run on Aer with the transpiled reference's counts and the native
+backend's distribution; a circuit in the basis is neither copied nor
+transpiled), `test_run_quantum_circuit_matches_qiskit_on_aer` in
+`tests/python/test_qasm_gate_equivalence.py` (the whole vocabulary on the real
+execution path) and `tests/python/test_backend_compatibility.py`. For a Qiskit
+`QuantumCircuit`, `polypus.backend_compatibility`
+(`crates/polypus/src/bindings/compatibility.rs`) replicates the Aer path's
+decision to lower and calls the run's own rewrite to report what the run
+would raise; it lowers nothing for execution, so it is not a lowering
+boundary, and `_assert_coherent` in that test, which runs every circuit it
+classifies, keeps the two copies in step. The CUNQA
+one by `tests/python/test_cunqa_lowering.py` (every gate CUNQA 3.0.0 does not
+convert, and a declared gate, reach `run` as an equivalent circuit in its list;
+a circuit in the list is neither copied nor transpiled).
 
 ---
 
 ## C-3 · Measurement counts format
 
 - Keys are **bitstrings** of width `num_clbits` (or `num_qubits` when the
-  circuit has no measurements — full-register read-out convention).
+  circuit has no measurements — full-register read-out convention). "No
+  measurements" means **no `measure` instruction** (`Measure`/`MeasureAll`
+  natively): classical registers that are declared but never written do not
+  count, and do not change the width. This holds on the Aer and the native
+  backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
+  such a circuit). The CUNQA path is not verified.
+- For a circuit **with** measurements, `num_clbits` is the circuit's
+  classical width (the key width, `Circuit.clbits_width` in Python and
+  `clbits_width()` in Rust — not `Circuit.num_clbits` /
+  `ParameterizedCircuit::num_clbits()`, which stay the implicit register
+  sized by the measurements, so that an unmeasured circuit's keys are
+  `num_qubits` wide): for an OpenQASM 2.0 program, the classical bits it
+  **declares** (the sum of all its `creg`s), even when fewer are written —
+  `creg c[3]; measure q[0] -> c[1];` gives `"010"`, and the bits no
+  measurement writes read `0`; for a `polypus.Circuit` built with the
+  builder, which declares no registers, the implicit width `max(cbit) + 1`
+  (`num_qubits` with `measure_all`). A `polypus.Circuit` imported with
+  `from_qasm2`/`from_qasm3` keeps the width its source declares, through
+  parameter binding and through the export Aer receives (its `creg c[n]` is
+  the declared width): it is keyed like the source. Aer and the native
+  backend agree on all three (issue #251; before it the native backend used
+  `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
+  verified; QMIO receives the declared width in all three program formats
+  (the QIR export's `required_num_results`, issue #322). The QMIO reply parser
+  requires one key width per reply (and per merged register) but does not
+  compare it with the declared width until the QPU's key width is verified
+  (issue #78).
+- The classical width is bounded. A circuit holds at most
+  `MAX_REGISTER_BITS` (1,000,000) classical bits: the importers reject a wider
+  declaration and the builder a `measure` into a bit at or beyond it
+  (`ValueError` in Python, issue #345). The native backend keys outcomes by a
+  64-bit word, so it refuses a **measured** circuit wider than
+  `polypus_sim::MAX_CLBITS` (64) bits with `NativeCircuitError` before
+  simulating, instead of returning wrong keys, panicking, or spending memory
+  in proportion to the width (issues #345, #346); Aer takes wider registers.
 - Bit order is **Qiskit little-endian**: qubit 0 is the least-significant
   (rightmost) character.
 - `sum(counts.values()) == shots` requested for that circuit. When shots are
@@ -174,32 +568,96 @@ unitary-equivalence test in `crates/polypus-sim/tests/contracts.rs`.
   `shots % n` is spread over the first QPUs, never dropped.
 - If several `measure` instructions write the same classical bit, the **last
   measurement wins** (OpenQASM 2.0 register semantics).
+- Every counts dict Polypus hands to Python lists its keys in **ascending
+  bitstring order** (`00`, `01`, `10`, `11`): `RunResult.counts` from
+  `run_quantum_circuit` and `qml.predict`, and the dict a `SampleCost` callback
+  receives. A float reduction over `.items()` therefore adds its terms in the
+  same order in every call and process. Dicts travelling the other way
+  (`run_qcs`, C-1) may list their keys in any order.
 
 The per-circuit dict format above is unchanged by C-7: `run_quantum_circuit`
-now returns that payload as the `counts` attribute of a `RunResult` wrapper
-(`list[dict]` for a single-QPU run, a merged `dict` for `n_qpus > 1`), so
-callers read `result.counts` rather than the bare value. The dict shape,
-bit order and shot-conservation rule are exactly as specified here.
+returns that payload inside a `RunResult` wrapper, whose shape does **not**
+depend on `n_qpus` (issue #211):
+
+- `result.counts` is always a `list[dict]` with **one dict per QPU replica**,
+  in the order the shots were apportioned (length `n_qpus`; length 1 for a
+  single-QPU run). Replica `i` holds exactly the shots apportioned to it
+  (`shots // n`, plus one for each of the first `shots % n` replicas). When
+  `shots < n_qpus`, the replicas apportioned zero shots are **empty dicts**
+  `{}` that stay in the list, so its length is still `n_qpus`.
+- `result.merged_counts` is a single `dict`: the key-by-key sum of every
+  entry of `counts`, i.e. the circuit's total over all `shots` (for
+  `n_qpus = 1` it equals `counts[0]`). It follows every rule above: ascending
+  key order, and `sum(merged_counts.values()) == shots`.
+
+`qml.predict` also returns a `RunResult`, but there each entry of `counts` is a
+different row's circuit, not a replica of one circuit, so summing them has no
+meaning and `merged_counts` is `None`. The dict shape, bit order, key order
+and shot-conservation rule are exactly as specified here.
 
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
-public-API case in `tests/python/test_local_run.py`; audit C6) and
-last-write-wins case in `polypus-sim` tests (to be added).
-
-**Out of scope — exact mode.** The native `qml.train` exact path
-(`exact=True`, native Model+Dataset only — design doc §17) does **not** produce
-`counts`: it reads exact basis-state probabilities (`|amplitude|²`) straight
-off the statevector via `NativeStatevectorBackend::run_circuits_exact`, an
-inherent method that never touches the `QuantumBackend` trait. C-3's guarantees
-(`sum(counts.values()) == shots`, shot-conservation across QPUs) simply do not
-apply there — there is no shot budget and nothing is sampled. The guarantee
-that *does* hold in its place is **byte-for-byte determinism given the same
-circuit, with no seed required** (there is no sampling RNG to seed): the
-expectation summation is performed in a fixed basis order so it is independent
-of `HashMap` iteration order, delivering the C-7 reproducibility promise
-without a seed. This mode is exclusive to the pure-statevector backend;
-"exact" has no physical meaning for a noisy Aer backend or real hardware
-(QMIO/CUNQA), which is why it is native-only and rejected elsewhere.
+public-API case in `tests/python/test_local_run.py`; audit C6); the stable
+`RunResult` shape — `counts` one dict per replica with its own apportioned
+shots (zero-shot replicas kept as `{}`), `merged_counts` their key-by-key sum —
+in the `execute_replicas` / `merge_counts` tests of
+`crates/polypus-backend/src/planner.rs`,
+`run_circuit_flow_returns_the_per_replica_counts` in
+`crates/polypus-orchestration/src/flow.rs`,
+`distribute_returns_each_replica_with_its_apportioned_shots` in
+`crates/polypus/tests/running_quantum_circuits_local.rs`,
+`TestRunQuantumCircuitMultipleQpus` and `TestMergedCounts` in
+`tests/python/test_local_run.py`, and
+`test_distributed_counts_shape_is_the_same_on_every_backend` in
+`tests/python/test_backend_selection.py`, with `merged_counts is None` for
+`qml.predict` in `tests/python/test_qml_predict.py` (issue #211); key order in
+`tests/python/test_local_run.py` (`run_quantum_circuit`, one and several QPUs,
+`counts` and `merged_counts`),
+`tests/python/test_qml_predict.py` and `tests/python/test_qml_supervised.py`
+(the `SampleCost` dict); flat bitstring keys for circuits with several
+classical registers (Aer vs native parity) in
+`tests/python/test_local_run_multi_register.py` (issue #206); last-write-wins
+in the `c3_*` tests of `crates/polypus-sim/tests/contracts.rs` (simulator
+semantics, incl. `MeasureAll` ordering against explicit `Measure`s) and
+`TestLastMeasurementWins` in `tests/python/test_backend_selection.py` (native
+vs. Aer, byte-identical counts; issue #205); the full-register read-out of a
+circuit without measurements, whatever `creg`s it declares, in
+`TestUnmeasuredCircuitsReadTheFullRegister` in
+`tests/python/test_backend_selection.py` (Aer and native, same keys) and
+`unmeasured_circuit_is_num_qubits_wide_whatever_its_cregs` /
+`format_counts_width_follows_measurement_instructions` in
+`crates/polypus-infrastructure/src/native.rs` (issue #218); the declared
+classical width of a measured OpenQASM program in
+`test_measured_circuit_with_a_wider_creg_has_the_same_keys` and
+`TestMeasuredCircuitsUseTheDeclaredClbitWidth` in
+`tests/python/test_backend_selection.py` (Aer and native, one and two QPUs,
+plus the implicit width of a built `polypus.Circuit` and the declared width
+of one from `Circuit.from_qasm2`/`from_qasm3`, the agreement of Aer and native
+on such an imported circuit, and the full read-out of an imported circuit
+that declares a `creg` but measures nothing),
+`format_counts_width_follows_the_declared_clbits`,
+`measured_qasm_is_keyed_at_its_declared_clbit_width`,
+`native_circuit_keeps_the_implicit_clbit_width`,
+`imported_native_circuit_keeps_its_declared_clbit_width` and
+`declared_clbit_width_survives_a_transpiler` in
+`crates/polypus-infrastructure/src/native.rs`, and
+`declared_clbits_is_the_sum_of_the_cregs`, `builder_circuits_declare_no_clbits`,
+`the_export_keeps_the_declared_width`,
+`the_width_is_never_narrower_than_the_measurements`,
+`a_measurement_within_the_declared_width_keeps_it`,
+`declared_width_is_part_of_eq_and_kept_by_clone` and
+`a_zero_size_creg_is_rejected` in
+`crates/polypus-circuit/tests/qasm_import.rs` and
+`declared_clbits_is_the_sum_of_the_bit_registers` and
+`declared_clbits_is_exported` in
+`crates/polypus-circuit/tests/qasm3.rs` (issues #251 and #279);
+`qir_declares_the_imported_classical_width` in
+`crates/polypus-circuit/tests/circuit_qir.rs` and
+`qir_formats_declare_the_classical_width_of_the_openqasm_program` in
+`crates/polypus-infrastructure/src/qmio.rs` (issue #322);
+`test_clbits_width_is_the_declared_width` in
+`tests/python/test_qasm_import.py` (issue #323), plus the
+circuit-side tests listed under C-2.
 
 ---
 
@@ -243,38 +701,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
 - `EvaluationOracle::evaluate_batch(candidates)` returns **exactly
   `candidates.len()` finite `f64` values**, in order; higher is better.
   Python-backed oracles must validate length before returning across the FFI.
-- Preconditions validated with an error (not a panic): DE `population_size >= 4`;
-  PSO/QNG `bounds.0 < bounds.1`; Adam/QNG `max_iters >= 1`. `dimensions == 0` is
-  *not* rejected: all four optimizers treat it as a supported degenerate no-op
-  that succeeds with an empty `best_params` (the oracle is still evaluated on the
-  empty parameter vector, so `best_fitness` stays a real value, not the `-inf`
-  sentinel).
-  DE/PSO need no `generations >= 1` check: they evaluate the initial population
-  before their generation loop, so `generations == 0` still yields a real
-  `best_fitness`. Adam/QNG are single-point with no such pre-loop evaluation, so
-  `max_iters == 0` would return the unevaluated random initial `θ` with the
-  `-inf` sentinel, violating the postcondition below.
+- Preconditions validated with an error (not a panic): DE `population_size >= 4`
+  (with every `strategy`); PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
-- **Additive:** `OptimizationOutcome` carries a `fitness_history: Vec<f64>`
-  beside `best_fitness` — the convergence curve of the run. No existing field,
-  guarantee or signature changes; every optimizer simply reports the incumbent
-  best it already tracked internally. Its guarantees:
-  - `fitness_history.len() == iterations_run`, on the early-stopping paths
-    included (DE's fitness stagnation, PSO's population collapse, QNG's/Adam's
-    `patience` streak) — the entry is recorded before the `break`, never after
-    it. It is empty exactly when `iterations_run == 0`.
-  - `*fitness_history.last() == best_fitness`: both are read from the same
-    incumbent-best variable, not recomputed.
-  - **Monotonically non-decreasing for all four optimizers.** Each entry is the
-    running best — DE's post-selection champion `fitness[argmax]`, PSO's global
-    best over the personal bests, QNG's/Adam's `best_energy` *after* its
-    `if energy > best_energy` update — and **not** the fitness of that
-    iteration's current candidate, which gradient ascent lets oscillate freely.
-    The monotonicity is structural (it is a running maximum), so it holds
-    whatever the oracle returns: a shot estimate, or a minibatch estimate. What
-    a noisy oracle changes is how much each entry *means*, never the shape of
-    the sequence. It is surfaced on the Python `TrainResult`.
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
   stagnation*, not on population-spread collapse. With `fitness_history[g]` the
   best fitness at the end of generation `g` (0-indexed; DE maximises, so this
@@ -295,66 +725,98 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `patience` (generations; DE binding default **20**) is the look-back window.
     No early stop can fire before generation `patience`, so a larger value makes
     the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
-  - The search dynamics are unchanged (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles
-    initialised in `[0, 2π)`); only the stopping rule differs.
-- **PSO early stopping — population collapse (unchanged).** PSO still stops
-  once every dimension's population standard deviation drops below the
-  absolute threshold `tolerance` — the same collapse test DE used before its
-  fitness-stagnation switch above.
-- `GradientOracle::gradient_batch(theta, dims)` (QNG and Adam) returns the fitness
-  gradient `∂fitness/∂θ`, **exactly `dims` values**, in order, same ascent-sign
-  convention as `EvaluationOracle` (higher fitness is better; the value points
-  uphill). QNG length-checks it like any oracle output. "Exact" is the
-  parameter-shift identity in the **noiseless limit**: evaluated over finite
-  `shots` it is an unbiased *estimator* of the true gradient, not a noise-free
-  value. Exactness is the caller's guarantee (the crate cannot see circuits or
-  gate generators), exactly as the QFIM-diagonal `VarianceOracle` is. The free
-  function `linear_parameter_shift_gradient` builds it for any oracle whose
-  fitness is linear in the shifted expectations (raw expectation or unweighted
-  mean, no nonlinear loss on top); an oracle that composes a nonlinear loss over
-  per-sample expectations needs the chain rule instead (see
-  `polypus_qml::QmlProblem::param_gradient`). That helper returns
-  `Result<Vec<f64>, OptimizerError>`: it submits `2 * dims` shifted candidates
-  and reads each parameter's ±π/2 pair positionally out of the result, so it
-  length-checks the batch against `2 * dims` — as every optimizer checks its own
-  batch calls — rather than trusting the oracle it was handed, which is any
-  implementation of a public trait. A `GradientOracle` that delegates to it
-  therefore has a failure to handle that its own trait method cannot return: the
-  two `polypus` oracles that delegate (`QmlOracle`, `VqcOracle`) record it in
-  their shared `OracleErrorSlot` and return finite sentinels, the same discipline
-  `evaluate_batch` already follows, so the entry point surfaces it after
-  `optimize` returns.
-- **Breaking change:** `AlgorithmQNGArgs` no longer accepts
-  `finite_difference_step` (and the Python `QNG` pyclass no longer exposes it).
-  QNG now consumes the exact parameter-shift gradient above instead of a
-  central finite-difference stencil — a deliberate contract change with no
-  compatibility shim.
-- **Breaking change:** `AlgorithmQNGArgs`/`AlgorithmAdamArgs` require a
-  `patience: usize` field, and the Python `QNG`/`Adam` pyclasses expose it as a
-  kwarg defaulting to **`3`**. Gradient-norm early stopping now needs `patience`
-  **consecutive** iterations with `‖∇fitness(θ)‖₂ < tolerance` before reporting
-  `converged = true`, where it previously needed one. The counter increments on
-  each sub-tolerance iteration and **resets to `0`** on any iteration that is
-  not, so three sub-tolerance iterations scattered among larger ones never stop
-  a run at `patience = 3`. `patience = 1` reproduces the previous
-  single-iteration rule exactly (pinned by its own test); `0` behaves as `1`,
-  since the streak is only tested after an iteration that was itself below the
-  tolerance. Runs whose gradient norm decreases smoothly are unaffected beyond
-  spending the extra iterations it takes to make the streak consecutive.
-  A deliberate behaviour change for **every** caller — minibatched or not,
-  because the optimizer cannot tell the two apart — with no compatibility shim.
-  Motivation and limits: the minibatch note below.
+  - The search dynamics of the default `strategy="rand1bin"` are unchanged
+    (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles initialised in `[0, 2π)`); only
+    the stopping rule differs. The `"shade"` and `"lshade"` strategies below
+    stop by the same rule. PSO still uses the per-dimension std-collapse test;
+    QNG has no early stop.
+- **DE strategies.** `polypus.DE(strategy=...)` (Rust: `DeStrategy` and
+  `AlgorithmDifferentialEvolution::optimize_with_strategy`) picks how trial
+  vectors are built. Any name other than `"rand1bin"`, `"shade"` and
+  `"lshade"` raises `ValueError` when the `DE` object is created or the
+  attribute set, so no run starts with one (in Rust, `DeStrategy::from_str`
+  returns `OptimizerError::InvalidConfig`).
+  - `"rand1bin"` (the default, and what `Optimizer::optimize` always runs) is
+    the DE/rand/1/bin above. Its seeded output is pinned bit for bit, so the
+    other strategies cannot change it.
+  - `"shade"` is SHADE (Tanabe and Fukunaga, CEC 2013): current-to-pbest/1
+    mutation with an archive of replaced parents, binomial crossover, and `F`
+    and `CR` drawn per individual from a memory of the values that improved
+    their parent. As in the paper, a trial replaces its parent when it is at
+    least as fit; `"rand1bin"` needs it strictly fitter.
+  - `"lshade"` is L-SHADE (CEC 2014): SHADE with its memory rules, plus a
+    population that shrinks after every generation, linearly in the
+    evaluations spent, from `population_size` to 4 when the evaluation budget
+    `population_size × (generations + 1)` runs out. The best members survive
+    and the archive shrinks with the population. For L-SHADE, `generations`
+    sets that budget, which is also `"rand1bin"`'s maximum, not the number of
+    generations: the run goes on in more, smaller batches until the next
+    generation would overshoot the budget, so it never exceeds the budget and
+    stops less than one final population short of it (with the defaults, 275
+    generations and 5048 of 5050 evaluations). The schedule depends only on
+    `population_size` and `generations`: `DeStrategy::max_generations` counts
+    it by stepping the schedule the optimizer follows, and the walltime
+    projection (`run_shape`) uses that count.
+  - The adaptive strategies share with `"rand1bin"` the initial population
+    (the same draws from the same seed), the wrapping of mutated angles into
+    `[0, 2π)` (`rem_euclid`: the parameters are periodic), one oracle batch per
+    generation after the initial one, its length checked, the evaluation
+    budget, the stagnation stop above (`patience` counts generations for
+    L-SHADE too) and every postcondition of this contract. `"rand1bin"` and
+    `"shade"` run at most `generations` generations, `"lshade"` at most
+    `DeStrategy::max_generations`.
+- **Quality trajectory.** Every optimizer reports `fitness_history: Vec<f64>` —
+  the best fitness at the end of each executed generation/iteration, so
+  `fitness_history.len() == iterations_run` and `fitness_history.last()`
+  equals `best_fitness`. It is surfaced on the Python `TrainResult`.
+- **CMA-ES** (`AlgorithmCmaEs`, exposed as `polypus.CMAES`: Hansen's
+  (μ/μ_w, λ)-CMA-ES with IPOP restarts).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG
+    draw or oracle call: `dimensions >= 1` (unlike DE and PSO, which accept
+    zero), `generations >= 1` (there is no initial batch), `sigma0` finite and
+    in `(0, 2π]`, `population_size >= 2` when given (`None` is Hansen's
+    `4 + ⌊3 ln d⌋`), and `population_size · 2^restarts` within `u32`.
+  - One `evaluate_batch` call of λ candidates per generation, its length
+    checked, and no separate initial batch. The mean and samples stay
+    unwrapped in ℝ^d; each candidate is wrapped into `[0, 2π)` when handed to
+    the oracle. Only the ranking of the fitness values (`NaN` last) reaches
+    the search, so a strictly increasing transformation of the fitness
+    samples the same candidates. The largest coordinate standard deviation
+    `σ·max√C_ii` is capped at `max(σ₀, π/2)`: a wider normal wraps to an
+    almost uniform distribution on the circle, where the step size would
+    drift without bound.
+  - A run ends on fitness stagnation (the rule above, applied to that run's
+    own best fitness) or on a degenerate distribution: a non-finite state, a
+    covariance condition number above `1e14`, or a largest coordinate
+    standard deviation `σ·max√C_ii` below `1e-12·σ₀` or above `1e4·σ₀`.
+    While restarts remain, the next run starts from a new uniform mean with
+    twice the population (IPOP); otherwise the optimisation stops with
+    `converged = true`. Without restarts this is DE's stop exactly. The
+    `generations` budget is shared by all runs.
+  - `best_params`/`best_fitness` are the best candidate the oracle scored over
+    all runs (never the unevaluated mean), and `fitness_history` is the best
+    so far after each generation, across restarts.
+  - `CmaEsBatchSchedule` bounds every batch's size before the run starts
+    (exact without restarts), for callers that budget the run. The CUNQA
+    walltime warning uses it: one batch per generation, and with restarts the
+    worst case of a restart after every generation
+    (`crates/polypus-orchestration/src/walltime.rs`).
+  - Enforced by `crates/polypus-optimizers/tests/cmaes.rs`
+    (`best_params_fitness_invariant_holds_across_seeds` checks every
+    postcondition above against the batches the oracle saw, over 25 seeds with
+    and without restarts; the stagnation, restart, batch-size, wrapping,
+    invariance, non-finite, short-oracle and configuration tests) and the unit
+    tests in `crates/polypus-optimizers/src/cmaes.rs` and `src/linalg.rs`;
+    through Python by `tests/python/test_cmaes.py` (configuration rejected
+    before any batch, batch sizes and restarts at the seam) and the CMA-ES
+    cases of `tests/python/test_oracle_contract.py`.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
 plus the DE fitness-stagnation tests there
 (`de_early_stops_on_fitness_stagnation`, `de_large_patience_never_stops_early`)
-and the `fitness_stagnated` unit tests in `crates/polypus-optimizers/src/util.rs`;
-the QNG/Adam gradient-norm `patience` streak has its own tests there
-(`qng_converges_after_patience_consecutive_sub_tolerance_iterations`,
-`adam_converges_after_patience_consecutive_sub_tolerance_iterations`, and the
-`patience_converged` unit tests in `util.rs`). **Plus**
-`tests/python/test_oracle_contract.py` for the Python-backed length and
+and the `fitness_stagnated` unit tests in `crates/polypus-optimizers/src/util.rs`,
+**plus** `tests/python/test_oracle_contract.py` for the Python-backed length and
 finiteness guarantee: the Rust invariant test never exercises the Python-callback
 return path, so it covers only one half of the contract. The Python test forces a
 short return list and a non-finite value through `polypus.train` and asserts each
@@ -362,28 +824,68 @@ surfaces as a typed `polypus.EvaluationError` (naming both lengths, or the
 offending index/value), never a `pyo3_runtime.PanicException` and never a
 silently-poisoned result.
 
+The DE strategies have their own suite,
+`crates/polypus-optimizers/tests/de_strategies.rs`: the pinned `"rand1bin"`
+outcome (`rand1bin_default_matches_its_pinned_outcome`), the multi-seed
+invariant (`adaptive_strategies_best_params_fitness_invariant_holds_across_seeds`),
+the stagnation stop, length errors (one on a shrunken L-SHADE batch), the
+L-SHADE schedule and budget
+(`lshade_spends_the_budget_in_more_and_smaller_generations`) and the
+population edge cases. In `polypus-orchestration`,
+`de_strategy_reaches_the_optimizer` checks the wiring and
+`de_run_shape_counts_the_batches_the_optimizer_sends` that the walltime
+projection counts exactly the batches each strategy sends;
+`tests/python/test_de_strategy.py` checks the `ValueError` and the batches
+each strategy sends, `test_seed_reproducibility.py` the seeded runs, and
+`test_oracle_contract.py` runs with every strategy.
+
 ---
 
 ## C-6 · Version coherence
 
-The workspace `Cargo.toml` version is the **single source of truth**. A release
-tag `vX.Y.Z` must match it exactly, and the Python package version is derived
-from it at build time. The release workflow refuses to publish when they
-diverge.
+The workspace `Cargo.toml` version (`[workspace.package].version`) is the
+**single source of truth**. Everything else must equal it exactly:
+
+- a release tag `vX.Y.Z`;
+- the root `version` of `CITATION.cff`;
+- the version of the installed `polypus-quantum` distribution, which maturin
+  derives from it at build time;
+- `polypus.__version__`, a `str` the compiled extension sets from
+  `CARGO_PKG_VERSION` when it is built, so it names the binary actually loaded
+  rather than whatever distribution metadata happens to be installed. It is
+  listed in `polypus.__all__`.
+
+The release workflow refuses to publish when the tag and `Cargo.toml` diverge.
 
 *Historical note: tag and Cargo.toml diverged at 0.6.0 (see CHANGELOG). The
 coherence check is enforced from 0.7.0 onwards; aligning the workspace version
 is the first release action.*
 
-**Enforcing check:** version-coherence step in `.github/workflows/hygiene.yml`.
+**Enforcing checks:**
+
+- Tag ↔ `Cargo.toml`: the `gate` job of `.github/workflows/release.yml`, on
+  every tag push (it reads `[workspace.package].version` and refuses a tag
+  other than `v<version>`).
+- `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
+  request and push to `main` (`.github/scripts/hygiene.py`, rule
+  `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
+- `polypus.__version__` ↔ `Cargo.toml` ↔ installed distribution:
+  `tests/python/test_version_coherence.py`, in the CI Python suite against the
+  installed wheel. Its distribution comparison skips only when no
+  `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
+  only when the tests run outside the repository.
+
+The release gate requires a green `ci.yml` run for the tagged commit but not a
+green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
+releases.
 
 ---
 
 ## C-7 · Seeding & run manifest (Python entry points)
 
-This contract governs the outer Rust↔Python boundary of the three public entry
-points `polypus.run_quantum_circuit`, `polypus.train` and `polypus.qml.train`:
-their `seed` kwarg and their return shape. (It is distinct from C-1, which
+This contract governs the outer Rust↔Python boundary of the four public entry
+points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
+`polypus.qml.predict`: their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -394,23 +896,42 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     statevector simulator, or `backend="aer"`, Qiskit Aer): an explicit `seed`
     is used directly — the native backend seeds its own RNG in-process, and
     Aer receives it as the `seed` kwarg forwarded across the C-1 seam
-    (`crates/polypus/src/infrastructure/local.rs`, which passes it to Aer's
+    (`crates/polypus-infrastructure/src/local.rs`, which passes it to Aer's
     `seed_simulator` option in `polypus_python`'s `local.py`) — and
     reproduces the counts byte-for-byte across calls, verified against a real
     Aer install. `seed=None` draws a fresh seed from OS entropy, so repeated
     calls produce **independent** noise (never the run-`id`-derived
     repetition that motivated this contract). The run `id` is decoupled from
     the RNG — it is only a logging/temp-file/SLURM label.
+  - **Per-circuit seeds (native backend).** A native backend seeded with `s`
+    numbers the circuits it runs `0, 1, 2, ...` (a global counter across the
+    batches it executes, reserved as one contiguous block per batch) and seeds
+    circuit `k` with `circuit_seed(s, k)`: output `k` of a SplitMix64 stream
+    whose state starts at SplitMix64-mixed `s`
+    (`crates/polypus-infrastructure/src/native.rs`). Distinct circuits in a
+    batch and distinct base seeds therefore get unrelated streams; in
+    particular circuit `k` of seed `s` is not circuit `k-1` of seed `s+1`, so
+    repetitions with seeds `0, 1, 2, ...` are independent. The seed of a
+    circuit depends only on `(s, k)`, never on chunking, the memory cap or
+    gate-vs-circuit parallelism. Shot splitting across `n_qpus` replicas
+    gives replica `i` seed index `i` of the batch, so the single-evolution fast
+    path reproduces the per-replica counts of running the replicas one by
+    one. Until #348 the seed was `s + k`, which made neighbouring base seeds
+    share streams shifted by one circuit; counts for a fixed seed changed when
+    that was fixed. Aer receives the base seed unchanged, and CUNQA keeps its
+    per-QPU offset below.
   - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
-    the same seam (`crates/polypus/src/infrastructure/cunqa.rs` mirrors
+    the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
-    per-QPU offset so distributed shots aren't identical copies. **This path
-    is unverified** — the `cunqa` package isn't installed anywhere this can be
-    tested, and reading CUNQA's actual source (CESGA-Quantum-Spain/cunqa) at
-    the version README.md pins (`>= 2.3`) turned up API mismatches predating
-    this contract (wrong module path, wrong kwarg names, a `.run()` method
-    that may not exist on `QPU` objects at that version) — see the CUNQA
-    integration follow-up.
+    per-QPU offset so distributed shots aren't identical copies: the circuit
+    sent to QPU `k` runs with `seed + k`, masked to 63 bits. With shots split
+    across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
+    QPU and seed even when the split is uneven (`shots` not a multiple of
+    `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
+    its first replica's index as `qpu_offset` (C-1; fixed in #370). **This path is verified against a fake CUNQA
+    only**: `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts
+    shape and reproducibility end to end, but has never run against a real
+    CUNQA; `tests/python/test_cunqa_real.py` does, on demand (#357).
   - With physical hardware (`infrastructure="qmio"`): passing an explicit
     `seed` raises `ValueError`. Real quantum processors rely on physical
     processes and cannot be deterministically seeded, so silently accepting
@@ -421,196 +942,78 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
-  so a `train()` run on any of them is reproducible end-to-end.
-
-  `qml.train` accepts **both** a Qiskit feature map and a native
-  `polypus.qml.Model`, dispatching on the type of its first argument: a `Model`
-  takes the native (pure-Rust) path, anything else the original Qiskit/Aer path.
-  The **native path is reproducible byte-for-byte on any simulated backend**
-  (`polypus`, `aer`, or `cunqa`) given the same seed: the `NativeQmlOracle`
-  builds circuits deterministically from the `QmlProblem` (C-10) and evaluates
-  candidates **concurrently** (one Tokio `spawn_blocking` task per candidate).
-  Reproducibility no longer depends on the order in which candidates are
-  evaluated, because `NativeStatevectorBackend` derives each circuit's shot-
-  sampling seed **solely from that circuit's own content** (an FNV-1a hash of its
-  OpenQASM 2.0 text) plus its position within a batch, added to the resolved base
-  seed — never from any mutable state shared between calls. Concurrent candidates
-  therefore can never race for seed assignment. On Aer the same resolved seed is
-  forwarded across the C-1 seam to `seed_simulator`, which carries no shared state
-  of its own. The **Qiskit path is
-  unchanged**, and with Aer's shot noise seeded too its reproducibility covers
-  both the optimizer trajectory and Aer's sampling. `qmio` still rejects an
-  explicit `seed` exactly as `run_quantum_circuit` does (real hardware cannot be
-  seeded) — unchanged by this phase. CUNQA's `seed` for the native path shares
-  Aer's shape on the Rust side but is **unverified**, for the same reason CUNQA
-  is flagged unverified elsewhere in this contract: the `cunqa` package isn't
-  installed anywhere this can be tested.
-
-  **Minibatching (`qml.train(..., batch_size=N)`, native path only, design doc
-  §17)** does not weaken this reproducibility. Each oracle call
-  (`evaluate_batch` or `gradient_batch`) draws its own minibatch from `seed`
-  combined with a per-oracle call counter that advances by exactly one per call
-  — the same counter is shared by both, not one each, so a given iteration's
-  fitness-tracking call and its gradient call consume two different counter
-  values and may see *different* minibatches (accepted); two independent
-  counters would instead put both calls of the same iteration on the same
-  value and make them see the *same* minibatch every time. Because the
-  derivation is `seed` + a deterministic counter, two runs with the same
-  seed and `batch_size` draw the identical sequence of minibatches and reproduce
-  byte-for-byte. Within a single `gradient_batch` call, all `dims` parameters and
-  both `θ±π/2` shifts share **one** minibatch — a correctness requirement of
-  parameter-shift, not a reproducibility nicety. The reported `best_fitness`
-  is **not** a minibatch estimate: after the optimizer loop ends it is recomputed
-  **once** against the full dataset (via the oracle's inherent `evaluate_full`),
-  so the C-5 guarantee that `best_fitness` is the fitness of `best_params` holds
-  against the whole training set, exactly as for a non-minibatch run — the
-  minibatch is only the cheap per-iteration heuristic that steers the search.
-
-  **`fitness_history` is the one field that recompute deliberately leaves
-  alone**, so under `batch_size` it is the only place C-5's
-  `fitness_history[-1] == best_fitness` does not hold. The curve keeps the
-  per-iteration *minibatch* estimates the optimizer actually steered by, which is
-  what a convergence curve is for; splicing the full-dataset number onto its last
-  point would mix two scales and — since a minibatch estimate is typically the
-  rosier of the two — could make the sequence decrease, trading C-5's
-  monotonicity guarantee for a cosmetic endpoint. Length and monotonicity hold
-  under `batch_size` exactly as everywhere else; read `best_fitness` for the
-  honest full-dataset number, as this contract already says.
-
-  **Minibatching interacts badly with gradient-norm early stopping — evaluated,
-  reproduces, mitigated by `patience` (not eliminated).** `AlgorithmQNG` and
-  `AlgorithmAdam` set `converged` from that iteration's `‖∇fitness(θ)‖₂` against
-  `tolerance`; under `batch_size` that is a *minibatch* gradient, so a minibatch
-  whose samples cancel each other can stop the run at an arbitrary point. This is
-  measured rather than suspected. It is **not** driven by shot noise: for a hinge
-  loss, two samples with identical features and opposite labels have their loss
-  derivatives cancel term by term, so a minibatch of exactly that pair has
-  gradient **exactly** zero while the full-dataset norm is O(0.1–0.5) — two
-  orders of magnitude above the `tolerance = 0.01` that `polypus.Adam`/
-  `polypus.QNG` default to. Consequences, all reproducible from the public API
-  (`test_qml_native.py::TestNativeQmlTrainMinibatch`, plus the norms themselves
-  in `exact_native_qml_oracle.rs`), stated for the pre-`patience` rule that
-  `patience = 1` still selects:
-
-  - the run stops on iteration 1 with `converged = True`, having barely moved
-    from its random initialization, where the same configuration without
-    `batch_size` uses all its iterations and reaches the optimum;
-  - lowering `tolerance` is **not** a mitigation — the norm is exactly zero, so
-    it falls below any threshold, `1e-12` included;
-  - QNG and Adam behave identically, since the rule lives in the convergence
-    check rather than in one optimizer;
-  - the trigger is *cancellation within one minibatch*, not minibatching as
-    such: on a separable dataset with no contradictory samples, no seed in a
-    ten-seed sweep stopped early.
-
-  **C-5 was never violated.** `best_fitness` remains the full-dataset fitness of
-  the returned `best_params` thanks to the final recompute above, so the reported
-  number stayed honest throughout; what a spurious stop costs is the optimization
-  itself and the meaning of the `converged` flag.
-
-  **The fix is the `patience = 3` default** documented under C-5 above: a stop
-  now needs three *consecutive* sub-tolerance iterations, so one cancelling
-  minibatch no longer ends the run. It is applied uniformly to every QNG/Adam
-  run rather than only under `batch_size`, because the optimizer has no way to
-  tell the two apart — `GradientOracle::gradient_batch` deliberately hides
-  whether its result came from a minibatch or the full dataset.
-
-  **`patience` reduces the probability; it does not eliminate the failure.**
-  Nothing stops the same cancelling minibatch from being redrawn `patience`
-  times in a row, and that is demonstrated, not conceded: on the six-sample
-  dataset with one contradictory pair, `batch_size=2`, `max_iters=60`, spurious
-  stops fall from **194/200 seeds at `patience=1` to 39/200 at `2` and 4/200 at
-  `3`** — a ~50× reduction with four survivors. `seed=140` is one, stopping on
-  iteration 8 at fitness ≈ −0.94 where the run should reach ≈ −0.34, and
-  `test_patience_is_a_probabilistic_mitigation_not_a_guarantee` pins it. So
-  `converged = True` from a minibatched gradient-optimizer run is *much* more
-  trustworthy than before but still not a guarantee: `best_fitness` remains the
-  number to read, and a small `batch_size` over contradictory labels remains the
-  configuration to avoid.
+  so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
+  Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
+  too, its reproducibility guarantee covers both the optimizer trajectory and
+  Aer's sampling. A seeded `CMAES` run reproduces on the same platform and
+  build only: its steps call `exp`, `ln` and `cos` from the platform's math
+  library, which is not guaranteed correctly rounded, so its trajectory can
+  differ between platforms even over a platform-independent backend (DE's
+  steps are basic arithmetic only).
+- **`qml.predict(..., seed=None)`** seeds shot sampling like
+  `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
+  from OS entropy, and the effective value is reported. `qmio` is rejected
+  outright, since a QML model is a Qiskit circuit.
+- **OS entropy failure.** If the OS entropy source cannot be read, the entry
+  point raises `polypus.BackendError` instead of panicking — whether while
+  drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance) or while drawing the random bytes of
+  the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
+  with or without an explicit seed and for `infrastructure="qmio"`, which
+  never draws a seed.
 
 ### The run manifest (return shapes)
 
 - `run_quantum_circuit` returns a **`RunResult`** exposing:
-  `counts` (the C-3 payload — `list[dict]` for one QPU, merged `dict` for
-  `n_qpus > 1`), `id` (str), `seed` (`int | None`; the effective seed used, or
+  `counts` (the C-3 payload — always a `list[dict]`, one dict per QPU
+  replica, length `n_qpus`), `merged_counts` (`dict`, the key-by-key sum of
+  `counts` over all `shots`; see C-3), `id` (str), `seed` (`int | None`; the effective seed used, or
   `None` only for the `qmio` infrastructure), `backend` (str), `infrastructure`
   (str).
+- `qml.predict` returns the same **`RunResult`**, but `counts` is always a
+  `list[dict]`, one C-3 dict per row of `x` in row order: `n_qpus` spreads the
+  rows, never one row's shots. `merged_counts` is `None`: the rows are
+  distinct circuits, so there is no meaningful total. `seed` is always an `int`; `id` is generated
+  internally (`predict_<n_qpus>_<infrastructure>_<uuid>`).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
-  `fitness_history` (`list[float]`, the convergence curve: one
-  best-fitness-so-far per iteration run, with C-5's length / last-entry /
-  monotonicity guarantees), `iterations_run` (int), `converged` (bool) — plus
-  `seed` (int, the effective seed used) and `id` (str, the effective run id: the caller-supplied `id`
+  `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
+  seed used) and `id` (str, the effective run id: the caller-supplied `id`
   prefix suffixed with a UUID v4 for uniqueness — a label for logging /
   SLURM / temp-file identification only, never for correlating runs by content;
   see #75). This replaces the former bare `list[float]`, which discarded
   fitness, iteration count and the convergence flag.
-- **`qml.train`'s return type follows the path it dispatched to** (design doc
-  §17), the same way its accepted kwargs already do — `x_train` /
-  `expectation_function` on the Qiskit path versus `loss` / `batch_size` on the
-  native one. This is an extension of that existing asymmetry, not a new
-  inconsistency:
-  - a native `polypus.qml.Model` (+ `Dataset`) returns a
-    **`polypus.qml.QmlTrainResult`**: the seven `TrainResult` fields above, with
-    identical names, types and meanings, plus **`trained_model`** — a
-    ready-to-use `polypus.qml.TrainedModel` (the model compiled against the
-    dataset's feature count and bound to `best_params`), built eagerly at the end
-    of training. So `qml.train(...).trained_model.predict(x_new, ...)` is the
-    whole train→predict flow, where before a caller had to rebuild
-    `TrainedModel(model, dataset, result.best_params)` by hand, passing back in
-    the two objects the `train` call already had.
-  - a Qiskit feature map returns a plain **`TrainResult`**, unchanged: that path
-    has no `Model`/`Dataset` to wrap.
-  - `QmlTrainResult` is **not** a subclass of `TrainResult` — two independent
-    pyclasses, so `isinstance(result, TrainResult)` is `False` on the native
-    path. Read the fields, not the type. `polypus.train` (the generic entry
-    point) is untouched and always returns `TrainResult`.
-  - **`Model.train(dataset, ...)`** is the method spelling of that native path
-    and therefore returns the same `QmlTrainResult`. It is the *same* run:
-    identical arguments and seed produce a byte-identical result either way,
-    since the method delegates to the same native implementation. Its kwargs are
-    `qml.train`'s minus `ansatz` (the dataset takes that positional slot) and the
-    two Qiskit-path ones, and `method` is a required positional argument there.
-    `qml.train` remains the only entry point for a Qiskit feature map, which has
-    no `Model` to hang a method off.
 
-The effective `seed` on every one of these result types is what lets a caller log
-a run and replay it exactly.
+The effective `seed` on both result types is what lets a caller log a run and
+replay it exactly.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
-rejection, and the returned manifest/outcome fields), plus the Rust tests in
+rejection, and the returned manifest/outcome fields), `tests/python/test_qml_predict.py`
+(the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
-`run_quantum_circuit`, the `qmio` rejection path, and the seed-resolution
-precedence / optimizer determinism) and `crates/polypus/src/infrastructure/native.rs`
-(same-seed reproduces / omitted-seed differs at the backend level). CUNQA's
+`run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
+precedence / optimizer determinism, the default-seed entropy-failure path
+(`seed_or_entropy`, `resolve_optimizer_seed`), and the run-id entropy-failure
+path and id format (`unique_id_from`)), `crates/polypus/src/exceptions.rs`
+(the entropy-failure `polypus.BackendError` mapping),
+`crates/polypus-infrastructure/src/execution_config.rs` (the fallible draws
+`random_seed_from` / `random_id_bytes_from` and their error messages) and
+`crates/polypus-infrastructure/src/native.rs` (same-seed reproduces /
+omitted-seed differs at the backend level). CUNQA's
 `seed` forwarding follows the same shape as Aer's on the Rust side
-(`crates/polypus/src/infrastructure/cunqa.rs` mirrors `local.rs`) but has no
-dedicated automated test and no verified-working status: per `ENGINEERING.md`
-§3 the Rust suite is deliberately Python-runtime-free, so this seam can only
-be tested from `tests/python/`, and the `cunqa` package isn't installed
-anywhere in this project's CI or dev sandboxes (unlike Aer) — so, unlike the
-Aer path, it has never actually been run. Treat CUNQA's `seed` support as
-unverified until the CUNQA integration follow-up confirms it against a real
-install. The per-path return shapes of `qml.train` are pinned by
-`tests/python/test_qml_native.py` section 13
-(`TestQmlTrainResultNativePath`, `TestQmlTrainResultTrainedModelEquivalence`,
-`TestQiskitPathStillReturnsTrainResult`): the native path's type and fields, the
-bit-for-bit equality between `result.trained_model`'s predictions and a
-hand-built `TrainedModel`'s, and the Qiskit path still returning `TrainResult`.
-`fitness_history` is covered on every one of those paths — the generic `train`
-(`test_vqc.py::TestTrainFitnessHistory`, DE and Adam), the native path and its
-`batch_size` exception (`test_qml_native.py` section 13), the Qiskit path
-(`TestQiskitPathStillReturnsTrainResult`), `Model.train`'s field-by-field
-agreement (section 14) and same-seed reproducibility of the whole curve
-(`test_seed_reproducibility.py`) — with the per-optimizer guarantees themselves
-pinned in `crates/polypus-optimizers/tests/optimizers.rs`.
+(`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) and is pinned
+end to end against a fake CUNQA SDK by `tests/python/test_cunqa_run_flow.py`
+(per-QPU seeds, 63-bit mask, same seed reproduces, reported seed replays). The
+`cunqa` package isn't installed in CI, so it has never run against a real
+CUNQA: treat CUNQA's `seed` support as unverified until the opt-in
+`tests/python/test_cunqa_real.py` passes on a real family.
 
 ---
 
-## C-8 · qml.train row/dimension symmetry (Python entry point)
+## C-8 · qml.train row/dimension/label symmetry (Python entry point)
 
 `polypus.qml.train` composes a Qiskit `feature_map` with an `ansatz`, pre-binds
 each row of `x_train` to the feature-map parameters, and hands the resulting
@@ -618,7 +1021,8 @@ circuits to the optimizer, which searches a `dimensions`-wide vector and binds
 it to the ansatz's free parameters. Two shape agreements must hold, and both are
 validated **upfront** with a clear `ValueError` — before any circuit is composed
 or executed — rather than surfacing as a silent truncation or a cryptic Qiskit
-binding error deep inside the oracle.
+binding error deep inside the oracle. A third agreement governs the optional
+labels.
 
 - **Row width.** Every row of `x_train` must have **exactly
   `len(feature_map.parameters)`** elements. A longer row would silently drop the
@@ -636,11 +1040,36 @@ binding error deep inside the oracle.
   mismatch is a `ValueError` naming both `dimensions` and the ansatz's free
   parameter count.
 
+- **Labels.** `y_train` (keyword-only, optional) holds **exactly one label per
+  `x_train` row**, in row order, because the oracle pairs circuits with labels by
+  position; a mismatch is a `ValueError` naming both counts. Each label is a
+  single finite number: a `str`, another non-number or a nested row (one-hot,
+  column vector) is a `TypeError`, and `NaN`/`inf` a `ValueError`, each naming the
+  0-based index. All-integer labels reach the objective as `int`, otherwise all as
+  `float`. With labels, `expectation_function` must be a callable
+  `(bitstring, label) -> float`, a `polypus.CachedCost(callable)` or a
+  `polypus.SampleCost((counts, label) -> float)`; a `Qubo`/`Ising` is a
+  `TypeError`, and so is a `SampleCost` without labels. These checks run before
+  any backend is created. `y_train=None` is the unsupervised path, unchanged.
+
+**Inference (`polypus.qml.predict`).** The same agreements hold, so a model runs
+the circuit it was trained as: each row of `x` has exactly
+`len(feature_map.parameters)` values (the row-width `ValueError`, naming `x`),
+and `params` has exactly `len(ansatz.parameters)` finite values. An empty `x` is
+rejected too, all before anything runs.
+
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
-above.
+above. `y_train` itself is only iterated, so a generator is fine there.
+A Qiskit failure while composing the circuits or binding a row (an ansatz wider
+than the feature map, a feature value Qiskit rejects) is raised as
+`polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
+#218).
 
-**Enforcing test:** `tests/python/test_qml_train_validation.py`.
+**Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
+with nothing executed), `tests/python/test_qml_supervised.py` (each sample's
+counts meet its own label; the objective calling convention) and
+`tests/python/test_qml_predict.py` (the inference agreements).
 
 ---
 
@@ -648,7 +1077,8 @@ above.
 
 The `id` kwarg of `polypus.train` and `polypus.qml.train` is a caller-supplied
 *prefix*: the entry point appends a UUID v4 to it and the result becomes
-`ExecutionConfig::id`, which names the run's temp files and log streams and —
+`ExecutionConfig::id` (and the `RunParams::id` derived from it), which names the
+run's temp files and log streams and —
 on `infrastructure="cunqa"` — travels to SLURM as the C-1 kwargs `family_name`
 (`connect_to_infrastructure`) and `family_id` (`run_qcs`), and from there
 verbatim into `qraise`. The crate cannot see how `qraise`/SLURM interpolate that
@@ -681,175 +1111,236 @@ the temp-file and log-stream naming applies to every infrastructure.
 `run_quantum_circuit` is not covered: it generates its own `id` internally and
 takes no such kwarg.
 
-**Enforcing test:** `tests/python/test_id_validation.py`.
+### Python mirror
+
+The `polypus_python` helpers in `python/polypus_python/running_functions.py` also turn
+an `id` into file names (`circuit_<id>.qpy`, `polypus_python_<id>.log`). They are
+public and can be called without going through `train`/`qml.train`, so they
+validate `id` themselves with `validate_id`, a Python mirror of the Rust check.
+The policy is **identical**: same charset (ASCII letters, ASCII digits, `.`,
+`_`, `-`, checked character by character, never with `str.isalnum()` or a
+`$`-anchored regex), same 64-character bound and same order of checks (empty,
+then charset, then length), with the same `ValueError` messages (the offending
+character and the id are shown with Python's `repr`). A non-`str` `id` raises
+`TypeError`.
+
+It runs as the first statement of `get_logger`, `log_message`,
+`_get_temp_directory`, `serialize_quantum_circuit`,
+and `_deserialize_quantum_circuit`, before any filesystem access and any `try`
+block, so a rejected `id` touches nothing and the `log_message` calls in the
+error handlers can never raise on `id` and mask the original exception.
+
+**Enforcing tests:** `tests/python/test_id_validation.py` (Rust entry points);
+`tests/python/test_python_helpers_hygiene.py` (Python mirror: it reuses
+the same `VALID_IDS`/`INVALID_IDS` lists, so the two sides cannot drift without
+a test failing).
 
 ---
 
-## C-10 · QML problem ↔ oracle (`polypus-qml`)
+## C-10 · OpenQASM 3 profile with Qiskit phase conventions
 
-This contract governs the seam between a [`QmlProblem`] (the trainable object
-`polypus-qml` produces) and the evaluation oracle that scores it. Like C-5, it
-is a **Rust-to-Rust** contract — no Python is involved — and it is what lets
-`crates/polypus`' native QML oracle drive the pure-Rust optimizers without
-either side knowing the other's internals.
+`ParameterizedCircuit::from_qasm3` / `to_qasm3` / `to_qasm3_with_params`
+(Python: `Circuit.from_qasm3`, `Circuit.to_qasm3(params=None)`,
+`Circuit.param_names`) read and write the **OpenQASM 3 profile with Qiskit
+phase conventions** — never "a subset of OpenQASM 3": the straight-line part of
+OpenQASM 3.0 that carries a parameterised, terminal-measurement circuit. Its
+`stdgates.inc` is the one of tag `spec/v3.1.0`
+(`c717508162a0eac892fa32134716fe77a284e835`), whose gate list is that of
+`spec/v3.0.0` (`51c36946c687c8b17000962f6ce735ca1d1c9b3b`) with `pow(1/2)`
+written `pow(0.5)`.
 
-A `QmlProblem` bundles a compiled model, a training set and a loss, and exposes
-exactly the pair of operations an oracle needs: *bind these parameters into
-circuits* and *here are the counts, give me the fitness*. Everything between —
-backend, shots, batching, distribution — is `crates/polypus`' concern. The four
-guarantees:
+**Accepted.** `OPENQASM 3;` or `OPENQASM 3.0;` (optional, first); `include
+"stdgates.inc";`, provided internally — no file is ever read; `qubit[n]`,
+`qubit`, `bit[n]`, `bit` declarations, flattened in declaration order;
+`input float[64] name;` and `input float name;` (both binary64); calls of `U`,
+of the `stdgates.inc` gates and of earlier `gate` declarations (bodies of gate
+calls only); `barrier`; measurements `c[i] = measure q[j];`, `c = measure q;`,
+`measure q -> c;` (C-4 applies unchanged); angle expressions over the inputs
+(in a body, over the gate's parameters): numbers, `pi`/`π`, `tau`/`τ`,
+`euler`/`ℇ`, `+ - * /`, unary minus, `**` (right-associative, binding tighter
+than unary minus), and `sin cos tan arcsin arccos arctan exp log sqrt`;
+Unicode identifiers; `//` and `/* */` comments.
 
-- **(a) `bind_batch` shape and order.** `bind_batch(θ)` returns exactly
-  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order** (one
-  circuit per training sample; full multi-circuit X/Y base grouping — one
-  circuit per base group — is still future, see the readout-basis note below).
-  Counts handed back to `fitness_from_counts` must be in the **same order** —
-  misaligned counts are a corrupt result, so the order is specified and tested,
-  never assumed.
-- **(b) Finite fitness or typed error.** `fitness_from_counts` returns a finite
-  `f64` (`= −mean_loss`, since the optimizers maximise) or a typed `QmlError` —
-  **never `NaN`**. `BinaryCrossEntropy` clamps its probability away from the
-  `log` singularities, and non-finite predictions are already impossible
-  upstream (the dataset and circuits reject them). Length-mismatched counts are
-  a typed `QmlError::CountsLengthMismatch`, not a panic.
-- **(c) Emitted circuits obey C-4 and C-2.** Every circuit `bind_batch`
-  produces satisfies C-4 (terminal measurement) and uses only the C-2 gate
-  vocabulary — guaranteed by construction, since the model emits exclusively
-  through `polypus-circuit`'s builder.
-- **(d) `num_params()` is stable and positive.** `num_params()` is fixed at
-  `compile` time, always `> 0` (a model with no trainable parameters is
-  rejected with `ValidationError::NoTrainableParams`), and is the `dimensions`
-  the optimizer consumes under C-5. `polypus.qml.Model.num_params()` reads that
-  same number from Python before any training happens — it compiles a clone of
-  the builder, so it inherits this guarantee verbatim, positivity included: an
-  ansatz-free model raises `NoTrainableParams` rather than reporting `0`.
+**Rejected**, each as `CircuitError::Parse` naming the construct and its
+1-based line (a construct both dialects reject is worded as the OpenQASM 2.0
+importer words it, so `benchmarks/qasm_coverage.py` classifies either):
+other versions and includes;
+`if`/`else`, `for`, `while`, `switch`; `reset`; classical types other than
+`bit` and `input float`; `let`; assignments other than measurement;
+`bit c = measure q;`; `const`; `output`; casts; `def`; `extern`; the modifiers
+`ctrl @`, `negctrl @`, `inv @`, `pow @` and `gphase`, in bodies too; `delay`,
+`stretch`, `duration`, `box`; `defcal`, `cal`, `defcalgrammar`; arrays,
+slices, index sets, concatenation; physical qubits (`$0`); annotations and
+pragmas; the functions `mod`, `popcount`, `rotl`, `rotr`, `floor`, `ceiling`,
+`pow` (and `sizeof`, `real`, `imag`); a division whose two operands are both
+integer expressions (`1/2`: integer division in OpenQASM 3 — write `1.0/2`);
+an input named like a `stdgates.inc` gate, included or not (input names are
+kept, and the export always includes it); in a body, a call of a gate its own
+parameter or qubit argument shadows.
 
-**Readout observables from Python (`Model.readout`).** Each element of
-`observables` is **one of three** forms:
+**Phase semantics.** `U`, `u2` and `u3` are read and written with Qiskit's
+matrices — Polypus's `u`, `u2`, `u3` — a declared deviation from the
+specification by exactly e^{−iθ/2} (`U`) and e^{+i(φ+λ)/2} (`u2`, `u3`).
+Amplitudes may differ from a specification-normative reader by these global
+factors; probabilities, counts and expectation values do not. This is sound
+only because modifiers and `gphase` are rejected (under them a global phase
+becomes observable); admitting either requires global-phase tracking. Every
+other `stdgates.inc` gate follows the specification exactly. `CX` is read as
+`cx`, as `standard_library.rst` describes it ("an alias for `cx`"), although
+`stdgates.inc` defines it as `ctrl @ U(π, 0, π)`, which under the
+specification's `U` is controlled-(iX). That Polypus reads Qiskit's
+`qasm3.dumps` output as Qiskit does is tested for Qiskit 2.5.2 with
+`qiskit-qasm3-import` 0.6.0, not guaranteed for other versions. The runtime
+dependencies are bounded accordingly: `qiskit>=2.0,<3` and
+`qiskit-aer>=0.17,<0.18` in `pyproject.toml`.
 
-- a bare list of `(pauli, position)` factors — one Pauli string with implicit
-  coefficient `1.0`;
-- a `polypus.qml.PauliTerm`, built by the free functions
-  `polypus.qml.Z/X/Y(position)` and multiplied with `@`: `Z(0)` and
-  `Z(0) @ Z(1)`. This is the *exact* equivalent of the bare form — one term,
-  coefficient `1.0` — so `Z(0)` builds the identical observable as `[("z", 0)]`
-  and `Z(0) @ Z(1)` the identical one as `[("z", 0), ("z", 1)]`, guaranteed
-  structurally: both go through one shared helper on the bindings side. A
-  `PauliTerm` carries **no** coefficient and is **never** a sum — it has no `+`,
-  `*` or `__rmul__`;
-- a `polypus.qml.Observable`, the weighted sum `O = Σ cᵢ·Pᵢ` the Rust
-  `Observable` has always supported (`Observable([(0.5, [("z", 0)]), (1.5,
-  [("z", 0), ("z", 1)])])` is `0.5·Z₀ + 1.5·Z₀Z₁`) — the only form that can
-  carry coefficients or several terms. Each term of an `Observable` is exactly
-  the same `(pauli, position)` list the bare form is, so
-  `Observable([(1.0, [("z", 0)])])` builds the identical observable as
-  `[("z", 0)]`.
+**Spellings.** On import `U` → `u`, `CX` → `cx`, `phase` → `p`, `cphase` →
+`cp`; on export `u` → `U`; no other name changes. A declared gate is never
+recognised as a built-in by its name.
 
-The two dedicated types are **additive**, not replacements: the bare form's
-meaning is unchanged, and all three spellings may be mixed inside one `readout`
-call (a multiclass `"argmax"` may spell one class bare, one as a `PauliTerm` and
-one weighted). They are distinguished by **type**, in order of decreasing
-specificity — `Observable`, then `PauliTerm`, then anything else extracted as the
-bare form — never by guessing at the shape of the tuples, so no form can be
-silently reinterpreted as another. A non-finite coefficient is a `ValueError`
-(`ValidationError::NonFiniteCoefficient`, reporting the offending term index), as
-are an unknown Pauli and a position repeated inside one term; an element that is
-none of the three forms is a `TypeError` naming all three.
+**Parameters.** Inputs are the free parameters, in declaration order, unused
+ones included. Their names are stored in the circuit (`param_names`), are part
+of its equality and survive clone, export and import, Unicode included;
+Qiskit's name mangling (`θ[0]` → `_θ_0_`) is not reversed. A parameter without
+a name is `theta_<index>`, or the first free `theta_<index>_<k>` if a named
+parameter or a declared gate the circuit calls takes that name.
 
-A repeated position is rejected **eagerly** in the `PauliTerm` form: `Z(0) @ Z(0)`
-raises at the `@`, before any `readout` call, where the bare form's equivalent
-`[("z", 0), ("z", 0)]` can only be caught once `readout` parses it. Same error,
-earlier.
+**Numbers.** Angles are evaluated in binary64, exactly the operations written,
+in source order. A constant angle is evaluated at import: a non-finite result
+or a division by zero is a `Parse` error (on the division's line); an angle of
+the inputs is evaluated at binding (`NonFiniteParam`, `DivisionByZero`). Only
+the final value must be finite: `1.0/exp(1000.0)` is `0.0`.
 
-**String-typed kwargs and their named constants.** Nine kwargs on the Python QML
-surface take a string from a closed set, each parsed strictly (an unrecognised
-value is a `ValueError` listing the options):
+**Canonical form.** What `to_qasm3` writes, and why its output is a fixed
+point: `to_qasm3(from_qasm3(to_qasm3(c)))` is byte-identical to `to_qasm3(c)`
+for every circuit `to_qasm3` accepts.
 
-| kwarg | accepted values | namespace |
-| --- | --- | --- |
-| `Model.angle_encoder(axis=)`, `Model.hardware_efficient(rotations=[…])` | `"rx"`, `"ry"`, `"rz"` | `polypus.qml.Axis` |
-| `Model.readout(decision=)` | `"sign"`, `"threshold"`, `"argmax"`, `"raw"` | `polypus.qml.Decision` |
-| `qml.train(loss=)`, `Model.train(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"` | `polypus.qml.Loss` |
-| `Model.hardware_efficient(entanglement=)`, `Model.iqp_encoder(entanglement=)` | `"linear"`, `"circular"`, `"full"` | `polypus.qml.Entanglement` |
-| `Model.hardware_efficient(entangler=)` | `"cx"`, `"cz"` | `polypus.qml.Entangler` |
-| `Model.conv(block=)` | `"basic"`, `"cartan"` | `polypus.qml.ConvBlock` |
-| `Model.conv(pairing=)` | `"even_pairs"`, `"odd_pairs"`, `"alternating"` | `polypus.qml.Pairing` |
-| `Model.pool(block=)` | `"basic"` | `polypus.qml.PoolBlock` |
-| `Model.pool(keep=)` | `"even_positions"`, `"odd_positions"` | `polypus.qml.KeepRule` |
+```text
+OPENQASM 3.0;
+include "stdgates.inc";
+input float[64] <name>;         one per parameter, in index order
+gate <name>(<p>, …) <q>, … {    each definition the circuit needs, once:
+  <statement>;                    callees first, in order of first use
+}
+qubit[<n>] q;                   unless n = 0
+bit[<m>] c;                     m = clbits_width(), unless 0
+<statement>;                    one per instruction
+```
 
-The namespaces in the last column are **additive and nothing more**: each
-constant *is* the plain string (`polypus.qml.Axis.RY == "ry"`), so the two
-spellings are interchangeable everywhere and the plain string remains the only
-accepted *type*. They exist so the vocabulary is discoverable —
-`dir(polypus.qml.Loss)`, editor completion, a docstring — rather than only
-recoverable from a `ValueError` after guessing wrong. No parser, no signature and
-no default changes because of them.
+- Registers: `bit[m] c;` is the circuit's classical width (C-2): the sum of
+  the `bit` registers an imported program declares, or the implicit register
+  the measurements need if that is wider — written with or without
+  measurements, so `bit[2] a; bit b;` becomes `bit[3] c;`. A circuit from the
+  builder writes only the bits its measurements need.
+- Statements: `name(a, b) q[i], q[j];`; `barrier q;` for every qubit
+  (`barrier;` with none), `barrier q[i], …;` otherwise; `c = measure q;` for a
+  full measurement when the registers have one size, `c[i] = measure q[j];`
+  otherwise. Inside a definition the same, over its formal names, indented two
+  spaces.
+- Numbers: the shortest decimal that reads back as the same binary64, always
+  with a decimal point — positional for 1e-5 ≤ |v| < 1e16 (`0.00001`, `1.0`),
+  scientific otherwise (`1.5e-7`, `1.0e16`); negative zero is `-0.0`.
+- Expressions: `+` and `-` between spaces, `*`, `/`, `**` without; functions
+  by name (`log` for the natural logarithm), constants as `pi`, `tau`,
+  `euler`; the fewest parentheses that keep the expression: `**` binds
+  tightest (right-associative; its exponent may be a negation), then unary
+  minus, then `* /`, then `+ -` (both left-associative). A negative number is
+  written with its minus and counts as a negation.
+- Instructions `stdgates.inc` lacks are calls of these definitions (exact
+  matrices, checked in `polypus-sim`): `rzz(θ)` = `cx; rz(θ); cx`, `rxx(θ)` =
+  `h ⊗ h; cx; rz(θ); cx; h ⊗ h`, `sxdg` = `h; sdg; h`, `csx` =
+  `h; cp(π/2); h` on the target, `cu1` = `cp`, `cu3(θ, φ, λ)` =
+  `cu(θ, φ, λ, 0)`, `u0` = the identity (empty body), and `rccx`, `rc3x`,
+  `c3x`, `c3sqrtx`, `c4x` as their `qelib1.inc` definitions (`qasm3.rs`'s
+  `HELPER_PROGRAM` holds the exact text). Declared gates are printed from
+  their definitions, never copied.
+- Names: an input keeps its name. A gate, register or formal name is kept if it
+  is a valid OpenQASM 3 identifier of at most 4096 bytes, not a keyword,
+  constant, function, `U`, `gphase` or `stdgates.inc` gate, and not taken in its
+  scope (inputs, then gates in order, then registers; a definition's formals
+  avoid all of those). Otherwise it is renamed: characters an identifier cannot
+  hold become `_`; `g` (gate), `p` (parameter), `q` (qubit argument or qubit
+  register) or `c` (bit register) is prefixed if it cannot start one; `_` is
+  appended to a reserved word; it is cut to 4075 bytes; `_1`, `_2`, … is
+  appended until it is free. Names that can be kept are claimed before any is
+  renamed, so the scheme never collides. The registers are `q` and `c`, renamed
+  the same way when taken.
+- Budgets: the export fails with `CircuitError::ExportLimit` rather than write a
+  program the importer would reject (the budgets below, counted as the importer
+  counts them), and with `CircuitError::GateNotExpressible`, naming the gate,
+  for a definition it cannot write: an OpenQASM 2.0 body with a barrier, or one
+  that would nest or expand beyond the importer's limits once its `c4x`-like
+  calls become definition calls.
 
-`ConvBlock` and `PoolBlock` are deliberately separate namespaces even though both
-spell a block `"basic"` today: they stand for two independent Rust enums, and
-`Model.pool` does not accept a conv block (`pool(block=ConvBlock.CARTAN)` is the
-same `ValueError` as `pool(block="cartan")`).
+**OpenQASM 2.0 export of OpenQASM 3 declarations.** `to_qasm2` needs every
+parameter bound. A declaration imported from OpenQASM 3 is printed from its
+definition on one line (`gate name(a,b) x,y { h x; cx x,y; }`), with `log` as
+`ln`, `**` as `^`, `tau` and `euler` as their values, numbers as above, and
+names renamed by the same scheme for OpenQASM 2.0's `[a-z][A-Za-z0-9_]*`
+(avoiding its keywords, the `qelib1.inc` gates, `q`, `c` and the names of
+the OpenQASM 2.0 declarations re-emitted verbatim, which keep theirs). A body using `arcsin`, `arccos`
+or `arctan` is `GateNotExpressible`, naming the gate (`try_to_qasm2` returns
+the error; the deprecated `ConcreteCircuit::to_qasm2` panics there). The backends that submit
+OpenQASM 2.0 — Aer and CUNQA (through `polypus_python`), QMIO, the subprocess
+bridge — report such a circuit as unsupported (`polypus.NativeCircuitError` in
+Python), never a panic; the native backend expands the gate and runs it.
+OpenQASM 2.0 declarations are re-emitted verbatim as before (C-2), except one
+named `q` or `c`, which OpenQASM 2.0's single namespace gives to the
+registers: it is printed and renamed by the same scheme (`c` becomes `c_1`),
+and so is every declaration whose body calls it. The export stays a fixed
+point and imports to the same gates under the new name.
 
-The constants are ordinary class attributes on `#[pyclass]` types with no
-constructor, so `polypus.qml.Axis()` is a `TypeError` — a namespace, never a
-value. They are **not** immutable: PyO3 builds mutable heap types, so
-`polypus.qml.Axis.RY = …` succeeds and corrupts the vocabulary process-wide. That
-is a foot-gun, not a supported operation.
+**Budgets** (each a `Parse` error on import; the export stays within them):
 
-**Readout measurement basis (single group).** A readout may measure `X`/`Y`
-Paulis, not just `Z`: `compile` inserts the basis change (`H` for `X`; `Sdg`
-then `H` for `Y`) before the terminal measurement. This is supported **only when
-the whole readout resolves to exactly one basis group** — a qubit→Pauli
-assignment every observable's every term agrees with on the qubits it touches
-(untouched qubits measure in `Z`, no gate). Any all-`Z` readout, or one whose
-observables share a compatible non-`Z` basis (e.g. a multiclass `Argmax` with
-every class in `X`), stays a single circuit per sample and keeps `num_circuits`
-unchanged. Two conflicting bases **inside one observable** (e.g. `Z₀ + X₀`) is a
-typed `ValidationError::ObservableHasIncompatibleBases`; a readout that would
-need **more than one group** (e.g. one class in `Z`, another in `X` on the same
-qubit) is a typed `ValidationError::ReadoutNeedsMultipleBasisGroups { groups }`
-— the multi-circuit case is not implemented yet (design doc §7.2), and is
-rejected rather than mismeasured.
+| Budget | Value |
+|---|---|
+| Source size (`MAX_SOURCE_BYTES`) | 32 MiB |
+| Identifier, number or string (`MAX_TOKEN_BYTES`) | 4096 bytes |
+| Inputs (`MAX_INPUTS`) | 100 000 |
+| `gate` declarations (`MAX_DECLARATIONS`) | 10 000 |
+| Expression nodes, one expression (`MAX_EXPR_NODES`) | 1 000 000 |
+| Expression nodes, whole program (`MAX_PROGRAM_NODES`) | 4 000 000 |
+| Expression nesting as written (`MAX_EXPR_DEPTH`) | 64 |
+| Qubits, and bits (`MAX_REGISTER_BITS`) | 1 000 000 each |
+| Instructions after broadcasting (`MAX_INSTRUCTIONS`) | 4 000 000 |
+| Qubits all barriers list, `barrier q;` listing every qubit of `q` (`MAX_BARRIER_OPERANDS`) | 4 000 000 |
+| Declared-gate nesting (`MAX_GATE_NESTING`) | 64 |
+| Statements one declaration expands to (`MAX_GATE_EXPANSION`) | 1 000 000 |
+| Statements all calls of declared gates expand to (`MAX_VALIDATED_EXPANSION`) | 20 000 000 |
 
-**Enforcing test:** `crates/polypus-qml/tests/contracts.rs` covers the QML side —
-`bind_batch` length/order, C-4/C-2 on every bound circuit, finite fitness, and
-`num_params()` matching the compiled model — and
-`crates/polypus/src/evaluation/native_qml_oracle.rs` covers the **oracle half**:
-the `NativeQmlOracle` that wires this problem to the C-5 optimizers returns one
-finite fitness per candidate, yields the finite `0.0` sentinel while recording
-the real failure in its shared `OracleErrorSlot` when a candidate cannot be
-evaluated, and is byte-reproducible for a fixed seed. The public-API path is
-exercised end-to-end from Python in `tests/python/test_qml_native.py`.
+The budgets live in one module (`crates/polypus-circuit/src/limits.rs`), and
+the OpenQASM 2.0 importer enforces them too, with the same messages (issue
+#343): source and token size, declarations, register size, instructions after
+broadcasting (checked before a statement is expanded), barrier operands, at
+most `MAX_EXPR_NODES`
+nodes in one parameter list, and at most `MAX_PROGRAM_NODES` nodes in gate
+bodies, whose expressions it keeps (top-level angles are evaluated as they are
+read). It lexes the source as it parses it. The OpenQASM 2.0 export is not
+budgeted: a register broadcast written out statement by statement can outgrow
+`MAX_SOURCE_BYTES`, and such an export does not import again.
+Enforcing tests: `crates/polypus-circuit/tests/hardening.rs`.
 
-### Model save format (design doc §17)
+Rationale, evidence and alternatives considered: see
+`docs/adr/0004-openqasm3-profile-and-angle-expressions.md`.
 
-A trained model is persisted as JSON — `polypus.qml.TrainedModel(model,
-dataset, theta).save(path)` / `.load(path)`, with the file I/O and the concrete
-JSON format living in `crates/polypus` (the pure `polypus-qml` crate only gains
-an optional `serde` feature deriving `Serialize`/`Deserialize` on the model
-tree). A `CompiledModel` serializes to **only** `{spec, num_features}`: its
-derived fields (`num_params`, per-layer allocations, resolved readout) are never
-written. Loading recompiles from those two fields via `QuantumModel::compile`,
-so the derived state is regenerated, never trusted from the file.
-
-The safety guarantee this buys: a corrupt or hand-tampered file can never
-produce an internally inconsistent model. Loading re-runs the full `compile`
-validation, so a spec that no longer compiles surfaces as a clean
-deserialization error (a `ValueError` at the Python boundary) instead of a panic
-or a silently-accepted broken model. `serde_json`'s `float_roundtrip` feature is
-enabled wherever this JSON is parsed, so a saved `theta` reloads bit-for-bit and
-the loaded model's predictions reproduce under C-7.
-
-**End-to-end inference — `predict(X, ...)`.** `TrainedModel.predict(X, ...)` is
-the one-call inference path: given a batch of **new** samples `X`
-(`List[List[float]]`, one row per sample), it binds each to the trained `theta`,
-runs it on a backend, and applies the model's readout decision, returning one
-prediction per sample in `X`'s order. Seed resolution and backend construction
-match `run_quantum_circuit` (direct `seed.unwrap_or_else(random_seed)`; `qmio`
-rejects an explicit seed), and it reuses the **exact same** `exact=True` guard as
-`qml.train` — exact mode requires `infrastructure="local"` and the native
-`backend="polypus"`, and any other combination is rejected rather than silently
-ignored. `predict_from_counts` remains the lower-level entry for a caller who
-obtained counts themselves.
-
-[`QmlProblem`]: ../crates/polypus-qml/src/problem.rs
+**Enforcing test:** `crates/polypus-circuit/tests/qasm3.rs` (every accepted
+and rejected construct with its line and message, the budgets on both sides,
+the canonical layout, numbers and parentheses, renaming and collisions — a
+native and a declared `rzz` included —, cross-dialect export),
+`crates/polypus-circuit/tests/contracts.rs` (`c2_*qasm3*`: the vocabulary's
+fixed point, and the declared `bit` width), the `declared_clbits_*` tests of
+`crates/polypus-circuit/tests/qasm3.rs` (the width written as `bit[m]`),
+`crates/polypus-sim/tests/qasm3_semantics.rs` (full matrices:
+every `stdgates.inc` gate and `U` against the specification, `U`/`u2`/`u3` by
+the declared factors, `CX`, every exported definition, cross-dialect),
+`tests/python/test_qasm3.py` and `tests/python/test_qasm3_interop.py` (Qiskit
+2.5.2 in both directions: pinned fixtures and a generated set, explicit
+parameter mapping, statevectors with the predicted phase only, counts and bit
+order), and the `from_qasm3` fuzz target in CI (import, export, re-import,
+fixed point, binding). The backends' refusal of a circuit OpenQASM 2.0 cannot
+express: `to_py_object_rejects_a_circuit_openqasm2_cannot_express`
+(`polypus-infrastructure`), `rejects_a_circuit_openqasm2_cannot_express`
+(QMIO), `a_circuit_openqasm2_cannot_express_is_rejected_without_a_worker`
+(`polypus-subprocess-backend`), and
+`test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking`
+in `tests/python/test_qasm3.py`.

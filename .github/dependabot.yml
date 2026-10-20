@@ -1,7 +1,5 @@
-# Keep the GitHub Actions used by CI up to date (checkout, setup-python,
-# rust-toolchain, rust-cache, ...). Rust/Python dependencies are deliberately
-# not tracked here: there is no committed lockfile, so CI already resolves
-# fresh semver-compatible versions on every run.
+# Weekly update PRs for the GitHub Actions used by CI and for the Rust and
+# Python dependencies, grouped into one combined PR per directory and cycle.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -19,3 +17,58 @@ updates:
       # "Updating" it would make the msrv CI job check a modern Rust instead
       # of the declared minimum. Bump it manually together with rust-version.
       - dependency-name: "dtolnay/rust-toolchain"
+
+  # The workspace and the two templates each commit a Cargo.lock, which CI
+  # builds with `--locked`, so none of them picks up new upstream releases on
+  # its own. The templates are separate workspaces (each Cargo.toml has its own
+  # empty `[workspace]` table), so each directory is listed. `fuzz/` is outside
+  # the workspace too (the root Cargo.toml `exclude`s it), but its Cargo.lock is
+  # gitignored (fuzz/.gitignore), so there Dependabot has no pin to refresh: it
+  # can only raise a requirement in fuzz/Cargo.toml (e.g. libfuzzer-sys) once a
+  # release falls outside it. The `cargo` group is applied per directory: at
+  # most one combined PR per directory each week.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /fuzz
+      - /examples/rust-backend-template
+      - /examples/python-backend-template
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    ignore:
+      # uuid 1.27 declares rust-version 1.89, above our MSRV, so it breaks the
+      # `msrv` CI job (checked with --locked). Interim: the workspace now uses
+      # the MSRV-aware resolver (`resolver = "3"`), but Dependabot is not known
+      # to honour it (dependabot-core#5423). Drop this ignore once the MSRV is
+      # raised or a Dependabot PR confirms the resolver is respected (#276).
+      - dependency-name: "uuid"
+        versions: [">=1.27"]
+
+  # From `/`, Dependabot reads pyproject.toml plus every root-level *.txt whose
+  # name contains "requirements", so requirements-dev.txt and
+  # requirements-examples.txt are covered without being listed.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    # The `>=` bounds in the requirements files are the oldest versions we
+    # support, not pins: raising them to the latest release would drop
+    # Python 3.10 (requires-python = ">=3.10", tested in CI), since those
+    # releases drop support for it. Only touch a requirement once a release falls
+    # outside its range (e.g. maturin<2.0).
+    versioning-strategy: increase-if-necessary
+    groups:
+      pip:
+        patterns:
+          - "*"
+    ignore:
+      # ruff is pinned twice: requirements-dev.txt for local runs and the
+      # `version:` of the ruff-action step in .github/workflows/ci.yml, which
+      # Dependabot does not update. Bumping only the requirements file would
+      # let local ruff drift from CI's (new rules / formatter output). Bump both
+      # by hand, together.
+      - dependency-name: "ruff"
