@@ -14,6 +14,10 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
+  probabilities of each circuit, keyed like its counts, with no sampling and
+  the same memory budget and windows as `run_circuits`. Only for a
+  full-register read-out; not yet reachable from Python.
 - Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
   same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`

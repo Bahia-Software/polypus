@@ -603,6 +603,18 @@ different row's circuit, not a replica of one circuit, so summing them has no
 meaning and `merged_counts` is `None`. The dict shape, bit order, key order
 and shot-conservation rule are exactly as specified here.
 
+**Exact probabilities (native backend only).**
+`NativeStatevectorBackend::run_circuits_exact` returns, instead of counts, each
+circuit's exact basis-state probabilities `|amplitude|²`, keyed exactly as the
+counts above (same width and bit order). It draws no samples and no seed: the
+values sum to 1 up to rounding, states of probability exactly zero are omitted
+as unobserved bitstrings are, and the result is the same bit for bit on every
+run. It reads every qubit, so it accepts only a full-register read-out (no
+measurement, or `measure_all`) and refuses a circuit that measures individual
+qubits (`UnsupportedCircuit`). It is not part of the `QuantumBackend` trait:
+"exact" means nothing for a noisy simulator or hardware. Enforced by the
+`exact_*` tests in `crates/polypus-infrastructure/src/native.rs`.
+
 **Enforcing test:** shot-conservation assertion in the orchestration tests
 (`crates/polypus/tests/running_quantum_circuits_local.rs`, plus the Python
 public-API case in `tests/python/test_local_run.py`; audit C6); the stable
