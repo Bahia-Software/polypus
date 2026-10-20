@@ -56,6 +56,10 @@ Changes on `main` since 0.7.2.
   other than `"automatic"` raises `ValueError` instead of being ignored, and so
   does a `backend` other than `"aer"` on a registered backend. This applies to
   `run_quantum_circuit`, `train`, `qml.train` and `qml.predict` (#334).
+- **BREAKING:** the native backend (`backend="polypus"`, `"statevector"` or
+  `"polypus_statevector"`) raises `ValueError` for a `sim_method` other than
+  `"automatic"` instead of ignoring it, in `run_quantum_circuit` and `train`
+  (#334).
 - **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
   returns a `Result` instead of panicking on an unexportable circuit (#350).
 - **BREAKING:** the native backend derives each circuit's seed from the base

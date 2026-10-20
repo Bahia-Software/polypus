@@ -109,6 +109,25 @@ class TestRunQuantumCircuitBackends:
                 noise_model=object(),
             )
 
+    @pytest.mark.parametrize(
+        "backend", ["polypus", "statevector", "polypus_statevector"]
+    )
+    def test_native_backend_rejects_sim_method(self, backend):
+        """The native backend has no simulation method to choose, so a
+        non-default ``sim_method`` is a ``ValueError`` instead of being
+        dropped (#334)."""
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match="sim_method"):
+            polypus.run_quantum_circuit(
+                qc,
+                shots=100,
+                infrastructure="local",
+                backend=backend,
+                sim_method="statevector",
+            )
+
     def test_native_backend_fusion_false_matches_fusion_true(self):
         """`fusion=False` opts the native backend out of gate fusion (issues
         #131/#132) for a strictly gate-by-gate simulation. Fusion only
