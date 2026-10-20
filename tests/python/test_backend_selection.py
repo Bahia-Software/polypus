@@ -362,6 +362,51 @@ class TestCunqaRejectsWhatItCannotHonour:
             )
 
 
+class TestRegistryRejectsWhatItCannotHonour:
+    """A registry backend (here the built-in ``subprocess`` bridge) takes its
+    settings from ``options`` only, so a ``noise_model``, a non-default
+    ``sim_method`` or ``backend`` is a ``ValueError`` at the edge instead of
+    being dropped (#334). The error comes before the seam, so no worker runs."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"noise_model": object()}, "noise_model"),
+            ({"sim_method": "statevector"}, "sim_method"),
+            ({"backend": "polypus"}, "backend"),
+        ],
+        ids=["noise_model", "sim_method", "backend"],
+    )
+    def test_rejected_in_run_quantum_circuit(self, kwargs, match):
+        import polypus
+
+        qc = polypus.Circuit(1).h(0).measure_all()
+        with pytest.raises(ValueError, match=match):
+            polypus.run_quantum_circuit(
+                qc, shots=100, infrastructure="subprocess", **kwargs
+            )
+
+    def test_rejected_in_train(self, simple_expectation_fn):
+        """The same guard protects the train() entry point."""
+        import polypus
+
+        qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
+        with pytest.raises(ValueError, match="noise_model"):
+            polypus.train(
+                qc,
+                polypus.DE(generations=2, population_size=4),
+                shots=100,
+                n_qpus=1,
+                dimensions=1,
+                expectation_function=simple_expectation_fn,
+                infrastructure="subprocess",
+                nodes=1,
+                cores_per_qpu=2,
+                id="test_train_registry_rejects_noise_model",
+                noise_model=object(),
+            )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Native vs Aer equivalence on the same native circuit
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,10 @@
+# Canonical contributor identities for `git log`, `git shortlog` and `git blame`.
+# Format: Proper Name <proper@email> [Commit Name <commit@email>]
+#
+# Commits whose author email names an internal host are left unmapped on
+# purpose: mapping them would put those host names back into the tree (#225).
+
+Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es>
+Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es> <diegoferpra@gmail.com>
+Diego Beltrán Fernández Prada <diego.fernandez@bahiasoftware.es> <82104023+DBFerPra@users.noreply.github.com>
+Kevin Pérez González <kevin.perez@bahiasoftware.es>

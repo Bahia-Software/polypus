@@ -362,7 +362,10 @@ configuration. Each value is a `str` or a `list`/`tuple` of `str`; anything else
 (`int`, `bool`, `float`, `None`, a `dict`, a list holding a non-`str`) is a
 `TypeError` naming the key, e.g. `options['recv_timeout_ms'] must be a str or a
 list of str, got int` — pass numbers as strings. `local` and `cunqa` take no
-`options` and reject a non-empty dict with `ValueError`.
+`options` and reject a non-empty dict with `ValueError`. Conversely, a registered
+backend takes nothing but `options`: a `noise_model`, a `sim_method` other than
+`"automatic"` or a `backend` other than `"aer"` raises `ValueError` instead of
+being dropped.
 
 **The `command` option has two forms:**
 
