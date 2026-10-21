@@ -30,6 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
+| C-11 | Native QML (problem ↔ oracle, `polypus.qml.Model`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + `tests/python/test_qml_native.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -967,9 +968,11 @@ releases.
 
 ## C-7 · Seeding & run manifest (Python entry points)
 
-This contract governs the outer Rust↔Python boundary of the four public entry
+This contract governs the outer Rust↔Python boundary of the public entry
 points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
-`polypus.qml.predict`: their `seed` kwarg and their return shape. (It is distinct from C-1, which
+`polypus.qml.predict`, and of the native QML API's `Model.fit`,
+`TrainedModel.predict` and `TrainedModel.run` (C-11): their `seed` kwarg and
+their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -1040,6 +1043,16 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
   outright, since a QML model is a Qiskit circuit.
+- **`Model.fit(..., seed=None)`** follows `train`: the explicit `seed` wins,
+  then the optimizer object's field, then OS entropy. The effective seed also
+  seeds the shot sampling and the minibatch draws (one subset of the samples
+  per oracle call, drawn from the seed and a call counter), so a run replays
+  exactly. With `exact=True` nothing is sampled, and the seed drives only the
+  optimizer and the minibatches.
+- **`TrainedModel.predict(..., seed=None)` / `TrainedModel.run(..., seed=None)`**
+  seed shot sampling like `run_quantum_circuit`: an explicit seed reproduces the
+  counts, `None` draws one from OS entropy, and an explicit seed on `qmio` is a
+  `ValueError`. With `exact=True` nothing is sampled.
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
@@ -1070,13 +1083,25 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   see #75). This replaces the former bare `list[float]`, which discarded
   fitness, iteration count and the convergence flag.
 
+- `Model.fit` returns the same **`TrainResult`**. `TrainedModel.run` returns
+  a **`RunResult`** shaped like `qml.predict`'s (one C-3 dict per row,
+  `merged_counts` `None`, `id` generated as `qml_<n_qpus>_<infrastructure>_<uuid>`,
+  `seed` `None` only on `qmio`), or, with `exact=True`, an **`ExactResult`**:
+  `probabilities` (one dict per row, keyed like the counts), `id`, `backend`
+  and `infrastructure`, and no `seed`, since nothing was sampled.
+
 The effective `seed` on both result types is what lets a caller log a run and
 replay it exactly.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
 rejection, and the returned manifest/outcome fields), `tests/python/test_qml_predict.py`
-(the `qml.predict` manifest, seed replay and per-row counts), plus the Rust tests in
+(the `qml.predict` manifest, seed replay and per-row counts),
+`tests/python/test_qml_native.py` (`Model.fit` and `TrainedModel.run`: seed
+replay, exact runs independent of shots, the `qmio` rejection, the
+`RunResult`/`ExactResult` fields), the minibatch draws in
+`crates/polypus-evaluation/src/qml_oracle.rs`
+(`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
 precedence / optimizer determinism, the default-seed entropy-failure path
@@ -1147,7 +1172,7 @@ legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
 A `polypus.qml.Encoder` or `Ansatz` as `feature_map` or `ansatz` is a
 `TypeError` before anything runs: native models are trained with
-`polypus.qml.Model.fit` (its contract, C-11, is to come).
+`polypus.qml.Model.fit` (C-11).
 A Qiskit failure while composing the circuits or binding a row (an ansatz wider
 than the feature map, a feature value Qiskit rejects) is raised as
 `polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
@@ -1432,3 +1457,199 @@ express: `to_py_object_rejects_a_circuit_openqasm2_cannot_express`
 (`polypus-subprocess-backend`), and
 `test_running_a_circuit_openqasm2_cannot_express_raises_instead_of_panicking`
 in `tests/python/test_qasm3.py`.
+
+---
+
+## C-11 · Native QML (`polypus-qml` problem ↔ oracle, and `polypus.qml.Model`)
+
+This contract governs the native form of quantum machine learning: a model that
+Polypus builds, reads out and scores itself, as opposed to the Qiskit form of
+C-8, whose circuits are opaque and scored by the caller's cost. The two forms
+are separate entry points that share the oracle, the scheduler and the
+optimizers underneath (`docs/adr/0007-native-qml.md`). The contract has a
+Rust half — the seam between a `QmlProblem` and the oracle that scores it, a
+Rust-to-Rust contract like C-5 — and a Python half, the `polypus.qml.Model` API
+built on it.
+
+### The problem ↔ oracle seam (Rust)
+
+A `QmlProblem` bundles a compiled model, a training set and a loss, and exposes
+exactly what an oracle needs: *bind these parameters into circuits* and *here
+are the results, give me the fitness (and its gradient)*. Backend, shots,
+batching and distribution are the oracle's concern.
+
+- **(a) `bind_batch` shape and order.** `bind_batch(θ)` returns exactly
+  `num_circuits()` `ConcreteCircuit`s in a **stable sample-major order**, one
+  per training sample. Results handed back to `fitness_from_counts` (or its
+  exact twin `fitness_from_probabilities`) must be in the **same order**:
+  misaligned results are a corrupt result, so the order is specified and
+  tested, never assumed.
+- **(b) Finite fitness or typed error.** The fitness is `−mean_loss` (the
+  optimizers maximise): a finite `f64` or a typed `QmlError`, **never `NaN`**.
+  `BinaryCrossEntropy` clamps its probability away from the `log`
+  singularities; the unsupervised `Expectation` loss is `−⟨O₀⟩`, so its fitness
+  is the mean expectation; non-finite predictions are impossible upstream (the
+  dataset and circuits reject them), and a problem never has zero samples.
+  Results of the wrong length are a typed `QmlError::CountsLengthMismatch`.
+- **(c) Emitted circuits obey C-4 and C-2.** Every bound circuit ends in one
+  `measure_all` (C-4) and uses only the C-2 vocabulary, by construction: the
+  model emits through `polypus-circuit`'s builder only.
+- **(d) `num_params()` is stable and positive.** Fixed at `compile` time and
+  `> 0` (a model without trainable parameters is
+  `ValidationError::NoTrainableParams`), it is the `dimensions` the optimizer
+  consumes under C-5.
+- **(e) The gradient is exact.** `gradient_circuits(θ)` and
+  `gradient_from_counts` / `gradient_from_probabilities` give `∂fitness/∂θ` by
+  the parameter-shift rule, applied **per occurrence**: a parameter that
+  several gates share (convolution and pooling reuse theirs across qubit pairs)
+  is shifted at each gate in turn and the results are summed. With exact
+  probabilities it matches a central finite difference of the fitness to near
+  machine precision for every layer. One gradient runs
+  `num_gradient_circuits() = num_circuits · (1 + 2 · occurrences)` circuits. The
+  rule is exact only for gates `exp(−iθP/2)` with `P` a Pauli product; every
+  `GateInstruction` kind is classified, and a model containing one the rule
+  cannot handle has no exact gradient (`QmlError::NoExactGradient`, raised
+  lazily, so gradient-free optimizers still train it).
+- **(f) The oracle.** The `QmlOracle` scores a native problem
+  (`QmlSource::Native`) through the same candidate windows as the Qiskit form:
+  one finite fitness per candidate (C-5), sampled through the planner or, in
+  exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
+  probabilities, same memory budget and windows). It is also the run's
+  `GradientOracle`, for Adam. With a minibatch, one subset of the samples is
+  drawn per call, from the run's seed and a call counter, and shared by every
+  candidate of an `evaluate_batch` and by the base and every shift of a
+  gradient; `evaluate_full` scores every sample (the minibatch rules of C-5).
+
+### The Python API (`polypus.qml`)
+
+**Building a model.** `Model(encoder, ansatz, readout)` joins an `Encoder` (the
+layers that load each sample), an `Ansatz` (the trainable layers, which may also
+re-upload the data) and a `Readout`. It copies the three, so building on them
+afterwards does not change it, and it holds no trained parameters. Everything
+that does not depend on the data is checked where it is written, as a
+`ValueError`:
+
+- each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
+  amplitude encoder, pooling below two active qubits) and leaves the object as
+  it was when it raises;
+- `Model` checks that the `Encoder` and the `Ansatz` have the same width, that
+  some layer loads the data, that the layers reserve trainable parameters, and
+  that the readout's positions exist among the qubits still active at the end.
+
+What depends on the data — how many features the encoders can carry — is
+checked when the model meets a dataset.
+
+**Readout observables.** `Readout(observables, decision="raw", threshold=None)`.
+Each observable is a `polypus.qml.PauliTerm` (`Z(0)`, `Z(0) @ Z(1)`: one product,
+coefficient `1.0`), a `polypus.qml.Observable` (a weighted sum
+`Observable([(0.5, Z(0)), (1.5, Z(0) @ Z(1))])`, the only form with coefficients
+or several terms) or a `[(pauli, position), …]` list, the literal spelling of a
+`PauliTerm`. They are told apart by type, never by the shape of the tuples, and
+may be mixed. Positions are logical: they index the qubits still active after
+any pooling. A non-finite coefficient, an unknown Pauli or a position repeated
+in one product is a `ValueError` (`Z(0) @ Z(0)` raises at the `@`); anything
+else is a `TypeError` naming the three forms. `"argmax"` reads one observable
+per class (at least two); the other decisions predict from the first.
+`threshold` is required by `"threshold"` and rejected by every other decision.
+
+**Measurement basis (single group).** A readout may measure `X`/`Y`: the model
+inserts the basis change (`H` for `X`; `Sdg` then `H` for `Y`) before the
+terminal measurement, provided the whole readout resolves to one basis group
+(every term agrees on the Pauli of each qubit it touches). Conflicting bases
+inside one observable are `ValidationError::ObservableHasIncompatibleBases`; a
+readout needing more than one group is
+`ValidationError::ReadoutNeedsMultipleBasisGroups`: rejected, never mismeasured.
+
+**Options.** Every option is a string from a closed set, checked when it is
+given; any other value is a `ValueError` listing the valid ones. The typing
+stubs spell each set as a `Literal`.
+
+| Option | Accepted values |
+| --- | --- |
+| `angle_encoder(axis=)`, `hardware_efficient(rotations=[…])` | `"rx"`, `"ry"`, `"rz"` |
+| `hardware_efficient(entanglement=)`, `iqp_encoder(entanglement=)` | `"linear"`, `"circular"`, `"full"` |
+| `hardware_efficient(entangler=)` | `"cx"`, `"cz"` |
+| `conv(block=)` | `"basic"`, `"cartan"` |
+| `conv(pairing=)` | `"even_pairs"`, `"odd_pairs"`, `"alternating"` |
+| `pool(block=)` | `"basic"` |
+| `pool(keep=)` | `"even_positions"`, `"odd_positions"` |
+| `Readout(decision=)` | `"raw"`, `"sign"`, `"threshold"`, `"argmax"` |
+| `fit(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"`, `"expectation"` |
+
+**Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
+argument after `y` is keyword-only and `method` is required. It returns a
+`TrainResult` (C-7) whose `best_params` has `num_params` values. All the checks
+below run before a backend exists:
+
+- **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
+  `Dataset`, `y` is a `ValueError` (it carries its own labels, or none).
+  Labels from `y` follow C-8's checks; the rows must be non-empty, of equal
+  width and finite.
+- **Labels and loss.** With labels, `loss` is required and is a supervised
+  loss; `"expectation"` (which ignores labels) is a `ValueError`. Without
+  labels (`y=None`, or a `Dataset` built without them), `loss=None` means
+  `"expectation"` and a supervised loss is a `ValueError`: labels are never
+  ignored, and a supervised loss never trains against made-up labels. `"argmax"`
+  pairs with `"categorical_cross_entropy"` only, and every other decision with a
+  scalar loss. Label domains are the loss's (±1 for `"hinge"`, 0/1 for
+  `"binary_cross_entropy"`, class indices below the number of observables for
+  `"categorical_cross_entropy"`).
+- **`exact=True`** replaces sampling with exact probabilities (so `shots` does
+  not matter) and needs `infrastructure="local"` with `backend="polypus"`.
+- **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
+  reported `best_fitness` is on every sample (C-5).
+- **`backend=None`** is `"polypus"` (the native simulator) on
+  `infrastructure="local"` and `"aer"` elsewhere (CUNQA's QPUs run Aer; a
+  registry backend such as QMIO does not read it); an explicit `backend` wins.
+  The other execution arguments follow `polypus.train` (C-1, C-7, C-9).
+
+**Inference.** `model.bind(params)` checks that `params` has exactly
+`num_params` finite values (`ValueError` otherwise) and returns an immutable
+`TrainedModel`; the `Model` is unchanged. `TrainedModel.predict(x, *, …)`
+returns one decision per row: an `int` for `"sign"` and `"threshold"` (±1) and
+for `"argmax"` (the class index), a `float` for `"raw"` (the expectation).
+`TrainedModel.run(x, *, …)` returns the raw results: a `RunResult` whose
+`counts` holds one C-3 dict per row (`merged_counts` is `None`), or with
+`exact=True` an `ExactResult` whose `probabilities` holds one dict per row,
+keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
+`exact` and `backend=None` follow `fit`'s rules.
+
+**Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
+reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
+
+```json
+{"format": "polypus.qml.TrainedModel", "version": 1, "spec": {…}, "params": […]}
+```
+
+- Loading checks the format and the version, then rebuilds the model through the
+  same checks as `Model` and `bind`, so a corrupt or edited file is a
+  `ValueError` and never an inconsistent model. Loading only parses JSON: it
+  never runs code.
+- Every parameter reads back bit for bit (the file is written with
+  `serde_json`'s round-trip float formatting), so a loaded model predicts
+  exactly as the saved one.
+- `save` replaces any file at `path`, writing beside it and renaming over it,
+  so a failure never leaves a partial file. A disk failure is an `OSError`
+  (`FileNotFoundError`, `PermissionError` where they apply) naming the path.
+
+`qml.train` and `qml.predict` take Qiskit circuits only: an `Encoder` or
+`Ansatz` given to them is a `TypeError` before anything runs (C-8).
+
+**Enforcing test:**
+
+- **Rust:**
+  - `crates/polypus-qml/tests/contracts.rs`: (a)–(d), and the readout and
+    zero-sample guards;
+  - `crates/polypus-qml/tests/gradient_exactness.rs` and
+    `every_instruction_kind_is_classified` in `src/problem.rs`: (e);
+  - the `serde_tests` and `trained_model_tests` in `src/model.rs`: the save
+    format, exact round-trip and revalidation on load;
+  - the `native_*`, `a_minibatch_*`, `evaluate_full_*` and `the_factory_*`
+    tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
+    tests in `crates/polypus-infrastructure/src/native.rs`, and the `adam_*` and
+    `minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
+    (f).
+- **Python:** `tests/python/test_qml_native.py` — construction and every
+  rejection, the option sets, `fit` (supervised, unsupervised, exact, sampled,
+  minibatches, seeds), inference, decision types and save/load.
+

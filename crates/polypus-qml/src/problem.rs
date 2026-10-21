@@ -8,7 +8,7 @@
 //! backend, shots, distribution — is `crates/polypus`' concern, which keeps
 //! this crate free of any execution dependency (design doc §1, D11). These two
 //! operations plus `num_params`/`num_circuits` are the QML side of contract
-//! C-10.
+//! C-11.
 //!
 //! The exact parameter-shift gradient has its own pair of operations:
 //! [`gradient_circuits`](QmlProblem::gradient_circuits) lists every circuit a
@@ -168,7 +168,7 @@ impl QmlProblem {
     /// Emptiness is the one thing a subset *can* violate, precisely because it is
     /// not a per-sample property: an empty `indices` would build a problem with
     /// zero templates, whose `fitness_from_counts` would divide by zero and hand
-    /// back `Ok(NaN)` against contract C-10. So this is the second entry point at
+    /// back `Ok(NaN)` against contract C-11. So this is the second entry point at
     /// which `Dataset`'s non-empty invariant is reasserted (`Dataset::from_rows`
     /// is the first), and it propagates that
     /// [`ValidationError::EmptyDataset`] instead of trusting its callers: this
@@ -212,7 +212,7 @@ impl QmlProblem {
     }
 
     /// Bind `theta` into one [`ConcreteCircuit`] per training sample, in stable
-    /// sample-major order (contract C-10). A wrong number of parameters surfaces
+    /// sample-major order (contract C-11). A wrong number of parameters surfaces
     /// as [`QmlError::Circuit`]`(`[`WrongNumberOfParams`]`)`.
     ///
     /// [`WrongNumberOfParams`]: polypus_circuit::CircuitError::WrongNumberOfParams
@@ -318,7 +318,7 @@ impl QmlProblem {
     /// it evaluates the [`Loss`] against each raw `⟨O₀⟩` and averages. The loss
     /// always operates on the raw expectation, never on the [`Decision`] output
     /// (design doc §8). Returns a finite `f64` for valid counts, or a typed
-    /// [`QmlError`] — never `NaN` (contract C-10).
+    /// [`QmlError`] — never `NaN` (contract C-11).
     pub fn fitness_from_counts(&self, counts: &[HashMap<String, u64>]) -> Result<f64, QmlError> {
         self.fitness_from_weighted(counts)
     }
@@ -363,7 +363,7 @@ impl QmlProblem {
         // `weights.len() == templates.len() >= 1`: a `Dataset` is never empty —
         // `Dataset::from_rows` and `Dataset::select` are the only two ways to
         // build one and both reject an empty sample set — so the mean is well
-        // defined and finite, never `0.0 / 0.0` (contract C-10).
+        // defined and finite, never `0.0 / 0.0` (contract C-11).
         Ok(-total / expectations.len() as f64)
     }
 
@@ -1532,7 +1532,7 @@ mod tests {
     fn subset_rejects_an_empty_index_set() {
         // An empty minibatch would build a 0-template problem whose
         // `fitness_from_counts` divides by zero and returns `Ok(NaN)`, breaking
-        // C-10. `subset` reasserts `Dataset`'s non-empty invariant instead
+        // C-11. `subset` reasserts `Dataset`'s non-empty invariant instead
         // of building that degenerate problem.
         let full = distinct_feature_problem(&[0.15, 0.25, 0.35], &[1.0, -1.0, 1.0]);
         assert_eq!(full.subset(&[]).unwrap_err(), ValidationError::EmptyDataset);
