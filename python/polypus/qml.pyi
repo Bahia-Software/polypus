@@ -26,7 +26,8 @@ __all__ = [
     "predict",
     "Encoder",
     "Ansatz",
-    "Objective",
+    "Readout",
+    "Model",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -115,24 +116,55 @@ class Ansatz:
     def num_params(self) -> int: ...
 
 @final
-class Objective:
+class Readout:
     def __new__(
         cls,
         observables: Sequence[_ReadoutObservable],
         decision: _Decision = "raw",
-        # `None`: "expectation" without labels; required with labels.
-        loss: Optional[_Loss] = None,
         # Only with `decision="threshold"`, which requires it.
         threshold: Optional[float] = None,
-    ) -> Objective: ...
+    ) -> Readout: ...
     @property
     def decision(self) -> _Decision: ...
     @property
     def threshold(self) -> Optional[float]: ...
     @property
-    def loss(self) -> Optional[_Loss]: ...
-    @property
     def num_observables(self) -> int: ...
+
+@final
+class Model:
+    def __new__(cls, encoder: Encoder, ansatz: Ansatz, readout: Readout) -> Model: ...
+    @property
+    def num_qubits(self) -> int: ...
+    @property
+    def num_params(self) -> int: ...
+    def fit(
+        self,
+        x: Union[_DatasetRows, Dataset],
+        # Labels; not with a `Dataset`, which carries its own.
+        y: Optional[_DatasetLabels] = None,
+        *,
+        method: _Method,
+        # Required with labels; `None` without them means "expectation".
+        loss: Optional[_Loss] = None,
+        shots: int = 1024,
+        infrastructure: str = "local",
+        n_qpus: int = 1,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        options: Optional[dict[str, str]] = None,
+        sim_method: str = "automatic",
+        noise_model: Optional[NoiseModel] = None,
+        # `None`: "polypus" on infrastructure="local", "aer" otherwise.
+        backend: Optional[str] = None,
+        seed: Optional[int] = None,
+        id: str = "qml",
+        # Exact probabilities instead of shots; local native simulator only.
+        exact: bool = False,
+        # `1 <= batch_size < number of training samples`.
+        batch_size: Optional[int] = None,
+    ) -> TrainResult: ...
 
 @final
 class Dataset:

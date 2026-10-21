@@ -1,11 +1,14 @@
 """
-The native pieces of ``polypus.qml``: ``Encoder``, ``Ansatz``, ``Objective``,
-``Dataset`` and the Pauli readout helpers (``Z``/``X``/``Y``, ``PauliTerm``,
-``Observable``).
+The native API of ``polypus.qml`` (plan D4-R): ``Encoder``, ``Ansatz`` and
+``Readout`` joined into a ``Model``, trained with ``Model.fit`` on rows or a
+``Dataset``, plus the Pauli readout helpers (``Z``/``X``/``Y``, ``PauliTerm``,
+``Observable``), and the rejection of these pieces by the Qiskit form's
+``qml.train``/``qml.predict``.
 
-These tests need no backend: they check construction, the closed option sets
-(plan F6), the checks each builder call runs without the data (plan F1), the
-loss and decision pairing (plan F2) and the unlabeled ``Dataset`` (plan F4).
+Construction tests need no backend: the closed option sets (plan F6), the
+checks each builder call and the ``Model`` run without the data (plans F1, G3)
+and the unlabeled ``Dataset`` (plan F4). The ``fit`` tests train on the native
+simulator, or are rejected before any backend exists (plans F2, F3, F5).
 """
 
 import math
@@ -159,79 +162,56 @@ class TestAnsatz:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Objective
+# Readout
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestObjective:
+class TestReadout:
     def test_defaults(self):
-        from polypus.qml import Objective, Z
+        from polypus.qml import Readout, Z
 
-        objective = Objective([Z(0)])
-        assert objective.decision == "raw"
-        assert objective.loss is None
-        assert objective.threshold is None
-        assert objective.num_observables == 1
-        assert repr(objective) == (
-            'Objective(num_observables=1, decision="raw", loss=None)'
-        )
+        readout = Readout([Z(0)])
+        assert readout.decision == "raw"
+        assert readout.threshold is None
+        assert readout.num_observables == 1
+        assert repr(readout) == 'Readout(num_observables=1, decision="raw")'
 
     def test_the_three_observable_forms(self):
-        from polypus.qml import Objective, Observable, Z
+        from polypus.qml import Observable, Readout, Z
 
-        objective = Objective(
+        readout = Readout(
             [Z(0), [("z", 1)], Observable([(0.5, Z(2)), (0.5, Z(3))])],
             decision="argmax",
-            loss="categorical_cross_entropy",
         )
-        assert objective.num_observables == 3
+        assert readout.num_observables == 3
 
     def test_threshold_is_required_by_threshold_only(self):
-        from polypus.qml import Objective, Z
+        from polypus.qml import Readout, Z
 
-        objective = Objective([Z(0)], decision="threshold", threshold=0.2, loss="hinge")
-        assert (objective.decision, objective.threshold) == ("threshold", 0.2)
+        readout = Readout([Z(0)], decision="threshold", threshold=0.2)
+        assert (readout.decision, readout.threshold) == ("threshold", 0.2)
         with pytest.raises(ValueError, match="requires a threshold"):
-            Objective([Z(0)], decision="threshold")
+            Readout([Z(0)], decision="threshold")
         with pytest.raises(ValueError, match="only valid with"):
-            Objective([Z(0)], decision="sign", threshold=0.2)
-
-    @pytest.mark.parametrize(
-        "loss",
-        ["squared_error", "binary_cross_entropy", "hinge", "expectation", None],
-    )
-    def test_argmax_takes_only_the_categorical_loss(self, loss):
-        from polypus.qml import Objective, Z
-
-        with pytest.raises(ValueError, match="categorical_cross_entropy|Argmax"):
-            Objective([Z(0), Z(1)], decision="argmax", loss=loss)
-
-    @pytest.mark.parametrize("decision", ["raw", "sign"])
-    def test_the_categorical_loss_takes_only_argmax(self, decision):
-        from polypus.qml import Objective, Z
-
-        with pytest.raises(ValueError):
-            Objective([Z(0)], decision=decision, loss="categorical_cross_entropy")
+            Readout([Z(0)], decision="sign", threshold=0.2)
 
     def test_argmax_needs_two_observables(self):
-        from polypus.qml import Objective, Z
+        from polypus.qml import Readout, Z
 
         with pytest.raises(ValueError):
-            Objective([Z(0)], decision="argmax", loss="categorical_cross_entropy")
+            Readout([Z(0)], decision="argmax")
 
-    def test_unknown_options_name_the_valid_ones(self):
-        from polypus.qml import Objective, Z
+    def test_an_unknown_decision_names_the_valid_ones(self):
+        from polypus.qml import Readout, Z
 
-        with pytest.raises(ValueError, match='"expectation"'):
-            Objective([Z(0)], loss="l2")
         with pytest.raises(ValueError, match='"argmax"'):
-            Objective([Z(0)], decision="max")
+            Readout([Z(0)], decision="max")
 
     def test_an_observable_of_another_type_is_a_type_error(self):
-        from polypus.qml import Objective
+        from polypus.qml import Readout
 
         with pytest.raises(TypeError, match="PauliTerm"):
-            Objective(["Z0"])
+            Readout(["Z0"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,8 +304,244 @@ class TestDataset:
             test.scale_features_with(ranges[:1], 0.0, math.pi)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Model
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _model(num_qubits=1, readout=None, encoder=None, ansatz=None):
+    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+    return Model(
+        encoder or Encoder(num_qubits).angle_encoder("ry"),
+        ansatz or Ansatz(num_qubits).real_amplitudes(1),
+        readout or Readout([Z(0)], decision="sign"),
+    )
+
+
+class TestModel:
+    def test_counts_and_repr(self):
+        model = _model(2)
+        assert (model.num_qubits, model.num_params) == (2, 4)
+        assert repr(model) == "Model(num_qubits=2, num_layers=2, num_params=4)"
+
+    def test_the_pieces_are_copied(self):
+        from polypus.qml import Ansatz
+
+        ansatz = Ansatz(1).real_amplitudes(1)
+        model = _model(ansatz=ansatz)
+        ansatz.real_amplitudes(1)
+        assert model.num_params == 2
+
+    def test_widths_must_match(self):
+        from polypus.qml import Ansatz, Encoder
+
+        with pytest.raises(ValueError, match="2 qubits but the Ansatz has 1"):
+            _model(
+                encoder=Encoder(2).angle_encoder("ry"),
+                ansatz=Ansatz(1).real_amplitudes(1),
+            )
+
+    def test_some_layer_must_load_the_data(self):
+        from polypus.qml import Encoder
+
+        with pytest.raises(ValueError, match="no layer loads the data"):
+            _model(encoder=Encoder(1))
+
+    def test_data_reuploading_with_an_empty_encoder(self):
+        from polypus.qml import Ansatz, Encoder
+
+        model = _model(
+            encoder=Encoder(1), ansatz=Ansatz(1).angle_encoder("ry").real_amplitudes(1)
+        )
+        assert model.num_params == 2
+
+    def test_the_model_needs_trainable_parameters(self):
+        from polypus.qml import Ansatz
+
+        with pytest.raises(ValueError):
+            _model(ansatz=Ansatz(1))
+
+    def test_readout_positions_follow_pooling(self):
+        from polypus.qml import Ansatz, Readout, Z
+
+        # Pooling 2 qubits leaves one active: logical position 1 does not exist.
+        with pytest.raises(ValueError):
+            _model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(1)]))
+        assert _model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(0)]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model.fit
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Two separable classes on one feature: ry(x) puts small x near |0> (⟨Z⟩ ≈ +1)
+# and large x near |1> (⟨Z⟩ ≈ −1).
+_X = [[0.1], [0.3], [2.9], [3.0], [0.2], [2.8]]
+_Y = [1, 1, -1, -1, 1, -1]
+
+
+def _fit(model=None, x=_X, y=_Y, **kwargs):
+    import polypus
+
+    kwargs.setdefault("method", polypus.Adam(max_iters=5, patience=10_000))
+    kwargs.setdefault("seed", 3)
+    if y is not None:
+        kwargs.setdefault("loss", "hinge")
+    return (model or _model()).fit(x, y, **kwargs)
+
+
+@pytest.mark.integration
+class TestFit:
+    def test_supervised_run_with_the_defaults(self):
+        result = _fit()
+        assert len(result.best_params) == 2
+        assert result.iterations_run == 5
+        assert math.isfinite(result.best_fitness)
+        assert result.fitness_history[-1] == result.best_fitness
+
+    def test_exact_mode_does_not_depend_on_shots(self):
+        r1 = _fit(exact=True, shots=16)
+        r2 = _fit(exact=True, shots=4096)
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+
+    def test_adam_climbs_in_exact_mode(self):
+        import polypus
+
+        result = _fit(
+            method=polypus.Adam(max_iters=60, learning_rate=0.1, patience=10_000),
+            exact=True,
+        )
+        # The hinge loss of a perfect margin-1 classifier is 0.
+        assert result.best_fitness > -0.2
+
+    def test_gradient_free_optimizers_train_too(self):
+        import polypus
+
+        result = _fit(method=polypus.DE(generations=2, population_size=4))
+        assert len(result.best_params) == 2
+
+    def test_a_dataset_carries_its_labels(self):
+        from polypus.qml import Dataset
+
+        result = _fit(x=Dataset(_X, _Y), y=None, loss="hinge", exact=True)
+        assert result.best_fitness == _fit(exact=True).best_fitness
+
+    def test_unsupervised_maximises_the_readout(self):
+        import polypus
+        from polypus.qml import Observable, Readout, Z
+
+        # Maximise -⟨Z⟩ = -cos(x + φ): close samples can all be rotated near |1>.
+        model = _model(readout=Readout([Observable([(-1.0, Z(0))])]))
+        result = _fit(
+            model,
+            x=[[0.1], [0.2], [0.3]],
+            y=None,
+            method=polypus.Adam(max_iters=60, learning_rate=0.2, patience=10_000),
+            exact=True,
+        )
+        assert result.best_fitness > 0.5
+
+    def test_minibatches(self):
+        assert len(_fit(batch_size=2, exact=True).best_params) == 2
+
+    def test_explicit_aer_backend(self):
+        assert len(_fit(backend="aer", shots=64).best_params) == 2
+
+    def test_the_seed_replays_the_run(self):
+        r1, r2 = _fit(seed=11), _fit(seed=11)
+        assert r1.seed == r2.seed == 11
+        assert r1.best_params == r2.best_params
+        assert r1.fitness_history == r2.fitness_history
+
+
+class TestFitRejections:
+    """Everything here is rejected before a backend exists."""
+
+    def test_method_is_required_and_keyword_only(self):
+        import polypus
+
+        with pytest.raises(TypeError):
+            _model().fit(_X, _Y)
+        with pytest.raises(TypeError):
+            _model().fit(_X, _Y, polypus.Adam())
+
+    def test_labels_need_a_supervised_loss(self):
+        with pytest.raises(ValueError, match="needs a loss"):
+            _fit(loss=None)
+        with pytest.raises(ValueError, match="does not use labels"):
+            _fit(loss="expectation")
+
+    def test_a_supervised_loss_needs_labels(self):
+        from polypus.qml import Dataset
+
+        with pytest.raises(ValueError, match="needs labels"):
+            _fit(y=None, loss="hinge")
+        with pytest.raises(ValueError, match="needs labels"):
+            _fit(x=Dataset(_X), y=None, loss="hinge")
+
+    def test_a_dataset_and_y_together(self):
+        from polypus.qml import Dataset
+
+        with pytest.raises(ValueError, match="carries its own labels"):
+            _fit(x=Dataset(_X, _Y))
+
+    def test_an_unknown_loss_names_the_valid_ones(self):
+        with pytest.raises(ValueError, match='"expectation"'):
+            _fit(loss="l2")
+
+    @pytest.mark.parametrize("loss", ["squared_error", "hinge", "expectation"])
+    def test_argmax_takes_only_the_categorical_loss(self, loss):
+        from polypus.qml import Readout, Z
+
+        model = _model(2, readout=Readout([Z(0), Z(1)], decision="argmax"))
+        y = None if loss == "expectation" else [0, 1, 0, 1, 0, 1]
+        with pytest.raises(ValueError, match="CategoricalCrossEntropy"):
+            _fit(model, x=[[0.1, 0.2]] * 6, y=y, loss=loss)
+
+    def test_the_categorical_loss_takes_only_argmax(self):
+        with pytest.raises(ValueError, match="CategoricalCrossEntropy"):
+            _fit(y=[0, 1, 0, 1, 0, 1], loss="categorical_cross_entropy")
+
+    def test_label_domain_is_checked(self):
+        with pytest.raises(ValueError):
+            _fit(y=[0, 1, 0, 1, 0, 1])  # hinge needs ±1
+
+    def test_too_many_features_for_the_encoder(self):
+        with pytest.raises(ValueError):
+            _fit(x=[[0.1, 0.2]] * 6)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"backend": "aer"},
+            {"infrastructure": "cunqa", "nodes": 1, "cores_per_qpu": 1},
+        ],
+    )
+    def test_exact_needs_the_local_native_simulator(self, kwargs):
+        with pytest.raises(ValueError, match="exact=True needs"):
+            _fit(exact=True, **kwargs)
+
+    @pytest.mark.parametrize("size", [0, 6, 7])
+    def test_batch_size_must_be_smaller_than_the_dataset(self, size):
+        with pytest.raises(ValueError, match="batch_size"):
+            _fit(batch_size=size)
+
+    def test_the_default_backend_is_the_native_simulator(self):
+        # The native simulator is noiseless, so a noise model without a backend
+        # is refused: proof that `backend=None` resolved to "polypus".
+        with pytest.raises(ValueError, match="noise"):
+            _fit(noise_model=object())
+
+    def test_an_invalid_id_is_rejected(self):
+        with pytest.raises(ValueError):
+            _fit(id="no spaces")
+
+
 @pytest.mark.parametrize(
-    "name", ["Encoder", "Ansatz", "Objective", "Dataset", "PauliTerm", "Observable"]
+    "name",
+    ["Encoder", "Ansatz", "Readout", "Model", "Dataset", "PauliTerm", "Observable"],
 )
 def test_classes_report_the_qml_module(name):
     import polypus.qml as qml

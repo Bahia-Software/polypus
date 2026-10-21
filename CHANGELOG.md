@@ -14,14 +14,20 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
-- Native QML pieces in `polypus.qml`: `Encoder` and `Ansatz` (layer builders
-  that check each call without the data, with data re-uploading inside the
-  ansatz), `Objective(observables, decision="raw", loss=None, threshold=None)`,
-  `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
-  split), and the readout helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and
-  `Observable` (weighted sums). Options are strings from closed sets. Native
-  models get their own entry point; `qml.train` and `qml.predict`, which run
-  Qiskit circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
+- Native QML models in `polypus.qml`: `Model(encoder, ansatz, readout)`
+  built from an `Encoder` and an `Ansatz` (layer builders that check each call
+  without the data, with data re-uploading inside the ansatz) and a
+  `Readout(observables, decision="raw", threshold=None)`, with the readout
+  helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and `Observable` (weighted
+  sums). `Model.fit(x, y=None, *, method, loss=None, ...)` trains it on rows or
+  a `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
+  split) and returns a `TrainResult`: supervised with a named loss, or
+  unsupervised maximising the readout; Adam gets the exact parameter-shift
+  gradient; `exact=True` uses exact probabilities on the local native
+  simulator; `batch_size` trains on minibatches. Execution arguments have
+  defaults, and `backend=None` is the native simulator on `local`. Options are
+  strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
+  circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
 - `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
   finite_difference_step=0.1, seed=None)`, accepted by `train` and
@@ -35,16 +41,16 @@ Changes on `main` since 0.7.2.
   uses the exact gradient or a finite difference of the evaluation, and the
   CUNQA walltime warning times its gradient too. With a minibatch, Adam tracks
   its best on the full dataset, and the other optimizers' `best_fitness` is
-  re-scored on it at the end. Minibatches are not yet reachable from Python.
+  re-scored on it at the end.
 - The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
   source, the exact parameter-shift gradient. Both sources share the
-  candidate windows. Not yet reachable from Python.
+  candidate windows.
 - `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
   probabilities of each circuit, keyed like its counts, with no sampling and
   the same memory budget and windows as `run_circuits`. Only for a
-  full-register read-out; not yet reachable from Python.
+  full-register read-out.
 - Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
   same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`

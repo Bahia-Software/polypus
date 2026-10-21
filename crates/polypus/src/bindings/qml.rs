@@ -1,14 +1,18 @@
-//! The native pieces of `polypus.qml`: the `Encoder`, `Ansatz`, `Objective` and
-//! `Dataset` that `qml.train` / `qml.predict` accept in place of Qiskit circuits
-//! and a Python cost (plan D4, P-a), plus the Pauli readout helpers `Z`/`X`/`Y`,
-//! `PauliTerm` and `Observable`.
+//! The native API of `polypus.qml` (plan D4-R): a [`Model`] built from an
+//! `Encoder` that loads each sample, an `Ansatz` with the trainable layers and a
+//! `Readout`, trained with [`Model::fit`]; the `Dataset` it trains on; and the
+//! Pauli readout helpers `Z`/`X`/`Y`, `PauliTerm` and `Observable`.
+//! `qml.train`/`qml.predict` stay the Qiskit form and reject these pieces.
 //!
 //! Each class wraps a `polypus-qml` type and validates as it is built: every
 //! option is a string checked against its closed set (plan F6), and every
 //! builder call on an `Encoder`/`Ansatz` re-checks the layers that do not need
 //! the data (plan F1), so a mistake surfaces at the line that made it rather
-//! than inside `train`. What does depend on the data (the feature count) is
-//! checked when the pieces meet a dataset.
+//! than inside `fit`. What does depend on the data (the feature count) is
+//! checked when the model meets a dataset.
+
+use std::sync::Arc;
+use std::time::Instant;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -17,11 +21,19 @@ use pyo3::types::PyModule;
 use polypus_qml::{
     AngleEncoder, ConvBlock, ConvLayer, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
     IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString, PoolBlock,
-    PoolLayer, QuantumModel, Readout, RotationAxis, ValidationError,
+    PoolLayer, QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
 };
 
-use super::seed_or_entropy;
+use super::{
+    build_backend_config, extract_labels, finish_optimization, interruptible_token,
+    is_native_backend, log_training_start, method_from_pyclass, method_seed,
+    resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation, validate_id,
+    validate_shots_and_qpus, OptionsArg,
+};
+use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
 use crate::infrastructure::execution_config::random_seed;
+use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
+use crate::orchestration::{Resources, Scheduler, TrainFlow};
 
 /// A `polypus-qml` [`ValidationError`] as a Python `ValueError`. A free function
 /// because both types are foreign here (the orphan rule forbids a `From`), as
@@ -643,89 +655,63 @@ impl Ansatz {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Objective
+// Readout
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// What a native model reads out and how it is scored, in the
-/// `expectation_function` slot of `qml.train` and `qml.predict`.
+/// What a native model measures and how that becomes a prediction: the third
+/// piece of a [`Model`].
 ///
-/// `Objective(observables, decision="raw", loss=None, threshold=None)`:
+/// `Readout(observables, decision="raw", threshold=None)`:
 ///
 /// - `observables`: what is measured, each a [`PauliTerm`] (`Z(0)`,
 ///   `Z(0) @ Z(1)`), an [`Observable`](PyObservable) (a weighted sum) or a
-///   `[(pauli, position), …]` list. `"argmax"` reads one per class (at least
+///   `[(pauli, position), …]` list. Positions are logical: they index the qubits
+///   still active after any pooling. `"argmax"` reads one per class (at least
 ///   two); the other decisions predict from the first.
 /// - `decision`: how the readout becomes a prediction: `"raw"` (the expectation
 ///   itself), `"sign"`, `"threshold"` (with `threshold`) or `"argmax"`.
-/// - `loss`: how a prediction is scored against its label: `"squared_error"`,
-///   `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"` (the one
-///   loss for `"argmax"`), or `"expectation"`, which needs no labels and
-///   maximises the first observable. With labels a loss is required; without
-///   them, `None` means `"expectation"` (plan F2).
-#[pyclass(module = "polypus.qml", name = "Objective", frozen)]
-pub struct Objective {
-    pub(crate) readout: Readout,
-    pub(crate) loss: Option<Loss>,
+///
+/// How a prediction is scored against a label is a training choice, the `loss`
+/// of [`Model::fit`].
+#[pyclass(module = "polypus.qml", name = "Readout", frozen)]
+pub struct PyReadout {
+    pub(crate) inner: Readout,
 }
 
 #[pymethods]
-impl Objective {
+impl PyReadout {
     #[new]
-    #[pyo3(signature = (observables, decision="raw", loss=None, threshold=None))]
+    #[pyo3(signature = (observables, decision="raw", threshold=None))]
     fn new(
         observables: Vec<Bound<'_, PyAny>>,
         decision: &str,
-        loss: Option<&str>,
         threshold: Option<f64>,
     ) -> PyResult<Self> {
         let decision = parse_decision(decision, threshold)?;
-        let loss = loss.map(parse_loss).transpose()?;
         let observables = observables
             .iter()
             .map(extract_observable)
             .collect::<PyResult<Vec<_>>>()?;
-        let readout = Readout::new(observables, decision).map_err(validation_to_py_err)?;
-        // `argmax` pairs only with the categorical loss and every other decision
-        // only with a scalar one (`QmlProblem::new`'s rule), checked here so the
-        // mistake surfaces where it is written. `None` stands for `expectation`
-        // (scalar) or a loss still to be named, and `argmax` has a single
-        // possible loss, so `argmax` without one is caught here too.
-        let effective = loss.unwrap_or(Loss::Expectation);
-        if (decision == Decision::Argmax) != (effective == Loss::CategoricalCrossEntropy) {
-            return Err(match loss {
-                Some(loss) => validation_to_py_err(ValidationError::DecisionNotSupportedByLoss {
-                    decision,
-                    loss,
-                }),
-                None => PyValueError::new_err(
-                    "decision=\"argmax\" needs loss=\"categorical_cross_entropy\"",
-                ),
-            });
-        }
-        Ok(Objective { readout, loss })
+        let inner = Readout::new(observables, decision).map_err(validation_to_py_err)?;
+        Ok(PyReadout { inner })
     }
 
     #[getter]
     fn decision(&self) -> &'static str {
-        decision_name(self.readout.decision)
+        decision_name(self.inner.decision)
     }
 
     #[getter]
     fn threshold(&self) -> Option<f64> {
-        match self.readout.decision {
+        match self.inner.decision {
             Decision::Threshold(threshold) => Some(threshold),
             _ => None,
         }
     }
 
     #[getter]
-    fn loss(&self) -> Option<&'static str> {
-        self.loss.map(loss_name)
-    }
-
-    #[getter]
     fn num_observables(&self) -> usize {
-        self.readout.observables.len()
+        self.inner.observables.len()
     }
 
     fn __repr__(&self) -> String {
@@ -733,13 +719,9 @@ impl Objective {
             .threshold()
             .map(|t| format!(", threshold={t}"))
             .unwrap_or_default();
-        let loss = self
-            .loss()
-            .map(|l| format!("\"{l}\""))
-            .unwrap_or_else(|| "None".to_string());
         format!(
-            "Objective(num_observables={}, decision=\"{}\", loss={loss}{threshold})",
-            self.readout.observables.len(),
+            "Readout(num_observables={}, decision=\"{}\"{threshold})",
+            self.inner.observables.len(),
             self.decision()
         )
     }
@@ -859,6 +841,327 @@ impl PyDataset {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Model and Model.fit
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether `layer` loads the sample. A `match` rather than a `matches!` so a new
+/// layer kind has to be classified here.
+fn loads_data(layer: &Layer) -> bool {
+    match layer {
+        Layer::AngleEncoder(_) | Layer::AmplitudeEncoder(_) | Layer::Iqp(_) | Layer::Basis(_) => {
+            true
+        }
+        Layer::HardwareEfficient(_) | Layer::Conv(_) | Layer::Pool(_) => false,
+    }
+}
+
+/// A native QML model: an [`Encoder`] that loads each sample, an [`Ansatz`]
+/// with the trainable layers and a [`Readout`](PyReadout) that turns the
+/// measurement into a prediction (plan D4-R).
+///
+/// `Model(encoder, ansatz, readout)` copies the three pieces, so building on
+/// them afterwards does not change the model, and checks everything that does
+/// not depend on the data: the `Encoder` and `Ansatz` have the same width, some
+/// layer loads the data, the layers reserve trainable parameters, and the
+/// readout's positions exist among the qubits still active at the end. What
+/// depends on the data (how many features the encoders can carry) is checked
+/// when the model meets a dataset.
+///
+/// The model holds no trained parameters: [`fit`](Self::fit) returns them in a
+/// `TrainResult`.
+#[pyclass(module = "polypus.qml", name = "Model", frozen)]
+pub struct Model {
+    /// Encoder layers, then ansatz layers, with the readout.
+    spec: QuantumModel,
+    num_params: usize,
+}
+
+#[pymethods]
+impl Model {
+    #[new]
+    fn new(
+        encoder: PyRef<'_, Encoder>,
+        ansatz: PyRef<'_, Ansatz>,
+        readout: PyRef<'_, PyReadout>,
+    ) -> PyResult<Self> {
+        let (encoder, ansatz) = (&encoder.stack, &ansatz.stack);
+        if encoder.num_qubits != ansatz.num_qubits {
+            return Err(PyValueError::new_err(format!(
+                "the Encoder has {} qubits but the Ansatz has {}; they must match",
+                encoder.num_qubits, ansatz.num_qubits
+            )));
+        }
+        if !encoder.layers.iter().chain(&ansatz.layers).any(loads_data) {
+            return Err(PyValueError::new_err(
+                "no layer loads the data: add an encoder to the Encoder (or re-upload the data \
+                 in the Ansatz)",
+            ));
+        }
+        let spec = encoder
+            .layers
+            .iter()
+            .chain(&ansatz.layers)
+            .cloned()
+            .fold(QuantumModel::new(encoder.num_qubits), QuantumModel::layer)
+            .readout(readout.inner.clone());
+        // Zero features trips no feature-count check and changes no parameter
+        // count (see `check_layers`), so this raises exactly the structural
+        // errors and returns the real count.
+        let num_params = spec
+            .clone()
+            .compile(0)
+            .map_err(validation_to_py_err)?
+            .num_params();
+        Ok(Model { spec, num_params })
+    }
+
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.spec.num_qubits()
+    }
+
+    /// The trainable parameters: the length of `best_params`.
+    #[getter]
+    fn num_params(&self) -> usize {
+        self.num_params
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Model(num_qubits={}, num_layers={}, num_params={})",
+            self.spec.num_qubits(),
+            self.spec.num_layers(),
+            self.num_params
+        )
+    }
+
+    /// Train the model on `x` (rows of features, or a `Dataset`) and, for
+    /// supervised training, the labels `y`, and return a `TrainResult`.
+    ///
+    /// - **Labels and loss.** With labels (`y`, or a labeled `Dataset`, never
+    ///   both) `loss` is required: `"squared_error"`, `"binary_cross_entropy"`,
+    ///   `"hinge"`, or `"categorical_cross_entropy"` for an `"argmax"` readout.
+    ///   Without labels the run maximises the readout's first observable
+    ///   (`loss=None` or `"expectation"`); a supervised loss is then an error.
+    /// - **`method`** is any optimizer (`DE`, `PSO`, `QNG`, `CMAES`, `Adam`);
+    ///   Adam gets the exact parameter-shift gradient.
+    /// - **`exact=True`** uses exact probabilities instead of shots (then `shots`
+    ///   does not matter), on `infrastructure="local"` with the native simulator
+    ///   only.
+    /// - **`batch_size`** scores each evaluation on a fresh, seed-determined
+    ///   subset of that many samples, `1 <= batch_size < num_samples`; the
+    ///   reported `best_fitness` is always on the whole training set (C-5).
+    /// - **Execution** takes the arguments of `polypus.train`. `backend=None`
+    ///   is the native simulator on `infrastructure="local"` and Aer otherwise
+    ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
+    ///   optimizer, the shots and the minibatches (C-7), and `id` is a prefix to
+    ///   which a UUID is appended (C-9).
+    ///
+    /// Every check runs before a backend exists. The fitness is the negated
+    /// mean loss over the samples, which the optimizers maximise.
+    #[pyo3(signature = (
+        x, y=None, *, method, loss=None, shots=1024, infrastructure="local", n_qpus=1,
+        nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
+        noise_model=None, backend=None, seed=None, id="qml", exact=false, batch_size=None,
+    ))]
+    fn fit<'py>(
+        &self,
+        x: &Bound<'py, PyAny>,
+        y: Option<&Bound<'py, PyAny>>,
+        method: &Bound<'py, PyAny>,
+        loss: Option<&str>,
+        shots: u32,
+        infrastructure: &str,
+        n_qpus: u32,
+        nodes: u32,
+        cores_per_qpu: u32,
+        walltime: Option<String>,
+        options: Option<OptionsArg>,
+        sim_method: &str,
+        noise_model: Option<Bound<'py, PyAny>>,
+        backend: Option<&str>,
+        seed: Option<u64>,
+        id: &str,
+        exact: bool,
+        batch_size: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let start = Instant::now();
+        let py = x.py();
+        validate_shots_and_qpus(shots, n_qpus)?;
+        validate_cunqa_allocation(infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+        validate_id(id)?;
+        let loss = loss.map(parse_loss).transpose()?;
+        let effective_seed = resolve_optimizer_seed(seed, method_seed(method), random_seed)?;
+        let backend = resolve_backend(backend, infrastructure);
+        if exact && !(infrastructure == "local" && is_native_backend(backend)) {
+            return Err(PyValueError::new_err(
+                "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
+                 native simulator computes exact probabilities",
+            ));
+        }
+
+        let (dataset, labeled) = native_dataset(x, y)?;
+        let loss = resolve_loss(loss, labeled)?;
+        let compiled = self
+            .spec
+            .clone()
+            .compile(dataset.num_features())
+            .map_err(validation_to_py_err)?;
+        let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_py_err)?;
+        let num_samples = problem.num_circuits();
+        // A batch as large as the training set is the run without minibatches.
+        let minibatch = match batch_size {
+            Some(size) if size == 0 || size >= num_samples => {
+                return Err(PyValueError::new_err(format!(
+                    "batch_size must satisfy 1 <= batch_size < {num_samples} (the number of \
+                     training samples), got {size}"
+                )));
+            }
+            Some(size) => Some(MinibatchConfig::new(size, effective_seed)),
+            None => None,
+        };
+        let dimensions = u32::try_from(self.num_params).map_err(|_| {
+            PyValueError::new_err(format!(
+                "the model has {} trainable parameters, more than an optimizer can search",
+                self.num_params
+            ))
+        })?;
+        let exact = exact.then(|| Arc::new(NativeStatevectorBackend::new(effective_seed)));
+
+        // Native circuits never ask for fusion here: `None` keeps the backend's
+        // default.
+        let backend_config = build_backend_config(
+            infrastructure,
+            backend,
+            sim_method,
+            noise_model.map(|nm| nm.unbind()),
+            nodes,
+            cores_per_qpu,
+            walltime.as_deref(),
+            None,
+            options.map(OptionsArg::into_inner),
+        )?;
+        let effective_id = unique_id(id)?;
+        let config = Arc::new(ExecutionConfig {
+            id: effective_id.clone(),
+            shots,
+            n_qpus,
+            infrastructure: infrastructure.to_string(),
+            backend_config,
+            opt_level: OptLevel::default(),
+            seed: Some(effective_seed),
+        });
+        log_training_start(
+            &effective_id,
+            infrastructure,
+            backend,
+            n_qpus,
+            shots,
+            effective_seed,
+        );
+        let backend = Infrastructure::create_backend(&config)
+            .map_err(crate::exceptions::backend_error_to_pyerr)?;
+        let errors = OracleErrorSlot::new();
+        let method = method_from_pyclass(method, &errors, &effective_id)?;
+        let resources = Resources::new(backend, None, Arc::new(config.run_params()))
+            .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
+        let scheduler = Scheduler::ephemeral(resources);
+        let flow = TrainFlow {
+            factory: QmlOracleFactory {
+                source: QmlSource::Native {
+                    problem: Arc::new(problem),
+                    exact,
+                },
+                minibatch,
+            },
+            method,
+            dimensions,
+            seed: effective_seed,
+            errors: errors.clone(),
+        };
+        // GIL released for the run, as in `train`; the interrupt token keeps
+        // Ctrl+C prompt between waves.
+        let token = interruptible_token();
+        let result = py.detach(|| scheduler.run_cancellable(flow, &token));
+        scheduler.close();
+        finish_optimization(py, result, effective_seed, effective_id, start)
+    }
+}
+
+/// The native API's backend when none is named (plan F5): the native simulator
+/// on `local`, Aer elsewhere (CUNQA's QPUs run Aer; a registry backend ignores
+/// it).
+fn resolve_backend<'a>(backend: Option<&'a str>, infrastructure: &str) -> &'a str {
+    backend.unwrap_or(if infrastructure == "local" {
+        "polypus"
+    } else {
+        "aer"
+    })
+}
+
+/// The training set and whether it has labels: a [`Dataset`](PyDataset) as it
+/// is (then `y` is an error), or rows plus an optional `y`, read with the same
+/// label checks as `qml.train`'s `y_train`.
+fn native_dataset(
+    x: &Bound<'_, PyAny>,
+    y: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(polypus_qml::Dataset, bool)> {
+    if let Ok(dataset) = x.cast::<PyDataset>() {
+        if y.is_some() {
+            return Err(PyValueError::new_err(
+                "x is a polypus.qml.Dataset, which carries its own labels; pass y only with \
+                 plain rows",
+            ));
+        }
+        let dataset = dataset.try_borrow()?;
+        return Ok((dataset.inner.clone(), dataset.labeled));
+    }
+    let rows: Vec<Vec<f64>> = x.extract()?;
+    let labels = y
+        .map(|y| {
+            extract_labels(y).map(|labels| {
+                labels
+                    .into_iter()
+                    .map(|label| match label {
+                        Label::Class(class) => class as f64,
+                        Label::Real(value) => value,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .transpose()?;
+    let labeled = labels.is_some();
+    // Unlabeled: zeros satisfy the pure crate; `labeled` keeps a supervised loss
+    // from ever training against them (plan F3).
+    let labels = labels.unwrap_or_else(|| vec![0.0; rows.len()]);
+    let dataset = polypus_qml::Dataset::from_rows(&rows, &labels).map_err(validation_to_py_err)?;
+    Ok((dataset, labeled))
+}
+
+/// The loss a run trains with (plans F2 and F3): with labels, a supervised loss,
+/// which must be named; without labels, `expectation`. Every other pairing is a
+/// `ValueError`, so labels are never ignored and a supervised loss never trains
+/// against made-up labels.
+fn resolve_loss(loss: Option<Loss>, labeled: bool) -> PyResult<Loss> {
+    match (loss, labeled) {
+        (None | Some(Loss::Expectation), false) => Ok(Loss::Expectation),
+        (Some(loss), false) => Err(PyValueError::new_err(format!(
+            "loss=\"{}\" needs labels: pass y (or a labeled Dataset), or use \
+             loss=\"expectation\" to maximise the readout",
+            loss_name(loss)
+        ))),
+        (None, true) => Err(PyValueError::new_err(
+            "the training set has labels, so fit needs a loss, e.g. loss=\"hinge\"",
+        )),
+        (Some(Loss::Expectation), true) => Err(PyValueError::new_err(
+            "loss=\"expectation\" does not use labels: drop y (or use a Dataset without \
+             labels), or choose a supervised loss",
+        )),
+        (Some(loss), true) => Ok(loss),
+    }
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -872,7 +1175,8 @@ pub(crate) fn reject_native_pieces(
     if native(feature_map) || native(ansatz) {
         return Err(PyTypeError::new_err(format!(
             "qml.{entry} takes Qiskit QuantumCircuits as feature_map and ansatz; a \
-             polypus.qml.Encoder or Ansatz builds a native model, which qml.{entry} does not run"
+             polypus.qml.Encoder or Ansatz belongs in a polypus.qml.Model, trained with \
+             Model.fit"
         )));
     }
     Ok(())
@@ -882,7 +1186,8 @@ pub(crate) fn reject_native_pieces(
 pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_class::<Encoder>()?;
     qml.add_class::<Ansatz>()?;
-    qml.add_class::<Objective>()?;
+    qml.add_class::<PyReadout>()?;
+    qml.add_class::<Model>()?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;
@@ -978,6 +1283,45 @@ mod tests {
             .unwrap(),
             4
         );
+    }
+
+    #[test]
+    fn resolve_loss_pairs_losses_with_labels() {
+        Python::initialize();
+        assert_eq!(resolve_loss(None, false).unwrap(), Loss::Expectation);
+        assert_eq!(
+            resolve_loss(Some(Loss::Expectation), false).unwrap(),
+            Loss::Expectation
+        );
+        assert_eq!(resolve_loss(Some(Loss::Hinge), true).unwrap(), Loss::Hinge);
+        assert!(resolve_loss(Some(Loss::Hinge), false).is_err());
+        assert!(resolve_loss(None, true).is_err());
+        assert!(resolve_loss(Some(Loss::Expectation), true).is_err());
+    }
+
+    #[test]
+    fn the_default_backend_follows_the_infrastructure() {
+        assert_eq!(resolve_backend(None, "local"), "polypus");
+        assert_eq!(resolve_backend(None, "cunqa"), "aer");
+        assert_eq!(resolve_backend(None, "qmio"), "aer");
+        assert_eq!(resolve_backend(Some("aer"), "local"), "aer");
+    }
+
+    #[test]
+    fn only_encoders_load_data() {
+        assert!(loads_data(&Layer::AngleEncoder(AngleEncoder::new(
+            RotationAxis::Ry
+        ))));
+        assert!(loads_data(&Layer::AmplitudeEncoder(
+            polypus_qml::AmplitudeEncoder
+        )));
+        assert!(loads_data(&Layer::Iqp(IqpEncoder::new())));
+        assert!(loads_data(&Layer::Basis(polypus_qml::BasisEncoder)));
+        assert!(!loads_data(&Layer::HardwareEfficient(
+            HardwareEfficientAnsatz::new(1)
+        )));
+        assert!(!loads_data(&Layer::Conv(ConvLayer::new(ConvBlock::Basic))));
+        assert!(!loads_data(&Layer::Pool(PoolLayer::new(PoolBlock::Basic))));
     }
 
     #[test]

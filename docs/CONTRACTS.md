@@ -1138,7 +1138,8 @@ A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
 A `polypus.qml.Encoder` or `Ansatz` as `feature_map` or `ansatz` is a
-`TypeError` before anything runs: native models have their own entry point.
+`TypeError` before anything runs: native models are trained with
+`polypus.qml.Model.fit` (its contract, C-11, is to come).
 A Qiskit failure while composing the circuits or binding a row (an ansatz wider
 than the feature map, a feature value Qiskit rejects) is raised as
 `polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
