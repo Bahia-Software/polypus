@@ -14,6 +14,7 @@ pub mod expr;
 pub mod logging;
 pub mod observable;
 pub mod pso;
+pub mod qml;
 pub mod qng;
 
 use adam::Adam;
@@ -2123,6 +2124,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let qml = PyModule::new(py, "polypus.qml")?;
     qml.add_function(wrap_pyfunction!(qml_train, &qml)?)?;
     qml.add_function(wrap_pyfunction!(qml_predict, &qml)?)?;
+    qml::register(&qml)?;
     // Attach under the short key: `add_submodule` would use the dotted `__name__`
     // verbatim as the attribute name, breaking `polypus.qml.train` access.
     m.add("qml", &qml)?;

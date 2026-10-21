@@ -1,10 +1,12 @@
 # Typing stubs for `polypus.qml`, a submodule the compiled extension creates at
 # import time (it is not a file). Mirrors `qml_train` / `qml_predict` in
-# `crates/polypus/src/bindings/mod.rs`; see `__init__.pyi` for how the stubs
+# `crates/polypus/src/bindings/mod.rs` and the native classes in
+# `crates/polypus/src/bindings/qml.rs`; see `__init__.pyi` for how the stubs
 # are checked.
 
-from typing import Callable, Iterable, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, final
 
+import numpy.typing as npt
 from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
@@ -19,7 +21,140 @@ from . import (
     _Method,
 )
 
-__all__ = ["train", "predict"]
+__all__ = [
+    "train",
+    "predict",
+    "Encoder",
+    "Ansatz",
+    "Objective",
+    "Dataset",
+    "PauliTerm",
+    "Observable",
+    "Z",
+    "X",
+    "Y",
+]
+
+# ── Native pieces ───────────────────────────────────────────────────────────
+# Each option is a string from a closed set (bindings/qml.rs); any other value
+# raises `ValueError` naming the valid ones.
+_Axis = Literal["rx", "ry", "rz"]
+_Entanglement = Literal["linear", "circular", "full"]
+_Entangler = Literal["cx", "cz"]
+_ConvBlock = Literal["basic", "cartan"]
+_Pairing = Literal["even_pairs", "odd_pairs", "alternating"]
+_PoolBlock = Literal["basic"]
+_KeepRule = Literal["even_positions", "odd_positions"]
+_Pauli = Literal["x", "y", "z"]
+_Decision = Literal["raw", "sign", "threshold", "argmax"]
+_Loss = Literal[
+    "squared_error",
+    "binary_cross_entropy",
+    "hinge",
+    "categorical_cross_entropy",
+    "expectation",
+]
+# A coefficient-free Pauli product: a `PauliTerm` or its `(pauli, position)` list.
+_Term = Union[PauliTerm, Sequence[tuple[_Pauli, int]]]
+# One readout observable: a product (coefficient 1.0) or a weighted sum.
+_ReadoutObservable = Union[_Term, Observable]
+# `Dataset` rows and labels: sequences or NumPy arrays (indexed, not iterated).
+_DatasetRows = Union[Sequence[Sequence[float]], npt.NDArray[Any]]
+_DatasetLabels = Union[Sequence[float], npt.NDArray[Any]]
+
+@final
+class PauliTerm:
+    def __matmul__(self, other: PauliTerm, /) -> PauliTerm: ...
+    def __rmatmul__(self, other: PauliTerm, /) -> PauliTerm: ...
+
+def Z(position: int) -> PauliTerm: ...
+def X(position: int) -> PauliTerm: ...
+def Y(position: int) -> PauliTerm: ...
+
+@final
+class Observable:
+    def __new__(cls, terms: Sequence[tuple[float, _Term]]) -> Observable: ...
+    @property
+    def num_terms(self) -> int: ...
+
+@final
+class Encoder:
+    def __new__(cls, num_qubits: int) -> Encoder: ...
+    def angle_encoder(self, axis: _Axis) -> Encoder: ...
+    def amplitude_encoder(self) -> Encoder: ...
+    def basis_encoder(self) -> Encoder: ...
+    def iqp_encoder(self, entanglement: _Entanglement = "full") -> Encoder: ...
+    @property
+    def num_qubits(self) -> int: ...
+    @property
+    def num_layers(self) -> int: ...
+
+@final
+class Ansatz:
+    def __new__(cls, num_qubits: int) -> Ansatz: ...
+    def hardware_efficient(
+        self,
+        reps: int,
+        rotations: Optional[Sequence[_Axis]] = None,
+        entangler: _Entangler = "cx",
+        entanglement: _Entanglement = "linear",
+        final_rotation_layer: bool = True,
+    ) -> Ansatz: ...
+    def real_amplitudes(self, reps: int) -> Ansatz: ...
+    def conv(self, block: _ConvBlock, pairing: _Pairing = "alternating") -> Ansatz: ...
+    def pool(self, block: _PoolBlock, keep: _KeepRule = "even_positions") -> Ansatz: ...
+    # Data re-uploading between trainable layers.
+    def angle_encoder(self, axis: _Axis) -> Ansatz: ...
+    def basis_encoder(self) -> Ansatz: ...
+    def iqp_encoder(self, entanglement: _Entanglement = "full") -> Ansatz: ...
+    @property
+    def num_qubits(self) -> int: ...
+    @property
+    def num_layers(self) -> int: ...
+    @property
+    def num_params(self) -> int: ...
+
+@final
+class Objective:
+    def __new__(
+        cls,
+        observables: Sequence[_ReadoutObservable],
+        decision: _Decision = "raw",
+        # `None`: "expectation" without labels; required with labels.
+        loss: Optional[_Loss] = None,
+        # Only with `decision="threshold"`, which requires it.
+        threshold: Optional[float] = None,
+    ) -> Objective: ...
+    @property
+    def decision(self) -> _Decision: ...
+    @property
+    def threshold(self) -> Optional[float]: ...
+    @property
+    def loss(self) -> Optional[_Loss]: ...
+    @property
+    def num_observables(self) -> int: ...
+
+@final
+class Dataset:
+    def __new__(
+        cls, x: _DatasetRows, y: Optional[_DatasetLabels] = None
+    ) -> Dataset: ...
+    @property
+    def num_samples(self) -> int: ...
+    @property
+    def num_features(self) -> int: ...
+    @property
+    def labeled(self) -> bool: ...
+    @property
+    def labels(self) -> Optional[list[float]]: ...
+    def train_test_split(
+        self, test_fraction: float, seed: Optional[int] = None
+    ) -> tuple[Dataset, Dataset]: ...
+    def scale_features_to(self, lo: float, hi: float) -> None: ...
+    def feature_ranges(self) -> list[tuple[float, float]]: ...
+    def scale_features_with(
+        self, ranges: Sequence[tuple[float, float]], lo: float, hi: float
+    ) -> None: ...
 
 # `expectation_function` without `y_train`: one score per measured bitstring.
 # With `y_train`, it reads each sample's label: `(bitstring, label) -> float`,

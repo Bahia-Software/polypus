@@ -41,6 +41,8 @@ polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
+# `polypus.qml`'s native pieces (Encoder, Ansatz, Objective, Dataset) wrap its types.
+polypus-qml = { workspace = true }
 polypus-infrastructure = { workspace = true }
 polypus-orchestration = { workspace = true }
 polypus-evaluation = { workspace = true }

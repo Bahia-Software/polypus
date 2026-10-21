@@ -14,6 +14,13 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- Native QML pieces in `polypus.qml`: `Encoder` and `Ansatz` (layer builders
+  that check each call without the data, with data re-uploading inside the
+  ansatz), `Objective(observables, decision="raw", loss=None, threshold=None)`,
+  `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
+  split), and the readout helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and
+  `Observable` (weighted sums). Options are strings from closed sets. Not yet
+  accepted by `qml.train` or `qml.predict`.
 - `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
   finite_difference_step=0.1, seed=None)`, accepted by `train` and
