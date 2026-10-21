@@ -49,6 +49,3 @@ docs/IMPLEMENTATION_PROMPT.md
 # Internal notes (also blocked by .github/scripts/hygiene.py).
 CLAUDE_*.md
 AI_GUIDELINES*
-
-# QML crate design docs (docs/design/qml*.md) — drafts kept on disk, not tracked yet
-docs/design/
