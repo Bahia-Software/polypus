@@ -10,24 +10,24 @@ qft_circuit.measure_all()
 
 # 1. Single Run Local
 print("Calling Polypus Local with 1 qpu")
-result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="local")
+result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infrastructure="local")
 print(result)
 
 # 2. Single Run Local with distribute by shots
 print("Calling Polypus Local with 10 qpus")
 result = polypus.run_quantum_circuit(
-    qft_circuit, shots=10000, infraestructure="local", n_qpus=10
+    qft_circuit, shots=10000, infrastructure="local", n_qpus=10
 )
 print(result)
 
 # 3. Single Run QMIO
 print("Calling Polypus CUNQA with 1 qpu")
-result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infraestructure="qmio")
+result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infrastructure="qmio")
 print(result)
 
 # 4. Distribute by shots
 print("Calling Polypus Single Run for 10 QPUs")
 result = polypus.run_quantum_circuit(
-    qft_circuit, shots=10000, infraestructure="qmio", n_qpus=10
+    qft_circuit, shots=10000, infrastructure="qmio", n_qpus=10
 )
 print(result)
