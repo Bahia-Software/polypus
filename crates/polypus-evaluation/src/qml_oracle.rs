@@ -1469,6 +1469,56 @@ class Bound:
             .unwrap()
     }
 
+    /// A native source whose backend fails keeps the oracle contract (C-5): one
+    /// finite sentinel per candidate, the original error kept in the slot for
+    /// the entry point to re-raise, and no further work once failed (the
+    /// gradient and the full-dataset view then return sentinels without calling
+    /// the backend again).
+    #[test]
+    fn a_failing_native_run_records_its_error_and_returns_sentinels() {
+        let problem = native_problem(4);
+        let candidates = native_candidates(&problem, 3);
+        let backend = Arc::new(MockBackend::failing_on(1));
+        let as_dyn: Arc<dyn QuantumBackend> = backend.clone();
+        let oracle = QmlOracle {
+            source: QmlSource::Native {
+                problem: Arc::clone(&problem),
+                exact: None,
+            },
+            config: config(64),
+            planner: as_dyn.default_planner(),
+            backend: as_dyn,
+            minibatch: None,
+            cancel: CancelToken::default(),
+            errors: OracleErrorSlot::new(),
+        };
+
+        let fitness = oracle.evaluate_batch(&candidates);
+        assert_eq!(fitness, vec![0.0; candidates.len()]);
+        assert!(oracle.errors.failed());
+        let calls = backend.call_sizes().len();
+
+        assert_eq!(
+            oracle.gradient_batch(&candidates[0], problem.num_params()),
+            vec![0.0; problem.num_params()]
+        );
+        assert_eq!(oracle.evaluate_batch_full(&candidates), vec![0.0; 3]);
+        assert_eq!(
+            backend.call_sizes().len(),
+            calls,
+            "no backend call after the failure"
+        );
+
+        let error = oracle.errors.take().expect("the failure is recorded");
+        let error = error
+            .downcast::<EvaluationError>()
+            .expect("the slot holds the oracle's EvaluationError");
+        assert!(
+            matches!(*error, EvaluationError::Backend(_)),
+            "a backend failure is kept as EvaluationError::Backend, got {error:?}"
+        );
+    }
+
     #[test]
     fn native_sampled_fitness_is_the_problems_fitness_of_the_same_counts() {
         let problem = native_problem(4);
