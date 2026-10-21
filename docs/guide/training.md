@@ -41,13 +41,14 @@ Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An except
 
 ## The result
 
-`train` and `qml.train` return a `TrainResult`:
+`train`, `qml.train` and `qml.Model.fit` return a `TrainResult`:
 
 | Field | Content |
 |---|---|
 | `best_params` | `list[float]`, the optimized parameters |
 | `best_fitness` | Fitness at those parameters |
 | `iterations_run` | Iterations actually run, early stopping included |
+| `fitness_history` | `list[float]`, the convergence curve: the best fitness so far after each iteration run, so it never decreases and has `iterations_run` entries. It ends at `best_fitness`, except when a gradient-free optimizer trains on minibatches: its curve holds the minibatch estimates it steered by, while `best_fitness` is re-scored on the whole training set |
 | `converged` | Whether the convergence criterion was met |
 | `seed` | The effective seed; pass it back as `seed=...` to reproduce the run |
 | `id` | The effective run id |
