@@ -1108,8 +1108,7 @@ labels.
   offending **0-based** row index and both lengths (row features vs.
   `len(feature_map.parameters)`), consistent with how `x_train` is indexed as an
   array/list on the Python side.
-- **Dimensions.** `dimensions` is optional: omitted, it is
-  `len(ansatz.parameters)`; given, it must be **exactly that count**. This
+- **Dimensions.** `dimensions` must be **exactly `len(ansatz.parameters)`**. This
   mirrors `train`, which validates `dimensions` against the circuit's free
   parameter count (`circuit_source.num_params()`); that symmetry was documented
   only implicitly (in `train`'s docstring) and was missing entirely from
@@ -1128,25 +1127,6 @@ labels.
   `polypus.SampleCost((counts, label) -> float)`; a `Qubo`/`Ising` is a
   `TypeError`, and so is a `SampleCost` without labels. These checks run before
   any backend is created. `y_train=None` is the unsupervised path, unchanged.
-- **A `Dataset` in `x_train`.** A `polypus.qml.Dataset` supplies the rows and,
-  if it has them, the labels, which follow the rule above by value (all whole
-  numbers reach the objective as `int`). Passing `y_train` as well is a
-  `ValueError`.
-- **`batch_size`** (keyword-only) must satisfy `1 <= batch_size < number of
-  training samples`, else `ValueError`; the minibatch rules are C-5's.
-
-**Native form.** With a `polypus.qml.Encoder` and `Ansatz` in place of the
-circuits, `expectation_function` must be a `polypus.qml.Objective`. Mixing the
-forms is rejected before anything runs: one native piece and one circuit (or
-the pieces swapped) is a `ValueError`; a callable or cost with native pieces,
-or an `Objective` with circuits, a `TypeError`. The `Encoder` and `Ansatz` must
-have the same width, some layer must load the data, and the rows must fit the
-encoders; `dimensions` is the `Ansatz`'s parameter count. With labels, the
-`Objective` needs a supervised loss; without them its loss is `"expectation"`,
-and a supervised loss is a `ValueError`. `exact=True` needs the native form on
-`infrastructure="local"` with `backend="polypus"`, which is also the default
-`backend` of the native form there (`backend=None`). The native form's own
-contract is C-11 (to come).
 
 **Inference (`polypus.qml.predict`).** The same agreements hold, so a model runs
 the circuit it was trained as: each row of `x` has exactly
@@ -1157,6 +1137,8 @@ rejected too, all before anything runs.
 A row whose length cannot be read (e.g. a generator with no `__len__`) is a
 legitimate type error and propagates as-is; it is not masked into the messages
 above. `y_train` itself is only iterated, so a generator is fine there.
+A `polypus.qml.Encoder` or `Ansatz` as `feature_map` or `ansatz` is a
+`TypeError` before anything runs: native models have their own entry point.
 A Qiskit failure while composing the circuits or binding a row (an ansatz wider
 than the feature map, a feature value Qiskit rejects) is raised as
 `polypus.EvaluationError` with the Qiskit original as `__cause__` (C-1, issue
@@ -1164,11 +1146,9 @@ than the feature map, a feature value Qiskit rejects) is raised as
 
 **Enforcing test:** `tests/python/test_qml_train_validation.py` (every rejection,
 with nothing executed), `tests/python/test_qml_supervised.py` (each sample's
-counts meet its own label; the objective calling convention),
-`tests/python/test_qml_predict.py` (the inference agreements),
-`tests/python/test_qml_train_forms.py` (defaults, `dimensions`, a `Dataset` and
-`batch_size` in the Qiskit form, mixed forms) and
-`tests/python/test_qml_native.py` (the native form's rejections).
+counts meet its own label; the objective calling convention) and
+`tests/python/test_qml_predict.py` (the inference agreements) and
+`tests/python/test_qml_native.py` (native pieces rejected by both).
 
 ---
 

@@ -19,17 +19,9 @@ Changes on `main` since 0.7.2.
   ansatz), `Objective(observables, decision="raw", loss=None, threshold=None)`,
   `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
   split), and the readout helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and
-  `Observable` (weighted sums). Options are strings from closed sets. Not yet
-  accepted by `qml.predict`.
-- `qml.train` takes a native form: a `polypus.qml.Encoder` and `Ansatz` with an
-  `Objective` in `expectation_function`, run on Polypus's own circuits, with
-  the exact parameter-shift gradient for Adam and, with `exact=True`, exact
-  probabilities instead of shots (local native simulator only). In either
-  form, everything after `method` now has a default (`shots=1024`, `n_qpus=1`,
-  `infrastructure="local"`, `nodes=1`, `cores_per_qpu=2`, `id="qml"`),
-  `dimensions` is inferred, `x_train` may be a `polypus.qml.Dataset`, and
-  `batch_size` trains on minibatches. `backend=None` picks `"polypus"` for the
-  native form on `local` and `"aer"` otherwise. Mixing the forms is an error.
+  `Observable` (weighted sums). Options are strings from closed sets. Native
+  models get their own entry point; `qml.train` and `qml.predict`, which run
+  Qiskit circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
 - `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
   finite_difference_step=0.1, seed=None)`, accepted by `train` and
@@ -43,7 +35,7 @@ Changes on `main` since 0.7.2.
   uses the exact gradient or a finite difference of the evaluation, and the
   CUNQA walltime warning times its gradient too. With a minibatch, Adam tracks
   its best on the full dataset, and the other optimizers' `best_fitness` is
-  re-scored on it at the end.
+  re-scored on it at the end. Minibatches are not yet reachable from Python.
 - The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
