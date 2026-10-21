@@ -11,29 +11,34 @@
 //! than inside `fit`. What does depend on the data (the feature count) is
 //! checked when the model meets a dataset.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyList, PyModule};
 
 use polypus_qml::{
-    AngleEncoder, ConvBlock, ConvLayer, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
-    IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString, PoolBlock,
-    PoolLayer, QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
+    AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
+    HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli,
+    PauliString, PoolBlock, PoolLayer, QmlError, QmlProblem, QuantumModel, Readout, RotationAxis,
+    ValidationError,
 };
 
 use super::{
-    build_backend_config, extract_labels, finish_optimization, interruptible_token,
-    is_native_backend, log_training_start, method_from_pyclass, method_seed,
+    build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
+    interruptible_token, is_native_backend, log_training_start, method_from_pyclass, method_seed,
     resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation, validate_id,
-    validate_shots_and_qpus, OptionsArg,
+    validate_shots_and_qpus, OptionsArg, RunResult,
 };
 use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
 use crate::infrastructure::execution_config::random_seed;
-use crate::infrastructure::{ExecutionConfig, Infrastructure, NativeStatevectorBackend, OptLevel};
-use crate::orchestration::{Resources, Scheduler, TrainFlow};
+use crate::infrastructure::{
+    BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
+    NativeStatevectorBackend, OptLevel,
+};
+use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
 
 /// A `polypus-qml` [`ValidationError`] as a Python `ValueError`. A free function
 /// because both types are foreign here (the orphan rule forbids a `From`), as
@@ -875,6 +880,8 @@ pub struct Model {
     /// Encoder layers, then ansatz layers, with the readout.
     spec: QuantumModel,
     num_params: usize,
+    /// The readout's decision, which `TrainedModel.predict` reports by.
+    decision: Decision,
 }
 
 #[pymethods]
@@ -913,7 +920,11 @@ impl Model {
             .compile(0)
             .map_err(validation_to_py_err)?
             .num_params();
-        Ok(Model { spec, num_params })
+        Ok(Model {
+            spec,
+            num_params,
+            decision: readout.inner.decision,
+        })
     }
 
     #[getter]
@@ -934,6 +945,30 @@ impl Model {
             self.spec.num_layers(),
             self.num_params
         )
+    }
+
+    /// Bind trained parameters (typically a `TrainResult.best_params`) into a
+    /// [`TrainedModel`] for inference. There must be exactly `num_params` of
+    /// them, all finite. The model itself is unchanged.
+    fn bind(&self, params: Vec<f64>) -> PyResult<TrainedModel> {
+        if params.len() != self.num_params {
+            return Err(PyValueError::new_err(format!(
+                "params has {} values, but the model has {} trainable parameters",
+                params.len(),
+                self.num_params
+            )));
+        }
+        if let Some((index, value)) = params.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(PyValueError::new_err(format!(
+                "params[{index}] is {value}; every parameter must be a finite number"
+            )));
+        }
+        Ok(TrainedModel {
+            spec: self.spec.clone(),
+            num_params: self.num_params,
+            decision: self.decision,
+            params,
+        })
     }
 
     /// Train the model on `x` (rows of features, or a `Dataset`) and, for
@@ -1162,6 +1197,389 @@ fn resolve_loss(loss: Option<Loss>, labeled: bool) -> PyResult<Loss> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TrainedModel and ExactResult
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The exact basis-state probabilities of each row, from
+/// `TrainedModel.run(..., exact=True)` (plan H3): no shots, so no seed and no
+/// sampling noise.
+#[pyclass(module = "polypus.qml", name = "ExactResult", frozen)]
+pub struct ExactResult {
+    /// One `dict[str, float]` per row, keyed like counts (C-3); basis states of
+    /// probability exactly zero are left out.
+    #[pyo3(get)]
+    pub probabilities: Py<PyAny>,
+    /// Run identifier used for logging.
+    #[pyo3(get)]
+    pub id: String,
+    /// Always the native simulator (`"polypus"`).
+    #[pyo3(get)]
+    pub backend: String,
+    /// Always `"local"`.
+    #[pyo3(get)]
+    pub infrastructure: String,
+}
+
+#[pymethods]
+impl ExactResult {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "ExactResult(rows={}, id='{}', backend='{}', infrastructure='{}')",
+            self.probabilities.bind(py).len()?,
+            self.id,
+            self.backend,
+            self.infrastructure
+        ))
+    }
+}
+
+/// The execution arguments `TrainedModel.predict` and `run` share.
+struct Execution<'a, 'py> {
+    shots: u32,
+    infrastructure: &'a str,
+    n_qpus: u32,
+    nodes: u32,
+    cores_per_qpu: u32,
+    walltime: Option<String>,
+    options: Option<OptionsArg>,
+    sim_method: &'a str,
+    noise_model: Option<Bound<'py, PyAny>>,
+    backend: Option<&'a str>,
+    seed: Option<u64>,
+    exact: bool,
+}
+
+/// One run of a [`TrainedModel`] over some rows: one result per row, the
+/// compiled model that reads them, and the run's manifest.
+struct RowsRun {
+    compiled: CompiledModel,
+    results: RowResults,
+    id: String,
+    seed: Option<u64>,
+    backend: String,
+    infrastructure: String,
+}
+
+enum RowResults {
+    Counts(Vec<Counts>),
+    Exact(Vec<HashMap<String, f64>>),
+}
+
+/// A `polypus-qml` [`QmlError`] (binding a row, reading a result) as a
+/// `ValueError`: at inference it is always about the input.
+fn qml_to_py_err(e: QmlError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// A [`Model`] bound to trained parameters, from [`Model::bind`]: what runs
+/// inference. Immutable: binding other parameters gives another `TrainedModel`
+/// and leaves the `Model` as it was.
+///
+/// [`predict`](Self::predict) returns the readout's decisions, and
+/// [`run`](Self::run) the raw counts (or exact probabilities). Both take the
+/// rows as rows of features or a `Dataset` (its labels are not used) and the
+/// execution arguments of `Model.fit`, all keyword-only; the seed is drawn when
+/// omitted and must be omitted on `qmio`, real hardware Polypus cannot seed.
+#[pyclass(module = "polypus.qml", name = "TrainedModel", frozen)]
+pub struct TrainedModel {
+    spec: QuantumModel,
+    num_params: usize,
+    decision: Decision,
+    params: Vec<f64>,
+}
+
+impl TrainedModel {
+    /// Bind every row of `x` to the parameters and run the circuits: sampled
+    /// through the scheduler, or, with `exact`, as exact probabilities on the
+    /// native simulator. Every check runs before a backend exists.
+    fn run_rows(&self, x: &Bound<'_, PyAny>, exec: Execution<'_, '_>) -> PyResult<RowsRun> {
+        let py = x.py();
+        let start = Instant::now();
+        validate_shots_and_qpus(exec.shots, exec.n_qpus)?;
+        validate_cunqa_allocation(
+            exec.infrastructure,
+            exec.nodes,
+            exec.cores_per_qpu,
+            exec.walltime.as_deref(),
+        )?;
+        let backend = resolve_backend(exec.backend, exec.infrastructure);
+        if exec.exact && !(exec.infrastructure == "local" && is_native_backend(backend)) {
+            return Err(PyValueError::new_err(
+                "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
+                 native simulator computes exact probabilities",
+            ));
+        }
+        // The labels play no part in inference.
+        let (rows, _) = native_dataset(x, None)?;
+        let compiled = self
+            .spec
+            .clone()
+            .compile(rows.num_features())
+            .map_err(validation_to_py_err)?;
+        let circuits = (0..rows.num_samples())
+            .map(|i| {
+                compiled
+                    .bind(rows.sample(i), &self.params)
+                    .map(BoundCircuit::Native)
+                    .map_err(qml_to_py_err)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        // As in `run_quantum_circuit` (C-7): `qmio` is hardware, so a seed there
+        // would be silently ineffective.
+        let seed = if exec.infrastructure == "qmio" {
+            if exec.seed.is_some() {
+                return Err(PyValueError::new_err(
+                    "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
+                ));
+            }
+            None
+        } else {
+            Some(seed_or_entropy(exec.seed, random_seed)?)
+        };
+        let backend_config = build_backend_config(
+            exec.infrastructure,
+            backend,
+            exec.sim_method,
+            exec.noise_model.map(|nm| nm.unbind()),
+            exec.nodes,
+            exec.cores_per_qpu,
+            exec.walltime.as_deref(),
+            None,
+            exec.options.map(OptionsArg::into_inner),
+        )?;
+        let id = unique_id(&format!("qml_{}_{}", exec.n_qpus, exec.infrastructure))?;
+        let config = ExecutionConfig {
+            id: id.clone(),
+            shots: exec.shots,
+            n_qpus: exec.n_qpus,
+            infrastructure: exec.infrastructure.to_string(),
+            backend_config,
+            opt_level: OptLevel::default(),
+            seed,
+        };
+        log::info!(
+            "qml inference {id} starting: rows={}, infrastructure={}, backend={backend}, \
+             n_qpus={}, shots={}, exact={}, seed={seed:?}",
+            circuits.len(),
+            exec.infrastructure,
+            exec.n_qpus,
+            exec.shots,
+            exec.exact
+        );
+        let shots = exec.shots;
+        let results = if exec.exact {
+            let native = NativeStatevectorBackend::new(seed.unwrap_or_default());
+            let params = config.run_params();
+            py.detach(|| native.run_circuits_exact(&circuits, &params))
+                .map(RowResults::Exact)
+                .map_err(crate::exceptions::backend_error_to_pyerr)?
+        } else {
+            // One run, GIL released, the rows in waves of the backend's
+            // concurrency; Ctrl+C is honoured between waves.
+            py.detach(move || -> Result<Vec<Counts>, InfrastructureError> {
+                let backend = Infrastructure::create_backend(&config)
+                    .map_err(InfrastructureError::Backend)?;
+                let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
+                let scheduler = Scheduler::ephemeral(resources);
+                let out = scheduler
+                    .run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
+                scheduler.close();
+                out
+            })
+            .map(RowResults::Counts)
+            .map_err(crate::exceptions::infrastructure_error_to_pyerr)?
+        };
+        log::info!(
+            "qml inference {id} completed: duration={:?}",
+            start.elapsed()
+        );
+        Ok(RowsRun {
+            compiled,
+            results,
+            id,
+            seed,
+            backend: backend.to_string(),
+            infrastructure: exec.infrastructure.to_string(),
+        })
+    }
+}
+
+#[pymethods]
+impl TrainedModel {
+    /// The bound parameters, in the order `Model.fit` returned them.
+    #[getter]
+    fn params(&self) -> Vec<f64> {
+        self.params.clone()
+    }
+
+    /// The model the parameters are bound to.
+    #[getter]
+    fn model(&self) -> Model {
+        Model {
+            spec: self.spec.clone(),
+            num_params: self.num_params,
+            decision: self.decision,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TrainedModel(num_qubits={}, num_params={})",
+            self.spec.num_qubits(),
+            self.num_params
+        )
+    }
+
+    /// The readout's decision for each row of `x`: `int` for `"sign"` and
+    /// `"threshold"` (±1) and for `"argmax"` (the class index), `float` for
+    /// `"raw"` (the expectation itself). With `exact=True` the decisions come
+    /// from exact probabilities instead of shots.
+    #[pyo3(signature = (
+        x, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1, cores_per_qpu=2,
+        walltime=None, options=None, sim_method="automatic", noise_model=None, backend=None,
+        seed=None, exact=false,
+    ))]
+    fn predict<'py>(
+        &self,
+        x: &Bound<'py, PyAny>,
+        shots: u32,
+        infrastructure: &str,
+        n_qpus: u32,
+        nodes: u32,
+        cores_per_qpu: u32,
+        walltime: Option<String>,
+        options: Option<OptionsArg>,
+        sim_method: &str,
+        noise_model: Option<Bound<'py, PyAny>>,
+        backend: Option<&str>,
+        seed: Option<u64>,
+        exact: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let run = self.run_rows(
+            x,
+            Execution {
+                shots,
+                infrastructure,
+                n_qpus,
+                nodes,
+                cores_per_qpu,
+                walltime,
+                options,
+                sim_method,
+                noise_model,
+                backend,
+                seed,
+                exact,
+            },
+        )?;
+        let values = match &run.results {
+            RowResults::Counts(counts) => counts
+                .iter()
+                .map(|counts| run.compiled.predict_from_counts(counts))
+                .collect::<Result<Vec<_>, _>>(),
+            RowResults::Exact(probabilities) => probabilities
+                .iter()
+                .map(|p| run.compiled.predict_from_probabilities(p))
+                .collect::<Result<Vec<_>, _>>(),
+        }
+        .map_err(qml_to_py_err)?;
+        let py = x.py();
+        let decisions = PyList::empty(py);
+        for value in values {
+            // A discrete decision is a whole number in `f64`; Python gets it as
+            // the `int` it is.
+            match self.decision {
+                Decision::Raw => decisions.append(value)?,
+                Decision::Sign | Decision::Threshold(_) | Decision::Argmax => {
+                    decisions.append(value as i64)?
+                }
+            }
+        }
+        Ok(decisions)
+    }
+
+    /// The raw results for each row of `x`: a `RunResult` whose `counts` holds
+    /// one dict per row (`merged_counts` is `None`: the rows are different
+    /// circuits), or, with `exact=True`, an `ExactResult` of probabilities.
+    #[pyo3(signature = (
+        x, *, shots=1024, infrastructure="local", n_qpus=1, nodes=1, cores_per_qpu=2,
+        walltime=None, options=None, sim_method="automatic", noise_model=None, backend=None,
+        seed=None, exact=false,
+    ))]
+    fn run<'py>(
+        &self,
+        x: &Bound<'py, PyAny>,
+        shots: u32,
+        infrastructure: &str,
+        n_qpus: u32,
+        nodes: u32,
+        cores_per_qpu: u32,
+        walltime: Option<String>,
+        options: Option<OptionsArg>,
+        sim_method: &str,
+        noise_model: Option<Bound<'py, PyAny>>,
+        backend: Option<&str>,
+        seed: Option<u64>,
+        exact: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let run = self.run_rows(
+            x,
+            Execution {
+                shots,
+                infrastructure,
+                n_qpus,
+                nodes,
+                cores_per_qpu,
+                walltime,
+                options,
+                sim_method,
+                noise_model,
+                backend,
+                seed,
+                exact,
+            },
+        )?;
+        let py = x.py();
+        match run.results {
+            RowResults::Counts(counts) => Py::new(
+                py,
+                RunResult {
+                    counts: counts_to_pylist(py, &counts)?.into_any().unbind(),
+                    merged_counts: py.None(),
+                    id: run.id,
+                    seed: run.seed,
+                    backend: run.backend,
+                    infrastructure: run.infrastructure,
+                },
+            )
+            .map(Py::into_any),
+            RowResults::Exact(probabilities) => {
+                let list = PyList::empty(py);
+                for row in &probabilities {
+                    let dict = PyDict::new(py);
+                    let mut keys: Vec<&String> = row.keys().collect();
+                    keys.sort();
+                    for key in keys {
+                        dict.set_item(key, row[key])?;
+                    }
+                    list.append(dict)?;
+                }
+                Py::new(
+                    py,
+                    ExactResult {
+                        probabilities: list.into_any().unbind(),
+                        id: run.id,
+                        backend: run.backend,
+                        infrastructure: run.infrastructure,
+                    },
+                )
+                .map(Py::into_any)
+            }
+        }
+    }
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -1188,6 +1606,8 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_class::<Ansatz>()?;
     qml.add_class::<PyReadout>()?;
     qml.add_class::<Model>()?;
+    qml.add_class::<TrainedModel>()?;
+    qml.add_class::<ExactResult>()?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;

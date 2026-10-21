@@ -539,9 +539,162 @@ class TestFitRejections:
             _fit(id="no spaces")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Model.bind and TrainedModel
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def trained():
+    """A one-qubit classifier trained exactly: ⟨Z⟩ = cos(x + φ) with φ ≈ 0."""
+    import polypus
+
+    model = _model()
+    result = model.fit(
+        _X,
+        _Y,
+        method=polypus.Adam(max_iters=60, learning_rate=0.1, patience=10_000),
+        loss="hinge",
+        exact=True,
+        seed=3,
+    )
+    return model.bind(result.best_params)
+
+
+class TestBind:
+    def test_bound_model(self):
+        model = _model()
+        trained = model.bind([0.1, 0.2])
+        assert trained.params == [0.1, 0.2]
+        assert trained.model.num_params == model.num_params == 2
+        assert repr(trained) == "TrainedModel(num_qubits=1, num_params=2)"
+
+    def test_the_model_is_unchanged(self):
+        model = _model()
+        model.bind([0.1, 0.2])
+        model.bind([0.3, 0.4])
+        assert model.num_params == 2
+
+    def test_the_parameter_count_must_match(self):
+        with pytest.raises(ValueError, match="params has 3 values"):
+            _model().bind([0.1, 0.2, 0.3])
+
+    @pytest.mark.parametrize("value", [math.nan, math.inf])
+    def test_parameters_must_be_finite(self, value):
+        with pytest.raises(ValueError, match=r"params\[1\]"):
+            _model().bind([0.1, value])
+
+
+@pytest.mark.integration
+class TestInference:
+    def test_predict_classifies_the_training_set(self, trained):
+        labels = trained.predict(_X, exact=True)
+        assert labels == _Y
+        assert all(type(label) is int for label in labels)
+
+    def test_sampled_predict_agrees(self, trained):
+        assert trained.predict(_X, shots=2048, seed=5) == _Y
+
+    def test_a_dataset_is_accepted_and_its_labels_unused(self, trained):
+        from polypus.qml import Dataset
+
+        assert trained.predict(Dataset(_X), exact=True) == _Y
+        assert trained.predict(Dataset(_X, [0] * 6), exact=True) == _Y
+
+    def test_run_returns_counts_per_row(self, trained):
+        import polypus
+
+        run = trained.run(_X, shots=128, seed=5)
+        assert isinstance(run, polypus.RunResult)
+        assert len(run.counts) == len(_X)
+        assert all(sum(counts.values()) == 128 for counts in run.counts)
+        assert run.merged_counts is None
+        assert (run.seed, run.backend, run.infrastructure) == (5, "polypus", "local")
+
+    def test_the_seed_replays_the_counts(self, trained):
+        assert (
+            trained.run(_X, shots=64, seed=9).counts
+            == trained.run(_X, shots=64, seed=9).counts
+        )
+
+    def test_exact_run_returns_probabilities(self, trained):
+        from polypus.qml import ExactResult
+
+        run = trained.run(_X, exact=True)
+        assert isinstance(run, ExactResult)
+        assert len(run.probabilities) == len(_X)
+        for row in run.probabilities:
+            assert set(row) <= {"0", "1"}
+            assert sum(row.values()) == pytest.approx(1.0)
+        assert (run.backend, run.infrastructure) == ("polypus", "local")
+        assert repr(run).startswith("ExactResult(rows=6,")
+
+    def test_raw_decisions_are_the_expectations(self):
+        from polypus.qml import Readout, Z
+
+        trained = _model(readout=Readout([Z(0)])).bind([0.0, 0.0])
+        values = trained.predict([[0.0], [math.pi / 2]], exact=True)
+        assert all(type(value) is float for value in values)
+        assert values == pytest.approx([1.0, 0.0], abs=1e-12)
+
+    def test_argmax_decisions_are_class_indices(self):
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        # Zero angles and CZ entanglers leave the basis state the encoder
+        # prepared, so ⟨Z_k⟩ = −1 on every qubit set to 1 and the argmax picks
+        # the qubit left at 0.
+        model = Model(
+            Encoder(2).basis_encoder(),
+            Ansatz(2).hardware_efficient(1, rotations=["ry"], entangler="cz"),
+            Readout([Z(0), Z(1)], decision="argmax"),
+        )
+        classes = model.bind([0.0] * model.num_params).predict(
+            [[1.0, 0.0], [0.0, 1.0]], exact=True
+        )
+        assert classes == [1, 0]
+
+    def test_explicit_aer_backend(self, trained):
+        assert len(trained.run(_X, backend="aer", shots=32, seed=1).counts) == 6
+
+
+class TestInferenceRejections:
+    """Everything here is rejected before a backend exists."""
+
+    def test_rows_must_fit_the_encoder(self, trained):
+        with pytest.raises(ValueError):
+            trained.predict([[0.1, 0.2]])
+
+    def test_no_rows(self, trained):
+        with pytest.raises(ValueError):
+            trained.predict([])
+
+    @pytest.mark.parametrize("method", ["predict", "run"])
+    def test_exact_needs_the_local_native_simulator(self, trained, method):
+        with pytest.raises(ValueError, match="exact=True needs"):
+            getattr(trained, method)(_X, exact=True, backend="aer")
+
+    def test_no_seed_on_qmio_hardware(self, trained):
+        with pytest.raises(ValueError, match="seed is not supported"):
+            trained.run(_X, infrastructure="qmio", seed=1)
+
+    def test_execution_arguments_are_keyword_only(self, trained):
+        with pytest.raises(TypeError):
+            trained.predict(_X, 128)
+
+
 @pytest.mark.parametrize(
     "name",
-    ["Encoder", "Ansatz", "Readout", "Model", "Dataset", "PauliTerm", "Observable"],
+    [
+        "Encoder",
+        "Ansatz",
+        "Readout",
+        "Model",
+        "TrainedModel",
+        "ExactResult",
+        "Dataset",
+        "PauliTerm",
+        "Observable",
+    ],
 )
 def test_classes_report_the_qml_module(name):
     import polypus.qml as qml

@@ -28,6 +28,8 @@ __all__ = [
     "Ansatz",
     "Readout",
     "Model",
+    "TrainedModel",
+    "ExactResult",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -165,6 +167,61 @@ class Model:
         # `1 <= batch_size < number of training samples`.
         batch_size: Optional[int] = None,
     ) -> TrainResult: ...
+    def bind(self, params: Sequence[float]) -> TrainedModel: ...
+
+@final
+class TrainedModel:
+    @property
+    def params(self) -> list[float]: ...
+    @property
+    def model(self) -> Model: ...
+    def predict(
+        self,
+        x: Union[_DatasetRows, Dataset],
+        *,
+        shots: int = 1024,
+        infrastructure: str = "local",
+        n_qpus: int = 1,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        options: Optional[dict[str, str]] = None,
+        sim_method: str = "automatic",
+        noise_model: Optional[NoiseModel] = None,
+        backend: Optional[str] = None,
+        # Omitted: drawn (and reported by `run`); must be omitted on "qmio".
+        seed: Optional[int] = None,
+        exact: bool = False,
+    ) -> list[Union[int, float]]: ...
+    def run(
+        self,
+        x: Union[_DatasetRows, Dataset],
+        *,
+        shots: int = 1024,
+        infrastructure: str = "local",
+        n_qpus: int = 1,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        options: Optional[dict[str, str]] = None,
+        sim_method: str = "automatic",
+        noise_model: Optional[NoiseModel] = None,
+        backend: Optional[str] = None,
+        seed: Optional[int] = None,
+        exact: bool = False,
+    ) -> Union[RunResult, ExactResult]: ...
+
+@final
+class ExactResult:
+    # One `dict[str, float]` per row, keyed like counts.
+    @property
+    def probabilities(self) -> list[dict[str, float]]: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def backend(self) -> str: ...
+    @property
+    def infrastructure(self) -> str: ...
 
 @final
 class Dataset:

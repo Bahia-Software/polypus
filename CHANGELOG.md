@@ -24,8 +24,12 @@ Changes on `main` since 0.7.2.
   split) and returns a `TrainResult`: supervised with a named loss, or
   unsupervised maximising the readout; Adam gets the exact parameter-shift
   gradient; `exact=True` uses exact probabilities on the local native
-  simulator; `batch_size` trains on minibatches. Execution arguments have
-  defaults, and `backend=None` is the native simulator on `local`. Options are
+  simulator; `batch_size` trains on minibatches. `Model.bind(params)` gives an
+  immutable `TrainedModel` whose `predict` returns the readout's decisions
+  (`int` for sign, threshold and argmax, `float` for raw) and whose `run`
+  returns the counts per row, or an `ExactResult` of probabilities with
+  `exact=True`. Execution arguments have defaults, and `backend=None` is the
+  native simulator on `local`. Options are
   strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
   circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
 - `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
