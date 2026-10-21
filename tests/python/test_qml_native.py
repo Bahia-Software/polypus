@@ -682,6 +682,91 @@ class TestInferenceRejections:
             trained.predict(_X, 128)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TrainedModel.save and qml.load
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSaveLoad:
+    def test_round_trip_predicts_identically(self, trained, tmp_path):
+        from polypus.qml import TrainedModel, load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        loaded = load(path)
+        assert isinstance(loaded, TrainedModel)
+        assert loaded.params == trained.params
+        assert loaded.predict(_X, exact=True) == trained.predict(_X, exact=True)
+        assert (
+            loaded.run(_X, exact=True).probabilities
+            == trained.run(_X, exact=True).probabilities
+        )
+
+    def test_floats_read_back_bit_for_bit(self, tmp_path):
+        from polypus.qml import load
+
+        params = [0.1 + 0.2, 1 / 3]
+        _model().bind(params).save(str(tmp_path / "m.json"))
+        assert load(str(tmp_path / "m.json")).params == params
+
+    def test_the_file_is_versioned_json(self, trained, tmp_path):
+        import json
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        saved = json.loads(path.read_text())
+        assert saved["format"] == "polypus.qml.TrainedModel"
+        assert saved["version"] == 1
+        assert saved["params"] == trained.params
+        assert set(saved) == {"format", "version", "spec", "params"}
+
+    def test_save_replaces_and_leaves_no_temporary_file(self, trained, tmp_path):
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        _model().bind([0.0, 0.0]).save(path)
+        trained.save(path)
+        assert load(path).params == trained.params
+        assert [p.name for p in tmp_path.iterdir()] == ["model.json"]
+
+    def test_disk_failures_are_os_errors(self, trained, tmp_path):
+        from polypus.qml import load
+
+        with pytest.raises(FileNotFoundError, match="missing.json"):
+            load(tmp_path / "missing.json")
+        with pytest.raises(FileNotFoundError):
+            trained.save(tmp_path / "no_such_dir" / "model.json")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "edit",
+        [
+            lambda saved: "not json",
+            lambda saved: json_dump({**saved, "format": "something.else"}),
+            lambda saved: json_dump({**saved, "version": 2}),
+            lambda saved: json_dump({**saved, "params": saved["params"][:-1]}),
+            lambda saved: json_dump({k: v for k, v in saved.items() if k != "spec"}),
+        ],
+        ids=["not-json", "format", "version", "params", "no-spec"],
+    )
+    def test_a_corrupt_or_edited_file_is_a_value_error(self, trained, tmp_path, edit):
+        import json
+
+        from polypus.qml import load
+
+        path = tmp_path / "model.json"
+        trained.save(path)
+        path.write_text(edit(json.loads(path.read_text())))
+        with pytest.raises(ValueError, match="not a valid polypus.qml.TrainedModel"):
+            load(path)
+
+
+def json_dump(value):
+    import json
+
+    return json.dumps(value)
+
+
 @pytest.mark.parametrize(
     "name",
     [

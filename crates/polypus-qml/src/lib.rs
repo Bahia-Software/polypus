@@ -83,9 +83,7 @@ pub use layers::{
     RotationAxis,
 };
 pub use loss::Loss;
-#[cfg(feature = "serde")]
-pub use model::TrainedModel;
-pub use model::{CompiledModel, QuantumModel};
+pub use model::{CompiledModel, QuantumModel, TrainedModel};
 pub use observables::{Observable, Pauli, PauliString};
 pub use problem::{minibatch_indices, QmlProblem};
 pub use readout::{Decision, Readout};

@@ -38,7 +38,7 @@ use crate::layers::{
     IqpEncoder, Layer, PoolBlock, PoolLayer, RotationAxis,
 };
 use crate::observables::{Pauli, ResolvedObservable, ResolvedPauliString};
-use crate::readout::{Readout, ResolvedReadout};
+use crate::readout::{Decision, Readout, ResolvedReadout};
 
 /// The accumulator threaded through a model's layers, in order, during
 /// compilation. Carries exactly the three things a layer's `plan` needs.
@@ -553,16 +553,144 @@ impl<'de> serde::Deserialize<'de> for CompiledModel {
     }
 }
 
-/// A trained model ready for inference: a compiled model plus its optimal
-/// trainable parameters (design doc §17). Exists only under the `serde`
-/// feature — saving/loading is its only purpose.
-#[cfg(feature = "serde")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// A trained model: a model specification bound to its trained parameters,
+/// ready for inference and for saving (design doc §17, plan D4-R).
+///
+/// It holds the *uncompiled* [`QuantumModel`] (with its readout) and `params`,
+/// so it serves any dataset the model can encode:
+/// [`compile`](Self::compile) it for a feature count, then bind each sample
+/// with [`params`](Self::params). Construction checks everything that does not
+/// depend on the data: the model compiles (its structure, its readout), and
+/// `params` has one finite value per trainable parameter.
+///
+/// Under the `serde` feature it saves as
+/// `{"format": "polypus.qml.TrainedModel", "version": 1, "spec": …, "params": […]}`
+/// and loads through [`new`](Self::new), so a corrupt or tampered file never
+/// yields an inconsistent model. This one format serves Rust and the Python
+/// `polypus.qml.TrainedModel.save` / `polypus.qml.load`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrainedModel {
-    /// The compiled model (round-tripped as `{spec, num_features}`).
-    pub model: CompiledModel,
-    /// The optimal trainable parameters, `θ`.
-    pub theta: Vec<f64>,
+    spec: QuantumModel,
+    params: Vec<f64>,
+    num_params: usize,
+    decision: Decision,
+}
+
+impl TrainedModel {
+    /// Bind `params` to the model `spec`, checking that the model compiles
+    /// without data and that `params` has exactly one finite value per
+    /// trainable parameter ([`ValidationError::ParamCountMismatch`],
+    /// [`ValidationError::NonFiniteParam`]).
+    pub fn new(spec: QuantumModel, params: Vec<f64>) -> Result<Self, ValidationError> {
+        // No feature count is known here. Zero trips no feature-count check and
+        // changes no parameter count (encoders reserve none), so this raises
+        // exactly the structural errors and gives the real count.
+        let compiled = spec.clone().compile(0)?;
+        let num_params = compiled.num_params();
+        if params.len() != num_params {
+            return Err(ValidationError::ParamCountMismatch {
+                expected: num_params,
+                got: params.len(),
+            });
+        }
+        if let Some((index, &value)) = params.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(ValidationError::NonFiniteParam { index, value });
+        }
+        let decision = compiled.resolved_readout().decision();
+        Ok(TrainedModel {
+            spec,
+            params,
+            num_params,
+            decision,
+        })
+    }
+
+    /// The model specification.
+    pub fn spec(&self) -> &QuantumModel {
+        &self.spec
+    }
+
+    /// The trained parameters, `θ`.
+    pub fn params(&self) -> &[f64] {
+        &self.params
+    }
+
+    /// The number of trainable parameters (`params().len()`).
+    pub fn num_params(&self) -> usize {
+        self.num_params
+    }
+
+    /// The readout's decision, which turns a sample's result into a prediction.
+    pub fn decision(&self) -> Decision {
+        self.decision
+    }
+
+    /// Compile the model for samples of `num_features` features: the
+    /// [`CompiledModel`] that binds them (with [`params`](Self::params)) and
+    /// reads their results.
+    pub fn compile(&self, num_features: usize) -> Result<CompiledModel, ValidationError> {
+        self.spec.clone().compile(num_features)
+    }
+}
+
+/// What a saved [`TrainedModel`] declares itself as, so another JSON file is
+/// rejected by name rather than by a confusing missing field.
+#[cfg(feature = "serde")]
+const TRAINED_MODEL_FORMAT: &str = "polypus.qml.TrainedModel";
+/// The save format's version. A file of another version is rejected, so a
+/// future format can change without being misread.
+#[cfg(feature = "serde")]
+const TRAINED_MODEL_VERSION: u32 = 1;
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for TrainedModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            format: &'static str,
+            version: u32,
+            spec: &'a QuantumModel,
+            params: &'a [f64],
+        }
+        Wire {
+            format: TRAINED_MODEL_FORMAT,
+            version: TRAINED_MODEL_VERSION,
+            spec: &self.spec,
+            params: &self.params,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Load through [`TrainedModel::new`]: the format and version are checked
+/// first, then the model and parameters are revalidated exactly as at
+/// construction, each failure a deserialization error carrying the reason.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for TrainedModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            format: String,
+            version: u32,
+            spec: QuantumModel,
+            params: Vec<f64>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.format != TRAINED_MODEL_FORMAT {
+            return Err(serde::de::Error::custom(format!(
+                "not a {TRAINED_MODEL_FORMAT} (format \"{}\")",
+                wire.format
+            )));
+        }
+        if wire.version != TRAINED_MODEL_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported {TRAINED_MODEL_FORMAT} version {}; this version of Polypus reads \
+                 version {TRAINED_MODEL_VERSION}",
+                wire.version
+            )));
+        }
+        TrainedModel::new(wire.spec, wire.params).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -1181,25 +1309,154 @@ mod serde_tests {
         assert_eq!(object.len(), 2);
     }
 
-    #[test]
-    fn trained_model_round_trips_model_and_theta() {
-        let model = full_model();
-        let theta: Vec<f64> = (0..model.num_params())
-            .map(|i| 0.1 * (i as f64 + 1.0))
-            .collect();
-        let trained = TrainedModel {
-            model,
-            theta: theta.clone(),
-        };
-        let json = serde_json::to_string(&trained).unwrap();
-        let loaded: TrainedModel = serde_json::from_str(&json).unwrap();
+    /// The full model's specification, uncompiled, as a `TrainedModel` holds it.
+    fn full_spec() -> QuantumModel {
+        full_model().spec
+    }
 
-        assert_eq!(loaded.theta, theta);
-        // The reloaded model still binds identically with the reloaded θ.
+    fn full_trained() -> TrainedModel {
+        let spec = full_spec();
+        let num_params = spec.clone().compile(0).unwrap().num_params();
+        // Values whose shortest decimal form is long, to pin exact round-trips.
+        let params = (0..num_params)
+            .map(|i| 0.1 * (i as f64 + 1.0) + 0.2 / 3.0)
+            .collect();
+        TrainedModel::new(spec, params).unwrap()
+    }
+
+    #[test]
+    fn trained_model_round_trips_exactly() {
+        let trained = full_trained();
+        let json = serde_json::to_string_pretty(&trained).unwrap();
+        let loaded: TrainedModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, trained);
+        // Bit for bit, so a loaded model predicts exactly as the saved one.
+        for (a, b) in loaded.params().iter().zip(trained.params()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
         let x = vec![0.1, 0.2, 0.3, 0.4];
         assert_eq!(
-            loaded.model.bind(&x, &loaded.theta).unwrap(),
-            trained.model.bind(&x, &theta).unwrap()
+            loaded
+                .compile(4)
+                .unwrap()
+                .bind(&x, loaded.params())
+                .unwrap(),
+            trained
+                .compile(4)
+                .unwrap()
+                .bind(&x, trained.params())
+                .unwrap()
         );
+    }
+
+    #[test]
+    fn trained_model_wire_names_its_format_and_version() {
+        let value = serde_json::to_value(full_trained()).unwrap();
+        let object = value.as_object().expect("a TrainedModel saves as a map");
+        assert_eq!(object["format"], "polypus.qml.TrainedModel");
+        assert_eq!(object["version"], 1);
+        assert!(object.contains_key("spec"));
+        assert!(object.contains_key("params"));
+        assert_eq!(object.len(), 4);
+    }
+
+    /// The saved form of `full_trained`, edited by `edit`, then loaded.
+    fn load_edited(edit: impl FnOnce(&mut serde_json::Value)) -> Result<TrainedModel, String> {
+        let mut value = serde_json::to_value(full_trained()).unwrap();
+        edit(&mut value);
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn loading_rejects_another_format_or_version() {
+        let err = load_edited(|v| v["format"] = "something.else".into()).unwrap_err();
+        assert!(err.contains("not a polypus.qml.TrainedModel"), "{err}");
+        let err = load_edited(|v| v["version"] = 2.into()).unwrap_err();
+        assert!(
+            err.contains("unsupported polypus.qml.TrainedModel version 2"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn loading_revalidates_the_parameters() {
+        let err = load_edited(|v| {
+            v["params"].as_array_mut().unwrap().pop();
+        })
+        .unwrap_err();
+        assert!(err.contains("params has"), "{err}");
+    }
+
+    #[test]
+    fn loading_revalidates_the_model() {
+        // A tampered readout naming a qubit that does not exist.
+        let err = load_edited(|v| {
+            let terms = &mut v["spec"]["readout"]["observables"][0]["terms"];
+            terms[0][1] = serde_json::json!([[99, "Z"]]);
+        })
+        .unwrap_err();
+        assert!(err.contains("99"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod trained_model_tests {
+    use super::*;
+    use crate::observables::{Observable, Pauli, PauliString};
+    use crate::readout::{Decision, Readout};
+
+    fn spec(decision: Decision) -> QuantumModel {
+        let z0 =
+            Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Z)]).unwrap())]).unwrap();
+        QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1)
+            .readout(Readout::new(vec![z0], decision).unwrap())
+    }
+
+    #[test]
+    fn new_checks_the_parameters() {
+        let num_params = spec(Decision::Sign).compile(0).unwrap().num_params();
+        assert_eq!(
+            TrainedModel::new(spec(Decision::Sign), vec![0.0; num_params - 1]).unwrap_err(),
+            ValidationError::ParamCountMismatch {
+                expected: num_params,
+                got: num_params - 1,
+            }
+        );
+        let mut params = vec![0.0; num_params];
+        params[1] = f64::INFINITY;
+        assert_eq!(
+            TrainedModel::new(spec(Decision::Sign), params).unwrap_err(),
+            ValidationError::NonFiniteParam {
+                index: 1,
+                value: f64::INFINITY,
+            }
+        );
+    }
+
+    #[test]
+    fn new_checks_the_model() {
+        let no_readout = QuantumModel::new(2)
+            .angle_encoder(RotationAxis::Ry)
+            .hardware_efficient(1);
+        assert_eq!(
+            TrainedModel::new(no_readout, vec![]).unwrap_err(),
+            ValidationError::MissingReadout
+        );
+    }
+
+    #[test]
+    fn accessors_report_the_bound_model() {
+        let num_params = spec(Decision::Raw).compile(0).unwrap().num_params();
+        let params: Vec<f64> = (0..num_params).map(|i| i as f64).collect();
+        let trained = TrainedModel::new(spec(Decision::Raw), params.clone()).unwrap();
+        assert_eq!(trained.params(), params.as_slice());
+        assert_eq!(trained.num_params(), num_params);
+        assert_eq!(trained.decision(), Decision::Raw);
+        assert_eq!(trained.spec(), &spec(Decision::Raw));
+        // Compiled for the data: two features bind with the trained params.
+        let compiled = trained.compile(2).unwrap();
+        assert!(compiled.bind(&[0.1, 0.2], trained.params()).is_ok());
     }
 }

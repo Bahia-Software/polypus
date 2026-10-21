@@ -12,10 +12,13 @@
 //! checked when the model meets a dataset.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyFileNotFoundError, PyOSError, PyPermissionError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 
@@ -880,8 +883,6 @@ pub struct Model {
     /// Encoder layers, then ansatz layers, with the readout.
     spec: QuantumModel,
     num_params: usize,
-    /// The readout's decision, which `TrainedModel.predict` reports by.
-    decision: Decision,
 }
 
 #[pymethods]
@@ -920,11 +921,7 @@ impl Model {
             .compile(0)
             .map_err(validation_to_py_err)?
             .num_params();
-        Ok(Model {
-            spec,
-            num_params,
-            decision: readout.inner.decision,
-        })
+        Ok(Model { spec, num_params })
     }
 
     #[getter]
@@ -951,24 +948,9 @@ impl Model {
     /// [`TrainedModel`] for inference. There must be exactly `num_params` of
     /// them, all finite. The model itself is unchanged.
     fn bind(&self, params: Vec<f64>) -> PyResult<TrainedModel> {
-        if params.len() != self.num_params {
-            return Err(PyValueError::new_err(format!(
-                "params has {} values, but the model has {} trainable parameters",
-                params.len(),
-                self.num_params
-            )));
-        }
-        if let Some((index, value)) = params.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-            return Err(PyValueError::new_err(format!(
-                "params[{index}] is {value}; every parameter must be a finite number"
-            )));
-        }
-        Ok(TrainedModel {
-            spec: self.spec.clone(),
-            num_params: self.num_params,
-            decision: self.decision,
-            params,
-        })
+        let inner = polypus_qml::TrainedModel::new(self.spec.clone(), params)
+            .map_err(validation_to_py_err)?;
+        Ok(TrainedModel { inner })
     }
 
     /// Train the model on `x` (rows of features, or a `Dataset`) and, for
@@ -1283,10 +1265,8 @@ fn qml_to_py_err(e: QmlError) -> PyErr {
 /// omitted and must be omitted on `qmio`, real hardware Polypus cannot seed.
 #[pyclass(module = "polypus.qml", name = "TrainedModel", frozen)]
 pub struct TrainedModel {
-    spec: QuantumModel,
-    num_params: usize,
-    decision: Decision,
-    params: Vec<f64>,
+    /// The crate's trained model, which also defines the save format.
+    inner: polypus_qml::TrainedModel,
 }
 
 impl TrainedModel {
@@ -1313,14 +1293,13 @@ impl TrainedModel {
         // The labels play no part in inference.
         let (rows, _) = native_dataset(x, None)?;
         let compiled = self
-            .spec
-            .clone()
+            .inner
             .compile(rows.num_features())
             .map_err(validation_to_py_err)?;
         let circuits = (0..rows.num_samples())
             .map(|i| {
                 compiled
-                    .bind(rows.sample(i), &self.params)
+                    .bind(rows.sample(i), self.inner.params())
                     .map(BoundCircuit::Native)
                     .map_err(qml_to_py_err)
             })
@@ -1410,25 +1389,36 @@ impl TrainedModel {
     /// The bound parameters, in the order `Model.fit` returned them.
     #[getter]
     fn params(&self) -> Vec<f64> {
-        self.params.clone()
+        self.inner.params().to_vec()
     }
 
     /// The model the parameters are bound to.
     #[getter]
     fn model(&self) -> Model {
         Model {
-            spec: self.spec.clone(),
-            num_params: self.num_params,
-            decision: self.decision,
+            spec: self.inner.spec().clone(),
+            num_params: self.inner.num_params(),
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
             "TrainedModel(num_qubits={}, num_params={})",
-            self.spec.num_qubits(),
-            self.num_params
+            self.inner.spec().num_qubits(),
+            self.inner.num_params()
         )
+    }
+
+    /// Save to `path` (a `str` or `pathlib.Path`) as JSON, replacing any file
+    /// there: `{"format": "polypus.qml.TrainedModel", "version": 1, "spec": …,
+    /// "params": […]}`, the format the `polypus-qml` crate reads too. The file
+    /// is written beside `path` and then renamed over it, so a failure never
+    /// leaves a partial model. Floats are written so they read back bit for
+    /// bit. A disk failure raises `OSError` naming the path.
+    fn save(&self, path: PathBuf) -> PyResult<()> {
+        let json = serde_json::to_string_pretty(&self.inner)
+            .map_err(|e| PyValueError::new_err(format!("cannot serialize the model: {e}")))?;
+        write_atomically(&path, json.as_bytes()).map_err(|e| io_to_py_err(&path, e))
     }
 
     /// The readout's decision for each row of `x`: `int` for `"sign"` and
@@ -1489,7 +1479,7 @@ impl TrainedModel {
         for value in values {
             // A discrete decision is a whole number in `f64`; Python gets it as
             // the `int` it is.
-            match self.decision {
+            match self.inner.decision() {
                 Decision::Raw => decisions.append(value)?,
                 Decision::Sign | Decision::Threshold(_) | Decision::Argmax => {
                     decisions.append(value as i64)?
@@ -1580,6 +1570,52 @@ impl TrainedModel {
     }
 }
 
+/// Write `bytes` to a temporary file beside `path`, then rename it over `path`,
+/// so `path` is either the old file or the complete new one. The temporary
+/// file is removed if anything fails.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the path names no file")
+    })?;
+    let mut temporary = name.to_os_string();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(temporary);
+    let result = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        // Best effort: the original error is the one worth reporting.
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// An I/O error on `path` as the matching `OSError` subclass, naming the path.
+fn io_to_py_err(path: &Path, e: std::io::Error) -> PyErr {
+    let message = format!("{}: {e}", path.display());
+    match e.kind() {
+        std::io::ErrorKind::NotFound => PyFileNotFoundError::new_err(message),
+        std::io::ErrorKind::PermissionDenied => PyPermissionError::new_err(message),
+        _ => PyOSError::new_err(message),
+    }
+}
+
+/// `polypus.qml.load(path)`: read a [`TrainedModel`] saved by
+/// `TrainedModel.save` (or by the `polypus-qml` crate). The file is checked as
+/// it is read: its format and version, then the model and parameters exactly
+/// as `Model` and `Model.bind` check them, so a corrupt or edited file is a
+/// `ValueError` and never an inconsistent model. Loading only parses JSON; it
+/// never runs code. A missing or unreadable file raises `OSError`.
+#[pyfunction(name = "load")]
+pub fn load(path: PathBuf) -> PyResult<TrainedModel> {
+    let json = std::fs::read_to_string(&path).map_err(|e| io_to_py_err(&path, e))?;
+    let inner = serde_json::from_str::<polypus_qml::TrainedModel>(&json).map_err(|e| {
+        PyValueError::new_err(format!(
+            "{} is not a valid polypus.qml.TrainedModel file: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(TrainedModel { inner })
+}
+
 /// `qml.train` and `qml.predict` run Qiskit circuits. A native piece in their
 /// `feature_map` or `ansatz` is a `TypeError` that says so (plan D4-R), rather
 /// than a Qiskit error from composing it.
@@ -1608,6 +1644,7 @@ pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_class::<Model>()?;
     qml.add_class::<TrainedModel>()?;
     qml.add_class::<ExactResult>()?;
+    qml.add_function(wrap_pyfunction!(load, qml)?)?;
     qml.add_class::<PyDataset>()?;
     qml.add_class::<PauliTerm>()?;
     qml.add_class::<PyObservable>()?;

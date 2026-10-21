@@ -817,6 +817,7 @@ dependencies = [
  "polypus-sim",
  "pyo3",
  "rayon",
+ "serde_json",
  "uuid",
 ]
 

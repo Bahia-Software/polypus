@@ -28,8 +28,10 @@ Changes on `main` since 0.7.2.
   immutable `TrainedModel` whose `predict` returns the readout's decisions
   (`int` for sign, threshold and argmax, `float` for raw) and whose `run`
   returns the counts per row, or an `ExactResult` of probabilities with
-  `exact=True`. Execution arguments have defaults, and `backend=None` is the
-  native simulator on `local`. Options are
+  `exact=True`. `TrainedModel.save(path)` writes it as versioned JSON (read back
+  bit for bit) and `polypus.qml.load(path)` reads it, revalidating the model
+  and its parameters; loading never runs code. Execution arguments have
+  defaults, and `backend=None` is the native simulator on `local`. Options are
   strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
   circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
 - `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
@@ -66,10 +68,12 @@ Changes on `main` since 0.7.2.
   ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
   argmax or raw decisions; squared-error, binary and categorical
   cross-entropy and hinge losses, and an unsupervised `Expectation` loss that
-  maximises the readout itself (no labels). It builds `polypus-circuit` circuits and
-  turns measurement counts into a fitness, and into an exact parameter-shift
-  gradient that stays exact when convolution and pooling reuse a parameter
-  across gates, but never runs them. It is not yet reachable from Python.
+  maximises the readout itself (no labels). It builds `polypus-circuit`
+  circuits and turns measurement counts into a fitness, and into an exact
+  parameter-shift gradient that stays exact when convolution and pooling reuse
+  a parameter across gates, but never runs them. A `TrainedModel` (model plus
+  trained parameters) saves as versioned JSON under the `serde` feature.
+  Python reaches it through `polypus.qml.Model`.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with

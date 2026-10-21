@@ -322,7 +322,7 @@ fn num_params_matches_compiled_model_c10() {
 // `Readout::observables` and `Observable::terms` are public and mutable, so a
 // readout can reach `compile` having never passed `Readout::new` /
 // `Observable::new` — mutated in place (below), or deserialized straight from a
-// save file (the `TrainedModel::load` path, covered by the unit tests in
+// save file (loading a `TrainedModel`, covered by the unit tests in
 // `model.rs`). `compile` must therefore re-run those construction checks and
 // fail with the *same* typed `ValidationError`, instead of trusting its input
 // and handing back a `CompiledModel` that indexes past `observables[0]` at the

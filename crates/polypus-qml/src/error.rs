@@ -261,6 +261,22 @@ pub enum ValidationError {
     /// construction error. In practice unreachable — the dataset and model are
     /// already validated — but typed rather than assumed away with `expect`.
     Template(QmlError),
+    /// A [`TrainedModel`](crate::TrainedModel) was given a parameter vector of
+    /// the wrong length for its model.
+    ParamCountMismatch {
+        /// The model's number of trainable parameters.
+        expected: usize,
+        /// The number of parameters supplied.
+        got: usize,
+    },
+    /// A [`TrainedModel`](crate::TrainedModel) parameter is `NaN` or infinite.
+    /// Reported for the first such parameter.
+    NonFiniteParam {
+        /// Index of the offending parameter.
+        index: usize,
+        /// The offending value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -392,6 +408,14 @@ impl fmt::Display for ValidationError {
                 "subset index {index} is out of range: only {num_circuits} circuit(s) are available"
             ),
             ValidationError::Template(e) => write!(f, "template compilation failed: {e}"),
+            ValidationError::ParamCountMismatch { expected, got } => write!(
+                f,
+                "params has {got} values, but the model has {expected} trainable parameters"
+            ),
+            ValidationError::NonFiniteParam { index, value } => write!(
+                f,
+                "params[{index}] is {value}; every parameter must be a finite number"
+            ),
         }
     }
 }
@@ -647,6 +671,23 @@ mod tests {
         .to_string();
         assert!(s.contains('4'));
         assert!(s.contains('3'));
+    }
+
+    #[test]
+    fn trained_model_variants_display_their_values() {
+        let s = ValidationError::ParamCountMismatch {
+            expected: 4,
+            got: 3,
+        }
+        .to_string();
+        assert!(s.contains("params has 3 values"), "{s}");
+        assert!(s.contains("4 trainable parameters"), "{s}");
+        let s = ValidationError::NonFiniteParam {
+            index: 2,
+            value: f64::NAN,
+        }
+        .to_string();
+        assert!(s.contains("params[2] is NaN"), "{s}");
     }
 
     #[test]

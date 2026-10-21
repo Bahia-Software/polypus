@@ -82,7 +82,7 @@ impl Readout {
     /// `new` is not the only way to obtain a `Readout`:
     /// [`observables`](Self::observables) is public and mutable, and the
     /// `serde` `Deserialize` derive builds one straight from the wire — the
-    /// route a `TrainedModel::load` of a hand-tampered save file takes.
+    /// route a hand-tampered `TrainedModel` save file takes when loaded.
     /// [`compile`](crate::QuantumModel::compile) calls this so neither route can
     /// yield a `CompiledModel` whose [`ResolvedReadout::predict`] would index
     /// past the end of `observables`.

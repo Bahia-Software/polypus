@@ -4,6 +4,7 @@
 # `crates/polypus/src/bindings/qml.rs`; see `__init__.pyi` for how the stubs
 # are checked.
 
+from os import PathLike
 from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, final
 
 import numpy.typing as npt
@@ -30,6 +31,7 @@ __all__ = [
     "Model",
     "TrainedModel",
     "ExactResult",
+    "load",
     "Dataset",
     "PauliTerm",
     "Observable",
@@ -210,6 +212,10 @@ class TrainedModel:
         seed: Optional[int] = None,
         exact: bool = False,
     ) -> Union[RunResult, ExactResult]: ...
+    # Versioned JSON, replacing any file at `path`; read back with `load`.
+    def save(self, path: Union[str, PathLike[str]]) -> None: ...
+
+def load(path: Union[str, PathLike[str]]) -> TrainedModel: ...
 
 @final
 class ExactResult:
