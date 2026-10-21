@@ -5,8 +5,8 @@ transpiled to the native gate set (`r`, `cz`) and coupling map, and run on Aer
 with a noise model built from an LRZ calibration snapshot. The physical QPU is
 not used.
 
-Status: device model only (phase F1). Instances, emulation runs, analysis and
-the QPU plan come next.
+Status: device model (F1), instances and routing study (F2). Emulation runs,
+analysis and the QPU plan come next.
 
 ## Inputs
 
@@ -41,6 +41,27 @@ Never run the full 52-qubit circuit with a noise model: Aer's automatic method
 picks a density matrix, and Aer 0.17.2 crashed on such circuits (see
 `compact`). Every relaxation channel uses T2 capped at T1 for the same reason
 (see `_cap_t2`).
+
+## Instances (`instances.py`)
+
+QAOA-MaxCut on random 3-regular graphs (main set) and on signed subgraphs of the
+device's own coupling graph (control, no routing cost), n = 16 and 20, three of
+each, from fixed seeds, with exact optima. Circuits come from polypus's
+`build_qaoa_circuit` (parameters: all betas, then all gammas); the cost layer is
+`rzz(-γ w)` per edge, so QAOA maximizes the cut. Counts are read with qubit 0
+rightmost; `approximation_ratio` uses polypus's `expectation_value`.
+
+## Routing study (`routing.py`)
+
+```bash
+python benchmarks/euro_q_exa/routing.py --calibration <calibration.json> \
+    --coupling-map <coupling_map.txt> --out benchmarks/euro_q_exa/results
+```
+
+transpiles every instance for p = 1..3 with 10 transpiler seeds, keeps the
+highest-ESP run, and writes `instances.json`, `routing.csv` (every seed) and
+`routing_summary.md` (the two-qubit gate count and depth table for LRZ).
+`results/` is git-ignored.
 
 ## Tests
 
