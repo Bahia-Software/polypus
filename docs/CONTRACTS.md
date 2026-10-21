@@ -22,7 +22,7 @@ Rules of the road:
 |---|---|---|---|---|
 | C-1 | Rust → Python execution | `tests/python/test_seam_contract.py` (+ `test_memory_budget.py`, `test_cunqa_contract.py`) | ✅ present | the CUNQA seal sent `cores` to `qraise`, which CUNQA renamed `cores_per_qpu` in 2.4.0, so every reservation raised `TypeError` on CUNQA ≥ 2.4 (#204, fixed: `cores_per_qpu` goes through unchanged; **CUNQA 2.3 is no longer supported**); `disconnect` now forwards `family` to `qdrop` (C1 fixed); local `run_qcs` received `backend` and `id` and CUNQA `run_qcs` received `backend`, none of them read (LOCAL-2, #230, fixed: Rust no longer sends them); Qiskit exceptions escaped the `polypus` hierarchy, now `polypus.BackendError` on the seam and `polypus.EvaluationError` when preparing/binding Qiskit circuits, with `__cause__` (#218, fixed); a statevector too large for the memory limit was started and OOM-killed with no Python exception (#215, fixed: `InsufficientMemoryError`) |
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
-| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed; CUNQA unverified); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
+| C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
@@ -539,7 +539,8 @@ a circuit in the list is neither copied nor transpiled).
   natively): classical registers that are declared but never written do not
   count, and do not change the width. This holds on the Aer and the native
   backend alike (issue #218; before it Aer raised `QiskitError: No counts` for
-  such a circuit). The CUNQA path is not verified.
+  such a circuit), and on CUNQA, whose vQPUs fail such a job: its seal adds the
+  same read-out (issue #253, checked on CUNQA 3.0.0).
 - For a circuit **with** measurements, `num_clbits` is the circuit's
   classical width (the key width, `Circuit.clbits_width` in Python and
   `clbits_width()` in Rust — not `Circuit.num_clbits` /
@@ -553,10 +554,10 @@ a circuit in the list is neither copied nor transpiled).
   (`num_qubits` with `measure_all`). A `polypus.Circuit` imported with
   `from_qasm2`/`from_qasm3` keeps the width its source declares, through
   parameter binding and through the export Aer receives (its `creg c[n]` is
-  the declared width): it is keyed like the source. Aer and the native
-  backend agree on all three (issue #251; before it the native backend used
-  `max(cbit) + 1` for OpenQASM input too). The QMIO and CUNQA paths are not
-  verified; QMIO receives the declared width in all three program formats
+  the declared width): it is keyed like the source. Aer, the native backend
+  and CUNQA agree on all three (issues #251 and #304; before #251 the native
+  backend used `max(cbit) + 1` for OpenQASM input too; CUNQA was checked on
+  3.0.0 with 1 and 2 QPUs). The QMIO path is not verified; QMIO receives the declared width in all three program formats
   (the QIR export's `required_num_results`, issue #322). The QMIO reply parser
   requires one key width per reply (and per merged register) but does not
   compare it with the declared width until the QPU's key width is verified
@@ -677,7 +678,14 @@ that declares a `creg` but measures nothing),
 `crates/polypus-infrastructure/src/qmio.rs` (issue #322);
 `test_clbits_width_is_the_declared_width` in
 `tests/python/test_qasm_import.py` (issue #323), plus the
-circuit-side tests listed under C-2.
+circuit-side tests listed under C-2; on CUNQA, the full read-out, the flat key
+of several registers and the declared width in
+`test_circuit_without_measurements_reads_the_full_register`,
+`test_several_registers_give_one_key_without_spaces` and
+`test_declared_classical_width_is_kept` in
+`tests/python/test_cunqa_run_flow.py` (against a fake that answers as CUNQA
+3.0.0 did) and `tests/python/test_cunqa_real.py` (a real family, opt-in;
+issues #253 and #304).
 
 ---
 
@@ -1004,10 +1012,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
     QPU and seed even when the split is uneven (`shots` not a multiple of
     `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
-    its first replica's index as `qpu_offset` (C-1; fixed in #370). **This path is verified against a fake CUNQA
-    only**: `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts
-    shape and reproducibility end to end, but has never run against a real
-    CUNQA; `tests/python/test_cunqa_real.py` does, on demand (#357).
+    its first replica's index as `qpu_offset` (C-1; fixed in #370). `tests/python/test_cunqa_run_flow.py` pins the seeds, the counts shape
+    and reproducibility end to end against a fake CUNQA, and the opt-in
+    `tests/python/test_cunqa_real.py` checks that a seed reproduces and that
+    QPUs differ on a real family (#357; passed on CUNQA 3.0.0).
   - With physical hardware (`infrastructure="qmio"`): passing an explicit
     `seed` raises `ValueError`. Real quantum processors rely on physical
     processes and cannot be deterministically seeded, so silently accepting
@@ -1083,9 +1091,9 @@ omitted-seed differs at the backend level). CUNQA's
 (`crates/polypus-infrastructure/src/cunqa.rs` mirrors `local.rs`) and is pinned
 end to end against a fake CUNQA SDK by `tests/python/test_cunqa_run_flow.py`
 (per-QPU seeds, 63-bit mask, same seed reproduces, reported seed replays). The
-`cunqa` package isn't installed in CI, so it has never run against a real
-CUNQA: treat CUNQA's `seed` support as unverified until the opt-in
-`tests/python/test_cunqa_real.py` passes on a real family.
+`cunqa` package isn't installed in CI; the opt-in
+`tests/python/test_cunqa_real.py` checks the same on a real family and passed
+on CUNQA 3.0.0.
 
 ---
 

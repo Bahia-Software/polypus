@@ -180,6 +180,12 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- With `infrastructure="cunqa"`, a circuit without measurements is read out on
+  the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
+  failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
+  several classical registers gets one flat bitstring key instead of CUNQA's
+  space-separated one (#304). Checked on a real CUNQA 3.0.0 family; the opt-in
+  `test_cunqa_real.py` now honours `POLYPUS_CUNQA_PATH` when deciding to skip.
 - With `infrastructure="cunqa"`, a shot split that is uneven across the QPUs
   (e.g. 10 shots on 3 QPUs) gives every replica its own QPU and seed: the
   calls per batch size restarted at QPU 0 and the base seed, so two replicas

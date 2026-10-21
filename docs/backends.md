@@ -687,15 +687,17 @@ Findings (LOCAL-1, LOCAL-2 and QMIO-1 are fixed):
 CUNQA was not runnable here (no SLURM, and the `cunqa` Python module is absent), so its
 row is by analysis: it shares the seal-delegation profile above.
 
-**Circuits without measurements (issue #218, fixed for Local).** Aer returns no counts
+**Circuits without measurements (issues #218 and #253, fixed).** Aer returns no counts
 for a circuit with no `measure` instruction, so the Local backend used to fail with
 `QiskitError: No counts for experiment` where the native backend returned the
 full-register read-out contract C-3 specifies. The seal now adds that read-out itself
 (on a copy, into a register of its own), so both backends return the same
-`num_qubits`-wide keys whatever classical registers the circuit declares. The CUNQA
-path is **not verified**: whether CUNQA's QPUs return counts for such a circuit, and in
-which key format, cannot be checked without a CUNQA install, so it forwards the circuit
-unchanged.
+`num_qubits`-wide keys whatever classical registers the circuit declares. CUNQA's vQPUs
+fail such a job too (CUNQA 3.0.0: `key 'counts' not found`), so its seal adds the same
+read-out (issue #253). CUNQA also separates the bits of each classical register with a
+space, cutting the key from the left in declaration order, which misplaces the cut; the
+seal joins the key back into one bitstring (issue #304). Both were checked on a real
+CUNQA 3.0.0 family with `tests/python/test_cunqa_real.py`.
 
 ### Which built-in backend can run a circuit: `polypus.backend_compatibility`
 
