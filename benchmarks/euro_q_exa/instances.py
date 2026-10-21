@@ -87,6 +87,20 @@ def approximation_ratio(counts, instance: Instance) -> float:
     return mean / instance.optimum
 
 
+def ising_cost(instance: Instance):
+    """The cut as a native ``polypus.Ising`` observable, for ``polypus.train``
+    (which maximizes): ``cut = sum w (1 - z_i z_j) / 2`` with ``z = 1 - 2x``,
+    i.e. couplings ``-w/2`` and constant ``sum w / 2``. Evaluated in Rust, with
+    the same bit order as the counts (qubit 0 rightmost)."""
+    import polypus
+
+    return polypus.Ising(
+        instance.n,
+        couplings=[(i, j, -w / 2) for i, j, w in instance.edges],
+        constant=instance.random_cut,
+    )
+
+
 def optimum_probability(counts, instance: Instance) -> float:
     """Fraction of shots that hit an optimal cut."""
     total = sum(counts.values())
@@ -144,12 +158,13 @@ def lattice_instance(n: int, index: int, coupling_edges) -> Instance:
     )
 
 
-def make_instances(coupling_edges) -> list[Instance]:
-    """The benchmark's 12 instances: both families x SIZES x INSTANCES_PER_SIZE."""
+def make_instances(coupling_edges, sizes=SIZES) -> list[Instance]:
+    """The benchmark's instances: both families x ``sizes`` x INSTANCES_PER_SIZE
+    (12 with the default sizes)."""
     out = []
-    for n in SIZES:
+    for n in sizes:
         out += [regular_instance(n, i) for i in range(INSTANCES_PER_SIZE)]
-    for n in SIZES:
+    for n in sizes:
         out += [
             lattice_instance(n, i, coupling_edges) for i in range(INSTANCES_PER_SIZE)
         ]
@@ -173,6 +188,27 @@ def qaoa_circuit(instance: Instance, p: int):
             qc.rx(2 * beta, q)
 
     return build_qaoa_circuit(_Nodes(), p, [cost] * p, [mixer] * p)
+
+
+def native_qaoa_circuit(instance: Instance, p: int, measure: bool = True):
+    """The same QAOA circuit as :func:`qaoa_circuit`, as a ``polypus.Circuit``
+    for the native backend, with the same parameter order (``Param(k)`` is
+    ``β[k]``, ``Param(p + k)`` is ``γ[k]``), so parameters trained on one bind
+    to the other."""
+    import polypus
+
+    circuit = polypus.Circuit(instance.n)
+    for q in range(instance.n):
+        circuit.h(q)
+    for layer in range(p):
+        beta, gamma = polypus.Param(layer), polypus.Param(p + layer)
+        for i, j, w in instance.edges:
+            circuit.rzz(i, j, -w * gamma)
+        for q in range(instance.n):
+            circuit.rx(q, 2 * beta)
+    if measure:
+        circuit.measure_all()
+    return circuit
 
 
 def save_instances(path, instances) -> None:

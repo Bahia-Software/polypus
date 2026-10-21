@@ -72,10 +72,9 @@ def test_lattice_instance_is_a_connected_signed_device_subgraph():
     assert {w for _, _, w in a.edges} <= {-1.0, 1.0}
 
 
-def test_make_instances_covers_both_families(monkeypatch):
-    # The synthetic device has 5 qubits: shrink the sizes to fit it.
-    monkeypatch.setattr(inst, "SIZES", (4,))
-    instances = inst.make_instances(COUPLING)
+def test_make_instances_covers_both_families():
+    # The synthetic device has 5 qubits: smaller sizes than the benchmark's.
+    instances = inst.make_instances(COUPLING, sizes=(4,))
     assert len(instances) == 2 * inst.INSTANCES_PER_SIZE
     assert {(i.family, i.n) for i in instances} == {("3reg", 4), ("lattice", 4)}
     assert len({i.name for i in instances}) == len(instances)

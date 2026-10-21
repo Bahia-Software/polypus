@@ -5,8 +5,23 @@ transpiled to the native gate set (`r`, `cz`) and coupling map, and run on Aer
 with a noise model built from an LRZ calibration snapshot. The physical QPU is
 not used.
 
-Status: device model (F1), instances and routing study (F2). Emulation runs,
-analysis and the QPU plan come next.
+Status: device model (F1), instances and routing study (F2), cost pilot (F3a)
+and the emulation sweep (F3b). Analysis and the QPU plan come next.
+
+The scripts and tests need the polypus extension built from this branch. To keep
+it apart from other environments on the machine, install the wheel into its own
+virtualenv:
+
+```bash
+maturin build --release --out dist
+python -m venv --system-site-packages ../eqe-venv
+../eqe-venv/bin/pip install --no-deps --force-reinstall --ignore-installed dist/polypus_quantum-*.whl
+```
+
+(`--ignore-installed`: with the same version number already in the base
+environment, pip would otherwise install nothing.) A wheel built here is tagged
+for this machine's glibc (`manylinux_2_39`); another system may need its own
+build.
 
 ## Inputs
 
@@ -63,10 +78,42 @@ highest-ESP run, and writes `instances.json`, `routing.csv` (every seed) and
 `routing_summary.md` (the two-qubit gate count and depth table for LRZ).
 `results/` is git-ignored.
 
+## Cost pilot (`cost_pilot.py`)
+
+```bash
+python benchmarks/euro_q_exa/cost_pilot.py --calibration <calibration.json> \
+    --coupling-map <coupling_map.txt> --out benchmarks/euro_q_exa/results
+```
+
+times, on one 3-regular instance per size and p = 1..3, a short noiseless
+`polypus.train` (DE, the cut as a native `polypus.Ising`; native backend with
+`native_qaoa_circuit` and Aer with the Qiskit circuit) and the noisy evaluation
+of the routed circuit (gate + readout noise, and with idle noise), then projects
+the full sweep. Writes `cost_pilot.json`.
+
+## Emulation sweep (`run_emulator.py`)
+
+```bash
+python benchmarks/euro_q_exa/run_emulator.py --calibration <calibration.json> \
+    --coupling-map <coupling_map.txt> --out benchmarks/euro_q_exa/results \
+    --sizes 16 --p 1 2 3
+```
+
+trains each (instance, p) without noise on the native backend (3 DE seeds,
+population 20, 50 generations, 1000 shots), then evaluates the trained
+parameters at 4000 shots under conditions A (ideal), B (ideal, routed),
+C (EQE noise), D (C with readout mitigation), I (C plus idle noise), and, for the
+best seed at `--sensitivity-p`, E (slow gates) and I_R (Ramsey T2 while
+waiting); plus P0 (random cuts) and, for 3-regular graphs, the published fixed
+angles under A, C and I. One gzipped JSON per (instance, p) under
+`results/sweep/`, with rows and counts; finished units are skipped on rerun.
+From the cost pilot, n = 20 with p >= 2 takes most of the time (an evaluation
+with idle noise is ~23 min at p = 2 and ~1 h at p = 3 on 8 cores).
+
 ## Tests
 
 ```bash
-pytest benchmarks/euro_q_exa/tests
+../eqe-venv/bin/python -m pytest benchmarks/euro_q_exa/tests
 ```
 
 They use a small synthetic calibration and are **not run by CI** on purpose:
