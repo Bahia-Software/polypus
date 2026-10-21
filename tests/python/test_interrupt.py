@@ -3,9 +3,11 @@ Ctrl+C responsiveness and GIL release during long-running calls
 (issues #36, #73, #86 and #110).
 
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
-``polypus.train`` (native backend) or ``polypus.qml.train`` (Qiskit/Aer
-backend) is running, rather than being ignored until the whole optimization
-finishes.
+``polypus.train`` (native backend), ``polypus.qml.train`` (Qiskit/Aer backend)
+or ``polypus.qml.Model.fit`` (native QML) is running, rather than being ignored
+until the whole optimization finishes. A minibatched native QML run also
+re-scores its result on the whole training set at the end; that step is checked
+for GIL release directly, with a background thread.
 
 ``run_quantum_circuit`` (issue #73) is covered here too: it releases the GIL
 around the whole run and calls ``py.check_signals()`` at the per-circuit /
@@ -318,6 +320,179 @@ def test_qml_training_responds_to_sigint_promptly():
             "guard (SignalInterrupt) is likely not attached to the run token, "
             "or the GIL is not released around the optimizer"
         ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Native QML: polypus.qml.Model.fit (contract C-11)
+# --------------------------------------------------------------------------- #
+
+# Same shape as `_NATIVE_CHILD`, through the native QML oracle
+# (`QmlSource::Native`) on the native simulator. 12 qubits and 16 samples make
+# each generation's batch a few tens of ms; `patience` far above `generations`
+# keeps convergence from ending the run, so only the interrupt can.
+_NATIVE_QML_CHILD = r"""
+import sys, time
+import polypus
+from polypus import qml
+
+model = qml.Model(
+    qml.Encoder(12).angle_encoder("ry"),
+    qml.Ansatz(12).hardware_efficient(2),
+    qml.Readout([qml.Z(0)], decision="sign"),
+)
+x = [[0.1 * ((i + j) % 7) for j in range(12)] for i in range(16)]
+y = [1 if i % 2 else -1 for i in range(16)]
+
+# Warm up the native path with a one-generation run.
+model.fit(x, y, method=polypus.DE(generations=1, population_size=8), loss="hinge")
+
+print("READY", flush=True)
+start = time.time()
+try:
+    model.fit(
+        x, y,
+        method=polypus.DE(
+            generations=100000, population_size=8, tolerance=1e-12, patience=200000
+        ),
+        loss="hinge",
+        id="native_qml_interrupt_test",
+    )
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a PanicException from a swallowed error
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+def test_native_qml_training_responds_to_sigint_promptly():
+    _assert_responds_to_sigint_promptly(
+        _NATIVE_QML_CHILD,
+        failure_hint=(
+            "Model.fit (the native QML oracle) — the interrupt guard is likely "
+            "not attached to the run token, or the GIL is held around the run"
+        ),
+    )
+
+
+# After a minibatched run, the optimizer's `best_fitness` is re-scored on the
+# whole training set (C-5): one full-set evaluation after the loop, the heaviest
+# single step of such a run. It must run with the GIL released, like the rest of
+# the run (docs/ENGINEERING.md §3). One native call cannot be measured by SIGINT
+# latency, so this measures GIL freedom directly: a background thread stamps the
+# time every 50 ms while the main thread runs the rescore; held, the GIL would
+# freeze it for the whole rescore.
+#
+# Sizing: the minibatch loop is trivial (`batch_size=1`, one DE generation of 8
+# candidates, milliseconds), while the rescore scores every one of `_SAMPLES`
+# 12-qubit circuits, seconds on the reference machine. So a frozen thread's gap
+# (≈ the rescore) and a live one's (≈ 50 ms) differ by about two orders of
+# magnitude, and `_MAX_LIVE_GAP_S` sits between them. The child fails with a
+# resize hint if the rescore ever gets too short to tell the two apart.
+_HEARTBEAT_INTERVAL_S = 0.05
+_MAX_LIVE_GAP_S = 1.0
+_MIN_RESCORE_S = 1.0
+_RESCORE_CHILD_TIMEOUT_S = 120.0
+
+_MINIBATCH_RESCORE_CHILD = f"""
+import sys, time, threading
+import polypus
+from polypus import qml
+
+_QUBITS = 12
+_SAMPLES = 4000
+
+model = qml.Model(
+    qml.Encoder(_QUBITS).angle_encoder("ry"),
+    qml.Ansatz(_QUBITS).hardware_efficient(1),
+    qml.Readout([qml.Z(0)], decision="sign"),
+)
+
+
+def data(n):
+    # Distinct rows so the encoder does real per-sample work; the labels only
+    # need to be valid, since the rescore's timing is what is measured.
+    x = [[0.3 + 0.0001 * i + 0.01 * j for j in range(_QUBITS)] for i in range(n)]
+    y = [1 if i % 2 else -1 for i in range(n)]
+    return x, y
+
+
+def fit(n, ident):
+    x, y = data(n)
+    model.fit(
+        x, y,
+        method=polypus.DE(generations=1, population_size=8, tolerance=1e-12),
+        loss="hinge", id=ident, seed=7, exact=True, batch_size=1,
+    )
+
+
+fit(4, "warmup")
+
+stamps = []
+stop = False
+
+
+def heartbeat():
+    while not stop:
+        stamps.append(time.time())
+        time.sleep({_HEARTBEAT_INTERVAL_S!r})
+
+
+beat = threading.Thread(target=heartbeat, daemon=True)
+beat.start()
+time.sleep(0.2)  # let the heartbeat establish its cadence first
+
+start = time.time()
+fit(_SAMPLES, "rescore_gil")
+duration = time.time() - start
+stop = True
+beat.join()
+
+gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+max_gap = max(gaps) if gaps else float("inf")
+if duration < {_MIN_RESCORE_S!r}:
+    print(f"UNSIZED duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+    sys.exit(2)
+if max_gap < {_MAX_LIVE_GAP_S!r}:
+    print(f"PASS duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+    sys.exit(0)
+print(f"FAIL duration={{duration:.3f}} max_gap={{max_gap:.3f}}", flush=True)
+sys.exit(1)
+"""
+
+
+def test_minibatch_rescore_runs_gil_free():
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _MINIBATCH_RESCORE_CHILD],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=_RESCORE_CHILD_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        pytest.fail(
+            f"the rescore child did not finish within {_RESCORE_CHILD_TIMEOUT_S}s "
+            f"(a held GIL would still finish, so this is a hang).\n"
+            f"stdout:\n{out}\nstderr:\n{err}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    if "UNSIZED" in out:
+        pytest.fail(
+            "the full-set rescore was too short on this machine to tell a frozen "
+            f"thread from a live one: raise _SAMPLES.\nstdout:\n{out}\nstderr:\n{err}"
+        )
+    assert proc.returncode == 0 and "PASS" in out, (
+        "a background Python thread froze during the full-set rescore: it ran "
+        "with the GIL held (docs/ENGINEERING.md §3).\n"
+        f"stdout:\n{out}\nstderr:\n{err}"
     )
 
 

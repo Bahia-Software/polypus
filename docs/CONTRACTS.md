@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, `polypus.qml.Model`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + `tests/python/test_qml_native.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, `polypus.qml.Model`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + `tests/python/test_qml_native*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -1097,9 +1097,9 @@ replay it exactly.
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
 rejection, and the returned manifest/outcome fields), `tests/python/test_qml_predict.py`
 (the `qml.predict` manifest, seed replay and per-row counts),
-`tests/python/test_qml_native.py` (`Model.fit` and `TrainedModel.run`: seed
-replay, exact runs independent of shots, the `qmio` rejection, the
-`RunResult`/`ExactResult` fields), the minibatch draws in
+`tests/python/test_qml_native_training.py` and `test_qml_native_inference.py`
+(`Model.fit` and `TrainedModel.run`: seed replay, exact runs independent of
+shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields), the minibatch draws in
 `crates/polypus-evaluation/src/qml_oracle.rs`
 (`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
@@ -1649,7 +1649,15 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     tests in `crates/polypus-infrastructure/src/native.rs`, and the `adam_*` and
     `minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
     (f).
-- **Python:** `tests/python/test_qml_native.py` — construction and every
-  rejection, the option sets, `fit` (supervised, unsupervised, exact, sampled,
-  minibatches, seeds), inference, decision types and save/load.
+- **Python:** `tests/python/test_qml_native.py` (construction, the option
+  sets, every construction check, `Dataset` splits and scaling, the
+  `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
+  layer and observable computes, against closed forms and bit-for-bit
+  equivalences, and predictions against the results they read),
+  `test_qml_native_training.py` (`fit`: supervised, unsupervised, exact,
+  sampled, minibatches, seeds, every layer trained, the convergence curve, every
+  rejection), `test_qml_native_inference.py` (`bind`, `predict`, `run`,
+  `ExactResult`, decision types, save/load and tampered files) and the native
+  QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
+  runs with the GIL released).
 

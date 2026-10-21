@@ -1,19 +1,21 @@
 """
-The native API of ``polypus.qml`` (plan D4-R): ``Encoder``, ``Ansatz`` and
-``Readout`` joined into a ``Model``, trained with ``Model.fit`` on rows or a
-``Dataset``, plus the Pauli readout helpers (``Z``/``X``/``Y``, ``PauliTerm``,
-``Observable``), and the rejection of these pieces by the Qiskit form's
+The native pieces of ``polypus.qml`` and their checks (contract C-11): Pauli
+terms and observables, ``Encoder``, ``Ansatz``, ``Readout``, ``Dataset`` and
+``Model``, and the rejection of native pieces by the Qiskit form's
 ``qml.train``/``qml.predict``.
 
-Construction tests need no backend: the closed option sets (plan F6), the
-checks each builder call and the ``Model`` run without the data (plans F1, G3)
-and the unlabeled ``Dataset`` (plan F4). The ``fit`` tests train on the native
-simulator, or are rejected before any backend exists (plans F2, F3, F5).
+Nothing here trains or runs a circuit: these pin construction, the closed option
+sets (plan F6), the checks each builder call and ``Model`` run without the data
+(plans F1, G3), the unlabeled ``Dataset`` (plan F4) and the ``Dataset``'s split
+and scaling arithmetic. Training is in ``test_qml_native_training.py``,
+inference and saving in ``test_qml_native_inference.py``, and the semantics of
+each layer and observable in ``test_qml_native_layers.py``.
 """
 
 import math
 
 import pytest
+from qml_native_helpers import make_model
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pauli terms and observables
@@ -304,24 +306,113 @@ class TestDataset:
             test.scale_features_with(ranges[:1], 0.0, math.pi)
 
 
+def _indexed(n=6):
+    """``n`` samples whose first feature *is* the sample index, so a
+    partition's ``feature_ranges()[0]`` reports which samples it received."""
+    from polypus.qml import Dataset
+
+    return Dataset(
+        [[float(i), 1.0 + 0.5 * i] for i in range(n)],
+        [1.0 if i % 2 else -1.0 for i in range(n)],
+    )
+
+
+class TestDatasetSplit:
+    def test_the_test_partition_rounds_down(self):
+        # floor(6 × 0.4) = 2 test samples, so 4 train, both at full width.
+        train, test = _indexed().train_test_split(0.4, seed=7)
+        assert (train.num_samples, test.num_samples) == (4, 2)
+        assert train.num_features == test.num_features == 2
+
+    def test_different_seeds_give_different_partitions(self):
+        # A property of the deterministic shuffle, not a probabilistic hope.
+        picks = {
+            _indexed().train_test_split(1 / 3, seed=s)[1].feature_ranges()[0]
+            for s in range(1, 9)
+        }
+        assert len(picks) > 1
+
+    def test_the_test_sample_is_missing_from_train(self):
+        # floor(6 × 0.2) = 1 test sample, so its index range is (i, i), and a
+        # partition cannot also hold it in train.
+        train, test = _indexed().train_test_split(0.2, seed=7)
+        lo, hi = test.feature_ranges()[0]
+        assert lo == hi and lo in {float(i) for i in range(6)}
+        train_lo, train_hi = train.feature_ranges()[0]
+        if lo == 0.0:
+            assert train_lo == 1.0
+        elif lo == 5.0:
+            assert train_hi == 4.0
+
+    @pytest.mark.parametrize("fraction", [-0.1, 1.5, math.nan])
+    def test_the_fraction_lies_in_the_open_unit_interval(self, fraction):
+        with pytest.raises(ValueError, match="test_fraction"):
+            _indexed().train_test_split(fraction, seed=7)
+
+    def test_a_partition_emptied_by_the_rounding(self):
+        # floor(5 × 0.1) = 0: an in-range fraction can still empty a partition,
+        # which would leave a problem averaging over no samples.
+        with pytest.raises(ValueError, match="empty"):
+            _indexed(n=5).train_test_split(0.1, seed=7)
+
+    @pytest.mark.parametrize("fraction", [0.1, 0.5, 0.9])
+    def test_one_sample_cannot_be_split(self, fraction):
+        with pytest.raises(ValueError, match="empty"):
+            _indexed(n=1).train_test_split(fraction, seed=7)
+
+
+class TestDatasetScaling:
+    @staticmethod
+    def _ds(rows):
+        from polypus.qml import Dataset
+
+        return Dataset(rows)
+
+    def test_ranges_are_per_feature(self):
+        ds = self._ds([[0.0, 20.0], [10.0, 5.0], [4.0, 30.0]])
+        assert ds.feature_ranges() == [(0.0, 10.0), (5.0, 30.0)]
+
+    def test_scaling_spans_the_interval(self):
+        ds = self._ds([[0.0, 20.0], [10.0, 5.0], [4.0, 30.0]])
+        ds.scale_features_to(0.0, 1.0)
+        assert ds.feature_ranges() == [(0.0, 1.0), (0.0, 1.0)]
+
+    def test_scaling_a_scaled_set_is_the_identity(self):
+        # 0 → 0, 5 → 0.5, 10 → 1 exactly; scaling again must not move anything.
+        ds = self._ds([[0.0], [5.0], [10.0]])
+        ds.scale_features_to(0.0, 1.0)
+        before = ds.feature_ranges()
+        ds.scale_features_to(0.0, 1.0)
+        assert ds.feature_ranges() == before == [(0.0, 1.0)]
+
+    def test_a_constant_feature_maps_to_lo(self):
+        ds = self._ds([[7.0, 1.0], [7.0, 2.0]])
+        ds.scale_features_to(3.0, 9.0)
+        assert ds.feature_ranges() == [(3.0, 3.0), (3.0, 9.0)]
+
+    def test_a_frozen_scaler_maps_beyond_its_range(self):
+        train, test = self._ds([[0.0], [10.0]]), self._ds([[5.0], [15.0]])
+        test.scale_features_with(train.feature_ranges(), 0.0, 1.0)
+        assert test.feature_ranges() == [(0.5, 1.5)]
+
+    def test_split_then_freeze_the_train_ranges(self):
+        train, test = _indexed(n=8).train_test_split(0.25, seed=7)
+        ranges = train.feature_ranges()
+        train.scale_features_to(0.0, math.pi)
+        test.scale_features_with(ranges, 0.0, math.pi)
+        assert train.feature_ranges()[0] == (0.0, math.pi)
+        test_lo, test_hi = test.feature_ranges()[0]
+        assert -3.2 < test_lo <= test_hi < 6.3
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _model(num_qubits=1, readout=None, encoder=None, ansatz=None):
-    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
-
-    return Model(
-        encoder or Encoder(num_qubits).angle_encoder("ry"),
-        ansatz or Ansatz(num_qubits).real_amplitudes(1),
-        readout or Readout([Z(0)], decision="sign"),
-    )
-
-
 class TestModel:
     def test_counts_and_repr(self):
-        model = _model(2)
+        model = make_model(2)
         assert (model.num_qubits, model.num_params) == (2, 4)
         assert repr(model) == "Model(num_qubits=2, num_layers=2, num_params=4)"
 
@@ -329,7 +420,7 @@ class TestModel:
         from polypus.qml import Ansatz
 
         ansatz = Ansatz(1).real_amplitudes(1)
-        model = _model(ansatz=ansatz)
+        model = make_model(ansatz=ansatz)
         ansatz.real_amplitudes(1)
         assert model.num_params == 2
 
@@ -337,7 +428,7 @@ class TestModel:
         from polypus.qml import Ansatz, Encoder
 
         with pytest.raises(ValueError, match="2 qubits but the Ansatz has 1"):
-            _model(
+            make_model(
                 encoder=Encoder(2).angle_encoder("ry"),
                 ansatz=Ansatz(1).real_amplitudes(1),
             )
@@ -346,12 +437,12 @@ class TestModel:
         from polypus.qml import Encoder
 
         with pytest.raises(ValueError, match="no layer loads the data"):
-            _model(encoder=Encoder(1))
+            make_model(encoder=Encoder(1))
 
     def test_data_reuploading_with_an_empty_encoder(self):
         from polypus.qml import Ansatz, Encoder
 
-        model = _model(
+        model = make_model(
             encoder=Encoder(1), ansatz=Ansatz(1).angle_encoder("ry").real_amplitudes(1)
         )
         assert model.num_params == 2
@@ -360,411 +451,15 @@ class TestModel:
         from polypus.qml import Ansatz
 
         with pytest.raises(ValueError):
-            _model(ansatz=Ansatz(1))
+            make_model(ansatz=Ansatz(1))
 
     def test_readout_positions_follow_pooling(self):
         from polypus.qml import Ansatz, Readout, Z
 
         # Pooling 2 qubits leaves one active: logical position 1 does not exist.
         with pytest.raises(ValueError):
-            _model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(1)]))
-        assert _model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(0)]))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Model.fit
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Two separable classes on one feature: ry(x) puts small x near |0> (⟨Z⟩ ≈ +1)
-# and large x near |1> (⟨Z⟩ ≈ −1).
-_X = [[0.1], [0.3], [2.9], [3.0], [0.2], [2.8]]
-_Y = [1, 1, -1, -1, 1, -1]
-
-
-def _fit(model=None, x=_X, y=_Y, **kwargs):
-    import polypus
-
-    kwargs.setdefault("method", polypus.Adam(max_iters=5, patience=10_000))
-    kwargs.setdefault("seed", 3)
-    if y is not None:
-        kwargs.setdefault("loss", "hinge")
-    return (model or _model()).fit(x, y, **kwargs)
-
-
-@pytest.mark.integration
-class TestFit:
-    def test_supervised_run_with_the_defaults(self):
-        result = _fit()
-        assert len(result.best_params) == 2
-        assert result.iterations_run == 5
-        assert math.isfinite(result.best_fitness)
-        assert result.fitness_history[-1] == result.best_fitness
-
-    def test_exact_mode_does_not_depend_on_shots(self):
-        r1 = _fit(exact=True, shots=16)
-        r2 = _fit(exact=True, shots=4096)
-        assert r1.best_params == r2.best_params
-        assert r1.best_fitness == r2.best_fitness
-
-    def test_adam_climbs_in_exact_mode(self):
-        import polypus
-
-        result = _fit(
-            method=polypus.Adam(max_iters=60, learning_rate=0.1, patience=10_000),
-            exact=True,
-        )
-        # The hinge loss of a perfect margin-1 classifier is 0.
-        assert result.best_fitness > -0.2
-
-    def test_gradient_free_optimizers_train_too(self):
-        import polypus
-
-        result = _fit(method=polypus.DE(generations=2, population_size=4))
-        assert len(result.best_params) == 2
-
-    def test_a_dataset_carries_its_labels(self):
-        from polypus.qml import Dataset
-
-        result = _fit(x=Dataset(_X, _Y), y=None, loss="hinge", exact=True)
-        assert result.best_fitness == _fit(exact=True).best_fitness
-
-    def test_unsupervised_maximises_the_readout(self):
-        import polypus
-        from polypus.qml import Observable, Readout, Z
-
-        # Maximise -⟨Z⟩ = -cos(x + φ): close samples can all be rotated near |1>.
-        model = _model(readout=Readout([Observable([(-1.0, Z(0))])]))
-        result = _fit(
-            model,
-            x=[[0.1], [0.2], [0.3]],
-            y=None,
-            method=polypus.Adam(max_iters=60, learning_rate=0.2, patience=10_000),
-            exact=True,
-        )
-        assert result.best_fitness > 0.5
-
-    def test_minibatches(self):
-        assert len(_fit(batch_size=2, exact=True).best_params) == 2
-
-    def test_explicit_aer_backend(self):
-        assert len(_fit(backend="aer", shots=64).best_params) == 2
-
-    def test_the_seed_replays_the_run(self):
-        r1, r2 = _fit(seed=11), _fit(seed=11)
-        assert r1.seed == r2.seed == 11
-        assert r1.best_params == r2.best_params
-        assert r1.fitness_history == r2.fitness_history
-
-
-class TestFitRejections:
-    """Everything here is rejected before a backend exists."""
-
-    def test_method_is_required_and_keyword_only(self):
-        import polypus
-
-        with pytest.raises(TypeError):
-            _model().fit(_X, _Y)
-        with pytest.raises(TypeError):
-            _model().fit(_X, _Y, polypus.Adam())
-
-    def test_labels_need_a_supervised_loss(self):
-        with pytest.raises(ValueError, match="needs a loss"):
-            _fit(loss=None)
-        with pytest.raises(ValueError, match="does not use labels"):
-            _fit(loss="expectation")
-
-    def test_a_supervised_loss_needs_labels(self):
-        from polypus.qml import Dataset
-
-        with pytest.raises(ValueError, match="needs labels"):
-            _fit(y=None, loss="hinge")
-        with pytest.raises(ValueError, match="needs labels"):
-            _fit(x=Dataset(_X), y=None, loss="hinge")
-
-    def test_a_dataset_and_y_together(self):
-        from polypus.qml import Dataset
-
-        with pytest.raises(ValueError, match="carries its own labels"):
-            _fit(x=Dataset(_X, _Y))
-
-    def test_an_unknown_loss_names_the_valid_ones(self):
-        with pytest.raises(ValueError, match='"expectation"'):
-            _fit(loss="l2")
-
-    @pytest.mark.parametrize("loss", ["squared_error", "hinge", "expectation"])
-    def test_argmax_takes_only_the_categorical_loss(self, loss):
-        from polypus.qml import Readout, Z
-
-        model = _model(2, readout=Readout([Z(0), Z(1)], decision="argmax"))
-        y = None if loss == "expectation" else [0, 1, 0, 1, 0, 1]
-        with pytest.raises(ValueError, match="CategoricalCrossEntropy"):
-            _fit(model, x=[[0.1, 0.2]] * 6, y=y, loss=loss)
-
-    def test_the_categorical_loss_takes_only_argmax(self):
-        with pytest.raises(ValueError, match="CategoricalCrossEntropy"):
-            _fit(y=[0, 1, 0, 1, 0, 1], loss="categorical_cross_entropy")
-
-    def test_label_domain_is_checked(self):
-        with pytest.raises(ValueError):
-            _fit(y=[0, 1, 0, 1, 0, 1])  # hinge needs ±1
-
-    def test_too_many_features_for_the_encoder(self):
-        with pytest.raises(ValueError):
-            _fit(x=[[0.1, 0.2]] * 6)
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"backend": "aer"},
-            {"infrastructure": "cunqa", "nodes": 1, "cores_per_qpu": 1},
-        ],
-    )
-    def test_exact_needs_the_local_native_simulator(self, kwargs):
-        with pytest.raises(ValueError, match="exact=True needs"):
-            _fit(exact=True, **kwargs)
-
-    @pytest.mark.parametrize("size", [0, 6, 7])
-    def test_batch_size_must_be_smaller_than_the_dataset(self, size):
-        with pytest.raises(ValueError, match="batch_size"):
-            _fit(batch_size=size)
-
-    def test_the_default_backend_is_the_native_simulator(self):
-        # The native simulator is noiseless, so a noise model without a backend
-        # is refused: proof that `backend=None` resolved to "polypus".
-        with pytest.raises(ValueError, match="noise"):
-            _fit(noise_model=object())
-
-    def test_an_invalid_id_is_rejected(self):
-        with pytest.raises(ValueError):
-            _fit(id="no spaces")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Model.bind and TrainedModel
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def trained():
-    """A one-qubit classifier trained exactly: ⟨Z⟩ = cos(x + φ) with φ ≈ 0."""
-    import polypus
-
-    model = _model()
-    result = model.fit(
-        _X,
-        _Y,
-        method=polypus.Adam(max_iters=60, learning_rate=0.1, patience=10_000),
-        loss="hinge",
-        exact=True,
-        seed=3,
-    )
-    return model.bind(result.best_params)
-
-
-class TestBind:
-    def test_bound_model(self):
-        model = _model()
-        trained = model.bind([0.1, 0.2])
-        assert trained.params == [0.1, 0.2]
-        assert trained.model.num_params == model.num_params == 2
-        assert repr(trained) == "TrainedModel(num_qubits=1, num_params=2)"
-
-    def test_the_model_is_unchanged(self):
-        model = _model()
-        model.bind([0.1, 0.2])
-        model.bind([0.3, 0.4])
-        assert model.num_params == 2
-
-    def test_the_parameter_count_must_match(self):
-        with pytest.raises(ValueError, match="params has 3 values"):
-            _model().bind([0.1, 0.2, 0.3])
-
-    @pytest.mark.parametrize("value", [math.nan, math.inf])
-    def test_parameters_must_be_finite(self, value):
-        with pytest.raises(ValueError, match=r"params\[1\]"):
-            _model().bind([0.1, value])
-
-
-@pytest.mark.integration
-class TestInference:
-    def test_predict_classifies_the_training_set(self, trained):
-        labels = trained.predict(_X, exact=True)
-        assert labels == _Y
-        assert all(type(label) is int for label in labels)
-
-    def test_sampled_predict_agrees(self, trained):
-        assert trained.predict(_X, shots=2048, seed=5) == _Y
-
-    def test_a_dataset_is_accepted_and_its_labels_unused(self, trained):
-        from polypus.qml import Dataset
-
-        assert trained.predict(Dataset(_X), exact=True) == _Y
-        assert trained.predict(Dataset(_X, [0] * 6), exact=True) == _Y
-
-    def test_run_returns_counts_per_row(self, trained):
-        import polypus
-
-        run = trained.run(_X, shots=128, seed=5)
-        assert isinstance(run, polypus.RunResult)
-        assert len(run.counts) == len(_X)
-        assert all(sum(counts.values()) == 128 for counts in run.counts)
-        assert run.merged_counts is None
-        assert (run.seed, run.backend, run.infrastructure) == (5, "polypus", "local")
-
-    def test_the_seed_replays_the_counts(self, trained):
-        assert (
-            trained.run(_X, shots=64, seed=9).counts
-            == trained.run(_X, shots=64, seed=9).counts
-        )
-
-    def test_exact_run_returns_probabilities(self, trained):
-        from polypus.qml import ExactResult
-
-        run = trained.run(_X, exact=True)
-        assert isinstance(run, ExactResult)
-        assert len(run.probabilities) == len(_X)
-        for row in run.probabilities:
-            assert set(row) <= {"0", "1"}
-            assert sum(row.values()) == pytest.approx(1.0)
-        assert (run.backend, run.infrastructure) == ("polypus", "local")
-        assert repr(run).startswith("ExactResult(rows=6,")
-
-    def test_raw_decisions_are_the_expectations(self):
-        from polypus.qml import Readout, Z
-
-        trained = _model(readout=Readout([Z(0)])).bind([0.0, 0.0])
-        values = trained.predict([[0.0], [math.pi / 2]], exact=True)
-        assert all(type(value) is float for value in values)
-        assert values == pytest.approx([1.0, 0.0], abs=1e-12)
-
-    def test_argmax_decisions_are_class_indices(self):
-        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
-
-        # Zero angles and CZ entanglers leave the basis state the encoder
-        # prepared, so ⟨Z_k⟩ = −1 on every qubit set to 1 and the argmax picks
-        # the qubit left at 0.
-        model = Model(
-            Encoder(2).basis_encoder(),
-            Ansatz(2).hardware_efficient(1, rotations=["ry"], entangler="cz"),
-            Readout([Z(0), Z(1)], decision="argmax"),
-        )
-        classes = model.bind([0.0] * model.num_params).predict(
-            [[1.0, 0.0], [0.0, 1.0]], exact=True
-        )
-        assert classes == [1, 0]
-
-    def test_explicit_aer_backend(self, trained):
-        assert len(trained.run(_X, backend="aer", shots=32, seed=1).counts) == 6
-
-
-class TestInferenceRejections:
-    """Everything here is rejected before a backend exists."""
-
-    def test_rows_must_fit_the_encoder(self, trained):
-        with pytest.raises(ValueError):
-            trained.predict([[0.1, 0.2]])
-
-    def test_no_rows(self, trained):
-        with pytest.raises(ValueError):
-            trained.predict([])
-
-    @pytest.mark.parametrize("method", ["predict", "run"])
-    def test_exact_needs_the_local_native_simulator(self, trained, method):
-        with pytest.raises(ValueError, match="exact=True needs"):
-            getattr(trained, method)(_X, exact=True, backend="aer")
-
-    def test_no_seed_on_qmio_hardware(self, trained):
-        with pytest.raises(ValueError, match="seed is not supported"):
-            trained.run(_X, infrastructure="qmio", seed=1)
-
-    def test_execution_arguments_are_keyword_only(self, trained):
-        with pytest.raises(TypeError):
-            trained.predict(_X, 128)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TrainedModel.save and qml.load
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestSaveLoad:
-    def test_round_trip_predicts_identically(self, trained, tmp_path):
-        from polypus.qml import TrainedModel, load
-
-        path = tmp_path / "model.json"
-        trained.save(path)
-        loaded = load(path)
-        assert isinstance(loaded, TrainedModel)
-        assert loaded.params == trained.params
-        assert loaded.predict(_X, exact=True) == trained.predict(_X, exact=True)
-        assert (
-            loaded.run(_X, exact=True).probabilities
-            == trained.run(_X, exact=True).probabilities
-        )
-
-    def test_floats_read_back_bit_for_bit(self, tmp_path):
-        from polypus.qml import load
-
-        params = [0.1 + 0.2, 1 / 3]
-        _model().bind(params).save(str(tmp_path / "m.json"))
-        assert load(str(tmp_path / "m.json")).params == params
-
-    def test_the_file_is_versioned_json(self, trained, tmp_path):
-        import json
-
-        path = tmp_path / "model.json"
-        trained.save(path)
-        saved = json.loads(path.read_text())
-        assert saved["format"] == "polypus.qml.TrainedModel"
-        assert saved["version"] == 1
-        assert saved["params"] == trained.params
-        assert set(saved) == {"format", "version", "spec", "params"}
-
-    def test_save_replaces_and_leaves_no_temporary_file(self, trained, tmp_path):
-        from polypus.qml import load
-
-        path = tmp_path / "model.json"
-        _model().bind([0.0, 0.0]).save(path)
-        trained.save(path)
-        assert load(path).params == trained.params
-        assert [p.name for p in tmp_path.iterdir()] == ["model.json"]
-
-    def test_disk_failures_are_os_errors(self, trained, tmp_path):
-        from polypus.qml import load
-
-        with pytest.raises(FileNotFoundError, match="missing.json"):
-            load(tmp_path / "missing.json")
-        with pytest.raises(FileNotFoundError):
-            trained.save(tmp_path / "no_such_dir" / "model.json")
-        assert list(tmp_path.iterdir()) == []
-
-    @pytest.mark.parametrize(
-        "edit",
-        [
-            lambda saved: "not json",
-            lambda saved: json_dump({**saved, "format": "something.else"}),
-            lambda saved: json_dump({**saved, "version": 2}),
-            lambda saved: json_dump({**saved, "params": saved["params"][:-1]}),
-            lambda saved: json_dump({k: v for k, v in saved.items() if k != "spec"}),
-        ],
-        ids=["not-json", "format", "version", "params", "no-spec"],
-    )
-    def test_a_corrupt_or_edited_file_is_a_value_error(self, trained, tmp_path, edit):
-        import json
-
-        from polypus.qml import load
-
-        path = tmp_path / "model.json"
-        trained.save(path)
-        path.write_text(edit(json.loads(path.read_text())))
-        with pytest.raises(ValueError, match="not a valid polypus.qml.TrainedModel"):
-            load(path)
-
-
-def json_dump(value):
-    import json
-
-    return json.dumps(value)
+            make_model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(1)]))
+        assert make_model(2, ansatz=Ansatz(2).pool("basic"), readout=Readout([Z(0)]))
 
 
 @pytest.mark.parametrize(
