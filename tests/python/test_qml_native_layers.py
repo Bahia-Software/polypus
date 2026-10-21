@@ -146,6 +146,25 @@ def _amplitude_model():
     )
 
 
+class TestAngleEncoder:
+    def test_the_three_axes_build_different_circuits(self):
+        from polypus.qml import Encoder
+
+        theta = [0.1 * (i + 1) for i in range(8)]
+        values = {
+            axis: _exact(
+                _raw_model(
+                    2,
+                    lambda a: a.hardware_efficient(1),
+                    encoder=Encoder(2).angle_encoder(axis),
+                ),
+                theta,
+            )
+            for axis in ("rx", "ry", "rz")
+        }
+        assert len(set(values.values())) == 3, values
+
+
 class TestAmplitudeEncoder:
     THETA = [0.1 * (i + 1) for i in range(8)]
 
@@ -356,6 +375,44 @@ class TestObservables:
             scores = [z0, 0.5 * z0 + 1.5 * z0z1]
             assert max(range(2), key=scores.__getitem__) == expected
             assert _obs(observables, sample=sample, decision="argmax") == expected
+
+    def test_argmax_over_all_three_spellings(self):
+        # Class 0 a list, class 1 a `PauliTerm`, class 2 a weighted sum; one
+        # sample per winner, so no observable can be dropped unnoticed.
+        from polypus.qml import Observable, Z
+
+        observables = [[("z", 0)], Z(1), Observable([(0.5, Z(0)), (1.5, Z(0) @ Z(1))])]
+        winners = set()
+        for sample, expected in [([0.0, 0.1], 0), ([0.8, 0.0], 1), ([1.0, 0.8], 2)]:
+            z0 = _expected_z(sample, _OBS_THETA, [0])
+            z1 = _expected_z(sample, _OBS_THETA, [1])
+            z0z1 = _expected_z(sample, _OBS_THETA, [0, 1])
+            scores = [z0, z1, 0.5 * z0 + 1.5 * z0z1]
+            assert max(range(3), key=scores.__getitem__) == expected
+            assert _obs(observables, sample=sample, decision="argmax") == expected
+            winners.add(expected)
+        assert winners == {0, 1, 2}
+
+    def test_the_four_decisions_against_their_closed_forms(self):
+        # On the product state ⟨Z₀⟩ = cos(1.1) ≈ 0.454 and ⟨Z₁⟩ = cos(2.2) < 0.
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        def decide(decision, threshold=None):
+            model = Model(
+                Encoder(2).angle_encoder("ry"),
+                Ansatz(2).hardware_efficient(0, rotations=["ry"]),
+                Readout([Z(0), Z(1)], decision=decision, threshold=threshold),
+            )
+            return _exact(model, _OBS_THETA, _OBS_SAMPLE)
+
+        z0 = _expected_z(_OBS_SAMPLE, _OBS_THETA, [0])
+        z1 = _expected_z(_OBS_SAMPLE, _OBS_THETA, [1])
+        assert z0 > 0.0 > z1
+        assert decide("raw") == pytest.approx(z0, abs=1e-12)
+        assert decide("sign") == 1
+        assert decide("threshold", 0.25) == 1
+        assert decide("threshold", 0.8) == -1
+        assert decide("argmax") == 0
 
     @pytest.mark.parametrize("coefficient", [math.nan, math.inf, -math.inf])
     def test_a_non_finite_coefficient_names_its_term(self, coefficient):

@@ -475,3 +475,95 @@ class TestFitnessHistory:
     def test_an_invalid_method_propagates_its_error(self):
         with pytest.raises(TypeError, match="method must be an instance"):
             _clusters_fit(method="not-an-optimizer", exact=True)
+
+
+@pytest.mark.integration
+class TestParameterCounts:
+    """``num_params`` against the length of the ``best_params`` training
+    returns, on two shapes counted by different rules."""
+
+    def test_a_hardware_efficient_model(self):
+        # 2 qubits × (ry, rz) × (1 rep + final layer) = 8.
+        model = _two_qubit_model()
+        assert model.num_params == 8
+        assert len(_clusters_fit(model, exact=True).best_params) == 8
+
+    def test_a_qcnn(self):
+        # A shared conv block (4) and a shared pool block (3), whatever the width.
+        from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+        model = Model(
+            Encoder(4).angle_encoder("ry"),
+            Ansatz(4).conv("basic").pool("basic"),
+            Readout([Z(0)], decision="sign"),
+        )
+        assert model.num_params == 7
+        result = _clusters_fit(model, x=[row * 2 for row in _CLUSTERS], exact=True)
+        assert len(result.best_params) == 7
+
+    def test_two_losses_score_the_same_data_differently(self):
+        squared = _clusters_fit(loss="squared_error", exact=True).best_fitness
+        hinge = _clusters_fit(loss="hinge", exact=True).best_fitness
+        assert squared != hinge
+
+
+# Every 2-bit input, labelled by its first bit. With a basis encoder ⟨Z₀⟩ = ±1
+# is reachable exactly, so the best hinge fitness is 0.
+_BITS = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+_BIT_LABELS = [-1, -1, 1, 1]
+
+
+def _basis_model(encoder=None):
+    from polypus.qml import Ansatz, Encoder, Model, Readout, Z
+
+    return Model(
+        encoder or Encoder(2).basis_encoder(),
+        Ansatz(2).hardware_efficient(1),
+        Readout([Z(0)], decision="sign"),
+    )
+
+
+@pytest.mark.integration
+class TestBasisEncoder:
+    def test_it_reserves_no_parameters(self):
+        assert _basis_model().num_params == 8
+
+    def test_it_learns_every_input(self):
+        import polypus
+
+        model = _basis_model()
+        result = _clusters_fit(
+            model,
+            x=_BITS,
+            y=_BIT_LABELS,
+            method=polypus.DE(generations=60, population_size=20, tolerance=1e-9),
+            exact=True,
+        )
+        assert result.best_fitness > -0.05, result.best_fitness
+        assert model.bind(result.best_params).predict(_BITS, exact=True) == _BIT_LABELS
+
+    def test_a_non_binary_feature_is_rejected_naming_it(self):
+        # 0.5 names no basis state: an error, never rounded, saying which feature.
+        with pytest.raises(ValueError) as excinfo:
+            _clusters_fit(
+                _basis_model(), x=[[0.0, 0.5], [1.0, 1.0]], y=[-1, 1], exact=True
+            )
+        assert "feature 1 is 0.5" in str(excinfo.value)
+
+    def test_the_same_rule_holds_at_inference(self):
+        trained = _basis_model().bind([0.1] * 8)
+        with pytest.raises(ValueError, match="feature 0 is 2"):
+            trained.predict([[2.0, 0.0]], exact=True)
+
+    def test_it_composes_after_another_encoder(self):
+        # A conditional X is an ordinary unitary, so unlike the amplitude encoder
+        # it may follow other layers.
+        from polypus.qml import Encoder
+
+        encoder = Encoder(2).angle_encoder("ry").basis_encoder()
+        assert encoder.num_layers == 2
+        result = _clusters_fit(
+            _basis_model(encoder), x=_BITS, y=_BIT_LABELS, exact=True
+        )
+        assert len(result.best_params) == 8
+        assert math.isfinite(result.best_fitness)

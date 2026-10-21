@@ -29,12 +29,46 @@ class TestPauliTerms:
         assert repr(Z(0)) == "Z(0)"
         assert repr(Z(0) @ X(1) @ Y(3)) == "Z(0) @ X(1) @ Y(3)"
 
-    @pytest.mark.parametrize("other", ["Z", "X"])
+    @pytest.mark.parametrize("other", ["Z", "X", "Y"])
     def test_a_repeated_position_is_rejected_at_the_product(self, other):
         import polypus.qml as qml
 
         with pytest.raises(ValueError):
             qml.Z(0) @ getattr(qml, other)(0)
+
+    def test_a_chain_is_checked_at_every_step(self):
+        from polypus.qml import X, Z
+
+        assert repr(Z(0) @ Z(1) @ X(2)) == "Z(0) @ Z(1) @ X(2)"
+        # The clash appears only at the third factor, and is caught there.
+        with pytest.raises(ValueError, match="position"):
+            Z(0) @ Z(1) @ X(1)
+
+    def test_the_list_spelling_is_only_checked_by_the_readout(self):
+        # The same mistake as a list cannot fail while the list is built; it
+        # fails where the `Readout` reads it. Same error, later.
+        from polypus.qml import Readout
+
+        bad = [("z", 0), ("z", 0)]
+        with pytest.raises(ValueError, match="position"):
+            Readout([bad])
+
+    def test_only_a_term_multiplies_a_term(self):
+        from polypus.qml import Observable, Z
+
+        with pytest.raises(TypeError):
+            Z(0) @ [("z", 1)]
+        with pytest.raises(TypeError):
+            Z(0) @ Observable([(1.0, Z(1))])
+
+    def test_no_symbolic_sum_or_scaling(self):
+        # `Observable(...)` is the spelling for weights and sums.
+        from polypus.qml import Z
+
+        with pytest.raises(TypeError):
+            Z(0) + Z(1)
+        with pytest.raises(TypeError):
+            2.0 * Z(0)
 
     def test_weighted_observable(self):
         from polypus.qml import Observable, Z
@@ -209,11 +243,17 @@ class TestReadout:
         with pytest.raises(ValueError, match='"argmax"'):
             Readout([Z(0)], decision="max")
 
-    def test_an_observable_of_another_type_is_a_type_error(self):
+    def test_an_observable_of_another_type_names_the_three_forms(self):
         from polypus.qml import Readout
 
-        with pytest.raises(TypeError, match="PauliTerm"):
-            Readout(["Z0"])
+        with pytest.raises(TypeError) as excinfo:
+            Readout([42])
+        for form in (
+            "polypus.qml.PauliTerm",
+            "polypus.qml.Observable",
+            "(pauli, position)",
+        ):
+            assert form in str(excinfo.value)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
