@@ -35,7 +35,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 | Feature | |
 |---|---|
 | **Multi-QPU execution** | Shots and populations are split across `n_qpus`; results come back per QPU and merged. |
-| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES and Adam behind one `train()` call, plus supervised QML with `qml.train` and `qml.predict`. |
+| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES and Adam behind one `train()` call. Quantum machine learning either with your own Qiskit circuits (`qml.train`, `qml.predict`) or with native models (`qml.Model`) that get exact gradients, exact simulation, minibatches and save/load. |
 | **Native cost observables** | QUBO and Ising costs are evaluated in Rust, without a Python call per bitstring. |
 | **Rust circuit engine** | `polypus.Circuit` imports and exports OpenQASM 2 and 3 and exports QIR. Parameter binding runs without the GIL, about 3x faster than Qiskit's `assign_parameters`. |
 | **Reproducible runs** | Every result reports the seed it used; pass it back to replay the run. |
@@ -154,7 +154,7 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`
 |---|---|
 | [Running circuits](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md) | `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors |
 | [Variational training](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/training.md) | `train` parameters, `TrainResult`, cost functions, DE, PSO, QNG, CMA-ES and Adam |
-| [Quantum machine learning](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/qml.md) | `qml.train` with labels, `SampleCost`, `qml.predict` |
+| [Quantum machine learning](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/qml.md) | `qml.train` with Qiskit circuits, labels and `qml.predict`; native models with `qml.Model`: layers, readout, losses, `fit`, prediction, saving |
 | [Circuits and interchange](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/circuits.md) | `polypus.Circuit`, the Rust builder, OpenQASM 2 and 3, QIR |
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
 | [Performance](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/performance.md) | Batched simulation, GIL-free binding, gate-parallel auto-calibration |
