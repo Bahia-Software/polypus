@@ -130,6 +130,8 @@ trained = model.bind(result.best_params)
 labels = trained.predict(np.array([[0.15], [2.95]]))  # [1, -1]
 ```
 
+[`examples/qml_iris_demo.py`](../../examples/qml_iris_demo.py) trains one on the Iris flowers end to end, and [`examples/qml_native_showcase.py`](../../examples/qml_native_showcase.py) runs every encoder, layer, optimizer and option in eleven checked scenarios.
+
 Everything after `y` is keyword-only. The execution arguments have defaults (`shots=1024`, `infrastructure="local"`, `n_qpus=1`, `nodes=1`, `cores_per_qpu=2`, `id="qml"`), and without `backend` the native simulator runs the model locally (on CUNQA, whose QPUs run Aer, it is `"aer"`).
 
 ### Building a model
