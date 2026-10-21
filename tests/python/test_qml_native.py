@@ -331,3 +331,216 @@ def test_classes_report_the_qml_module(name):
     import polypus.qml as qml
 
     assert getattr(qml, name).__module__ == "polypus.qml"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# qml.train in the native form
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Two separable classes on one feature: ry(x) puts small x near |0> (⟨Z⟩ ≈ +1)
+# and large x near |1> (⟨Z⟩ ≈ −1).
+_X = [[0.1], [0.3], [2.9], [3.0], [0.2], [2.8]]
+_Y = [1, 1, -1, -1, 1, -1]
+
+
+def _pieces(num_qubits=1):
+    from polypus.qml import Ansatz, Encoder
+
+    return (
+        Encoder(num_qubits).angle_encoder("ry"),
+        Ansatz(num_qubits).real_amplitudes(1),
+    )
+
+
+def _classifier(**kwargs):
+    from polypus.qml import Objective, Z
+
+    return Objective([Z(0)], decision="sign", loss=kwargs.pop("loss", "hinge"))
+
+
+def _native_train(method=None, x=_X, y=_Y, objective=None, **kwargs):
+    import polypus
+
+    encoder, ansatz = kwargs.pop("pieces", None) or _pieces()
+    if y is not None:
+        kwargs["y_train"] = y
+    return polypus.qml.train(
+        encoder,
+        ansatz,
+        x,
+        method or polypus.Adam(max_iters=5, patience=10_000),
+        expectation_function=objective or _classifier(),
+        seed=kwargs.pop("seed", 3),
+        **kwargs,
+    )
+
+
+@pytest.mark.integration
+class TestNativeTraining:
+    def test_supervised_run_with_the_defaults(self):
+        result = _native_train()
+        assert len(result.best_params) == 2  # RealAmplitudes(1) on one qubit
+        assert result.iterations_run == 5
+        assert math.isfinite(result.best_fitness)
+        assert result.fitness_history[-1] == result.best_fitness
+
+    def test_exact_mode_does_not_depend_on_shots(self):
+        r1 = _native_train(exact=True, shots=16)
+        r2 = _native_train(exact=True, shots=4096)
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+
+    def test_adam_climbs_in_exact_mode(self):
+        import polypus
+
+        result = _native_train(
+            polypus.Adam(max_iters=60, learning_rate=0.1, patience=10_000), exact=True
+        )
+        # The hinge loss of a perfect margin-1 classifier is 0.
+        assert result.best_fitness > -0.2
+
+    def test_gradient_free_optimizers_train_too(self):
+        import polypus
+
+        result = _native_train(polypus.DE(generations=2, population_size=4))
+        assert len(result.best_params) == 2
+
+    def test_a_dataset_carries_its_labels(self):
+        from polypus.qml import Dataset
+
+        result = _native_train(x=Dataset(_X, _Y), y=None, exact=True)
+        assert result.best_fitness == _native_train(exact=True).best_fitness
+
+    def test_unsupervised_maximises_the_observable(self):
+        import polypus
+        from polypus.qml import Objective, Observable, Z
+
+        # Maximise -⟨Z⟩ = -cos(x + φ): close samples can all be rotated near |1>.
+        objective = Objective([Observable([(-1.0, Z(0))])])
+        result = _native_train(
+            polypus.Adam(max_iters=60, learning_rate=0.2, patience=10_000),
+            x=[[0.1], [0.2], [0.3]],
+            y=None,
+            objective=objective,
+            exact=True,
+        )
+        assert result.best_fitness > 0.5
+
+    def test_minibatches_report_the_full_dataset(self):
+        r = _native_train(batch_size=2, exact=True)
+        assert len(r.best_params) == 2
+
+    def test_explicit_aer_backend(self):
+        result = _native_train(backend="aer", shots=64)
+        assert len(result.best_params) == 2
+
+    def test_data_reuploading_with_an_empty_encoder(self):
+        from polypus.qml import Ansatz, Encoder
+
+        pieces = (Encoder(1), Ansatz(1).angle_encoder("ry").real_amplitudes(1))
+        assert len(_native_train(pieces=pieces).best_params) == 2
+
+    def test_dimensions_is_inferred_and_checked(self):
+        assert len(_native_train(dimensions=2).best_params) == 2
+        with pytest.raises(ValueError, match="does not match"):
+            _native_train(dimensions=3)
+
+
+class TestNativeTrainingRejections:
+    """Everything here is rejected before a backend exists."""
+
+    def test_missing_expectation_function_is_a_type_error(self):
+        import polypus
+
+        encoder, ansatz = _pieces()
+        with pytest.raises(TypeError, match="expectation_function"):
+            polypus.qml.train(encoder, ansatz, _X, polypus.Adam(), y_train=_Y)
+
+    def test_a_callable_needs_qiskit_circuits(self):
+        with pytest.raises(TypeError, match="must be a polypus.qml.Objective"):
+            _native_train(objective=lambda b, y: 0.0)
+
+    def test_mixed_forms_are_rejected(self):
+        import polypus
+        from polypus.qml import Encoder
+        from qiskit import QuantumCircuit
+
+        with pytest.raises(ValueError, match="same form"):
+            polypus.qml.train(
+                Encoder(1).angle_encoder("ry"),
+                QuantumCircuit(1),
+                _X,
+                polypus.Adam(),
+                expectation_function=_classifier(),
+                y_train=_Y,
+            )
+
+    def test_swapped_pieces_are_rejected(self):
+        encoder, ansatz = _pieces()
+        with pytest.raises(ValueError, match="same form"):
+            _native_train(pieces=(ansatz, encoder))
+
+    def test_widths_must_match(self):
+        from polypus.qml import Ansatz, Encoder
+
+        pieces = (Encoder(2).angle_encoder("ry"), Ansatz(1).real_amplitudes(1))
+        with pytest.raises(ValueError, match="2 qubits but the Ansatz has 1"):
+            _native_train(pieces=pieces)
+
+    def test_a_model_that_never_loads_the_data(self):
+        from polypus.qml import Ansatz, Encoder
+
+        with pytest.raises(ValueError, match="no layer loads the data"):
+            _native_train(pieces=(Encoder(1), Ansatz(1).real_amplitudes(1)))
+
+    def test_labels_need_a_supervised_loss(self):
+        from polypus.qml import Objective, Z
+
+        with pytest.raises(ValueError, match="needs a loss"):
+            _native_train(objective=Objective([Z(0)], decision="sign"))
+        with pytest.raises(ValueError, match="does not use labels"):
+            _native_train(objective=Objective([Z(0)], loss="expectation"))
+
+    def test_a_supervised_loss_needs_labels(self):
+        from polypus.qml import Dataset
+
+        with pytest.raises(ValueError, match="needs labels"):
+            _native_train(y=None)
+        with pytest.raises(ValueError, match="needs labels"):
+            _native_train(x=Dataset(_X), y=None)
+
+    def test_a_dataset_and_y_train_together(self):
+        from polypus.qml import Dataset
+
+        with pytest.raises(ValueError, match="carries its own labels"):
+            _native_train(x=Dataset(_X, _Y))
+
+    def test_label_domain_is_checked(self):
+        with pytest.raises(ValueError):
+            _native_train(y=[0, 1, 0, 1, 0, 1])  # hinge needs ±1
+
+    def test_too_many_features_for_the_encoder(self):
+        with pytest.raises(ValueError):
+            _native_train(x=[[0.1, 0.2]] * 6)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"backend": "aer"},
+            {"infrastructure": "cunqa", "nodes": 1, "cores_per_qpu": 1},
+        ],
+    )
+    def test_exact_needs_the_local_native_simulator(self, kwargs):
+        with pytest.raises(ValueError, match="exact=True needs"):
+            _native_train(exact=True, **kwargs)
+
+    @pytest.mark.parametrize("size", [0, 6, 7])
+    def test_batch_size_must_be_smaller_than_the_dataset(self, size):
+        with pytest.raises(ValueError, match="batch_size"):
+            _native_train(batch_size=size)
+
+    def test_the_default_backend_is_the_native_simulator(self):
+        # The native simulator is noiseless, so a noise model without a backend
+        # is refused: proof that `backend=None` resolved to "polypus".
+        with pytest.raises(ValueError, match="noise"):
+            _native_train(noise_model=object())

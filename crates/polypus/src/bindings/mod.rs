@@ -29,15 +29,15 @@ use pso::PSO;
 use qng::QNG;
 
 use crate::evaluation::{
-    CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
-    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, QmlSource, SupervisedObjective,
-    VqcOracleFactory,
+    CircuitSource, CostObservable, Label, MinibatchConfig, OracleErrorSlot, PyCallbackObservable,
+    PyLabelledCost, PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, QmlSource,
+    SupervisedObjective, VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::{random_id_bytes, random_seed};
 use crate::infrastructure::{
     merge_counts, validate_walltime, BackendConfig, BoundCircuit, Counts, EntropyError,
-    ExecutionConfig, Infrastructure, InfrastructureError, OptLevel, OptionValue, Planner,
-    ShotDistributingPlanner, DEFAULT_WALLTIME,
+    ExecutionConfig, Infrastructure, InfrastructureError, NativeStatevectorBackend, OptLevel,
+    OptionValue, Planner, ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources,
@@ -1664,24 +1664,37 @@ fn bind_feature_rows<'py>(
     Ok(circuits)
 }
 
-/// QML entry point: train a data-encoding VQC where `feature_map` encodes each
-/// training sample and `ansatz` holds the trainable weights.
+/// QML entry point: train a data-encoding model, `feature_map` loading each
+/// training sample and `ansatz` holding the trainable weights. It takes two
+/// forms, chosen by the types of `feature_map` and `ansatz` (plan D4):
 ///
-/// Internally, this function:
-/// 1. Composes `feature_map` and `ansatz` into a single circuit.
-/// 2. Pre-binds each row of `x_train` to the feature-map parameters, producing
-///    one partially-bound circuit per training sample.
-/// 3. Delegates to the chosen optimizer with `TrainMode::Qml`, so that for
-///    every candidate parameter vector θ the optimizer binds θ to all training
-///    circuits, runs them, and averages the per-sample values into a single
-///    fitness value (maximised).
+/// - **Native:** a `polypus.qml.Encoder` and a `polypus.qml.Ansatz` of the same
+///   width, scored by a `polypus.qml.Objective` in `expectation_function`
+///   (observables, decision and loss). The model runs on Polypus's own circuits,
+///   and Adam gets the exact parameter-shift gradient.
+/// - **Qiskit:** `QuantumCircuit`s, composed into one circuit; each `x_train`
+///   row is pre-bound to the feature map, and `expectation_function` scores the
+///   measured bitstrings.
 ///
-/// # Labels (`y_train`)
+/// Mixing the forms (one piece of each, or a callable with native pieces, or an
+/// `Objective` with Qiskit circuits) is an error (plan G2). Either way, for
+/// every candidate θ the optimizer binds θ to all training circuits, runs them
+/// and averages the per-sample values into one fitness, which it maximises.
 ///
-/// Without `y_train`, every sample is scored by the same
-/// `expectation_function(bitstring) -> float`. With `y_train` (keyword-only, one
-/// label per `x_train` row), each sample is scored against its own label and
-/// `expectation_function` is one of:
+/// # Training data and labels
+///
+/// `x_train` is rows of features or a `polypus.qml.Dataset`, in either form. A
+/// `Dataset` brings its own labels, if it has them, so `y_train` is then an
+/// error. Otherwise `y_train` (keyword-only) gives one label per row.
+///
+/// In the **native** form the labels feed the `Objective`'s loss, which must be
+/// a supervised one (`loss` is required with labels). Without labels the run
+/// maximises the first observable (`loss=None` or `"expectation"`); a supervised
+/// loss without labels is an error.
+///
+/// In the **Qiskit** form, without labels every sample is scored by the same
+/// `expectation_function(bitstring) -> float`. With labels, each sample is
+/// scored against its own label and `expectation_function` is one of:
 ///
 /// - a callable `f(bitstring, label) -> float`, averaged over each sample's shots
 ///   (the expected accuracy, when `f` returns `1.0` for a correct read-out);
@@ -1690,14 +1703,35 @@ fn bind_feature_rows<'py>(
 ///   whole distribution, for non-linear losses such as a log-likelihood.
 ///
 /// Integer labels reach the objective as `int`; if any label is not an integer,
-/// all are passed as `float`. `y_train` is validated before anything runs
-/// (contract C-8).
+/// all are passed as `float` (a `Dataset`'s labels follow the same rule by
+/// value). Labels are validated before anything runs (contract C-8).
+///
+/// # Defaults
+///
+/// Everything after `method` has a default: `shots=1024`, `n_qpus=1`,
+/// `infrastructure="local"`, `nodes=1`, `cores_per_qpu=2`, `id="qml"`.
+/// `expectation_function` is required all the same (`TypeError` without it).
+/// `dimensions` is the model's parameter count (`len(ansatz.parameters)`, or the
+/// `Ansatz`'s); if passed, it must match. `backend=None` picks `"polypus"` for
+/// the native form on `infrastructure="local"` and `"aer"` otherwise (CUNQA's
+/// QPUs run Aer, and the native simulator cannot run Qiskit circuits); an
+/// explicit `backend` always wins.
+///
+/// # `exact` and `batch_size` (keyword-only)
+///
+/// `exact=True` replaces sampling with exact probabilities, so `shots` no longer
+/// matters; only for the native form on `infrastructure="local"` with
+/// `backend="polypus"`. `batch_size` scores each evaluation on a fresh,
+/// seed-determined subset of that many samples, `1 <= batch_size <
+/// num_samples`, in either form; the reported `best_fitness` is always on the
+/// whole training set (contract C-5).
+///
+/// # Seeds, ids and the rest
 ///
 /// `seed` follows the same precedence as [`train`] and makes the optimizer's
-/// search reproducible; it returns a [`TrainResult`]. `qml.train` runs on the
-/// Qiskit/Aer path (the native backend is rejected), and Aer's shot sampling
-/// is now seeded too (contract C-7), so a `qml.train` run is fully
-/// reproducible end-to-end given the same seed.
+/// search reproducible; it returns a [`TrainResult`]. It also seeds the shot
+/// sampling of the native backend and of Aer (contract C-7), so a `qml.train`
+/// run is fully reproducible end-to-end given the same seed.
 ///
 /// As in [`train`], the `id` kwarg is a human-readable *prefix*: a UUID v4 is
 /// appended for uniqueness (mirroring [`run_quantum_circuit`]), so the returned
@@ -1735,7 +1769,20 @@ fn bind_feature_rows<'py>(
 /// memory as it announces. Off CESGA's private network, use a tunnel (see "QMIO
 /// transport threat model" in `docs/backends.md`).
 ///
-/// Example (supervised binary classifier, parity read-out):
+/// Example (native supervised classifier):
+///
+/// ```ignore
+///     result = polypus.qml.train(
+///         polypus.qml.Encoder(4).angle_encoder("ry"),
+///         polypus.qml.Ansatz(4).hardware_efficient(2),
+///         X_train, polypus.Adam(max_iters=100),
+///         expectation_function=polypus.qml.Objective(
+///             [polypus.qml.Z(0)], decision="sign", loss="hinge"),
+///         y_train=y_train,
+///     )
+/// ```
+///
+/// Example (Qiskit form, parity read-out):
 ///
 /// ```ignore
 ///     def correct(bitstring, label):
@@ -1750,7 +1797,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots=1024, n_qpus=1, dimensions=None, expectation_function=None, infrastructure="local", nodes=1, cores_per_qpu=2, id="qml", sim_method="automatic", noise_model=None, backend=None, seed=None, options=None, walltime=None, *, y_train=None, exact=false, batch_size=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1758,90 +1805,168 @@ pub fn qml_train<'py>(
     method: Bound<'py, PyAny>,
     shots: u32,
     n_qpus: u32,
-    dimensions: u32,
-    expectation_function: Bound<'py, PyAny>,
-    infrastructure: String,
+    dimensions: Option<u32>,
+    expectation_function: Option<Bound<'py, PyAny>>,
+    infrastructure: &str,
     nodes: u32,
     cores_per_qpu: u32,
-    id: String,
+    id: &str,
     sim_method: &str,
     noise_model: Option<Bound<'py, PyAny>>,
-    backend: &str,
+    backend: Option<&str>,
     seed: Option<u64>,
     options: Option<OptionsArg>,
     walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
+    exact: bool,
+    batch_size: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
-    validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
-    validate_id(&id)?;
+    validate_cunqa_allocation(infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    validate_id(id)?;
+    // A default only so the arguments before it can have one (plan E8): it is
+    // required, and missing it is the `TypeError` Python raises for any missing
+    // argument.
+    let expectation_function = expectation_function.ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "qml.train() missing required argument: 'expectation_function'",
+        )
+    })?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
-    // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
-    // below); this seed governs the optimizer's RNG and, since it's threaded
-    // into ExecutionConfig::seed below, Aer's shot sampling too.
+    // OS entropy. It drives the optimizer, the shot sampling (threaded into
+    // ExecutionConfig::seed below) and the minibatches.
     let effective_seed = resolve_optimizer_seed(seed, method_seed(&method), random_seed)?;
-    // QML composes Qiskit feature maps and ansätze, so it is inherently a
-    // Qiskit path; the native statevector backend cannot consume a Qiskit
-    // `QuantumCircuit`. Accept `backend` for API symmetry but reject native.
-    if is_native_backend(backend) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "the native 'polypus' backend is not supported for qml.train (feature maps \
-             and ansätze are Qiskit circuits); use backend=\"aer\"",
-        ));
-    }
-    // The optimizer searches a `dimensions`-wide vector and binds it to the
-    // ansatz's free parameters; a mismatch surfaces later as a cryptic Qiskit
-    // binding error inside the oracle. Catch it upfront, mirroring how `train`
-    // validates `dimensions` against the circuit's parameter count (contract
-    // C-8). `len()` calls `__len__`, working on Qiskit's ParameterView the same
-    // as on a list.
-    let num_ansatz_params = ansatz.getattr("parameters")?.len()?;
-    if num_ansatz_params != dimensions as usize {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
-        )));
-    }
-    // Type-checked before any circuit is composed; the count is checked once
-    // `x_train` has been read (contract C-8).
-    let labels = y_train.as_ref().map(extract_labels).transpose()?;
+    let native = qml::native_pieces(&feature_map, &ansatz)?;
+    // Plan F5: each form's natural backend unless one is named.
+    let backend = backend.unwrap_or(if native.is_some() && infrastructure == "local" {
+        "polypus"
+    } else {
+        "aer"
+    });
     let py = feature_map.py();
 
-    let composed = compose_qml_template(&feature_map, &ansatz)?;
-    // Pre-bind each sample, leaving the ansatz parameters for the optimizer.
-    let qcs = bind_feature_rows(&composed, &feature_map, &x_train, "x_train")?;
-
-    if qcs.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "x_train must contain at least one training sample",
-        ));
-    }
-
-    // One label per row (contract C-8), and an objective that can read labels:
-    // both checked before any backend, and so any CUNQA allocation, exists.
-    let supervised = match labels {
-        Some(labels) => {
-            if labels.len() != qcs.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "y_train has {} labels, but x_train has {} rows; qml.train needs exactly \
-                     one label per training sample",
-                    labels.len(),
-                    qcs.len()
-                )));
+    // Everything below up to `build_backend_config` validates the run, so a
+    // mistake never costs a backend (or a CUNQA allocation).
+    let (source, num_params) = match native {
+        Some(pieces) => {
+            if exact && !(infrastructure == "local" && is_native_backend(backend)) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only \
+                     the native simulator computes exact probabilities",
+                ));
             }
-            Some((extract_supervised_objective(&expectation_function)?, labels))
+            let problem =
+                qml::native_problem(pieces, &x_train, y_train.as_ref(), &expectation_function)?;
+            let num_params = problem.num_params();
+            let exact = exact.then(|| Arc::new(NativeStatevectorBackend::new(effective_seed)));
+            (QmlSource::Native { problem, exact }, num_params)
         }
+        None => {
+            if exact {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "exact=True needs the native form (a polypus.qml.Encoder and Ansatz): \
+                     Qiskit circuits run on Aer, which samples",
+                ));
+            }
+            qml::reject_objective(&expectation_function)?;
+            // QML composes Qiskit feature maps and ansätze here, which the native
+            // statevector backend cannot consume.
+            if is_native_backend(backend) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "the native 'polypus' backend is not supported for qml.train with Qiskit \
+                     feature maps and ansätze; use backend=\"aer\", or the native form \
+                     (polypus.qml.Encoder and Ansatz)",
+                ));
+            }
+            // A `Dataset` brings its rows and labels (plan G1).
+            let dataset = qml::qiskit_dataset(&x_train, y_train.is_some())?;
+            let labels = match &dataset {
+                Some((_, labels)) => labels.clone(),
+                // Type-checked before any circuit is composed; the count is
+                // checked once `x_train` has been read (contract C-8).
+                None => y_train.as_ref().map(extract_labels).transpose()?,
+            };
+            let rows = match &dataset {
+                Some((rows, _)) => rows.as_any().clone(),
+                None => x_train.clone(),
+            };
+            let num_params = ansatz.getattr("parameters")?.len()?;
+
+            let composed = compose_qml_template(&feature_map, &ansatz)?;
+            // Pre-bind each sample, leaving the ansatz parameters for the optimizer.
+            let qcs = bind_feature_rows(&composed, &feature_map, &rows, "x_train")?;
+            if qcs.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "x_train must contain at least one training sample",
+                ));
+            }
+            // One label per row (contract C-8), and an objective that can read
+            // labels.
+            let objective = match labels {
+                Some(labels) => {
+                    if labels.len() != qcs.len() {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "y_train has {} labels, but x_train has {} rows; qml.train needs \
+                             exactly one label per training sample",
+                            labels.len(),
+                            qcs.len()
+                        )));
+                    }
+                    QmlObjective::Supervised {
+                        objective: extract_supervised_objective(&expectation_function)?,
+                        labels,
+                    }
+                }
+                None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
+            };
+            (
+                QmlSource::Qiskit {
+                    training_circuits: qcs,
+                    objective,
+                },
+                num_params,
+            )
+        }
+    };
+    // The optimizer searches a `dimensions`-wide vector bound to the model's free
+    // parameters, so a passed value must match (contract C-8).
+    if let Some(dimensions) = dimensions {
+        if dimensions as usize != num_params {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dimensions ({dimensions}) does not match the ansatz's free parameters \
+                 ({num_params})"
+            )));
+        }
+    }
+    let dimensions = u32::try_from(num_params).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "the ansatz has {num_params} free parameters, more than an optimizer can search"
+        ))
+    })?;
+    let num_samples = match &source {
+        QmlSource::Native { problem, .. } => problem.num_circuits(),
+        QmlSource::Qiskit {
+            training_circuits, ..
+        } => training_circuits.len(),
+    };
+    // A batch as large as the training set is the run without minibatches (plan E7).
+    let minibatch = match batch_size {
+        Some(size) if size == 0 || size >= num_samples => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "batch_size must satisfy 1 <= batch_size < {num_samples} (the number of \
+                 training samples), got {size}"
+            )));
+        }
+        Some(size) => Some(MinibatchConfig::new(size, effective_seed)),
         None => None,
     };
 
-    // QML composes Qiskit feature maps and ansätze, so it is inherently a
-    // Qiskit path (native backend already rejected above): `backend` can only be
-    // an Aer variant here, which never fuses. Pass `None` (no fusion opinion)
-    // rather than `Some(true)` — the latter would trip build_backend_config's
-    // "fusion=True on a non-fusing backend" rejection for a value the caller
-    // never chose.
+    // Native circuits never ask for fusion here; `None` keeps the backend's
+    // default and never trips build_backend_config's "fusion=True on a
+    // non-fusing backend" rejection for a value the caller never chose.
     let backend_config = build_backend_config(
-        &infrastructure,
+        infrastructure,
         backend,
         sim_method,
         noise_model.map(|nm| nm.unbind()),
@@ -1855,23 +1980,22 @@ pub fn qml_train<'py>(
     // concurrent qml.train runs sharing the same `id` never collide on the
     // SLURM family/allocation, temp files or log streams named by
     // ExecutionConfig::id. The effective id is reported back in the TrainResult.
-    let effective_id = unique_id(&id)?;
+    let effective_id = unique_id(id)?;
     let config = Arc::new(ExecutionConfig {
         id: effective_id.clone(),
         shots,
         n_qpus,
-        infrastructure: infrastructure.clone(),
+        infrastructure: infrastructure.to_string(),
         backend_config,
         opt_level: OptLevel::default(),
-        // Consumed only by the native backend; ignored by Aer/CUNQA/QMIO. Set
-        // unconditionally so a native-backend training run reproduces exactly.
+        // Consumed by the native backend and Aer, so a run reproduces exactly.
         seed: Some(effective_seed),
     });
     // Log before `backend` is shadowed below (see `train`): the device selector
     // string is the manifest value, not the constructed backend object.
     log_training_start(
         &effective_id,
-        &infrastructure,
+        infrastructure,
         backend,
         n_qpus,
         shots,
@@ -1882,22 +2006,12 @@ pub fn qml_train<'py>(
     // Shared error slot (see `train`): the oracle records the first evaluation
     // failure here and `finish_optimization` surfaces it after `optimize`.
     let errors = OracleErrorSlot::new();
-    let objective = match supervised {
-        Some((objective, labels)) => QmlObjective::Supervised { objective, labels },
-        None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
-    };
     let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
-        factory: QmlOracleFactory {
-            source: QmlSource::Qiskit {
-                training_circuits: qcs,
-                objective,
-            },
-            minibatch: None,
-        },
+        factory: QmlOracleFactory { source, minibatch },
         method: method_enum,
         dimensions,
         seed: effective_seed,

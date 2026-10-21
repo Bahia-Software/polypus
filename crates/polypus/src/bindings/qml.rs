@@ -10,17 +10,20 @@
 //! than inside `train`. What does depend on the data (the feature count) is
 //! checked when the pieces meet a dataset.
 
+use std::sync::Arc;
+
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyList, PyModule};
 
 use polypus_qml::{
     AngleEncoder, ConvBlock, ConvLayer, Decision, Entanglement, Entangler, HardwareEfficientAnsatz,
     IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli, PauliString, PoolBlock,
-    PoolLayer, QuantumModel, Readout, RotationAxis, ValidationError,
+    PoolLayer, QmlProblem, QuantumModel, Readout, RotationAxis, ValidationError,
 };
 
-use super::seed_or_entropy;
+use super::{extract_labels, seed_or_entropy};
+use crate::evaluation::Label;
 use crate::infrastructure::execution_config::random_seed;
 
 /// A `polypus-qml` [`ValidationError`] as a Python `ValueError`. A free function
@@ -859,6 +862,219 @@ impl PyDataset {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// qml.train: the native form, and the Dataset in the Qiskit form
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What each form takes, for the errors that reject a mix (plan G2).
+const FORMS: &str = "the native form takes a polypus.qml.Encoder as feature_map, a \
+                     polypus.qml.Ansatz as ansatz and a polypus.qml.Objective as \
+                     expectation_function; the Qiskit form takes QuantumCircuits and a \
+                     callable, CachedCost, SampleCost, Qubo or Ising";
+
+/// The layers of a native `feature_map`/`ansatz` pair.
+pub(crate) struct NativePieces {
+    encoder: Layers,
+    ansatz: Layers,
+}
+
+/// The native pieces if `feature_map` is an [`Encoder`] and `ansatz` an
+/// [`Ansatz`], `None` if neither is native (the Qiskit form), and a
+/// `ValueError` for anything in between: one native piece and one circuit, or
+/// the two native pieces swapped.
+pub(crate) fn native_pieces(
+    feature_map: &Bound<'_, PyAny>,
+    ansatz: &Bound<'_, PyAny>,
+) -> PyResult<Option<NativePieces>> {
+    let is_native =
+        |obj: &Bound<'_, PyAny>| obj.is_instance_of::<Encoder>() || obj.is_instance_of::<Ansatz>();
+    match (feature_map.cast::<Encoder>(), ansatz.cast::<Ansatz>()) {
+        (Ok(encoder), Ok(trainable)) => Ok(Some(NativePieces {
+            encoder: encoder.try_borrow()?.stack.clone(),
+            ansatz: trainable.try_borrow()?.stack.clone(),
+        })),
+        _ if !is_native(feature_map) && !is_native(ansatz) => Ok(None),
+        _ => Err(PyValueError::new_err(format!(
+            "feature_map and ansatz must belong to the same form: {FORMS}"
+        ))),
+    }
+}
+
+/// Whether `layer` loads the sample. A `match` rather than a `matches!` so a new
+/// layer kind has to be classified here.
+fn loads_data(layer: &Layer) -> bool {
+    match layer {
+        Layer::AngleEncoder(_) | Layer::AmplitudeEncoder(_) | Layer::Iqp(_) | Layer::Basis(_) => {
+            true
+        }
+        Layer::HardwareEfficient(_) | Layer::Conv(_) | Layer::Pool(_) => false,
+    }
+}
+
+/// The training set of the native form and whether it has labels: a
+/// [`Dataset`](PyDataset) as it is (then `y_train` is an error), or rows plus
+/// an optional `y_train`, read with the same label checks as the Qiskit form.
+fn native_dataset(
+    x_train: &Bound<'_, PyAny>,
+    y_train: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(polypus_qml::Dataset, bool)> {
+    if let Ok(dataset) = x_train.cast::<PyDataset>() {
+        if y_train.is_some() {
+            return Err(dataset_and_labels_err());
+        }
+        let dataset = dataset.try_borrow()?;
+        return Ok((dataset.inner.clone(), dataset.labeled));
+    }
+    let rows: Vec<Vec<f64>> = x_train.extract()?;
+    let labels = y_train
+        .map(|y| {
+            extract_labels(y).map(|labels| {
+                labels
+                    .into_iter()
+                    .map(|label| match label {
+                        Label::Class(class) => class as f64,
+                        Label::Real(value) => value,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .transpose()?;
+    let labeled = labels.is_some();
+    // Unlabeled: zeros satisfy the pure crate; `labeled` keeps a supervised loss
+    // from ever training against them (plan F3).
+    let labels = labels.unwrap_or_else(|| vec![0.0; rows.len()]);
+    let dataset = polypus_qml::Dataset::from_rows(&rows, &labels).map_err(validation_to_py_err)?;
+    Ok((dataset, labeled))
+}
+
+fn dataset_and_labels_err() -> PyErr {
+    PyValueError::new_err(
+        "x_train is a polypus.qml.Dataset, which carries its own labels; pass y_train only \
+         with plain rows",
+    )
+}
+
+/// The loss a run trains with (plans F2 and F3): with labels, the Objective's
+/// supervised loss, which it must name; without labels, `expectation`. Every
+/// other pairing is a `ValueError`, so labels are never ignored and a
+/// supervised loss never trains against made-up labels.
+fn resolve_loss(loss: Option<Loss>, labeled: bool) -> PyResult<Loss> {
+    match (loss, labeled) {
+        (None | Some(Loss::Expectation), false) => Ok(Loss::Expectation),
+        (Some(loss), false) => Err(PyValueError::new_err(format!(
+            "loss=\"{}\" needs labels: pass y_train (or a labeled Dataset), or use \
+             loss=\"expectation\" to maximise the readout",
+            loss_name(loss)
+        ))),
+        (None, true) => Err(PyValueError::new_err(
+            "the training set has labels, so the Objective needs a loss, e.g. \
+             Objective([Z(0)], decision=\"sign\", loss=\"hinge\")",
+        )),
+        (Some(Loss::Expectation), true) => Err(PyValueError::new_err(
+            "loss=\"expectation\" does not use labels: drop y_train (or use a Dataset \
+             without labels), or choose a supervised loss",
+        )),
+        (Some(loss), true) => Ok(loss),
+    }
+}
+
+/// The native form's problem: `Encoder` and `Ansatz` joined into one model
+/// read out by the [`Objective`], compiled against the training set and scored
+/// with the resolved loss. Every check runs here, before any backend exists.
+pub(crate) fn native_problem(
+    pieces: NativePieces,
+    x_train: &Bound<'_, PyAny>,
+    y_train: Option<&Bound<'_, PyAny>>,
+    expectation_function: &Bound<'_, PyAny>,
+) -> PyResult<Arc<QmlProblem>> {
+    let objective = expectation_function.cast::<Objective>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "with a native Encoder and Ansatz, expectation_function must be a \
+             polypus.qml.Objective ({FORMS})"
+        ))
+    })?;
+    let objective = objective.get();
+    let NativePieces { encoder, ansatz } = pieces;
+    if encoder.num_qubits != ansatz.num_qubits {
+        return Err(PyValueError::new_err(format!(
+            "the Encoder has {} qubits but the Ansatz has {}; they must match",
+            encoder.num_qubits, ansatz.num_qubits
+        )));
+    }
+    if !encoder.layers.iter().chain(&ansatz.layers).any(loads_data) {
+        return Err(PyValueError::new_err(
+            "no layer loads the data: add an encoder to the Encoder (or re-upload the data \
+             in the Ansatz)",
+        ));
+    }
+    let (dataset, labeled) = native_dataset(x_train, y_train)?;
+    let loss = resolve_loss(objective.loss, labeled)?;
+    let compiled = encoder
+        .layers
+        .into_iter()
+        .chain(ansatz.layers)
+        .fold(QuantumModel::new(encoder.num_qubits), QuantumModel::layer)
+        .readout(objective.readout.clone())
+        .compile(dataset.num_features())
+        .map_err(validation_to_py_err)?;
+    let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_py_err)?;
+    Ok(Arc::new(problem))
+}
+
+/// The Qiskit form's rejection of an [`Objective`] (plan G2).
+pub(crate) fn reject_objective(expectation_function: &Bound<'_, PyAny>) -> PyResult<()> {
+    if expectation_function.is_instance_of::<Objective>() {
+        return Err(PyTypeError::new_err(format!(
+            "a polypus.qml.Objective needs a native Encoder and Ansatz ({FORMS})"
+        )));
+    }
+    Ok(())
+}
+
+/// A [`Dataset`](PyDataset) read for the Qiskit form: its rows as a Python list
+/// to bind to the feature map, and its labels if it has them.
+pub(crate) type QiskitDataset<'py> = (Bound<'py, PyList>, Option<Vec<Label>>);
+
+/// A [`Dataset`](PyDataset) in the Qiskit form's `x_train` (plan G1), or `None`
+/// when `x_train` is not one. Labels that are all whole numbers reach the
+/// objective as `int` class labels, otherwise all as `float`, the rule
+/// `y_train` follows.
+pub(crate) fn qiskit_dataset<'py>(
+    x_train: &Bound<'py, PyAny>,
+    has_y_train: bool,
+) -> PyResult<Option<QiskitDataset<'py>>> {
+    let Ok(dataset) = x_train.cast::<PyDataset>() else {
+        return Ok(None);
+    };
+    if has_y_train {
+        return Err(dataset_and_labels_err());
+    }
+    let dataset = dataset.try_borrow()?;
+    let inner = &dataset.inner;
+    let rows = PyList::empty(x_train.py());
+    for i in 0..inner.num_samples() {
+        rows.append(inner.sample(i).to_vec())?;
+    }
+    let labels = dataset.labeled.then(|| {
+        let values = inner.labels();
+        // Below 2^53 every whole `f64` converts to `i64` exactly.
+        let whole = values
+            .iter()
+            .all(|v| v.fract() == 0.0 && v.abs() < 2f64.powi(53));
+        values
+            .iter()
+            .map(|&v| {
+                if whole {
+                    Label::Class(v as i64)
+                } else {
+                    Label::Real(v)
+                }
+            })
+            .collect()
+    });
+    Ok(Some((rows, labels)))
+}
+
 /// Add the native classes and the Pauli helpers to the `polypus.qml` module.
 pub(crate) fn register(qml: &Bound<'_, PyModule>) -> PyResult<()> {
     qml.add_class::<Encoder>()?;
@@ -959,6 +1175,37 @@ mod tests {
             .unwrap(),
             4
         );
+    }
+
+    #[test]
+    fn resolve_loss_pairs_losses_with_labels() {
+        Python::initialize();
+        assert_eq!(resolve_loss(None, false).unwrap(), Loss::Expectation);
+        assert_eq!(
+            resolve_loss(Some(Loss::Expectation), false).unwrap(),
+            Loss::Expectation
+        );
+        assert_eq!(resolve_loss(Some(Loss::Hinge), true).unwrap(), Loss::Hinge);
+        assert!(resolve_loss(Some(Loss::Hinge), false).is_err());
+        assert!(resolve_loss(None, true).is_err());
+        assert!(resolve_loss(Some(Loss::Expectation), true).is_err());
+    }
+
+    #[test]
+    fn only_encoders_load_data() {
+        assert!(loads_data(&Layer::AngleEncoder(AngleEncoder::new(
+            RotationAxis::Ry
+        ))));
+        assert!(loads_data(&Layer::AmplitudeEncoder(
+            polypus_qml::AmplitudeEncoder
+        )));
+        assert!(loads_data(&Layer::Iqp(IqpEncoder::new())));
+        assert!(loads_data(&Layer::Basis(polypus_qml::BasisEncoder)));
+        assert!(!loads_data(&Layer::HardwareEfficient(
+            HardwareEfficientAnsatz::new(1)
+        )));
+        assert!(!loads_data(&Layer::Conv(ConvLayer::new(ConvBlock::Basic))));
+        assert!(!loads_data(&Layer::Pool(PoolLayer::new(PoolBlock::Basic))));
     }
 
     #[test]

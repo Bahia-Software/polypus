@@ -172,27 +172,39 @@ _QmlObjective = Union[
 # Rows of feature values, one per sample (a list of lists or a 2-D NumPy array).
 _FeatureRows = Iterable[Sequence[float]]
 
+# `x_train` in either form: rows of features, or a `Dataset` (then no `y_train`).
+_TrainingData = Union[_FeatureRows, Dataset]
+
 def train(
-    feature_map: QuantumCircuit,
-    ansatz: QuantumCircuit,
-    x_train: _FeatureRows,
+    # Both native (`Encoder`, `Ansatz`, `Objective`) or both Qiskit circuits
+    # with a Python cost; mixing the forms raises.
+    feature_map: Union[QuantumCircuit, Encoder],
+    ansatz: Union[QuantumCircuit, Ansatz],
+    x_train: _TrainingData,
     method: _Method,
-    shots: int,
-    n_qpus: int,
-    dimensions: int,
-    expectation_function: _QmlObjective,
-    infrastructure: str,
-    nodes: int,
-    cores_per_qpu: int,
-    id: str,
+    shots: int = 1024,
+    n_qpus: int = 1,
+    # `None`: the ansatz's parameter count; if given, it must match.
+    dimensions: Optional[int] = None,
+    # Required: `None` raises `TypeError`.
+    expectation_function: Optional[Union[_QmlObjective, Objective]] = None,
+    infrastructure: str = "local",
+    nodes: int = 1,
+    cores_per_qpu: int = 2,
+    id: str = "qml",
     sim_method: str = "automatic",
     noise_model: Optional[NoiseModel] = None,
-    backend: str = "aer",
+    # `None`: "polypus" for the native form on "local", else "aer".
+    backend: Optional[str] = None,
     seed: Optional[int] = None,
     options: Optional[dict[str, str]] = None,
     walltime: Optional[str] = None,
     *,
     y_train: Optional[Iterable[float]] = None,
+    # Native form on the local "polypus" backend only.
+    exact: bool = False,
+    # `1 <= batch_size < number of training samples`.
+    batch_size: Optional[int] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,
