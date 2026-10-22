@@ -146,7 +146,7 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`
 | `"cunqa"` | | CUNQA QPUs over SLURM | Yes | `nodes`, `cores_per_qpu` and `walltime` (`HH:MM:SS`) size the allocation |
 | `"qmio"` | | QMIO quantum processor | No | Pure-Rust ZeroMQ client; build with `--features qmio` |
 
-`polypus.backend_compatibility(qc)` lists, for each backend, why it would reject a circuit, without running it. Third-party backends plug in through a Rust trait or a Python worker; see [Writing a backend](https://github.com/Bahia-Software/polypus/blob/main/docs/backends.md).
+`polypus.backend_compatibility(qc)` lists, for each backend (Aer, native, CUNQA, QMIO), why it would reject a circuit, without running it; `resources=True` also checks the native qubit ceiling and memory budget. Third-party backends plug in through a Rust trait or a Python worker; see [Writing a backend](https://github.com/Bahia-Software/polypus/blob/main/docs/backends.md).
 
 ## User guide
 

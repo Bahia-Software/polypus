@@ -16,7 +16,7 @@ use crate::{
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
 use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
-use polypus_sim::{sample_projected, Simulator, StatevectorSimulator, MAX_CLBITS};
+use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, MAX_CLBITS};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -102,9 +102,30 @@ impl NativeStatevectorBackend {
     /// unlike execution, it writes no log record for a rejected circuit.
     ///
     /// Structural only: the qubit ceiling and the memory budget, which depend on
-    /// the host, are not checked.
+    /// the host, are not checked; [`check_resources`](Self::check_resources)
+    /// does.
     pub fn check_circuit(circuit: &BoundCircuit) -> Result<(), BackendError> {
         native_source(circuit).map(|_| ())
+    }
+
+    /// Check, without allocating anything, that this backend can hold
+    /// `circuit`'s statevector, with the error a run fails with: a circuit wider
+    /// than the qubit ceiling ([`polypus_sim::MAX_QUBITS`], every backend's) is
+    /// [`BackendError::NativeCircuit`], one whose statevector does not fit in
+    /// the memory budget (issue #215, read from `POLYPUS_MEM_BUDGET` or the host
+    /// at each call) is [`BackendError::InsufficientMemory`]. A circuit
+    /// [`check_circuit`](Self::check_circuit) rejects fails with that error
+    /// instead. GIL-free, and silent like `check_circuit`.
+    pub fn check_resources(circuit: &BoundCircuit) -> Result<(), BackendError> {
+        let num_qubits = native_source(circuit)?.circuit.num_qubits();
+        let max = polypus_sim::MAX_QUBITS;
+        if num_qubits > max {
+            return Err(simulation_failed(&SimError::TooManyQubits {
+                requested: num_qubits,
+                max,
+            }));
+        }
+        check_fits(num_qubits, active_budget()).map_err(BackendError::from)
     }
 
     /// Override the injected [`StatevectorSimulator::fusion`] flag (`true` by
@@ -185,7 +206,7 @@ impl NativeStatevectorBackend {
             .run_and_sample(&source.circuit, shots as usize, seed)
             .map_err(|e| {
                 log::error!("native statevector simulation failed: {e}");
-                BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+                simulation_failed(&e)
             })?;
         Ok(format_counts(&source.circuit, source.declared_clbits, raw))
     }
@@ -318,6 +339,11 @@ impl NativeStatevectorBackend {
 struct NativeSource<'a> {
     circuit: Cow<'a, ConcreteCircuit>,
     declared_clbits: Option<usize>,
+}
+
+/// The error a simulation failure `e` reaches the caller as.
+fn simulation_failed(e: &SimError) -> BackendError {
+    BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
 }
 
 /// The [`ConcreteCircuit`] a [`BoundCircuit`] stands for, obtained without
@@ -526,7 +552,7 @@ impl QuantumBackend for NativeStatevectorBackend {
         self.check_memory(concrete.num_qubits())?;
         let sv = self.simulator.run(concrete).map_err(|e| {
             log::error!("native statevector simulation failed: {e}");
-            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+            simulation_failed(&e)
         })?;
         // Reserve a contiguous seed block, one seed per batch, from the same
         // scheme `run_circuits` uses so a given base seed reproduces identical
@@ -956,6 +982,34 @@ mod tests {
             matches!(&err, BackendError::NativeCircuit(m) if m.contains("qubits")),
             "expected the ceiling error, got {err:?}"
         );
+    }
+
+    /// `check_resources` reports the ceiling error a run fails with, and lets a
+    /// circuit within the ceiling and the budget through.
+    #[test]
+    fn check_resources_reports_the_ceiling_error_of_a_run() {
+        let backend = NativeStatevectorBackend::new(0);
+        let too_wide = BoundCircuit::Native(
+            ParameterizedCircuit::new(polypus_sim::MAX_QUBITS + 1)
+                .measure_all()
+                .assign_parameters(&[])
+                .unwrap(),
+        );
+        let checked = NativeStatevectorBackend::check_resources(&too_wide).unwrap_err();
+        let run = backend
+            .run_circuits(
+                &[too_wide],
+                &RunParams {
+                    id: "ceiling".to_string(),
+                    shots: 8,
+                    seed: Some(1),
+                    opt_level: OptLevel::default(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(&checked, BackendError::NativeCircuit(_)));
+        assert_eq!(checked.to_string(), run.to_string());
+        NativeStatevectorBackend::check_resources(&BoundCircuit::Native(bell())).unwrap();
     }
 
     /// Issue #147: a high-qubit batch that cannot fit in the memory budget is

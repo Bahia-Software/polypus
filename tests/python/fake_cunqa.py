@@ -35,6 +35,15 @@ SUPPORTED_TAGS = ["2.4.0", "3.0.0", "3.1.0"]
 # The run options the seal may send; anything else is a seal change to review.
 RUN_OPTIONS = {"shots", "transpile", "method", "seed"}
 
+# `SUPPORTED_QISKIT_OPERATIONS` of CUNQA 3.0.0 (`cunqa/circuit/ir.py`).
+CUNQA_OPERATIONS = {
+    "unitary", "ryy", "rz", "z", "p", "rxx", "rx", "cx", "id", "x", "sxdg", "u1",
+    "ccy", "rzz", "rzx", "ry", "s", "cu", "crz", "ecr", "t", "ccx", "y", "cswap",
+    "r", "sdg", "csx", "crx", "ccz", "u3", "u2", "u", "cp", "tdg", "sx", "cu1",
+    "swap", "cy", "cry", "cz", "h", "cu3", "measure", "if_else", "barrier", "reset",
+    "save_state", "set_statevector",
+}  # fmt: skip
+
 
 NO_COUNTS_ERROR = (
     "Error during simulation, please check availability of QPUs, run arguments "
@@ -128,7 +137,7 @@ class FakeCunqa:
     ``(name, bound arguments)`` in order; ``runs`` records each ``run`` as a dict
     with the circuit, the QPU and the run options."""
 
-    def __init__(self, tag="3.1.0", run_error=None):
+    def __init__(self, tag="3.1.0", run_error=None, converter=False):
         self.tag = tag
         self.signatures = {n: signature(p) for n, p in SIGNATURES[tag].items()}
         self.families = {}
@@ -136,6 +145,36 @@ class FakeCunqa:
         self.calls = []
         self.runs = []
         self.run_error = run_error
+        # With `converter`, the fake also publishes `cunqa.circuit.ir` and its
+        # `run` converts each circuit with `to_ir` first, as CUNQA 3.x does.
+        self.converter = converter
+
+    # cunqa.circuit.ir.to_ir
+    def to_ir(self, circuit):
+        """CUNQA 3.0.0's converter, as far as rejecting goes, with its
+        ``ValueError`` messages: an instruction outside ``CUNQA_OPERATIONS``, an
+        ``if_else`` with an ``else`` body or a condition value other than 1, and
+        the same rules inside an ``if_else`` body."""
+        for instruction in circuit.data:
+            operation = instruction.operation
+            if operation.name not in CUNQA_OPERATIONS:
+                raise ValueError(
+                    f"Instruction {operation.name} not supported for conversion."
+                )
+            if operation.name == "if_else":
+                true_body, false_body = operation.params
+                if false_body is not None:
+                    raise ValueError(
+                        "if_else instruction with 'else' case is not supported for "
+                        "the current version."
+                    )
+                if operation.condition[1] != 1:
+                    raise ValueError(
+                        "Only 1 is accepted as condition for classicaly controlled "
+                        "operations for the current version."
+                    )
+                self.to_ir(true_body)
+        return {"num_qubits": circuit.num_qubits}
 
     def _bind(self, name, args, kwargs):
         bound = self.signatures[name].bind(*args, **kwargs)
@@ -181,6 +220,8 @@ class FakeCunqa:
         seed = options.get("seed")
         if seed is not None and not 0 <= seed < 2**63:
             raise ValueError(f"seed {seed} is outside Aer's 63-bit range")
+        if self.converter:
+            self.to_ir(circuit)
         self.runs.append({"circuit": circuit, "qpu": qpu, "options": dict(options)})
         if self.run_error is not None:
             raise self.run_error
@@ -227,6 +268,12 @@ class FakeCunqa:
         monkeypatch.setitem(sys.modules, "cunqa", types.ModuleType("cunqa"))
         monkeypatch.setitem(sys.modules, "cunqa.qpu", qpu)
         monkeypatch.setitem(sys.modules, "cunqa.qjob", qjob)
+        if self.converter:
+            ir = types.ModuleType("cunqa.circuit.ir")
+            ir.SUPPORTED_QISKIT_OPERATIONS = set(CUNQA_OPERATIONS)
+            ir.to_ir = lambda circuit: self.to_ir(circuit)
+            monkeypatch.setitem(sys.modules, "cunqa.circuit", types.ModuleType("c"))
+            monkeypatch.setitem(sys.modules, "cunqa.circuit.ir", ir)
         # Force a fresh import so the seal binds these functions.
         monkeypatch.delitem(sys.modules, "polypus_python.cunqa", raising=False)
         monkeypatch.delenv("POLYPUS_CUNQA_BACKEND", raising=False)

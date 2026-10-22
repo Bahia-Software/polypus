@@ -811,10 +811,21 @@ fn build_qmio_registered(
     _backend: &str,
     _options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
-    Err(pyo3::exceptions::PyValueError::new_err(
-        "the 'qmio' infrastructure requires compiling polypus with --features qmio",
-    ))
+    Err(pyo3::exceptions::PyValueError::new_err(QMIO_NOT_COMPILED))
 }
+
+/// Why `infrastructure="qmio"` fails in a build without the `qmio` feature;
+/// `backend_compatibility` reports the same text.
+#[cfg(not(feature = "qmio"))]
+const QMIO_NOT_COMPILED: &str =
+    "the 'qmio' infrastructure requires compiling polypus with --features qmio";
+
+/// Why `run_quantum_circuit(..., infrastructure="qmio")` rejects a Qiskit
+/// `QuantumCircuit`; `backend_compatibility` reports the same text.
+const QMIO_REJECTS_QISKIT: &str =
+    "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+     serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+     2.0 string";
 
 /// Why `run_quantum_circuit(..., backend="polypus")` rejects a Qiskit
 /// `QuantumCircuit`; `backend_compatibility` reports the same text.
@@ -1250,11 +1261,7 @@ pub fn run_quantum_circuit<'py>(
     // The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
     // read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
     if infrastructure == "qmio" && bound_qc.is_foreign() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
-             serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
-             2.0 string",
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err(QMIO_REJECTS_QISKIT));
     }
     // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
     // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
