@@ -1,11 +1,16 @@
-"""Native ``polypus.qml`` showcase: eleven scenarios, each one verified.
+"""Native ``polypus.qml`` showcase: sixteen scenarios, each one verified.
 
 ``examples/basic_qml.py`` shows the *Qiskit* form of QML (a ``QuantumCircuit``
 feature map and ansatz scored by your own ``expectation_function``). This script
 is its counterpart for **native models**, ``polypus.qml.Model``: all four
-encoders (angle, amplitude, IQP and computational basis), the QCNN layers, every
-optimizer, exact and sampled runs, minibatches, inference and saving, the
-``Dataset`` utilities, weighted observables, and the convergence curve.
+encoders (angle, amplitude, IQP and computational basis), data re-uploading
+between trainable layers, the QCNN layers, every optimizer (DE, PSO, CMA-ES, QNG
+and Adam with its exact parameter-shift gradient), readouts in the X, Y and Z
+bases, all four decisions (sign, threshold, argmax and raw), classification,
+regression and unsupervised training of a Hamiltonian's ground state, exact and
+sampled runs, minibatches, inference and saving, the ``Dataset`` utilities,
+weighted observables, the Aer backend beside the native one, and the convergence
+curve.
 
 Every scenario *checks learning*, not just that nothing raised: the toy datasets
 are two or three well-separated clusters in ``[0, π]`` (or, for the
@@ -43,9 +48,9 @@ from polypus import qml
 PI = math.pi
 
 # Every run uses the native simulator, the default on infrastructure="local":
-# seeded end to end by Polypus (contract C-7), no Aer needed, and the only
-# backend with `exact=True`.
-Z, X = qml.Z, qml.X
+# seeded end to end by Polypus (contract C-7) and the only backend with
+# `exact=True`. Scenario 16 also runs a trained model on Aer.
+Z, X, Y = qml.Z, qml.X, qml.Y
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +230,13 @@ def sign_model_2q(reps=2):
         qml.Ansatz(2).hardware_efficient(reps),
         qml.Readout([Z(0)], decision="sign"),
     )
+
+
+def z0(distribution):
+    """``⟨Z₀⟩`` from a probability or counts dictionary, computed by hand. C-3
+    keys put qubit 0 last, so its bit is the key's last character."""
+    total = sum(distribution.values())
+    return sum((1 if k[-1] == "0" else -1) * w for k, w in distribution.items()) / total
 
 
 def qng_variance(theta, param_index):
@@ -458,46 +470,48 @@ def scenario_5_multiclass_argmax():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scenario 6: a readout in the X basis
+# Scenario 6: readouts in the X and Y bases
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def scenario_6_x_basis_readout():
-    """``sign(⟨X₀⟩)`` instead of ``sign(⟨Z₀⟩)``: the model adds the basis change
-    (an ``H`` before the measurement) itself. The model must separate both
-    clusters, including two samples it never saw."""
+def scenario_6_x_and_y_readouts():
+    """``sign(⟨X₀⟩)`` and ``sign(⟨Y₀⟩)`` instead of ``sign(⟨Z₀⟩)``: the model
+    adds the basis change before the measurement itself (``H`` for X,
+    ``S†`` then ``H`` for Y). Each model must separate both clusters, including
+    two samples it never saw."""
     x, y = two_clusters_2f()
-    model = qml.Model(
-        qml.Encoder(2).angle_encoder("ry"),
-        qml.Ansatz(2).hardware_efficient(2),
-        qml.Readout([X(0)], decision="sign"),
-    )
-    result = model.fit(
-        x,
-        y,
-        # The X expectation of this circuit is a harder surface for DE than
-        # scenario 1's, so a larger budget; still milliseconds.
-        method=polypus.DE(
-            generations=120, population_size=30, tolerance=1e-9, patience=120
-        ),
-        loss="hinge",
-        exact=True,
-        seed=23,
-        id="showcase_6",
-    )
-    trained = model.bind(result.best_params)
-    acc, _ = accuracy(trained, x, y)
-    held_acc, held = accuracy(trained, [[0.52, 0.58], [2.58, 2.52]], [-1, 1])
-    checks = [
-        params_check(model, result),
-        ("hinge fitness > -0.1", result.best_fitness > -0.1),
-        ("train accuracy == 1.0", acc == 1.0),
-        ("held-out accuracy == 1.0", held_acc == 1.0),
-    ] + history_checks(result)
-    return verdict(
-        checks,
-        f"DE/⟨X₀⟩ readout: fitness={result.best_fitness:+.4f} acc={acc:.0%} held-out={held}",
-    )
+    held_x, held_y = [[0.52, 0.58], [2.58, 2.52]], [-1, 1]
+    checks, parts = [], []
+    for name, pauli in [("X", X), ("Y", Y)]:
+        model = qml.Model(
+            qml.Encoder(2).angle_encoder("ry"),
+            qml.Ansatz(2).hardware_efficient(2),
+            qml.Readout([pauli(0)], decision="sign"),
+        )
+        result = model.fit(
+            x,
+            y,
+            # These expectations are a harder surface for DE than scenario 1's
+            # ⟨Z₀⟩, so a larger budget; still milliseconds.
+            method=polypus.DE(
+                generations=120, population_size=30, tolerance=1e-9, patience=120
+            ),
+            loss="hinge",
+            exact=True,
+            seed=23,
+            id=f"showcase_6_{name}",
+        )
+        trained = model.bind(result.best_params)
+        acc, _ = accuracy(trained, x, y)
+        held_acc, _ = accuracy(trained, held_x, held_y)
+        checks += [
+            params_check(model, result),
+            (f"{name}: hinge fitness > -0.1", result.best_fitness > -0.1),
+            (f"{name}: train accuracy == 1.0", acc == 1.0),
+            (f"{name}: held-out accuracy == 1.0", held_acc == 1.0),
+        ] + history_checks(result)
+        parts.append(f"⟨{name}₀⟩ fitness={result.best_fitness:+.4f} acc={acc:.0%}")
+    return verdict(checks, "DE: " + ", ".join(parts) + " (held-out 100 %)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -572,7 +586,7 @@ def scenario_8_save_load_predict():
     The parameters read back bit for bit. On two samples the model never saw,
     its decisions are checked three ways: ``predict`` itself, the sign of
     ``⟨Z₀⟩`` computed by hand from ``run(exact=True)``'s probabilities, and the
-    same from ``run``'s sampled counts. (C-3 keys put qubit 0 last.)
+    same from ``run``'s sampled counts.
     """
     x, y = two_clusters_2f()
     model = sign_model_2q()
@@ -591,13 +605,6 @@ def scenario_8_save_load_predict():
         path = os.path.join(tmp, "showcase_model.json")
         model.bind(result.best_params).save(path)
         loaded = qml.load(path)
-
-    def z0(distribution):
-        total = sum(distribution.values())
-        return (
-            sum((1 if k[-1] == "0" else -1) * w for k, w in distribution.items())
-            / total
-        )
 
     new_x, expected = [[0.52, 0.58], [2.58, 2.52]], [-1, 1]
     via_predict = loaded.predict(new_x, exact=True)
@@ -773,6 +780,239 @@ def scenario_11_basis_encoder_parity():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Scenario 12: unsupervised, the ground state of a Hamiltonian
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_12_unsupervised_ground_state():
+    """No labels: the readout *is* the objective.
+
+    With ``y`` omitted, ``fit`` maximises the readout's expectation itself
+    (``loss="expectation"``). Reading out ``−H`` for ``H = Z₀Z₁ + 0.5·Z₁`` makes
+    that a variational eigensolver: the optimum is ``−E₀ = 1.5``, reached only in
+    the basis state ``|q₁q₀⟩ = |10⟩``. The one sample is the zero vector, so the
+    ``ry`` encoder is the identity and the ansatz alone prepares the state. Adam
+    follows the exact parameter-shift gradient for its whole budget.
+    """
+    hamiltonian = qml.Observable([(-1.0, Z(0) @ Z(1)), (-0.5, Z(1))])
+    model = qml.Model(
+        qml.Encoder(2).angle_encoder("ry"),
+        qml.Ansatz(2).hardware_efficient(2),
+        qml.Readout([hamiltonian]),
+    )
+    result = model.fit(
+        [[0.0, 0.0]],
+        method=polypus.Adam(
+            max_iters=150, learning_rate=0.1, tolerance=1e-9, patience=150
+        ),
+        exact=True,
+        seed=4,
+        id="showcase_12",
+    )
+    (probabilities,) = (
+        model.bind(result.best_params).run([[0.0, 0.0]], exact=True).probabilities
+    )
+    ground = probabilities.get("10", 0.0)
+    checks = [
+        params_check(model, result),
+        # A random θ averages 0 here; only the ground state comes this close.
+        ("energy within 0.001 of E₀ = -1.5", result.best_fitness > 1.499),
+        ("never above the true maximum", result.best_fitness <= 1.5 + 1e-9),
+        ("P(|10⟩) > 0.999", ground > 0.999),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"Adam/expectation: E={-result.best_fitness:+.4f} (E₀=-1.5) "
+        f"P(|10⟩)={ground:.4f} iters={result.iterations_run}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 13: data re-uploading
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_13_data_reuploading():
+    """An ``angle_encoder`` *inside* the ``Ansatz``, between trainable layers,
+    loads the data a second time.
+
+    The labels follow ``sign(cos 2x)`` on one feature: positive, negative,
+    positive across ``[0.15, 2.99]``. On one qubit with one ``ry`` upload,
+    ``⟨Z⟩ = cos(x + φ)`` changes sign at most once over an interval shorter than
+    π, so no parameters fit this pattern; uploading twice gives ``⟨Z⟩`` the
+    ``2x`` frequency it needs, and the same optimizer fits it exactly.
+    """
+    x = [[0.15 + i * (PI - 0.3) / 11] for i in range(12)]
+    y = [1.0 if math.cos(2 * row[0]) >= 0 else -1.0 for row in x]
+
+    def fit(ansatz, tag):
+        model = qml.Model(
+            qml.Encoder(1).angle_encoder("ry"),
+            ansatz,
+            qml.Readout([Z(0)], decision="sign"),
+        )
+        result = model.fit(
+            x,
+            y,
+            method=polypus.Adam(max_iters=150, learning_rate=0.1),
+            loss="hinge",
+            exact=True,
+            seed=2,
+            id=f"showcase_13_{tag}",
+        )
+        acc, _ = accuracy(model.bind(result.best_params), x, y)
+        return model, result, acc
+
+    _, _, once_acc = fit(qml.Ansatz(1).real_amplitudes(1), "once")
+    model, result, acc = fit(
+        qml.Ansatz(1).real_amplitudes(1).angle_encoder("ry").real_amplitudes(1),
+        "twice",
+    )
+    checks = [
+        ("labels change sign twice", y[0] == y[-1] == 1.0 and -1.0 in y),
+        ("one upload cannot fit it", once_acc < 1.0),
+        params_check(model, result),
+        ("re-uploaded accuracy == 1.0", acc == 1.0),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"Adam/sign(cos 2x): one upload acc={once_acc:.0%}, "
+        f"two uploads acc={acc:.0%} fitness={result.best_fitness:+.4f}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 14: CMA-ES + a threshold decision
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_14_cmaes_threshold():
+    """``CMA-ES`` with ``decision="threshold"``: ``+1`` when ``⟨Z₀⟩ ≥ 0.2``,
+    ``−1`` below it. The decisions are checked against ``⟨Z₀⟩`` read by hand
+    from the exact probabilities, so the cut sits at 0.2, not at 0."""
+    x, y = two_clusters_2f()
+    model = qml.Model(
+        qml.Encoder(2).angle_encoder("ry"),
+        qml.Ansatz(2).hardware_efficient(1),
+        qml.Readout([Z(0)], decision="threshold", threshold=0.2),
+    )
+    result = model.fit(
+        x,
+        y,
+        method=polypus.CMAES(generations=60, patience=60),
+        loss="hinge",
+        exact=True,
+        seed=9,
+        id="showcase_14",
+    )
+    trained = model.bind(result.best_params)
+    acc, predictions = accuracy(trained, x, y)
+    # Probe the cut itself: ⟨Z₀⟩ over a sweep of inputs, decided by hand.
+    sweep = [[0.3 * i, 0.3 * i] for i in range(11)]
+    expectations = [z0(p) for p in trained.run(sweep, exact=True).probabilities]
+    by_hand = [1 if e >= 0.2 else -1 for e in expectations]
+    checks = [
+        params_check(model, result),
+        ("hinge fitness > -0.1", result.best_fitness > -0.1),
+        ("train accuracy == 1.0", acc == 1.0),
+        (
+            "decisions == [⟨Z₀⟩ ≥ 0.2] on a sweep",
+            trained.predict(sweep, exact=True) == by_hand,
+        ),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"CMA-ES/threshold 0.2: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
+        f"iters={result.iterations_run}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 15: regression, a raw decision
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_15_regression_raw():
+    """``decision="raw"`` + ``loss="squared_error"``: the model predicts the
+    real number ``⟨Z₀⟩`` itself, here fitted to the curve ``0.8·cos x``."""
+    x = [[0.2 + i * 0.25] for i in range(12)]
+    y = [0.8 * math.cos(row[0]) for row in x]
+    model = qml.Model(
+        qml.Encoder(1).angle_encoder("ry"),
+        qml.Ansatz(1).hardware_efficient(1),
+        qml.Readout([Z(0)], decision="raw"),
+    )
+    result = model.fit(
+        x,
+        y,
+        method=polypus.Adam(max_iters=200, learning_rate=0.05),
+        loss="squared_error",
+        exact=True,
+        seed=3,
+        id="showcase_15",
+    )
+    predictions = model.bind(result.best_params).predict(x, exact=True)
+    worst = max(abs(p - t) for p, t in zip(predictions, y))
+    checks = [
+        params_check(model, result),
+        # Fitness is −mean squared error.
+        ("mean squared error < 0.005", result.best_fitness > -0.005),
+        ("every prediction within 0.1", worst < 0.1),
+        ("predictions are real values", len(set(predictions)) == len(x)),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"Adam/raw/0.8·cos x: mse={-result.best_fitness:.5f} max error={worst:.4f}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 16: one trained model, three ways to run it
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_16_backends():
+    """Trained on the native simulator, then run exactly, sampled on the native
+    simulator and sampled on **Aer**: the same ``TrainedModel``, three
+    executions, one answer. ``backend=`` is the only change, as for any
+    Polypus circuit; CUNQA and QMIO take the same model through
+    ``infrastructure=``."""
+    x, y = two_clusters_2f()
+    model = sign_model_2q()
+    result = model.fit(
+        x,
+        y,
+        method=polypus.DE(
+            generations=80, population_size=20, tolerance=1e-9, patience=80
+        ),
+        loss="hinge",
+        exact=True,
+        seed=7,
+        id="showcase_16",
+    )
+    trained = model.bind(result.best_params)
+    exact = trained.predict(x, exact=True)
+    native = trained.predict(x, shots=4096, seed=1)
+    aer = trained.predict(x, shots=4096, seed=1, backend="aer")
+    aer_z0 = [z0(c) for c in trained.run(x, shots=4096, seed=1, backend="aer").counts]
+    exact_z0 = [z0(p) for p in trained.run(x, exact=True).probabilities]
+    gap = max(abs(a - e) for a, e in zip(aer_z0, exact_z0))
+    checks = [
+        params_check(model, result),
+        ("exact predictions == labels", exact == y),
+        ("native sampled == exact", native == exact),
+        ("Aer sampled == exact", aer == exact),
+        # 4096 shots: a standard error of at most 1/64 per expectation.
+        ("Aer ⟨Z₀⟩ within 0.06 of exact", gap < 0.06),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"exact / native shots / Aer shots agree on {len(x)} samples; "
+        f"max |⟨Z₀⟩ Aer − exact|={gap:.4f}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -782,12 +1022,17 @@ SCENARIOS = [
     ("3. IQP encoding + Adam (shots)", scenario_3_iqp_adam_shots),
     ("4. QCNN conv/pool/conv + QNG", scenario_4_qcnn_qng),
     ("5. Three classes, argmax + cross-entropy", scenario_5_multiclass_argmax),
-    ("6. X-basis readout", scenario_6_x_basis_readout),
+    ("6. X- and Y-basis readouts", scenario_6_x_and_y_readouts),
     ("7. Minibatches (Adam and DE)", scenario_7_minibatches),
     ("8. Save, load and predictions", scenario_8_save_load_predict),
     ("9. Dataset split + scaling", scenario_9_dataset_utilities),
     ("10. Weighted observable", scenario_10_weighted_observable),
     ("11. Basis encoding + parity", scenario_11_basis_encoder_parity),
+    ("12. Unsupervised ground state", scenario_12_unsupervised_ground_state),
+    ("13. Data re-uploading", scenario_13_data_reuploading),
+    ("14. CMA-ES + threshold decision", scenario_14_cmaes_threshold),
+    ("15. Regression, raw decision", scenario_15_regression_raw),
+    ("16. Native, sampled and Aer runs", scenario_16_backends),
 ]
 
 
