@@ -56,6 +56,15 @@ Changes on `main` since 0.7.2.
   DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
   (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
+- `initial_point` in `train` and `qml.train` (keyword-only in `qml.train`)
+  starts the search from a given point, such as an earlier run's
+  `best_params`: `dimensions` finite numbers as a list, tuple or NumPy array,
+  otherwise `ValueError` before anything runs. DE (every `strategy`)
+  evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
+  population; PSO as its first particle, which must lie within `bounds`; QNG
+  starts from it; CMA-ES centres its first run on it and keeps its `sigma0`,
+  so a refinement wants a smaller one. Without it every optimizer behaves as
+  before, seeded runs included (#395).
 
 ### Changed
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
@@ -120,6 +129,11 @@ Changes on `main` since 0.7.2.
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs`,
+  `AlgorithmPSOArgs`, `AlgorithmQNGArgs` and `AlgorithmCmaEsArgs` have an
+  `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
+  `initial_point` as its last argument and `TrainFlow` has an `initial_point`
+  field; `None` keeps the previous behaviour (#395).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
