@@ -235,7 +235,7 @@ fn describe(err: &BoxedError) -> String {
     }
 }
 
-/// Run `method` over `oracle` and return the outcome, or the run's failure.
+/// Run `method` over `oracles` and return the outcome, or the run's failure.
 ///
 /// The caller releases the GIL around this call; the optimizer loop is pure Rust
 /// and the oracle re-acquires the GIL internally where it must. An oracle failure

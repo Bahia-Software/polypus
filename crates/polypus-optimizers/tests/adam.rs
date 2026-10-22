@@ -367,7 +367,8 @@ fn a_broken_oracle_behind_the_finite_difference_is_reported() {
     );
 }
 
-/// Both an oracle and its gradient, like a QML oracle with an exact gradient.
+/// Both an oracle and its gradient, like an oracle that computes its own exact
+/// gradient.
 struct BowlWithGradient;
 
 impl EvaluationOracle for BowlWithGradient {

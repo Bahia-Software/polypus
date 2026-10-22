@@ -20,17 +20,17 @@ Changes on `main` since 0.7.2.
   `qml.train`: gradient ascent with Adam. Each iteration takes a central
   finite difference of the fitness, one batch of `2·dimensions` circuits, then
   scores the updated parameters. Invalid settings raise `ValueError` before
-  any circuit runs.
+  any circuit runs (#394).
 - Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
   exact gradient when it has one); Adam uses the exact gradient or a finite
   difference of the evaluation, and the CUNQA walltime warning times its
-  gradient too.
+  gradient too (#394).
 - Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
   same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
   turns any `EvaluationOracle` into a `GradientOracle` by central differences,
-  in one batch per gradient.
+  in one batch per gradient (#394).
 - `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
   `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
   does and converts it with CUNQA's own converter, without raising QPUs; the

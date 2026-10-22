@@ -103,7 +103,7 @@ mod tests {
     }
 
     /// Pins the absolute seeded output of every sampling method the optimizers
-    /// draw from in `src/` (DE, PSO, QNG, CMA-ES). The determinism tests above only
+    /// draw from in `src/` (DE, PSO, QNG, CMA-ES, Adam). The determinism tests above only
     /// compare one run against another, so a `rand` bump that changed the
     /// `StdRng` stream or a sampling algorithm would pass them silently; this
     /// one fails instead. Values captured with rand 0.9.4; `f64`s are compared
@@ -138,7 +138,7 @@ mod tests {
             ]
         );
 
-        // DE/PSO/QNG/CMA-ES: `random_range` over an `f64` interval for
+        // DE/PSO/QNG/CMA-ES/Adam: `random_range` over an `f64` interval for
         // initialisation.
         let ranged: [u64; 3] = with_seeded_rng(Some(42), |rng| {
             std::array::from_fn(|_| rng.random_range(-1.5..2.5f64).to_bits())
