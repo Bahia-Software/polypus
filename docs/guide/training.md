@@ -36,6 +36,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `id` | Run name prefix: `[A-Za-z0-9._-]`, at most 64 characters. A UUID is appended for uniqueness. |
 | `backend` | `"aer"` (default) or `"polypus"` for `infrastructure="local"` |
 | `seed` | Optional RNG seed. Without one, a seed is drawn from OS entropy and reported in the result. |
+| `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
 
 Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function` propagates as itself.
 
@@ -168,6 +169,45 @@ A run also ends when its distribution degenerates: its spread collapses below `1
 With `infrastructure="cunqa"`, the walltime warning projects the first generation over `generations`. With `restarts`, it assumes the worst case, a restart after every generation until none are left. Because the population doubles at each restart, the projection can be well above the usual run time.
 
 **Reproducibility.** A seed reproduces a CMA-ES run exactly on the same machine and build. Across operating systems or CPU architectures it may not: CMA-ES's own steps use exponentials, logarithms and cosines from the platform's math library, whose last bit can differ, and a one-bit difference early on can lead a run to a different optimum. DE's steps use only basic arithmetic, so a DE run over a backend whose results do not depend on the platform is reproducible everywhere; the native simulator's `sin`/`cos` add the same caveat to every optimizer.
+
+## Starting point
+
+By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
+
+| Optimizer | What it does with `initial_point` |
+|---|---|
+| `DE`, every `strategy` | Makes it, wrapped into `[0, 2π)`, the first member of the initial population, so it is the first candidate evaluated. The other members are drawn as without it |
+| `PSO` | Makes it the position of the first particle, the first candidate evaluated; the other particles are drawn as without it. Every value must lie within `bounds`, since positions are clamped to them, otherwise `ValueError` before anything runs |
+| `QNG` | Starts from it: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
+| `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
+
+Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
+
+CMA-ES keeps its `sigma0`. With the default `π/2`, two standard deviations already span the whole circle, so the first generation explores around the point rather than refining it; to refine around a point, pass a smaller `sigma0` too, such as `0.3`. IPOP restarts start from a new random mean, not from the point. CMA-ES samples around the point without evaluating the point itself, so its `best_fitness` can come out below the one the point had in the earlier run.
+
+A broad search followed by a local refinement from its best point:
+
+```python
+common = dict(
+    shots=1024,
+    n_qpus=1,
+    dimensions=2,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="qaoa",
+)
+explore = polypus.train(
+    qc, polypus.DE(strategy="lshade", generations=100, population_size=50), **common
+)
+refine = polypus.train(
+    qc,
+    polypus.CMAES(generations=50, sigma0=0.3),
+    **common,
+    initial_point=explore.best_params,
+)
+```
 
 ## Choosing an optimizer
 

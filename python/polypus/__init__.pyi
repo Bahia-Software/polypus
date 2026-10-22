@@ -453,6 +453,7 @@ def train(
     fusion: Optional[bool] = None,
     options: Optional[dict[str, str]] = None,
     walltime: Optional[str] = None,
+    initial_point: Optional[_FloatVector] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],

@@ -24,7 +24,7 @@ Rules of the road:
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` | ✅ present | DE `best_fitness` mismatch (C4) |
+| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`) | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
@@ -710,7 +710,51 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   `candidates.len()` finite `f64` values**, in order; higher is better.
   Python-backed oracles must validate length before returning across the FFI.
 - Preconditions validated with an error (not a panic): DE `population_size >= 4`
-  (with every `strategy`); PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`.
+  (with every `strategy`); PSO/QNG `bounds.0 < bounds.1`; `dimensions >= 1`;
+  `initial_point` as below.
+- **Starting point (`initial_point`).** Every optimizer takes an optional
+  starting point: the `initial_point: Option<Vec<f64>>` field of
+  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`
+  and `AlgorithmCmaEsArgs`, the last argument of `dispatch_optimizer`, and
+  `train(..., initial_point=None)` / `qml.train(..., initial_point=None)` in
+  Python.
+  - Preconditions: exactly `dimensions` values, every one finite, and for PSO
+    every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
+    bounds, so a point outside them would be moved). QNG takes any finite
+    point: its `bounds` only shape the random draw. Each optimizer checks this
+    after its other preconditions, whose errors come first, and before any RNG
+    draw or oracle call, as `OptimizerError::InvalidConfig` for
+    `initial_point`. `train` and `qml.train` check the same (length,
+    finiteness and PSO's bounds) themselves before anything runs (no backend,
+    no CUNQA allocation), raising `ValueError` with the optimizer's message.
+  - Postconditions: the optimizer draws everything exactly as without a
+    point, then the point replaces part of it, so the RNG stream is
+    unchanged. DE (every strategy): the point, wrapped into `[0, 2π)`, is the
+    first member of the initial population, so it is the first candidate of
+    the first batch and every other member is the one drawn without it. PSO:
+    it is the first particle's position (its velocity is the drawn one), so
+    likewise the first candidate of the first batch. QNG: it is θ₀, so the
+    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. CMA-ES:
+    the point, wrapped into `[0, 2π)` like every candidate, is the mean of the
+    first run, IPOP restarts draw a fresh mean as without it, and `sigma0` is
+    not changed. Every other postcondition of this contract holds
+    with a point. Without one (`None`, the default) every optimizer is bit
+    for bit what it was before `initial_point` existed.
+  - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
+    batch of PSO and every DE strategy against the same seed without a point,
+    QNG's stencil around the point, CMA-ES's first generation, a far point
+    that still moves, and its restarts against the same seed without a point,
+    the rejections before
+    any oracle call and their precedence, PSO's bounds, the postconditions
+    over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
+    bits they had before it), the `check_initial_point` unit tests in
+    `src/util.rs`, `initial_point_reaches_every_optimizer` in
+    `crates/polypus-orchestration/src/dispatch.rs`, and
+    `tests/python/test_initial_point.py` (the `ValueError`s, PSO's bounds
+    included, before the CUNQA seam is reached, the first candidates every optimizer sends through
+    `train` and `qml.train`, and a `best_params` list, tuple or NumPy array
+    as the point). The pinned `"rand1bin"` outcome and
+    `tests/python/test_determinism_baseline.py` are unchanged.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
@@ -995,7 +1039,9 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   fitness, iteration count and the convergence flag.
 
 The effective `seed` on both result types is what lets a caller log a run and
-replay it exactly.
+replay it exactly. A run started from an `initial_point` (contract C-5) replays
+only with the same point too: the result does not echo it, so a caller that
+passes one logs it alongside the seed.
 
 **Enforcing test:** `tests/python/test_seed_reproducibility.py` (public-API
 end-to-end: native and Aer reproducibility, entropy variation, the `qmio`
