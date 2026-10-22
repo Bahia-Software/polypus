@@ -6,8 +6,8 @@
 //! actually evaluated: the point is the first candidate of the first batch
 //! (wrapped into `[0, 2π)` for DE), the rest of that batch is what the same
 //! seed gives without a point, CMA-ES centres its first generation on it, QNG
-//! and Adam start their gradient stencil at it, and a rejected point reaches no
-//! oracle.
+//! starts its gradient stencil at it, Adam measures it first, and a rejected
+//! point reaches no oracle.
 
 use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
@@ -177,8 +177,8 @@ fn cmaes_args(
 const ADAM_STEP: f64 = 0.1;
 
 /// Adam as a training run without an exact gradient dispatches it: a central
-/// finite difference of the same oracle that tracks the best solution, so every
-/// batch either one sends reaches the recorder.
+/// finite difference of the same oracle that tracks the best solution, so each
+/// iteration's one batch, θ and its stencil, reaches the recorder.
 fn adam_args(
     oracle: Box<dyn EvaluationOracle>,
     initial_point: Option<Vec<f64>>,
@@ -329,14 +329,17 @@ fn qng_starts_its_first_gradient_stencil_at_the_point_even_outside_its_bounds() 
 }
 
 #[test]
-fn adam_takes_its_first_gradient_at_the_point_even_outside_its_bounds() {
+fn adam_evaluates_the_point_first_even_outside_its_bounds() {
     // Like QNG's, Adam's bounds (-π, π) only shape the random draw of θ₀.
     let point = vec![-5.0, 0.5, 9.0];
     let (oracle, batches) = recorder(quadratic);
     AlgorithmAdam
         .optimize(adam_args(oracle, Some(point.clone()), 17))
         .expect("a finite point outside the bounds is accepted");
-    assert_eq!(first_batch(&batches), stencil(&point, ADAM_STEP));
+    // The first batch is θ₀ itself, then the stencil of its first gradient.
+    let first = first_batch(&batches);
+    assert_eq!(first[0], point);
+    assert_eq!(first[1..], stencil(&point, ADAM_STEP)[..]);
 }
 
 /// Adam draws θ₀ with or without a point and the point only replaces it, so a
@@ -354,11 +357,10 @@ fn adam_from_the_point_its_seed_draws_is_the_run_without_one() {
         (outcome, batches)
     };
     let (without, without_batches) = run(None);
-    // The first batch is the stencil around the drawn θ₀: θ₀ + h·e₀ holds every
-    // coordinate of θ₀ but the first, which θ₀ + h·e₁ holds.
+    // The first batch is the drawn θ₀, then the stencil around it.
     let first = &without_batches[0];
-    let drawn = vec![first[2][0], first[0][1], first[0][2]];
-    assert_eq!(*first, stencil(&drawn, ADAM_STEP));
+    let drawn = first[0].clone();
+    assert_eq!(first[1..], stencil(&drawn, ADAM_STEP)[..]);
     let (with, with_batches) = run(Some(drawn));
     assert_eq!(with_batches, without_batches);
     assert_eq!(with, without);

@@ -79,7 +79,7 @@ pub struct CmaesConfig {
 /// Adam configuration, mirroring the `polypus.Adam` object (see [`DeConfig`]).
 /// The gradient comes from the run's [`Oracles`]; when they carry no exact one,
 /// dispatch takes a central finite difference of the evaluation oracle with
-/// `finite_difference_step`.
+/// `finite_difference_step`, which scores θ in the same batch as its stencil.
 pub struct AdamConfig {
     pub max_iters: u32,
     pub learning_rate: f64,
@@ -333,7 +333,8 @@ pub fn dispatch_optimizer(
 }
 
 /// Adam: the gradient is the exact one when the oracles carry it, otherwise a
-/// finite difference of `evaluation`, which also tracks the best solution.
+/// finite difference of `evaluation`, which scores θ with its stencil in one
+/// batch per iteration.
 fn dispatch_adam(
     cfg: AdamConfig,
     evaluation: Box<dyn EvaluationOracle>,
@@ -347,7 +348,9 @@ fn dispatch_adam(
         match gradient {
             Some(gradient) => (gradient, evaluation),
             None => {
-                // The finite difference and the tracking share one oracle.
+                // The finite difference and the tracking share one oracle: θ's
+                // value comes from the difference's batch, and Adam reports it
+                // as the run's fitness (C-5).
                 let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
                 let difference = FiniteDifferenceGradient::new(
                     Arc::clone(&evaluation),
@@ -685,10 +688,10 @@ mod tests {
     }
 
     /// Dispatch hands `initial_point` to every `Method`: it is the first
-    /// candidate of the first batch (DE, PSO), the centre of the first
-    /// gradient stencil (QNG, and Adam's finite difference, whose first
-    /// candidate is θ₀ + h·e₀) and the first mean (CMA-ES, whose candidates
-    /// all sit on it with a tiny σ₀).
+    /// candidate of the first batch (DE, PSO, and Adam, whose batch is θ₀ and
+    /// then its finite-difference stencil), the centre of the first gradient
+    /// stencil (QNG, whose first candidate is θ₀ + h·e₀) and the first mean
+    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -761,7 +764,7 @@ mod tests {
                 .clone()
                 .expect("the oracle was called");
             let expected = match name {
-                "QNG" | "Adam" => vec![point[0] + step, point[1], point[2]],
+                "QNG" => vec![point[0] + step, point[1], point[2]],
                 _ => point.clone(),
             };
             let tolerance = if name == "CMA-ES" { 1e-6 } else { 0.0 };
@@ -852,14 +855,11 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
-        // Each iteration: one finite-difference stencil (2·dims candidates) and
-        // the single tracked candidate, on the same oracle.
+        // Each iteration: one batch on the same oracle, θ and its
+        // finite-difference stencil (2·dims + 1 candidates).
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), 2 * outcome.iterations_run);
-        assert!(
-            sizes.chunks_exact(2).all(|pair| pair == [6, 1]),
-            "{sizes:?}"
-        );
+        assert_eq!(sizes.len(), outcome.iterations_run);
+        assert!(sizes.iter().all(|&n| n == 7), "{sizes:?}");
     }
 
     #[test]
@@ -881,8 +881,11 @@ mod tests {
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
         assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
-        // No stencil: the evaluation oracle only tracks, one candidate a call.
-        assert!(sizes(&log).iter().all(|&n| n == 1));
+        // No stencil: the evaluation oracle only scores θ, one candidate a call,
+        // once per iteration.
+        let sizes = sizes(&log);
+        assert_eq!(sizes.len(), outcome.iterations_run);
+        assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
     }
 
     #[test]

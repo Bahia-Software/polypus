@@ -10,10 +10,10 @@ A valid point is where the optimizer starts. The batch tests run the real
 training loops on Aer with ``polypus_python.run_qcs`` replaced by a fake that
 records every batch the optimizer sends and answers with fixed counts, and
 read the candidates back from the recorded circuits: the point is the first
-candidate DE (every strategy, wrapped into ``[0, 2π)``) and PSO evaluate, the
-centre of QNG's and Adam's first finite-difference stencil, and the mean of
-CMA-ES's first generation. Without it nothing changes; ``test_determinism_baseline.py``
-pins that for seeded runs.
+candidate DE (every strategy, wrapped into ``[0, 2π)``), PSO and Adam (before
+its first finite-difference stencil) evaluate, the centre of QNG's first
+stencil, and the mean of CMA-ES's first generation. Without it nothing
+changes; ``test_determinism_baseline.py`` pins that for seeded runs.
 """
 
 import math
@@ -26,6 +26,7 @@ DIMENSIONS = 2
 POINT = [0.25, 1.5]
 # QNG's default finite_difference_step, and Adam's.
 QNG_STEP = 0.1
+ADAM_STEP = 0.1
 OPTIMIZERS = ["rand1bin", "shade", "lshade", "pso", "qng", "cmaes", "adam"]
 STRATEGIES = ["rand1bin", "shade", "lshade"]
 
@@ -267,14 +268,18 @@ class TestStartingPoint:
         result = run(_method(name), initial_point=POINT)
         first = [candidate(qc) for qc in batches[0]]
         if name in ("qng", "adam"):
-            # The finite-difference stencil around θ₀ = POINT.
+            # The finite-difference stencil around θ₀ = POINT; Adam measures
+            # θ₀ itself first, in the same batch.
+            step = QNG_STEP if name == "qng" else ADAM_STEP
             p0, p1 = POINT
             stencil = [
-                [p0 + QNG_STEP, p1],
-                [p0 - QNG_STEP, p1],
-                [p0, p1 + QNG_STEP],
-                [p0, p1 - QNG_STEP],
+                [p0 + step, p1],
+                [p0 - step, p1],
+                [p0, p1 + step],
+                [p0, p1 - step],
             ]
+            if name == "adam":
+                stencil.insert(0, POINT)
             assert len(first) == len(stencil)
             for got, want in zip(first, stencil):
                 assert got == pytest.approx(want, abs=1e-12)
@@ -322,9 +327,7 @@ class TestStartingPoint:
     def test_adam_accepts_a_point_outside_its_bounds(self, monkeypatch):
         batches = _record_batches(monkeypatch)
         _train(_method("adam"), initial_point=[-5.0, 9.0])
-        assert _vqc_candidate(batches[0][0]) == pytest.approx(
-            [-5.0 + QNG_STEP, 9.0], abs=1e-12
-        )
+        assert _vqc_candidate(batches[0][0]) == pytest.approx([-5.0, 9.0], abs=1e-12)
 
     def test_none_is_the_default(self, monkeypatch):
         omitted = _record_batches(monkeypatch)

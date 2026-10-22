@@ -3,14 +3,15 @@ use pyo3::prelude::*;
 /// Adam optimizer configuration: Kingma and Ba's Adam with bias correction,
 /// climbing the fitness along its gradient.
 ///
-/// The gradient is a central finite difference of the fitness with step
-/// `finite_difference_step`, one batch of `2·dimensions` circuits per
-/// iteration. The settings are validated when `train`/`qml.train` starts,
-/// before any circuit runs: an invalid one raises `ValueError` (contract C-5).
+/// Each iteration sends one batch of `2·dimensions + 1` circuits: the current
+/// parameters, whose fitness is the iteration's, and the central finite
+/// difference around them with step `finite_difference_step`, which gives the
+/// gradient. `best_params` is the best of the parameters measured. The settings
+/// are validated when `train`/`qml.train` starts, before any circuit runs: an
+/// invalid one raises `ValueError` (contract C-5).
 #[pyclass(module = "polypus")]
 pub struct Adam {
-    /// Iterations, each one gradient and one evaluation of the updated
-    /// parameters. At least 1.
+    /// Iterations, each one batch of `2·dimensions + 1` circuits. At least 1.
     #[pyo3(get, set)]
     pub max_iters: u32,
     /// Step size, finite and `> 0`. Defaults to `0.05`, not deep learning's

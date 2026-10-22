@@ -9,6 +9,7 @@ use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, EvaluationOracle, FiniteDifferenceGradient, GradientOracle,
     OptimizationOutcome, Optimizer, OptimizerError,
 };
+use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex};
 
 /// The maximum of every test landscape.
@@ -326,6 +327,39 @@ fn finite_difference_scores_one_batch_of_the_whole_stencil() {
     assert_eq!(batches[0], stencil);
 }
 
+/// `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`.
+fn stencil(theta: &[f64], h: f64) -> Vec<Vec<f64>> {
+    (0..theta.len())
+        .flat_map(|i| {
+            let mut plus = theta.to_vec();
+            let mut minus = theta.to_vec();
+            plus[i] += h;
+            minus[i] -= h;
+            [plus, minus]
+        })
+        .collect()
+}
+
+#[test]
+fn finite_difference_scores_theta_first_in_the_batch_of_its_stencil() {
+    let oracle = Recorder::new(bowl);
+    let h = 0.25;
+    let fd = FiniteDifferenceGradient::new(oracle.clone(), h).unwrap();
+    let theta = vec![0.3, 0.9, -0.4];
+    let (value, gradient) = fd.value_and_gradient(&theta, 3).unwrap();
+    assert_eq!(value, bowl(&theta));
+    assert_eq!(gradient, fd.gradient_batch(&theta, 3));
+    let batches = oracle.batches();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0][0], theta);
+    assert_eq!(batches[0][1..], stencil(&theta, h)[..]);
+    // The other gradient oracles keep the default: they do not score θ.
+    assert_eq!(
+        ExactGradient::new(bowl_gradient).value_and_gradient(&theta, 3),
+        None
+    );
+}
+
 #[test]
 fn finite_difference_rejects_a_bad_step() {
     for step in [0.0, -1e-3, f64::NAN, f64::INFINITY] {
@@ -348,6 +382,9 @@ fn a_broken_oracle_behind_the_finite_difference_is_reported() {
     let fd = FiniteDifferenceGradient::new(Short, 1e-3).unwrap();
     assert!(fd.gradient_batch(&[0.1, 0.2], 2).is_empty());
     assert!(fd.gradient(&[0.1, 0.2], 0).is_nan());
+    let (value, gradient) = fd.value_and_gradient(&[0.1, 0.2], 2).unwrap();
+    assert!(value.is_nan());
+    assert!(gradient.is_empty());
     let err = AlgorithmAdam
         .optimize(args(
             Recorder::new(bowl),
@@ -412,11 +449,199 @@ fn adam_trains_with_a_finite_difference_over_the_same_shared_oracle() {
     for (x, t) in outcome.best_params.iter().zip(TARGET) {
         assert!((x - t).abs() < 1e-3, "{:?}", outcome.best_params);
     }
-    // Both the stencils and the tracking batches reached the one shared oracle.
-    let sizes: Vec<usize> = oracle.batches().iter().map(Vec::len).collect();
-    assert_eq!(sizes.len(), 2 * outcome.iterations_run);
-    assert!(sizes.chunks_exact(2).all(|pair| pair == [6, 1]));
-    // The stencil points are not candidates: C-5 holds over the tracked ones.
+    // θ and its stencil reached the one shared oracle, one batch per iteration.
+    let batches = oracle.batches();
+    let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+    assert_eq!(sizes.len(), outcome.iterations_run);
+    assert!(sizes.iter().all(|&n| n == 7), "{sizes:?}");
+    // The stencil points are not candidates: C-5 holds over the measured θs,
+    // which head the batches.
+    assert!(batches.iter().any(|batch| batch[0] == outcome.best_params));
     assert_eq!(outcome.best_fitness, bowl(&outcome.best_params));
     assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
+}
+
+// --- One batch per iteration: θ and its finite-difference stencil -------------
+
+/// Adam over a finite difference of `oracle`, as a training run without an
+/// exact gradient dispatches it: the difference and Adam share the oracle.
+fn fd_args(oracle: &Recorder, step: f64, seed: u64) -> AlgorithmAdamArgs {
+    let shared: Arc<dyn EvaluationOracle> = Arc::new(oracle.clone());
+    let gradient = FiniteDifferenceGradient::new(Arc::clone(&shared), step).unwrap();
+    args(shared, gradient, seed)
+}
+
+/// A fitness landscape.
+type Fitness = fn(&[f64]) -> f64;
+
+/// `Σ cos(xᵢ − tᵢ)`: periodic, with its maximum 3 at [`TARGET`] + 2πk.
+fn cosine(x: &[f64]) -> f64 {
+    x.iter().zip(TARGET).map(|(xi, ti)| (xi - ti).cos()).sum()
+}
+
+/// The distance from `x` to `t` on the circle.
+fn angular_gap(x: f64, t: f64) -> f64 {
+    let gap = (x - t).rem_euclid(TAU);
+    gap.min(TAU - gap)
+}
+
+#[test]
+fn each_iteration_is_one_batch_of_theta_then_its_stencil() {
+    let oracle = Recorder::new(bowl);
+    let h = 0.2;
+    let outcome = AlgorithmAdam.optimize(fd_args(&oracle, h, 4)).unwrap();
+    let batches = oracle.batches();
+    assert_eq!(batches.len(), outcome.iterations_run);
+    for batch in &batches {
+        assert_eq!(batch.len(), 2 * TARGET.len() + 1);
+        assert_eq!(batch[1..], stencil(&batch[0], h)[..]);
+    }
+    // Each batch measures the θ the previous step reached.
+    assert!(batches.windows(2).all(|pair| pair[0][0] != pair[1][0]));
+}
+
+/// C-5 against the batches the oracle saw: θ heads every batch, `best_params`
+/// is the first θ measured with the best value, `best_fitness` the oracle's
+/// value for it, and `fitness_history[t]` the best measured up to iteration `t`.
+#[test]
+fn best_params_fitness_invariant_holds_across_seeds_with_a_finite_difference() {
+    let mut overshot = false;
+    for seed in 0..25 {
+        let oracle = Recorder::new(bowl);
+        let mut args = fd_args(&oracle, 0.2, seed);
+        // A rough step size, so iterates overshoot and the best is not the last.
+        args.learning_rate = 0.8;
+        args.max_iters = 60;
+        let outcome = AlgorithmAdam.optimize(args).unwrap();
+        let measured: Vec<Vec<f64>> = oracle
+            .batches()
+            .into_iter()
+            .map(|batch| batch[0].clone())
+            .collect();
+        assert_eq!(measured.len(), outcome.iterations_run, "seed {seed}");
+        assert_eq!(outcome.fitness_history.len(), outcome.iterations_run);
+        let mut running = f64::NEG_INFINITY;
+        for (theta, recorded) in measured.iter().zip(&outcome.fitness_history) {
+            running = running.max(bowl(theta));
+            assert_eq!(*recorded, running, "seed {seed}");
+        }
+        assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
+        assert_eq!(
+            outcome.best_fitness,
+            bowl(&outcome.best_params),
+            "seed {seed}"
+        );
+        assert_eq!(
+            measured
+                .iter()
+                .find(|theta| bowl(theta) == outcome.best_fitness),
+            Some(&outcome.best_params),
+            "seed {seed}"
+        );
+        overshot |= measured.last() != Some(&outcome.best_params);
+    }
+    assert!(overshot, "no run's best was before its last θ");
+}
+
+#[test]
+fn converges_on_a_sphere_and_on_a_periodic_cosine_landscape() {
+    let landscapes: [(&str, Fitness, f64); 2] = [("sphere", bowl, 0.0), ("cosine", cosine, 3.0)];
+    for (name, fitness, maximum) in landscapes {
+        for seed in [21, 22, 23] {
+            let oracle = Recorder::new(fitness);
+            let mut args = fd_args(&oracle, 0.2, seed);
+            args.learning_rate = 0.1;
+            args.max_iters = 400;
+            let outcome = AlgorithmAdam.optimize(args).unwrap();
+            assert!(
+                outcome.best_fitness > maximum - 1e-4,
+                "{name} seed {seed}: {}",
+                outcome.best_fitness
+            );
+            for (x, t) in outcome.best_params.iter().zip(TARGET) {
+                // θ is not wrapped, so compare on the circle.
+                assert!(
+                    angular_gap(*x, t) < 1e-2,
+                    "{name} seed {seed}: {:?}",
+                    outcome.best_params
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_initial_point_is_the_first_theta_measured() {
+    let point = vec![-5.0, 0.5, 9.0];
+    // With a finite difference, the first candidate of the first batch.
+    let oracle = Recorder::new(bowl);
+    let mut args = fd_args(&oracle, 0.2, 6);
+    args.initial_point = Some(point.clone());
+    AlgorithmAdam.optimize(args).unwrap();
+    assert_eq!(oracle.batches()[0][0], point);
+    // With an exact gradient, the single candidate Adam scores first.
+    let (mut args, oracle, _) = bowl_args(6);
+    args.initial_point = Some(point.clone());
+    AlgorithmAdam.optimize(args).unwrap();
+    assert_eq!(oracle.batches()[0], vec![point]);
+}
+
+/// [`bowl`], with `NaN` for the first candidate of every second batch: under a
+/// finite difference that is θ, so the gradient stays finite. Records each
+/// batch with the values it returned.
+#[derive(Clone, Default)]
+struct NanEverySecondTheta(Arc<Mutex<Vec<Scored>>>);
+
+/// A batch and the values the oracle returned for it.
+type Scored = (Vec<Vec<f64>>, Vec<f64>);
+
+impl EvaluationOracle for NanEverySecondTheta {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        let mut log = self.0.lock().unwrap();
+        let mut values: Vec<f64> = candidates.iter().map(|c| bowl(c)).collect();
+        if log.len() % 2 == 1 {
+            values[0] = f64::NAN;
+        }
+        log.push((candidates.to_vec(), values.clone()));
+        values
+    }
+}
+
+#[test]
+fn a_nan_fitness_never_becomes_the_best() {
+    let oracle = NanEverySecondTheta::default();
+    let shared: Arc<dyn EvaluationOracle> = Arc::new(oracle.clone());
+    let gradient = FiniteDifferenceGradient::new(Arc::clone(&shared), 0.2).unwrap();
+    let outcome = AlgorithmAdam.optimize(args(shared, gradient, 8)).unwrap();
+    let log = oracle.0.lock().unwrap().clone();
+    assert_eq!(log.len(), outcome.iterations_run);
+    assert!(log.iter().any(|(_, values)| values[0].is_nan()));
+    // The best is a θ the oracle gave a number, and that number.
+    assert!(outcome.best_fitness.is_finite());
+    assert!(log.iter().any(|(batch, values)| {
+        batch[0] == outcome.best_params && values[0] == outcome.best_fitness
+    }));
+    assert!(outcome.fitness_history.iter().all(|f| f.is_finite()));
+    assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
+    // Half the measurements are lost, yet the finite gradient still climbs.
+    assert!(outcome.best_fitness > -1e-4, "{}", outcome.best_fitness);
+}
+
+fn always_nan(_: &[f64]) -> f64 {
+    f64::NAN
+}
+
+#[test]
+fn an_oracle_that_only_returns_nan_does_not_panic() {
+    let oracle = Recorder::new(always_nan);
+    let mut args = fd_args(&oracle, 0.2, 3);
+    args.max_iters = 12;
+    let outcome = AlgorithmAdam.optimize(args).unwrap();
+    // A NaN improvement is never below `tolerance`, so the run goes on to the
+    // end, and the best is the first θ measured, with the NaN it got.
+    assert_eq!(outcome.iterations_run, 12);
+    assert!(!outcome.converged);
+    assert_eq!(outcome.best_params, oracle.batches()[0][0]);
+    assert!(outcome.best_fitness.is_nan());
+    assert_eq!(outcome.fitness_history.len(), 12);
 }

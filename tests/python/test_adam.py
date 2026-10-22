@@ -2,10 +2,10 @@
 ``polypus.Adam``: gradient ascent with Kingma and Ba's Adam (contract C-5).
 
 Adam takes a central finite difference of the fitness: each iteration sends
-one batch of ``2·dimensions`` circuits (``θ ± h·e_i``) and then one circuit,
-the updated ``θ``. The option tests need no backend. The batch tests run the
-real loops on Aer with ``polypus_python.run_qcs`` replaced by a fake that
-records every batch and answers with fixed counts. Seeded reproducibility is in
+one batch of ``2·dimensions + 1`` circuits, ``θ`` and then ``θ ± h·e_i``. The
+option tests need no backend. The batch tests run the real loops on Aer with
+``polypus_python.run_qcs`` replaced by a fake that records every batch and
+answers with fixed counts. Seeded reproducibility is in
 ``test_seed_reproducibility.py`` (contract C-7) and the non-finite fitness cases
 in ``test_oracle_contract.py``. The last class trains a one-qubit rotation on
 the native simulator end to end.
@@ -176,33 +176,34 @@ class TestAdamOptions:
 @pytest.mark.integration
 @pytest.mark.vqc
 class TestAdamBatches:
-    """What Adam sends to the backend: per iteration, the finite-difference
-    stencil and then the updated ``θ``, and nothing at all for an invalid
+    """What Adam sends to the backend: per iteration, one batch of ``θ`` and
+    the finite-difference stencil around it, and nothing at all for an invalid
     configuration."""
 
-    def test_each_iteration_is_a_stencil_then_one_candidate(self, monkeypatch):
+    def test_each_iteration_is_one_batch_of_theta_and_its_stencil(self, monkeypatch):
         import polypus
 
         batches = _record_batches(monkeypatch)
         # All fitness values are equal, so only a patience longer than the run
         # keeps the stagnation stop from ending it early.
         result = _train(polypus.Adam(max_iters=4, patience=10_000), dimensions=3)
-        assert [len(b) for b in batches] == [6, 1] * 4
+        assert [len(b) for b in batches] == [7] * 4
         assert result.iterations_run == 4
         assert not result.converged
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
 
-    def test_the_stencil_is_centred_on_theta_with_the_step(self, monkeypatch):
+    def test_theta_comes_first_and_the_stencil_is_centred_on_it(self, monkeypatch):
         import polypus
 
         batches = _record_batches(monkeypatch)
         _train(polypus.Adam(max_iters=2, finite_difference_step=0.25, patience=10_000))
         angles = [[float(a) for qc in b for a in _ANGLE.findall(qc)] for b in batches]
-        # Iteration 2's stencil is centred on iteration 1's updated θ.
-        plus, minus = angles[2]
-        assert plus - minus == pytest.approx(0.5)
-        assert (plus + minus) / 2 == pytest.approx(angles[1][0])
+        # Each iteration's batch is θ, then θ + h and θ − h around it.
+        assert len(angles) == 2
+        for theta, plus, minus in angles:
+            assert plus - minus == pytest.approx(0.5)
+            assert (plus + minus) / 2 == pytest.approx(theta)
 
     def test_a_flat_fitness_stagnates_and_converges(self, monkeypatch):
         import polypus
