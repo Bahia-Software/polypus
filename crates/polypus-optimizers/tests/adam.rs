@@ -645,3 +645,95 @@ fn an_oracle_that_only_returns_nan_does_not_panic() {
     assert!(outcome.best_fitness.is_nan());
     assert_eq!(outcome.fitness_history.len(), 12);
 }
+
+/// [`bowl`] with plain products, so its value is bit-identical on every
+/// IEEE-754 platform.
+fn sphere(x: &[f64]) -> f64 {
+    -x.iter()
+        .zip(TARGET)
+        .map(|(xi, ti)| {
+            let d = xi - ti;
+            d * d
+        })
+        .sum::<f64>()
+}
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|x| x.to_bits()).collect()
+}
+
+/// A seeded run's outcome, bit for bit. Adam's steps use only +, −, ×, ÷ and
+/// `sqrt` (the bias corrections are running products, not `powi`), the
+/// finite difference and the seeded draw of θ₀ likewise, and [`sphere`] only
+/// products, so these bits hold on every IEEE-754 platform (contract C-7). The
+/// run overshoots after its fourth θ, so the best is not the last measured.
+#[test]
+fn a_seeded_run_reproduces_its_pinned_bits() {
+    let oracle = Recorder::new(sphere);
+    let mut args = fd_args(&oracle, 0.2, 17);
+    args.learning_rate = 0.1;
+    args.max_iters = 6;
+    let outcome = AlgorithmAdam.optimize(args).unwrap();
+    assert_eq!(
+        bits(&outcome.best_params),
+        [
+            4604544315024150808,
+            13831309793379619842,
+            4611759284161466444,
+        ]
+    );
+    assert_eq!(outcome.best_fitness.to_bits(), 13796529125890119336);
+    assert_eq!(outcome.iterations_run, 6);
+    assert_eq!(
+        bits(&outcome.fitness_history),
+        [
+            13818145615990575740,
+            13812053528160597440,
+            13803818617241952935,
+            13796529125890119336,
+            13796529125890119336,
+            13796529125890119336,
+        ]
+    );
+}
+
+/// Adam's θs follow Kingma and Ba's Algorithm 1 (ascending), against a
+/// reference written with `powi` for the bias corrections: over a dozen
+/// iterations of a gradient that changes with θ, so a mistake in the moments
+/// or in either correction (a `β₂ᵗ` not advanced, say) shows, whereas the
+/// pinned bits above would only freeze it.
+#[test]
+fn adam_is_kingma_and_bas_update() {
+    for (beta1, beta2) in [
+        (AlgorithmAdam::DEFAULT_BETA1, AlgorithmAdam::DEFAULT_BETA2),
+        (0.5, 0.8),
+    ] {
+        let oracle = Recorder::new(bowl);
+        let mut args = args(oracle.clone(), ExactGradient::new(bowl_gradient), 9);
+        args.max_iters = 12;
+        args.beta1 = beta1;
+        args.beta2 = beta2;
+        let (learning_rate, epsilon) = (args.learning_rate, args.epsilon);
+        AlgorithmAdam.optimize(args).unwrap();
+        let measured: Vec<Vec<f64>> = oracle.batches().concat();
+        assert_eq!(measured.len(), 12);
+        let mut theta = measured[0].clone();
+        let (mut m, mut v) = ([0.0; 3], [0.0; 3]);
+        for (t, next) in (1..).zip(&measured[1..]) {
+            let g = bowl_gradient(&theta);
+            for i in 0..theta.len() {
+                m[i] = beta1 * m[i] + (1.0 - beta1) * g[i];
+                v[i] = beta2 * v[i] + (1.0 - beta2) * g[i] * g[i];
+                let m_hat = m[i] / (1.0 - beta1.powi(t));
+                let v_hat = v[i] / (1.0 - beta2.powi(t));
+                theta[i] += learning_rate * m_hat / (v_hat.sqrt() + epsilon);
+            }
+            for (got, want) in next.iter().zip(&theta) {
+                assert!(
+                    (got - want).abs() < 1e-12,
+                    "β₁ {beta1}, β₂ {beta2}, step {t}: {next:?} vs {theta:?}"
+                );
+            }
+        }
+    }
+}

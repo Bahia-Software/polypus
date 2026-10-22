@@ -140,6 +140,12 @@ impl AlgorithmAdam {
         let mut theta = initial_point.unwrap_or(drawn);
         let mut m = vec![0.0_f64; dims];
         let mut v = vec![0.0_f64; dims];
+        // β₁ᵗ and β₂ᵗ, one product each per iteration rather than `powi`, whose
+        // rounding Rust leaves unspecified: with only +, −, ×, ÷ and `sqrt`,
+        // all correctly rounded in IEEE 754, a seeded run reproduces bit for
+        // bit on every platform (C-7).
+        let mut beta1_t = 1.0_f64;
+        let mut beta2_t = 1.0_f64;
         let mut best = BestMeasured::new();
         let mut iterations_run = 0usize;
         let mut converged = false;
@@ -172,9 +178,10 @@ impl AlgorithmAdam {
             fitness_history.push(best.value());
 
             // ── 3. Bias-corrected moment update (t is 1-based) ────────────────
-            let t = iteration as i32 + 1;
-            let bias1 = 1.0 - beta1.powi(t);
-            let bias2 = 1.0 - beta2.powi(t);
+            beta1_t *= beta1;
+            beta2_t *= beta2;
+            let bias1 = 1.0 - beta1_t;
+            let bias2 = 1.0 - beta2_t;
             for i in 0..dims {
                 m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
                 v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];

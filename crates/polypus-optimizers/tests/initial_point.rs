@@ -344,8 +344,8 @@ fn adam_evaluates_the_point_first_even_outside_its_bounds() {
 
 /// Adam draws θ₀ with or without a point and the point only replaces it, so a
 /// run from the very θ₀ its seed draws is the run without a point, batch for
-/// batch and bit for bit. (Adam's update goes through `powi`, whose last bit
-/// Rust leaves to the platform, so this stands in for pinned bits.)
+/// batch and bit for bit. (Adam's own seeded outcome is pinned bit for bit in
+/// `adam.rs`.)
 #[test]
 fn adam_from_the_point_its_seed_draws_is_the_run_without_one() {
     let run = |point| {
