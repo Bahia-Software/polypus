@@ -493,7 +493,7 @@ mod tests {
                 let batches = Arc::new(Mutex::new(0));
                 let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
                 let outcome =
-                    dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3).ok();
+                    dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3, None).ok();
                 let label = format!("{strategy} {population_size} × {generations}");
                 assert!(outcome.is_some_and(|o| !o.converged), "{label}");
                 assert_eq!(*batches.lock().unwrap(), shape.generations, "{label}");
@@ -561,8 +561,15 @@ mod tests {
             sizes: Arc::clone(&sizes),
             fitness,
         });
-        let outcome =
-            dispatch_optimizer(method, oracle, dimensions, &OracleErrorSlot::new(), seed).ok();
+        let outcome = dispatch_optimizer(
+            method,
+            oracle,
+            dimensions,
+            &OracleErrorSlot::new(),
+            seed,
+            None,
+        )
+        .ok();
         let sizes = sizes.lock().unwrap().clone();
         (outcome, sizes)
     }
