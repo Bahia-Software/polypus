@@ -714,16 +714,16 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   `initial_point` as below.
 - **Starting point (`initial_point`).** Every optimizer takes an optional
   starting point: the `initial_point: Option<Vec<f64>>` field of
-  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`
-  and `AlgorithmCmaEsArgs`, the last argument of `dispatch_optimizer`, and
-  `train(..., initial_point=None)` / `qml.train(..., initial_point=None)` in
-  Python.
+  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`,
+  `AlgorithmCmaEsArgs` and `AlgorithmAdamArgs`, the last argument of
+  `dispatch_optimizer`, and `train(..., initial_point=None)` /
+  `qml.train(..., initial_point=None)` in Python.
   - Preconditions: exactly `dimensions` values, every one finite, and for PSO
     every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
-    bounds, so a point outside them would be moved). QNG takes any finite
-    point: its `bounds` only shape the random draw. Each optimizer checks this
-    after its other preconditions, whose errors come first, and before any RNG
-    draw or oracle call, as `OptimizerError::InvalidConfig` for
+    bounds, so a point outside them would be moved). QNG and Adam take any
+    finite point: their `bounds` only shape the random draw. Each optimizer
+    checks this after its other preconditions, whose errors come first, and
+    before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
     `initial_point`. `train` and `qml.train` check the same (length,
     finiteness and PSO's bounds) themselves before anything runs (no backend,
     no CUNQA allocation), raising `ValueError` with the optimizer's message.
@@ -734,7 +734,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     the first batch and every other member is the one drawn without it. PSO:
     it is the first particle's position (its velocity is the drawn one), so
     likewise the first candidate of the first batch. QNG: it is θ₀, so the
-    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. CMA-ES:
+    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. Adam:
+    it is θ₀, where the first gradient is taken, so with a
+    `FiniteDifferenceGradient` the first batch is the same stencil. CMA-ES:
     the point, wrapped into `[0, 2π)` like every candidate, is the mean of the
     first run, IPOP restarts draw a fresh mean as without it, and `sigma0` is
     not changed. Every other postcondition of this contract holds
@@ -742,9 +744,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     for bit what it was before `initial_point` existed.
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
     batch of PSO and every DE strategy against the same seed without a point,
-    QNG's stencil around the point, CMA-ES's first generation, a far point
-    that still moves, and its restarts against the same seed without a point,
-    the rejections before
+    QNG's and Adam's stencil around the point, Adam's run from the θ₀ its
+    seed draws against the run without a point, CMA-ES's first generation, a
+    far point that still moves, and its restarts against the same seed
+    without a point, the rejections before
     any oracle call and their precedence, PSO's bounds, the postconditions
     over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
     bits they had before it), the `check_initial_point` unit tests in
@@ -871,10 +874,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - Preconditions, each an error before any RNG draw or oracle call:
     `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
     `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`
-    (`InvalidConfig`), and `bounds` finite with `lb < ub` (`InvalidBounds`).
-  - The initial `θ` is drawn uniformly from `bounds` (and not wrapped
-    afterwards). Each iteration asks the gradient oracle once and scores the
-    updated `θ` in one `evaluate_batch` of one candidate, its length checked.
+    (`InvalidConfig`), `bounds` finite with `lb < ub` (`InvalidBounds`), and
+    `initial_point` as under *Starting point* above.
+  - The initial `θ` is `initial_point` when given, otherwise drawn uniformly
+    from `bounds`, and is not wrapped afterwards. Each iteration asks the
+    gradient oracle once and scores the updated `θ` in one `evaluate_batch` of
+    one candidate, its length checked.
     `best_params`/`best_fitness` are the best scored `θ`, `fitness_history` the
     best so far after each iteration.
   - A run ends on fitness stagnation, the rule above with `patience` counted in

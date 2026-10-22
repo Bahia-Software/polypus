@@ -258,7 +258,17 @@ pub fn dispatch_optimizer(
         gradient,
     } = oracles.into();
     let method = match method {
-        Method::Adam(cfg) => return dispatch_adam(cfg, oracle, gradient, dimensions, errors, seed),
+        Method::Adam(cfg) => {
+            return dispatch_adam(
+                cfg,
+                oracle,
+                gradient,
+                dimensions,
+                errors,
+                seed,
+                initial_point,
+            )
+        }
         other => other,
     };
     let result = match method {
@@ -331,6 +341,7 @@ fn dispatch_adam(
     dimensions: u32,
     errors: &OracleErrorSlot,
     seed: u64,
+    initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OracleError> {
     let (gradient_oracle, tracking): (Box<dyn GradientOracle>, Box<dyn EvaluationOracle>) =
         match gradient {
@@ -359,6 +370,7 @@ fn dispatch_adam(
         tolerance: cfg.tolerance,
         patience: cfg.patience,
         seed: Some(seed),
+        initial_point,
     });
     finish(result, errors)
 }
@@ -674,8 +686,9 @@ mod tests {
 
     /// Dispatch hands `initial_point` to every `Method`: it is the first
     /// candidate of the first batch (DE, PSO), the centre of the first
-    /// gradient stencil (QNG, whose first candidate is θ₀ + h·e₀) and the
-    /// first mean (CMA-ES, whose candidates all sit on it with a tiny σ₀).
+    /// gradient stencil (QNG, and Adam's finite difference, whose first
+    /// candidate is θ₀ + h·e₀) and the first mean (CMA-ES, whose candidates
+    /// all sit on it with a tiny σ₀).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -717,6 +730,20 @@ mod tests {
                     restarts: 0,
                 }),
             ),
+            (
+                "Adam",
+                Method::Adam(AdamConfig {
+                    max_iters: 2,
+                    learning_rate: 0.05,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    epsilon: 1e-8,
+                    bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+                    tolerance: 0.0,
+                    patience: 10,
+                    finite_difference_step: step,
+                }),
+            ),
         ];
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             methods.push((strategy.as_str(), de_method(strategy)));
@@ -734,7 +761,7 @@ mod tests {
                 .clone()
                 .expect("the oracle was called");
             let expected = match name {
-                "QNG" => vec![point[0] + step, point[1], point[2]],
+                "QNG" | "Adam" => vec![point[0] + step, point[1], point[2]],
                 _ => point.clone(),
             };
             let tolerance = if name == "CMA-ES" { 1e-6 } else { 0.0 };

@@ -180,6 +180,7 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `PSO` | Makes it the position of the first particle, the first candidate evaluated; the other particles are drawn as without it. Every value must lie within `bounds`, since positions are clamped to them, otherwise `ValueError` before anything runs |
 | `QNG` | Starts from it: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 | `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
+| `Adam` | Starts from it, like `QNG`: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 

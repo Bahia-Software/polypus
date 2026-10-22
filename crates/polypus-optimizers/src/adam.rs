@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_oracle_len, fitness_stagnated};
+use crate::util::{check_initial_point, check_oracle_len, fitness_stagnated};
 use rand::{Rng, RngExt};
 
 /// Adam optimizer (Kingma and Ba, 2015).
@@ -26,8 +26,9 @@ pub struct AlgorithmAdam;
 /// `max_iters >= 1` (Adam evaluates nothing before its first step, so zero
 /// iterations could not report a real `best_fitness`), `dimensions >= 1`,
 /// `learning_rate` finite and `> 0`, `beta1` and `beta2` in `[0, 1)` (at `1`
-/// the bias correction divides by zero), `epsilon` finite and `> 0`, and
-/// `bounds` finite with `lb < ub` (the initial `θ` is drawn uniformly from it).
+/// the bias correction divides by zero), `epsilon` finite and `> 0`,
+/// `bounds` finite with `lb < ub` (the initial `θ` is drawn uniformly from it),
+/// and `initial_point`, when given, `dimensions` finite values.
 pub struct AlgorithmAdamArgs {
     /// Maps parameter vectors to fitness values (higher is better). Called once
     /// per iteration, on the updated `θ`, to track the best solution.
@@ -56,6 +57,11 @@ pub struct AlgorithmAdamArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional initial `θ`, one value per dimension, all finite; it may lie
+    /// outside `bounds`, which only shape the random draw (θ is never clamped).
+    /// The first gradient is taken at it. `None` draws `θ` uniformly from
+    /// `bounds`.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 impl AlgorithmAdam {
@@ -97,6 +103,7 @@ impl AlgorithmAdam {
             tolerance,
             patience,
             seed: _,
+            initial_point,
         } = args;
 
         validate(max_iters, dimensions, learning_rate, beta1, beta2, epsilon)?;
@@ -110,7 +117,11 @@ impl AlgorithmAdam {
 
         let dims = dimensions as usize;
         let patience = patience as usize;
-        let mut theta: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+        check_initial_point(initial_point.as_deref(), dims)?;
+        // Draw θ uniformly in [lb, ub), or start at the caller's point: θ is
+        // drawn either way, so the RNG stream does not depend on it.
+        let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+        let mut theta = initial_point.unwrap_or(drawn);
         let mut m = vec![0.0_f64; dims];
         let mut v = vec![0.0_f64; dims];
         let mut best_fitness = f64::NEG_INFINITY;

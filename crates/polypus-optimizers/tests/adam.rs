@@ -106,6 +106,7 @@ fn args(
         tolerance: 1e-12,
         patience: 50,
         seed: Some(seed),
+        initial_point: None,
     }
 }
 

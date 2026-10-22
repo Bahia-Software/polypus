@@ -6,13 +6,14 @@
 //! actually evaluated: the point is the first candidate of the first batch
 //! (wrapped into `[0, 2π)` for DE), the rest of that batch is what the same
 //! seed gives without a point, CMA-ES centres its first generation on it, QNG
-//! starts its gradient stencil at it, and a rejected point reaches no oracle.
+//! and Adam start their gradient stencil at it, and a rejected point reaches no
+//! oracle.
 
 use polypus_optimizers::{
-    AlgorithmCmaEs, AlgorithmCmaEsArgs, AlgorithmDifferentialEvolution,
-    AlgorithmDifferentialEvolutionArgs, AlgorithmPSO, AlgorithmPSOArgs, AlgorithmQNG,
-    AlgorithmQNGArgs, DeStrategy, EvaluationOracle, OptimizationOutcome, Optimizer, OptimizerError,
-    VarianceOracle,
+    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
+    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
+    FiniteDifferenceGradient, OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
 use std::f64::consts::{PI, TAU};
 use std::sync::{Arc, Mutex};
@@ -173,6 +174,50 @@ fn cmaes_args(
     }
 }
 
+const ADAM_STEP: f64 = 0.1;
+
+/// Adam as a training run without an exact gradient dispatches it: a central
+/// finite difference of the same oracle that tracks the best solution, so every
+/// batch either one sends reaches the recorder.
+fn adam_args(
+    oracle: Box<dyn EvaluationOracle>,
+    initial_point: Option<Vec<f64>>,
+    seed: u64,
+) -> AlgorithmAdamArgs {
+    let oracle: Arc<dyn EvaluationOracle> = Arc::from(oracle);
+    let gradient = FiniteDifferenceGradient::new(Arc::clone(&oracle), ADAM_STEP)
+        .expect("a finite, positive step is valid");
+    AlgorithmAdamArgs {
+        oracle: Box::new(oracle),
+        gradient_oracle: Box::new(gradient),
+        max_iters: 5,
+        learning_rate: 0.1,
+        beta1: AlgorithmAdam::DEFAULT_BETA1,
+        beta2: AlgorithmAdam::DEFAULT_BETA2,
+        epsilon: AlgorithmAdam::DEFAULT_EPSILON,
+        bounds: (-PI, PI),
+        dimensions: 3,
+        tolerance: 1e-12,
+        patience: 1_000,
+        seed: Some(seed),
+        initial_point,
+    }
+}
+
+/// The central-difference stencil around `theta`:
+/// `[θ + h·e₀, θ − h·e₀, θ + h·e₁, …]`.
+fn stencil(theta: &[f64], h: f64) -> Vec<Vec<f64>> {
+    (0..theta.len())
+        .flat_map(|i| {
+            let mut plus = theta.to_vec();
+            let mut minus = theta.to_vec();
+            plus[i] += h;
+            minus[i] -= h;
+            [plus, minus]
+        })
+        .collect()
+}
+
 /// Runs one optimizer over an oracle, from an optional point, with a seed.
 type Runner = Box<
     dyn Fn(
@@ -200,9 +245,12 @@ fn optimizers() -> Vec<(String, Runner)> {
         Box::new(|oracle, point, seed| AlgorithmQNG.optimize(qng_args(oracle, point, seed)));
     let cmaes: Runner =
         Box::new(|oracle, point, seed| AlgorithmCmaEs.optimize(cmaes_args(oracle, point, seed)));
+    let adam: Runner =
+        Box::new(|oracle, point, seed| AlgorithmAdam.optimize(adam_args(oracle, point, seed)));
     all.push(("PSO".to_string(), pso));
     all.push(("QNG".to_string(), qng));
     all.push(("CMA-ES".to_string(), cmaes));
+    all.push(("Adam".to_string(), adam));
     all
 }
 
@@ -278,6 +326,42 @@ fn qng_starts_its_first_gradient_stencil_at_the_point_even_outside_its_bounds() 
         })
         .collect();
     assert_eq!(first_batch(&batches), stencil);
+}
+
+#[test]
+fn adam_takes_its_first_gradient_at_the_point_even_outside_its_bounds() {
+    // Like QNG's, Adam's bounds (-π, π) only shape the random draw of θ₀.
+    let point = vec![-5.0, 0.5, 9.0];
+    let (oracle, batches) = recorder(quadratic);
+    AlgorithmAdam
+        .optimize(adam_args(oracle, Some(point.clone()), 17))
+        .expect("a finite point outside the bounds is accepted");
+    assert_eq!(first_batch(&batches), stencil(&point, ADAM_STEP));
+}
+
+/// Adam draws θ₀ with or without a point and the point only replaces it, so a
+/// run from the very θ₀ its seed draws is the run without a point, batch for
+/// batch and bit for bit. (Adam's update goes through `powi`, whose last bit
+/// Rust leaves to the platform, so this stands in for pinned bits.)
+#[test]
+fn adam_from_the_point_its_seed_draws_is_the_run_without_one() {
+    let run = |point| {
+        let (oracle, batches) = recorder(rough);
+        let outcome = AlgorithmAdam
+            .optimize(adam_args(oracle, point, 17))
+            .expect("valid Adam args optimize successfully");
+        let batches = batches.lock().unwrap().clone();
+        (outcome, batches)
+    };
+    let (without, without_batches) = run(None);
+    // The first batch is the stencil around the drawn θ₀: θ₀ + h·e₀ holds every
+    // coordinate of θ₀ but the first, which θ₀ + h·e₁ holds.
+    let first = &without_batches[0];
+    let drawn = vec![first[2][0], first[0][1], first[0][2]];
+    assert_eq!(*first, stencil(&drawn, ADAM_STEP));
+    let (with, with_batches) = run(Some(drawn));
+    assert_eq!(with_batches, without_batches);
+    assert_eq!(with, without);
 }
 
 #[test]
@@ -371,7 +455,7 @@ fn cmaes_restarts_sample_what_they_would_without_a_point() {
 fn de_and_pso_keep_a_point_at_the_optimum() {
     let optimum = vec![1.0, 1.0, 1.0];
     for (name, optimize) in optimizers() {
-        if name == "QNG" || name == "CMA-ES" {
+        if name == "QNG" || name == "CMA-ES" || name == "Adam" {
             continue;
         }
         let (oracle, _) = recorder(quadratic);
@@ -472,6 +556,25 @@ fn the_other_configuration_errors_are_reported_first() {
             ..
         })
     ));
+    let (oracle, _) = recorder(quadratic);
+    assert!(matches!(
+        AlgorithmAdam.optimize(AlgorithmAdamArgs {
+            beta1: 1.0,
+            ..adam_args(oracle, bad(), 1)
+        }),
+        Err(OptimizerError::InvalidConfig {
+            parameter: "beta1",
+            ..
+        })
+    ));
+    let (oracle, _) = recorder(quadratic);
+    assert_eq!(
+        AlgorithmAdam.optimize(AlgorithmAdamArgs {
+            bounds: (1.0, 0.0),
+            ..adam_args(oracle, bad(), 1)
+        }),
+        Err(OptimizerError::InvalidBounds { lb: 1.0, ub: 0.0 })
+    );
 }
 
 #[test]

@@ -72,9 +72,9 @@ Changes on `main` since 0.7.2.
   otherwise `ValueError` before anything runs. DE (every `strategy`)
   evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
   population; PSO as its first particle, which must lie within `bounds`; QNG
-  starts from it; CMA-ES centres its first run on it and keeps its `sigma0`,
-  so a refinement wants a smaller one. Without it every optimizer behaves as
-  before, seeded runs included (#395).
+  and Adam start from it; CMA-ES centres its first run on it and keeps its
+  `sigma0`, so a refinement wants a smaller one. Without it every optimizer
+  behaves as before, seeded runs included (#395).
 
 ### Changed
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
