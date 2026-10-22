@@ -4,7 +4,9 @@ use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{argmax, check_oracle_len, population_converged, rows_to_candidates};
+use crate::util::{
+    argmax, check_initial_point, check_oracle_len, population_converged, rows_to_candidates,
+};
 use ndarray::Array2;
 use rand::{Rng, RngExt};
 
@@ -19,7 +21,8 @@ pub struct AlgorithmPSO;
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); positions and velocities
-/// are drawn uniformly from ranges derived from it.
+/// are drawn uniformly from ranges derived from it. `initial_point`, when
+/// given, holds `dimensions` finite values within `[lb, ub]`.
 pub struct AlgorithmPSOArgs {
     /// Oracle that maps parameter vectors → fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
@@ -34,6 +37,14 @@ pub struct AlgorithmPSOArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional starting point, one value per dimension, all finite and within
+    /// `[lb, ub]`: positions are clamped to `bounds`, so a point outside them
+    /// would be moved, and it is rejected instead. The swarm is drawn as usual
+    /// and the first particle's position replaced with it (its velocity is the
+    /// drawn one), so it is the first candidate of the initial batch while the
+    /// other particles, and the RNG stream, are the same as without it. `None`
+    /// draws every position.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 impl AlgorithmPSO {
@@ -64,6 +75,7 @@ impl AlgorithmPSO {
             social_weight,
             tolerance,
             seed: _,
+            initial_point,
         } = args;
 
         let popsize = population_size as usize;
@@ -79,6 +91,22 @@ impl AlgorithmPSO {
         // draw or for the derived infinite `vel_range` velocity draw).
         if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
+        }
+        check_initial_point(initial_point.as_deref(), dims)?;
+        // Every position is clamped to [lb, ub], so a point outside would be
+        // silently moved: reject it.
+        if let Some((index, value)) = initial_point
+            .iter()
+            .flatten()
+            .enumerate()
+            .find(|(_, x)| !(lb..=ub).contains(*x))
+        {
+            return Err(OptimizerError::InvalidConfig {
+                parameter: "initial_point",
+                reason: format!(
+                    "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
+                ),
+            });
         }
         let max_vel = (ub - lb) * 0.2;
         let vel_range = (ub - lb) * 0.1;
@@ -96,6 +124,15 @@ impl AlgorithmPSO {
         for mut row in velocities.outer_iter_mut() {
             for e in row.iter_mut() {
                 *e = rng.random_range(-vel_range..vel_range);
+            }
+        }
+
+        // The caller's point replaces the first particle's position once the
+        // swarm is drawn, so the other particles and the RNG stream are unchanged.
+        if let (Some(point), Some(mut first)) = (&initial_point, positions.outer_iter_mut().next())
+        {
+            for (e, &x) in first.iter_mut().zip(point) {
+                *e = x;
             }
         }
 

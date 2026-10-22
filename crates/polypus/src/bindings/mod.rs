@@ -2674,6 +2674,7 @@ mod tests {
                     tolerance: 1e-9,
                     patience: 20,
                     seed: Some(seed),
+                    initial_point: None,
                 })
                 .expect("valid DE args optimize successfully")
         };

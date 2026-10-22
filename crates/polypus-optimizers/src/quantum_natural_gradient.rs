@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::check_oracle_len;
+use crate::util::{check_initial_point, check_oracle_len};
 use rand::{Rng, RngExt};
 
 /// Quantum Natural Gradient optimizer.
@@ -22,7 +22,8 @@ pub struct AlgorithmQNG;
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); the initial `θ` is drawn
-/// uniformly from it.
+/// uniformly from it. `initial_point`, when given, holds `dimensions` finite
+/// values.
 pub struct AlgorithmQNGArgs {
     /// Oracle that maps parameter vectors → fitness values (used for gradient + energy eval).
     pub oracle: Box<dyn EvaluationOracle>,
@@ -38,6 +39,11 @@ pub struct AlgorithmQNGArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional initial `θ`, one value per dimension, all finite; it may lie
+    /// outside `bounds`, which only shape the random draw (θ is never clamped).
+    /// The first gradient batch is the finite-difference stencil around it.
+    /// `None` draws `θ` uniformly from `bounds`.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +155,7 @@ impl AlgorithmQNG {
             variance_oracle,
             tikhonov_reg,
             seed: _,
+            initial_point,
         } = args;
 
         let dims = dimensions as usize;
@@ -191,9 +198,12 @@ impl AlgorithmQNG {
         if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
+        check_initial_point(initial_point.as_deref(), dims)?;
 
-        // Initialise θ uniformly in [lb, ub)
-        let mut theta: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+        // Initialise θ uniformly in [lb, ub), or at the caller's point: θ is
+        // drawn either way, so the RNG stream does not depend on it.
+        let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+        let mut theta = initial_point.unwrap_or(drawn);
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;

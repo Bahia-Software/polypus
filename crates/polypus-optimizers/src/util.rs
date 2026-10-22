@@ -3,14 +3,17 @@
 //! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution),
 //! [`AlgorithmPSO`](crate::AlgorithmPSO) and (the oracle length check and the
 //! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
-//! crate's public API, so the module is `pub(crate)`-scoped. Each helper is a small,
-//! single-purpose free function that used to be inlined (and duplicated) inside
-//! the optimizer loops. The behaviour is preserved exactly — same operation
-//! order, same comparators, same diagnostics — so the determinism the tests pin
-//! (`tests/optimizers.rs`) is unaffected.
+//! crate's public API, so the module is `pub(crate)`-scoped. Every optimizer,
+//! [`AlgorithmQNG`](crate::AlgorithmQNG) included, checks its optional starting
+//! point with [`check_initial_point`], and DE and CMA-ES share [`wrap_angle`].
+//! Each helper is a small, single-purpose free function that used to be inlined
+//! (and duplicated) inside the optimizer loops. The behaviour is preserved
+//! exactly — same operation order, same comparators, same diagnostics — so the
+//! determinism the tests pin (`tests/optimizers.rs`) is unaffected.
 
 use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
+use std::f64::consts::TAU;
 
 /// NaN-safe argmax over a fitness slice.
 ///
@@ -152,6 +155,49 @@ pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), Optimi
         Ok(())
     } else {
         Err(OptimizerError::OracleLengthMismatch { expected, got })
+    }
+}
+
+/// Validate an optimizer's optional starting point against its `dims`
+/// parameters: exactly `dims` values, every one finite.
+///
+/// Each optimizer calls this after its other configuration checks and before
+/// any RNG draw or oracle call, so a bad point is reported as
+/// [`OptimizerError::InvalidConfig`] for `initial_point` with nothing drawn or
+/// evaluated. `None` (no starting point) always passes.
+pub(crate) fn check_initial_point(
+    point: Option<&[f64]>,
+    dims: usize,
+) -> Result<(), OptimizerError> {
+    let Some(point) = point else {
+        return Ok(());
+    };
+    if point.len() != dims {
+        return Err(OptimizerError::InvalidConfig {
+            parameter: "initial_point",
+            reason: format!(
+                "must have one value per dimension ({dims}), got {}",
+                point.len()
+            ),
+        });
+    }
+    if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(OptimizerError::InvalidConfig {
+            parameter: "initial_point",
+            reason: format!("every value must be finite, got {value} at index {index}"),
+        });
+    }
+    Ok(())
+}
+
+/// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a
+/// tiny negative `x` (the exact result rounds up); that is the same angle as 0.
+pub(crate) fn wrap_angle(x: f64) -> f64 {
+    let wrapped = x.rem_euclid(TAU);
+    if wrapped >= TAU {
+        0.0
+    } else {
+        wrapped
     }
 }
 
@@ -337,6 +383,61 @@ mod tests {
         // patience 0 compares the last generation with itself.
         assert_eq!(recent_improvement(&[1.0], 0), Some(0.0));
         assert_eq!(recent_improvement(&[], 0), None);
+    }
+
+    #[test]
+    fn wrap_angle_stays_in_the_half_open_circle() {
+        assert_eq!(wrap_angle(0.0), 0.0);
+        assert_eq!(wrap_angle(-0.0), 0.0);
+        assert_eq!(wrap_angle(TAU), 0.0);
+        assert_eq!(wrap_angle(-TAU), 0.0);
+        assert_eq!(wrap_angle(1.0 + TAU), (1.0 + TAU).rem_euclid(TAU));
+        // rem_euclid rounds this up to 2π exactly; the wrap folds it to 0.
+        assert_eq!((-1e-20f64).rem_euclid(TAU), TAU);
+        assert_eq!(wrap_angle(-1e-20), 0.0);
+        for x in [-1e9, -7.5, -1e-300, 3.0, 6.283_185_307_179_585, 1e12] {
+            let w = wrap_angle(x);
+            assert!((0.0..TAU).contains(&w), "{x} -> {w}");
+        }
+        assert!(wrap_angle(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn check_initial_point_accepts_none_and_a_finite_point_of_the_right_length() {
+        assert_eq!(check_initial_point(None, 3), Ok(()));
+        assert_eq!(check_initial_point(Some(&[0.5, -7.0, 1e300]), 3), Ok(()));
+        assert_eq!(check_initial_point(Some(&[]), 0), Ok(()));
+    }
+
+    #[test]
+    fn check_initial_point_rejects_a_wrong_length() {
+        for point in [&[0.5][..], &[0.5, 1.0, 1.5, 2.0][..], &[][..]] {
+            assert_eq!(
+                check_initial_point(Some(point), 3),
+                Err(OptimizerError::InvalidConfig {
+                    parameter: "initial_point",
+                    reason: format!("must have one value per dimension (3), got {}", point.len()),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn check_initial_point_rejects_a_non_finite_value_naming_its_index() {
+        for (value, shown) in [
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            let err = check_initial_point(Some(&[0.5, 1.0, value]), 3)
+                .expect_err("a non-finite value is rejected");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid initial_point: every value must be finite, got {shown} at index 2"
+                )
+            );
+        }
     }
 
     #[test]

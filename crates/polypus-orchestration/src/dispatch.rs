@@ -210,6 +210,7 @@ pub fn dispatch_optimizer(
                 tolerance: cfg.tolerance,
                 patience: cfg.patience,
                 seed: Some(seed),
+                initial_point: None,
             },
         ),
         Method::Pso(cfg) => AlgorithmPSO.optimize(AlgorithmPSOArgs {
@@ -223,6 +224,7 @@ pub fn dispatch_optimizer(
             social_weight: cfg.social_weight,
             tolerance: cfg.tolerance,
             seed: Some(seed),
+            initial_point: None,
         }),
         Method::Qng(cfg, variance_oracle) => AlgorithmQNG.optimize(AlgorithmQNGArgs {
             oracle,
@@ -234,6 +236,7 @@ pub fn dispatch_optimizer(
             variance_oracle,
             tikhonov_reg: cfg.tikhonov_reg,
             seed: Some(seed),
+            initial_point: None,
         }),
         Method::Cmaes(cfg) => AlgorithmCmaEs.optimize(AlgorithmCmaEsArgs {
             oracle,
@@ -245,6 +248,7 @@ pub fn dispatch_optimizer(
             patience: cfg.patience,
             restarts: cfg.restarts,
             seed: Some(seed),
+            initial_point: None,
         }),
     };
 
@@ -506,6 +510,7 @@ mod tests {
                 tolerance: 0.0,
                 patience: 100,
                 seed: Some(9),
+                initial_point: None,
             })
             .expect("a valid DE configuration runs");
         assert_eq!(dispatched, direct);

@@ -61,6 +61,7 @@
 //!         tolerance: 1e-6,
 //!         patience: 20,
 //!         seed: Some(7),
+//!         initial_point: None,
 //!     })
 //!     .expect("valid arguments optimize successfully");
 //!

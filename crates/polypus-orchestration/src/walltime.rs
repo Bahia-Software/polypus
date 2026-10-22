@@ -598,6 +598,7 @@ mod tests {
                 patience: 5,
                 restarts: 1,
                 seed: Some(21),
+                initial_point: None,
             })
             .expect("a valid CMA-ES configuration runs");
         assert_eq!(dispatched, direct);
