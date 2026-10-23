@@ -5,8 +5,10 @@ transpiled to the native gate set (`r`, `cz`) and coupling map, and run on Aer
 with a noise model built from an LRZ calibration snapshot. The physical QPU is
 not used.
 
-Status: device model (F1), instances and routing study (F2), cost pilot (F3a)
-and the emulation sweep (F3b). Analysis and the QPU plan come next.
+Status: local phase complete on bahia189: device model (F1), instances and
+routing study (F2), cost pilot (F3a), emulation sweep for n = 16 at p = 1..3 and
+n = 20 at p = 1 (F3b), analysis and QPU plan (F4). Pending: n = 20 at p >= 2 on
+LRZ's Qaptiva machines.
 
 The scripts and tests need the polypus extension built from this branch. To keep
 it apart from other environments on the machine, install the wheel into its own
@@ -109,6 +111,22 @@ angles under A, C and I. One gzipped JSON per (instance, p) under
 `results/sweep/`, with rows and counts; finished units are skipped on rerun.
 From the cost pilot, n = 20 with p >= 2 takes most of the time (an evaluation
 with idle noise is ~23 min at p = 2 and ~1 h at p = 3 on 8 cores).
+
+## Analysis and QPU plan (`analyze.py`, `qpu_plan.py`)
+
+```bash
+python benchmarks/euro_q_exa/analyze.py --sweep benchmarks/euro_q_exa/results/sweep \
+    --out benchmarks/euro_q_exa/results/analysis
+python benchmarks/euro_q_exa/qpu_plan.py --out benchmarks/euro_q_exa/results/analysis
+```
+
+`analyze.py` aggregates the sweep per (family, n, p, condition): mean and
+standard deviation of the approximation ratio, the normalized ratio
+`(cut - random) / (optimum - random)` (the comparable figure for the signed
+control, whose random baseline is negative), the probability of the optimal cut
+and the share of the ideal gain kept under noise. `qpu_plan.py` counts circuits
+and shots for a physical run and estimates QPU hours from explicit assumptions
+on time per shot, overheads and accounting.
 
 ## Tests
 
