@@ -90,6 +90,9 @@ pub struct AdamConfig {
     pub tolerance: f64,
     pub patience: u32,
     pub finite_difference_step: f64,
+    /// How the gradient becomes a step (`polypus.Adam(rule=...)`);
+    /// [`AdamRule::Adam`] is Kingma and Ba's Adam.
+    pub rule: AdamRule,
 }
 
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
@@ -372,7 +375,7 @@ fn dispatch_adam(
         dimensions,
         tolerance: cfg.tolerance,
         patience: cfg.patience,
-        rule: AdamRule::default(),
+        rule: cfg.rule,
         seed: Some(seed),
         initial_point,
     });
@@ -746,6 +749,7 @@ mod tests {
                     tolerance: 0.0,
                     patience: 10,
                     finite_difference_step: step,
+                    rule: AdamRule::Adam,
                 }),
             ),
         ];
@@ -813,6 +817,7 @@ mod tests {
             tolerance: 0.0,
             patience: 1_000,
             finite_difference_step: 1e-4,
+            rule: AdamRule::Adam,
         })
     }
 
@@ -887,6 +892,53 @@ mod tests {
         let sizes = sizes(&log);
         assert_eq!(sizes.len(), outcome.iterations_run);
         assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
+    }
+
+    /// The configured rule reaches the optimizer: dispatch runs what
+    /// `AlgorithmAdam` runs with that rule over a finite difference of the
+    /// same oracle, and the two rules run differently.
+    #[test]
+    fn adam_rule_reaches_the_optimizer() {
+        let dispatched = |rule| {
+            let (oracle, _) = recorder();
+            let method = match adam_method(20) {
+                Method::Adam(cfg) => Method::Adam(AdamConfig { rule, ..cfg }),
+                other => other,
+            };
+            dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None)
+                .unwrap_or_else(|_| panic!("a valid Adam run must succeed"))
+        };
+        let direct = |rule| {
+            let (oracle, _) = recorder();
+            let oracle: Arc<dyn EvaluationOracle> = Arc::new(*oracle);
+            let gradient = FiniteDifferenceGradient::new(Arc::clone(&oracle), 1e-4)
+                .expect("a finite, positive step is valid");
+            AlgorithmAdam
+                .optimize(AlgorithmAdamArgs {
+                    oracle: Box::new(oracle),
+                    gradient_oracle: Box::new(gradient),
+                    max_iters: 20,
+                    learning_rate: 0.05,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    epsilon: 1e-8,
+                    bounds: (-2.0, 2.0),
+                    dimensions: 3,
+                    tolerance: 0.0,
+                    patience: 1_000,
+                    rule,
+                    seed: Some(1),
+                    initial_point: None,
+                })
+                .expect("a valid Adam configuration runs")
+        };
+        for rule in [AdamRule::Adam, AdamRule::Momentum] {
+            assert_eq!(dispatched(rule), direct(rule), "{rule}");
+        }
+        assert_ne!(
+            dispatched(AdamRule::Adam).best_params,
+            dispatched(AdamRule::Momentum).best_params
+        );
     }
 
     #[test]

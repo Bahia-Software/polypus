@@ -101,12 +101,13 @@ class TestAdamOptions:
         assert adam.tolerance == pytest.approx(0.01)
         assert adam.patience == 20
         assert adam.finite_difference_step == pytest.approx(0.1)
+        assert adam.rule == "adam"
         assert adam.seed is None
 
     def test_keywords_and_positions(self):
         import polypus
 
-        values = (30, 0.2, 0.8, 0.99, 1e-6, (-1.0, 2.0), 1e-3, 7, 0.05, 5)
+        values = (30, 0.2, 0.8, 0.99, 1e-6, (-1.0, 2.0), 1e-3, 7, 0.05, "momentum", 5)
         by_name = polypus.Adam(
             max_iters=30,
             learning_rate=0.2,
@@ -117,6 +118,7 @@ class TestAdamOptions:
             tolerance=1e-3,
             patience=7,
             finite_difference_step=0.05,
+            rule="momentum",
             seed=5,
         )
         by_position = polypus.Adam(*values)
@@ -131,6 +133,7 @@ class TestAdamOptions:
                 adam.tolerance,
                 adam.patience,
                 adam.finite_difference_step,
+                adam.rule,
                 adam.seed,
             ) == values
 
@@ -147,6 +150,7 @@ class TestAdamOptions:
         adam.tolerance = 0.5
         adam.patience = 3
         adam.finite_difference_step = 0.2
+        adam.rule = "momentum"
         adam.seed = 9
         assert (
             adam.max_iters,
@@ -158,8 +162,9 @@ class TestAdamOptions:
             adam.tolerance,
             adam.patience,
             adam.finite_difference_step,
+            adam.rule,
             adam.seed,
-        ) == (12, 0.3, 0.5, 0.9, 1e-4, (0.0, 1.0), 0.5, 3, 0.2, 9)
+        ) == (12, 0.3, 0.5, 0.9, 1e-4, (0.0, 1.0), 0.5, 3, 0.2, "momentum", 9)
 
     @pytest.mark.parametrize("kwargs", [{"max_iters": -1}, {"patience": -1}])
     def test_negative_counts_are_rejected_at_construction(self, kwargs):
@@ -167,6 +172,21 @@ class TestAdamOptions:
 
         with pytest.raises(OverflowError):
             polypus.Adam(**kwargs)
+
+    @pytest.mark.parametrize("rule", ["Adam", "MOMENTUM", "nesterov", ""])
+    def test_an_unknown_rule_raises_value_error_naming_the_valid_ones(self, rule):
+        import polypus
+
+        with pytest.raises(ValueError, match='"adam" or "momentum"'):
+            polypus.Adam(rule=rule)
+
+    def test_setting_an_unknown_rule_raises_and_keeps_the_rule(self):
+        import polypus
+
+        adam = polypus.Adam(rule="momentum")
+        with pytest.raises(ValueError, match='"adam" or "momentum"'):
+            adam.rule = "sgd"
+        assert adam.rule == "momentum"
 
     def test_a_non_method_names_adam_in_its_type_error(self):
         with pytest.raises(TypeError, match="polypus.Adam"):
@@ -180,13 +200,17 @@ class TestAdamBatches:
     the finite-difference stencil around it, and nothing at all for an invalid
     configuration."""
 
-    def test_each_iteration_is_one_batch_of_theta_and_its_stencil(self, monkeypatch):
+    @pytest.mark.parametrize("rule", ["adam", "momentum"])
+    def test_each_iteration_is_one_batch_of_theta_and_its_stencil(
+        self, monkeypatch, rule
+    ):
         import polypus
 
         batches = _record_batches(monkeypatch)
         # All fitness values are equal, so only a patience longer than the run
         # keeps the stagnation stop from ending it early.
-        result = _train(polypus.Adam(max_iters=4, patience=10_000), dimensions=3)
+        method = polypus.Adam(max_iters=4, patience=10_000, rule=rule)
+        result = _train(method, dimensions=3)
         assert [len(b) for b in batches] == [7] * 4
         assert result.iterations_run == 4
         assert not result.converged
@@ -238,15 +262,20 @@ class TestAdamBatches:
             _train(polypus.Adam(**kwargs), ident="adam_invalid")
         assert batches == []
 
-    def test_qml_train_runs_adam(self, monkeypatch):
+    @pytest.mark.parametrize("rule", ["adam", "momentum"])
+    def test_qml_train_runs_adam(self, monkeypatch, rule):
         import polypus
 
         batches = _record_batches(monkeypatch)
-        result = _qml_train(polypus.Adam(max_iters=3, patience=10_000))
+        result = _qml_train(polypus.Adam(max_iters=3, patience=10_000, rule=rule))
         assert result.iterations_run == 3
         assert len(result.best_params) == 4
         assert len(result.fitness_history) == 3
         assert batches
+        # Per iteration, θ and the stencil of its 4 parameters, each on the 2
+        # rows of x_train. (The QML oracle may split a batch into windows of
+        # the backend's concurrency, so only the total is fixed.)
+        assert sum(len(b) for b in batches) == 3 * 9 * 2
 
     def test_qml_train_rejects_an_invalid_configuration_before_any_batch(
         self, monkeypatch
@@ -262,12 +291,13 @@ class TestAdamBatches:
 @pytest.mark.integration
 @pytest.mark.vqc
 class TestAdamClimbs:
-    def test_seeded_rotation_reaches_the_all_ones_state(self):
+    @pytest.mark.parametrize("rule", ["adam", "momentum"])
+    def test_seeded_rotation_reaches_the_all_ones_state(self, rule):
         """``P(1) = sin²(θ/2)`` on one qubit: Adam climbs to ``θ ≈ ±π``."""
         import polypus
 
         result = _train(
-            polypus.Adam(max_iters=150, learning_rate=0.1, patience=10_000),
+            polypus.Adam(max_iters=150, learning_rate=0.1, patience=10_000, rule=rule),
             seed=2024,
             ident="adam_climb",
             shots=4096,
@@ -275,3 +305,21 @@ class TestAdamClimbs:
         )
         assert result.best_fitness > 0.95
         assert math.cos(result.best_params[0]) < -0.9
+
+    def test_the_rule_reaches_the_optimizer(self):
+        """The same seed on the native simulator: the two rules take different
+        steps from the same θ₀, and each reproduces itself."""
+        import polypus
+
+        def run(rule):
+            return _train(
+                polypus.Adam(max_iters=5, patience=10_000, rule=rule),
+                seed=7,
+                ident="adam_rule",
+                shots=1024,
+                backend="polypus",
+            )
+
+        adam, momentum = run("adam"), run("momentum")
+        assert adam.best_params != momentum.best_params
+        assert run("momentum").best_params == momentum.best_params

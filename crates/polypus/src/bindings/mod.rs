@@ -532,6 +532,7 @@ fn method_from_pyclass(
             tolerance: adam.tolerance,
             patience: adam.patience,
             finite_difference_step: adam.finite_difference_step,
+            rule: adam.rule,
         }));
     }
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -2805,6 +2806,57 @@ mod tests {
         });
     }
 
+    /// `polypus.Adam(rule=...)` rejects an unknown name with `ValueError`
+    /// when it is passed or set, before any run, naming the valid ones.
+    #[test]
+    fn adam_rule_is_validated_when_passed_or_set() {
+        Python::initialize();
+        Python::attach(|py| {
+            let new = |rule| {
+                Adam::new(
+                    100,
+                    0.05,
+                    0.9,
+                    0.999,
+                    1e-8,
+                    (-1.0, 1.0),
+                    0.01,
+                    20,
+                    0.1,
+                    rule,
+                    None,
+                )
+            };
+            let err = new("Momentum").err().expect("an unknown rule is rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+
+            let adam = Py::new(py, new("adam").unwrap()).unwrap();
+            let bound = adam.bind(py);
+            let err = bound
+                .setattr("rule", "nesterov")
+                .expect_err("an unknown rule is rejected when set");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "adam",
+                "a rejected name leaves the rule unchanged"
+            );
+            bound.setattr("rule", "momentum").unwrap();
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "momentum"
+            );
+        });
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Direct unit coverage of the private entry-point helpers.
     //
@@ -3905,6 +3957,7 @@ mod tests {
     /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
     #[test]
     fn adam_reaches_the_method_and_its_seed_is_read() {
+        use polypus_optimizers::AdamRule;
         Python::initialize();
         Python::attach(|py| {
             let adam = Py::new(
@@ -3919,8 +3972,10 @@ mod tests {
                     0.5,
                     7,
                     0.05,
+                    "momentum",
                     Some(99),
-                ),
+                )
+                .expect("a valid rule"),
             )
             .expect("the pyclass instantiates");
             let bound = adam.bind(py);
@@ -3936,6 +3991,7 @@ mod tests {
                     assert_eq!(cfg.tolerance, 0.5);
                     assert_eq!(cfg.patience, 7);
                     assert_eq!(cfg.finite_difference_step, 0.05);
+                    assert_eq!(cfg.rule, AdamRule::Momentum);
                 }
                 _ => panic!("a polypus.Adam parses into Method::Adam"),
             }

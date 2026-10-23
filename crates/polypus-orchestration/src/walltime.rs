@@ -644,6 +644,7 @@ mod tests {
                     tolerance: 0.0,
                     patience: 1,
                     finite_difference_step: 0.2,
+                    rule: polypus_optimizers::AdamRule::Adam,
                 });
                 let shape = method.run_shape_over(&oracles);
                 let outcome =
@@ -691,6 +692,7 @@ mod tests {
             tolerance: 0.0,
             patience: 1,
             finite_difference_step: 0.2,
+            rule: polypus_optimizers::AdamRule::Adam,
         })
     }
 
@@ -1048,6 +1050,7 @@ mod tests {
             tolerance: 0.0,
             patience: 10,
             finite_difference_step: 1e-3,
+            rule: polypus_optimizers::AdamRule::Adam,
         });
         // On its own, an Adam iteration is the one batch of θ and its stencil;
         // the exact gradient adds its call.
