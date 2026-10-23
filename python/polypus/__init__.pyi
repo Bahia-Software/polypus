@@ -18,8 +18,10 @@ from typing import (
     Any,
     Callable,
     ClassVar,
+    Iterable,
     Literal,
     Optional,
+    Protocol,
     Sequence,
     TypedDict,
     Union,
@@ -50,6 +52,7 @@ __all__ = [
     "Adam",
     "SPSA",
     "Rotosolve",
+    "External",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -90,7 +93,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve, External]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -279,6 +282,20 @@ class Rotosolve:
         patience: int = 2,
         seed: Optional[int] = None,
     ) -> Rotosolve: ...
+
+# What `External` runs (bindings/external.rs): `ask()` returns the next batch
+# of rows (a 2-D NumPy array is fine), or `None` or an empty batch when done;
+# `tell` receives the batch as `list[list[float]]` and the fitness to maximise
+# as `list[float]`, and its return value is ignored.
+class _AskTell(Protocol):
+    def ask(self) -> Optional[Iterable[Iterable[float]]]: ...
+    def tell(self, candidates: list[list[float]], values: list[float], /) -> object: ...
+
+@final
+class External:
+    optimizer: _AskTell
+    max_evaluations: int
+    def __new__(cls, optimizer: _AskTell, max_evaluations: int) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 

@@ -63,6 +63,11 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "Rotosolve")
 
+    def test_External_class_exists(self):
+        import polypus
+
+        assert hasattr(polypus, "External")
+
 
 class TestPolypusInstantiation:
     def test_DE_default_instantiation(self):
@@ -130,6 +135,21 @@ class TestPolypusInstantiation:
         assert qng.max_iters == 50
         assert qng.learning_rate == pytest.approx(0.01)
 
+    def test_External_instantiation(self):
+        import polypus
+
+        class Done:
+            def ask(self):
+                return []
+
+            def tell(self, candidates, values):
+                pass
+
+        optimizer = Done()
+        external = polypus.External(optimizer, 100)
+        assert external.optimizer is optimizer
+        assert external.max_evaluations == 100
+
 
 class TestPolypusModuleMetadata:
     """
@@ -148,6 +168,7 @@ class TestPolypusModuleMetadata:
             "Adam",
             "SPSA",
             "Rotosolve",
+            "External",
             "Circuit",
             "Param",
             "RunResult",

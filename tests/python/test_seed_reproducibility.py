@@ -10,7 +10,8 @@ These exercise issue #34 / #56's acceptance criteria from Python:
 * ``train`` / ``qml.train`` seed: same seed ⇒ identical outcome; no seed ⇒
   different outcome; the outcome now exposes fitness / iterations / convergence
   / seed, and the ``DE``/``PSO``/``QNG``/``CMAES``/``Adam``/``SPSA``/``Rotosolve``
-  ``seed`` field feeds the precedence.
+  ``seed`` field feeds the precedence. ``External`` has no ``seed`` field: its
+  library owns its seed, and the run's seed fixes the shot sampling only.
 
 CUNQA's simulated QPUs (``infrastructure="cunqa"``) get the same seed forwarding
 as Aer, offset per QPU. It is pinned against a fake CUNQA SDK in
@@ -409,6 +410,46 @@ class TestTrainSeed:
         assert r1.best_params == r2.best_params
         r3 = self._train(seed=777, method=method(seed=1), ident="rotosolve_field")
         assert r3.seed == 777
+
+    # External: the library owns its seed (here the random search's own), and
+    # the run's seed fixes the shot sampling only.
+    @staticmethod
+    def _external(optimizer=None):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        if optimizer is None:
+            optimizer = RandomSearch(1, sizes=(4,), seed=3)
+        return polypus.External(optimizer, 24)
+
+    def test_same_seed_reproduces_external(self):
+        r1 = self._train(seed=2024, method=self._external(), ident="seed_external")
+        r2 = self._train(seed=2024, method=self._external(), ident="seed_external")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run == 6
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_the_seed_fixes_only_the_shots_of_external(self):
+        from ask_tell_helpers import RandomSearch
+
+        first, second = RandomSearch(1, seed=3), RandomSearch(1, seed=3)
+        self._train(seed=1, method=self._external(first), ident="external_shots")
+        self._train(seed=2, method=self._external(second), ident="external_shots")
+        # The same candidates, measured with other shots.
+        assert first.asked == second.asked
+        assert [v for _, v in first.told] != [v for _, v in second.told]
+
+    def test_no_seed_draws_one_for_the_shots_of_external(self):
+        from ask_tell_helpers import RandomSearch
+
+        first, second = RandomSearch(1, seed=3), RandomSearch(1, seed=3)
+        r1 = self._train(seed=None, method=self._external(first), ident="ext_none")
+        r2 = self._train(seed=None, method=self._external(second), ident="ext_none")
+        assert r1.seed != r2.seed
+        assert [v for _, v in first.told] != [v for _, v in second.told]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
