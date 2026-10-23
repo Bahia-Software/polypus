@@ -397,7 +397,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log::logged_for;
+    use crate::test_log::{capture_logs, logged_for};
     use std::fmt;
 
     // The slot is type-erased, so these exercise it with a trivial pure error —
@@ -474,6 +474,7 @@ mod tests {
     #[test]
     fn record_logs_only_the_error_it_stores() {
         let run_id = "oracle-error-slot-logs-only-the-stored-error";
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         slot.record(boxed("first"), run_id);
@@ -524,6 +525,7 @@ mod tests {
 
         let run_id = "oracle-error-slot-formats-outside-the-lock";
         // The format only happens when an `ERROR` line will be written.
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         let (formatting_tx, formatting_rx) = mpsc::channel();

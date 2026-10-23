@@ -423,7 +423,8 @@ mod tests {
         run_id: &str,
         walltime: Option<std::time::Duration>,
     ) -> Vec<String> {
-        use crate::test_log::logged_for;
+        use crate::test_log::{capture_logs, logged_for};
+        capture_logs();
         let resources = Resources::new(
             Arc::new(ExpiringBackend(walltime)),
             Some(Arc::new(EchoPlanner)),

@@ -369,7 +369,7 @@ fn hms(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log::logged_for;
+    use crate::test_log::{capture_logs, logged_for};
     use std::sync::Arc;
 
     /// A clock the oracle below advances by hand.
@@ -439,6 +439,7 @@ mod tests {
 
     #[test]
     fn warns_once_when_the_projection_exceeds_the_walltime() {
+        capture_logs();
         let run_id = "walltime-watch-exceeds";
         // 101 generations of 2 min each is 3:22:00, past a 3 h walltime.
         let (watch, _) = watch(
@@ -463,6 +464,7 @@ mod tests {
 
     #[test]
     fn stays_quiet_when_the_projection_fits() {
+        capture_logs();
         let run_id = "walltime-watch-fits";
         // 101 × 1 min = 1:41:00, inside a 3 h walltime.
         let (watch, _) = watch(
@@ -480,6 +482,7 @@ mod tests {
     /// first one does not warn.
     #[test]
     fn only_the_first_generation_is_timed() {
+        capture_logs();
         let run_id = "walltime-watch-first-only";
         let (watch, clock) = watch(
             run_id,
@@ -498,6 +501,7 @@ mod tests {
     /// estimate waits for both and includes the gap.
     #[test]
     fn a_qng_iteration_spans_both_batches() {
+        capture_logs();
         let run_id = "walltime-watch-qng";
         let shape = RunShape {
             batches_per_generation: 2,
@@ -939,6 +943,7 @@ mod tests {
     /// and says why.
     #[test]
     fn a_growing_run_is_projected_with_its_bound() {
+        capture_logs();
         let run_id = "walltime-watch-cmaes-restarts";
         let method = cmaes(Some(10), 100, 2, 20, 0.01);
         // 1 + 2 + 98 × 4 = 395 first generations of 1 min: 6:35:00 > 3 h, where
@@ -1028,6 +1033,7 @@ mod tests {
     /// gradient: the watch times both, so a slow gradient is not missed.
     #[test]
     fn an_adam_iteration_counts_its_exact_gradient() {
+        capture_logs();
         let run_id = "walltime-watch-adam";
         let clock = FakeClock::new();
         let oracles = Oracles {
@@ -1117,6 +1123,7 @@ mod tests {
     /// overestimates, here warning about a run of 1:41:00 within 3 h.
     #[test]
     fn a_watched_gradient_that_scores_theta_is_forwarded_and_timed() {
+        capture_logs();
         let run_id = "walltime-watch-adam-scoring";
         let clock = FakeClock::new();
         let oracles = Oracles {
