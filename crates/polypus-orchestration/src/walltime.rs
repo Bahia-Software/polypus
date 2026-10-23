@@ -6,8 +6,9 @@
 //! [`TrainFlow`](crate::TrainFlow) then wraps its oracle in a [`WalltimeWatch`],
 //! which times the first generation, projects it over the optimizer's generation
 //! budget (for CMA-ES with IPOP restarts, whose batches grow, over the bound
-//! [`Method::growth`] gives) and logs one `warn` when the projection exceeds the
-//! walltime. Backends
+//! [`Method::growth`] gives; batches sent before the first generation, such as
+//! a calibration, are not timed but added at its pace) and logs one `warn`
+//! when the projection exceeds the walltime. Backends
 //! without a walltime get the bare oracle, so they pay nothing.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,11 +37,17 @@ impl Clock for SystemClock {
 
 /// How an optimizer spends its oracle calls: one generation is
 /// `batches_per_generation` consecutive `evaluate_batch` calls, and a run makes at
-/// most `generations` of them.
+/// most `generations` of them, after `leading_batches` calls that belong to no
+/// generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunShape {
     pub batches_per_generation: u32,
     pub generations: u64,
+    /// Batches sent once before the first generation, unlike any generation's:
+    /// a calibration. The watch does not time them as the first generation;
+    /// it adds them to the projection by their circuits, at the first
+    /// generation's pace. 0 for an optimizer without them.
+    pub leading_batches: u32,
     pub unit: &'static str,
 }
 
@@ -66,16 +73,19 @@ impl Method {
                     .strategy
                     .max_generations(cfg.population_size, cfg.generations)
                     + 1,
+                leading_batches: 0,
                 unit: "generations",
             },
             Method::Pso(cfg) => RunShape {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations) + 1,
+                leading_batches: 0,
                 unit: "generations",
             },
             Method::Qng(cfg, _) => RunShape {
                 batches_per_generation: 2,
                 generations: u64::from(cfg.max_iters),
+                leading_batches: 0,
                 unit: "iterations",
             },
             // One batch per generation and no initial batch; the generations of
@@ -83,6 +93,7 @@ impl Method {
             Method::Cmaes(cfg) => RunShape {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations),
+                leading_batches: 0,
                 unit: "generations",
             },
             // One batch of 2·d + 1 per iteration: θ, whose value is the
@@ -90,6 +101,7 @@ impl Method {
             Method::Adam(cfg) => RunShape {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.max_iters),
+                leading_batches: 0,
                 unit: "iterations",
             },
         }
@@ -164,6 +176,15 @@ pub(crate) struct Growth {
 /// its last, so a QNG iteration includes the variance evaluations between its two
 /// batches. Early stopping can only shorten a run, so the projection is an upper
 /// bound. After the first generation the watch is one atomic load per batch.
+///
+/// The shape's [`leading_batches`](RunShape::leading_batches) pass through
+/// untimed before it, counting their circuits, so a large calibration batch
+/// is not taken for a generation. With `n` circuits in them and `m` in the
+/// first generation, the projection is the first generation's time × (the
+/// generations + `n / m`): the leading batches at the first generation's pace
+/// per circuit, the assumption [`Method::growth`] makes of larger batches.
+/// Without leading batches `n = 0`, and the projection is the first
+/// generation's time × the generations, bit for bit.
 pub(crate) struct WalltimeWatch<C: Clock> {
     inner: Box<dyn EvaluationOracle>,
     walltime: Duration,
@@ -177,10 +198,26 @@ pub(crate) struct WalltimeWatch<C: Clock> {
 
 #[derive(Default)]
 struct WatchState {
+    /// Leading batches seen so far, and their circuits.
+    leading: u32,
+    leading_circuits: u64,
     started: Option<Instant>,
+    /// Batches of the first generation seen so far, and their circuits.
     batches: u32,
+    circuits: u64,
     /// The projected duration, when the warning fired.
     warned: Option<Duration>,
+}
+
+impl WatchState {
+    /// The leading batches' work in first generations: their circuits over the
+    /// first generation's (0 without leading batches).
+    fn leading_generations(&self) -> f64 {
+        if self.leading_circuits == 0 {
+            return 0.0;
+        }
+        self.leading_circuits as f64 / self.circuits.max(1) as f64
+    }
 }
 
 impl<C: Clock> WalltimeWatch<C> {
@@ -216,9 +253,10 @@ impl<C: Clock> WalltimeWatch<C> {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).warned
     }
 
-    fn after_batch(&self) {
+    fn after_batch(&self, circuits: usize) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.batches += 1;
+        state.circuits += circuits as u64;
         if state.batches < self.shape.batches_per_generation {
             return;
         }
@@ -229,9 +267,10 @@ impl<C: Clock> WalltimeWatch<C> {
         let first = self.clock.now().saturating_duration_since(started);
         let work = self
             .growth
-            .map_or(self.shape.generations, |g| g.first_generations);
+            .map_or(self.shape.generations, |g| g.first_generations) as f64
+            + state.leading_generations();
         let projected =
-            Duration::try_from_secs_f64(first.as_secs_f64() * work as f64).unwrap_or(Duration::MAX);
+            Duration::try_from_secs_f64(first.as_secs_f64() * work).unwrap_or(Duration::MAX);
         if projected > self.walltime {
             state.warned = Some(projected);
             if let Some(growth) = self.growth {
@@ -245,6 +284,23 @@ impl<C: Clock> WalltimeWatch<C> {
                     self.shape.unit,
                     hms(first),
                     growth.restarts,
+                    hms(projected),
+                    hms(self.walltime),
+                    self.shape.unit,
+                );
+                return;
+            }
+            if state.leading_circuits > 0 {
+                log::warn!(
+                    "run {}: the first of up to {} {} took {}; with the {} circuits sent \
+                     before it at that pace, the optimisation may take up to {}, beyond the \
+                     {} walltime; the QPUs are released when it runs out. Raise `walltime` \
+                     or lower the {}.",
+                    self.run_id,
+                    self.shape.generations,
+                    self.shape.unit,
+                    hms(first),
+                    state.leading_circuits,
                     hms(projected),
                     hms(self.walltime),
                     self.shape.unit,
@@ -268,26 +324,41 @@ impl<C: Clock> WalltimeWatch<C> {
 }
 
 impl<C: Clock> WalltimeWatch<C> {
-    /// Run `call` as one of the generation's batches: timed until the first
-    /// generation is complete, then passed straight through.
-    fn observe<T>(&self, call: impl FnOnce() -> T) -> T {
-        self.observe_if(call, |_| true)
+    /// Run `call`, a batch of `circuits` circuits: counted, untimed, while
+    /// leading batches remain, then timed as one of the first generation's
+    /// batches until it is complete, then passed straight through.
+    fn observe<T>(&self, circuits: usize, call: impl FnOnce() -> T) -> T {
+        self.observe_if(circuits, call, |_| true)
     }
 
-    /// [`observe`](Self::observe) a call that is one of the generation's
-    /// batches only when `scored` says so of its result.
-    fn observe_if<T>(&self, call: impl FnOnce() -> T, scored: impl FnOnce(&T) -> bool) -> T {
+    /// [`observe`](Self::observe) a call that is a batch only when `scored`
+    /// says so of its result.
+    fn observe_if<T>(
+        &self,
+        circuits: usize,
+        call: impl FnOnce() -> T,
+        scored: impl FnOnce(&T) -> bool,
+    ) -> T {
         if self.done.load(Ordering::Relaxed) {
             return call();
         }
-        self.state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .started
-            .get_or_insert_with(|| self.clock.now());
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.leading < self.shape.leading_batches {
+                drop(state);
+                let out = call();
+                if scored(&out) {
+                    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    state.leading += 1;
+                    state.leading_circuits += circuits as u64;
+                }
+                return out;
+            }
+            state.started.get_or_insert_with(|| self.clock.now());
+        }
         let out = call();
         if scored(&out) {
-            self.after_batch();
+            self.after_batch(circuits);
         }
         out
     }
@@ -295,7 +366,7 @@ impl<C: Clock> WalltimeWatch<C> {
 
 impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        self.observe(|| self.inner.evaluate_batch(candidates))
+        self.observe(candidates.len(), || self.inner.evaluate_batch(candidates))
     }
 }
 
@@ -310,7 +381,8 @@ impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
 /// [`Method::run_shape_over`] counts per iteration. One that scores θ itself
 /// makes an iteration a single batch, which the shape cannot tell in advance:
 /// the watch then times two iterations as the first, so the projection
-/// overestimates.
+/// overestimates. A gradient call has no candidates, so it counts as a batch of
+/// no circuits.
 struct Watched<T: ?Sized, C: Clock> {
     watch: Arc<WalltimeWatch<C>>,
     inner: Box<T>,
@@ -319,16 +391,17 @@ struct Watched<T: ?Sized, C: Clock> {
 impl<C: Clock> GradientOracle for Watched<dyn GradientOracle, C> {
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
         self.watch
-            .observe(|| self.inner.gradient(theta, param_index))
+            .observe(0, || self.inner.gradient(theta, param_index))
     }
 
     fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
         self.watch
-            .observe(|| self.inner.gradient_batch(theta, dims))
+            .observe(0, || self.inner.gradient_batch(theta, dims))
     }
 
     fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
         self.watch.observe_if(
+            0,
             || self.inner.value_and_gradient(theta, dims),
             Option::is_some,
         )
@@ -434,6 +507,7 @@ mod tests {
     const DE_100: RunShape = RunShape {
         batches_per_generation: 1,
         generations: 101,
+        leading_batches: 0,
         unit: "generations",
     };
 
@@ -506,6 +580,7 @@ mod tests {
         let shape = RunShape {
             batches_per_generation: 2,
             generations: 50,
+            leading_batches: 0,
             unit: "iterations",
         };
         let (watch, clock) = watch(
@@ -525,6 +600,126 @@ mod tests {
         // (30 + 20 + 30) s × 50 = 4000 s > 3600 s.
         assert_eq!(watch.warned(), Some(Duration::from_secs(4000)));
         assert_eq!(logged_for(run_id).len(), 1);
+    }
+
+    /// Every circuit takes `per_circuit` on the fake clock, so a batch takes
+    /// as long as its size says.
+    struct PerCircuitOracle {
+        clock: Arc<FakeClock>,
+        per_circuit: Duration,
+    }
+
+    impl EvaluationOracle for PerCircuitOracle {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            self.clock
+                .advance(self.per_circuit * candidates.len() as u32);
+            vec![0.0; candidates.len()]
+        }
+    }
+
+    fn per_circuit_watch(
+        run_id: &str,
+        walltime: Duration,
+        shape: RunShape,
+    ) -> (WalltimeWatch<Arc<FakeClock>>, Arc<FakeClock>) {
+        let clock = FakeClock::new();
+        let oracle = PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        };
+        let watch = WalltimeWatch::new(
+            Box::new(oracle),
+            walltime,
+            shape,
+            run_id,
+            Arc::clone(&clock),
+        );
+        (watch, clock)
+    }
+
+    /// A calibration batch of 50 circuits, then iterations of 3: the
+    /// calibration is not timed as the first iteration, and it adds 50 / 3
+    /// iterations at the first iteration's pace.
+    const CALIBRATED: RunShape = RunShape {
+        batches_per_generation: 1,
+        generations: 300,
+        leading_batches: 1,
+        unit: "iterations",
+    };
+
+    #[test]
+    fn leading_batches_are_not_timed_and_count_by_their_circuits() {
+        capture_logs();
+        let run_id = "walltime-watch-leading";
+        let (watch, _) = per_circuit_watch(run_id, Duration::from_secs(2 * 3600), CALIBRATED);
+        watch.evaluate_batch(&vec![vec![0.0]; 50]);
+        assert_eq!(watch.warned(), None, "the calibration is not an iteration");
+        watch.evaluate_batch(&vec![vec![0.0]; 3]);
+        // 30 s × (300 + 50/3) = 9500 s, where timing the 500 s calibration as
+        // the first of 300 iterations would have projected 150 000 s.
+        let projected = watch.warned().expect("9500 s is beyond 2 h");
+        assert!(
+            projected.abs_diff(Duration::from_secs(9500)) < Duration::from_millis(1),
+            "{projected:?}"
+        );
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 300 iterations took 0:00:30; with the 50 \
+                 circuits sent before it at that pace, the optimisation may take up to \
+                 2:38:20, beyond the 2:00:00 walltime; the QPUs are released when it runs \
+                 out. Raise `walltime` or lower the iterations."
+            )]
+        );
+
+        // The same run fits a 3 h walltime.
+        let quiet = "walltime-watch-leading-fits";
+        let (watch, _) = per_circuit_watch(quiet, Duration::from_secs(3 * 3600), CALIBRATED);
+        watch.evaluate_batch(&vec![vec![0.0]; 50]);
+        watch.evaluate_batch(&vec![vec![0.0]; 3]);
+        assert_eq!(watch.warned(), None);
+        assert!(logged_for(quiet).is_empty());
+    }
+
+    /// Without leading batches the first batch is timed, whatever its size: why
+    /// a calibration needs them.
+    #[test]
+    fn without_leading_batches_the_first_batch_is_the_first_generation() {
+        let run_id = "walltime-watch-no-leading";
+        let shape = RunShape {
+            leading_batches: 0,
+            ..CALIBRATED
+        };
+        let (watch, _) = per_circuit_watch(run_id, Duration::from_secs(3 * 3600), shape);
+        watch.evaluate_batch(&vec![vec![0.0]; 50]);
+        assert_eq!(watch.warned(), Some(Duration::from_secs(500 * 300)));
+    }
+
+    /// A generation of several batches after a leading one: the generation's
+    /// circuits are summed over its batches, and the time spans them all.
+    #[test]
+    fn leading_batches_are_converted_by_the_whole_first_generation() {
+        let run_id = "walltime-watch-leading-two-batches";
+        let shape = RunShape {
+            batches_per_generation: 2,
+            generations: 100,
+            leading_batches: 2,
+            unit: "iterations",
+        };
+        let (watch, clock) = per_circuit_watch(run_id, Duration::from_secs(3600), shape);
+        watch.evaluate_batch(&vec![vec![0.0]; 20]);
+        watch.evaluate_batch(&vec![vec![0.0]; 10]);
+        // A gap before the first generation is not timed either.
+        clock.advance(Duration::from_secs(1000));
+        watch.evaluate_batch(&vec![vec![0.0]; 4]);
+        assert_eq!(
+            watch.warned(),
+            None,
+            "no estimate before the generation ends"
+        );
+        watch.evaluate_batch(&vec![vec![0.0]; 2]);
+        // 60 s × (100 + 30/6) = 6300 s.
+        assert_eq!(watch.warned(), Some(Duration::from_secs(6300)));
     }
 
     fn de(
@@ -566,6 +761,11 @@ mod tests {
             tolerance: 0.0,
         });
         assert_eq!(pso.run_shape().generations, 8);
+        // None of them sends a batch before its first generation.
+        assert_eq!(lshade.leading_batches, 0);
+        assert_eq!(pso.run_shape().leading_batches, 0);
+        assert_eq!(adam(5).run_shape().leading_batches, 0);
+        assert_eq!(cmaes(None, 5, 2, 20, 0.01).run_shape().leading_batches, 0);
     }
 
     /// Counts the batches it is handed; every candidate scores the same, so the
@@ -1065,6 +1265,7 @@ mod tests {
             RunShape {
                 batches_per_generation: 1,
                 generations: 101,
+                leading_batches: 0,
                 unit: "iterations",
             }
         );
