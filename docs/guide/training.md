@@ -25,7 +25,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | Parameter | Description |
 |---|---|
 | `qc` | Parameterized circuit: a `polypus.Circuit` with `polypus.Param(i)` angles, or a Qiskit `QuantumCircuit` |
-| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES` or `polypus.Adam` |
+| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam` or `polypus.SPSA` |
 | `shots` | Shots per circuit execution |
 | `n_qpus` | Number of QPUs the population is spread over |
 | `dimensions` | Number of variational parameters |
@@ -216,6 +216,57 @@ Any other `rule` raises `ValueError`.
 
 **Reproducibility.** With either rule Adam's steps use only basic arithmetic and square roots, so, as with DE and unlike CMA-ES, a seeded run over a backend whose results do not depend on the platform reproduces exactly everywhere.
 
+### SPSA
+
+```python
+polypus.SPSA(
+    max_iters=300,
+    resamplings=1,
+    perturbation=0.1,
+    target_step=0.63,
+    alpha=0.602,
+    gamma=0.101,
+    eval_interval=20,
+    seed=None,
+)
+```
+
+Simultaneous perturbation stochastic approximation (Spall, 1992) is a gradient method whose cost per step does not grow with the number of parameters. It moves every parameter at once by `±c_k`, with random signs `Δ`, and estimates the gradient from the difference of the two fitness values, `(f(θ + c_k·Δ) − f(θ − c_k·Δ)) / (2·c_k) · Δ`: two circuits per estimate, where Adam's finite difference takes `2 × dimensions`. It is a common choice on hardware: in Bonet-Monroig et al.'s comparison of four optimizers on small chemistry and materials problems (arXiv:2111.13454), SPSA did best with default settings, and CMA-ES matched or beat it only once its hyperparameters were tuned for each problem.
+
+A run has three parts:
+
+1. **Calibration.** One batch of 50 circuits around the starting point θ₀, 25 random perturbations in both directions, measures how large the gradient estimates are there, and SPSA sets its gain so that the first step moves each parameter by about `target_step` radians, following Spall's guideline (1998), as Qiskit's `SPSA.calibrate` does. Each pair gives `|f₊ − f₋| / (2·perturbation)`, the size of every component of its estimate, and the gain is `target_step` over their mean. If every pair has the same fitness (a flat landscape around θ₀), the gain is `target_step` and a warning is logged.
+2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / k^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults.
+3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration, every `eval_interval` iterations after it and on the last, as Jones, Mineh and Montanaro do (arXiv:2411.13742). `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration. The step after the last iteration is not measured.
+
+| Parameter | Description |
+|---|---|
+| `max_iters` | Iterations, each one batch of `2 × resamplings` circuits, plus one when θ is measured. At least 1 |
+| `resamplings` | Perturbations averaged per iteration, at least 1. Each adds two circuits to the iteration's batch |
+| `perturbation` | `c`, the size of the first perturbations in radians, finite and `> 0` |
+| `target_step` | Size of the first step on each parameter, in radians, finite and `> 0`. The default `0.63` is about `2π/10` |
+| `alpha`, `gamma` | Decay exponents of the steps and of the perturbations: `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5`, Spall's conditions for the iterates to converge |
+| `eval_interval` | Iterations between measurements of θ, at least 1 |
+
+θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `1 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+
+**When to prefer SPSA: many parameters, few QPUs.** An Adam iteration is one batch of `2 × dimensions + 1` circuits, 61 for 30 parameters and 401 for 200, which a single QPU runs one after another. An SPSA iteration is 2 circuits whatever the number of parameters. Its estimates are noisier than a finite difference, so it takes many cheap steps where Adam takes few expensive ones.
+
+**`resamplings` fills the QPUs.** With one perturbation per iteration, each batch is 2 circuits, so a run on many QPUs leaves most of them idle and takes as many sequential rounds as iterations. `resamplings=K` makes each batch `2K` circuits, spread over the QPUs, and averages `K` estimates, so each step is less noisy and the same budget takes `K` times fewer rounds. Set `2 × resamplings` close to `n_qpus`.
+
+**Tune `target_step` and `perturbation`.** The calibration sets the scale of the steps, but the result still depends on both. A `target_step` too large jumps between optima, one too small crawls. A small `perturbation` lets shot noise swamp the difference of the two fitness values, which is divided by `2 × c_k`, as with Adam's finite-difference step. Try a few values on instances of your problem kept apart from the ones you report.
+
+**SPSA needs budget.** The calibration takes 50 circuits before the first step, and the steps that follow are small and noisy, so with a small budget SPSA can end below a global search. Like Adam, it is a local method: [Starting point](#starting-point) shows how to start it from a global search's result.
+
+**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / k^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
+
+**References.**
+
+- J. C. Spall, "Multivariate stochastic approximation using a simultaneous perturbation gradient approximation", IEEE Transactions on Automatic Control 37(3), 332–341 (1992).
+- J. C. Spall, "Implementation of the simultaneous perturbation algorithm for stochastic optimization", IEEE Transactions on Aerospace and Electronic Systems 34(3), 817–823 (1998).
+- B. D. M. Jones, L. Mineh and A. Montanaro, "Benchmarking a wide range of optimisers for solving the Fermi-Hubbard model using the variational quantum eigensolver", Quantum Science and Technology 10(4), 045032 (2025), arXiv:2411.13742.
+- X. Bonet-Monroig, H. Wang, D. Vermetten, B. Senjean, C. Moussa, T. Bäck, V. Dunjko and T. E. O'Brien, "Performance comparison of optimization methods on variational quantum algorithms", Physical Review A 107, 032407 (2023), arXiv:2111.13454.
+
 ## Starting point
 
 By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
@@ -227,6 +278,7 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `QNG` | Starts from it: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 | `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
 | `Adam` | Starts from it and evaluates it first: the first batch is the point, then the finite-difference stencil that estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
+| `SPSA` | Starts from it: the calibration batch is centred on it, and the first iteration measures it first. It is taken as given, not wrapped into `[0, 2π)` |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 

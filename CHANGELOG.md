@@ -14,6 +14,31 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
+  target_step=0.63, alpha=0.602, gamma=0.101, eval_interval=20, seed=None)`,
+  accepted by `train` and `qml.train`: Spall's simultaneous perturbation
+  stochastic approximation (1992), with his gains `a/k^alpha` and
+  `c/k^gamma` and practical exponents (1998). It estimates the gradient from
+  two circuits per random perturbation whatever the number of parameters,
+  so it suits many parameters and few QPUs. A calibration batch of 50
+  circuits around the starting point sets the gain so the first step moves
+  each parameter by about `target_step`, as Qiskit's `SPSA.calibrate` does.
+  Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
+  fills more QPUs and averages that many estimates; the parameters are
+  measured in the same batch on the first iteration, every `eval_interval`
+  iterations and on the last, and `best_params` is the best of them. The run
+  makes `max_iters` iterations and reports `converged=False`. An
+  `initial_point` is the centre of the calibration and the first point
+  measured. A seeded run reproduces on the same platform only, as with
+  CMA-ES. Invalid settings
+  raise `ValueError` before any circuit runs. See the training guide for
+  when to prefer it and its sensitivity to `target_step` and `perturbation`
+  (#396).
+- SPSA in training runs (Rust, `polypus-orchestration`): `Method::Spsa` with
+  `SpsaConfig`. The CUNQA walltime warning leaves the calibration batch out
+  of the timing and adds its circuits at the first iteration's pace (#396).
+- SPSA in `polypus-optimizers`: `AlgorithmSPSA` and `AlgorithmSPSAArgs`,
+  with an `initial_point` like every optimizer (#396).
 - `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
   finite_difference_step=0.2, rule="adam", seed=None)`, accepted by `train`
@@ -164,6 +189,8 @@ Changes on `main` since 0.7.2.
   `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
   `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
   works, and `Method` has an `Adam` variant.
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
+  so an exhaustive `match` on it needs an arm for it (#396).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
