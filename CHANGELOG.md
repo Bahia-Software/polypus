@@ -182,6 +182,9 @@ Changes on `main` since 0.7.2.
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
+- CI runs every push to `main` to completion: the next push cancelled it, and
+  the release gate needs a successful push run for the commit it publishes
+  (#403).
 
 ## [0.7.2] - 2026-09-30
 

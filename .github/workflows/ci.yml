@@ -5,10 +5,13 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref to save minutes.
+# Pull requests: one group per PR, so a new push cancels the run it supersedes.
+# Pushes to main: one group per run, never cancelled. The release gate
+# (release.yml) needs a completed push run for the exact commit it publishes,
+# and a shared group would cancel a queued run as soon as a newer one queued.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CI only reads the repo; keep the default token read-only.
 permissions:
