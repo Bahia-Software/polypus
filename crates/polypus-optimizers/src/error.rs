@@ -7,8 +7,10 @@ use std::fmt;
 /// Every variant is a *precondition* or *contract* violation surfaced by
 /// [`Optimizer::optimize`](crate::Optimizer::optimize): an invalid
 /// configuration (population too small, empty bounds) detected before any RNG
-/// draw or oracle call, or an [`EvaluationOracle`](crate::EvaluationOracle)
-/// that breaks the "one fitness value per candidate" length contract mid-run.
+/// draw or oracle call, an [`EvaluationOracle`](crate::EvaluationOracle)
+/// that breaks the "one fitness value per candidate" length contract mid-run,
+/// or an [`AskTell`](crate::AskTell) optimizer that fails or proposes a row
+/// that is not a candidate.
 /// Returning these instead of panicking is what lets the Python seam map a bad
 /// input to a `PyValueError` instead of unwinding across the FFI boundary.
 ///
@@ -74,7 +76,11 @@ pub enum OptimizerError {
     /// (each ≥ 1) or `tolerance` (finite, `>= 0`); or a
     /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)'s
     /// `finite_difference_step` (finite, `> 0`); or any optimizer's
-    /// `initial_point` (`dimensions` finite values, within `bounds` for PSO).
+    /// `initial_point` (`dimensions` finite values, within `bounds` for PSO);
+    /// or [`AlgorithmExternal`](crate::AlgorithmExternal)'s `max_evaluations`
+    /// and `dimensions` (each ≥ 1), or a `max_evaluations` smaller than the
+    /// external optimizer's first batch, found after its first `ask` but
+    /// before any oracle call.
     /// Detected before any RNG draw or oracle call, so a bad config maps to a
     /// `PyValueError` at the seam rather than producing a `NaN`/`inf` result.
     /// (Empty or non-finite `bounds` keep their own
@@ -83,6 +89,26 @@ pub enum OptimizerError {
         /// The offending parameter's name.
         parameter: &'static str,
         /// Why it was rejected (valid domain + the offending value).
+        reason: String,
+    },
+    /// An [`AskTell`](crate::AskTell) optimizer asked for a row that is not a
+    /// candidate: it does not have one value per dimension, or one of its
+    /// values is not finite. [`AlgorithmExternal`](crate::AlgorithmExternal)
+    /// checks every row of a batch before scoring it, so nothing of that batch
+    /// was scored or told, and the run stops.
+    InvalidCandidate {
+        /// The batch, counted from 0 over the run's `ask` calls.
+        batch: usize,
+        /// The row within that batch, counted from 0.
+        row: usize,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// An [`AskTell`](crate::AskTell) optimizer failed: its `ask` or `tell`
+    /// returned an error, or its first `ask` proposed nothing, so that no
+    /// candidate was scored and there is no result to report.
+    ExternalOptimizer {
+        /// What happened, with the optimizer's own message.
         reason: String,
     },
 }
@@ -104,6 +130,13 @@ impl fmt::Display for OptimizerError {
             ),
             OptimizerError::InvalidConfig { parameter, reason } => {
                 write!(f, "invalid {parameter}: {reason}")
+            }
+            OptimizerError::InvalidCandidate { batch, row, reason } => write!(
+                f,
+                "invalid candidate in row {row} of batch {batch} from the external optimizer's ask() (both 0-based): {reason}"
+            ),
+            OptimizerError::ExternalOptimizer { reason } => {
+                write!(f, "external optimizer: {reason}")
             }
         }
     }

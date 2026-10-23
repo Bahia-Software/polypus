@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description       = "Pure-Rust variational optimizers for Polypus (Differential Evolution, Particle Swarm Optimization, Quantum Natural Gradient, CMA-ES, Adam with an optional momentum rule, SPSA, Rotosolve). Decoupled from circuits and Python via the EvaluationOracle/VarianceOracle/GradientOracle contracts. No PyO3, no Python."
+description       = "Pure-Rust variational optimizers for Polypus (Differential Evolution, Particle Swarm Optimization, Quantum Natural Gradient, CMA-ES, Adam with an optional momentum rule, SPSA, Rotosolve), plus a bridge that runs an external ask/tell optimizer. Decoupled from circuits and Python via the EvaluationOracle/VarianceOracle/GradientOracle/AskTell contracts. No PyO3, no Python."
 
 [lib]
 name = "polypus_optimizers"
