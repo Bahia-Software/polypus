@@ -35,8 +35,8 @@ mod test_log;
 mod walltime;
 
 pub use dispatch::{
-    dispatch_optimizer, AdamConfig, BoxedError, CmaesConfig, DeConfig, Method, OracleError,
-    OracleErrorSlot, Oracles, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+    dispatch_optimizer, AdamConfig, BoxedError, CmaesConfig, DeConfig, ExternalConfig, Method,
+    OracleError, OracleErrorSlot, Oracles, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
 };
 pub use flow::{FinalEvaluation, Flow, OracleFactory, RunCircuitFlow, TrainFlow, TrainOutcome};
 pub use scheduler::{Resources, Scheduler};
