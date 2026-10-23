@@ -24,18 +24,22 @@ env:
 
 jobs:
   examples:
-    name: examples (type-check and run)
+    name: examples (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest and the newest supported Python, as in ci.yml: each leg
+        # resolves its own dependency versions, and mypy checks against those.
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The latest supported Python; examples/mypy.ini type-checks for the
-      # oldest one.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # requirements-dev.txt is only a constraints file in this job: it sets
