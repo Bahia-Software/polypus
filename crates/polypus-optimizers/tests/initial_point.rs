@@ -6,14 +6,16 @@
 //! actually evaluated: the point is the first candidate of the first batch
 //! (wrapped into `[0, 2π)` for DE), the rest of that batch is what the same
 //! seed gives without a point, CMA-ES centres its first generation on it, QNG
-//! starts its gradient stencil at it, Adam measures it first, and a rejected
-//! point reaches no oracle.
+//! starts its gradient stencil at it, Adam measures it first, SPSA centres its
+//! calibration on it and then measures it first, and a rejected point reaches
+//! no oracle.
 
 use polypus_optimizers::{
     AdamRule, AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
-    FiniteDifferenceGradient, OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, AlgorithmSPSA, AlgorithmSPSAArgs, DeStrategy,
+    EvaluationOracle, FiniteDifferenceGradient, OptimizationOutcome, Optimizer, OptimizerError,
+    VarianceOracle,
 };
 use std::f64::consts::{PI, TAU};
 use std::sync::{Arc, Mutex};
@@ -205,6 +207,28 @@ fn adam_args(
     }
 }
 
+const SPSA_STEP: f64 = 0.1;
+
+fn spsa_args(
+    oracle: Box<dyn EvaluationOracle>,
+    initial_point: Option<Vec<f64>>,
+    seed: u64,
+) -> AlgorithmSPSAArgs {
+    AlgorithmSPSAArgs {
+        oracle,
+        max_iters: 5,
+        resamplings: 1,
+        perturbation: SPSA_STEP,
+        target_step: 0.63,
+        alpha: AlgorithmSPSA::DEFAULT_ALPHA,
+        gamma: AlgorithmSPSA::DEFAULT_GAMMA,
+        eval_interval: 2,
+        dimensions: 3,
+        seed: Some(seed),
+        initial_point,
+    }
+}
+
 /// The central-difference stencil around `theta`:
 /// `[θ + h·e₀, θ − h·e₀, θ + h·e₁, …]`.
 fn stencil(theta: &[f64], h: f64) -> Vec<Vec<f64>> {
@@ -248,10 +272,13 @@ fn optimizers() -> Vec<(String, Runner)> {
         Box::new(|oracle, point, seed| AlgorithmCmaEs.optimize(cmaes_args(oracle, point, seed)));
     let adam: Runner =
         Box::new(|oracle, point, seed| AlgorithmAdam.optimize(adam_args(oracle, point, seed)));
+    let spsa: Runner =
+        Box::new(|oracle, point, seed| AlgorithmSPSA.optimize(spsa_args(oracle, point, seed)));
     all.push(("PSO".to_string(), pso));
     all.push(("QNG".to_string(), qng));
     all.push(("CMA-ES".to_string(), cmaes));
     all.push(("Adam".to_string(), adam));
+    all.push(("SPSA".to_string(), spsa));
     all
 }
 
@@ -368,6 +395,51 @@ fn adam_from_the_point_its_seed_draws_is_the_run_without_one() {
 }
 
 #[test]
+fn spsa_centres_its_calibration_on_the_point_and_measures_it_first() {
+    // SPSA takes no bounds and does not wrap: a point outside [0, 2π) is θ₀
+    // as it is.
+    let point = vec![-5.0, 0.5, 9.0];
+    let (oracle, batches) = recorder(quadratic);
+    AlgorithmSPSA
+        .optimize(spsa_args(oracle, Some(point.clone()), 17))
+        .expect("a finite point outside [0, 2π) is accepted");
+    let batches = batches.lock().unwrap().clone();
+    // The calibration: 25 pairs θ₀ ± c·Δ, Δ of ±1 components.
+    assert_eq!(batches[0].len(), 50);
+    for pair in batches[0].chunks_exact(2) {
+        for j in 0..3 {
+            let d = if pair[0][j] > point[j] { 1.0 } else { -1.0 };
+            assert_eq!(pair[0][j], point[j] + SPSA_STEP * d, "{pair:?}");
+            assert_eq!(pair[1][j], point[j] - SPSA_STEP * d, "{pair:?}");
+        }
+    }
+    // The first iteration measures θ₀ first, then its one pair.
+    assert_eq!(batches[1].len(), 3);
+    assert_eq!(batches[1][0], point);
+}
+
+/// SPSA draws θ₀ with or without a point and the point only replaces it, so a
+/// run from the very θ₀ its seed draws is the run without a point, batch for
+/// batch and bit for bit.
+#[test]
+fn spsa_from_the_point_its_seed_draws_is_the_run_without_one() {
+    let run = |point| {
+        let (oracle, batches) = recorder(rough);
+        let outcome = AlgorithmSPSA
+            .optimize(spsa_args(oracle, point, 17))
+            .expect("valid SPSA args optimize successfully");
+        let batches = batches.lock().unwrap().clone();
+        (outcome, batches)
+    };
+    let (without, without_batches) = run(None);
+    let drawn = without_batches[1][0].clone();
+    assert!(drawn.iter().all(|x| (0.0..TAU).contains(x)), "{drawn:?}");
+    let (with, with_batches) = run(Some(drawn));
+    assert_eq!(with_batches, without_batches);
+    assert_eq!(with, without);
+}
+
+#[test]
 fn cmaes_centres_its_first_generation_on_the_point() {
     // With a tiny step size every candidate of the first generation is the
     // mean, which is the point wrapped into [0, 2π): two of its coordinates
@@ -458,7 +530,7 @@ fn cmaes_restarts_sample_what_they_would_without_a_point() {
 fn de_and_pso_keep_a_point_at_the_optimum() {
     let optimum = vec![1.0, 1.0, 1.0];
     for (name, optimize) in optimizers() {
-        if name == "QNG" || name == "CMA-ES" || name == "Adam" {
+        if ["QNG", "CMA-ES", "Adam", "SPSA"].contains(&name.as_str()) {
             continue;
         }
         let (oracle, _) = recorder(quadratic);
@@ -578,6 +650,17 @@ fn the_other_configuration_errors_are_reported_first() {
         }),
         Err(OptimizerError::InvalidBounds { lb: 1.0, ub: 0.0 })
     );
+    let (oracle, _) = recorder(quadratic);
+    assert!(matches!(
+        AlgorithmSPSA.optimize(AlgorithmSPSAArgs {
+            resamplings: 0,
+            ..spsa_args(oracle, bad(), 1)
+        }),
+        Err(OptimizerError::InvalidConfig {
+            parameter: "resamplings",
+            ..
+        })
+    ));
 }
 
 #[test]

@@ -14,6 +14,9 @@
 //! - [`AlgorithmAdam`] — Adam (adaptive moment estimation), or Polyak's
 //!   heavy-ball momentum ([`AdamRule`]), gradient ascent driven by a
 //!   [`GradientOracle`]
+//! - [`AlgorithmSPSA`] — Simultaneous Perturbation Stochastic Approximation
+//!   (SPSA): gradient ascent along an estimate from two evaluations per random
+//!   perturbation, whatever the number of parameters
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
 //! Python interpreter. They only depend on these input contracts:
@@ -89,6 +92,7 @@ pub mod objective;
 pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
+pub mod spsa;
 
 mod linalg;
 mod rng;
@@ -106,3 +110,4 @@ pub use objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};
+pub use spsa::{AlgorithmSPSA, AlgorithmSPSAArgs};
