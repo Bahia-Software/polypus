@@ -322,3 +322,94 @@ class TestOracleContractC5Adam:
         assert math.isfinite(result.best_fitness)
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5SPSA:
+    """The same guarantees for ``polypus.SPSA``: its calibration batch and each
+    iteration's batch of perturbed pairs, with ``θ`` heading it when measured,
+    are evaluation-oracle batches, so a bad value in any of them must surface
+    as a typed error."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, **kwargs):
+        import polypus
+
+        return polypus.train(
+            parametrized_circuit,
+            polypus.SPSA(max_iters=4, eval_interval=2, **kwargs),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+
+        try:
+            self._train(parametrized_circuit, lambda _b: value, "spsa_non_finite")
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+
+    def test_non_finite_value_of_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """The calibration batch sees only finite values; in the second batch,
+        ``θ`` (its first circuit) measures a bitstring whose value is NaN while
+        its perturbed pair stays finite."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            theta = len(sizes) == 2
+            return [
+                {"1" if theta and i == 0 else "0": kwargs["shots"]}
+                for i in range(len(kwargs["qcs"]))
+            ]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "spsa_theta_nan",
+            )
+        # The 50 calibration circuits, then θ and one perturbed pair.
+        assert sizes == [50, 3], sizes
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "spsa_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(parametrized_circuit, simple_expectation_fn, "spsa_valid")
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert result.iterations_run == 4
+        assert not result.converged
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness

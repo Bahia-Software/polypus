@@ -53,6 +53,11 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "Adam")
 
+    def test_SPSA_class_exists(self):
+        import polypus
+
+        assert hasattr(polypus, "SPSA")
+
 
 class TestPolypusInstantiation:
     def test_DE_default_instantiation(self):
@@ -136,6 +141,7 @@ class TestPolypusModuleMetadata:
             "QNG",
             "CMAES",
             "Adam",
+            "SPSA",
             "Circuit",
             "Param",
             "RunResult",

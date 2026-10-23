@@ -48,6 +48,7 @@ __all__ = [
     "QNG",
     "CMAES",
     "Adam",
+    "SPSA",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -88,7 +89,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES, Adam]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -239,6 +240,28 @@ class Adam:
         rule: _AdamRule = "adam",
         seed: Optional[int] = None,
     ) -> Adam: ...
+
+@final
+class SPSA:
+    max_iters: int
+    resamplings: int
+    perturbation: float
+    target_step: float
+    alpha: float
+    gamma: float
+    eval_interval: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 300,
+        resamplings: int = 1,
+        perturbation: float = 0.1,
+        target_step: float = 0.63,
+        alpha: float = 0.602,
+        gamma: float = 0.101,
+        eval_interval: int = 20,
+        seed: Optional[int] = None,
+    ) -> SPSA: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
