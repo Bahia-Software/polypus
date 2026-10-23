@@ -141,6 +141,10 @@ jobs:
     name: test (Rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The QIR tests that assemble with llvm-as fail without it instead of
+      # skipping (LLVM is installed below).
+      POLYPUS_REQUIRE_LLVM_AS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3 links libpython at build time, and the PyO3-touching crates' tests
@@ -151,6 +155,12 @@ jobs:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
+      # llvm-as checks that the QIR export is valid LLVM IR.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Every workspace member, with no hand-maintained list: a crate added to
       # the workspace is tested without touching this file. Default features,
@@ -268,16 +278,21 @@ jobs:
   # Python test suite. Mirrors install.sh and the manual README instructions:
   # install dev deps, then build & install the single `polypus-quantum` wheel
   # (the `polypus` extension plus the bundled `polypus_python` helpers), then run
-  # pytest. Runs at the floor and latest supported Python versions.
+  # pytest. Runs at the floor and latest supported Python versions with the
+  # latest Qiskit, and on 3.12 with the Qiskit that wrote the OpenQASM 3 interop
+  # fixtures (contract C-10), whose test skips with any other.
   # ---------------------------------------------------------------------------
   python-tests:
-    name: test (Python ${{ matrix.python-version }})
+    name: test (Python ${{ matrix.python-version }}${{ matrix.qiskit == 'fixtures' && ', Qiskit of the C-10 fixtures' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
+        include:
+          - python-version: "3.12"
+            qiskit: fixtures
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -285,11 +300,25 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
+      # llvm-as checks that the QIR bitcode export is valid LLVM.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip maturin pytest
           pip install -r requirements-dev.txt
+      # The version tests/python/qasm3_fixtures.py names; the wheel below keeps
+      # it, since it satisfies the wheel's own Qiskit requirement.
+      - name: Install the Qiskit of the OpenQASM 3 fixtures
+        if: matrix.qiskit == 'fixtures'
+        working-directory: tests/python
+        run: |
+          version=$(python -c 'import qasm3_fixtures; print(qasm3_fixtures.QISKIT_VERSION)')
+          pip install "qiskit==$version"
       # One wheel now carries both the `polypus` extension and the bundled
       # `polypus_python` helpers (the extension imports `polypus_python` at its
       # execution seams via PyModule::import). Installing the wheel also pulls the
@@ -303,8 +332,14 @@ jobs:
       # Python — this catches syntax rot without running them.
       - name: Compile-check examples and benchmarks
         run: python -m compileall -q examples benchmarks
+      # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
+      # variables turn the skips of tests that back a contract into failures:
+      # a missing llvm-as, and in the fixtures leg another Qiskit.
       - name: Run Python tests
-        run: pytest tests/python
+        env:
+          POLYPUS_REQUIRE_LLVM_AS: "1"
+          POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
+        run: pytest tests/python -rs --strict-markers
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
       # missing parameter, a changed default or a name the stubs do not declare.
@@ -320,6 +355,19 @@ jobs:
           python -m mypy.stubtest polypus
           --allowlist tests/python/stubtest_allowlist.txt
           --mypy-config-file tests/python/stubtest_mypy.ini
+      # The conformance battery against the Aer backend
+      # (polypus-infrastructure/tests/conformance.rs) needs Qiskit Aer and the
+      # wheel's polypus_python, so it is #[ignore]d in the Rust job and runs
+      # here. One OpenMP thread: Aer is fragile when it fans experiments out
+      # from a cargo-test thread.
+      - name: Conformance battery against the Aer backend
+        if: matrix.python-version == '3.13'
+        env:
+          OMP_NUM_THREADS: "1"
+          POLYPUS_REQUIRE_AER: "1"
+        run: >
+          cargo test --locked -p polypus-infrastructure --test conformance
+          -- --ignored --exact local_aer_backend_conformance --nocapture
 
   # Execute every tutorial notebook headless against this PR's own build, so a
   # broken notebook (a stale API call, a typo introduced while editing) fails

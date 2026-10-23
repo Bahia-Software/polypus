@@ -110,13 +110,24 @@ Python tests, with the wheel installed (see Setting up):
 
 ```bash
 python -m compileall -q examples benchmarks
-pytest tests/python
+pytest tests/python -rs --strict-markers   # -rs lists every skip with its reason
 python -m mypy.stubtest polypus \
   --allowlist tests/python/stubtest_allowlist.txt \
   --mypy-config-file tests/python/stubtest_mypy.ini
                                            # typing stubs vs the installed extension
                                            # (mypy from requirements-dev.txt)
+OMP_NUM_THREADS=1 cargo test --locked -p polypus-infrastructure --test conformance \
+  -- --ignored --exact local_aer_backend_conformance
+                                           # the conformance battery against Aer
 ```
+
+A few tests skip when what they need is missing. CI provides it and sets a
+variable that turns those skips into failures: `POLYPUS_REQUIRE_LLVM_AS=1`
+for the QIR tests that run `llvm-as` (Rust and Python), `POLYPUS_REQUIRE_AER=1`
+for the Aer conformance battery, and `POLYPUS_REQUIRE_FIXTURES_QISKIT=1` in the
+leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
+pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
+Qiskit, where those fixture tests skip.
 
 CI also builds the wheel on Linux, macOS and Windows and executes every
 notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).

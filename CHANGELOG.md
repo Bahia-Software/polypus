@@ -193,6 +193,11 @@ Changes on `main` since 0.7.2.
 - CI tests the whole workspace (`cargo test --workspace`), so a crate added to
   it is tested without editing the workflow, which listed the crates by hand
   (#412).
+- CI runs tests it skipped without notice: the pinned-fixture test of the
+  OpenQASM 3 interop with Qiskit (contract C-10), in a leg with the Qiskit
+  that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
+  battery against Aer. There a missing tool fails those tests instead of
+  skipping them, and pytest lists every skip with its reason (#407).
 
 ## [0.7.2] - 2026-09-30
 
