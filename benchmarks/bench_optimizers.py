@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """
-Optimizer benchmark: Polypus's DE strategies and CMA-ES on QAOA MaxCut.
+Optimizer benchmark: Polypus's DE strategies, CMA-ES and Adam on MaxCut.
 
-Each optimizer trains the same QAOA circuits through ``polypus.train`` with the
+Each optimizer trains the same circuits through ``polypus.train`` with the
 same evaluation budget, and is scored by the *exact* approximation ratio of the
 parameters it returns: the expected cut of ``best_params`` from the native
 statevector, divided by the maximum cut. Instances are paired: instance ``s``
 is one random 3-regular graph, the same for every optimizer, and every
 optimizer runs it with seed ``s``.
 
-Optimizers compared (``--de-population`` sets ``P``, 30 by default):
+Two circuits train on each graph, both measured on the same cut observable:
+
+  qaoa          QAOA with p layers: |+>^n, then p times exp(-iγC) and RX(2β)
+                on every qubit, 2p parameters
+  hea           a hardware-efficient ansatz with ``reps`` repetitions: |0>^n,
+                then reps + 1 layers of RY on every qubit with a linear chain
+                of CZ between consecutive layers (Qiskit's TwoLocal ry/cz),
+                n (reps + 1) parameters, each in exactly one RY; 30 with
+                10 nodes and reps = 2
+
+Optimizers compared (``--de-population`` sets ``P``, 30 by default; ``d`` is
+the number of parameters):
 
   rand1bin      polypus.DE(population_size=P), the classic DE (the baseline)
   shade         polypus.DE(population_size=P, strategy="shade")
@@ -18,16 +29,31 @@ Optimizers compared (``--de-population`` sets ``P``, 30 by default):
   cmaes-P       polypus.CMAES(population_size=P), DE's batch size
   cmaes-ipop    polypus.CMAES(restarts=R), IPOP restarts doubling the
                 population (``--restarts``, 3 by default)
+  adam          polypus.Adam() with its defaults: rule "adam", learning rate
+                0.1, finite-difference step 0.2
+  momentum      polypus.Adam(rule="momentum"), learning rate 0.03 on QAOA and
+                0.1 on the HEA, finite-difference step 0.4 on both
+  lshade-adam   L-SHADE on half the budget, then polypus.Adam() from its
+                ``best_params`` (``initial_point``) with the evaluations left
+  adam-x3       three polypus.Adam() runs with different seeds sharing the
+                budget; the one with the best reported ``best_fitness`` wins
+
+Momentum's learning rate depends on the scale of the cost, so its rate and
+step are tuned per problem: they are the values the review that proposed Adam
+(#395) chose on reserved instances 100-109, never on the test instances
+0-29. Adam uses one configuration, its defaults, for both problems.
 
 Early stopping is off (``tolerance=0``) for all but ``cmaes-ipop``, so they
 spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
 ``patience=20``, because its restarts start when a run stagnates.
 
 Budgets. DE runs ``budget / P - 1`` generations after its initial population
-(L-SHADE spends the same budget in more, smaller generations), and CMA-ES
-without restarts ``budget / λ`` generations. IPOP's batch sizes depend on when
-its restarts happen, so no generation count fixes its budget in advance.
-Instead every batch goes through a meter that replaces the local seam
+(L-SHADE spends the same budget in more, smaller generations), CMA-ES
+without restarts ``budget / λ`` generations, and Adam ``budget / (2d + 1)``
+iterations, each one batch of the current point and the central difference
+around it. IPOP's batch sizes depend on when its restarts happen, so no
+generation count fixes its budget in advance. Instead every batch goes through
+a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
 statevector simulator (``polypus.statevector``), samples its shots with a
 seeded NumPy RNG and counts the evaluations. A batch that would take an
@@ -36,6 +62,14 @@ cut, so they never become the optimizer's best, and the run is scored on what
 it found within the budget. All optimizers go through the same meter, so they
 see the same shot noise model and are measured the same way. The fitness is
 Polypus's native ``Qubo`` observable of the cut.
+
+The chained optimizers make several ``polypus.train`` calls through one meter,
+so the calls share the budget and their evaluations and batches add up.
+``lshade-adam`` gives L-SHADE ``(budget / 2) / P - 1`` generations, DE's rule
+for half the budget, and Adam the evaluations L-SHADE left; the run is scored
+on Adam's result. ``adam-x3`` gives each run an equal share of the evaluations
+still left (a third of the budget for the first), with seeds ``s``,
+``s + 10^6`` and ``s + 2·10^6``.
 
 Reported per optimizer, over the instances:
 
@@ -51,12 +85,17 @@ Reported per optimizer, over the instances:
 
 Usage
 -----
-  python benchmarks/bench_optimizers.py                  # p=3, 256 shots, 1500 evals, 10 instances
-  python benchmarks/bench_optimizers.py --full           # the four scenarios of the guide, 30 instances
+  python benchmarks/bench_optimizers.py                  # QAOA p=3, 256 shots, 1500 evals, 10 instances
+  python benchmarks/bench_optimizers.py --full           # the five scenarios of the guide, 30 instances
   python benchmarks/bench_optimizers.py --quick          # seconds: a smoke run on 6 nodes
   python benchmarks/bench_optimizers.py --scenario 5:256:3000 --instances 20
   python benchmarks/bench_optimizers.py --scenario 3:exact:1500   # 2^20 shots
-  python benchmarks/bench_optimizers.py --only rand1bin cmaes --json results.json
+  python benchmarks/bench_optimizers.py --scenario hea:2:256:5000 # the 30-parameter HEA
+  python benchmarks/bench_optimizers.py --only rand1bin adam lshade-adam --json results.json
+
+Every run is written to ``--json``; those of ``lshade-adam`` and ``adam-x3``
+also list their ``stages``, the evaluations, batches, reported fitness and
+exact ratio of each ``polypus.train`` call.
 """
 
 import argparse
@@ -83,8 +122,25 @@ REPO = Path(__file__).resolve().parents[1]
 # The shots of the "exact" scenarios: the sampling error of the cut is then
 # below 0.002 edges.
 EXACT_SHOTS = 2**20
-OPTIMIZERS = ["rand1bin", "shade", "lshade", "cmaes", "cmaes-P", "cmaes-ipop"]
+OPTIMIZERS = [
+    "rand1bin",
+    "shade",
+    "lshade",
+    "cmaes",
+    "cmaes-P",
+    "cmaes-ipop",
+    "adam",
+    "momentum",
+    "lshade-adam",
+    "adam-x3",
+]
 BASELINE = "rand1bin"
+PROBLEMS = ("qaoa", "hea")
+# Momentum's (learning rate, finite-difference step) per problem, as tuned on
+# the reserved instances 100-109 in the review that proposed Adam (#395).
+MOMENTUM = {"qaoa": (0.03, 0.4), "hea": (0.1, 0.4)}
+# adam-x3's runs use seeds s, s + RESTART_SEED_STEP, s + 2 RESTART_SEED_STEP.
+RESTART_SEED_STEP = 1_000_000
 
 
 # ── Problem ──────────────────────────────────────────────────────────────────
@@ -109,14 +165,22 @@ def regular3_graph(n, rng):
 
 
 class Instance:
-    """QAOA for MaxCut on one graph: the trainable circuit (parameters
-    ``[γ_0..γ_{p-1}, β_0..β_{p-1}]``), its native cut observable, and the cut
-    of every basis state for exact scoring. Qubit ``i`` is node ``i`` and
-    variable ``i`` of the observable (the right-most bit of a bitstring)."""
+    """MaxCut on one graph: the trainable circuit, its native cut observable,
+    and the cut of every basis state for exact scoring. Qubit ``i`` is node
+    ``i`` and variable ``i`` of the observable (the right-most bit of a
+    bitstring).
 
-    def __init__(self, nodes, layers, seed):
+    ``problem="qaoa"``: QAOA with ``layers`` = p, parameters
+    ``[γ_0..γ_{p-1}, β_0..β_{p-1}]``. ``problem="hea"``: the hardware-efficient
+    ansatz with ``layers`` = reps, parameter ``layer·n + q`` the RY angle of
+    qubit ``q`` in RY layer ``layer`` (0 to reps)."""
+
+    def __init__(self, nodes, layers, seed, problem="qaoa"):
+        if problem not in PROBLEMS:
+            raise ValueError(f"unknown problem {problem!r}")
         self.nodes = nodes
         self.layers = layers
+        self.problem = problem
         self.edges = regular3_graph(nodes, np.random.default_rng(1000 + seed))
         index = np.arange(2**nodes)
         bits = (index[:, None] >> np.arange(nodes)) & 1
@@ -133,14 +197,24 @@ class Instance:
             quadratic=[(a, b, -2.0) for a, b in self.edges],
         )
         qc = polypus.Circuit(nodes)
-        for q in range(nodes):
-            qc.h(q)
-        for k in range(layers):
-            gamma, beta = polypus.Param(k), polypus.Param(layers + k)
-            for a, b in self.edges:
-                qc.rzz(a, b, gamma)
+        if problem == "qaoa":
+            self.dimensions = 2 * layers
             for q in range(nodes):
-                qc.rx(q, 2 * beta)
+                qc.h(q)
+            for k in range(layers):
+                gamma, beta = polypus.Param(k), polypus.Param(layers + k)
+                for a, b in self.edges:
+                    qc.rzz(a, b, gamma)
+                for q in range(nodes):
+                    qc.rx(q, 2 * beta)
+        else:
+            self.dimensions = nodes * (layers + 1)
+            for layer in range(layers + 1):
+                if layer:
+                    for q in range(nodes - 1):
+                        qc.cz(q, q + 1)
+                for q in range(nodes):
+                    qc.ry(q, polypus.Param(layer * nodes + q))
         self.circuit = qc.measure_all()
 
     def expected_cut(self, params):
@@ -188,8 +262,20 @@ def default_lambda(dimensions):
     return 4 + math.floor(3 * math.log(dimensions))
 
 
-def make_method(name, dimensions, budget, population, restarts):
-    """The optimizer ``name`` configured for ``budget`` evaluations."""
+def adam_iterations(dimensions, budget):
+    """Adam's iterations within ``budget``: one batch of 2d + 1 each."""
+    iterations = budget // (2 * dimensions + 1)
+    if iterations < 1:
+        raise ValueError(
+            f"a budget of {budget} evaluations does not fit one Adam batch of "
+            f"{2 * dimensions + 1}"
+        )
+    return iterations
+
+
+def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
+    """The optimizer ``name`` configured for ``budget`` evaluations, the
+    single-run ones only (``lshade-adam`` and ``adam-x3`` chain them)."""
     if name in ("rand1bin", "shade", "lshade"):
         return polypus.DE(
             generations=budget // population - 1,
@@ -211,20 +297,31 @@ def make_method(name, dimensions, budget, population, restarts):
         return polypus.CMAES(
             generations=budget // default_lambda(dimensions), restarts=restarts
         )
+    if name == "adam":
+        return polypus.Adam(
+            max_iters=adam_iterations(dimensions, budget), tolerance=0.0
+        )
+    if name == "momentum":
+        learning_rate, step = MOMENTUM[problem]
+        return polypus.Adam(
+            max_iters=adam_iterations(dimensions, budget),
+            learning_rate=learning_rate,
+            tolerance=0.0,
+            finite_difference_step=step,
+            rule="momentum",
+        )
     raise ValueError(f"unknown optimizer {name!r}")
 
 
-def run_one(instance, name, shots, budget, population, restarts, seed):
-    meter = Meter(instance.nodes, budget, seed=10_000 + seed)
-    polypus_python.run_qcs = meter
-    dimensions = 2 * instance.layers
-    start = time.perf_counter()
-    result = polypus.train(
+def train(instance, method, shots, seed, initial_point=None):
+    """One ``polypus.train`` run of ``method`` on ``instance``, through the
+    local seam."""
+    return polypus.train(
         instance.circuit,
-        make_method(name, dimensions, budget, population, restarts),
+        method,
         shots=shots,
         n_qpus=1,
-        dimensions=dimensions,
+        dimensions=instance.dimensions,
         expectation_function=instance.observable,
         infrastructure="local",
         nodes=1,
@@ -232,21 +329,110 @@ def run_one(instance, name, shots, budget, population, restarts, seed):
         id="bench_optimizers",
         backend="aer",
         seed=seed,
+        initial_point=initial_point,
     )
+
+
+def train_stage(instance, name, method, shots, seed, meter, stages, **kwargs):
+    """``train``, recording in ``stages`` what the run spent and found."""
+    evaluations, batches = meter.evaluations, meter.batches
+    result = train(instance, method, shots, seed, **kwargs)
+    stages.append(
+        {
+            "optimizer": name,
+            "seed": seed,
+            "evaluations": meter.evaluations - evaluations,
+            "batches": meter.batches - batches,
+            "iterations_run": result.iterations_run,
+            "best_fitness": result.best_fitness,
+            "ratio": instance.expected_cut(result.best_params) / instance.max_cut,
+        }
+    )
+    return result
+
+
+def lshade_then_adam(instance, shots, budget, population, restarts, seed, meter):
+    """L-SHADE explores with half the budget, then Adam refines its best
+    point with the evaluations left. The run is Adam's."""
+    stages = []
+    d = instance.dimensions
+    explore = train_stage(
+        instance,
+        "lshade",
+        make_method("lshade", d, budget // 2, population, restarts),
+        shots,
+        seed,
+        meter,
+        stages,
+    )
+    refine = train_stage(
+        instance,
+        "adam",
+        make_method("adam", d, budget - meter.evaluations, population, restarts),
+        shots,
+        seed,
+        meter,
+        stages,
+        initial_point=explore.best_params,
+    )
+    return refine, stages
+
+
+def adam_restarts(instance, shots, budget, population, restarts, seed, meter, runs=3):
+    """``runs`` Adam runs with different seeds, each with an equal share of
+    the evaluations still left; the best reported ``best_fitness`` wins."""
+    stages, best = [], None
+    for k in range(runs):
+        share = (budget - meter.evaluations) // (runs - k)
+        result = train_stage(
+            instance,
+            "adam",
+            make_method("adam", instance.dimensions, share, population, restarts),
+            shots,
+            seed + RESTART_SEED_STEP * k,
+            meter,
+            stages,
+        )
+        if best is None or result.best_fitness > best.best_fitness:
+            best = result
+    return best, stages
+
+
+CHAINED = {"lshade-adam": lshade_then_adam, "adam-x3": adam_restarts}
+
+
+def run_one(instance, name, shots, budget, population, restarts, seed):
+    meter = Meter(instance.nodes, budget, seed=10_000 + seed)
+    polypus_python.run_qcs = meter
+    start = time.perf_counter()
+    if name in CHAINED:
+        result, stages = CHAINED[name](
+            instance, shots, budget, population, restarts, seed, meter
+        )
+        iterations_run = sum(stage["iterations_run"] for stage in stages)
+    else:
+        method = make_method(
+            name, instance.dimensions, budget, population, restarts, instance.problem
+        )
+        result, stages = train(instance, method, shots, seed), None
+        iterations_run = result.iterations_run
     elapsed = time.perf_counter() - start
     if name != "cmaes-ipop" and meter.refused:
         raise AssertionError(f"{name} went past its budget: {meter.refused} refused")
     exact = instance.expected_cut(result.best_params)
-    return {
+    row = {
         "optimizer": name,
         "instance": seed,
         "ratio": exact / instance.max_cut,
         "bias": (result.best_fitness - exact) / instance.max_cut,
         "evaluations": meter.evaluations,
         "batches": meter.batches,
-        "iterations_run": result.iterations_run,
+        "iterations_run": iterations_run,
         "seconds": elapsed,
     }
+    if stages is not None:
+        row["stages"] = stages
+    return row
 
 
 # ── Report ───────────────────────────────────────────────────────────────────
@@ -285,14 +471,26 @@ def summarise(rows, optimizers):
 
 
 def parse_scenario(text):
+    """``[PROBLEM:]LAYERS:SHOTS:BUDGET`` as ``(problem, layers, shots,
+    budget)``; the problem is QAOA unless it says ``hea``."""
+    fields = text.split(":")
+    problem = fields.pop(0) if fields and fields[0] in PROBLEMS else "qaoa"
     try:
-        layers, shots, budget = text.split(":")
+        layers, shots, budget = fields
         shots = EXACT_SHOTS if shots == "exact" else int(shots)
-        return int(layers), shots, int(budget)
+        return problem, int(layers), shots, int(budget)
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"expected LAYERS:SHOTS:BUDGET (SHOTS may be 'exact'), got {text!r}"
+            "expected [qaoa:|hea:]LAYERS:SHOTS:BUDGET (SHOTS may be 'exact'), "
+            f"got {text!r}"
         ) from None
+
+
+def describe(problem, nodes, layers):
+    """The scenario's circuit, for the report headings."""
+    if problem == "qaoa":
+        return f"QAOA p = {layers} ({2 * layers} parameters), n = {nodes}"
+    return f"HEA reps = {layers} ({nodes * (layers + 1)} parameters), n = {nodes}"
 
 
 def environment():
@@ -316,7 +514,7 @@ def environment():
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Compare Polypus's DE strategies and CMA-ES on QAOA MaxCut.",
+        description="Compare Polypus's DE strategies, CMA-ES and Adam on MaxCut.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
@@ -324,9 +522,10 @@ def parse_args(argv=None):
         nargs="+",
         type=parse_scenario,
         default=None,
-        metavar="LAYERS:SHOTS:BUDGET",
-        help="QAOA layers p, shots per circuit ('exact' for 2^20) and the "
-        "evaluation budget (default: 3:256:1500).",
+        metavar="[PROBLEM:]LAYERS:SHOTS:BUDGET",
+        help="the circuit, 'qaoa' (the default, LAYERS = p) or 'hea' (LAYERS = "
+        "reps), shots per circuit ('exact' for 2^20) and the evaluation budget "
+        "(default: 3:256:1500).",
     )
     p.add_argument("--nodes", type=int, default=10, help="graph nodes (default: 10)")
     p.add_argument(
@@ -352,7 +551,7 @@ def parse_args(argv=None):
         "--full",
         action="store_true",
         help="the guide's run: scenarios 3:256:1500 3:exact:1500 5:256:3000 "
-        "3:256:500 with 30 instances",
+        "3:256:500 hea:2:256:5000 with 30 instances",
     )
     p.add_argument(
         "--quick",
@@ -363,16 +562,17 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.full:
         args.scenario = args.scenario or [
-            (3, 256, 1500),
-            (3, EXACT_SHOTS, 1500),
-            (5, 256, 3000),
-            (3, 256, 500),
+            ("qaoa", 3, 256, 1500),
+            ("qaoa", 3, EXACT_SHOTS, 1500),
+            ("qaoa", 5, 256, 3000),
+            ("qaoa", 3, 256, 500),
+            ("hea", 2, 256, 5000),
         ]
         args.instances = 30
     if args.quick:
-        args.scenario = args.scenario or [(1, 64, 120)]
+        args.scenario = args.scenario or [("qaoa", 1, 64, 120)]
         args.nodes, args.instances, args.de_population = 6, 2, 8
-    args.scenario = args.scenario or [(3, 256, 1500)]
+    args.scenario = args.scenario or [("qaoa", 3, 256, 1500)]
     return args
 
 
@@ -380,19 +580,19 @@ def main(argv=None):
     args = parse_args(argv)
     optimizers = args.only or OPTIMIZERS
     env = environment()
-    print("# Polypus optimizer benchmark: QAOA MaxCut on random 3-regular graphs\n")
+    print("# Polypus optimizer benchmark: MaxCut on random 3-regular graphs\n")
     for key, value in env.items():
         print(f"- {key}: {value}")
     seeds = range(args.first_instance, args.first_instance + args.instances)
     report = {"environment": env, "scenarios": []}
-    for layers, shots, budget in args.scenario:
+    for problem, layers, shots, budget in args.scenario:
         shots_label = "2^20" if shots == EXACT_SHOTS else str(shots)
         print(
-            f"\n## n = {args.nodes}, p = {layers}, {shots_label} shots, "
+            f"\n## {describe(problem, args.nodes, layers)}, {shots_label} shots, "
             f"{budget} evaluations, {args.instances} instances\n",
             flush=True,
         )
-        instances = [Instance(args.nodes, layers, s) for s in seeds]
+        instances = [Instance(args.nodes, layers, s, problem) for s in seeds]
         rows = []
         for name in optimizers:
             for instance, seed in zip(instances, seeds):
@@ -410,8 +610,10 @@ def main(argv=None):
         print(summarise(rows, optimizers), flush=True)
         report["scenarios"].append(
             {
+                "problem": problem,
                 "nodes": args.nodes,
                 "layers": layers,
+                "parameters": instances[0].dimensions,
                 "shots": shots,
                 "budget": budget,
                 "de_population": args.de_population,
