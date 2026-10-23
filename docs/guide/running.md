@@ -47,7 +47,7 @@ With `infrastructure="cunqa"`, three keyword arguments size the SLURM allocation
 | `cores_per_qpu` | `2` | CPU cores per QPU |
 | `walltime` | `"10:00:00"` | SLURM walltime of the QPUs, as `HH:MM:SS` |
 
-`walltime` accepts only `HH:MM:SS`: hours are one or more digits (so `"48:00:00"` is valid), minutes and seconds are two digits below 60, and the total must be above zero. SLURM's `D-HH:MM:SS` form is rejected. Anything else raises `ValueError` before any QPU is requested. The QPUs are released when the walltime runs out, so set it above the expected duration of a long optimisation. Training logs a warning after the first generation when, at that pace, the run would outlast the walltime (see [Allocation walltime](../backends.md#allocation-walltime)).
+`walltime` accepts only `HH:MM:SS`: hours are one or more digits (so `"48:00:00"` is valid), minutes and seconds are two digits below 60, and the total must be above zero. SLURM's `D-HH:MM:SS` form is rejected. Anything else raises `ValueError` before any QPU is requested. The QPUs are released when the walltime runs out, so set it above the expected duration of a long optimisation. Training logs a warning after the first generation when, at that pace, the run would outlast the walltime (see [Allocation walltime](../backends.md#allocation-walltime)); the final batch of `final_shots` is not counted.
 
 ```python
 result = polypus.run_quantum_circuit(

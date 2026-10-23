@@ -37,6 +37,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `backend` | `"aer"` (default) or `"polypus"` for `infrastructure="local"` |
 | `seed` | Optional RNG seed. Without one, a seed is drawn from OS entropy and reported in the result. |
 | `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
+| `final_shots` | Optional shots per circuit for one last batch that re-evaluates the best candidates after the optimizer stops: an integer `>= 1`. See [Final re-evaluation](#final-re-evaluation). |
 
 Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function` propagates as itself.
 
@@ -50,6 +51,8 @@ Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An except
 | `best_fitness` | Fitness at those parameters |
 | `iterations_run` | Iterations actually run, early stopping included |
 | `converged` | Whether the convergence criterion was met |
+| `final_params` | With `final_shots`, the re-evaluated candidate with the best value; otherwise `None` |
+| `final_fitness` | With `final_shots`, its value with `final_shots` shots; otherwise `None` |
 | `seed` | The effective seed; pass it back as `seed=...` to reproduce the run |
 | `id` | The effective run id |
 
@@ -356,6 +359,41 @@ best = max(runs, key=lambda run: run.best_fitness)
 ```
 
 In the benchmark, three runs raised the worst instance at p = 5, where single runs sometimes ended in a poor optimum, but their mean there was within noise of one run's. With 256 shots at p = 3 and on the HEA they did worse, a third of the budget being too short for each run, and starting from L-SHADE had the higher mean in every scenario.
+
+## Final re-evaluation
+
+Under shot noise, `best_fitness` overstates the value of `best_params`. An optimizer keeps the best of many noisy estimates, and the best estimate is more often one that came out high by chance: the winner's curse. The more candidates a run scores, the larger the bias, so a population method has more of it than a local one. `final_shots` corrects for it. Once the optimizer has stopped, its best candidates are evaluated once more, in one batch with `final_shots` shots per circuit, and the result goes to two fields of its own:
+
+```python
+result = polypus.train(
+    qc,
+    polypus.DE(strategy="lshade", generations=100, population_size=30),
+    shots=256,
+    n_qpus=1,
+    dimensions=dimensions,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="maxcut",
+    final_shots=4096,
+)
+result.final_params  # the re-evaluated candidate with the best value
+result.final_fitness  # its value with 4096 shots
+```
+
+| Optimizer | Candidates re-evaluated |
+|---|---|
+| `DE` (every `strategy`), `PSO`, `CMAES` | `best_params` and the four best other distinct candidates the run scored |
+| `QNG`, `Adam`, `SPSA` | `best_params` |
+
+`final_params` is the candidate with the highest re-evaluated value, `best_params` on a tie. Re-evaluating the best few candidates of a population, as Novák et al. recommend, lets the run pick one whose value with many shots beats `best_params`, which may have come first only by its noise. `final_fitness` is then the highest of a few fresh estimates, so it is still slightly optimistic, though far less than `best_fitness`, the highest of the whole run; when `best_params` is re-evaluated alone, it has no bias. `best_params`, `best_fitness` and `fitness_history` remain what the optimizer found: a seeded run sends the same batches with and without `final_shots`, and then the final batch. Without it, `final_params` and `final_fitness` are `None`.
+
+`final_shots` must be an integer `>= 1`; anything else, such as `0`, `4096.0` or `True`, raises `ValueError` before anything runs. `qml.train` takes it as a keyword argument and runs every training circuit of each candidate with those shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises.
+
+**References.**
+
+- V. Novák, S. Illésová, T. Bezděk, I. Zelinka and M. Beseda, "Reliable Optimization Under Noise in Quantum Variational Algorithms", arXiv:2511.08289 (2025).
 
 ## Choosing an optimizer
 
