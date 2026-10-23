@@ -185,8 +185,9 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG, Adam and SPSA, the first step for Rotosolve), multiplies it by the
-generation budget and logs one `warn` if the projection exceeds the walltime:
+iteration for QNG, Adam and SPSA, the first step for Rotosolve, the first batch for an
+external optimizer), multiplies it by the generation budget and logs one `warn` if the
+projection exceeds the walltime:
 
 ```text
 run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
@@ -223,6 +224,23 @@ upper bound but can reach `⌈(n + 1)/Q⌉ / ⌈n/Q⌉` times the real time: `(n
 one QPU (1.5 times for Rotosolve and `resamplings=1`, about 1.06 times with
 `resamplings=8`), twice on `n` QPUs (2 for Rotosolve and `resamplings=1`, 16 with
 `resamplings=8`), and not at all on `n + 1` QPUs or more.
+
+An external optimizer (`polypus.External`) has a budget in candidates,
+`max_evaluations`, and batches whose size is the library's, known only once the run
+has started. The first batch is timed, and with `n` candidates in it the projection
+counts `⌊max_evaluations / n⌋` batches (at least one): exactly the batches the run
+sends when every batch has the first's size, as pycma's generations do, and Optuna's
+and Nevergrad's through the `polypus.external` adapters, whose batches hold
+`batch_size` and `num_workers` candidates. When later batches are larger, the run
+sends fewer, and if a batch `k` times larger takes at most `k` times as long, the
+projection stays an upper bound to within one first batch, the remainder the floor
+drops. When they are smaller, the run sends more, each leaving QPUs idle, and the
+projection can be too low. A library that stops early only shortens the run. Only
+the batch's evaluation is timed: the library's own time in `ask()` and `tell()`,
+between the batches, is not in the projection, and for a model-based method, which
+computes its next candidates from all the values it has seen, it can take much of
+the run. Its warning counts batches and asks to lower `max_evaluations` ("the first
+of up to 50 batches took ... Raise `walltime` or lower the max_evaluations.").
 
 ### Cancellation
 

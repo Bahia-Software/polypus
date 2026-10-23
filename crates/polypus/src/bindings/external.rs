@@ -104,7 +104,7 @@ impl External {
         Ok(())
     }
 
-    /// The most circuits a run evaluates, an integer `>= 1`.
+    /// The most candidates a run evaluates, an integer `>= 1`.
     #[getter]
     fn max_evaluations(&self) -> u64 {
         self.max_evaluations
