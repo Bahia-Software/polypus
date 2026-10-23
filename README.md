@@ -101,7 +101,9 @@ result.merged_counts  # e.g. {'00': 487, '11': 513}
 **Run it on Qiskit Aer**
 
 ```python
-result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local", backend="aer")
+result = polypus.run_quantum_circuit(
+    bell, shots=1000, infrastructure="local", backend="aer"
+)
 ```
 
 Aer is the default `backend`. It also runs Qiskit `QuantumCircuit` objects and noise models; see [Choosing a local backend](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md#choosing-a-local-backend). If `import qiskit_aer` fails with `cannot allocate memory in static TLS block`, see [Troubleshooting](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md#troubleshooting).
