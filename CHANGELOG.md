@@ -127,6 +127,11 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- The README quickstart runs on the native backend (`backend="polypus"`), so it
+  no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
+  to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
+  static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
+  Troubleshooting section for the error (#392).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
