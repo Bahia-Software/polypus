@@ -111,8 +111,8 @@ def test_lshade_then_adam_refines_from_the_lshade_point(monkeypatch):
     monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
     train, calls = script.train, []
 
-    def spy(instance, method, shots, seed, initial_point=None):
-        result = train(instance, method, shots, seed, initial_point)
+    def spy(instance, method, shots, seed, initial_point=None, final_shots=None):
+        result = train(instance, method, shots, seed, initial_point, final_shots)
         calls.append((method, initial_point, result))
         return result
 
@@ -137,8 +137,8 @@ def test_adam_x3_makes_three_runs_that_share_the_budget(monkeypatch):
     monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
     train, calls = script.train, []
 
-    def spy(instance, method, shots, seed, initial_point=None):
-        result = train(instance, method, shots, seed, initial_point)
+    def spy(instance, method, shots, seed, initial_point=None, final_shots=None):
+        result = train(instance, method, shots, seed, initial_point, final_shots)
         calls.append((method, seed, result))
         return result
 
@@ -258,9 +258,9 @@ def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
     monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
     train, calls = script.train, []
 
-    def spy(instance, method, shots, seed, initial_point=None):
+    def spy(instance, method, shots, seed, initial_point=None, final_shots=None):
         calls.append(method)
-        return train(instance, method, shots, seed, initial_point)
+        return train(instance, method, shots, seed, initial_point, final_shots)
 
     monkeypatch.setattr(script, "train", spy)
     instance = script.Instance(nodes=6, layers=1, seed=2)
@@ -273,3 +273,55 @@ def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
     assert run["evaluations"] <= 120
     assert run["batches"] == method.max_iters + 1
     assert run["iterations_run"] == method.max_iters
+
+
+@pytest.mark.parametrize(("name", "count"), [("lshade", 5), ("adam", 1)])
+def test_final_shots_reevaluate_outside_the_budget(monkeypatch, name, count):
+    """With ``final_shots`` the run is the run without them, then one batch
+    of the best candidates with those shots, outside the budget, scored on
+    ``final_params``."""
+    script = _load_script()
+    monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
+    instance = script.Instance(nodes=6, layers=1, seed=3)
+    plain = script.run_one(instance, name, 64, 120, 8, 3, seed=3)
+    run = script.run_one(instance, name, 64, 120, 8, 3, seed=3, final_shots=1024)
+    for key in ("ratio", "bias", "evaluations", "batches", "iterations_run"):
+        assert run[key] == plain[key], key
+    assert "final_ratio" not in plain
+    assert run["final_shots"] == 1024
+    assert run["final_evaluations"] == count
+    assert run["final_batches"] == 1
+    assert 0.0 < run["final_ratio"] <= 1.0
+    exact = run["final_ratio"] * instance.max_cut
+    assert run["final_bias"] == pytest.approx(
+        (run["final_fitness"] - exact) / instance.max_cut
+    )
+    if count == 1:
+        assert run["final_is_best"] and run["final_ratio"] == run["ratio"]
+
+
+def test_final_shots_must_differ_from_the_scenario_shots():
+    script = _load_script()
+    instance = script.Instance(nodes=6, layers=1, seed=3)
+    with pytest.raises(ValueError, match="must differ from the scenario's shots"):
+        script.run_one(instance, "adam", 64, 120, 8, 3, seed=3, final_shots=64)
+    with pytest.raises(SystemExit):
+        script.parse_args(["--final-shots", "0"])
+
+
+def test_quick_mode_reports_the_final_values(tmp_path):
+    report, stdout = _run(
+        tmp_path, "--final-shots", "1024", "--only", "rand1bin", "lshade-adam"
+    )
+    (scenario,) = report["scenarios"]
+    assert scenario["final_shots"] == 1024
+    for run in scenario["runs"]:
+        assert 0 < run["evaluations"] <= scenario["budget"], run
+        assert 0.0 < run["final_ratio"] <= 1.0, run
+        if run["optimizer"] == "rand1bin":
+            assert run["final_evaluations"] == 5, run
+        else:
+            # L-SHADE's five and Adam's one; the run is scored on Adam's.
+            assert run["final_evaluations"] == 6, run
+            assert run["final_ratio"] == run["stages"][1]["final_ratio"], run
+    assert "final ratio | final bias |" in stdout
