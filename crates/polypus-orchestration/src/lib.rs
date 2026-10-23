@@ -27,6 +27,7 @@
 //! `PyErr`.
 
 pub mod dispatch;
+mod final_batch;
 pub mod flow;
 pub mod scheduler;
 #[cfg(test)]
@@ -37,5 +38,5 @@ pub use dispatch::{
     dispatch_optimizer, AdamConfig, BoxedError, CmaesConfig, DeConfig, Method, OracleError,
     OracleErrorSlot, Oracles, PsoConfig, QngConfig, SpsaConfig,
 };
-pub use flow::{Flow, OracleFactory, RunCircuitFlow, TrainFlow};
+pub use flow::{FinalEvaluation, Flow, OracleFactory, RunCircuitFlow, TrainFlow, TrainOutcome};
 pub use scheduler::{Resources, Scheduler};

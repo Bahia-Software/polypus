@@ -42,7 +42,7 @@ use crate::infrastructure::{
 };
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources,
-    RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow,
+    RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow, TrainOutcome,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -432,13 +432,13 @@ fn validate_initial_point(
 /// recorded failure with its original class preserved.
 fn finish_optimization(
     py: Python<'_>,
-    result: Result<OptimizationOutcome, OracleError>,
+    result: Result<TrainOutcome, OracleError>,
     seed: u64,
     id: String,
     start: Instant,
 ) -> PyResult<Py<PyAny>> {
     let outcome = match result {
-        Ok(outcome) => outcome,
+        Ok(outcome) => outcome.optimization,
         Err(OracleError::Evaluation(boxed)) => {
             // The oracle boxed an `EvaluationError` into the type-erased slot
             // (the scheduler crate is pyo3-free); recover it to re-raise with its
@@ -1664,6 +1664,7 @@ pub fn train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
+        final_shots: None,
         errors: errors.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
@@ -1987,6 +1988,7 @@ pub fn qml_train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
+        final_shots: None,
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md

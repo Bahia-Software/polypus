@@ -9,7 +9,9 @@
 //! [`Method::growth`] gives; batches sent before the first generation, such as
 //! a calibration, are not timed but added at its pace) and logs one `warn`
 //! when the projection exceeds the walltime. Backends
-//! without a walltime get the bare oracle, so they pay nothing.
+//! without a walltime get the bare oracle, so they pay nothing. The final batch
+//! of a run with `final_shots`, sent once the optimizer has stopped, is not in
+//! the projection.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -383,6 +385,14 @@ impl<C: Clock> WalltimeWatch<C> {
 impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
         self.observe(candidates.len(), || self.inner.evaluate_batch(candidates))
+    }
+
+    /// Forwarded, neither timed nor counted: the optimizer never sends such a
+    /// batch. A training run's final batch (`final_shots`) comes after the
+    /// optimizer has stopped and is not in the [`RunShape`], so the projection
+    /// leaves it out.
+    fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+        self.inner.evaluate_batch_with_shots(candidates, shots)
     }
 }
 
@@ -1031,6 +1041,59 @@ mod tests {
                  out. Raise `walltime` or lower the iterations."
             )]
         );
+    }
+
+    /// Takes `per_batch` on the fake clock and records the shots of every
+    /// batch sent with shots.
+    struct SlowShots {
+        clock: Arc<FakeClock>,
+        per_batch: Duration,
+        shots: Mutex<Vec<u32>>,
+    }
+
+    impl EvaluationOracle for SlowShots {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            self.clock.advance(self.per_batch);
+            vec![0.0; candidates.len()]
+        }
+        fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+            self.shots.lock().unwrap().push(shots);
+            self.evaluate_batch(candidates)
+        }
+    }
+
+    /// A batch with shots, as a run's final batch, reaches the inner oracle
+    /// with its shots and is neither timed nor counted as a generation.
+    #[test]
+    fn a_batch_with_shots_is_forwarded_untimed() {
+        capture_logs();
+        let run_id = "walltime-watch-final-batch";
+        let clock = FakeClock::new();
+        let inner = Arc::new(SlowShots {
+            clock: Arc::clone(&clock),
+            per_batch: Duration::from_secs(120),
+            shots: Mutex::new(Vec::new()),
+        });
+        let watch = WalltimeWatch::new(
+            Box::new(Arc::clone(&inner)),
+            Duration::from_secs(3 * 3600),
+            DE_100,
+            run_id,
+            Arc::clone(&clock),
+        );
+        // Each would project 101 × 2 min, past the walltime, if it were timed.
+        for _ in 0..3 {
+            assert_eq!(
+                watch.evaluate_batch_with_shots(&vec![vec![0.0]; 2], 4096),
+                vec![0.0; 2]
+            );
+        }
+        assert_eq!(*inner.shots.lock().unwrap(), vec![4096; 3]);
+        assert_eq!(watch.warned(), None);
+        assert!(logged_for(run_id).is_empty());
+        // The first generation is still the optimizer's first batch.
+        watch.evaluate_batch(&[vec![0.0]]);
+        assert_eq!(watch.warned(), Some(Duration::from_secs(101 * 120)));
     }
 
     #[test]
