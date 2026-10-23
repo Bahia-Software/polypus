@@ -15,7 +15,8 @@ Two circuits train on each graph, both measured on the same cut observable:
                 on every qubit, 2p parameters
   hea           a hardware-efficient ansatz with ``reps`` repetitions: |0>^n,
                 then reps + 1 layers of RY on every qubit with a linear chain
-                of CZ between consecutive layers (Qiskit's TwoLocal ry/cz),
+                of CZ between consecutive layers (Qiskit's TwoLocal ry/cz with
+                entanglement="linear"),
                 n (reps + 1) parameters, each in exactly one RY; 30 with
                 10 nodes and reps = 2
 
@@ -380,7 +381,11 @@ def lshade_then_adam(instance, shots, budget, population, restarts, seed, meter)
 
 def adam_restarts(instance, shots, budget, population, restarts, seed, meter, runs=3):
     """``runs`` Adam runs with different seeds, each with an equal share of
-    the evaluations still left; the best reported ``best_fitness`` wins."""
+    the evaluations still left; the best reported ``best_fitness`` wins.
+
+    The first run uses the instance's seed and the same meter seed as the
+    ``adam`` row, so it repeats the start of that run on a shorter budget and
+    the two rows stay paired."""
     stages, best = [], None
     for k in range(runs):
         share = (budget - meter.evaluations) // (runs - k)
