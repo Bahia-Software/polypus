@@ -1,17 +1,17 @@
 # ── teleport_qiskit.py ──────────────────────────────────────────────────────
-# Teleportación cuántica en QmioBackend: MISMO circuito en Qiskit y en polypus
-# para comparar el TIEMPO de cada librería (mismo trabajo → comparación justa).
-# Lanzar:  python examples/teleport_qiskit.py
+# Quantum teleportation on QmioBackend: the SAME circuit in Qiskit and in polypus,
+# to compare the TIME each library takes (same work → fair comparison).
+# Run:  python examples/hpc/teleport_qiskit.py
 # ─────────────────────────────────────────────────────────────────
 #
-# Circuito de 6 qubits enrutado a mano para la topología de QMIO (cadena 3-4-5):
-#   q5  estado a teleportar  |ψ⟩ = Rx(θ)|0⟩
-#   q4  qubit Bell de Alice
-#   q3  qubit de Bob   ← recibe |ψ⟩
-# La corrección Z diferida (cz lógico q5-q3) necesita un SWAP(5,4) porque q5 y q3
-# no son adyacentes. Medida diferida → solo puertas estándar (sin if clásico).
+# 6-qubit circuit routed by hand for QMIO's topology (chain 3-4-5):
+#   q5  state to teleport  |ψ⟩ = Rx(θ)|0⟩
+#   q4  Alice's Bell qubit
+#   q3  Bob's qubit   ← receives |ψ⟩
+# The deferred Z correction (logical cz q5-q3) needs a SWAP(5,4) because q5 and q3
+# are not adjacent. Deferred measurement → standard gates only (no classical if).
 #
-# Resultado esperado con θ=π/3:  P(Bob=|1⟩) = sin²(π/6) ≈ 0.25
+# Expected result with θ=π/3:  P(Bob=|1⟩) = sin²(π/6) ≈ 0.25
 # ────────────────────────────────────────────────────────────────────────────
 
 import math
@@ -24,20 +24,20 @@ from qmiotools.integrations.qiskitqmio import QmioBackend
 THETA = math.pi / 3
 SHOTS = 1024
 
-# ── 1. Circuito Qiskit ───────────────────────────────────────────────────────
+# ── 1. Qiskit circuit ───────────────────────────────────────────────────────
 
 
-# Builder único: construye el MISMO circuito en ambas librerías (garantiza que
-# son idénticos). La única diferencia de API es el orden de argumentos de rx
-# (Qiskit: rx(theta, q); polypus: rx(q, theta)), adaptado con el parámetro `rx`.
+# A single builder: builds the SAME circuit in both libraries (guarantees they
+# are identical). The only API difference is the argument order of rx
+# (Qiskit: rx(theta, q); polypus: rx(q, theta)), adapted with the `rx` parameter.
 def build_teleport(qc, rx):
-    rx(5, THETA)  # estado a teleportar  |ψ⟩ = Rx(θ)|0⟩
+    rx(5, THETA)  # state to teleport  |ψ⟩ = Rx(θ)|0⟩
     qc.h(4)
-    qc.cx(4, 3)  # par Bell (Alice q4 — Bob q3)
+    qc.cx(4, 3)  # Bell pair (Alice q4 — Bob q3)
     qc.cx(5, 4)
-    qc.h(5)  # base de medida de Bell
-    qc.cx(4, 3)  # corrección X diferida
-    # corrección Z diferida cz(5,3): 5 y 3 no adyacentes → SWAP(5,4).
+    qc.h(5)  # Bell measurement basis
+    qc.cx(4, 3)  # deferred X correction
+    # Deferred Z correction cz(5,3): 5 and 3 not adjacent → SWAP(5,4).
     # cx(4,5) = H(4)H(5) cx(5,4) H(4)H(5);  SWAP(5,4) = cx(5,4) cx(4,5) cx(5,4)
     qc.cx(5, 4)
     qc.h(4)
@@ -46,14 +46,14 @@ def build_teleport(qc, rx):
     qc.h(4)
     qc.h(5)
     qc.cx(5, 4)
-    qc.cz(4, 3)  # corrección Z (estado de q5 ya en pos. 4)
+    qc.cz(4, 3)  # Z correction (q5's state already in position 4)
     qc.cx(5, 4)
     qc.h(4)
     qc.h(5)
     qc.cx(5, 4)
     qc.h(4)
     qc.h(5)
-    qc.cx(5, 4)  # deshacer SWAP
+    qc.cx(5, 4)  # undo SWAP
     qc.measure_all()
     return qc
 
@@ -61,38 +61,38 @@ def build_teleport(qc, rx):
 qc_qk = QuantumCircuit(QuantumRegister(6, "q"))
 build_teleport(qc_qk, lambda qb, th: qc_qk.rx(th, qb))
 
-# ── 2. Circuito polypus ──────────────────────────────────────────────────────
+# ── 2. polypus circuit ──────────────────────────────────────────────────────
 
 qc_poly = polypus.Circuit(6)
 build_teleport(qc_poly, lambda qb, th: qc_poly.rx(qb, th))
 
-# ── 3. Ejecución en QmioBackend ──────────────────────────────────────────────
+# ── 3. Run on QmioBackend ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
     p1_theory = math.sin(THETA / 2) ** 2  # P(Bob=|1⟩) = sin²(π/6) = 0.25
-    BOB = 3  # el estado teleportado queda en q3
-    TOL = 0.10  # margen ruido muestreo + QPU
-    print(f"P(Bob=|1⟩) teórico: {p1_theory:.4f}\n")
+    BOB = 3  # the teleported state ends up in q3
+    TOL = 0.10  # margin for sampling + QPU noise
+    print(f"P(Bob=|1⟩) expected: {p1_theory:.4f}\n")
 
     def p_bob(counts):
-        # little-endian con MSB a la izquierda → qubit i = carácter i por la derecha
+        # little-endian with the MSB on the left → qubit i = character i from the right
         total = sum(counts.values())
         return sum(v for k, v in counts.items() if k[::-1][BOB] == "1") / total
 
     def report(tag, counts, elapsed):
         p1 = p_bob(counts)
         err = abs(p1 - p1_theory)
-        estado = "CORRECTA" if err <= TOL else "INCORRECTA"
+        status = "CORRECT" if err <= TOL else "INCORRECT"
         print(
             f"[{tag}] P(Bob=|1⟩)={p1:.4f}  error={err:.4f}  "
-            f"tiempo={elapsed:.3f}s  => {estado}"
+            f"time={elapsed:.3f}s  => {status}"
         )
 
     backend = QmioBackend()
 
-    # Qiskit: opt_level=0 + layout identidad → NO re-enruta, solo traduce a
-    # puertas nativas; corre EXACTAMENTE el mismo circuito que polypus.
-    print("[Qiskit] Enviando circuito a Qmio...")
+    # Qiskit: opt_level=0 + identity layout → does NOT re-route, it only translates
+    # to native gates; it runs EXACTLY the same circuit as polypus.
+    print("[Qiskit] Sending the circuit to Qmio...")
     t0 = time.time()
     qc_qk_t = transpile(
         qc_qk, backend, optimization_level=0, initial_layout=list(range(6))
@@ -103,19 +103,19 @@ if __name__ == "__main__":
     counts_qk = job_qk.result().get_counts()
     t_qk = time.time() - t0
 
-    # polypus: misma ruta de extremo a extremo (serializa + envía + recoge).
-    print("[polypus] Enviando circuito a Qmio...")
+    # polypus: the same end-to-end path (serialise + send + collect).
+    print("[polypus] Sending the circuit to Qmio...")
     t0 = time.time()
     result_poly = polypus.run_quantum_circuit(
         qc_poly, shots=SHOTS, infrastructure="qmio"
     )
     t_poly = time.time() - t0
-    counts_poly = result_poly[0] if isinstance(result_poly, list) else result_poly
+    counts_poly = result_poly.counts[0]
 
     print()
     report("Qiskit ", counts_qk, t_qk)
     report("polypus", counts_poly, t_poly)
-    print("\n── Tiempos ──")
+    print("\n── Times ──")
     print(f"  Qiskit : {t_qk:.3f}s")
     print(f"  Qiskit run: {t1_run - t1:.3f}s")
     print(f"  polypus run: {t_poly:.3f}s")
