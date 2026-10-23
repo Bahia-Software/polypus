@@ -1,4 +1,14 @@
-//! Adam optimizer (adaptive moment estimation).
+//! Adam optimizer (adaptive moment estimation), with Polyak's heavy-ball
+//! momentum as an alternative update rule ([`AdamRule`]).
+//!
+//! References:
+//!
+//! - D. P. Kingma and J. Ba, "Adam: A Method for Stochastic Optimization",
+//!   ICLR 2015, arXiv:1412.6980: the [`AdamRule::Adam`] update and its bias
+//!   corrections.
+//! - B. T. Polyak, "Some methods of speeding up the convergence of iteration
+//!   methods", USSR Computational Mathematics and Mathematical Physics 4(5),
+//!   1964: the heavy ball of [`AdamRule::Momentum`].
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
@@ -6,9 +16,77 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{check_initial_point, check_oracle_len, fitness_stagnated, BestMeasured};
 use rand::{Rng, RngExt};
+use std::fmt;
+use std::str::FromStr;
 
 /// Adam optimizer (Kingma and Ba, 2015).
 pub struct AlgorithmAdam;
+
+/// How [`AlgorithmAdam`] turns the gradient `g` into a step (`polypus.Adam(rule=...)`).
+///
+/// - [`Adam`](Self::Adam), the default: Kingma and Ba's Adam. Bias-corrected
+///   running averages of `g` and of `g²` scale each parameter's step to about
+///   `learning_rate`, whatever the scale of the cost, so one configuration
+///   suits costs of different scales.
+/// - [`Momentum`](Self::Momentum): Polyak's heavy ball, with `beta1` as the
+///   momentum μ: a velocity `v ← μ·v + learning_rate·g` is added to `θ`. The
+///   step grows with `g`, so the learning rate that works depends on the
+///   scale of the cost. `beta2` and `epsilon` are not used (they are still
+///   validated).
+///
+/// The names `polypus.Adam(rule=...)` accepts are [`as_str`](Self::as_str)
+/// and parse back with [`FromStr`]:
+///
+/// ```
+/// use polypus_optimizers::AdamRule;
+///
+/// assert_eq!("momentum".parse::<AdamRule>(), Ok(AdamRule::Momentum));
+/// assert_eq!(AdamRule::default().as_str(), "adam");
+/// assert!("Adam".parse::<AdamRule>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AdamRule {
+    /// Adam: bias-corrected, moment-normalised steps.
+    #[default]
+    Adam,
+    /// Polyak's heavy-ball momentum.
+    Momentum,
+}
+
+impl AdamRule {
+    /// The rule's name, as `polypus.Adam(rule=...)` takes it: `"adam"` or
+    /// `"momentum"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdamRule::Adam => "adam",
+            AdamRule::Momentum => "momentum",
+        }
+    }
+}
+
+impl fmt::Display for AdamRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AdamRule {
+    type Err = OptimizerError;
+
+    /// Parse one of the names [`as_str`](Self::as_str) returns. Matching is
+    /// exact; any other string is [`OptimizerError::InvalidConfig`] for
+    /// `rule`, which the Python binding raises as `ValueError`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "adam" => Ok(AdamRule::Adam),
+            "momentum" => Ok(AdamRule::Momentum),
+            other => Err(OptimizerError::InvalidConfig {
+                parameter: "rule",
+                reason: format!("must be \"adam\" or \"momentum\", got {other:?}"),
+            }),
+        }
+    }
+}
 
 /// Arguments for the Adam optimizer.
 ///
@@ -19,7 +97,8 @@ pub struct AlgorithmAdam;
 /// needs no [`VarianceOracle`](crate::VarianceOracle): its per-parameter step
 /// size comes from running averages of the gradient and of its square.
 ///
-/// Each iteration measures the current `θ` and the gradient there, then steps.
+/// Each iteration measures the current `θ` and the gradient there, then steps
+/// by [`rule`](AlgorithmAdamArgs::rule).
 /// When the gradient oracle scores `θ` in its own batch
 /// ([`GradientOracle::value_and_gradient`]), that is one call: with a
 /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient), one batch of
@@ -36,7 +115,8 @@ pub struct AlgorithmAdam;
 /// `max_iters >= 1` (each iteration measures `θ`, so zero iterations would
 /// measure nothing and could not report a real `best_fitness`), `dimensions >= 1`,
 /// `learning_rate` finite and `> 0`, `beta1` and `beta2` in `[0, 1)` (at `1`
-/// the bias correction divides by zero), `epsilon` finite and `> 0`,
+/// the bias correction divides by zero), `epsilon` finite and `> 0` (with
+/// either rule, although momentum uses neither `beta2` nor `epsilon`),
 /// `bounds` finite with `lb < ub` (the initial `θ` is drawn uniformly from it),
 /// and `initial_point`, when given, `dimensions` finite values.
 pub struct AlgorithmAdamArgs {
@@ -52,13 +132,17 @@ pub struct AlgorithmAdamArgs {
     /// over an [`Arc`](std::sync::Arc) shared with it.
     pub gradient_oracle: Box<dyn GradientOracle>,
     pub max_iters: u32,
-    /// Step size applied to the bias-corrected, moment-normalised update.
+    /// Step size applied to the bias-corrected, moment-normalised update; with
+    /// [`AdamRule::Momentum`], the factor of the gradient in the velocity.
     pub learning_rate: f64,
-    /// Decay rate of the first moment (running mean of the gradient).
+    /// Decay rate of the first moment (running mean of the gradient); with
+    /// [`AdamRule::Momentum`], the momentum μ.
     pub beta1: f64,
     /// Decay rate of the second moment (running mean of the squared gradient).
+    /// Unused by [`AdamRule::Momentum`].
     pub beta2: f64,
     /// Added to the denominator of the update so it never divides by zero.
+    /// Unused by [`AdamRule::Momentum`].
     pub epsilon: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
@@ -70,6 +154,9 @@ pub struct AlgorithmAdamArgs {
     /// Iterations over which the best-fitness improvement is measured; no run
     /// ends on stagnation before it has run `patience + 1` iterations.
     pub patience: u32,
+    /// How the gradient becomes a step: Adam (the default) or Polyak's
+    /// momentum.
+    pub rule: AdamRule,
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
@@ -98,7 +185,8 @@ impl AlgorithmAdam {
         String::from(
             "Trains a variational quantum circuit with Adam: gradient ascent with a \
              per-parameter step size adapted from running averages of the gradient and its \
-             square, with bias correction. Stops early when the best fitness stagnates.",
+             square, with bias correction, or with Polyak's heavy-ball momentum. Stops \
+             early when the best fitness stagnates.",
         )
     }
 
@@ -118,6 +206,7 @@ impl AlgorithmAdam {
             dimensions,
             tolerance,
             patience,
+            rule,
             seed: _,
             initial_point,
         } = args;
@@ -177,17 +266,29 @@ impl AlgorithmAdam {
             // best as its last entry (C-5).
             fitness_history.push(best.value());
 
-            // ── 3. Bias-corrected moment update (t is 1-based) ────────────────
-            beta1_t *= beta1;
-            beta2_t *= beta2;
-            let bias1 = 1.0 - beta1_t;
-            let bias2 = 1.0 - beta2_t;
-            for i in 0..dims {
-                m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
-                v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
-                let m_hat = m[i] / bias1;
-                let v_hat = v[i] / bias2;
-                theta[i] += learning_rate * m_hat / (v_hat.sqrt() + epsilon);
+            // ── 3. Step uphill by the rule ────────────────────────────────────
+            match rule {
+                // Bias-corrected moment update (t is 1-based).
+                AdamRule::Adam => {
+                    beta1_t *= beta1;
+                    beta2_t *= beta2;
+                    let bias1 = 1.0 - beta1_t;
+                    let bias2 = 1.0 - beta2_t;
+                    for i in 0..dims {
+                        m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
+                        v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
+                        let m_hat = m[i] / bias1;
+                        let v_hat = v[i] / bias2;
+                        theta[i] += learning_rate * m_hat / (v_hat.sqrt() + epsilon);
+                    }
+                }
+                // Heavy ball: `m` is the velocity and β₁ its momentum.
+                AdamRule::Momentum => {
+                    for i in 0..dims {
+                        m[i] = beta1 * m[i] + learning_rate * grad[i];
+                        theta[i] += m[i];
+                    }
+                }
             }
 
             // ── 4. Stop when the best fitness stagnates (C-5) ─────────────────

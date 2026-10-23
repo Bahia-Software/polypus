@@ -10,7 +10,7 @@
 //! point reaches no oracle.
 
 use polypus_optimizers::{
-    AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
+    AdamRule, AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
     FiniteDifferenceGradient, OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
@@ -199,6 +199,7 @@ fn adam_args(
         dimensions: 3,
         tolerance: 1e-12,
         patience: 1_000,
+        rule: AdamRule::Adam,
         seed: Some(seed),
         initial_point,
     }

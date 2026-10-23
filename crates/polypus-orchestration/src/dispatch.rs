@@ -19,7 +19,7 @@
 //! `EvaluationError`, keeping this crate free of `pyo3`.
 
 use polypus_optimizers::{
-    AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
+    AdamRule, AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
 };
 use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs};
 use polypus_optimizers::{
@@ -372,6 +372,7 @@ fn dispatch_adam(
         dimensions,
         tolerance: cfg.tolerance,
         patience: cfg.patience,
+        rule: AdamRule::default(),
         seed: Some(seed),
         initial_point,
     });
