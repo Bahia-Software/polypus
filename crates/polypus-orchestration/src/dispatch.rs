@@ -6,8 +6,8 @@
 //! either the oracle's recorded failure or the optimizer's own config error).
 //! That triplication now lives here once:
 //! [`dispatch_optimizer`] takes a pyo3-free [`Method`] (the binding parses the
-//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` object into it and builds the QNG
-//! variance oracle), runs the matching optimizer, and returns an
+//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` object into it and
+//! builds the QNG variance oracle), runs the matching optimizer, and returns an
 //! [`OracleError`] the binding converts back into a `PyErr`.
 //!
 //! This crate is deliberately Python-free — the GIL is released by the caller
@@ -27,6 +27,7 @@ use polypus_optimizers::{
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
     OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
+use polypus_optimizers::{AlgorithmRotosolve, AlgorithmRotosolveArgs};
 use polypus_optimizers::{AlgorithmSPSA, AlgorithmSPSAArgs};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -110,6 +111,18 @@ pub struct SpsaConfig {
     pub eval_interval: u32,
 }
 
+/// Rotosolve configuration, mirroring the `polypus.Rotosolve` object (see
+/// [`DeConfig`]). Each step is one batch of two circuits, plus the parameters
+/// themselves on the first step and every `reevaluate_every` steps; a sweep is
+/// one step per parameter. The caller checks that the circuit qualifies
+/// (every trainable parameter one single-Pauli rotation angle).
+pub struct RotosolveConfig {
+    pub sweeps: u32,
+    pub reevaluate_every: u32,
+    pub tolerance: f64,
+    pub patience: u32,
+}
+
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
 /// variance oracle (built from the Python callback at the binding boundary), so
 /// dispatch stays Python-free.
@@ -120,6 +133,7 @@ pub enum Method {
     Cmaes(CmaesConfig),
     Adam(AdamConfig),
     Spsa(SpsaConfig),
+    Rotosolve(RotosolveConfig),
 }
 
 /// What a training run evaluates through: built by an
@@ -350,6 +364,16 @@ pub fn dispatch_optimizer(
             alpha: cfg.alpha,
             gamma: cfg.gamma,
             eval_interval: cfg.eval_interval,
+            dimensions,
+            seed: Some(seed),
+            initial_point,
+        }),
+        Method::Rotosolve(cfg) => AlgorithmRotosolve.optimize(AlgorithmRotosolveArgs {
+            oracle,
+            sweeps: cfg.sweeps,
+            reevaluate_every: cfg.reevaluate_every,
+            tolerance: cfg.tolerance,
+            patience: cfg.patience,
             dimensions,
             seed: Some(seed),
             initial_point,
@@ -726,8 +750,10 @@ mod tests {
     /// candidate of the first batch (DE, PSO, and Adam, whose batch is θ₀ and
     /// then its finite-difference stencil), the centre of the first gradient
     /// stencil (QNG, whose first candidate is θ₀ + h·e₀), the first mean
-    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀) and the centre
-    /// of the calibration (SPSA, whose first candidate is θ₀ + c·Δ₁).
+    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀), the centre
+    /// of the calibration (SPSA, whose first candidate is θ₀ + c·Δ₁) and the
+    /// first point measured (Rotosolve, whose first batch is θ₀ and its two
+    /// neighbours along the first parameter).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -785,6 +811,7 @@ mod tests {
                 }),
             ),
             ("SPSA", spsa_method(2, 1)),
+            ("Rotosolve", rotosolve_method(2, 5)),
         ];
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             methods.push((strategy.as_str(), de_method(strategy)));
@@ -1070,6 +1097,68 @@ mod tests {
                 assert_eq!(parameter, "eval_interval")
             }
             _ => panic!("expected an InvalidConfig for eval_interval"),
+        }
+        assert!(sizes(&log).is_empty());
+    }
+
+    // ── Rotosolve ─────────────────────────────────────────────────────────────
+
+    fn rotosolve_method(sweeps: u32, reevaluate_every: u32) -> Method {
+        Method::Rotosolve(RotosolveConfig {
+            sweeps,
+            reevaluate_every,
+            tolerance: 0.0,
+            patience: 2,
+        })
+    }
+
+    /// Dispatch hands every `RotosolveConfig` field and the seed to Rotosolve:
+    /// the outcome is the one `AlgorithmRotosolve::optimize` returns for the
+    /// same arguments, after one batch per step.
+    #[test]
+    fn rotosolve_dispatch_runs_the_configured_optimizer() {
+        let (oracle, log) = recorder();
+        let dispatched = dispatch_optimizer(
+            rotosolve_method(3, 4),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Rotosolve run must succeed"));
+        // θ heads the batches of steps 0, 4 and 8.
+        assert_eq!(sizes(&log), [3, 2, 2, 2, 3, 2, 2, 2, 3]);
+        let (oracle, _) = recorder();
+        let direct = AlgorithmRotosolve
+            .optimize(AlgorithmRotosolveArgs {
+                oracle,
+                sweeps: 3,
+                reevaluate_every: 4,
+                tolerance: 0.0,
+                patience: 2,
+                dimensions: 3,
+                seed: Some(4),
+                initial_point: None,
+            })
+            .expect("a valid Rotosolve configuration runs");
+        assert_eq!(dispatched, direct);
+    }
+
+    #[test]
+    fn rotosolve_rejects_an_invalid_configuration_before_any_batch() {
+        let (oracle, log) = recorder();
+        let method = Method::Rotosolve(RotosolveConfig {
+            sweeps: 10,
+            reevaluate_every: 0,
+            tolerance: 0.01,
+            patience: 2,
+        });
+        match dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "reevaluate_every")
+            }
+            _ => panic!("expected an InvalidConfig for reevaluate_every"),
         }
         assert!(sizes(&log).is_empty());
     }

@@ -50,7 +50,13 @@ pub(crate) struct RunShape {
     /// it adds them to the projection by their circuits, at the first
     /// generation's pace. 0 for an optimizer without them.
     pub leading_batches: u32,
+    /// What a generation is called in the warning: "generations",
+    /// "iterations" or "steps".
     pub unit: &'static str,
+    /// The setting the warning asks to lower, the one that bounds
+    /// `generations`: the unit itself, except for Rotosolve, whose steps are
+    /// bounded by its `sweeps`.
+    pub setting: &'static str,
 }
 
 impl Method {
@@ -63,10 +69,16 @@ impl Method {
     /// measured), after one leading calibration batch of 50 circuits, which
     /// the watch does not time as the first iteration. SPSA's first iteration
     /// measures θ, so it holds `2K + 1` circuits where most hold `2K`, for
-    /// `K` perturbations: when the circuits run one after another (one QPU),
-    /// the projection can be up to `(2K + 1) / 2K` of the real time, 1.5×
-    /// with one perturbation; when a whole batch runs in one round, the
-    /// iterations are not overestimated.
+    /// `K` perturbations. A Rotosolve step is one batch of `x ± π/2` along one
+    /// of the `dimensions` parameters, so a run is at most
+    /// `sweeps × dimensions` steps; its first step, and every
+    /// `reevaluate_every`-th, also measures `x`, 3 circuits where most hold 2.
+    /// For both, the first batch holds `n + 1` circuits where most hold `n`:
+    /// on `Q` QPUs it takes `⌈(n + 1)/Q⌉` rounds where most take `⌈n/Q⌉`, so
+    /// the projection stays an upper bound but can reach
+    /// `⌈(n + 1)/Q⌉ / ⌈n/Q⌉` times the real time: `(n + 1)/n` on one QPU
+    /// (1.5× with `n = 2`), 2× on `Q = n` QPUs (2 for Rotosolve or SPSA with
+    /// one perturbation), and not at all on `n + 1` QPUs or more.
     ///
     /// Every DE strategy makes one batch per generation. L-SHADE spends the
     /// evaluation budget of `generations` full generations in more, smaller
@@ -75,7 +87,7 @@ impl Method {
     /// gives their exact number, from the schedule the optimizer itself steps.
     /// None of its batches is larger than the first, so the projection stays an
     /// upper bound.
-    pub(crate) fn run_shape(&self) -> RunShape {
+    pub(crate) fn run_shape(&self, dimensions: u32) -> RunShape {
         match self {
             Method::De(cfg) => RunShape {
                 batches_per_generation: 1,
@@ -85,18 +97,21 @@ impl Method {
                     + 1,
                 leading_batches: 0,
                 unit: "generations",
+                setting: "generations",
             },
             Method::Pso(cfg) => RunShape {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations) + 1,
                 leading_batches: 0,
                 unit: "generations",
+                setting: "generations",
             },
             Method::Qng(cfg, _) => RunShape {
                 batches_per_generation: 2,
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 0,
                 unit: "iterations",
+                setting: "iterations",
             },
             // One batch per generation and no initial batch; the generations of
             // the first run and of every restart share the budget.
@@ -105,6 +120,7 @@ impl Method {
                 generations: u64::from(cfg.generations),
                 leading_batches: 0,
                 unit: "generations",
+                setting: "generations",
             },
             // One batch of 2·d + 1 per iteration: θ, whose value is the
             // iteration's fitness, and the finite-difference stencil around it.
@@ -113,6 +129,7 @@ impl Method {
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 0,
                 unit: "iterations",
+                setting: "iterations",
             },
             // One batch per iteration, 2·resamplings perturbed points and θ
             // when it is measured, after the calibration batch of 50.
@@ -121,6 +138,15 @@ impl Method {
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 1,
                 unit: "iterations",
+                setting: "iterations",
+            },
+            // One batch per step, every parameter once per sweep.
+            Method::Rotosolve(cfg) => RunShape {
+                batches_per_generation: 1,
+                generations: u64::from(cfg.sweeps) * u64::from(dimensions),
+                leading_batches: 0,
+                unit: "steps",
+                setting: "sweeps",
             },
         }
     }
@@ -131,8 +157,8 @@ impl Method {
     /// that scores θ itself ([`GradientOracle::value_and_gradient`]) makes an
     /// iteration one call, which cannot be told in advance, so the projection
     /// then overestimates (see [`Watched`]).
-    pub(crate) fn run_shape_over(&self, oracles: &Oracles) -> RunShape {
-        let mut shape = self.run_shape();
+    pub(crate) fn run_shape_over(&self, oracles: &Oracles, dimensions: u32) -> RunShape {
+        let mut shape = self.run_shape(dimensions);
         if matches!(self, Method::Adam(_)) && oracles.gradient.is_some() {
             shape.batches_per_generation += 1;
         }
@@ -304,7 +330,7 @@ impl<C: Clock> WalltimeWatch<C> {
                     growth.restarts,
                     hms(projected),
                     hms(self.walltime),
-                    self.shape.unit,
+                    self.shape.setting,
                 );
                 return;
             }
@@ -321,7 +347,7 @@ impl<C: Clock> WalltimeWatch<C> {
                     state.leading_circuits,
                     hms(projected),
                     hms(self.walltime),
-                    self.shape.unit,
+                    self.shape.setting,
                 );
                 return;
             }
@@ -335,7 +361,7 @@ impl<C: Clock> WalltimeWatch<C> {
                 hms(first),
                 hms(projected),
                 hms(self.walltime),
-                self.shape.unit,
+                self.shape.setting,
             );
         }
     }
@@ -443,7 +469,7 @@ pub(crate) fn watched<C: Clock + 'static>(
     run_id: &str,
     clock: C,
 ) -> Oracles {
-    let shape = method.run_shape_over(&oracles);
+    let shape = method.run_shape_over(&oracles, dimensions);
     let watch = Arc::new(
         WalltimeWatch::new(oracles.evaluation, walltime, shape, run_id, clock)
             .with_growth(method.growth(dimensions)),
@@ -535,6 +561,7 @@ mod tests {
         generations: 101,
         leading_batches: 0,
         unit: "generations",
+        setting: "generations",
     };
 
     #[test]
@@ -608,6 +635,7 @@ mod tests {
             generations: 50,
             leading_batches: 0,
             unit: "iterations",
+            setting: "iterations",
         };
         let (watch, clock) = watch(
             run_id,
@@ -671,6 +699,7 @@ mod tests {
         generations: 300,
         leading_batches: 1,
         unit: "iterations",
+        setting: "iterations",
     };
 
     #[test]
@@ -731,6 +760,7 @@ mod tests {
             generations: 100,
             leading_batches: 2,
             unit: "iterations",
+            setting: "iterations",
         };
         let (watch, clock) = per_circuit_watch(run_id, Duration::from_secs(3600), shape);
         watch.evaluate_batch(&vec![vec![0.0]; 20]);
@@ -767,10 +797,10 @@ mod tests {
         use crate::PsoConfig;
         use polypus_optimizers::DeStrategy;
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade] {
-            assert_eq!(de(strategy, 10, 100).run_shape(), DE_100, "{strategy}");
+            assert_eq!(de(strategy, 10, 100).run_shape(2), DE_100, "{strategy}");
         }
         // L-SHADE spends the same 1010 evaluations in more, smaller generations.
-        let lshade = de(DeStrategy::LShade, 10, 100).run_shape();
+        let lshade = de(DeStrategy::LShade, 10, 100).run_shape(2);
         assert_eq!(
             lshade.generations,
             DeStrategy::LShade.max_generations(10, 100) + 1
@@ -786,12 +816,12 @@ mod tests {
             social_weight: 1.0,
             tolerance: 0.0,
         });
-        assert_eq!(pso.run_shape().generations, 8);
+        assert_eq!(pso.run_shape(2).generations, 8);
         // None of them sends a batch before its first generation.
         assert_eq!(lshade.leading_batches, 0);
-        assert_eq!(pso.run_shape().leading_batches, 0);
-        assert_eq!(adam(5).run_shape().leading_batches, 0);
-        assert_eq!(cmaes(None, 5, 2, 20, 0.01).run_shape().leading_batches, 0);
+        assert_eq!(pso.run_shape(2).leading_batches, 0);
+        assert_eq!(adam(5).run_shape(2).leading_batches, 0);
+        assert_eq!(cmaes(None, 5, 2, 20, 0.01).run_shape(2).leading_batches, 0);
     }
 
     /// Counts the batches it is handed; every candidate scores the same, so the
@@ -821,7 +851,7 @@ mod tests {
                     patience: 1,
                     strategy,
                 });
-                let shape = method.run_shape();
+                let shape = method.run_shape(2);
                 let batches = Arc::new(Mutex::new(0));
                 let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
                 let outcome =
@@ -876,7 +906,7 @@ mod tests {
                     finite_difference_step: 0.2,
                     rule: polypus_optimizers::AdamRule::Adam,
                 });
-                let shape = method.run_shape_over(&oracles);
+                let shape = method.run_shape_over(&oracles, 2);
                 let outcome =
                     dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
                 let label = format!("exact gradient {exact}, {max_iters} iterations");
@@ -946,7 +976,7 @@ mod tests {
                     gradient: Some(gradient),
                 };
                 let method = adam(7);
-                let shape = method.run_shape_over(&oracles);
+                let shape = method.run_shape_over(&oracles, 2);
                 let oracles = if behind_the_watch {
                     watched(
                         oracles,
@@ -989,7 +1019,7 @@ mod tests {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
         for (max_iters, resamplings, eval_interval) in [(1, 1, 20), (7, 3, 2), (30, 8, 20)] {
             let method = spsa(max_iters, resamplings, eval_interval);
-            let shape = method.run_shape();
+            let shape = method.run_shape(2);
             assert_eq!(method.growth(2), None);
             let batches = Arc::new(Mutex::new(0));
             let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
@@ -1039,6 +1069,87 @@ mod tests {
                  circuits sent before it at that pace, the optimisation may take up to \
                  2:38:20, beyond the 2:00:00 walltime; the QPUs are released when it runs \
                  out. Raise `walltime` or lower the iterations."
+            )]
+        );
+    }
+
+    fn rotosolve(sweeps: u32, reevaluate_every: u32) -> Method {
+        Method::Rotosolve(crate::RotosolveConfig {
+            sweeps,
+            reevaluate_every,
+            // Zero improvement is never below a zero tolerance.
+            tolerance: 0.0,
+            patience: 1,
+        })
+    }
+
+    /// `run_shape` counts exactly the batches Rotosolve sends when it does not
+    /// stop early: one per step, `sweeps × dimensions` steps, and nothing
+    /// before the first.
+    #[test]
+    fn rotosolve_run_shape_counts_the_batches_the_optimizer_sends() {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        for (sweeps, dimensions, reevaluate_every) in
+            [(1, 1, 5), (3, 2, 1), (10, 4, 5), (7, 3, 100)]
+        {
+            let method = rotosolve(sweeps, reevaluate_every);
+            let shape = method.run_shape(dimensions);
+            assert_eq!(method.growth(dimensions), None);
+            assert_eq!(shape.leading_batches, 0);
+            assert_eq!(shape.batches_per_generation, 1);
+            assert_eq!((shape.unit, shape.setting), ("steps", "sweeps"));
+            let batches = Arc::new(Mutex::new(0));
+            let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
+            let outcome =
+                dispatch_optimizer(method, oracle, dimensions, &OracleErrorSlot::new(), 3, None)
+                    .ok();
+            let label = format!("{sweeps} sweeps × {dimensions}, every {reevaluate_every}");
+            let steps = (sweeps * dimensions) as usize;
+            assert!(
+                outcome.is_some_and(|o| !o.converged && o.iterations_run == steps),
+                "{label}"
+            );
+            assert_eq!(*batches.lock().unwrap(), shape.generations, "{label}");
+        }
+    }
+
+    /// Through the watch, a Rotosolve run is projected from its first step,
+    /// which also measures θ₀: at 10 s a circuit, 3 circuits, so 100 sweeps of
+    /// 3 parameters project to 30 s × 300 = 2:30:00. Most steps hold 2
+    /// circuits, so the run itself takes (300 × 2 + 60) × 10 s = 1:50:00: on
+    /// one QPU the projection overestimates, as `run_shape` says.
+    #[test]
+    fn a_rotosolve_run_is_projected_from_its_first_step() {
+        capture_logs();
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let run_id = "walltime-watch-rotosolve";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        });
+        let method = rotosolve(100, 5);
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(2 * 3600),
+            &method,
+            3,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let start = clock.now();
+        let outcome = dispatch_optimizer(method, oracles, 3, &OracleErrorSlot::new(), 3, None);
+        assert!(outcome.is_ok());
+        assert_eq!(
+            clock.now().saturating_duration_since(start),
+            Duration::from_secs(6600)
+        );
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 300 steps took 0:00:30, so the optimisation \
+                 may take up to 2:30:00, beyond the 2:00:00 walltime; the QPUs are released \
+                 when it runs out. Raise `walltime` or lower the sweeps."
             )]
         );
     }
@@ -1241,7 +1352,7 @@ mod tests {
         {
             // Zero improvement is never below a zero tolerance.
             let method = cmaes(population_size, generations, 0, 1, 0.0);
-            let shape = method.run_shape();
+            let shape = method.run_shape(2);
             assert_eq!(shape.batches_per_generation, 1);
             assert_eq!(method.growth(2), None);
             let (outcome, sizes) = dispatch_cmaes(method, 2, flat, 3);
@@ -1270,7 +1381,7 @@ mod tests {
         ] {
             let label = format!("{population_size:?} × {generations}, {restarts} restarts");
             let method = cmaes(population_size, generations, restarts, patience, 1.0);
-            let shape = method.run_shape();
+            let shape = method.run_shape(2);
             let growth = method.growth(2).expect("restarts can grow the batches");
             assert_eq!(growth.restarts, restarts);
             let (outcome, sizes) = dispatch_cmaes(method, 2, flat, 5);
@@ -1312,7 +1423,7 @@ mod tests {
             run_id,
             Duration::from_secs(60),
             Duration::from_secs(3 * 3600),
-            method.run_shape(),
+            method.run_shape(2),
         );
         let growing = bare.with_growth(growth);
         growing.evaluate_batch(&vec![vec![0.0]; 10]);
@@ -1333,7 +1444,7 @@ mod tests {
             quiet,
             Duration::from_secs(60),
             Duration::from_secs(3 * 3600),
-            method.run_shape(),
+            method.run_shape(2),
         );
         let growing = bare.with_growth(method.growth(4));
         growing.evaluate_batch(&vec![vec![0.0]; 10]);
@@ -1413,15 +1524,16 @@ mod tests {
         // On its own, an Adam iteration is the one batch of θ and its stencil;
         // the exact gradient adds its call.
         assert_eq!(
-            method.run_shape(),
+            method.run_shape(2),
             RunShape {
                 batches_per_generation: 1,
                 generations: 101,
                 leading_batches: 0,
                 unit: "iterations",
+                setting: "iterations",
             }
         );
-        assert_eq!(method.run_shape_over(&oracles).batches_per_generation, 2);
+        assert_eq!(method.run_shape_over(&oracles, 2).batches_per_generation, 2);
         let oracles = watched(
             oracles,
             Duration::from_secs(3 * 3600),

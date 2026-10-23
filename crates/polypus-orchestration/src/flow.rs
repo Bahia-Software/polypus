@@ -110,8 +110,8 @@ pub struct TrainFlow<F: OracleFactory> {
     /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
     pub factory: F,
     /// Chosen optimizer + its config (built at the edge from the
-    /// `polypus.DE/PSO/QNG/CMAES/Adam/SPSA` object; `Qng` carries its variance
-    /// oracle).
+    /// `polypus.DE/PSO/QNG/CMAES/Adam/SPSA/Rotosolve` object; `Qng` carries its
+    /// variance oracle).
     pub method: Method,
     /// Free-parameter count validated at the edge.
     pub dimensions: u32,
@@ -676,7 +676,9 @@ mod tests {
 
     /// A small run of every optimizer, with its name.
     fn every_method() -> Vec<(&'static str, Method)> {
-        use crate::{AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, SpsaConfig};
+        use crate::{
+            AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+        };
         use polypus_optimizers::{AdamRule, DeStrategy};
         let bounds = (-std::f64::consts::PI, std::f64::consts::PI);
         let mut methods: Vec<(&'static str, Method)> =
@@ -757,6 +759,15 @@ mod tests {
                     alpha: 0.602,
                     gamma: 0.101,
                     eval_interval: 2,
+                }),
+            ),
+            (
+                "rotosolve",
+                Method::Rotosolve(RotosolveConfig {
+                    sweeps: 2,
+                    reevaluate_every: 3,
+                    tolerance: 0.0,
+                    patience: 1,
                 }),
             ),
         ]);
