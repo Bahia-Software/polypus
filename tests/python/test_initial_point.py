@@ -12,8 +12,9 @@ records every batch the optimizer sends and answers with fixed counts, and
 read the candidates back from the recorded circuits: the point is the first
 candidate DE (every strategy, wrapped into ``[0, 2π)``), PSO and Adam (before
 its first finite-difference stencil) evaluate, the centre of QNG's first
-stencil, the mean of CMA-ES's first generation, and the centre of SPSA's
-calibration batch, which SPSA then measures first. Without it nothing
+stencil, the mean of CMA-ES's first generation, the centre of SPSA's
+calibration batch, which SPSA then measures first, and the first point
+Rotosolve measures. Without it nothing
 changes; ``test_determinism_baseline.py`` pins that for seeded runs.
 """
 
@@ -30,7 +31,17 @@ QNG_STEP = 0.1
 ADAM_STEP = 0.2
 # SPSA's default perturbation.
 SPSA_STEP = 0.1
-OPTIMIZERS = ["rand1bin", "shade", "lshade", "pso", "qng", "cmaes", "adam", "spsa"]
+OPTIMIZERS = [
+    "rand1bin",
+    "shade",
+    "lshade",
+    "pso",
+    "qng",
+    "cmaes",
+    "adam",
+    "spsa",
+    "rotosolve",
+]
 STRATEGIES = ["rand1bin", "shade", "lshade"]
 
 _RY = re.compile(r"^ry\(([^)]*)\) q\[(\d+)\];$", re.MULTILINE)
@@ -42,7 +53,8 @@ def _all_ones(bitstring):
 
 def _method(name):
     """A small configuration of the optimizer ``name`` (a DE strategy name,
-    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"`` or ``"spsa"``). CMA-ES gets a tiny
+    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"``, ``"spsa"`` or ``"rotosolve"``).
+    CMA-ES gets a tiny
     ``sigma0`` so that every candidate of its first generation sits on its
     mean."""
     import polypus
@@ -57,6 +69,8 @@ def _method(name):
         return polypus.Adam(max_iters=1)
     if name == "spsa":
         return polypus.SPSA(max_iters=1)
+    if name == "rotosolve":
+        return polypus.Rotosolve(sweeps=1)
     return polypus.DE(generations=2, population_size=6, strategy=name)
 
 
@@ -353,6 +367,17 @@ class TestStartingPoint:
         batches = _record_batches(monkeypatch)
         _train(_method("spsa"), initial_point=[-5.0, 9.0])
         assert _vqc_candidate(batches[1][0]) == pytest.approx([-5.0, 9.0], abs=1e-12)
+
+    def test_rotosolve_takes_a_point_outside_zero_two_pi_unwrapped(self, monkeypatch):
+        # θ₀ itself heads the first batch, then its two neighbours along the
+        # first parameter.
+        batches = _record_batches(monkeypatch)
+        _train(_method("rotosolve"), initial_point=[-5.0, 9.0])
+        first = [_vqc_candidate(qc) for qc in batches[0]]
+        expected = [[-5.0, 9.0], [-5.0 + math.pi / 2, 9.0], [-5.0 - math.pi / 2, 9.0]]
+        assert len(first) == len(expected)
+        for got, want in zip(first, expected):
+            assert got == pytest.approx(want, abs=1e-12)
 
     def test_none_is_the_default(self, monkeypatch):
         omitted = _record_batches(monkeypatch)

@@ -8,6 +8,7 @@ its own; ``polypus.train`` and ``polypus.qml.train`` call it (and the Rust
 check of a ``polypus.Circuit``) before anything runs.
 """
 
+import math
 import warnings
 
 import pytest
@@ -308,3 +309,318 @@ def test_a_gate_problem_comes_before_a_repeated_parameter():
 def test_anything_but_a_circuit_is_a_type_error():
     with pytest.raises(TypeError, match="got str"):
         single_frequency_problem("OPENQASM 2.0;")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# polypus.Rotosolve
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIMENSIONS = 2
+
+
+def _all_ones(bitstring):
+    return float(all(b == "1" for b in bitstring))
+
+
+def _native(*, controlled=False):
+    """``ry(θ₀)`` and ``ry(θ₁)`` on two qubits, or the second a ``crx`` (which
+    does not qualify)."""
+    import polypus
+
+    qc = polypus.Circuit(DIMENSIONS)
+    qc.ry(0, polypus.Param(0))
+    if controlled:
+        qc.crx(0, 1, polypus.Param(1))
+    else:
+        qc.ry(1, polypus.Param(1))
+    qc.measure_all()
+    return qc
+
+
+def _train(qc, method, *, infrastructure="local", backend="aer", **kwargs):
+    import polypus
+
+    return polypus.train(
+        qc,
+        method,
+        shots=kwargs.pop("shots", 256),
+        n_qpus=1,
+        dimensions=DIMENSIONS,
+        expectation_function=kwargs.pop("expectation_function", _all_ones),
+        infrastructure=infrastructure,
+        nodes=1,
+        cores_per_qpu=1,
+        id="rotosolve",
+        backend=backend,
+        seed=kwargs.pop("seed", 11),
+        **kwargs,
+    )
+
+
+def _qml_model(*, ansatz_gate="ry"):
+    """``rx(x)`` and ``p(2·x)`` encode the sample (a feature map's angles may
+    be anything), then the ansatz weights are ``theta[0]`` on ``ansatz_gate``
+    and ``ry(theta[1])``."""
+    x = ParameterVector("x", 1)
+    theta = ParameterVector("theta", DIMENSIONS)
+    feature_map = QuantumCircuit(2)
+    feature_map.rx(x[0], 0)
+    feature_map.p(2 * x[0], 1)
+    feature_map.cp(x[0], 0, 1)
+    ansatz = QuantumCircuit(2)
+    if ansatz_gate == "crz":
+        ansatz.crz(theta[0], 0, 1)
+    else:
+        ansatz.ry(theta[0], 0)
+    ansatz.ry(theta[1], 1)
+    return feature_map, ansatz
+
+
+def _qml_train(method, *, ansatz_gate="ry", infrastructure="local", **kwargs):
+    import polypus
+
+    feature_map, ansatz = _qml_model(ansatz_gate=ansatz_gate)
+    return polypus.qml.train(
+        feature_map,
+        ansatz,
+        [[0.3], [1.1]],
+        method,
+        shots=64,
+        n_qpus=1,
+        dimensions=DIMENSIONS,
+        expectation_function=kwargs.pop("expectation_function", _all_ones),
+        infrastructure=infrastructure,
+        nodes=1,
+        cores_per_qpu=1,
+        id="rotosolve_qml",
+        seed=11,
+        **kwargs,
+    )
+
+
+class _Stop(Exception):
+    """Raised by the recorder to end the run at the CUNQA seam."""
+
+
+@pytest.fixture
+def seam_calls(monkeypatch):
+    """Record every ``connect_to_infrastructure`` call (the one that raises
+    CUNQA QPUs) and stop the run there."""
+    import polypus_python
+
+    calls = []
+
+    def record(infrastructure, **kwargs):
+        calls.append((infrastructure, kwargs))
+        raise _Stop
+
+    monkeypatch.setattr(polypus_python, "connect_to_infrastructure", record)
+    return calls
+
+
+def _record_batches(monkeypatch):
+    """Replace the local seam with a fake that records each batch's size and
+    returns all ones for every circuit."""
+    import polypus_python
+
+    sizes = []
+
+    def fake_run_qcs(infrastructure, **kwargs):
+        sizes.append(len(kwargs["qcs"]))
+        return [{"1" * 2: kwargs["shots"]} for _ in kwargs["qcs"]]
+
+    monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+    return sizes
+
+
+def test_the_defaults_and_fields():
+    import polypus
+
+    method = polypus.Rotosolve()
+    assert (method.sweeps, method.reevaluate_every) == (10, 5)
+    assert (method.tolerance, method.patience, method.seed) == (0.01, 2, None)
+    method.sweeps = 3
+    method.reevaluate_every = 1
+    method.tolerance = 0.0
+    method.patience = 4
+    method.seed = 7
+    assert (method.sweeps, method.reevaluate_every, method.patience) == (3, 1, 4)
+    assert (method.tolerance, method.seed) == (0.0, 7)
+    assert type(method).__module__ == "polypus"
+
+
+class TestTheCircuitIsCheckedBeforeAnythingRuns:
+    """A circuit or objective Rotosolve cannot train raises ``ValueError``
+    before any backend exists: with ``infrastructure="cunqa"``, before
+    ``connect_to_infrastructure`` (and so ``qraise``) is reached."""
+
+    def test_a_native_controlled_rotation(self, seam_calls):
+        import polypus
+
+        with pytest.raises(ValueError) as raised:
+            _train(
+                _native(controlled=True), polypus.Rotosolve(), infrastructure="cunqa"
+            )
+        message = str(raised.value)
+        assert message.startswith(
+            "polypus.Rotosolve cannot train this circuit: parameter 1 ('theta_1') is "
+            "an angle of 'crx' (instruction 1), which is not a rotation generated by a "
+            "single Pauli operator. Rotosolve needs every trainable parameter to be "
+            "the angle of exactly one rx, ry, rz, rxx, rzz, p or u1 gate"
+        )
+        assert seam_calls == []
+
+    def test_a_native_repeated_parameter(self, seam_calls):
+        import polypus
+
+        qc = polypus.Circuit(2).ry(0, polypus.Param(0)).ry(1, polypus.Param(0))
+        qc.rz(1, polypus.Param(1)).measure_all()
+        with pytest.raises(ValueError, match=r"parameter 0 \('theta_0'\) is in 2"):
+            _train(qc, polypus.Rotosolve(), infrastructure="cunqa")
+        assert seam_calls == []
+
+    def test_a_qiskit_circuit_with_a_doubled_angle(self, seam_calls):
+        import polypus
+
+        a = ParameterVector("a", DIMENSIONS)
+        qc = QuantumCircuit(2)
+        qc.ry(a[0], 0)
+        qc.rz(2 * a[1], 1)
+        qc.measure_all()
+        with pytest.raises(ValueError) as raised:
+            _train(qc, polypus.Rotosolve(), infrastructure="cunqa")
+        assert str(raised.value).startswith(
+            "polypus.Rotosolve cannot train this circuit: the angle of 'rz' "
+            "(instruction 1) is not ±a[1] + c: its coefficient is 2, not ±1. "
+        )
+        assert seam_calls == []
+
+    def test_a_qiskit_gate_whose_definition_cannot_be_built(self, seam_calls):
+        # Qiskit raises TypeError building a HamiltonianGate's definition
+        # while its time is a parameter; the check names the gate instead.
+        import polypus
+
+        a = ParameterVector("a", DIMENSIONS)
+        qc = QuantumCircuit(2)
+        qc.append(HamiltonianGate([[1, 0], [0, -1]], a[0]), [0])
+        qc.ry(a[1], 1)
+        qc.measure_all()
+        with pytest.raises(ValueError) as raised:
+            _train(qc, polypus.Rotosolve(), infrastructure="cunqa")
+        assert str(raised.value).startswith(
+            "polypus.Rotosolve cannot train this circuit: parameter 'a[0]' is an "
+            "angle of 'hamiltonian' (instruction 0), which has no definition to "
+            "check. "
+        )
+        assert seam_calls == []
+
+    def test_a_qml_ansatz_with_a_controlled_rotation(self, seam_calls):
+        import polypus
+
+        with pytest.raises(ValueError, match=r"is an angle of 'crz'"):
+            _qml_train(polypus.Rotosolve(), ansatz_gate="crz", infrastructure="cunqa")
+        assert seam_calls == []
+
+    @pytest.mark.parametrize("labelled", [True, False])
+    def test_a_sample_cost(self, seam_calls, labelled):
+        import polypus
+
+        labels = {"y_train": [0, 1]} if labelled else {}
+        with pytest.raises(ValueError) as raised:
+            _qml_train(
+                polypus.Rotosolve(),
+                expectation_function=polypus.SampleCost(lambda counts, label: 0.0),
+                infrastructure="cunqa",
+                **labels,
+            )
+        assert str(raised.value).startswith(
+            "polypus.Rotosolve cannot train with a polypus.SampleCost"
+        )
+        assert seam_calls == []
+
+    def test_circuits_that_qualify_get_to_the_seam(self, seam_calls):
+        # The control for the tests above: the feature map's p(2·x) and cp(x)
+        # are constants.
+        import polypus
+
+        with pytest.raises(_Stop):
+            _train(_native(), polypus.Rotosolve(), infrastructure="cunqa")
+        with pytest.raises(_Stop):
+            _qml_train(
+                polypus.Rotosolve(),
+                expectation_function=polypus.CachedCost(lambda b, label: 0.0),
+                y_train=[0, 1],
+                infrastructure="cunqa",
+            )
+        assert len(seam_calls) == 2
+
+    def test_other_optimizers_are_not_checked(self, seam_calls):
+        import polypus
+
+        with pytest.raises(_Stop):
+            _train(_native(controlled=True), polypus.DE(), infrastructure="cunqa")
+        assert len(seam_calls) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestTraining:
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            {"sweeps": 0},
+            {"reevaluate_every": 0},
+            {"patience": 0},
+            {"tolerance": -0.5},
+            {"tolerance": float("nan")},
+            {"tolerance": float("inf")},
+        ],
+        ids=lambda setting: "-".join(f"{k}={v}" for k, v in setting.items()),
+    )
+    def test_an_invalid_setting_raises_before_any_circuit_runs(
+        self, monkeypatch, setting
+    ):
+        import polypus
+
+        sizes = _record_batches(monkeypatch)
+        (name,) = setting
+        with pytest.raises(ValueError, match=f"invalid {name}: "):
+            _train(_native(), polypus.Rotosolve(**setting))
+        assert sizes == []
+
+    def test_each_step_is_one_batch_of_two_with_the_point_every_interval(
+        self, monkeypatch
+    ):
+        import polypus
+
+        sizes = _record_batches(monkeypatch)
+        result = _train(
+            _native(), polypus.Rotosolve(sweeps=3, reevaluate_every=4, tolerance=0)
+        )
+        assert sizes == [3, 2, 2, 2, 3, 2]
+        assert result.iterations_run == 6
+        assert not result.converged
+        assert len(result.fitness_history) == 6
+        assert result.fitness_history[-1] == result.best_fitness
+
+    def test_qml_train_sends_every_sample_per_candidate(self, monkeypatch):
+        import polypus
+
+        sizes = _record_batches(monkeypatch)
+        result = _qml_train(polypus.Rotosolve(sweeps=1))
+        # Two samples, so a step's three or two candidates are 6 or 4 circuits.
+        assert sum(sizes) == 2 * (3 + 2)
+        assert result.iterations_run == 2
+
+    def test_it_climbs_to_the_maximum_on_the_native_backend(self):
+        import polypus
+
+        result = _train(
+            _native(),
+            polypus.Rotosolve(sweeps=3, reevaluate_every=1),
+            backend="polypus",
+            shots=4096,
+        )
+        assert result.best_fitness > 0.97
+        for angle in result.best_params:
+            assert abs(math.remainder(angle - math.pi, 2 * math.pi)) < 0.3

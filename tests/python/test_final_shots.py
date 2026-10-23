@@ -28,7 +28,17 @@ import pytest
 DIMENSIONS = 2
 SHOTS = 64
 FINAL_SHOTS = 4096
-OPTIMIZERS = ["rand1bin", "shade", "lshade", "pso", "qng", "cmaes", "adam", "spsa"]
+OPTIMIZERS = [
+    "rand1bin",
+    "shade",
+    "lshade",
+    "pso",
+    "qng",
+    "cmaes",
+    "adam",
+    "spsa",
+    "rotosolve",
+]
 # Re-evaluate their five best candidates; the others only best_params.
 POPULATION = {"rand1bin", "shade", "lshade", "pso", "cmaes"}
 
@@ -41,7 +51,9 @@ def _all_ones(bitstring):
 
 def _method(name):
     """A small configuration of the optimizer ``name`` (a DE strategy name,
-    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"`` or ``"spsa"``)."""
+    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"``, ``"spsa"`` or ``"rotosolve"``).
+    Both models below qualify for Rotosolve: each trainable parameter is one
+    ``ry`` or ``rz`` angle."""
     import polypus
 
     if name == "pso":
@@ -54,6 +66,8 @@ def _method(name):
         return polypus.Adam(max_iters=2)
     if name == "spsa":
         return polypus.SPSA(max_iters=3)
+    if name == "rotosolve":
+        return polypus.Rotosolve(sweeps=2)
     return polypus.DE(generations=3, population_size=6, strategy=name)
 
 

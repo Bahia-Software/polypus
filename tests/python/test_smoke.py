@@ -58,6 +58,11 @@ class TestPolypusImport:
 
         assert hasattr(polypus, "SPSA")
 
+    def test_Rotosolve_class_exists(self):
+        import polypus
+
+        assert hasattr(polypus, "Rotosolve")
+
 
 class TestPolypusInstantiation:
     def test_DE_default_instantiation(self):
@@ -142,6 +147,7 @@ class TestPolypusModuleMetadata:
             "CMAES",
             "Adam",
             "SPSA",
+            "Rotosolve",
             "Circuit",
             "Param",
             "RunResult",
