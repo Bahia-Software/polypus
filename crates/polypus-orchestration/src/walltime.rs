@@ -56,7 +56,15 @@ impl Method {
     /// population in one batch the size of a generation's, so it counts as one;
     /// a QNG iteration is a gradient batch plus a single-candidate batch; an
     /// Adam iteration is one batch, θ and its finite-difference stencil
-    /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over)).
+    /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over));
+    /// an SPSA iteration is one batch of its perturbations (and θ when it is
+    /// measured), after one leading calibration batch of 50 circuits, which
+    /// the watch does not time as the first iteration. SPSA's first iteration
+    /// measures θ, so it holds `2K + 1` circuits where most hold `2K`, for
+    /// `K` perturbations: when the circuits run one after another (one QPU),
+    /// the projection can be up to `(2K + 1) / 2K` of the real time, 1.5×
+    /// with one perturbation; when a whole batch runs in one round, the
+    /// iterations are not overestimated.
     ///
     /// Every DE strategy makes one batch per generation. L-SHADE spends the
     /// evaluation budget of `generations` full generations in more, smaller
@@ -102,6 +110,14 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 0,
+                unit: "iterations",
+            },
+            // One batch per iteration, 2·resamplings perturbed points and θ
+            // when it is measured, after the calibration batch of 50.
+            Method::Spsa(cfg) => RunShape {
+                batches_per_generation: 1,
+                generations: u64::from(cfg.max_iters),
+                leading_batches: 1,
                 unit: "iterations",
             },
         }
@@ -942,6 +958,79 @@ mod tests {
                 assert_eq!(*batches.lock().unwrap(), 7 * per_iteration, "{label}");
             }
         }
+    }
+
+    fn spsa(max_iters: u32, resamplings: u32, eval_interval: u32) -> Method {
+        Method::Spsa(crate::SpsaConfig {
+            max_iters,
+            resamplings,
+            perturbation: 0.1,
+            target_step: 0.63,
+            alpha: 0.602,
+            gamma: 0.101,
+            eval_interval,
+        })
+    }
+
+    /// `run_shape` counts exactly the batches SPSA sends: the leading
+    /// calibration, then one per iteration (SPSA never stops early).
+    #[test]
+    fn spsa_run_shape_counts_the_batches_the_optimizer_sends() {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        for (max_iters, resamplings, eval_interval) in [(1, 1, 20), (7, 3, 2), (30, 8, 20)] {
+            let method = spsa(max_iters, resamplings, eval_interval);
+            let shape = method.run_shape();
+            assert_eq!(method.growth(2), None);
+            let batches = Arc::new(Mutex::new(0));
+            let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
+            let outcome =
+                dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3, None).ok();
+            let label = format!("{max_iters} × {resamplings}, every {eval_interval}");
+            assert!(outcome.is_some_and(|o| o.iterations_run == max_iters as usize));
+            assert_eq!(shape.leading_batches, 1, "{label}");
+            assert_eq!(
+                *batches.lock().unwrap(),
+                u64::from(shape.leading_batches)
+                    + shape.generations * u64::from(shape.batches_per_generation),
+                "{label}"
+            );
+        }
+    }
+
+    /// Through the watch, an SPSA run's calibration (50 circuits) is not timed
+    /// as its first iteration (θ₀ and one pair, 3 circuits): at 10 s a
+    /// circuit, 300 iterations project to 30 s × (300 + 50/3) = 2:38:20, not
+    /// 500 s × 300.
+    #[test]
+    fn the_spsa_calibration_is_not_timed_as_the_first_iteration() {
+        capture_logs();
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let run_id = "walltime-watch-spsa";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        });
+        let method = spsa(300, 1, 20);
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(2 * 3600),
+            &method,
+            2,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let outcome = dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None);
+        assert!(outcome.is_ok());
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 300 iterations took 0:00:30; with the 50 \
+                 circuits sent before it at that pace, the optimisation may take up to \
+                 2:38:20, beyond the 2:00:00 walltime; the QPUs are released when it runs \
+                 out. Raise `walltime` or lower the iterations."
+            )]
+        );
     }
 
     #[test]
