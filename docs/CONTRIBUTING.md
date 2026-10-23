@@ -68,35 +68,68 @@ way.
 
 ## Running the checks
 
-Everything CI runs, you can run locally:
+These are the checks CI runs (`.github/workflows/ci.yml` and `hygiene.yml`);
+each can be run locally. Lints and builds:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # all crates, no hand-maintained list
+ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
+cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
+cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
+cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+```
+
+Rust tests:
+
+```bash
+cargo test --locked --workspace            # every crate, default features
                                            # (polypus-subprocess-backend's tests spawn a Python
                                            #  worker; they skip gracefully if python3 is absent)
-cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
-cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs polypus installed (see Setting up)
+cargo test --locked --all-features -p polypus-circuit -p polypus-sim -p polypus-physics \
+  -p polypus-optimizers -p polypus-observable -p polypus-backend \
+  -p polypus-backend-conformance -p polypus-subprocess-backend
+                                           # pure-Rust crates, every feature
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
+cargo test --locked -p polypus-logger      # no log-level feature
+cargo test --locked -p polypus-infrastructure --features qmio
+cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
+cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
+cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
+```
+
+Python tests, with the wheel installed (see Setting up):
+
+```bash
+python -m compileall -q examples benchmarks
+pytest tests/python
 python -m mypy.stubtest polypus \
   --allowlist tests/python/stubtest_allowlist.txt \
   --mypy-config-file tests/python/stubtest_mypy.ini
                                            # typing stubs vs the installed extension
-                                           # (needs the wheel installed and mypy from
-                                           #  requirements-dev.txt)
-python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+                                           # (mypy from requirements-dev.txt)
 ```
+
+CI also builds the wheel on Linux, macOS and Windows, executes every notebook
+under `tutorials/` (`jupyter nbconvert --to notebook --execute`), checks the
+workspace with the MSRV toolchain, fuzzes the OpenQASM importers and runs
+Miri over `polypus-sim`'s `unsafe` kernels; those jobs in `ci.yml` show the
+exact commands.
 
 A green run is a **precondition** for opening a PR, not something to fix
 afterwards.
 
-> Note: we intentionally use `--workspace` instead of listing crates one by
-> one — a hand-maintained crate list silently goes stale every time a crate is
-> added or split (it already happened once). The one deliberate exception is
-> CI's all-features pass over the pure-Rust crates (see
-> `.github/workflows/ci.yml`): `--workspace --all-features` would enable
-> `extension-module`, which breaks building the test targets.
+> Note: CI tests with `--workspace` instead of listing crates one by one — a
+> hand-maintained crate list silently goes stale every time a crate is added
+> or split (it already happened once). The one deliberate exception is the
+> all-features pass over the pure-Rust crates: `--workspace --all-features`
+> would enable `extension-module`, which breaks building the test targets.
 
 Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,

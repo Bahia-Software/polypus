@@ -142,11 +142,24 @@ jobs:
           python-version: "3.11"
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every workspace member, with no hand-maintained list: a crate added to
+      # the workspace is tested without touching this file. Default features,
+      # so `polypus` builds without extension-module (see the clippy note).
+      # Cargo unifies features across the members, so this pass compiles e.g.
+      # polypus-sim with `parallel` and polypus-logger with `info-logs`, which
+      # other members enable; the steps below cover the other feature sets and
+      # profiles. `polypus-subprocess-backend`'s integration tests spawn a
+      # Python worker; they resolve `python3` (provided by the setup-python step
+      # in this job) and skip gracefully if none is found.
+      - name: Test the workspace (default features)
+        run: cargo test --locked --workspace
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
-      # whose results must be bit-identical to the sequential path).
-      # `polypus-subprocess-backend` is pyo3-free (belongs here), but its
-      # integration tests spawn a Python worker; they resolve `python3` (provided by
-      # the setup-python step in this job) and skip gracefully if none is found.
+      # whose results must be bit-identical to the sequential path). The one
+      # hand-maintained list (docs/CONTRIBUTING.md): `--workspace --all-features`
+      # would enable `polypus`'s extension-module. The crates that link
+      # libpython stay out: `polypus-infrastructure` and `polypus-evaluation`
+      # (their seams touch the GIL), `polypus-orchestration` (pyo3-free, but it
+      # links libpython through polypus-infrastructure) and `polypus`.
       - name: Test pure-Rust crates (all features)
         run: >
           cargo test --locked
@@ -171,31 +184,18 @@ jobs:
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
       # feature), not independent toggles — `--all-features` sets several at
-      # once and the `log` crate refuses to compile. Test it with no features.
-      - name: Test polypus-logger
+      # once and the `log` crate refuses to compile. The workspace pass builds
+      # it with `info-logs`; test it with no features too.
+      - name: Test polypus-logger (no features)
         run: cargo test --locked -p polypus-logger
-      # `polypus-infrastructure` links libpython like `polypus` (its backend
-      # seams touch the GIL), so it is tested here — default features and the
-      # optional qmio backend — not in the pure-Rust group above.
-      - name: Test polypus-infrastructure (default features)
-        run: cargo test --locked -p polypus-infrastructure
+      # The optional QMIO backend lives in `polypus-infrastructure`; `polypus`
+      # forwards the feature to it.
       - name: Test polypus-infrastructure (qmio backend)
         run: cargo test --locked -p polypus-infrastructure --features qmio
-      # `polypus-orchestration` is pyo3-free but links libpython transitively (via
-      # polypus-infrastructure), so it is tested here, not in the pure-Rust group.
-      - name: Test polypus-orchestration
-        run: cargo test --locked -p polypus-orchestration
-      # `polypus-evaluation` touches pyo3 (Qiskit binding, Python callbacks), so
-      # like `polypus` it links libpython and is tested here.
-      - name: Test polypus-evaluation
-        run: cargo test --locked -p polypus-evaluation
-      # `polypus` with default features — NOT extension-module (see clippy note).
-      - name: Test polypus (default features)
-        run: cargo test --locked -p polypus
       - name: Test polypus (qmio backend)
         run: cargo test --locked -p polypus --features qmio
       # The two backend templates are standalone crates (their own `[workspace]`),
-      # so `cargo test --workspace` above does not reach them; run each explicitly.
+      # so the workspace pass above does not reach them; run each explicitly.
       # Both certify themselves against the conformance battery. The Python one spawns
       # a worker through the subprocess bridge and skips gracefully without an
       # interpreter (setup-python above provides one).

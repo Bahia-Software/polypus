@@ -185,6 +185,9 @@ Changes on `main` since 0.7.2.
 - CI runs every push to `main` to completion: the next push cancelled it, and
   the release gate needs a successful push run for the commit it publishes
   (#403).
+- CI tests the whole workspace (`cargo test --workspace`), so a crate added to
+  it is tested without editing the workflow, which listed the crates by hand
+  (#412).
 
 ## [0.7.2] - 2026-09-30
 
