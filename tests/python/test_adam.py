@@ -93,14 +93,14 @@ class TestAdamOptions:
 
         adam = polypus.Adam()
         assert adam.max_iters == 100
-        assert adam.learning_rate == pytest.approx(0.05)
+        assert adam.learning_rate == pytest.approx(0.1)
         assert adam.beta1 == pytest.approx(0.9)
         assert adam.beta2 == pytest.approx(0.999)
         assert adam.epsilon == pytest.approx(1e-8)
         assert adam.bounds == (-math.pi, math.pi)
         assert adam.tolerance == pytest.approx(0.01)
         assert adam.patience == 20
-        assert adam.finite_difference_step == pytest.approx(0.1)
+        assert adam.finite_difference_step == pytest.approx(0.2)
         assert adam.rule == "adam"
         assert adam.seed is None
 

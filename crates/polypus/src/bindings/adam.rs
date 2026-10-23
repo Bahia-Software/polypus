@@ -16,9 +16,11 @@ pub struct Adam {
     /// Iterations, each one batch of `2·dimensions + 1` circuits. At least 1.
     #[pyo3(get, set)]
     pub max_iters: u32,
-    /// Step size, finite and `> 0`. Defaults to `0.05`, not deep learning's
+    /// Step size, finite and `> 0`. Defaults to `0.1`, not deep learning's
     /// `0.001`: the parameters are rotation angles in radians, not network
-    /// weights, so a larger step is well scaled.
+    /// weights, so with `rule="adam"` each parameter moves about 0.1 rad per
+    /// iteration. With `rule="momentum"` the step also scales with the
+    /// gradient, so the rate that works depends on the scale of the cost.
     #[pyo3(get, set)]
     pub learning_rate: f64,
     /// Decay of the first-moment estimate, in `[0, 1)`; the momentum with
@@ -46,7 +48,10 @@ pub struct Adam {
     #[pyo3(get, set)]
     pub patience: u32,
     /// Step of the central finite difference that estimates the gradient,
-    /// finite and `> 0`. Defaults to `0.1`, QNG's default.
+    /// finite and `> 0`. Defaults to `0.2`. Shot noise in the two fitness
+    /// values is divided by `2·finite_difference_step`, so a small step ruins
+    /// the gradient: Jones, Mineh and Montanaro (arXiv:2411.13742) found
+    /// that `0.4` works and `0.01` does not.
     #[pyo3(get, set)]
     pub finite_difference_step: f64,
     /// How the gradient becomes a step. Python reads and writes it by name
@@ -71,7 +76,7 @@ fn parse_rule(name: &str) -> PyResult<AdamRule> {
 #[pymethods]
 impl Adam {
     #[new]
-    #[pyo3(signature = (max_iters = 100, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, patience = 20, finite_difference_step = 0.1, rule = "adam", seed = None))]
+    #[pyo3(signature = (max_iters = 100, learning_rate = 0.1, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, bounds = (-std::f64::consts::PI, std::f64::consts::PI), tolerance = 0.01, patience = 20, finite_difference_step = 0.2, rule = "adam", seed = None))]
     pub fn new(
         max_iters: u32,
         learning_rate: f64,

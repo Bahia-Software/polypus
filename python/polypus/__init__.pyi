@@ -227,7 +227,7 @@ class Adam:
     def __new__(
         cls,
         max_iters: int = 100,
-        learning_rate: float = 0.05,
+        learning_rate: float = 0.1,
         beta1: float = 0.9,
         beta2: float = 0.999,
         epsilon: float = 1e-8,
@@ -235,7 +235,7 @@ class Adam:
         bounds: tuple[float, float] = ...,
         tolerance: float = 0.01,
         patience: int = 20,
-        finite_difference_step: float = 0.1,
+        finite_difference_step: float = 0.2,
         rule: _AdamRule = "adam",
         seed: Optional[int] = None,
     ) -> Adam: ...

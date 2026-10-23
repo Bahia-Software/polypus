@@ -24,9 +24,9 @@ import pytest
 DIMENSIONS = 2
 # Inside DE's [0, 2π) and PSO's default bounds (-π, π), away from either seam.
 POINT = [0.25, 1.5]
-# QNG's default finite_difference_step, and Adam's.
+# QNG's and Adam's default finite_difference_step.
 QNG_STEP = 0.1
-ADAM_STEP = 0.1
+ADAM_STEP = 0.2
 OPTIMIZERS = ["rand1bin", "shade", "lshade", "pso", "qng", "cmaes", "adam"]
 STRATEGIES = ["rand1bin", "shade", "lshade"]
 

@@ -9,6 +9,13 @@
 //! - B. T. Polyak, "Some methods of speeding up the convergence of iteration
 //!   methods", USSR Computational Mathematics and Mathematical Physics 4(5),
 //!   1964: the heavy ball of [`AdamRule::Momentum`].
+//! - B. D. M. Jones, L. Mineh and A. Montanaro, "Benchmarking a wide range of
+//!   optimisers for solving the Fermi-Hubbard model using the variational
+//!   quantum eigensolver", Quantum Sci. Technol. 10(4), 045032 (2025),
+//!   arXiv:2411.13742: with finite-difference gradients under shot noise,
+//!   momentum and Adam reach the best final precision, and the difference
+//!   step matters (`0.4` works, `0.01` ruins the gradient). `polypus.Adam`
+//!   defaults to a step of `0.2` and a `learning_rate` of `0.1`.
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
