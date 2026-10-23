@@ -59,6 +59,15 @@ FIXED_ANGLES = {
     3: {"gamma": [0.422, 0.798, 0.937], "beta": [0.609, 0.459, 0.235]},
 }
 DE_SEEDS = (1, 2, 3)
+# Training configuration, chosen in F3b on n = 16 (exact ideal ratio, 3
+# instances x 3 seeds): the default DE (rand1bin, population 20, 50 generations,
+# 1000 shots, early stop) stopped at generation 21-30 and fell short of the
+# fixed angles (0.815 / 0.826 vs 0.840 / 0.882 at p = 2 / 3); SHADE with these
+# values and no early stop reaches 0.839 / 0.874, ~20 s per run at n = 16.
+DE_STRATEGY = "shade"
+DE_POPULATION = 40
+DE_GENERATIONS = 300
+DE_TRAIN_SHOTS = 4000
 SLOW_GATES = eqe.NoiseAssumptions(r_duration_ns=60, cz_duration_ns=100)
 RAMSEY_IDLE = eqe.NoiseAssumptions(idle_t2="ramsey")
 
@@ -205,7 +214,12 @@ def evaluate(instance, p, device, target, args, log=print):
         result = polypus.train(
             inst.native_qaoa_circuit(instance, p),
             polypus.DE(
-                generations=args.generations, population_size=args.population, seed=seed
+                generations=args.generations,
+                population_size=args.population,
+                tolerance=args.tolerance,
+                patience=args.patience or args.generations,
+                seed=seed,
+                strategy=args.strategy,
             ),
             shots=args.train_shots,
             n_qpus=1,
@@ -258,9 +272,16 @@ def main():
     parser.add_argument("--p", type=int, nargs="+", default=list(routing.DEPTHS))
     parser.add_argument("--families", nargs="+", default=list(inst.FAMILIES))
     parser.add_argument("--de-seeds", type=int, nargs="+", default=list(DE_SEEDS))
-    parser.add_argument("--population", type=int, default=20)
-    parser.add_argument("--generations", type=int, default=50)
-    parser.add_argument("--train-shots", type=int, default=1000)
+    parser.add_argument("--strategy", default=DE_STRATEGY)
+    parser.add_argument("--population", type=int, default=DE_POPULATION)
+    parser.add_argument("--generations", type=int, default=DE_GENERATIONS)
+    # DE stops early when the best fitness improves by less than `tolerance`
+    # over `patience` generations; the defaults here never stop early.
+    parser.add_argument("--tolerance", type=float, default=0.0)
+    parser.add_argument(
+        "--patience", type=int, default=None, help="default: --generations"
+    )
+    parser.add_argument("--train-shots", type=int, default=DE_TRAIN_SHOTS)
     parser.add_argument("--eval-shots", type=int, default=4000)
     parser.add_argument("--routing-seeds", type=int, default=routing.DEFAULT_SEEDS)
     parser.add_argument("--sensitivity-p", type=int, nargs="*", default=[1])

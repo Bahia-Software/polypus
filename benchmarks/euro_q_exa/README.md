@@ -100,7 +100,7 @@ python benchmarks/euro_q_exa/run_emulator.py --calibration <calibration.json> \
 ```
 
 trains each (instance, p) without noise on the native backend (3 DE seeds,
-population 20, 50 generations, 1000 shots), then evaluates the trained
+SHADE, population 40, 300 generations, 4000 shots, no early stop), then evaluates the trained
 parameters at 4000 shots under conditions A (ideal), B (ideal, routed),
 C (EQE noise), D (C with readout mitigation), I (C plus idle noise), and, for the
 best seed at `--sensitivity-p`, E (slow gates) and I_R (Ramsey T2 while

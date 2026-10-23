@@ -118,6 +118,8 @@ def test_sweep_writes_every_condition_and_resumes(tmp_path, monkeypatch, capsys)
     assert {("fa", c) for c in ("A", "C", "I")} <= runs
     assert ("p0", "P0") in runs
     by = {(r["run"], r["condition"]): r for r in unit["rows"]}
+    # No early stop by default: DE runs every generation asked for.
+    assert by[("de1", "A")]["train_iterations"] == 3
     # Routing does not change the state: B matches A up to shot noise.
     assert by[("de1", "B")]["ar"] == pytest.approx(by[("de1", "A")]["ar"], abs=0.05)
     for row in unit["rows"]:
