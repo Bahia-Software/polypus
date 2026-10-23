@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimizer benchmark: Polypus's DE strategies, CMA-ES and Adam on MaxCut.
+Optimizer benchmark: Polypus's DE strategies, CMA-ES, Adam and SPSA on MaxCut.
 
 Each optimizer trains the same circuits through ``polypus.train`` with the
 same evaluation budget, and is scored by the *exact* approximation ratio of the
@@ -38,11 +38,19 @@ the number of parameters):
                 ``best_params`` (``initial_point``) with the evaluations left
   adam-x3       three polypus.Adam() runs with different seeds sharing the
                 budget; the one with the best reported ``best_fitness`` wins
+  spsa          polypus.SPSA(), one perturbation per iteration: perturbation
+                0.2 and target step 1.2 on QAOA, 0.1 and 0.63 (the defaults)
+                on the HEA
+  spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
+                iteration: perturbation 0.1 and target step 0.63 (the
+                defaults) on both
 
 Momentum's learning rate depends on the scale of the cost, so its rate and
 step are tuned per problem: they are the values the review that proposed Adam
 (#395) chose on reserved instances 100-109, never on the test instances
-0-29. Adam uses one configuration, its defaults, for both problems.
+0-29. Adam uses one configuration, its defaults, for both problems. SPSA's
+perturbation and target step are likewise the values the review that
+proposed SPSA (#396) chose on instances 100-109.
 
 Early stopping is off (``tolerance=0``) for all but ``cmaes-ipop``, so they
 spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
@@ -52,7 +60,10 @@ Budgets. DE runs ``budget / P - 1`` generations after its initial population
 (L-SHADE spends the same budget in more, smaller generations), CMA-ES
 without restarts ``budget / λ`` generations, and Adam ``budget / (2d + 1)``
 iterations, each one batch of the current point and the central difference
-around it. IPOP's batch sizes depend on when its restarts happen, so no
+around it. SPSA runs the most iterations that fit after its 50-circuit
+calibration: each is one batch of ``2K`` circuits for ``K`` perturbations,
+plus the current point on the first iteration, every 20th after it and the
+last (``spsa_iterations``). IPOP's batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -134,6 +145,8 @@ OPTIMIZERS = [
     "momentum",
     "lshade-adam",
     "adam-x3",
+    "spsa",
+    "spsa-k8",
 ]
 BASELINE = "rand1bin"
 PROBLEMS = ("qaoa", "hea")
@@ -142,6 +155,16 @@ PROBLEMS = ("qaoa", "hea")
 MOMENTUM = {"qaoa": (0.03, 0.4), "hea": (0.1, 0.4)}
 # adam-x3's runs use seeds s, s + RESTART_SEED_STEP, s + 2 RESTART_SEED_STEP.
 RESTART_SEED_STEP = 1_000_000
+# SPSA's perturbations per iteration and (perturbation, target step) per
+# problem, as tuned on the reserved instances 100-109 in the review that
+# proposed SPSA (#396).
+SPSA_RESAMPLINGS = {"spsa": 1, "spsa-k8": 8}
+SPSA = {
+    "qaoa": {"spsa": (0.2, 1.2), "spsa-k8": (0.1, 0.63)},
+    "hea": {"spsa": (0.1, 0.63), "spsa-k8": (0.1, 0.63)},
+}
+# The circuits of SPSA's calibration batch, before its first iteration.
+SPSA_CALIBRATION = 50
 
 
 # ── Problem ──────────────────────────────────────────────────────────────────
@@ -274,6 +297,29 @@ def adam_iterations(dimensions, budget):
     return iterations
 
 
+def spsa_evaluations(max_iters, resamplings, eval_interval=20):
+    """The circuits an SPSA run sends: the calibration, then ``2K`` per
+    iteration, plus the current point on iterations 1, 1 + eval_interval, …
+    and the last."""
+    measured = (max_iters - 1) // eval_interval + 1
+    if (max_iters - 1) % eval_interval:
+        measured += 1
+    return SPSA_CALIBRATION + 2 * resamplings * max_iters + measured
+
+
+def spsa_iterations(budget, resamplings):
+    """SPSA's iterations within ``budget``: the most whose run fits."""
+    iterations = (budget - SPSA_CALIBRATION) // (2 * resamplings)
+    while iterations >= 1 and spsa_evaluations(iterations, resamplings) > budget:
+        iterations -= 1
+    if iterations < 1:
+        raise ValueError(
+            f"a budget of {budget} evaluations does not fit SPSA's calibration "
+            f"and one iteration of {2 * resamplings + 1}"
+        )
+    return iterations
+
+
 def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
     """The optimizer ``name`` configured for ``budget`` evaluations, the
     single-run ones only (``lshade-adam`` and ``adam-x3`` chain them)."""
@@ -310,6 +356,15 @@ def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
             tolerance=0.0,
             finite_difference_step=step,
             rule="momentum",
+        )
+    if name in SPSA_RESAMPLINGS:
+        resamplings = SPSA_RESAMPLINGS[name]
+        perturbation, target_step = SPSA[problem][name]
+        return polypus.SPSA(
+            max_iters=spsa_iterations(budget, resamplings),
+            resamplings=resamplings,
+            perturbation=perturbation,
+            target_step=target_step,
         )
     raise ValueError(f"unknown optimizer {name!r}")
 
@@ -519,7 +574,7 @@ def environment():
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Compare Polypus's DE strategies, CMA-ES and Adam on MaxCut.",
+        description="Compare Polypus's DE strategies, CMA-ES, Adam and SPSA on MaxCut.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
