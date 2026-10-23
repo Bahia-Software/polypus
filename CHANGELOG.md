@@ -120,6 +120,11 @@ Changes on `main` since 0.7.2.
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- `rust-toolchain.toml` pins the Rust that CI and the release builds use
+  (1.99.1), and that rustup selects in a checkout; a new Rust release can no
+  longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
+  does not include the file. Fuzzing and Miri use a dated nightly, and the
+  docs, release and tutorial-sync jobs have a timeout (#415).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits

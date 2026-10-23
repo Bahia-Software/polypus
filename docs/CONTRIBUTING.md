@@ -69,7 +69,9 @@ way.
 ## Running the checks
 
 These are the checks CI runs (`.github/workflows/ci.yml` and `hygiene.yml`);
-each can be run locally. Lints and builds:
+each can be run locally. They use the Rust that `rust-toolchain.toml` pins,
+which rustup selects in this checkout (`rustup toolchain install` installs
+it). Lints and builds:
 
 ```bash
 cargo fmt --all --check
@@ -116,11 +118,12 @@ python -m mypy.stubtest polypus \
                                            # (mypy from requirements-dev.txt)
 ```
 
-CI also builds the wheel on Linux, macOS and Windows, executes every notebook
-under `tutorials/` (`jupyter nbconvert --to notebook --execute`), checks the
-workspace with the MSRV toolchain, fuzzes the OpenQASM importers and runs
-Miri over `polypus-sim`'s `unsafe` kernels; those jobs in `ci.yml` show the
-exact commands.
+CI also builds the wheel on Linux, macOS and Windows and executes every
+notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
+Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the
+workspace with the MSRV (`rust-version` in `Cargo.toml`), and `fuzz` and
+`miri` fuzz the OpenQASM importers and run Miri over `polypus-sim`'s `unsafe`
+kernels on a dated nightly. Their jobs in `ci.yml` show the exact commands.
 
 A green run is a **precondition** for opening a PR, not something to fix
 afterwards.
