@@ -185,8 +185,8 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG, Adam and SPSA), multiplies it by the generation budget and logs one `warn` if
-the projection exceeds the walltime:
+iteration for QNG, Adam and SPSA, the first step for Rotosolve), multiplies it by the
+generation budget and logs one `warn` if the projection exceeds the walltime:
 
 ```text
 run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
@@ -209,10 +209,20 @@ first iteration would inflate the projection. The projection adds its circuits a
 first iteration's pace instead, and the warning says so ("with the 50 circuits sent
 before it at that pace"). The first iteration also measures the parameters, so it
 holds `2 × resamplings + 1` circuits where most iterations hold `2 × resamplings`.
-When a QPU runs the circuits one after another, the projection can therefore be up
-to `(2K + 1) / 2K` of the real time for `K = resamplings`: 1.5 times with
-`resamplings=1`, about 1.06 times with `resamplings=8`. When a whole batch runs in
-one round, on `2K + 1` QPUs or more, the iterations are not overestimated.
+
+Rotosolve's budget is `sweeps × dimensions` steps, each one batch: the two neighbours
+of the parameters along one of them, and the parameters themselves on the first step
+and every `reevaluate_every` steps. The first step is timed, with its 3 circuits where
+most steps hold 2. Its warning counts steps and asks to lower the sweeps ("the first
+of up to 300 steps took ... Raise `walltime` or lower the sweeps.").
+
+For both, the timed batch holds `n + 1` circuits where most hold `n`: `n = 2K` for
+SPSA with `K = resamplings`, `n = 2` for Rotosolve. On `Q` QPUs it takes
+`⌈(n + 1)/Q⌉` rounds where most batches take `⌈n/Q⌉`, so the projection stays an
+upper bound but can reach `⌈(n + 1)/Q⌉ / ⌈n/Q⌉` times the real time: `(n + 1)/n` on
+one QPU (1.5 times for Rotosolve and `resamplings=1`, about 1.06 times with
+`resamplings=8`), twice on `n` QPUs (2 for Rotosolve and `resamplings=1`, 16 with
+`resamplings=8`), and not at all on `n + 1` QPUs or more.
 
 ### Cancellation
 
