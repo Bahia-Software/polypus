@@ -35,7 +35,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 | Feature | |
 |---|---|
 | **Multi-QPU execution** | Shots and populations are split across `n_qpus`; results come back per QPU and merged. |
-| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES and Adam behind one `train()` call, plus supervised QML with `qml.train` and `qml.predict`. |
+| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES and Adam (or momentum) behind one `train()` call, plus supervised QML with `qml.train` and `qml.predict`. |
 | **Native cost observables** | QUBO and Ising costs are evaluated in Rust, without a Python call per bitstring. |
 | **Rust circuit engine** | `polypus.Circuit` imports and exports OpenQASM 2 and 3 and exports QIR. Parameter binding runs without the GIL, about 3x faster than Qiskit's `assign_parameters`. |
 | **Reproducible runs** | Every result reports the seed it used; pass it back to replay the run. |
@@ -177,7 +177,7 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 | [`polypus`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus) | Python extension, exception hierarchy, re-exports |
 | [`polypus-circuit`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-circuit) | Circuit representation, OpenQASM 2 and 3, QIR |
 | [`polypus-sim`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-sim) | Statevector simulator |
-| [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE, PSO, QNG, CMA-ES and Adam |
+| [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE, PSO, QNG, CMA-ES and Adam (or momentum) |
 | [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables |
 | [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport and Pauli-sum Hamiltonians |
 | [`polypus-backend`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-backend) | The `QuantumBackend` trait that backends implement and the `Planner` that sizes circuit waves |

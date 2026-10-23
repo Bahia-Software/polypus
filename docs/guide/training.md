@@ -175,31 +175,46 @@ With `infrastructure="cunqa"`, the walltime warning projects the first generatio
 ```python
 polypus.Adam(
     max_iters=100,
-    learning_rate=0.05,
+    learning_rate=0.1,
     beta1=0.9,
     beta2=0.999,
     epsilon=1e-8,
     bounds=(-math.pi, math.pi),
     tolerance=0.01,
     patience=20,
-    finite_difference_step=0.1,
+    finite_difference_step=0.2,
+    rule="adam",
     seed=None,
 )
 ```
 
-Adam (Kingma and Ba, arXiv:1412.6980) climbs the fitness along its gradient, with a step per parameter scaled by running averages of the gradient and of its square. Each iteration estimates the gradient by central differences: one batch of `2 × dimensions` circuits, `θ ± finite_difference_step` along each parameter, then one circuit for the updated parameters. Shot noise enters the estimate through the difference of two fitness values divided by `2 × finite_difference_step`, so a smaller step needs more shots.
+A gradient method: it climbs the fitness along its gradient, estimated by central differences. Each iteration sends one batch of `2 × dimensions + 1` circuits, spread over the `n_qpus` QPUs: the current parameters `θ`, whose fitness is the iteration's, and `θ ± finite_difference_step` along each parameter, which give the gradient (61 circuits for 30 parameters). It then steps by its `rule`:
+
+| `rule` | Step |
+|---|---|
+| `"adam"` (default) | Adam (Kingma and Ba, arXiv:1412.6980): bias-corrected running averages of the gradient and of its square scale each parameter's step to about `learning_rate` radians, whatever the scale of the cost, so one configuration suits problems whose costs differ in scale |
+| `"momentum"` | Polyak's heavy ball (1964): a velocity, `beta1 × velocity + learning_rate × gradient`, is added to the parameters. The step grows with the gradient, so the `learning_rate` that works depends on the scale of the cost: a rate tuned on one problem can make another, with a larger cost, diverge. `beta2` and `epsilon` are not used |
+
+Any other `rule` raises `ValueError`.
 
 | Parameter | Description |
 |---|---|
-| `max_iters` | Iterations, each one gradient and one evaluation. At least 1 |
-| `learning_rate` | Step size, finite and `> 0`. The default `0.05` is sized for rotation angles in radians rather than network weights, so it is larger than deep learning's usual `0.001` |
-| `beta1`, `beta2` | Decay of the running averages of the gradient and of its square, in `[0, 1)` |
-| `epsilon` | Added to the denominator for numerical stability, finite and `> 0` |
-| `bounds` | Range the initial parameters are drawn from, finite with `lower < upper`. The run itself is not confined to it |
+| `max_iters` | Iterations, each one batch of `2 × dimensions + 1` circuits. At least 1 |
+| `learning_rate` | Step size, finite and `> 0`. The default `0.1` is sized for rotation angles in radians rather than network weights, so it is larger than deep learning's usual `0.001`. With `"momentum"`, tune it to the scale of the cost |
+| `beta1`, `beta2` | Decay of the running averages of the gradient and of its square, in `[0, 1)`. With `"momentum"`, `beta1` is the momentum and `beta2` is unused |
+| `epsilon` | Added to the denominator for numerical stability, finite and `> 0`. Unused by `"momentum"` |
+| `bounds` | Range the initial parameters are drawn from, finite with `lower < upper`. The run itself is not confined to it, and the parameters are not wrapped into `[0, 2π)` |
 | `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` iterations, as with DE |
-| `finite_difference_step` | Step of the central difference, finite and `> 0` |
+| `finite_difference_step` | Step of the central difference, in radians, finite and `> 0` |
+| `rule` | `"adam"` or `"momentum"`, above |
 
-`best_params` is the best evaluated point and `fitness_history` the best fitness after each iteration. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+**The finite-difference step matters.** Shot noise enters the gradient through the difference of two fitness values divided by `2 × finite_difference_step`, so a small step amplifies it. Jones, Mineh and Montanaro (arXiv:2411.13742) found that a step of 0.4 works and 0.01 ruins the gradient. Prefer the default `0.2` to a small step, which needs many more shots for the same accuracy.
+
+`best_params` is the measured point with the best fitness and `fitness_history` the best fitness measured up to each iteration. The step after the last iteration is not measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+
+**A local method.** Adam and momentum climb to an optimum near where they start, so on a landscape with many local optima one run can end in a poor one. Start them from a global search's result, such as an L-SHADE run's `best_params`, with `initial_point` (see [Starting point](#starting-point)), or run them a few times with different seeds and keep the best.
+
+**Reproducibility.** With either rule Adam's steps use only basic arithmetic and square roots, so, as with DE and unlike CMA-ES, a seeded run over a backend whose results do not depend on the platform reproduces exactly everywhere.
 
 ## Starting point
 
@@ -211,7 +226,7 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `PSO` | Makes it the position of the first particle, the first candidate evaluated; the other particles are drawn as without it. Every value must lie within `bounds`, since positions are clamped to them, otherwise `ValueError` before anything runs |
 | `QNG` | Starts from it: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 | `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
-| `Adam` | Starts from it, like `QNG`: the first batch estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
+| `Adam` | Starts from it and evaluates it first: the first batch is the point, then the finite-difference stencil that estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 
