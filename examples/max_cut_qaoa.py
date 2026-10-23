@@ -280,7 +280,7 @@ def plot_results(
         f"Runned {algorithm} with {population_size} individuals for {max_generations} "
         f"generations for a QAOA with {layers} layers"
     )
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
     os.makedirs("examples/plots_maxcut", exist_ok=True)
     plt.savefig(f"examples/plots_maxcut/maxcut_result_{experiment_id}.png")
     plt.close(fig)
@@ -311,8 +311,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         type=str,
-        required=True,
-        help="Method to use (scipy, polypus_local, polypus_cunqa)",
+        default="polypus_local",
+        help="Method to use (scipy, polypus_local, polypus_cunqa, polypus_local_pso, "
+        "polypus_cunqa_pso, polypus_local_qng, polypus_cunqa_qng; "
+        "default: polypus_local)",
     )
     parser.add_argument(
         "--qubits", type=int, default=4, help="Number of qubits for the QAOA circuit"

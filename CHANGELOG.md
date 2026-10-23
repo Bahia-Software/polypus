@@ -127,6 +127,14 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with

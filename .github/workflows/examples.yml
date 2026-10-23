@@ -1,0 +1,75 @@
+name: Examples
+
+# Builds the wheel, type-checks every script under examples/ against the stubs
+# it ships, and runs the scripts at the top of examples/, which need no
+# external service. The ones under examples/hpc/ need CESGA's CUNQA or QMIO,
+# so they are type-checked only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Pull requests: one run per PR, superseded runs cancelled. Pushes: one group
+# per run, so no push to main is ever cancelled.
+concurrency:
+  group: examples-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  examples:
+    name: examples (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest and the newest supported Python, as in ci.yml: each leg
+        # resolves its own dependency versions, and mypy checks against those.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # requirements-dev.txt is only a constraints file in this job: it sets
+      # the versions of maturin and mypy and installs nothing else.
+      # The wheel is the one users get: the extension, its typing stubs and the
+      # bundled polypus_python helpers; installing it pulls qiskit and
+      # qiskit-aer.
+      - name: Build & install polypus-quantum
+        run: |
+          python -m pip install --upgrade pip maturin -c requirements-dev.txt
+          maturin build --release --locked --out dist
+          pip install dist/polypus_quantum-*.whl
+      - name: Install the examples' dependencies and mypy
+        run: pip install -r requirements-examples.txt mypy -c requirements-dev.txt
+      - name: Type-check examples/ against the shipped stubs
+        run: mypy --config-file examples/mypy.ini examples
+      # Each script with its defaults; max_cut_qaoa.py also with its other
+      # local methods.
+      - name: Run the local examples
+        env:
+          # Headless: no display on the runner.
+          MPLBACKEND: Agg
+        run: |
+          for example in examples/*.py; do
+            echo "::group::$example"
+            python "$example"
+            echo "::endgroup::"
+          done
+          for method in polypus_local_pso polypus_local_qng scipy; do
+            echo "::group::examples/max_cut_qaoa.py --method $method"
+            python examples/max_cut_qaoa.py --method "$method"
+            echo "::endgroup::"
+          done
