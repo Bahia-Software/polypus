@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Optimizer benchmark: Polypus's DE strategies, CMA-ES, Adam and SPSA on MaxCut.
+Optimizer benchmark: Polypus's DE strategies, CMA-ES, Adam, SPSA and Rotosolve
+on MaxCut.
 
 Each optimizer trains the same circuits through ``polypus.train`` with the
 same evaluation budget, and is scored by the *exact* approximation ratio of the
@@ -44,6 +45,15 @@ the number of parameters):
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
                 iteration: perturbation 0.1 and target step 0.63 (the
                 defaults) on both
+  rotosolve     polypus.Rotosolve(), the HEA only: as many sweeps as the
+                budget allows, the current point re-measured every fifth
+                step (the default)
+
+Rotosolve needs every trainable parameter to be the angle of exactly one
+single-Pauli rotation. The HEA meets that, since each angle is in one RY.
+QAOA does not: each γ is in every cost gate and each β in every RX.
+``polypus.train`` refuses that circuit with Rotosolve, so the script runs
+nothing there and prints the row as "—" (not applicable).
 
 Momentum's learning rate depends on the scale of the cost, so its rate and
 step are tuned per problem: they are the values the review that proposed Adam
@@ -63,7 +73,10 @@ iterations, each one batch of the current point and the central difference
 around it. SPSA runs the most iterations that fit after its 50-circuit
 calibration: each is one batch of ``2K`` circuits for ``K`` perturbations,
 plus the current point on the first iteration, every 20th after it and the
-last (``spsa_iterations``). IPOP's batch sizes depend on when its restarts happen, so no
+last (``spsa_iterations``). Rotosolve runs the most sweeps of ``d``
+coordinate steps that fit: each step is one batch of the two circuits
+with its coordinate shifted by ±π/2, plus the current point on the first
+step and every fifth after it (``rotosolve_sweeps``). IPOP's batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -167,6 +180,7 @@ OPTIMIZERS = [
     "adam-x3",
     "spsa",
     "spsa-k8",
+    "rotosolve",
 ]
 BASELINE = "rand1bin"
 PROBLEMS = ("qaoa", "hea")
@@ -185,6 +199,14 @@ SPSA = {
 }
 # The circuits of SPSA's calibration batch, before its first iteration.
 SPSA_CALIBRATION = 50
+# Rotosolve re-measures the current point every this many coordinate steps
+# (polypus.Rotosolve's default).
+ROTOSOLVE_REEVALUATE = 5
+# The optimizers that do not apply to a problem, and why. Rotosolve needs
+# every parameter to be the angle of exactly one single-Pauli rotation.
+NOT_APPLICABLE = {
+    ("rotosolve", "qaoa"): "each γ is in every cost gate and each β in every RX",
+}
 
 
 # ── Problem ──────────────────────────────────────────────────────────────────
@@ -355,6 +377,32 @@ def spsa_iterations(budget, resamplings):
     return iterations
 
 
+def rotosolve_evaluations(sweeps, dimensions):
+    """The circuits a Rotosolve run of ``sweeps`` sweeps sends: two per
+    coordinate step, plus the current point on the first step and every
+    ``ROTOSOLVE_REEVALUATE``-th after it."""
+    steps = sweeps * dimensions
+    return 2 * steps + -(-steps // ROTOSOLVE_REEVALUATE)
+
+
+def rotosolve_sweeps(dimensions, budget):
+    """Rotosolve's sweeps within ``budget``: the most whose run fits."""
+    sweeps = budget // (2 * dimensions)
+    while sweeps >= 1 and rotosolve_evaluations(sweeps, dimensions) > budget:
+        sweeps -= 1
+    if sweeps < 1:
+        raise ValueError(
+            f"a budget of {budget} evaluations does not fit one Rotosolve sweep "
+            f"of {rotosolve_evaluations(1, dimensions)}"
+        )
+    return sweeps
+
+
+def applies(name, problem):
+    """Whether optimizer ``name`` can train ``problem``'s circuit."""
+    return (name, problem) not in NOT_APPLICABLE
+
+
 def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
     """The optimizer ``name`` configured for ``budget`` evaluations, the
     single-run ones only (``lshade-adam`` and ``adam-x3`` chain them)."""
@@ -400,6 +448,15 @@ def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
             resamplings=resamplings,
             perturbation=perturbation,
             target_step=target_step,
+        )
+    if name == "rotosolve":
+        if not applies(name, problem):
+            raise ValueError(
+                f"rotosolve does not apply to {problem}: "
+                f"{NOT_APPLICABLE[name, problem]}"
+            )
+        return polypus.Rotosolve(
+            sweeps=rotosolve_sweeps(dimensions, budget), tolerance=0.0
         )
     raise ValueError(f"unknown optimizer {name!r}")
 
@@ -581,7 +638,7 @@ def run_one(
 # ── Report ───────────────────────────────────────────────────────────────────
 
 
-def summarise(rows, optimizers):
+def summarise(rows, optimizers, problem="qaoa"):
     by = {
         name: {r["instance"]: r for r in rows if r["optimizer"] == name}
         for name in optimizers
@@ -593,7 +650,16 @@ def summarise(rows, optimizers):
         + (" final ratio | final bias |" if final else ""),
         "|---|---|---|---|---|---|---|---|" + ("---|---|" if final else ""),
     ]
+    notes = []
     for name in optimizers:
+        if not applies(name, problem):
+            dashes = 7 + (2 if final else 0)
+            lines.append(f"| {name} |" + " — |" * dashes)
+            notes.append(
+                f"{name}: not applicable to {problem} "
+                f"({NOT_APPLICABLE[name, problem]})."
+            )
+            continue
         runs = list(by[name].values())
         mean = lambda key: statistics.fmean(r[key] for r in runs)  # noqa: E731
         if base is None or name == BASELINE:
@@ -615,6 +681,9 @@ def summarise(rows, optimizers):
         if final:
             line += f" {mean('final_ratio'):.3f} | {mean('final_bias'):+.3f} |"
         lines.append(line)
+    if notes:
+        lines.append("")
+        lines.extend(notes)
     return "\n".join(lines)
 
 
@@ -673,7 +742,8 @@ def environment():
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Compare Polypus's DE strategies, CMA-ES, Adam and SPSA on MaxCut.",
+        description="Compare Polypus's DE strategies, CMA-ES, Adam, SPSA and "
+        "Rotosolve on MaxCut.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
@@ -762,6 +832,8 @@ def main(argv=None):
         instances = [Instance(args.nodes, layers, s, problem) for s in seeds]
         rows = []
         for name in optimizers:
+            if not applies(name, problem):
+                continue
             for instance, seed in zip(instances, seeds):
                 rows.append(
                     run_one(
@@ -775,7 +847,7 @@ def main(argv=None):
                         final_shots=args.final_shots,
                     )
                 )
-        print(summarise(rows, optimizers), flush=True)
+        print(summarise(rows, optimizers, problem), flush=True)
         report["scenarios"].append(
             {
                 "problem": problem,
@@ -787,6 +859,7 @@ def main(argv=None):
                 "de_population": args.de_population,
                 "restarts": args.restarts,
                 "final_shots": args.final_shots,
+                "not_applicable": [n for n in optimizers if not applies(n, problem)],
                 "runs": rows,
             }
         )

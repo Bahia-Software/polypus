@@ -51,16 +51,22 @@ def test_quick_mode_runs_every_optimizer_within_budget(tmp_path):
     (scenario,) = report["scenarios"]
     assert (scenario["layers"], scenario["shots"], scenario["budget"]) == (1, 64, 120)
     runs = scenario["runs"]
-    assert {r["optimizer"] for r in runs} == set(script.OPTIMIZERS)
-    assert len(runs) == 2 * len(script.OPTIMIZERS)
+    # Rotosolve does not apply to QAOA, so it makes no runs there.
+    applicable = [n for n in script.OPTIMIZERS if n != "rotosolve"]
+    assert scenario["not_applicable"] == ["rotosolve"]
+    assert {r["optimizer"] for r in runs} == set(applicable)
+    assert len(runs) == 2 * len(applicable)
     for run in runs:
         assert 0 < run["evaluations"] <= scenario["budget"], run
         assert 0 < run["batches"] <= run["evaluations"], run
         assert 0.0 < run["ratio"] <= 1.0, run
-    # The table prints a row per optimizer, the baseline without a delta.
+    # The table prints a row per optimizer, the baseline without a delta,
+    # and the one that does not apply as dashes with a note.
     for name in script.OPTIMIZERS:
         assert f"| {name} |" in stdout
     assert "| rand1bin | " in stdout and "| — | — |" in stdout
+    assert "| rotosolve |" + " — |" * 7 in stdout
+    assert "rotosolve: not applicable to qaoa (" in stdout
     # The chained optimizers spend one budget over their stages.
     for run in runs:
         stages = run.get("stages")
@@ -96,11 +102,19 @@ def test_quick_hea_scenario_runs_every_optimizer_within_budget(tmp_path):
     assert scenario["problem"] == "hea"
     assert scenario["parameters"] == 6 * 3
     runs = scenario["runs"]
+    assert scenario["not_applicable"] == []
     assert {r["optimizer"] for r in runs} == set(script.OPTIMIZERS)
     for run in runs:
         assert 0 < run["evaluations"] <= scenario["budget"], run
         assert 0.0 < run["ratio"] <= 1.0, run
     assert "## HEA reps = 2 (18 parameters), n = 6," in stdout
+    assert "not applicable" not in stdout
+    # Rotosolve spends five sweeps of 18 steps: 2 circuits each, plus the
+    # current point on every fifth step.
+    for run in runs:
+        if run["optimizer"] == "rotosolve":
+            assert run["evaluations"] == 2 * 90 + 18 == 198, run
+            assert run["batches"] == run["iterations_run"] == 90, run
 
 
 def test_lshade_then_adam_refines_from_the_lshade_point(monkeypatch):
@@ -248,6 +262,19 @@ def test_the_budget_fixes_every_generation_count():
     assert script.spsa_evaluations(91, 8) > 1500
     with pytest.raises(ValueError, match="does not fit SPSA's calibration"):
         script.make_method("spsa-k8", 6, 66, 30, 3)
+    # Rotosolve: the most sweeps of d steps whose 2 circuits each and the
+    # measurements of the current point (every fifth step) fit.
+    roto = script.make_method("rotosolve", 30, 5000, 30, 3, "hea")
+    assert isinstance(roto, polypus.Rotosolve)
+    assert (roto.sweeps, roto.reevaluate_every, roto.tolerance) == (75, 5, 0.0)
+    assert script.rotosolve_evaluations(75, 30) == 4500 + 450 == 4950
+    assert script.rotosolve_evaluations(76, 30) > 5000
+    assert script.rotosolve_evaluations(1, 7) == 14 + 2
+    assert script.make_method("rotosolve", 18, 200, 8, 3, "hea").sweeps == 5
+    with pytest.raises(ValueError, match="does not fit one Rotosolve sweep"):
+        script.make_method("rotosolve", 30, 65, 30, 3, "hea")
+    with pytest.raises(ValueError, match="rotosolve does not apply to qaoa"):
+        script.make_method("rotosolve", 6, 1500, 30, 3, "qaoa")
 
 
 @pytest.mark.parametrize("name", ["spsa", "spsa-k8"])
