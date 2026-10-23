@@ -12,10 +12,10 @@ avoid-breaking-exported-api = false
 # The PyO3 entry points in `crates/polypus/src/bindings` mirror their Python
 # kwargs one-for-one, so their arity is set by the API they expose (contract C-1
 # for the execution seam), not by design choice -- `qml_train` is the widest at
-# 16. Tune the threshold once here instead of per-function `#[allow(...)]`: 20
+# 21. Tune the threshold once here instead of per-function `#[allow(...)]`: 24
 # clears today's signatures with room for a few more kwargs, while still
 # flagging a genuinely runaway parameter list.
-too-many-arguments-threshold = 20
+too-many-arguments-threshold = 24
 
 # `Uuid::new_v4` panics if `getrandom` fails, and a panic must never cross the
 # FFI edge (contract C-1, #264). The root Cargo.toml drops uuid's `v4` feature,

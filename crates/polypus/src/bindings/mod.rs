@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyList, PyModule};
+use pyo3::types::{IntoPyDict, PyBool, PyDict, PyList, PyModule};
 use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
@@ -41,8 +41,8 @@ use crate::infrastructure::{
     ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
-    AdamConfig, CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources,
-    RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow, TrainOutcome,
+    AdamConfig, CmaesConfig, DeConfig, FinalEvaluation, Method, OracleError, PsoConfig, QngConfig,
+    Resources, RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow, TrainOutcome,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -205,6 +205,17 @@ pub struct TrainResult {
     /// computed from (contract C-5).
     #[pyo3(get)]
     pub fitness_history: Vec<f64>,
+    /// With `final_shots`, the candidate the final batch chose: the best
+    /// candidates (`best_params` and, for DE, PSO and CMA-ES, up to four
+    /// more), re-evaluated once with `final_shots` shots after the optimizer
+    /// stopped; the highest value wins, `best_params` on a tie. `None`
+    /// without `final_shots` (contract C-5).
+    #[pyo3(get)]
+    pub final_params: Option<Vec<f64>>,
+    /// The value of [`final_params`](Self::final_params) in the final batch;
+    /// `None` without `final_shots`.
+    #[pyo3(get)]
+    pub final_fitness: Option<f64>,
     /// Effective RNG seed that drove the optimizer (and, on the native backend,
     /// shot sampling): the explicit `seed` kwarg, else the optimizer object's
     /// `seed`, else a fresh OS-entropy value (contract C-7).
@@ -222,8 +233,12 @@ pub struct TrainResult {
 #[pymethods]
 impl TrainResult {
     fn __repr__(&self) -> String {
+        // Unchanged without `final_shots`.
+        let final_fitness = self
+            .final_fitness
+            .map_or(String::new(), |value| format!(", final_fitness={value}"));
         format!(
-            "TrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
+            "TrainResult(id={:?}, best_fitness={}{final_fitness}, iterations_run={}, converged={}, seed={}, best_params={:?})",
             self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
         )
     }
@@ -239,9 +254,14 @@ impl TrainResult {
 fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
+    final_evaluation: Option<FinalEvaluation>,
     seed: u64,
     id: String,
 ) -> PyResult<Py<PyAny>> {
+    let (final_params, final_fitness) = match final_evaluation {
+        Some(evaluation) => (Some(evaluation.params), Some(evaluation.fitness)),
+        None => (None, None),
+    };
     Py::new(
         py,
         TrainResult {
@@ -250,6 +270,8 @@ fn outcome_to_train_result(
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             fitness_history: outcome.fitness_history,
+            final_params,
+            final_fitness,
             seed,
             id,
         },
@@ -410,6 +432,53 @@ fn validate_initial_point(
     Ok(())
 }
 
+/// Check the `final_shots` of `train`/`qml.train` before anything runs
+/// (contract C-5), as `shots` is checked: `None`, or an integer from 1 to
+/// 4294967295, the shots a circuit takes. A Python `int` or anything with
+/// `__index__` (a NumPy integer) is an integer; a `bool`, a `float` (even
+/// `4096.0`), a `str` or anything else raises `ValueError`, before any backend
+/// or CUNQA allocation exists. Only the `TypeError` of `operator.index` means
+/// "not an integer"; any other exception, raised inside a custom `__index__`
+/// or a `KeyboardInterrupt`, propagates unchanged.
+fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u32>> {
+    let Some(value) = final_shots.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    let shown = || {
+        value
+            .repr()
+            .map_or_else(|_| "an unprintable value".to_string(), |r| r.to_string())
+    };
+    let not_positive = || {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "final_shots must be an integer >= 1, got {}",
+            shown()
+        ))
+    };
+    if value.is_instance_of::<PyBool>() {
+        return Err(not_positive());
+    }
+    let py = value.py();
+    let index = match PyModule::import(py, "operator")?.call_method1("index", (value,)) {
+        Ok(index) => index,
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+            return Err(not_positive());
+        }
+        Err(err) => return Err(err),
+    };
+    if index.lt(1)? {
+        return Err(not_positive());
+    }
+    match index.extract::<u32>() {
+        Ok(shots) => Ok(Some(shots)),
+        Err(_) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "final_shots must be at most {}, got {}",
+            u32::MAX,
+            shown()
+        ))),
+    }
+}
+
 /// Turn an optimizer result into the value the Python entry point returns.
 ///
 /// An oracle failure recorded in `errors` takes precedence over the optimizer's
@@ -437,8 +506,8 @@ fn finish_optimization(
     id: String,
     start: Instant,
 ) -> PyResult<Py<PyAny>> {
-    let outcome = match result {
-        Ok(outcome) => outcome.optimization,
+    let (outcome, final_evaluation) = match result {
+        Ok(outcome) => (outcome.optimization, outcome.final_evaluation),
         Err(OracleError::Evaluation(boxed)) => {
             // The oracle boxed an `EvaluationError` into the type-erased slot
             // (the scheduler crate is pyo3-free); recover it to re-raise with its
@@ -459,13 +528,18 @@ fn finish_optimization(
             ));
         }
     };
+    let final_fitness = final_evaluation
+        .as_ref()
+        .map_or(String::new(), |evaluation| {
+            format!(", final_fitness={}", evaluation.fitness)
+        });
     log::info!(
-        "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
+        "training run {id} completed: iterations_run={}, converged={}{final_fitness}, duration={:?}",
         outcome.iterations_run,
         outcome.converged,
         start.elapsed()
     );
-    outcome_to_train_result(py, outcome, seed, id)
+    outcome_to_train_result(py, outcome, final_evaluation, seed, id)
 }
 
 /// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` object into a pyo3-free
@@ -1475,7 +1549,8 @@ pub fn run_quantum_circuit<'py>(
 /// OS-entropy value. On the native backend the same seed also drives shot
 /// sampling, so a native-backend run reproduces exactly. Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
-/// `converged`, the effective `seed` and the effective `id`.
+/// `converged`, `fitness_history`, `final_params`, `final_fitness`, the
+/// effective `seed` and the effective `id`.
 ///
 /// The `id` kwarg is a human-readable *prefix*, not the literal effective id:
 /// a UUID v4 is appended for uniqueness (mirroring [`run_quantum_circuit`]),
@@ -1495,6 +1570,19 @@ pub fn run_quantum_circuit<'py>(
 /// its first run on it (restarts start elsewhere), with its `sigma0`
 /// unchanged; SPSA starts from it as θ₀ and centres its calibration batch on
 /// it. Without it every optimizer starts as before (contract C-5).
+///
+/// `final_shots` (default `None`) re-evaluates the best candidates once the
+/// optimizer has stopped, in one more batch with that many shots per circuit:
+/// `best_params` and, for DE, PSO and CMA-ES, the four best other distinct
+/// candidates they scored. `TrainResult.final_params` is the one with the
+/// highest re-evaluated value (`best_params` on a tie) and `final_fitness`
+/// that value; both are `None` without it, and `best_params`, `best_fitness`
+/// and `fitness_history` are the same with and without it, seeded runs
+/// included (contract C-5). It must be an integer `>= 1` (not a `bool` or a
+/// `float`), otherwise `ValueError` before anything runs. The batch is sent
+/// whatever stopped the optimizer, but not after an error or an interrupt; it
+/// is not part of the CUNQA walltime projection, and if it fails, `train`
+/// raises as for any batch.
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -1534,7 +1622,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1554,6 +1642,7 @@ pub fn train<'py>(
     options: Option<OptionsArg>,
     walltime: Option<String>,
     initial_point: Option<Vec<f64>>,
+    final_shots: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1577,6 +1666,7 @@ pub fn train<'py>(
         }
     }
     validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    let final_shots = validate_final_shots(final_shots.as_ref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
     if is_native_backend(backend) {
@@ -1664,7 +1754,7 @@ pub fn train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
-        final_shots: None,
+        final_shots,
         errors: errors.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
@@ -1794,6 +1884,11 @@ fn bind_feature_rows<'py>(
 /// given point of the ansatz weights, as in [`train`]: `dimensions` finite
 /// numbers, otherwise `ValueError` before anything runs.
 ///
+/// `final_shots` (keyword-only, default `None`) re-evaluates the best
+/// candidates with that many shots once the optimizer has stopped, as in
+/// [`train`]: every training circuit of each candidate runs with them, and
+/// `TrainResult.final_params` and `final_fitness` hold the result.
+///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
 /// finish, and an exception raised by `expectation_function` propagates as
@@ -1837,7 +1932,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1859,6 +1954,7 @@ pub fn qml_train<'py>(
     walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
     initial_point: Option<Vec<f64>>,
+    final_shots: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1891,6 +1987,7 @@ pub fn qml_train<'py>(
         )));
     }
     validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    let final_shots = validate_final_shots(final_shots.as_ref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
@@ -1988,7 +2085,7 @@ pub fn qml_train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
-        final_shots: None,
+        final_shots,
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
