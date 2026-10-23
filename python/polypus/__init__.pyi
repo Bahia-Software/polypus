@@ -18,10 +18,8 @@ from typing import (
     Any,
     Callable,
     ClassVar,
-    Iterable,
     Literal,
     Optional,
-    Protocol,
     Sequence,
     TypedDict,
     Union,
@@ -34,7 +32,11 @@ from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
 from . import circuits as circuits
+from . import external as external
 from . import qml as qml
+
+# What `External` runs (bindings/external.rs), typed in `polypus.external`.
+from .external import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -83,6 +85,7 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
+    "external",
 ]
 
 __version__: str
@@ -282,14 +285,6 @@ class Rotosolve:
         patience: int = 2,
         seed: Optional[int] = None,
     ) -> Rotosolve: ...
-
-# What `External` runs (bindings/external.rs): `ask()` returns the next batch
-# of rows (a 2-D NumPy array is fine), or `None` or an empty batch when done;
-# `tell` receives the batch as `list[list[float]]` and the fitness to maximise
-# as `list[float]`, and its return value is ignored.
-class _AskTell(Protocol):
-    def ask(self) -> Optional[Iterable[Iterable[float]]]: ...
-    def tell(self, candidates: list[list[float]], values: list[float], /) -> object: ...
 
 @final
 class External:
