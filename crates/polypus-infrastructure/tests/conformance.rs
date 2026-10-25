@@ -4,17 +4,21 @@
 //!
 //! ## What runs where — and what is a CI guard vs one-off evidence
 //!
-//! **Only `native_backend_conforms` is a continuous CI guard.** It is pure Rust, runs
-//! on every build, and must stay fully conformant. The other three tests are
-//! **`#[ignore]`d** and are *not* run by CI: they are the record of a **one-off manual
-//! run** performed for this phase (their findings, below, are frozen in
-//! `docs/backends.md`), not something re-verified on each build. Re-run them by hand
-//! (commands on each test) when touching the relevant backend.
+//! **Two tests are continuous CI guards.** `native_backend_conforms` is pure Rust, runs
+//! on every build, and must stay fully conformant. `local_aer_backend_conformance` is
+//! `#[ignore]`d because it needs Qiskit Aer and the `polypus_python` seal, which the
+//! Rust job does not install; CI's Python job runs it once the wheel is installed, with
+//! `POLYPUS_REQUIRE_AER=1` so that a missing Aer fails it instead of skipping it. The
+//! CUNQA and QMIO tests are **`#[ignore]`d** and are *not* run by CI: they are the
+//! record of a **one-off manual run** performed for this phase (their findings, below,
+//! are frozen in `docs/backends.md`), not something re-verified on each build. Re-run
+//! them by hand (commands on each test) when touching the relevant backend.
 //!
 //! - **Native** (pure Rust) — CI guard: runs the whole battery unconditionally and
 //!   must be fully conformant.
-//! - **Local (Aer)** — `#[ignore]`d manual run: needs Qiskit Aer + the `polypus_python`
-//!   seal, and is fragile off the main thread (run with `OMP_NUM_THREADS=1`).
+//! - **Local (Aer)** — CI guard in the Python job, `#[ignore]`d elsewhere: needs Qiskit
+//!   Aer + the `polypus_python` seal, and is fragile off the main thread (run with
+//!   `OMP_NUM_THREADS=1`).
 //! - **CUNQA** — `#[ignore]`d manual run: delegates 100% to the seal and needs a SLURM
 //!   allocation even to construct; self-skips when that environment is absent.
 //! - **QMIO** — `#[ignore]`d manual run (behind `--features qmio`): no simulator mode,
@@ -44,6 +48,10 @@ use std::sync::Arc;
 use polypus_backend::QuantumBackend;
 use polypus_backend_conformance::{Conformance, Fault, Status};
 use polypus_infrastructure::{LocalBackend, NativeStatevectorBackend};
+
+/// Set to `1` where the Aer battery must run (CI's Python job): without Aer it then
+/// fails instead of skipping.
+const REQUIRE_AER: &str = "POLYPUS_REQUIRE_AER";
 
 /// Whether Qiskit Aer and the `polypus_python` seal are importable, so the Local
 /// backend can actually run. Keeps a seal-less CI from failing on the Aer battery.
@@ -107,17 +115,22 @@ fn native_backend_conforms() {
 /// The printed report is the evidence. Finding LOCAL-1 (an empty batch raised through
 /// the seal) is fixed, so `empty_batch_returns_empty` passes too.
 ///
-/// `#[ignore]`d: it drives Qiskit Aer's C++/OpenMP engine from a cargo-test worker
-/// thread, which is fragile there (Aer segfaults when it fans experiments across
-/// cores off the main thread). Run it explicitly, pinned to one OpenMP thread:
+/// `#[ignore]`d: it needs Qiskit Aer and the installed `polypus_python` seal, and it
+/// drives Aer's C++/OpenMP engine from a cargo-test worker thread, which is fragile
+/// there (Aer segfaults when it fans experiments across cores off the main thread).
+/// Run it explicitly, pinned to one OpenMP thread, as CI's Python job does:
 /// ```text
 /// LD_LIBRARY_PATH=$CONDA_PREFIX/lib OMP_NUM_THREADS=1 \
 ///   cargo test -p polypus-infrastructure --test conformance local_aer -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "diagnostic: needs Qiskit Aer; run with OMP_NUM_THREADS=1 (see docs/backends.md)"]
+#[ignore = "needs Qiskit Aer and polypus_python; run with OMP_NUM_THREADS=1 (see docs/backends.md)"]
 fn local_aer_backend_conformance() {
     if !aer_available() {
+        assert!(
+            std::env::var_os(REQUIRE_AER).is_none_or(|v| v != "1"),
+            "qiskit_aer / polypus_python not importable, and {REQUIRE_AER}=1 requires them"
+        );
         eprintln!("skipping: qiskit_aer / polypus_python not importable in this environment");
         return;
     }
