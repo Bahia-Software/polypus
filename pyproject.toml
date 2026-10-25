@@ -119,3 +119,15 @@ markers = [
     "integration: tests that execute real quantum circuits (require AerSimulator)",
     "vqc: tests that train variational quantum circuits (slow)",
 ]
+
+# Coverage of the Python packages the wheel ships (sonar.yml). Tests run
+# against the installed wheel, so `coverage combine` maps site-packages back
+# to python/ and the XML report carries repo-relative paths.
+[tool.coverage.run]
+source_pkgs = ["polypus", "polypus_python"]
+parallel = true
+relative_files = true
+
+[tool.coverage.paths]
+polypus = ["python/polypus", "*/site-packages/polypus"]
+polypus_python = ["python/polypus_python", "*/site-packages/polypus_python"]

@@ -49,3 +49,11 @@ docs/IMPLEMENTATION_PROMPT.md
 # Internal notes (also blocked by .github/scripts/hygiene.py).
 CLAUDE_*.md
 AI_GUIDELINES*
+
+# Coverage and analysis reports (sonar.yml)
+.coverage
+.coverage.*
+coverage.xml
+lcov.info
+clippy.json
+.scannerwork/
