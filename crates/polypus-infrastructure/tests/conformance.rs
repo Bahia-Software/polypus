@@ -22,7 +22,9 @@
 //! - **CUNQA** — `#[ignore]`d manual run: delegates 100% to the seal and needs a SLURM
 //!   allocation even to construct; self-skips when that environment is absent.
 //! - **QMIO** — `#[ignore]`d manual run (behind `--features qmio`): no simulator mode,
-//!   so only its *error classification* runs, against an unreachable endpoint.
+//!   so only its *error classification* runs, against an unreachable endpoint. It is in
+//!   `qmio_conformance.rs`, alone in its binary, because it sets the `QMIO_*` tuning
+//!   variables in the process environment.
 //!
 //! ## Findings (documented in `docs/backends.md` §"Conformance of the built-in backends")
 //!
@@ -218,47 +220,4 @@ fn cunqa_backend_conformance_is_environment_gated() {
             );
         }
     }
-}
-
-/// QMIO has no simulator mode, so only its error classification is exercised — against
-/// an **unreachable endpoint**, with a short timeout so the test is fast. Documents
-/// that a `Foreign` circuit is rejected as `UnsupportedCircuit` (finding QMIO-1) and that a
-/// wire timeout is a clean `External` error (QMIO exhausts its own retries,
-/// so `Unresponsive` is not applicable and is not supplied).
-#[cfg(feature = "qmio")]
-#[test]
-#[ignore = "diagnostic: builds the qmio feature and attempts a socket; run explicitly (see docs/backends.md)"]
-fn qmio_error_classification() {
-    use polypus_infrastructure::qmio::{QmioBackend, QmioProgramFormat};
-
-    // Fast-fail: short receive timeout, no retries, so an unreachable endpoint returns
-    // promptly instead of retrying with backoff.
-    std::env::set_var("QMIO_RECV_TIMEOUT_MS", "150");
-    std::env::set_var("QMIO_MAX_RETRIES", "0");
-    std::env::set_var("QMIO_RETRY_BACKOFF_MS", "0");
-
-    let make = || {
-        QmioBackend::new(
-            "tcp://127.0.0.1:59999".to_string(), // nothing is listening here
-            QmioProgramFormat::OpenQasm,
-            0,
-            None,
-            "binary_count".to_string(),
-        )
-        .map(|b| Arc::new(b) as Arc<dyn QuantumBackend>)
-        .map_err(|e| e.to_string())
-    };
-
-    let report = Conformance::new("qmio(unreachable)", make)
-        // A wire failure is a clean, definitive provider error → External.
-        .fault(Fault::CleanError, make)
-        // Deliberately NO Unresponsive factory: QMIO exhausts its own retries and then
-        // reports a definitive External, so Unresponsive is not applicable.
-        .run_error_classification();
-    println!("\n{report}");
-
-    // QMIO does classify its wire failure as a clean (External) error.
-    assert_status(&report, "clean_provider_error_is_classified", true);
-    // Finding QMIO-1 (fixed): a Foreign circuit is `UnsupportedCircuit`, not `External`.
-    assert_status(&report, "foreign_circuit_rejected_as_unsupported", true);
 }
