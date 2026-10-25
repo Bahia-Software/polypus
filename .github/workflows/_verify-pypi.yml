@@ -2,8 +2,9 @@
 # someone with NO relation to CESGA: a stock `python:*` container (Debian) has no
 # Rust toolchain, no ZeroMQ/libzmq and none of the CESGA environment. We install
 # straight from PyPI, assert the dependency closure never pulls ZeroMQ or CUNQA
-# (i.e. the qmio/QMIO feature stayed out of the default build), and run a real
-# README example end to end.
+# (i.e. the qmio/QMIO feature stayed out of the default build), and run the
+# README Bell example end to end: on the native backend, as the README
+# quickstart does, and separately on Aer.
 #
 # Called by:
 #   • release.yml         — after publishing, with the exact released version.
@@ -29,12 +30,15 @@ jobs:
     name: wheel (py${{ matrix.python }})
     runs-on: ubuntu-latest
     container: python:${{ matrix.python }}-slim
+    # Leaves room for the ~20 min of install retries while a release propagates.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - name: Install from PyPI (wheels only) and run the README Bell example
+      - name: Install from PyPI (wheels only)
+        id: install
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -53,19 +57,46 @@ jobs:
           done
           [ "$ok" = 1 ]
           pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
+          pip list | grep -i -E '^(qiskit|qiskit-aer|numpy|scipy) '
           python - <<'PY'
           import importlib.util as u
           assert u.find_spec("zmq") is None, "pyzmq leaked into the install"
           assert u.find_spec("cunqa") is None, "cunqa leaked into the install"
-          import polypus
-          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-          counts = result.counts[0]
-          print("counts:", counts)
-          assert sum(counts.values()) == 1000, counts
-          assert set(counts) <= {"00", "11"} and {"00", "11"} <= set(counts), counts
-          print("wheel + Bell example OK")
           PY
+          # The Bell check the steps below run, on one backend each.
+          cat > "$RUNNER_TEMP/bell.py" <<'PY'
+          import sys
+
+          import polypus
+
+          backend = sys.argv[1]
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local", backend=backend)
+          counts = result.counts[0]
+          print(backend, "counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) == {"00", "11"}, counts
+          if backend == "polypus":
+              # The README quickstart runs here: it must not need Aer (#392).
+              loaded = [m for m in ("qiskit_aer", "polypus_python") if m in sys.modules]
+              assert not loaded, f"the native backend imported {loaded}"
+          else:
+              assert "qiskit_aer" in sys.modules, "the Aer run did not import qiskit_aer"
+          print(backend, "Bell example OK")
+          PY
+      - name: Run the README Bell example on the native backend
+        run: python "$RUNNER_TEMP/bell.py" polypus
+      - name: Run the Bell example on Aer
+        id: aer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python "$RUNNER_TEMP/bell.py" aer
+      # Diagnosis only, the job stays red: tells whether the documented static
+      # TLS workaround (docs/guide/running.md#troubleshooting) fixes the Aer run.
+      - name: Retry Aer with GLIBC_TUNABLES (diagnosis)
+        if: ${{ !cancelled() && steps.aer.outcome == 'failure' }}
+        env:
+          GLIBC_TUNABLES: glibc.rtld.optional_static_tls=16384
+        run: python "$RUNNER_TEMP/bell.py" aer
 
   # sdist path: what Spack and EasyBuild take. They provide a compiler + Rust
   # toolchain (added here via rustup on a full `python:3.11` image, which already
@@ -76,13 +107,17 @@ jobs:
     name: sdist (Spack/EasyBuild path)
     runs-on: ubuntu-latest
     container: python:3.11
+    # Leaves room for the ~20 min of install retries while a release
+    # propagates, plus the build from source.
+    timeout-minutes: 45
     steps:
       - name: Install Rust toolchain (what Spack/EasyBuild provide)
         run: |
           set -eux
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build from sdist and run the README Bell example
+      - name: Build from sdist
+        id: install
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -97,16 +132,41 @@ jobs:
           done
           [ "$ok" = 1 ]
           pip show polypus-quantum | grep -E '^(Name|Version|Requires):'
+          pip list | grep -i -E '^(qiskit|qiskit-aer|numpy|scipy) '
           python - <<'PY'
           import importlib.util as u
           assert u.find_spec("zmq") is None, "pyzmq leaked into the sdist build"
           assert u.find_spec("cunqa") is None, "cunqa leaked into the sdist build"
-          import polypus
-          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
-          counts = result.counts[0]
-          print("counts:", counts)
-          assert sum(counts.values()) == 1000, counts
-          assert set(counts) <= {"00", "11"} and {"00", "11"} <= set(counts), counts
-          print("sdist build + Bell example OK")
           PY
+          # Same Bell check as the wheel job.
+          cat > "$RUNNER_TEMP/bell.py" <<'PY'
+          import sys
+
+          import polypus
+
+          backend = sys.argv[1]
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local", backend=backend)
+          counts = result.counts[0]
+          print(backend, "counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) == {"00", "11"}, counts
+          if backend == "polypus":
+              # The README quickstart runs here: it must not need Aer (#392).
+              loaded = [m for m in ("qiskit_aer", "polypus_python") if m in sys.modules]
+              assert not loaded, f"the native backend imported {loaded}"
+          else:
+              assert "qiskit_aer" in sys.modules, "the Aer run did not import qiskit_aer"
+          print(backend, "Bell example OK")
+          PY
+      - name: Run the README Bell example on the native backend
+        run: python "$RUNNER_TEMP/bell.py" polypus
+      - name: Run the Bell example on Aer
+        id: aer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python "$RUNNER_TEMP/bell.py" aer
+      - name: Retry Aer with GLIBC_TUNABLES (diagnosis)
+        if: ${{ !cancelled() && steps.aer.outcome == 'failure' }}
+        env:
+          GLIBC_TUNABLES: glibc.rtld.optional_static_tls=16384
+        run: python "$RUNNER_TEMP/bell.py" aer
