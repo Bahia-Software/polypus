@@ -132,6 +132,11 @@ Changes on `main` since 0.7.2.
   to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
   static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
   Troubleshooting section for the error (#392).
+- The `polypus-physics` tests cover the `POLYPUS_ENDF_DATA_DIR` override
+  without setting the variable, which raced the tests that read it and cache
+  what they read, and write their files to per-process scratch directories
+  instead of fixed paths in the temp directory. The crate no longer contains
+  `unsafe` (#420).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
