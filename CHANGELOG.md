@@ -132,6 +132,14 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
 - The README quickstart runs on the native backend (`backend="polypus"`), so it
   no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
   to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
