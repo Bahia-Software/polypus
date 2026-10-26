@@ -5,7 +5,10 @@ use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::shade;
-use crate::util::{argmax, check_oracle_len, fitness_stagnated, rows_to_candidates};
+use crate::util::{
+    argmax, check_initial_point, check_oracle_len, fitness_stagnated, rows_to_candidates,
+    wrap_angle,
+};
 use ndarray::{Array1, Array2};
 use rand::{seq::IndexedRandom, Rng, RngExt};
 use std::f64::consts::PI;
@@ -146,7 +149,8 @@ impl FromStr for DeStrategy {
 /// # Preconditions
 ///
 /// `population_size >= 4` — each trial mutation samples 3 *distinct* other
-/// members of the population.
+/// members of the population. `initial_point`, when given, holds `dimensions`
+/// finite values.
 pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
@@ -173,6 +177,12 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional starting point, one angle per dimension, all finite. Every
+    /// strategy draws its initial population as usual and then replaces the
+    /// first member with this point wrapped into `[0, 2π)`, so it is the first
+    /// candidate of the initial batch while the other members, and the RNG
+    /// stream, are the same as without it. `None` draws the whole population.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 impl AlgorithmDifferentialEvolution {
@@ -190,6 +200,29 @@ impl AlgorithmDifferentialEvolution {
     /// *distinct* other members, so at least 4 members are required. Every
     /// strategy shares it; 4 is also the size L-SHADE shrinks towards.
     pub(crate) const MIN_POPULATION: usize = 4;
+
+    /// Check the preconditions of [`AlgorithmDifferentialEvolutionArgs`] that
+    /// every strategy checks before any RNG draw or oracle call, in the same
+    /// order, without running anything: `population_size` at least 4, then
+    /// `initial_point` (`dimensions` finite values). `train` and `qml.train`
+    /// call it before any backend exists.
+    pub fn check_preconditions(
+        population_size: u32,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        // Sampling 3 distinct other members needs `popsize >= 4`: rejected
+        // with a typed error instead of the out-of-bounds `sel[2]` panic that
+        // fired one line into the trial loop.
+        let popsize = population_size as usize;
+        if popsize < Self::MIN_POPULATION {
+            return Err(OptimizerError::PopulationTooSmall {
+                got: popsize,
+                min: Self::MIN_POPULATION,
+            });
+        }
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
 
     /// Run Differential Evolution with the given `strategy`.
     ///
@@ -228,6 +261,7 @@ impl AlgorithmDifferentialEvolution {
     ///             tolerance: 1e-6,
     ///             patience: 20,
     ///             seed: Some(7),
+    ///             initial_point: None,
     ///         },
     ///     )
     ///     .expect("valid arguments optimize successfully");
@@ -262,6 +296,7 @@ impl AlgorithmDifferentialEvolution {
             tolerance,
             patience,
             seed: _,
+            initial_point,
         } = args;
 
         let popsize = population_size as usize;
@@ -269,22 +304,22 @@ impl AlgorithmDifferentialEvolution {
         let dims = dimensions as usize;
         let patience = patience as usize;
 
-        // Precondition (documented on the struct): sampling 3 distinct other
-        // members needs `popsize >= 4`. Reject *before* any RNG draw or oracle
-        // call so the caller gets a typed error instead of the out-of-bounds
-        // `sel[2]` panic that fired one line into the trial loop.
-        if popsize < Self::MIN_POPULATION {
-            return Err(OptimizerError::PopulationTooSmall {
-                got: popsize,
-                min: Self::MIN_POPULATION,
-            });
-        }
+        // Preconditions (documented on the struct), before any RNG draw or
+        // oracle call.
+        Self::check_preconditions(population_size, dimensions, initial_point.as_deref())?;
 
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));
         for mut row in pop.outer_iter_mut() {
             for e in row.iter_mut() {
                 *e = rng.random_range(0.0..2.0 * PI);
+            }
+        }
+        // The caller's point replaces the first member once every member is
+        // drawn, so the rest of the population and the RNG stream are unchanged.
+        if let (Some(point), Some(mut first)) = (&initial_point, pop.outer_iter_mut().next()) {
+            for (e, &x) in first.iter_mut().zip(point) {
+                *e = wrap_angle(x);
             }
         }
 

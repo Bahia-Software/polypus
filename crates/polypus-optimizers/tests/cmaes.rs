@@ -102,6 +102,7 @@ fn setup(f: Fitness, dimensions: u32, generations: u32, seed: u64) -> (Algorithm
         patience: 30,
         restarts: 0,
         seed: Some(seed),
+        initial_point: None,
     };
     (args, log)
 }
@@ -483,6 +484,7 @@ fn trajectory(
         patience: 10,
         restarts,
         seed: Some(9),
+        initial_point: None,
     });
     let candidates = log
         .lock()
@@ -608,6 +610,7 @@ fn constant_args(value: f64, restarts: u32) -> AlgorithmCmaEsArgs {
         patience: 10,
         restarts,
         seed: Some(11),
+        initial_point: None,
     }
 }
 
@@ -648,6 +651,7 @@ fn nan_and_infinite_candidates_rank_below_finite_ones() {
         patience: 30,
         restarts: 0,
         seed: Some(12),
+        initial_point: None,
     });
     // The NaN and -∞ candidates never become the best, and the finite ones
     // still drive the search to the sphere's optimum.
@@ -691,6 +695,7 @@ fn short_oracle_returns_an_error_not_a_panic() {
         patience: 2,
         restarts: 2,
         seed: Some(13),
+        initial_point: None,
     };
     // First batch: 4 + ⌊3 ln 4⌋ = 8 candidates.
     assert_eq!(
@@ -734,6 +739,7 @@ fn invalid_configuration_is_rejected_before_any_oracle_call() {
         patience: 5,
         restarts: 0,
         seed: Some(14),
+        initial_point: None,
     };
     type Tweak = fn(AlgorithmCmaEsArgs) -> AlgorithmCmaEsArgs;
     let cases: [(&str, Tweak); 12] = [
@@ -842,6 +848,7 @@ fn error_messages_name_the_rule() {
         patience: 5,
         restarts: 0,
         seed: None,
+        initial_point: None,
     };
     assert_eq!(
         message(AlgorithmCmaEsArgs {

@@ -83,6 +83,49 @@ pub enum Method {
     Cmaes(CmaesConfig),
 }
 
+impl Method {
+    /// Check every precondition the optimizer checks before any RNG draw or
+    /// oracle call, in its order, without running anything: its configuration
+    /// first, then `initial_point` (contract C-5). Each arm calls the
+    /// optimizer's own `check_preconditions`, so the error is the one
+    /// [`dispatch_optimizer`] would return as [`OracleError::Config`] for the
+    /// same arguments. `train` and `qml.train` call it before any backend, and
+    /// so any CUNQA allocation, exists.
+    pub fn check_preconditions(
+        &self,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        match self {
+            Method::De(cfg) => AlgorithmDifferentialEvolution::check_preconditions(
+                cfg.population_size,
+                dimensions,
+                initial_point,
+            ),
+            Method::Pso(cfg) => {
+                AlgorithmPSO::check_preconditions(dimensions, cfg.bounds, initial_point)
+            }
+            Method::Qng(cfg, _) => AlgorithmQNG::check_preconditions(
+                cfg.max_iters,
+                cfg.learning_rate,
+                cfg.finite_difference_step,
+                cfg.bounds,
+                cfg.tikhonov_reg,
+                dimensions,
+                initial_point,
+            ),
+            Method::Cmaes(cfg) => AlgorithmCmaEs::check_preconditions(
+                dimensions,
+                cfg.population_size,
+                cfg.generations,
+                cfg.sigma0,
+                cfg.restarts,
+                initial_point,
+            ),
+        }
+    }
+}
+
 /// A training run's failure, in the order the binding must surface it.
 ///
 /// `Evaluation` (an oracle failure recorded mid-run in the shared slot) takes
@@ -192,12 +235,17 @@ fn describe(err: &BoxedError) -> String {
 /// and the oracle re-acquires the GIL internally where it must. An oracle failure
 /// recorded in `errors` during the run is returned in preference to the
 /// optimizer's own error (see [`OracleError`]).
+///
+/// `initial_point` is handed to whichever optimizer `method` names (each
+/// optimizer's `initial_point` field says how it starts from it); `None` starts
+/// every optimizer as before.
 pub fn dispatch_optimizer(
     method: Method,
     oracle: Box<dyn EvaluationOracle>,
     dimensions: u32,
     errors: &OracleErrorSlot,
     seed: u64,
+    initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OracleError> {
     let result = match method {
         Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
@@ -210,6 +258,7 @@ pub fn dispatch_optimizer(
                 tolerance: cfg.tolerance,
                 patience: cfg.patience,
                 seed: Some(seed),
+                initial_point,
             },
         ),
         Method::Pso(cfg) => AlgorithmPSO.optimize(AlgorithmPSOArgs {
@@ -223,6 +272,7 @@ pub fn dispatch_optimizer(
             social_weight: cfg.social_weight,
             tolerance: cfg.tolerance,
             seed: Some(seed),
+            initial_point,
         }),
         Method::Qng(cfg, variance_oracle) => AlgorithmQNG.optimize(AlgorithmQNGArgs {
             oracle,
@@ -234,6 +284,7 @@ pub fn dispatch_optimizer(
             variance_oracle,
             tikhonov_reg: cfg.tikhonov_reg,
             seed: Some(seed),
+            initial_point,
         }),
         Method::Cmaes(cfg) => AlgorithmCmaEs.optimize(AlgorithmCmaEsArgs {
             oracle,
@@ -245,6 +296,7 @@ pub fn dispatch_optimizer(
             patience: cfg.patience,
             restarts: cfg.restarts,
             seed: Some(seed),
+            initial_point,
         }),
     };
 
@@ -483,11 +535,17 @@ mod tests {
     fn dispatch_de(strategy: DeStrategy) -> (OptimizationOutcome, Vec<usize>) {
         let sizes = Arc::new(Mutex::new(Vec::new()));
         let oracle = Box::new(RecordingQuadratic(Arc::clone(&sizes)));
-        let outcome =
-            match dispatch_optimizer(de_method(strategy), oracle, 3, &OracleErrorSlot::new(), 9) {
-                Ok(outcome) => outcome,
-                Err(_) => panic!("a valid DE configuration must run"),
-            };
+        let outcome = match dispatch_optimizer(
+            de_method(strategy),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            9,
+            None,
+        ) {
+            Ok(outcome) => outcome,
+            Err(_) => panic!("a valid DE configuration must run"),
+        };
         let sizes = sizes.lock().unwrap_or_else(|p| p.into_inner()).clone();
         (outcome, sizes)
     }
@@ -506,6 +564,7 @@ mod tests {
                 tolerance: 0.0,
                 patience: 100,
                 seed: Some(9),
+                initial_point: None,
             })
             .expect("a valid DE configuration runs");
         assert_eq!(dispatched, direct);
@@ -521,5 +580,269 @@ mod tests {
         assert_eq!(lshade.len(), outcome.iterations_run + 1);
         assert_eq!(lshade[0], 12);
         assert!(*lshade.last().unwrap() < 12, "{lshade:?}");
+    }
+
+    /// Scores `-Σ (xᵢ − 1)²` and records the first candidate of the first batch.
+    struct FirstCandidate(Arc<Mutex<Option<Vec<f64>>>>);
+    impl EvaluationOracle for FirstCandidate {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            let mut first = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            if first.is_none() {
+                *first = candidates.first().cloned();
+            }
+            candidates
+                .iter()
+                .map(|c| -c.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>())
+                .collect()
+        }
+    }
+
+    /// Constant QFIM diagonal for the QNG case.
+    struct ConstVariance;
+    impl VarianceOracle for ConstVariance {
+        fn variance(&self, _theta: &[f64], _param_index: usize) -> f64 {
+            1.0
+        }
+    }
+
+    /// Dispatch hands `initial_point` to every `Method`: it is the first
+    /// candidate of the first batch (DE, PSO), the centre of the first
+    /// gradient stencil (QNG, whose first candidate is θ₀ + h·e₀) and the
+    /// first mean (CMA-ES, whose candidates all sit on it with a tiny σ₀).
+    #[test]
+    fn initial_point_reaches_every_optimizer() {
+        let point = vec![0.5, 2.0, 1.25];
+        let step = 0.1;
+        let mut methods = vec![
+            (
+                "PSO",
+                Method::Pso(PsoConfig {
+                    generations: 2,
+                    population_size: 6,
+                    bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+                    inertia_weight: 0.5,
+                    cognitive_weight: 1.0,
+                    social_weight: 1.0,
+                    tolerance: 0.0,
+                }),
+            ),
+            (
+                "QNG",
+                Method::Qng(
+                    QngConfig {
+                        max_iters: 2,
+                        learning_rate: 0.1,
+                        finite_difference_step: step,
+                        bounds: (-std::f64::consts::PI, std::f64::consts::PI),
+                        tikhonov_reg: 0.05,
+                    },
+                    Box::new(ConstVariance),
+                ),
+            ),
+            (
+                "CMA-ES",
+                Method::Cmaes(CmaesConfig {
+                    generations: 1,
+                    population_size: None,
+                    sigma0: 1e-9,
+                    tolerance: 0.0,
+                    patience: 10,
+                    restarts: 0,
+                }),
+            ),
+        ];
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            methods.push((strategy.as_str(), de_method(strategy)));
+        }
+        for (name, method) in methods {
+            let first = Arc::new(Mutex::new(None));
+            let oracle = Box::new(FirstCandidate(Arc::clone(&first)));
+            let errors = OracleErrorSlot::new();
+            if dispatch_optimizer(method, oracle, 3, &errors, 5, Some(point.clone())).is_err() {
+                panic!("{name}: a valid configuration must run");
+            }
+            let first = first
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .expect("the oracle was called");
+            let expected = match name {
+                "QNG" => vec![point[0] + step, point[1], point[2]],
+                _ => point.clone(),
+            };
+            let tolerance = if name == "CMA-ES" { 1e-6 } else { 0.0 };
+            assert_eq!(first.len(), expected.len(), "{name}");
+            for (x, want) in first.iter().zip(&expected) {
+                assert!(
+                    (x - want).abs() <= tolerance,
+                    "{name}: {first:?} vs {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// `Method::check_preconditions` returns exactly what dispatch returns as
+    /// its configuration error, in the same order (the configuration before
+    /// `initial_point`), and passes whatever dispatch runs.
+    #[test]
+    fn check_preconditions_agrees_with_dispatch() {
+        use std::f64::consts::PI;
+        let pso = |bounds| {
+            Method::Pso(PsoConfig {
+                generations: 2,
+                population_size: 6,
+                bounds,
+                inertia_weight: 0.5,
+                cognitive_weight: 1.0,
+                social_weight: 1.0,
+                tolerance: 0.0,
+            })
+        };
+        let qng = |max_iters, bounds| {
+            Method::Qng(
+                QngConfig {
+                    max_iters,
+                    learning_rate: 0.1,
+                    finite_difference_step: 0.1,
+                    bounds,
+                    tikhonov_reg: 0.05,
+                },
+                Box::new(ConstVariance),
+            )
+        };
+        let cmaes = |sigma0| {
+            Method::Cmaes(CmaesConfig {
+                generations: 2,
+                population_size: None,
+                sigma0,
+                tolerance: 0.0,
+                patience: 10,
+                restarts: 0,
+            })
+        };
+        let de = |strategy, population_size| {
+            Method::De(DeConfig {
+                generations: 2,
+                population_size,
+                tolerance: 0.0,
+                patience: 10,
+                strategy,
+            })
+        };
+        let short = Some(vec![0.5]);
+        let outside = Some(vec![0.5, 4.0]);
+        // A name, a way to build the method (it is not `Clone`) and a point.
+        type Case = (&'static str, Box<dyn Fn() -> Method>, Option<Vec<f64>>);
+        let mut cases: Vec<Case> = vec![
+            (
+                "PSO, empty bounds",
+                Box::new(move || pso((1.0, 1.0))),
+                short.clone(),
+            ),
+            (
+                "PSO, short point",
+                Box::new(move || pso((-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "PSO, point outside",
+                Box::new(move || pso((-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "PSO, valid",
+                Box::new(move || pso((-PI, PI))),
+                Some(vec![0.5, 1.0]),
+            ),
+            (
+                "QNG, max_iters 0",
+                Box::new(move || qng(0, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, empty bounds",
+                Box::new(move || qng(1, (1.0, 0.0))),
+                short.clone(),
+            ),
+            (
+                "QNG, short point",
+                Box::new(move || qng(1, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, point outside",
+                Box::new(move || qng(1, (-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "CMA-ES, sigma0 0",
+                Box::new(move || cmaes(0.0)),
+                short.clone(),
+            ),
+            (
+                "CMA-ES, NaN",
+                Box::new(move || cmaes(0.3)),
+                Some(vec![0.5, f64::NAN]),
+            ),
+            ("CMA-ES, no point", Box::new(move || cmaes(0.3)), None),
+        ];
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            cases.push((
+                "DE, population 2",
+                Box::new(move || de(strategy, 2)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, short point",
+                Box::new(move || de(strategy, 6)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, valid",
+                Box::new(move || de(strategy, 6)),
+                outside.clone(),
+            ));
+        }
+        for (name, method, point) in cases {
+            let checked = method().check_preconditions(2, point.as_deref());
+            let oracle = Box::new(FirstCandidate(Arc::default()));
+            let dispatched =
+                dispatch_optimizer(method(), oracle, 2, &OracleErrorSlot::new(), 5, point);
+            match (checked, dispatched) {
+                (Ok(()), Ok(_)) => {}
+                (Err(checked), Err(OracleError::Config(dispatched))) => {
+                    assert_eq!(checked, dispatched, "{name}");
+                }
+                (checked, dispatched) => panic!(
+                    "{name}: check_preconditions gave {checked:?}, dispatch {}",
+                    match dispatched {
+                        Ok(_) => "Ok".to_string(),
+                        Err(OracleError::Config(e)) => format!("Config({e})"),
+                        Err(OracleError::Evaluation(e)) => format!("Evaluation({e})"),
+                    }
+                ),
+            }
+        }
+    }
+
+    /// A point of the wrong length is the optimizer's configuration error.
+    #[test]
+    fn a_wrong_initial_point_is_a_config_error() {
+        let oracle = Box::new(RecordingQuadratic(Arc::default()));
+        let result = dispatch_optimizer(
+            de_method(DeStrategy::Rand1Bin),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            5,
+            Some(vec![0.5]),
+        );
+        assert!(matches!(
+            result,
+            Err(OracleError::Config(OptimizerError::InvalidConfig {
+                parameter: "initial_point",
+                ..
+            }))
+        ));
     }
 }

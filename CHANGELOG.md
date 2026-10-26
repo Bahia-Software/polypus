@@ -56,6 +56,18 @@ Changes on `main` since 0.7.2.
   DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
   (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
+- `initial_point` in `train` and `qml.train` (keyword-only in `qml.train`)
+  starts the search from a given point, such as an earlier run's
+  `best_params`: `dimensions` finite numbers as a list, tuple or NumPy array,
+  otherwise `ValueError` before anything runs. DE (every `strategy`)
+  evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
+  population; PSO as its first particle, which must lie within `bounds`; QNG
+  starts from it; CMA-ES centres its first run on it and keeps its `sigma0`,
+  so a refinement wants a smaller one. Without it every optimizer behaves as
+  before, seeded runs included (#395). In Rust, each optimizer's
+  `check_preconditions` checks its configuration and then the point without
+  running anything, and `polypus_orchestration::Method::check_preconditions`
+  calls the one the method names.
 
 ### Changed
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
@@ -120,6 +132,16 @@ Changes on `main` since 0.7.2.
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- `train` and `qml.train` check the optimizer's configuration (a DE
+  `population_size` below 4, empty PSO or QNG `bounds`, an invalid CMA-ES
+  `sigma0`, ...) before any backend or CUNQA allocation exists, and before
+  `initial_point`, as the optimizer does. These `ValueError`s used to come
+  once the backend existed (#395).
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs`,
+  `AlgorithmPSOArgs`, `AlgorithmQNGArgs` and `AlgorithmCmaEsArgs` have an
+  `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
+  `initial_point` as its last argument and `TrainFlow` has an `initial_point`
+  field; `None` keeps the previous behaviour (#395).
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist

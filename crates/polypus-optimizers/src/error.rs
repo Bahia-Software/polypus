@@ -56,16 +56,17 @@ pub enum OptimizerError {
         /// Number of fitness values the oracle actually returned.
         got: usize,
     },
-    /// A scalar configuration value is outside its valid domain: QNG's
+    /// A configuration value is outside its valid domain: QNG's
     /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
     /// report `-inf`), `finite_difference_step` (must be finite and `> 0`),
     /// `tikhonov_reg` (must be finite and `>= 0`) or `learning_rate` (must be
     /// finite); or CMA-ES's `dimensions` (≥ 1), `generations` (≥ 1),
     /// `sigma0` (finite, in `(0, 2π]`), `population_size` (≥ 2 when given) or
-    /// `restarts` (the largest population must fit in a `u32`). Detected
-    /// before any RNG draw or oracle call, so a bad config maps to a
-    /// `PyValueError` at the seam rather than producing a `NaN`/`inf` result.
-    /// (Empty or non-finite `bounds` keep their own
+    /// `restarts` (the largest population must fit in a `u32`); or any
+    /// optimizer's `initial_point` (`dimensions` finite values, within
+    /// `bounds` for PSO). Detected before any RNG draw or oracle call, so a
+    /// bad config maps to a `PyValueError` at the seam rather than producing a
+    /// `NaN`/`inf` result. (Empty or non-finite `bounds` keep their own
     /// [`InvalidBounds`](OptimizerError::InvalidBounds) variant.)
     InvalidConfig {
         /// The offending parameter's name.

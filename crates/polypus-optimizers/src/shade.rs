@@ -10,7 +10,8 @@
 //! turned into a maximiser and fitted to the parts every DE strategy shares:
 //!
 //! - angles start uniform in `[0, 2π)`, drawn exactly as DE/rand/1/bin draws
-//!   them, so a given seed starts every strategy from the same population;
+//!   them, so a given seed starts every strategy from the same population,
+//!   whose first member an `initial_point` replaces as in DE/rand/1/bin;
 //! - a mutant coordinate is wrapped back into `[0, 2π)` with `rem_euclid`, as
 //!   DE/rand/1/bin does, instead of the papers' bound repair: the parameters
 //!   are angles, so the objective is periodic;
@@ -33,7 +34,7 @@ use crate::differential_evolution::{
 };
 use crate::error::OptimizerError;
 use crate::outcome::OptimizationOutcome;
-use crate::util::{argmax, check_oracle_len, fitness_stagnated};
+use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle};
 use rand::{Rng, RngExt};
 use std::f64::consts::{PI, TAU};
 
@@ -354,26 +355,30 @@ pub(crate) fn run_with_rng<R: Rng>(
         tolerance,
         patience,
         seed: _,
+        initial_point,
     } = args;
 
     let initial = population_size as usize;
     let dims = dimensions as usize;
     let patience = patience as usize;
 
-    // Same precondition as DE/rand/1/bin, checked before any RNG draw or oracle
-    // call. It also covers what current-to-pbest/1 needs: a donor other than the
-    // parent and a second one other than both.
-    if initial < MIN_POPULATION {
-        return Err(OptimizerError::PopulationTooSmall {
-            got: initial,
-            min: MIN_POPULATION,
-        });
-    }
+    // The same preconditions as DE/rand/1/bin, checked before any RNG draw or
+    // oracle call. The population bound also covers what current-to-pbest/1
+    // needs: a donor other than the parent and a second one other than both.
+    AlgorithmDifferentialEvolution::check_preconditions(
+        population_size,
+        dimensions,
+        initial_point.as_deref(),
+    )?;
 
-    // The same draws, in the same order, as DE/rand/1/bin's initialisation.
+    // The same draws, in the same order, as DE/rand/1/bin's initialisation, and
+    // the same replacement of the first member by the caller's point.
     let mut population: Vec<Vec<f64>> = (0..initial)
         .map(|_| (0..dims).map(|_| rng.random_range(0.0..TAU)).collect())
         .collect();
+    if let (Some(point), Some(first)) = (initial_point, population.first_mut()) {
+        *first = point.into_iter().map(wrap_angle).collect();
+    }
     let mut fitness = oracle.evaluate_batch(&population);
     check_oracle_len(population.len(), fitness.len())?;
     let mut schedule = Schedule::new(variant, initial, generations);
