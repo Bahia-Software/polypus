@@ -13,6 +13,17 @@
 //! | [`monte_carlo`] | Classical MC transport engine |
 //! | [`hamiltonians`] | Quantum Hamiltonians as `PauliSum` (data only) |
 //!
+//! ## ENDF-6 photon data
+//!
+//! [`medium::compound::CompoundMedium`] and
+//! [`interactions::photon::mass_attenuation_coefficients`] read the EPDL2023
+//! photon cross-sections (`ZA{Z:03}000.txt`, one file per element) at runtime
+//! from a local directory. The data is not part of the crate and is never
+//! downloaded. The directory is `POLYPUS_ENDF_DATA_DIR` if set, otherwise
+//! `reference-data/endf-epdl-2023/` of the Polypus repository, which holds the
+//! files and their provenance. Outside a checkout, point
+//! `POLYPUS_ENDF_DATA_DIR` at a copy of that folder.
+//!
 //! ## Classical Monte Carlo — 1.25 MeV photon in water
 //!
 //! ```
