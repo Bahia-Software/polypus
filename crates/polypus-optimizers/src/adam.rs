@@ -197,6 +197,33 @@ impl AlgorithmAdam {
         )
     }
 
+    /// Check the preconditions of [`AlgorithmAdamArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: the configuration
+    /// listed on [`AlgorithmAdamArgs`], `bounds`, then `initial_point`
+    /// (`dimensions` finite values, inside `bounds` or not). `train` and
+    /// `qml.train` call it before any backend exists.
+    pub fn check_preconditions(
+        max_iters: u32,
+        learning_rate: f64,
+        beta1: f64,
+        beta2: f64,
+        epsilon: f64,
+        bounds: (f64, f64),
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        validate(max_iters, dimensions, learning_rate, beta1, beta2, epsilon)?;
+        let (lb, ub) = bounds;
+        // The same check as QNG's: `lb >= ub` is empty, and a non-finite bound
+        // (`NaN` fails every comparison, an infinity would make the sampler panic)
+        // cannot be drawn from.
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
+            return Err(OptimizerError::InvalidBounds { lb, ub });
+        }
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     fn run_with_rng<R: Rng>(
         args: AlgorithmAdamArgs,
         rng: &mut R,
@@ -218,18 +245,20 @@ impl AlgorithmAdam {
             initial_point,
         } = args;
 
-        validate(max_iters, dimensions, learning_rate, beta1, beta2, epsilon)?;
+        Self::check_preconditions(
+            max_iters,
+            learning_rate,
+            beta1,
+            beta2,
+            epsilon,
+            bounds,
+            dimensions,
+            initial_point.as_deref(),
+        )?;
         let (lb, ub) = bounds;
-        // The same check as QNG's: `lb >= ub` is empty, and a non-finite bound
-        // (`NaN` fails every comparison, an infinity would make the sampler panic)
-        // cannot be drawn from.
-        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
-            return Err(OptimizerError::InvalidBounds { lb, ub });
-        }
 
         let dims = dimensions as usize;
         let patience = patience as usize;
-        check_initial_point(initial_point.as_deref(), dims)?;
         // Draw θ uniformly in [lb, ub), or start at the caller's point: θ is
         // drawn either way, so the RNG stream does not depend on it.
         let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();

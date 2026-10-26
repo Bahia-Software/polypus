@@ -48,6 +48,31 @@ pub struct AlgorithmPSOArgs {
 }
 
 impl AlgorithmPSO {
+    /// Check the preconditions of [`AlgorithmPSOArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: `bounds` first, then
+    /// `initial_point` (`dimensions` finite values within `bounds`).
+    /// `train` and `qml.train` call it before any backend exists.
+    pub fn check_preconditions(
+        dimensions: u32,
+        bounds: (f64, f64),
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        let (lb, ub) = bounds;
+        // Positions are drawn from the half-open interval [lb, ub); reject an
+        // empty or unbounded interval. `lb >= ub` covers the empty case; the
+        // finiteness checks reject `NaN` (which fails every comparison) and an
+        // infinite bound (which would make `random_range` draw from an unbounded
+        // interval — a panic in the `Uniform` sampler, either for the position
+        // draw or for the derived infinite `vel_range` velocity draw).
+        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
+            return Err(OptimizerError::InvalidBounds { lb, ub });
+        }
+        // Every position is clamped to [lb, ub], so a point outside would be
+        // silently moved: it is rejected.
+        check_initial_point(initial_point, dimensions as usize, Some(bounds))
+    }
+
     /// The optimizer's human-readable name.
     pub fn name(&self) -> String {
         String::from("Particle Swarm Optimization")
@@ -81,33 +106,8 @@ impl AlgorithmPSO {
         let popsize = population_size as usize;
         let max_gen = generations as usize;
         let dims = dimensions as usize;
+        Self::check_preconditions(dimensions, bounds, initial_point.as_deref())?;
         let (lb, ub) = bounds;
-        // Precondition (documented on the struct): positions are drawn from the
-        // half-open interval [lb, ub); reject an empty or unbounded interval
-        // before any RNG draw or oracle call. `lb >= ub` covers the empty case;
-        // the finiteness checks reject `NaN` (which fails every comparison) and
-        // an infinite bound (which would make `random_range` draw from an unbounded
-        // interval — a panic in the `Uniform` sampler, either for the position
-        // draw or for the derived infinite `vel_range` velocity draw).
-        if !lb.is_finite() || !ub.is_finite() || lb >= ub {
-            return Err(OptimizerError::InvalidBounds { lb, ub });
-        }
-        check_initial_point(initial_point.as_deref(), dims)?;
-        // Every position is clamped to [lb, ub], so a point outside would be
-        // silently moved: reject it.
-        if let Some((index, value)) = initial_point
-            .iter()
-            .flatten()
-            .enumerate()
-            .find(|(_, x)| !(lb..=ub).contains(*x))
-        {
-            return Err(OptimizerError::InvalidConfig {
-                parameter: "initial_point",
-                reason: format!(
-                    "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
-                ),
-            });
-        }
         let max_vel = (ub - lb) * 0.2;
         let vel_range = (ub - lb) * 0.1;
 

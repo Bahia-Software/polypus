@@ -182,6 +182,19 @@ impl AlgorithmExternal {
         )
     }
 
+    /// Check the preconditions of [`AlgorithmExternalArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before the first `ask`, in the
+    /// same order, without running anything: the configuration listed on
+    /// [`AlgorithmExternalArgs`]. There is no point to check: the optimizer
+    /// chooses its own start. `train` and `qml.train` call it before any
+    /// backend exists.
+    pub fn check_preconditions(
+        max_evaluations: u64,
+        dimensions: u32,
+    ) -> Result<(), OptimizerError> {
+        validate(max_evaluations, dimensions)
+    }
+
     fn run(args: AlgorithmExternalArgs) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmExternalArgs {
             oracle,
@@ -189,7 +202,7 @@ impl AlgorithmExternal {
             max_evaluations,
             dimensions,
         } = args;
-        validate(max_evaluations, dimensions)?;
+        Self::check_preconditions(max_evaluations, dimensions)?;
         let dims = dimensions as usize;
 
         let mut best = BestMeasured::new();

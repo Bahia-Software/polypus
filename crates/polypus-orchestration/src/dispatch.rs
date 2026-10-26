@@ -19,6 +19,7 @@
 //! boxed by the oracle and recovered by the `polypus` edge via `downcast` to
 //! `EvaluationError`, keeping this crate free of `pyo3`.
 
+use polypus_optimizers::finite_difference;
 use polypus_optimizers::{
     AdamRule, AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
 };
@@ -179,6 +180,91 @@ impl<O: EvaluationOracle + 'static> From<Box<O>> for Oracles {
     }
 }
 
+impl Method {
+    /// Check every precondition the optimizer checks before any RNG draw or
+    /// oracle call, in its order, without running anything: its configuration
+    /// first, then `initial_point` (contract C-5). Each arm calls the
+    /// optimizer's own `check_preconditions`, so the error is the one
+    /// [`dispatch_optimizer`] would return as [`OracleError::Config`] for the
+    /// same arguments. `train` and `qml.train` call it before any backend, and
+    /// so any CUNQA allocation, exists.
+    pub fn check_preconditions(
+        &self,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        match self {
+            Method::De(cfg) => AlgorithmDifferentialEvolution::check_preconditions(
+                cfg.population_size,
+                dimensions,
+                initial_point,
+            ),
+            Method::Pso(cfg) => {
+                AlgorithmPSO::check_preconditions(dimensions, cfg.bounds, initial_point)
+            }
+            Method::Qng(cfg, _) => AlgorithmQNG::check_preconditions(
+                cfg.max_iters,
+                cfg.learning_rate,
+                cfg.finite_difference_step,
+                cfg.bounds,
+                cfg.tikhonov_reg,
+                dimensions,
+                initial_point,
+            ),
+            Method::Cmaes(cfg) => AlgorithmCmaEs::check_preconditions(
+                dimensions,
+                cfg.population_size,
+                cfg.generations,
+                cfg.sigma0,
+                cfg.restarts,
+                initial_point,
+            ),
+            Method::Spsa(cfg) => AlgorithmSPSA::check_preconditions(
+                cfg.max_iters,
+                cfg.resamplings,
+                cfg.perturbation,
+                cfg.target_step,
+                cfg.alpha,
+                cfg.gamma,
+                cfg.eval_interval,
+                dimensions,
+                initial_point,
+            ),
+            Method::Rotosolve(cfg) => AlgorithmRotosolve::check_preconditions(
+                cfg.sweeps,
+                cfg.reevaluate_every,
+                cfg.tolerance,
+                cfg.patience,
+                dimensions,
+                initial_point,
+            ),
+            // The step first: dispatch builds the finite difference before it
+            // runs Adam whenever the run's oracles carry no exact gradient,
+            // which is every `train` and `qml.train` run. With an exact
+            // gradient dispatch never reads the step.
+            Method::Adam(cfg) => {
+                finite_difference::check_step(cfg.finite_difference_step)?;
+                AlgorithmAdam::check_preconditions(
+                    cfg.max_iters,
+                    cfg.learning_rate,
+                    cfg.beta1,
+                    cfg.beta2,
+                    cfg.epsilon,
+                    cfg.bounds,
+                    dimensions,
+                    initial_point,
+                )
+            }
+            // The library chooses its own start, so after the configuration
+            // any point is refused.
+            Method::External(cfg, _) => {
+                AlgorithmExternal::check_preconditions(cfg.max_evaluations, dimensions)?;
+                refuse_external_initial_point(initial_point)
+            }
+        }
+    }
+}
+
 /// A training run's failure, in the order the binding must surface it.
 ///
 /// `Evaluation` (an oracle failure recorded mid-run in the shared slot) takes
@@ -300,8 +386,8 @@ fn describe(err: &BoxedError) -> String {
 /// optimizer's `initial_point` field says how it starts from it); `None` starts
 /// every optimizer as before. [`Method::External`] takes none, since its
 /// library chooses its own start: a point is an
-/// [`InvalidConfig`](OptimizerError::InvalidConfig) for `initial_point`, before
-/// any `ask()`. It ignores `seed` too (contract C-7: the library owns its
+/// [`InvalidConfig`](OptimizerError::InvalidConfig) for `initial_point`, after
+/// External's configuration is checked and before any `ask()`. It ignores `seed` too (contract C-7: the library owns its
 /// seed).
 pub fn dispatch_optimizer(
     method: Method,
@@ -403,18 +489,19 @@ pub fn dispatch_optimizer(
             seed: Some(seed),
             initial_point,
         }),
-        Method::External(cfg, optimizer) => match initial_point {
-            Some(_) => Err(OptimizerError::InvalidConfig {
-                parameter: "initial_point",
-                reason: EXTERNAL_INITIAL_POINT.to_string(),
-            }),
-            None => AlgorithmExternal.optimize(AlgorithmExternalArgs {
-                oracle,
-                optimizer,
-                max_evaluations: cfg.max_evaluations,
-                dimensions,
-            }),
-        },
+        // As every optimizer: the configuration, then the point.
+        Method::External(cfg, optimizer) => {
+            AlgorithmExternal::check_preconditions(cfg.max_evaluations, dimensions)
+                .and_then(|()| refuse_external_initial_point(initial_point.as_deref()))
+                .and_then(|()| {
+                    AlgorithmExternal.optimize(AlgorithmExternalArgs {
+                        oracle,
+                        optimizer,
+                        max_evaluations: cfg.max_evaluations,
+                        dimensions,
+                    })
+                })
+        }
         // Routed to `dispatch_adam` above; total rather than a panic, which must
         // never reach the FFI edge.
         Method::Adam(_) => Err(OptimizerError::InvalidConfig {
@@ -425,9 +512,20 @@ pub fn dispatch_optimizer(
     finish(result, errors)
 }
 
-/// Why [`Method::External`] rejects an `initial_point`.
-const EXTERNAL_INITIAL_POINT: &str = "the external optimizer chooses its own start; \
-     give the starting point to the library (or to the adapter's initial_point) instead";
+/// [`Method::External`] takes no `initial_point`: any point is an
+/// [`InvalidConfig`](OptimizerError::InvalidConfig) for it, whatever its
+/// length or values.
+fn refuse_external_initial_point(initial_point: Option<&[f64]>) -> Result<(), OptimizerError> {
+    match initial_point {
+        Some(_) => Err(OptimizerError::InvalidConfig {
+            parameter: "initial_point",
+            reason: "the external optimizer chooses its own start; give the starting point \
+                     to the library (or to the adapter's initial_point) instead"
+                .to_string(),
+        }),
+        None => Ok(()),
+    }
+}
 
 /// Adam: the gradient is the exact one when the oracles carry it, otherwise a
 /// finite difference of `evaluation`, which scores θ with its stencil in one
@@ -916,6 +1014,272 @@ mod tests {
         }
     }
 
+    /// `Method::check_preconditions` returns exactly what dispatch returns as
+    /// its configuration error, in the same order (the configuration before
+    /// `initial_point`), and passes whatever dispatch runs.
+    #[test]
+    fn check_preconditions_agrees_with_dispatch() {
+        use std::f64::consts::PI;
+        let pso = |bounds| {
+            Method::Pso(PsoConfig {
+                generations: 2,
+                population_size: 6,
+                bounds,
+                inertia_weight: 0.5,
+                cognitive_weight: 1.0,
+                social_weight: 1.0,
+                tolerance: 0.0,
+            })
+        };
+        let qng = |max_iters, bounds| {
+            Method::Qng(
+                QngConfig {
+                    max_iters,
+                    learning_rate: 0.1,
+                    finite_difference_step: 0.1,
+                    bounds,
+                    tikhonov_reg: 0.05,
+                },
+                Box::new(ConstVariance),
+            )
+        };
+        let cmaes = |sigma0| {
+            Method::Cmaes(CmaesConfig {
+                generations: 2,
+                population_size: None,
+                sigma0,
+                tolerance: 0.0,
+                patience: 10,
+                restarts: 0,
+            })
+        };
+        let de = |strategy, population_size| {
+            Method::De(DeConfig {
+                generations: 2,
+                population_size,
+                tolerance: 0.0,
+                patience: 10,
+                strategy,
+            })
+        };
+        let short = Some(vec![0.5]);
+        let outside = Some(vec![0.5, 4.0]);
+        // A name, a way to build the method (it is not `Clone`) and a point.
+        type Case = (&'static str, Box<dyn Fn() -> Method>, Option<Vec<f64>>);
+        let mut cases: Vec<Case> = vec![
+            (
+                "PSO, empty bounds",
+                Box::new(move || pso((1.0, 1.0))),
+                short.clone(),
+            ),
+            (
+                "PSO, short point",
+                Box::new(move || pso((-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "PSO, point outside",
+                Box::new(move || pso((-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "PSO, valid",
+                Box::new(move || pso((-PI, PI))),
+                Some(vec![0.5, 1.0]),
+            ),
+            (
+                "QNG, max_iters 0",
+                Box::new(move || qng(0, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, empty bounds",
+                Box::new(move || qng(1, (1.0, 0.0))),
+                short.clone(),
+            ),
+            (
+                "QNG, short point",
+                Box::new(move || qng(1, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, point outside",
+                Box::new(move || qng(1, (-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "CMA-ES, sigma0 0",
+                Box::new(move || cmaes(0.0)),
+                short.clone(),
+            ),
+            (
+                "CMA-ES, NaN",
+                Box::new(move || cmaes(0.3)),
+                Some(vec![0.5, f64::NAN]),
+            ),
+            ("CMA-ES, no point", Box::new(move || cmaes(0.3)), None),
+        ];
+        let adam = |finite_difference_step, learning_rate| {
+            Method::Adam(AdamConfig {
+                max_iters: 2,
+                learning_rate,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (-PI, PI),
+                tolerance: 0.0,
+                patience: 10,
+                finite_difference_step,
+                rule: AdamRule::Adam,
+            })
+        };
+        let adam_cases: Vec<Case> = vec![
+            (
+                "Adam, step 0",
+                Box::new(move || adam(0.0, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Adam, rate 0",
+                Box::new(move || adam(0.1, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Adam, short point",
+                Box::new(move || adam(0.1, 0.05)),
+                short.clone(),
+            ),
+            (
+                "Adam, point outside",
+                Box::new(move || adam(0.1, 0.05)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(adam_cases);
+        let spsa = |max_iters, alpha| {
+            Method::Spsa(SpsaConfig {
+                max_iters,
+                resamplings: 1,
+                perturbation: 0.1,
+                target_step: 0.63,
+                alpha,
+                gamma: 0.101,
+                eval_interval: 1,
+            })
+        };
+        let spsa_cases: Vec<Case> = vec![
+            (
+                "SPSA, max_iters 0",
+                Box::new(move || spsa(0, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, alpha NaN",
+                Box::new(move || spsa(2, f64::NAN)),
+                short.clone(),
+            ),
+            (
+                "SPSA, short point",
+                Box::new(move || spsa(2, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, valid",
+                Box::new(move || spsa(2, 0.602)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(spsa_cases);
+        let rotosolve = |sweeps, tolerance| {
+            Method::Rotosolve(RotosolveConfig {
+                sweeps,
+                reevaluate_every: 1,
+                tolerance,
+                patience: 1,
+            })
+        };
+        let rotosolve_cases: Vec<Case> = vec![
+            (
+                "Rotosolve, sweeps 0",
+                Box::new(move || rotosolve(0, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, tolerance -1",
+                Box::new(move || rotosolve(1, -1.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, short point",
+                Box::new(move || rotosolve(1, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, valid",
+                Box::new(move || rotosolve(1, 0.0)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(rotosolve_cases);
+        let external = |max_evaluations| {
+            Method::External(
+                ExternalConfig { max_evaluations },
+                Box::new(Scripted::new(external_batches())),
+            )
+        };
+        let external_cases: Vec<Case> = vec![
+            (
+                "External, max_evaluations 0",
+                Box::new(move || external(0)),
+                short.clone(),
+            ),
+            (
+                "External, a point",
+                Box::new(move || external(6)),
+                outside.clone(),
+            ),
+            ("External, valid", Box::new(move || external(6)), None),
+        ];
+        cases.extend(external_cases);
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            cases.push((
+                "DE, population 2",
+                Box::new(move || de(strategy, 2)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, short point",
+                Box::new(move || de(strategy, 6)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, valid",
+                Box::new(move || de(strategy, 6)),
+                outside.clone(),
+            ));
+        }
+        for (name, method, point) in cases {
+            let checked = method().check_preconditions(2, point.as_deref());
+            let oracle = Box::new(FirstCandidate(Arc::default()));
+            let dispatched =
+                dispatch_optimizer(method(), oracle, 2, &OracleErrorSlot::new(), 5, point);
+            match (checked, dispatched) {
+                (Ok(()), Ok(_)) => {}
+                (Err(checked), Err(OracleError::Config(dispatched))) => {
+                    assert_eq!(checked, dispatched, "{name}");
+                }
+                (checked, dispatched) => panic!(
+                    "{name}: check_preconditions gave {checked:?}, dispatch {}",
+                    match dispatched {
+                        Ok(_) => "Ok".to_string(),
+                        Err(OracleError::Config(e)) => format!("Config({e})"),
+                        Err(OracleError::Evaluation(e)) => format!("Evaluation({e})"),
+                    }
+                ),
+            }
+        }
+    }
+
     /// A point of the wrong length is the optimizer's configuration error.
     #[test]
     fn a_wrong_initial_point_is_a_config_error() {
@@ -1343,7 +1707,8 @@ mod tests {
     }
 
     /// An `initial_point` is a configuration error before the library is asked
-    /// anything or the oracle called: the library chooses its own start.
+    /// anything or the oracle called: the library chooses its own start. It
+    /// comes after External's own configuration errors.
     #[test]
     fn external_rejects_an_initial_point_before_any_ask() {
         let (oracle, log) = recorder();
@@ -1366,6 +1731,25 @@ mod tests {
         }
         assert_eq!(*asks.lock().unwrap_or_else(|p| p.into_inner()), 0);
         assert!(sizes(&log).is_empty());
+
+        let (oracle, _) = recorder();
+        let method = Method::External(
+            ExternalConfig { max_evaluations: 0 },
+            Box::new(Scripted::new(external_batches())),
+        );
+        match dispatch_optimizer(
+            method,
+            oracle,
+            2,
+            &OracleErrorSlot::new(),
+            1,
+            Some(vec![0.5, 0.5]),
+        ) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "max_evaluations")
+            }
+            _ => panic!("expected an InvalidConfig for max_evaluations"),
+        }
     }
 
     /// A failure the bridge recorded in the run's slot (the Python exception

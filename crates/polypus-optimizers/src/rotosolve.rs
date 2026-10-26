@@ -194,6 +194,24 @@ impl AlgorithmRotosolve {
         )
     }
 
+    /// Check the preconditions of [`AlgorithmRotosolveArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: the configuration
+    /// listed on [`AlgorithmRotosolveArgs`], then `initial_point`
+    /// (`dimensions` finite values). `train` and `qml.train` call it before
+    /// any backend exists.
+    pub fn check_preconditions(
+        sweeps: u32,
+        reevaluate_every: u32,
+        tolerance: f64,
+        patience: u32,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        validate(sweeps, dimensions, reevaluate_every, tolerance, patience)?;
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     /// Whether step `step` (from 0) measures the current point: the first,
     /// and every `reevaluate_every` after it.
     fn measures(step: u64, reevaluate_every: u32) -> bool {
@@ -215,9 +233,15 @@ impl AlgorithmRotosolve {
             initial_point,
         } = args;
 
-        validate(sweeps, dimensions, reevaluate_every, tolerance, patience)?;
+        Self::check_preconditions(
+            sweeps,
+            reevaluate_every,
+            tolerance,
+            patience,
+            dimensions,
+            initial_point.as_deref(),
+        )?;
         let dims = dimensions as usize;
-        check_initial_point(initial_point.as_deref(), dims)?;
         // Draw θ₀ in [0, 2π), or start at the caller's point: θ₀ is drawn
         // either way, so the RNG stream does not depend on it.
         let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(0.0..TAU)).collect();

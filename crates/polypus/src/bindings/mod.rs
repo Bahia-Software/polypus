@@ -403,8 +403,9 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 }
 
 /// `ValueError` when `method` is a `polypus.External` and an `initial_point`
-/// is given: the external library chooses its own start. Checked before the
-/// point itself, so the message says why any point is refused.
+/// is given: the external library chooses its own start. Checked after
+/// External's configuration and instead of the point's length and finiteness,
+/// so the message says why any point is refused.
 fn check_external_initial_point(
     method: &Bound<'_, PyAny>,
     initial_point: Option<&[f64]>,
@@ -465,49 +466,34 @@ fn check_rotosolve_circuit(
     Err(rotosolve_circuit_error(&problem.extract::<String>()?))
 }
 
-/// Check the `initial_point` of `train`/`qml.train` before anything runs: one
-/// finite value per optimization dimension and, for PSO, within its `bounds`
-/// (contract C-5). The optimizers check the same again once the backend
-/// exists; here a wrong point raises `ValueError` before any QPU is requested,
-/// with the optimizer's own message. Bounds that PSO itself rejects are left
-/// to it, so that error keeps its precedence.
-fn validate_initial_point(
-    initial_point: Option<&[f64]>,
-    dimensions: u32,
+/// Check the optimizer's preconditions, `initial_point` included, before
+/// anything runs in `train`/`qml.train` (contract C-5): every check the
+/// optimizer makes before its first RNG draw, in its order, so its
+/// configuration errors come before the point's (`dimensions` finite values,
+/// within `bounds` for PSO), through [`Method::check_preconditions`]. A failure
+/// raises `ValueError` with the optimizer's own message before any QPU is
+/// requested; a `method` that is no optimizer raises the `TypeError` of
+/// [`method_from_pyclass`]. `External` refuses any point after its
+/// configuration, with [`check_external_initial_point`]'s message.
+fn validate_method(
     method: &Bound<'_, PyAny>,
+    dimensions: u32,
+    initial_point: Option<&[f64]>,
 ) -> PyResult<()> {
-    let Some(point) = initial_point else {
-        return Ok(());
+    // A throwaway `Method`: the checks read only its configuration, never the
+    // QNG variance oracle or the External optimizer, so its error slot and run
+    // id are placeholders.
+    let parsed = method_from_pyclass(method, &OracleErrorSlot::new(), "")?;
+    // `External`'s point is refused below, with the message that names the
+    // adapters, rather than with dispatch's.
+    let point = match parsed {
+        Method::External(..) => None,
+        _ => initial_point,
     };
-    let invalid = |reason: String| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid initial_point: {reason}"))
-    };
-    if point.len() != dimensions as usize {
-        return Err(invalid(format!(
-            "must have one value per dimension ({dimensions}), got {}",
-            point.len()
-        )));
-    }
-    if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-        return Err(invalid(format!(
-            "every value must be finite, got {value} at index {index}"
-        )));
-    }
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let (lb, ub) = pso.bounds;
-        if lb.is_finite() && ub.is_finite() && lb < ub {
-            if let Some((index, value)) = point
-                .iter()
-                .enumerate()
-                .find(|(_, x)| !(lb..=ub).contains(*x))
-            {
-                return Err(invalid(format!(
-                    "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    parsed
+        .check_preconditions(dimensions, point)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    check_external_initial_point(method, initial_point)
 }
 
 /// Check the `final_shots` of `train`/`qml.train` before anything runs
@@ -1790,10 +1776,7 @@ pub fn train<'py>(
             )));
         }
     }
-    // `External`'s library chooses its own start, so any point is refused
-    // first; then a point is checked for the other optimizers.
-    check_external_initial_point(&method, initial_point.as_deref())?;
-    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    validate_method(&method, dimensions, initial_point.as_deref())?;
     let final_shots = validate_final_shots(final_shots.as_ref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
@@ -2126,9 +2109,7 @@ pub fn qml_train<'py>(
             "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
         )));
     }
-    // As in `train`: `External` refuses any point before the point is checked.
-    check_external_initial_point(&method, initial_point.as_deref())?;
-    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    validate_method(&method, dimensions, initial_point.as_deref())?;
     let final_shots = validate_final_shots(final_shots.as_ref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).

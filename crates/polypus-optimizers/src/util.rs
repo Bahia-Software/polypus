@@ -164,33 +164,48 @@ pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), Optimi
 }
 
 /// Validate an optimizer's optional starting point against its `dims`
-/// parameters: exactly `dims` values, every one finite.
+/// parameters: exactly `dims` values, every one finite, and, when `bounds`
+/// is `Some((lb, ub))`, every one within `[lb, ub]` (PSO's, whose positions
+/// are clamped to them).
 ///
-/// Each optimizer calls this after its other configuration checks and before
-/// any RNG draw or oracle call, so a bad point is reported as
-/// [`OptimizerError::InvalidConfig`] for `initial_point` with nothing drawn or
-/// evaluated. `None` (no starting point) always passes.
+/// Each optimizer calls this from its `check_preconditions`, after its other
+/// configuration checks and before any RNG draw or oracle call, so a bad
+/// point is reported as [`OptimizerError::InvalidConfig`] for
+/// `initial_point` with nothing drawn or evaluated. `None` (no starting
+/// point) always passes.
 pub(crate) fn check_initial_point(
     point: Option<&[f64]>,
     dims: usize,
+    bounds: Option<(f64, f64)>,
 ) -> Result<(), OptimizerError> {
     let Some(point) = point else {
         return Ok(());
     };
+    let invalid = |reason: String| OptimizerError::InvalidConfig {
+        parameter: "initial_point",
+        reason,
+    };
     if point.len() != dims {
-        return Err(OptimizerError::InvalidConfig {
-            parameter: "initial_point",
-            reason: format!(
-                "must have one value per dimension ({dims}), got {}",
-                point.len()
-            ),
-        });
+        return Err(invalid(format!(
+            "must have one value per dimension ({dims}), got {}",
+            point.len()
+        )));
     }
     if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-        return Err(OptimizerError::InvalidConfig {
-            parameter: "initial_point",
-            reason: format!("every value must be finite, got {value} at index {index}"),
-        });
+        return Err(invalid(format!(
+            "every value must be finite, got {value} at index {index}"
+        )));
+    }
+    if let Some((lb, ub)) = bounds {
+        if let Some((index, value)) = point
+            .iter()
+            .enumerate()
+            .find(|(_, x)| !(lb..=ub).contains(*x))
+        {
+            return Err(invalid(format!(
+                "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
+            )));
+        }
     }
     Ok(())
 }
@@ -457,16 +472,19 @@ mod tests {
 
     #[test]
     fn check_initial_point_accepts_none_and_a_finite_point_of_the_right_length() {
-        assert_eq!(check_initial_point(None, 3), Ok(()));
-        assert_eq!(check_initial_point(Some(&[0.5, -7.0, 1e300]), 3), Ok(()));
-        assert_eq!(check_initial_point(Some(&[]), 0), Ok(()));
+        assert_eq!(check_initial_point(None, 3, None), Ok(()));
+        assert_eq!(
+            check_initial_point(Some(&[0.5, -7.0, 1e300]), 3, None),
+            Ok(())
+        );
+        assert_eq!(check_initial_point(Some(&[]), 0, None), Ok(()));
     }
 
     #[test]
     fn check_initial_point_rejects_a_wrong_length() {
         for point in [&[0.5][..], &[0.5, 1.0, 1.5, 2.0][..], &[][..]] {
             assert_eq!(
-                check_initial_point(Some(point), 3),
+                check_initial_point(Some(point), 3, None),
                 Err(OptimizerError::InvalidConfig {
                     parameter: "initial_point",
                     reason: format!("must have one value per dimension (3), got {}", point.len()),
@@ -482,7 +500,7 @@ mod tests {
             (f64::INFINITY, "inf"),
             (f64::NEG_INFINITY, "-inf"),
         ] {
-            let err = check_initial_point(Some(&[0.5, 1.0, value]), 3)
+            let err = check_initial_point(Some(&[0.5, 1.0, value]), 3, None)
                 .expect_err("a non-finite value is rejected");
             assert_eq!(
                 err.to_string(),
@@ -537,6 +555,31 @@ mod tests {
         // Any number, even -inf, beats it.
         assert!(best.offer(&[3.0], f64::NEG_INFINITY));
         assert_eq!(best.into_parts(), (vec![3.0], f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn check_initial_point_checks_the_bounds_only_when_given_and_after_the_rest() {
+        let bounds = Some((-1.0, 1.0));
+        // Both ends are inside: PSO clamps positions to the closed interval.
+        assert_eq!(
+            check_initial_point(Some(&[-1.0, 0.0, 1.0]), 3, bounds),
+            Ok(())
+        );
+        let err = check_initial_point(Some(&[0.5, 1.5, -2.0]), 3, bounds)
+            .expect_err("a value outside the bounds is rejected");
+        assert_eq!(
+            err.to_string(),
+            "invalid initial_point: every value must lie within bounds [-1, 1], got 1.5 at index 1"
+        );
+        assert_eq!(
+            check_initial_point(Some(&[0.5, 1.5, -2.0]), 3, None),
+            Ok(())
+        );
+        // The length and the finiteness are reported first.
+        let err = check_initial_point(Some(&[5.0]), 3, bounds).expect_err("wrong length");
+        assert!(err.to_string().contains("one value per dimension"), "{err}");
+        let err = check_initial_point(Some(&[5.0, f64::NAN, 0.0]), 3, bounds).expect_err("NaN");
+        assert!(err.to_string().contains("must be finite"), "{err}");
     }
 
     #[test]
