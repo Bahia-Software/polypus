@@ -301,6 +301,31 @@ class TestOracleContractC5Adam:
             )
         assert sizes == [3, 3], sizes
 
+    def test_non_finite_value_at_the_final_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step Adam measures the final ``θ`` in a batch of its
+        own, a single circuit; a NaN there is an evaluation error too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "adam_final_nan",
+            )
+        # A flat fitness stops the run after its second step (patience 1).
+        assert sizes == [3, 3, 1], sizes
+
     def test_short_seam_result_is_a_typed_error(
         self, parametrized_circuit, simple_expectation_fn, monkeypatch
     ):
@@ -389,6 +414,32 @@ class TestOracleContractC5SPSA:
             )
         # The 50 calibration circuits, then θ and one perturbed pair.
         assert sizes == [50, 3], sizes
+
+    def test_non_finite_value_at_the_final_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step SPSA measures the final ``θ`` in a batch of its
+        own, a single circuit; a NaN there is an evaluation error too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "spsa_final_nan",
+            )
+        # The calibration, four iterations (θ on the first and the third),
+        # then the final θ.
+        assert sizes == [50, 3, 2, 3, 2, 1], sizes
 
     def test_short_seam_result_is_a_typed_error(
         self, parametrized_circuit, simple_expectation_fn, monkeypatch

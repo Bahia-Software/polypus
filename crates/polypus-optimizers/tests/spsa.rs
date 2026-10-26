@@ -119,10 +119,10 @@ fn spsa_args(oracle: &Recorder, seed: u64) -> AlgorithmSPSAArgs {
     }
 }
 
-/// Whether iteration `k` (from 1) measures θ: the first, every `interval`
-/// after it, and the last.
-fn measured(k: usize, max_iters: usize, interval: usize) -> bool {
-    k == 1 || (k - 1) % interval == 0 || k == max_iters
+/// Whether iteration `k` (from 1) measures θ: the first, and every
+/// `interval` after it.
+fn measured(k: usize, interval: usize) -> bool {
+    (k - 1) % interval == 0
 }
 
 /// The ±1 perturbation of a pair around `centre`, read from its `+` side.
@@ -214,7 +214,7 @@ fn the_calibration_sets_the_first_step() {
         let (batches, values) = (oracle.batches(), oracle.values());
         assert_eq!(
             batches.iter().map(Vec::len).collect::<Vec<_>>(),
-            [CALIBRATION, 3, 3]
+            [CALIBRATION, 3, 3, 1]
         );
         let a = calibrated_gain(&values[0], 0.1, target_step);
         let theta1 = &batches[1][0];
@@ -302,8 +302,9 @@ fn a_non_finite_calibration_pair_is_left_out_of_the_mean() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// After the calibration, each iteration is one batch of `2K` candidates,
-/// with θ_k first (`2K + 1`) on the first iteration, every `eval_interval`
-/// after it and the last; the pairs are centred on θ_k.
+/// with θ_k first (`2K + 1`) on the first iteration and every
+/// `eval_interval` after it; the pairs are centred on θ_k. After the last
+/// step, a batch of one candidate measures the θ it reached.
 #[test]
 fn each_iteration_is_one_batch_of_2k_with_theta_first_when_measured() {
     for resamplings in [1, 3, 8] {
@@ -315,7 +316,8 @@ fn each_iteration_is_one_batch_of_2k_with_theta_first_when_measured() {
         let outcome = AlgorithmSPSA.optimize(args).unwrap();
         let k2 = 2 * resamplings as usize;
         let expected: Vec<usize> = std::iter::once(CALIBRATION)
-            .chain((1..=23).map(|k| k2 + usize::from(measured(k, 23, 5))))
+            .chain((1..=23).map(|k| k2 + usize::from(measured(k, 5))))
+            .chain(std::iter::once(1))
             .collect();
         let batches = oracle.batches();
         assert_eq!(
@@ -325,10 +327,11 @@ fn each_iteration_is_one_batch_of_2k_with_theta_first_when_measured() {
         );
         assert_eq!(
             expected.iter().filter(|&&n| n == k2 + 1).count(),
-            6,
-            "k = 1, 6, 11, 16, 21, 23"
+            5,
+            "k = 1, 6, 11, 16, 21"
         );
-        for (k, batch) in (1..).zip(&batches[1..]) {
+        let iterations = &batches[1..batches.len() - 1];
+        for (k, batch) in (1..).zip(iterations) {
             let pairs = &batch[batch.len() - k2..];
             // Every pair of the batch shares one centre: θ_k.
             let centre: Vec<f64> = pairs[0]
@@ -336,7 +339,7 @@ fn each_iteration_is_one_batch_of_2k_with_theta_first_when_measured() {
                 .zip(&pairs[1])
                 .map(|(p, m)| (p + m) / 2.0)
                 .collect();
-            if measured(k, 23, 5) {
+            if measured(k, 5) {
                 for (x, c) in batch[0].iter().zip(&centre) {
                     assert!((x - c).abs() < 1e-12, "K = {resamplings}, k = {k}");
                 }
@@ -370,7 +373,10 @@ fn every_step_follows_spalls_gains_and_the_mean_of_the_estimates() {
         AlgorithmSPSA.optimize(args).unwrap();
         let (batches, values) = (oracle.batches(), oracle.values());
         let a = calibrated_gain(&values[0], 0.2, 0.4);
-        for k in 1..12 {
+        // Batch 13 is the θ the twelfth step reached, alone.
+        assert_eq!(batches.len(), 14);
+        assert_eq!(batches[13].len(), 1);
+        for k in 1..=12 {
             let (batch, scored) = (&batches[k], &values[k]);
             let kf = k as f64;
             let (a_k, c_k) = (a / kf.powf(alpha), 0.2 / kf.powf(gamma));
@@ -401,7 +407,8 @@ fn every_step_follows_spalls_gains_and_the_mean_of_the_estimates() {
 /// C-5 against the batches the oracle saw, over 25 seeds and two values of K:
 /// only the measured θs count (they head their batches), `best_params` is the
 /// first measured θ with the best value, `best_fitness` the oracle's value for
-/// it, and `fitness_history[k − 1]` the best measured up to iteration `k`.
+/// it, and `fitness_history[k − 1]` the best measured up to iteration `k`,
+/// the final θ counted in the last entry.
 #[test]
 fn best_params_fitness_invariant_holds_across_seeds() {
     for resamplings in [1, 4] {
@@ -418,19 +425,27 @@ fn best_params_fitness_invariant_holds_across_seeds() {
             let outcome = AlgorithmSPSA.optimize(args).unwrap();
             let label = format!("K {resamplings} seed {seed}");
             let batches = oracle.batches();
-            assert_eq!(batches.len(), 61, "{label}");
+            assert_eq!(batches.len(), 62, "{label}");
             assert_eq!(outcome.iterations_run, 60);
             assert!(!outcome.converged);
             assert_eq!(outcome.fitness_history.len(), 60);
             let mut running = f64::NEG_INFINITY;
             let mut measured_thetas = Vec::new();
-            for (k, batch) in (1..).zip(&batches[1..]) {
-                if measured(k, 60, 3) {
+            let (last, iterations) = batches[1..].split_last().unwrap();
+            for (k, batch) in (1..).zip(iterations) {
+                if measured(k, 3) {
                     running = running.max(rough(&batch[0]));
                     measured_thetas.push(batch[0].clone());
                 }
-                assert_eq!(outcome.fitness_history[k - 1], running, "{label} k {k}");
+                if k < 60 {
+                    assert_eq!(outcome.fitness_history[k - 1], running, "{label} k {k}");
+                }
             }
+            // The final θ, alone in the last batch, joins the last entry.
+            assert_eq!(last.len(), 1, "{label}");
+            running = running.max(rough(&last[0]));
+            measured_thetas.push(last[0].clone());
+            assert_eq!(outcome.fitness_history[59], running, "{label}");
             assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
             assert_eq!(outcome.best_fitness, rough(&outcome.best_params), "{label}");
             assert_eq!(
@@ -596,7 +611,8 @@ fn an_oracle_that_only_returns_nan_does_not_panic() {
     assert_eq!(outcome.best_params, batches[1][0]);
     assert!(outcome.best_fitness.is_nan());
     assert_eq!(outcome.fitness_history.len(), 12);
-    for k in [1, 5, 9, 12] {
+    // Iterations 1, 5 and 9, then the final θ in batch 13.
+    for k in [1, 5, 9, 13] {
         assert_eq!(batches[k][0], batches[1][0]);
     }
 }
@@ -694,7 +710,8 @@ impl EvaluationOracle for Short {
 
 #[test]
 fn a_wrong_length_from_the_oracle_is_an_error() {
-    for (short_from, expected) in [(0, CALIBRATION), (1, 3), (2, 2)] {
+    // The calibration, the first iteration, the second, and the final θ.
+    for (short_from, expected) in [(0, CALIBRATION), (1, 3), (2, 2), (301, 1)] {
         let oracle = Recorder::new(bowl);
         let args = AlgorithmSPSAArgs {
             oracle: Box::new(Short {
@@ -720,14 +737,19 @@ fn outcome_of(oracle: &Recorder, seed: u64, max_iters: u32) -> OptimizationOutco
     AlgorithmSPSA.optimize(args).unwrap()
 }
 
+/// One iteration measures θ₀ with its pair, steps, and measures the θ it
+/// reached: the best of the two is the outcome.
 #[test]
-fn one_iteration_measures_theta0_and_reports_it() {
+fn one_iteration_measures_theta0_and_the_theta_it_reached() {
     let oracle = Recorder::new(bowl);
     let outcome = outcome_of(&oracle, 7, 1);
     let batches = oracle.batches();
-    assert_eq!(batches.len(), 2);
-    assert_eq!(batches[1].len(), 3);
-    assert_eq!(outcome.best_params, batches[1][0]);
-    assert_eq!(outcome.best_fitness, bowl(&batches[1][0]));
-    assert_eq!(outcome.fitness_history, vec![outcome.best_fitness]);
+    let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+    assert_eq!(sizes, [CALIBRATION, 3, 1]);
+    let (start, end) = (&batches[1][0], &batches[2][0]);
+    assert_ne!(start, end);
+    let best = bowl(start).max(bowl(end));
+    assert_eq!(outcome.best_fitness, best);
+    assert!(outcome.best_params == *start || outcome.best_params == *end);
+    assert_eq!(outcome.fitness_history, vec![best]);
 }

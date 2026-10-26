@@ -134,7 +134,9 @@ pub struct TrainFlow<F: OracleFactory> {
     /// The batch comes after every batch the optimizer sent, so a seeded run is
     /// the same up to it with and without it. It is not part of the CUNQA
     /// walltime projection, and it is sent whatever stopped the optimizer, but
-    /// not after an error or an interrupt.
+    /// not after an error or an interrupt. The optimizer's `best_params` and
+    /// `best_fitness` are logged before it, and again if it fails, since its
+    /// error is then the run's.
     pub final_shots: Option<u32>,
     /// Shared failure slot: the oracle records into it, `dispatch_optimizer` takes
     /// it, and the edge downcasts + re-raises.
@@ -239,14 +241,34 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             self.seed,
             self.initial_point,
         )?;
+        // A failure or an interrupt in the final batch is the run's error, and
+        // the optimizer's result is not returned: log it first, at full
+        // precision (`{:?}` prints the shortest exact `f64`), and again on
+        // failure, where a default logging setup shows it.
+        let run_id = &resources.config.id;
+        log::info!(
+            "run {run_id}: the optimizer stopped after {} iteration(s) at \
+             best_fitness {:?}, best_params {:?}",
+            optimization.iterations_run,
+            optimization.best_fitness,
+            optimization.best_params
+        );
         let candidates = elite.final_candidates(&optimization.best_params, count);
         let final_evaluation = final_batch(
             evaluation.as_ref(),
             candidates,
             final_shots,
             &self.errors,
-            &resources.config.id,
-        )?;
+            run_id,
+        )
+        .inspect_err(|_| {
+            log::warn!(
+                "run {run_id}: the final batch failed, so the run returns no result; \
+                 the optimizer had reached best_fitness {:?} at best_params {:?}",
+                optimization.best_fitness,
+                optimization.best_params
+            );
+        })?;
         Ok(TrainOutcome {
             optimization,
             final_evaluation: Some(final_evaluation),
@@ -781,10 +803,24 @@ mod tests {
         final_shots: Option<u32>,
         walltime: Option<std::time::Duration>,
     ) -> Result<TrainOutcome, OracleError> {
+        noisy_run_as(&config().id, method, factory, final_shots, walltime)
+    }
+
+    /// [`noisy_run`] with the run id `run_id`.
+    fn noisy_run_as(
+        run_id: &str,
+        method: Method,
+        factory: NoisyFactory,
+        final_shots: Option<u32>,
+        walltime: Option<std::time::Duration>,
+    ) -> Result<TrainOutcome, OracleError> {
         let resources = Resources::new(
             Arc::new(ExpiringBackend(walltime)),
             Some(Arc::new(EchoPlanner)),
-            Arc::new(config()),
+            Arc::new(RunParams {
+                id: run_id.to_string(),
+                ..config()
+            }),
         )
         .unwrap();
         let scheduler = Scheduler::ephemeral(resources);
@@ -950,6 +986,37 @@ mod tests {
         let result = noisy_run(method, factory, Some(4096), None);
         assert!(matches!(result, Err(OracleError::Evaluation(_))));
         assert_eq!(calls.lock().unwrap().last().unwrap().1, Some(4096));
+    }
+
+    /// When the final batch fails, the optimizer's result is in the log.
+    #[test]
+    fn a_failing_final_batch_logs_the_optimizers_result() {
+        use crate::test_log::{capture_logs, logged_for};
+        capture_logs();
+        let run_id = "flow-final-batch-fails";
+        let probe = NoisyFactory::default();
+        let calls = Arc::clone(&probe.calls);
+        let (_, method) = every_method().remove(0);
+        let Ok(plain) = noisy_run_as(run_id, method, probe, None, None) else {
+            panic!("the probe must run");
+        };
+        let sent = calls.lock().unwrap().len();
+        assert!(logged_for(run_id).is_empty());
+        let factory = NoisyFactory {
+            fail_at: Some(sent),
+            ..NoisyFactory::default()
+        };
+        let (_, method) = every_method().remove(0);
+        assert!(noisy_run_as(run_id, method, factory, Some(4096), None).is_err());
+        let best = &plain.optimization;
+        assert_eq!(
+            logged_for(run_id),
+            [format!(
+                "run {run_id}: the final batch failed, so the run returns no result; \
+                 the optimizer had reached best_fitness {:?} at best_params {:?}",
+                best.best_fitness, best.best_params
+            )]
+        );
     }
 
     /// `final_shots = Some(0)` is rejected before the oracle is built.

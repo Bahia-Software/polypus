@@ -23,10 +23,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// SplitMix64 increment (the golden-ratio gamma).
-const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(crate) const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// SplitMix64 output finaliser: a bijective 64-bit mixer.
-fn splitmix64_mix(mut z: u64) -> u64 {
+pub(crate) fn splitmix64_mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

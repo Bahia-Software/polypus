@@ -2,7 +2,8 @@
 ``polypus.Adam``: gradient ascent with Kingma and Ba's Adam (contract C-5).
 
 Adam takes a central finite difference of the fitness: each iteration sends
-one batch of ``2·dimensions + 1`` circuits, ``θ`` and then ``θ ± h·e_i``. The
+one batch of ``2·dimensions + 1`` circuits, ``θ`` and then ``θ ± h·e_i``, and
+steps; after the last step one more batch measures the final ``θ``. The
 option tests need no backend. The batch tests run the real loops on Aer with
 ``polypus_python.run_qcs`` replaced by a fake that records every batch and
 answers with fixed counts. Seeded reproducibility is in
@@ -197,7 +198,8 @@ class TestAdamOptions:
 @pytest.mark.vqc
 class TestAdamBatches:
     """What Adam sends to the backend: per iteration, one batch of ``θ`` and
-    the finite-difference stencil around it, and nothing at all for an invalid
+    the finite-difference stencil around it, then the final ``θ`` alone, and
+    nothing at all for an invalid
     configuration."""
 
     @pytest.mark.parametrize("rule", ["adam", "momentum"])
@@ -211,7 +213,7 @@ class TestAdamBatches:
         # keeps the stagnation stop from ending it early.
         method = polypus.Adam(max_iters=4, patience=10_000, rule=rule)
         result = _train(method, dimensions=3)
-        assert [len(b) for b in batches] == [7] * 4
+        assert [len(b) for b in batches] == [7] * 4 + [1]
         assert result.iterations_run == 4
         assert not result.converged
         assert len(result.fitness_history) == result.iterations_run
@@ -223,9 +225,10 @@ class TestAdamBatches:
         batches = _record_batches(monkeypatch)
         _train(polypus.Adam(max_iters=2, finite_difference_step=0.25, patience=10_000))
         angles = [[float(a) for qc in b for a in _ANGLE.findall(qc)] for b in batches]
-        # Each iteration's batch is θ, then θ + h and θ − h around it.
-        assert len(angles) == 2
-        for theta, plus, minus in angles:
+        # Each iteration's batch is θ, then θ + h and θ − h around it; the last
+        # batch is the θ the second step reached.
+        assert [len(a) for a in angles] == [3, 3, 1]
+        for theta, plus, minus in angles[:-1]:
             assert plus - minus == pytest.approx(0.5)
             assert (plus + minus) / 2 == pytest.approx(theta)
 
@@ -246,6 +249,7 @@ class TestAdamBatches:
             ({"beta1": 1.0}, "beta1"),
             ({"beta2": -0.1}, "beta2"),
             ({"epsilon": 0.0}, "epsilon"),
+            ({"patience": 0}, "patience"),
             ({"bounds": (1.0, 1.0)}, "bound"),
             ({"bounds": (0.0, float("inf"))}, "bound"),
             ({"finite_difference_step": 0.0}, "finite_difference_step"),
@@ -272,10 +276,11 @@ class TestAdamBatches:
         assert len(result.best_params) == 4
         assert len(result.fitness_history) == 3
         assert batches
-        # Per iteration, θ and the stencil of its 4 parameters, each on the 2
-        # rows of x_train. (The QML oracle may split a batch into windows of
-        # the backend's concurrency, so only the total is fixed.)
-        assert sum(len(b) for b in batches) == 3 * 9 * 2
+        # Per iteration, θ and the stencil of its 4 parameters, then the final
+        # θ, each on the 2 rows of x_train. (The QML oracle may split a batch
+        # into windows of the backend's concurrency, so only the total is
+        # fixed.)
+        assert sum(len(b) for b in batches) == (3 * 9 + 1) * 2
 
     def test_qml_train_rejects_an_invalid_configuration_before_any_batch(
         self, monkeypatch

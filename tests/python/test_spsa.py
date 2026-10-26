@@ -4,8 +4,9 @@
 
 SPSA starts with one calibration batch of 50 circuits, 25 pairs around the
 starting point, then sends one batch per iteration: ``2·resamplings`` perturbed
-circuits, headed by ``θ`` itself on the first iteration, every
-``eval_interval`` iterations after it and on the last. The option tests need no
+circuits, headed by ``θ`` itself on the first iteration and every
+``eval_interval`` iterations after it, and after the last step one circuit
+measures the final ``θ``. The option tests need no
 backend. The batch tests run the real loops on Aer with
 ``polypus_python.run_qcs`` replaced by a fake that records every batch and
 answers with fixed counts. Seeded reproducibility is in
@@ -179,15 +180,16 @@ class TestSPSAOptions:
 class TestSPSABatches:
     """What SPSA sends to the backend: one calibration batch, then per
     iteration one batch of perturbed pairs, headed by ``θ`` when it is
-    measured, and nothing at all for an invalid configuration."""
+    measured, then the final ``θ`` alone, and nothing at all for an invalid
+    configuration."""
 
     @pytest.mark.parametrize(
         ("resamplings", "sizes"),
         [
-            # Iterations 1, 3 and 5 (the first, every 2nd after it and the
-            # last) measure θ.
-            (1, [50, 3, 2, 3, 2, 3]),
-            (3, [50, 7, 6, 7, 6, 7]),
+            # Iterations 1, 3 and 5 (the first and every 2nd after it)
+            # measure θ, then the final θ is one circuit.
+            (1, [50, 3, 2, 3, 2, 3, 1]),
+            (3, [50, 7, 6, 7, 6, 7, 1]),
         ],
     )
     def test_calibration_then_one_batch_per_iteration(
@@ -204,13 +206,14 @@ class TestSPSABatches:
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
 
-    def test_the_last_iteration_is_measured_whatever_the_interval(self, monkeypatch):
+    def test_the_final_theta_is_measured_whatever_the_interval(self, monkeypatch):
         import polypus
 
         batches = _record_batches(monkeypatch)
         _train(polypus.SPSA(max_iters=4), dimensions=2)
-        # eval_interval 20: only the first and the last iteration measure θ.
-        assert [len(b) for b in batches] == [50, 3, 2, 2, 3]
+        # eval_interval 20: only the first iteration measures θ, and the
+        # final θ is measured after the last step.
+        assert [len(b) for b in batches] == [50, 3, 2, 2, 2, 1]
 
     def test_pairs_are_centred_on_theta_with_the_perturbation(self, monkeypatch):
         import polypus
@@ -220,13 +223,15 @@ class TestSPSABatches:
             polypus.SPSA(max_iters=2, perturbation=0.25, eval_interval=1),
             dimensions=2,
         )
-        calibration, first, second = (
+        calibration, first, second, final = (
             [_candidate(qc) for qc in batch] for batch in batches
         )
         # The fake answers the same counts everywhere: the calibration finds a
         # flat landscape, every estimate is zero, and θ stays at θ₀.
         theta = first[0]
         assert second[0] == pytest.approx(theta, abs=1e-12)
+        assert len(final) == 1
+        assert final[0] == pytest.approx(theta, abs=1e-12)
         # c₁ = c, so the calibration and the first iteration perturb by c;
         # c₂ = c / 2^gamma.
         for pairs, c in [
@@ -278,9 +283,9 @@ class TestSPSABatches:
         assert len(result.best_params) == 4
         assert len(result.fitness_history) == 3
         assert not result.converged
-        # The 50 calibration circuits, then 2K per iteration and θ on the
-        # first and the last, each on the 2 rows of x_train. (The QML oracle
-        # may split a batch into windows, so only the total is fixed.)
+        # The 50 calibration circuits, then 2K per iteration, θ on the first,
+        # and the final θ, each on the 2 rows of x_train. (The QML oracle may
+        # split a batch into windows, so only the total is fixed.)
         assert sum(len(b) for b in batches) == (50 + 3 * 2 * resamplings + 2) * 2
 
     def test_qml_train_rejects_an_invalid_configuration_before_any_batch(

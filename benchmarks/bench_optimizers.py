@@ -43,8 +43,8 @@ the number of parameters):
                 0.2 and target step 1.2 on QAOA, 0.1 and 0.63 (the defaults)
                 on the HEA
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
-                iteration: perturbation 0.1 and target step 0.63 (the
-                defaults) on both
+                iteration, with spsa's perturbation and target step on each
+                problem, so the two differ only in the perturbations
   rotosolve     polypus.Rotosolve(), the HEA only: as many sweeps as the
                 budget allows, the current point re-measured every fifth
                 step (the default)
@@ -68,16 +68,20 @@ spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
 
 Budgets. DE runs ``budget / P - 1`` generations after its initial population
 (L-SHADE spends the same budget in more, smaller generations), CMA-ES
-without restarts ``budget / λ`` generations, and Adam ``budget / (2d + 1)``
+without restarts ``budget / λ`` generations, and Adam ``(budget − 1) / (2d + 1)``
 iterations, each one batch of the current point and the central difference
-around it. SPSA runs the most iterations that fit after its 50-circuit
-calibration: each is one batch of ``2K`` circuits for ``K`` perturbations,
-plus the current point on the first iteration, every 20th after it and the
-last (``spsa_iterations``). Rotosolve runs the most sweeps of ``d``
-coordinate steps that fit: each step is one batch of the two circuits
-with its coordinate shifted by ±π/2, plus the current point on the first
-step and every fifth after it, and the final point after the last step
-(``rotosolve_sweeps``). IPOP's batch sizes depend on when its restarts happen, so no
+around it, then one evaluation of the point its last step reached. SPSA runs
+the most iterations that fit after its 50-circuit calibration: each is one
+batch of ``2K`` circuits for ``K`` perturbations, plus the current point on the
+first iteration and every 20th after it, and one evaluation measures its final
+point (``spsa_iterations``). Rotosolve runs the most sweeps of ``d``
+coordinate steps that fit: each step is one batch of the two circuits with its
+coordinate shifted by ±π/2, plus the current point on the first step and every
+fifth after it, and the final point after the last step (``rotosolve_sweeps``).
+Every optimizer's budget is checked before the first run, so a budget too
+small for one of them (``adam-x3``'s third must hold an Adam iteration and its
+final point) is an error before anything runs. IPOP's
+batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -100,6 +104,7 @@ still left (a third of the budget for the first), with seeds ``s``,
 Reported per optimizer, over the instances:
 
   ratio        mean exact approximation ratio of ``best_params``
+  lowest       the lowest exact approximation ratio of the instances
   Δ vs DE      mean paired difference from ``rand1bin``, ± its standard error
   wins         share of instances where it beats ``rand1bin`` (ties count half)
   bias         mean (reported ``best_fitness`` − exact value) / max cut: the
@@ -108,6 +113,10 @@ Reported per optimizer, over the instances:
   batches      mean batches sent within the budget: the sequential rounds,
                which is what costs time when the QPUs outnumber a batch
   time         mean wall-clock seconds per run on this machine
+
+A second table gives the paired differences from ``lshade``, from ``adam`` and
+from ``spsa`` when they ran, and a last line how ``lshade-adam``'s Adam stage
+changed the ratio of its L-SHADE stage.
 
 ``--final-shots N`` passes ``final_shots=N`` to every ``polypus.train``
 call: once each optimizer has stopped, its best candidates (``best_params``
@@ -126,7 +135,11 @@ and every run in the JSON gets ``final_shots``, ``final_fitness``,
 ``final_ratio``, ``final_bias``, ``final_evaluations`` and ``final_batches``
 (the final batch's circuits and calls) and ``final_is_best``
 (``final_params == best_params``). A chained run reports the final values of
-the result it is scored on and counts every stage's final batch.
+the result it is scored on and counts every stage's final batch. A last table
+then compares ``final_params`` with ``best_params`` per optimizer: the mean
+paired change in ratio, ± its standard error, the runs whose
+``final_params`` is another candidate, how many of those it is better in,
+the worst change, and the largest |final bias| of a run.
 
 Usage
 -----
@@ -190,14 +203,12 @@ PROBLEMS = ("qaoa", "hea")
 MOMENTUM = {"qaoa": (0.03, 0.4), "hea": (0.1, 0.4)}
 # adam-x3's runs use seeds s, s + RESTART_SEED_STEP, s + 2 RESTART_SEED_STEP.
 RESTART_SEED_STEP = 1_000_000
-# SPSA's perturbations per iteration and (perturbation, target step) per
+# SPSA's perturbations per iteration, and its (perturbation, target step) per
 # problem, as tuned on the reserved instances 100-109 in the review that
-# proposed SPSA (#396).
+# proposed SPSA (#396) with one perturbation; spsa-k8 takes the same, so the
+# two rows differ only in the perturbations.
 SPSA_RESAMPLINGS = {"spsa": 1, "spsa-k8": 8}
-SPSA = {
-    "qaoa": {"spsa": (0.2, 1.2), "spsa-k8": (0.1, 0.63)},
-    "hea": {"spsa": (0.1, 0.63), "spsa-k8": (0.1, 0.63)},
-}
+SPSA = {"qaoa": (0.2, 1.2), "hea": (0.1, 0.63)}
 # The circuits of SPSA's calibration batch, before its first iteration.
 SPSA_CALIBRATION = 50
 # Rotosolve re-measures the current point every this many coordinate steps
@@ -242,6 +253,11 @@ class Instance:
     ansatz with ``layers`` = reps, parameter ``layer·n + q`` the RY angle of
     qubit ``q`` in RY layer ``layer`` (0 to reps)."""
 
+    @staticmethod
+    def parameters(problem, nodes, layers):
+        """The circuit's number of parameters, without building it."""
+        return 2 * layers if problem == "qaoa" else nodes * (layers + 1)
+
     def __init__(self, nodes, layers, seed, problem="qaoa"):
         if problem not in PROBLEMS:
             raise ValueError(f"unknown problem {problem!r}")
@@ -264,8 +280,8 @@ class Instance:
             quadratic=[(a, b, -2.0) for a, b in self.edges],
         )
         qc = polypus.Circuit(nodes)
+        self.dimensions = self.parameters(problem, nodes, layers)
         if problem == "qaoa":
-            self.dimensions = 2 * layers
             for q in range(nodes):
                 qc.h(q)
             for k in range(layers):
@@ -275,7 +291,6 @@ class Instance:
                 for q in range(nodes):
                     qc.rx(q, 2 * beta)
         else:
-            self.dimensions = nodes * (layers + 1)
             for layer in range(layers + 1):
                 if layer:
                     for q in range(nodes - 1):
@@ -345,24 +360,23 @@ def default_lambda(dimensions):
 
 
 def adam_iterations(dimensions, budget):
-    """Adam's iterations within ``budget``: one batch of 2d + 1 each."""
-    iterations = budget // (2 * dimensions + 1)
+    """Adam's iterations within ``budget``: one batch of 2d + 1 each, then one
+    evaluation of the final point."""
+    iterations = (budget - 1) // (2 * dimensions + 1)
     if iterations < 1:
         raise ValueError(
-            f"a budget of {budget} evaluations does not fit one Adam batch of "
-            f"{2 * dimensions + 1}"
+            f"a budget of {budget} evaluations does not fit one Adam iteration "
+            f"of {2 * dimensions + 1} and its final point"
         )
     return iterations
 
 
 def spsa_evaluations(max_iters, resamplings, eval_interval=20):
     """The circuits an SPSA run sends: the calibration, then ``2K`` per
-    iteration, plus the current point on iterations 1, 1 + eval_interval, …
-    and the last."""
+    iteration, plus the current point on iterations 1, 1 + eval_interval, …,
+    and the final point after the last step."""
     measured = (max_iters - 1) // eval_interval + 1
-    if (max_iters - 1) % eval_interval:
-        measured += 1
-    return SPSA_CALIBRATION + 2 * resamplings * max_iters + measured
+    return SPSA_CALIBRATION + 2 * resamplings * max_iters + measured + 1
 
 
 def spsa_iterations(budget, resamplings):
@@ -372,8 +386,8 @@ def spsa_iterations(budget, resamplings):
         iterations -= 1
     if iterations < 1:
         raise ValueError(
-            f"a budget of {budget} evaluations does not fit SPSA's calibration "
-            f"and one iteration of {2 * resamplings + 1}"
+            f"a budget of {budget} evaluations does not fit SPSA's calibration, "
+            f"one iteration of {2 * resamplings + 1} and its final point"
         )
     return iterations
 
@@ -403,6 +417,42 @@ def rotosolve_sweeps(dimensions, budget):
 def applies(name, problem):
     """Whether optimizer ``name`` can train ``problem``'s circuit."""
     return (name, problem) not in NOT_APPLICABLE
+
+
+def check_budget(name, dimensions, budget, population):
+    """Raise ``ValueError`` when ``budget`` cannot run ``name``: checked for
+    every optimizer before the first run, so that a small budget does not stop
+    the benchmark half-way, its results unwritten. A chained optimizer's later
+    stages get at least the share checked here: L-SHADE spends at most half
+    the budget, and each Adam run at most its share."""
+    try:
+        if name in ("rand1bin", "shade", "lshade", "cmaes-P"):
+            if budget < population:
+                raise ValueError(
+                    f"a budget of {budget} evaluations does not fit one "
+                    f"population of {population}"
+                )
+        elif name in ("cmaes", "cmaes-ipop"):
+            if budget < default_lambda(dimensions):
+                raise ValueError(
+                    f"a budget of {budget} evaluations does not fit one "
+                    f"generation of {default_lambda(dimensions)}"
+                )
+        elif name in ("adam", "momentum"):
+            adam_iterations(dimensions, budget)
+        elif name == "lshade-adam":
+            check_budget("lshade", dimensions, budget // 2, population)
+            adam_iterations(dimensions, budget - budget // 2)
+        elif name == "adam-x3":
+            adam_iterations(dimensions, budget // 3)
+        elif name in SPSA_RESAMPLINGS:
+            spsa_iterations(budget, SPSA_RESAMPLINGS[name])
+        elif name == "rotosolve":
+            rotosolve_sweeps(dimensions, budget)
+        else:
+            raise ValueError("unknown optimizer")
+    except ValueError as err:
+        raise ValueError(f"{name}: {err}") from None
 
 
 def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
@@ -444,7 +494,7 @@ def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
         )
     if name in SPSA_RESAMPLINGS:
         resamplings = SPSA_RESAMPLINGS[name]
-        perturbation, target_step = SPSA[problem][name]
+        perturbation, target_step = SPSA[problem]
         return polypus.SPSA(
             max_iters=spsa_iterations(budget, resamplings),
             resamplings=resamplings,
@@ -640,6 +690,21 @@ def run_one(
 # ── Report ───────────────────────────────────────────────────────────────────
 
 
+def paired(runs, reference):
+    """The mean paired difference in ratio of ``runs`` from ``reference``
+    (both by instance), ± its standard error, and the share of instances where
+    ``runs`` did better (ties count half)."""
+    diffs = [runs[s]["ratio"] - reference[s]["ratio"] for s in runs]
+    share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
+    return mean_and_error(diffs), f"{100 * share / len(diffs):.0f} %"
+
+
+def mean_and_error(diffs):
+    """The mean of ``diffs`` ± its standard error."""
+    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
+    return f"{statistics.fmean(diffs):+.3f} ± {se:.3f}"
+
+
 def summarise(rows, optimizers, problem="qaoa"):
     by = {
         name: {r["instance"]: r for r in rows if r["optimizer"] == name}
@@ -648,14 +713,14 @@ def summarise(rows, optimizers, problem="qaoa"):
     base = by.get(BASELINE)
     final = any("final_ratio" in r for r in rows)
     lines = [
-        "| Optimizer | ratio | Δ vs rand1bin | wins | bias | evals | batches | time (s) |"
-        + (" final ratio | final bias |" if final else ""),
-        "|---|---|---|---|---|---|---|---|" + ("---|---|" if final else ""),
+        "| Optimizer | ratio | lowest | Δ vs rand1bin | wins | bias | evals | batches "
+        "| time (s) |" + (" final ratio | final bias |" if final else ""),
+        "|---|---|---|---|---|---|---|---|---|" + ("---|---|" if final else ""),
     ]
     notes = []
     for name in optimizers:
         if not applies(name, problem):
-            dashes = 7 + (2 if final else 0)
+            dashes = 8 + (2 if final else 0)
             lines.append(f"| {name} |" + " — |" * dashes)
             notes.append(
                 f"{name}: not applicable to {problem} "
@@ -664,21 +729,15 @@ def summarise(rows, optimizers, problem="qaoa"):
             continue
         runs = list(by[name].values())
         mean = lambda key: statistics.fmean(r[key] for r in runs)  # noqa: E731
+        lowest = min(r["ratio"] for r in runs)
         if base is None or name == BASELINE:
             delta, wins = "—", "—"
         else:
-            diffs = [by[name][s]["ratio"] - base[s]["ratio"] for s in by[name]]
-            se = (
-                statistics.stdev(diffs) / math.sqrt(len(diffs))
-                if len(diffs) > 1
-                else 0.0
-            )
-            delta = f"{statistics.fmean(diffs):+.3f} ± {se:.3f}"
-            share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
-            wins = f"{100 * share / len(diffs):.0f} %"
+            delta, wins = paired(by[name], base)
         line = (
-            f"| {name} | {mean('ratio'):.3f} | {delta} | {wins} | {mean('bias'):+.3f} "
-            f"| {mean('evaluations'):.0f} | {mean('batches'):.0f} | {mean('seconds'):.2f} |"
+            f"| {name} | {mean('ratio'):.3f} | {lowest:.3f} | {delta} | {wins} "
+            f"| {mean('bias'):+.3f} | {mean('evaluations'):.0f} "
+            f"| {mean('batches'):.0f} | {mean('seconds'):.2f} |"
         )
         if final:
             line += f" {mean('final_ratio'):.3f} | {mean('final_bias'):+.3f} |"
@@ -686,6 +745,60 @@ def summarise(rows, optimizers, problem="qaoa"):
     if notes:
         lines.append("")
         lines.extend(notes)
+    references = [name for name in ("lshade", "adam", "spsa") if name in by]
+    if references:
+        lines += [
+            "",
+            "| Optimizer | "
+            + " | ".join(f"Δ vs {name} | wins" for name in references)
+            + " |",
+            "|---|" + "---|---|" * len(references),
+        ]
+        for name in optimizers:
+            if not applies(name, problem):
+                lines.append(f"| {name} |" + " — |" * (2 * len(references)))
+                continue
+            cells = []
+            for reference in references:
+                cells += (
+                    ["—", "—"]
+                    if name == reference
+                    else list(paired(by[name], by[reference]))
+                )
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    if "lshade-adam" in by:
+        gains = [
+            run["stages"][1]["ratio"] - run["stages"][0]["ratio"]
+            for run in by["lshade-adam"].values()
+        ]
+        lines += [
+            "",
+            f"lshade-adam: its Adam stage changed the ratio of its L-SHADE stage by "
+            f"{statistics.fmean(gains):+.3f} on average ({min(gains):+.3f} at worst) "
+            f"and raised it on {sum(g > 0 for g in gains)} of {len(gains)} instances.",
+        ]
+    if final:
+        lines += [
+            "",
+            "| Optimizer | final − best ratio | other candidate | better | worst "
+            "| largest final bias |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name in optimizers:
+            if not applies(name, problem):
+                lines.append(f"| {name} |" + " — |" * 5)
+                continue
+            runs = list(by[name].values())
+            moved = [
+                r["final_ratio"] - r["ratio"] for r in runs if not r["final_is_best"]
+            ]
+            change = mean_and_error([r["final_ratio"] - r["ratio"] for r in runs])
+            worst = f"{min(moved):+.3f}" if moved else "—"
+            largest = max(abs(r["final_bias"]) for r in runs)
+            lines.append(
+                f"| {name} | {change} | {len(moved)} of {len(runs)} "
+                f"| {sum(m > 0 for m in moved)} | {worst} | {largest:.3f} |"
+            )
     return "\n".join(lines)
 
 
@@ -823,6 +936,19 @@ def main(argv=None):
     for key, value in env.items():
         print(f"- {key}: {value}")
     seeds = range(args.first_instance, args.first_instance + args.instances)
+    problems = []
+    for problem, layers, _, budget in args.scenario:
+        dimensions = Instance.parameters(problem, args.nodes, layers)
+        for name in optimizers:
+            if not applies(name, problem):
+                continue
+            try:
+                check_budget(name, dimensions, budget, args.de_population)
+            except ValueError as err:
+                problems.append(f"{problem}:{layers}, {budget} evaluations: {err}")
+    if problems:
+        print("[bench-optimizers] ERROR: " + "; ".join(problems), file=sys.stderr)
+        sys.exit(2)
     report = {"environment": env, "scenarios": []}
     for problem, layers, shots, budget in args.scenario:
         shots_label = "2^20" if shots == EXACT_SHOTS else str(shots)
