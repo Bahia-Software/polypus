@@ -247,6 +247,65 @@ jobs:
           name: wheels-sdist
           path: dist
 
+  # ── Pre-publish sdist smoke test ────────────────────────────────────────────
+  # The sdist is what Spack, EasyBuild and platforms without a wheel build from,
+  # and a broken one cannot be replaced on PyPI. Build it from source in a clean
+  # container (gcc, but no Rust, no ZeroMQ and no checkout of the sources) with
+  # the toolchain rust-toolchain.toml pins: the sdist does not ship that file, so
+  # it is read from the repository and installed as rustup's default. Then run
+  # the README Bell example, as `smoke` does for the wheels.
+  sdist-smoke:
+    name: smoke (sdist, build from source)
+    needs: sdist
+    runs-on: ubuntu-latest
+    container: python:3.11
+    timeout-minutes: 45
+    env:
+      POLYPUS_NO_AUTOCALIBRATE: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: rust-toolchain.toml
+          sparse-checkout-cone-mode: false
+          path: repo
+      - name: Install Rust (rust-toolchain.toml channel)
+        run: |
+          set -eux
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' repo/rust-toolchain.toml)
+          test -n "$channel"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$channel"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels-sdist
+          path: dist
+      - name: Install the sdist (build from source)
+        run: |
+          set -eux
+          rustc --version
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir dist/*.tar.gz
+          python - <<'PY'
+          import importlib.util as u
+          assert u.find_spec("zmq") is None, "pyzmq leaked into the sdist build"
+          assert u.find_spec("cunqa") is None, "cunqa leaked into the sdist build"
+          PY
+      - name: Import and run the README Bell example
+        run: |
+          python - <<'PY'
+          import polypus
+          print("polypus", polypus.__version__)
+          bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
+          result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local")
+          counts = result.counts[0]
+          print("counts:", counts)
+          assert sum(counts.values()) == 1000, counts
+          assert set(counts) == {"00", "11"}, counts
+          PY
+
   # ── Pre-publish wheel smoke test ────────────────────────────────────────────
   # ci.yml runs the test suite on Linux x86_64 only, so every built wheel is
   # installed on its own platform and interpreter before anything is published:
@@ -313,7 +372,7 @@ jobs:
   # Publish to PyPI on a version tag, or a manual run with target=pypi.
   publish-pypi:
     name: Publish to PyPI
-    needs: [linux, macos, windows, sdist, smoke]
+    needs: [linux, macos, windows, sdist, sdist-smoke, smoke]
     if: >-
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
@@ -338,7 +397,7 @@ jobs:
   # Manual dry run: publish to TestPyPI (the default target for a manual run).
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [linux, macos, windows, sdist, smoke]
+    needs: [linux, macos, windows, sdist, sdist-smoke, smoke]
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -367,7 +426,7 @@ jobs:
   # environment); the token is only exposed to the publish step.
   publish-crates:
     name: Publish to crates.io
-    needs: [gate, linux, macos, windows, sdist, smoke]
+    needs: [gate, linux, macos, windows, sdist, sdist-smoke, smoke]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 120

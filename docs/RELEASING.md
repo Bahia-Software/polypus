@@ -42,7 +42,8 @@ and any future change must be applied to both.
 2. **Publish the GitHub release.** Create a **GitHub Release** (not just a bare
    tag) named `vX.Y.Z`. This:
    - triggers [`release.yml`](../.github/workflows/release.yml) → builds the
-     wheels + sdist, smoke-tests every wheel on its platform, publishes to PyPI
+     wheels + sdist, smoke-tests every wheel on its platform and the sdist
+     (built from source in a clean container), publishes to PyPI
      (Trusted Publishing) and the Rust crates to crates.io (see
      [crates.io](#cratesio)), then runs the clean-install verification;
    - fires the Zenodo webhook → Zenodo archives the release, reads `.zenodo.json`,
@@ -53,7 +54,7 @@ and any future change must be applied to both.
 
 The `publish-crates` job of `release.yml` publishes every workspace crate to
 crates.io on a `vX.Y.Z` tag push (not on manual runs), after the same gates as
-PyPI: the release gate, every wheel build and the wheel smoke tests.
+PyPI: the release gate, every wheel and sdist build and their smoke tests.
 
 - **Which crates.** All thirteen workspace crates. `polypus-backend`,
   `polypus-subprocess-backend` and `polypus-backend-conformance` are needed by
