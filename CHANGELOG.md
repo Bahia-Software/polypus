@@ -225,9 +225,8 @@ Changes on `main` since 0.7.2.
 
 ### Changed
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
-  `External`, and `polypus_optimizers::OptimizerError` two,
-  `InvalidCandidate` and `ExternalOptimizer`, so an exhaustive `match` on
-  either outside its crate must handle them (#399).
+  `External`, so an exhaustive `match` on it outside its crate must handle
+  it (#399).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
   it (#398).
@@ -312,15 +311,16 @@ Changes on `main` since 0.7.2.
   `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
   `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
   works, and `Method` has an `Adam` variant.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has new variants,
+  `NonFiniteGradient` (#394), `InvalidCandidate` and `ExternalOptimizer`
+  (#399), and is `#[non_exhaustive]`; a `match` on it outside its crate needs
+  a wildcard arm, and later variants are not breaking.
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
   so an exhaustive `match` on it needs an arm for it (#396).
 - **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has a
   `final_shots` field (`None` keeps the previous behaviour), and its
   `Flow::Output` is `TrainOutcome`, whose `optimization` field is the
   `OptimizationOutcome` it returned before (#397).
-- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has a new variant,
-  `NonFiniteGradient`, and is `#[non_exhaustive]`; a `match` on it outside its
-  crate needs a wildcard arm, and later variants are not breaking (#394).
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist

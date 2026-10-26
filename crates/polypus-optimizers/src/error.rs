@@ -38,6 +38,8 @@ use std::fmt;
 ///         OptimizerError::OracleLengthMismatch { .. } => "length",
 ///         OptimizerError::NonFiniteGradient { .. } => "gradient",
 ///         OptimizerError::InvalidConfig { .. } => "config",
+///         OptimizerError::InvalidCandidate { .. } => "candidate",
+///         OptimizerError::ExternalOptimizer { .. } => "external",
 ///     }
 /// }
 /// ```
