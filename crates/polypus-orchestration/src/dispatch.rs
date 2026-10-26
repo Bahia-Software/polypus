@@ -18,6 +18,7 @@
 //! boxed by the oracle and recovered by the `polypus` edge via `downcast` to
 //! `EvaluationError`, keeping this crate free of `pyo3`.
 
+use polypus_optimizers::finite_difference;
 use polypus_optimizers::{
     AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
 };
@@ -129,6 +130,66 @@ impl<O: EvaluationOracle + 'static> From<Box<O>> for Oracles {
     fn from(evaluation: Box<O>) -> Self {
         let evaluation: Box<dyn EvaluationOracle> = evaluation;
         evaluation.into()
+    }
+}
+
+impl Method {
+    /// Check every precondition the optimizer checks before any RNG draw or
+    /// oracle call, in its order, without running anything: its configuration
+    /// first, then `initial_point` (contract C-5). Each arm calls the
+    /// optimizer's own `check_preconditions`, so the error is the one
+    /// [`dispatch_optimizer`] would return as [`OracleError::Config`] for the
+    /// same arguments. `train` and `qml.train` call it before any backend, and
+    /// so any CUNQA allocation, exists.
+    pub fn check_preconditions(
+        &self,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        match self {
+            Method::De(cfg) => AlgorithmDifferentialEvolution::check_preconditions(
+                cfg.population_size,
+                dimensions,
+                initial_point,
+            ),
+            Method::Pso(cfg) => {
+                AlgorithmPSO::check_preconditions(dimensions, cfg.bounds, initial_point)
+            }
+            Method::Qng(cfg, _) => AlgorithmQNG::check_preconditions(
+                cfg.max_iters,
+                cfg.learning_rate,
+                cfg.finite_difference_step,
+                cfg.bounds,
+                cfg.tikhonov_reg,
+                dimensions,
+                initial_point,
+            ),
+            Method::Cmaes(cfg) => AlgorithmCmaEs::check_preconditions(
+                dimensions,
+                cfg.population_size,
+                cfg.generations,
+                cfg.sigma0,
+                cfg.restarts,
+                initial_point,
+            ),
+            // The step first: dispatch builds the finite difference before it
+            // runs Adam whenever the run's oracles carry no exact gradient,
+            // which is every `train` and `qml.train` run. With an exact
+            // gradient dispatch never reads the step.
+            Method::Adam(cfg) => {
+                finite_difference::check_step(cfg.finite_difference_step)?;
+                AlgorithmAdam::check_preconditions(
+                    cfg.max_iters,
+                    cfg.learning_rate,
+                    cfg.beta1,
+                    cfg.beta2,
+                    cfg.epsilon,
+                    cfg.bounds,
+                    dimensions,
+                    initial_point,
+                )
+            }
+        }
     }
 }
 
@@ -771,6 +832,186 @@ mod tests {
                     (x - want).abs() <= tolerance,
                     "{name}: {first:?} vs {expected:?}"
                 );
+            }
+        }
+    }
+
+    /// `Method::check_preconditions` returns exactly what dispatch returns as
+    /// its configuration error, in the same order (the configuration before
+    /// `initial_point`), and passes whatever dispatch runs.
+    #[test]
+    fn check_preconditions_agrees_with_dispatch() {
+        use std::f64::consts::PI;
+        let pso = |bounds| {
+            Method::Pso(PsoConfig {
+                generations: 2,
+                population_size: 6,
+                bounds,
+                inertia_weight: 0.5,
+                cognitive_weight: 1.0,
+                social_weight: 1.0,
+                tolerance: 0.0,
+            })
+        };
+        let qng = |max_iters, bounds| {
+            Method::Qng(
+                QngConfig {
+                    max_iters,
+                    learning_rate: 0.1,
+                    finite_difference_step: 0.1,
+                    bounds,
+                    tikhonov_reg: 0.05,
+                },
+                Box::new(ConstVariance),
+            )
+        };
+        let cmaes = |sigma0| {
+            Method::Cmaes(CmaesConfig {
+                generations: 2,
+                population_size: None,
+                sigma0,
+                tolerance: 0.0,
+                patience: 10,
+                restarts: 0,
+            })
+        };
+        let de = |strategy, population_size| {
+            Method::De(DeConfig {
+                generations: 2,
+                population_size,
+                tolerance: 0.0,
+                patience: 10,
+                strategy,
+            })
+        };
+        let short = Some(vec![0.5]);
+        let outside = Some(vec![0.5, 4.0]);
+        // A name, a way to build the method (it is not `Clone`) and a point.
+        type Case = (&'static str, Box<dyn Fn() -> Method>, Option<Vec<f64>>);
+        let mut cases: Vec<Case> = vec![
+            (
+                "PSO, empty bounds",
+                Box::new(move || pso((1.0, 1.0))),
+                short.clone(),
+            ),
+            (
+                "PSO, short point",
+                Box::new(move || pso((-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "PSO, point outside",
+                Box::new(move || pso((-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "PSO, valid",
+                Box::new(move || pso((-PI, PI))),
+                Some(vec![0.5, 1.0]),
+            ),
+            (
+                "QNG, max_iters 0",
+                Box::new(move || qng(0, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, empty bounds",
+                Box::new(move || qng(1, (1.0, 0.0))),
+                short.clone(),
+            ),
+            (
+                "QNG, short point",
+                Box::new(move || qng(1, (-PI, PI))),
+                short.clone(),
+            ),
+            (
+                "QNG, point outside",
+                Box::new(move || qng(1, (-PI, PI))),
+                outside.clone(),
+            ),
+            (
+                "CMA-ES, sigma0 0",
+                Box::new(move || cmaes(0.0)),
+                short.clone(),
+            ),
+            (
+                "CMA-ES, NaN",
+                Box::new(move || cmaes(0.3)),
+                Some(vec![0.5, f64::NAN]),
+            ),
+            ("CMA-ES, no point", Box::new(move || cmaes(0.3)), None),
+        ];
+        let adam = |finite_difference_step, learning_rate| {
+            Method::Adam(AdamConfig {
+                max_iters: 2,
+                learning_rate,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                bounds: (-PI, PI),
+                tolerance: 0.0,
+                patience: 10,
+                finite_difference_step,
+            })
+        };
+        let adam_cases: Vec<Case> = vec![
+            (
+                "Adam, step 0",
+                Box::new(move || adam(0.0, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Adam, rate 0",
+                Box::new(move || adam(0.1, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Adam, short point",
+                Box::new(move || adam(0.1, 0.05)),
+                short.clone(),
+            ),
+            (
+                "Adam, point outside",
+                Box::new(move || adam(0.1, 0.05)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(adam_cases);
+        for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+            cases.push((
+                "DE, population 2",
+                Box::new(move || de(strategy, 2)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, short point",
+                Box::new(move || de(strategy, 6)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, valid",
+                Box::new(move || de(strategy, 6)),
+                outside.clone(),
+            ));
+        }
+        for (name, method, point) in cases {
+            let checked = method().check_preconditions(2, point.as_deref());
+            let oracle = Box::new(FirstCandidate(Arc::default()));
+            let dispatched =
+                dispatch_optimizer(method(), oracle, 2, &OracleErrorSlot::new(), 5, point);
+            match (checked, dispatched) {
+                (Ok(()), Ok(_)) => {}
+                (Err(checked), Err(OracleError::Config(dispatched))) => {
+                    assert_eq!(checked, dispatched, "{name}");
+                }
+                (checked, dispatched) => panic!(
+                    "{name}: check_preconditions gave {checked:?}, dispatch {}",
+                    match dispatched {
+                        Ok(_) => "Ok".to_string(),
+                        Err(OracleError::Config(e)) => format!("Config({e})"),
+                        Err(OracleError::Evaluation(e)) => format!("Evaluation({e})"),
+                    }
+                ),
             }
         }
     }

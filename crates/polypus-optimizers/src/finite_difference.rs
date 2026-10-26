@@ -3,6 +3,19 @@
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
 
+/// Check a finite-difference step as [`FiniteDifferenceGradient::new`] does,
+/// without an oracle: finite and `> 0` ([`OptimizerError::InvalidConfig`] for
+/// `finite_difference_step` otherwise).
+pub fn check_step(step: f64) -> Result<(), OptimizerError> {
+    if !step.is_finite() || step <= 0.0 {
+        return Err(OptimizerError::InvalidConfig {
+            parameter: "finite_difference_step",
+            reason: format!("must be finite and > 0, got {step}"),
+        });
+    }
+    Ok(())
+}
+
 /// Central finite-difference gradient of an [`EvaluationOracle`]'s fitness.
 ///
 /// For callers that can only score candidates, such as a circuit the library
@@ -32,12 +45,7 @@ impl<O: EvaluationOracle> FiniteDifferenceGradient<O> {
     /// Wrap `oracle` with the finite-difference step `step`, which must be
     /// finite and `> 0` ([`OptimizerError::InvalidConfig`] otherwise).
     pub fn new(oracle: O, step: f64) -> Result<Self, OptimizerError> {
-        if !step.is_finite() || step <= 0.0 {
-            return Err(OptimizerError::InvalidConfig {
-                parameter: "finite_difference_step",
-                reason: format!("must be finite and > 0, got {step}"),
-            });
-        }
+        check_step(step)?;
         Ok(FiniteDifferenceGradient { oracle, step })
     }
 

@@ -724,9 +724,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     finite point: their `bounds` only shape the random draw. Each optimizer
     checks this after its other preconditions, whose errors come first, and
     before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
-    `initial_point`. `train` and `qml.train` check the same (length,
-    finiteness and PSO's bounds) themselves before anything runs (no backend,
-    no CUNQA allocation), raising `ValueError` with the optimizer's message.
+    `initial_point`. Each optimizer's `check_preconditions` makes these checks,
+    configuration and point, in that order, without running anything;
+    `Method::check_preconditions` in `polypus-orchestration` calls the one the
+    method names, and `train` and `qml.train` call it before anything runs (no
+    backend, no CUNQA allocation), raising `ValueError` with the optimizer's
+    message, so a configuration error comes first there too.
   - Postconditions: the optimizer draws everything exactly as without a
     point, then the point replaces part of it, so the RNG stream is
     unchanged. DE (every strategy): the point, wrapped into `[0, 2π)`, is the
@@ -751,10 +754,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     any oracle call and their precedence, PSO's bounds, the postconditions
     over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
     bits they had before it), the `check_initial_point` unit tests in
-    `src/util.rs`, `initial_point_reaches_every_optimizer` in
+    `src/util.rs`, `initial_point_reaches_every_optimizer` and
+    `check_preconditions_agrees_with_dispatch` in
     `crates/polypus-orchestration/src/dispatch.rs`, and
     `tests/python/test_initial_point.py` (the `ValueError`s, PSO's bounds
-    included, before the CUNQA seam is reached, the first candidates every optimizer sends through
+    included, before the CUNQA seam is reached, a configuration error before
+    the point's, the first candidates every optimizer sends through
     `train` and `qml.train`, and a `best_params` list, tuple or NumPy array
     as the point). The pinned `"rand1bin"` outcome and
     `tests/python/test_determinism_baseline.py` are unchanged.

@@ -4,7 +4,8 @@
 A point of the wrong length or with a non-finite value raises ``ValueError``
 before anything runs: with ``infrastructure="cunqa"``, before
 ``connect_to_infrastructure`` (and so ``qraise``) is reached, which a recorder
-checks without SLURM or CUNQA.
+checks without SLURM or CUNQA. An invalid optimizer configuration is reported
+first, as the optimizer itself does.
 
 A valid point is where the optimizer starts. The batch tests run the real
 training loops on Aer with ``polypus_python.run_qcs`` replaced by a fake that
@@ -234,6 +235,36 @@ class TestValidation:
             ),
         ):
             run(polypus.PSO(), infrastructure="cunqa", initial_point=[0.25, 4.0])
+        assert seam_calls == []
+
+    @pytest.mark.parametrize(
+        ("name", "message"),
+        [
+            ("de", "population_size must be at least 4"),
+            ("pso", "bounds must be a non-empty interval"),
+            ("qng", "invalid max_iters"),
+            ("cmaes", "invalid sigma0"),
+            ("adam", "invalid finite_difference_step"),
+        ],
+    )
+    @pytest.mark.parametrize("point", [None, [0.25]])
+    def test_a_configuration_error_comes_first_before_anything_runs(
+        self, seam_calls, entry, name, message, point
+    ):
+        # As in Rust: the optimizer's configuration is checked before the
+        # point, here before any QPU is requested, with or without a point.
+        import polypus
+
+        method = {
+            "de": lambda: polypus.DE(population_size=2),
+            "pso": lambda: polypus.PSO(bounds=(1.0, 0.0)),
+            "qng": lambda: polypus.QNG(lambda theta, a: 1.0, max_iters=0),
+            "cmaes": lambda: polypus.CMAES(sigma0=0.0),
+            "adam": lambda: polypus.Adam(finite_difference_step=0.0),
+        }[name]()
+        run, _ = ENTRY_POINTS[entry]
+        with pytest.raises(ValueError, match=re.escape(message)):
+            run(method, infrastructure="cunqa", initial_point=point)
         assert seam_calls == []
 
     def test_a_valid_point_gets_to_the_seam(self, seam_calls, entry):
