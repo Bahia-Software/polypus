@@ -58,9 +58,11 @@ nothing there and prints the row as "—" (not applicable).
 Momentum's learning rate depends on the scale of the cost, so its rate and
 step are tuned per problem: they are the values the review that proposed Adam
 (#395) chose on reserved instances 100-109, never on the test instances
-0-29. Adam uses one configuration, its defaults, for both problems. SPSA's
+0-29. Adam uses one configuration for both problems, its defaults, which the
+same review chose on reserved instances, not on the test ones. SPSA's
 perturbation and target step are likewise the values the review that
-proposed SPSA (#396) chose on instances 100-109.
+proposed SPSA (#396) chose on instances 100-109. DE and CMA-ES use their
+defaults, untuned.
 
 Early stopping is off (``tolerance=0``) for all but ``cmaes-ipop``, so they
 spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
