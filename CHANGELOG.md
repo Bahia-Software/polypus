@@ -164,6 +164,11 @@ Changes on `main` since 0.7.2.
   `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
   `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
   works, and `Method` has an `Adam` variant.
+- `rust-toolchain.toml` pins the Rust that CI and the release builds use
+  (1.99.1), and that rustup selects in a checkout; a new Rust release can no
+  longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
+  does not include the file. Fuzzing and Miri use a dated nightly, and the
+  docs, release and tutorial-sync jobs have a timeout (#415).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -171,6 +176,24 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
+- The README quickstart runs on the native backend (`backend="polypus"`), so it
+  no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
+  to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
+  static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
+  Troubleshooting section for the error (#392).
+- The `polypus-physics` tests cover the `POLYPUS_ENDF_DATA_DIR` override
+  without setting the variable, which raced the tests that read it and cache
+  what they read, and write their files to per-process scratch directories
+  instead of fixed paths in the temp directory. The crate no longer contains
+  `unsafe` (#420).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
@@ -226,6 +249,17 @@ Changes on `main` since 0.7.2.
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
+- CI runs every push to `main` to completion: the next push cancelled it, and
+  the release gate needs a successful push run for the commit it publishes
+  (#403).
+- CI tests the whole workspace (`cargo test --workspace`), so a crate added to
+  it is tested without editing the workflow, which listed the crates by hand
+  (#412).
+- CI runs tests it skipped without notice: the pinned-fixture test of the
+  OpenQASM 3 interop with Qiskit (contract C-10), in a leg with the Qiskit
+  that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
+  battery against Aer. There a missing tool fails those tests instead of
+  skipping them, and pytest lists every skip with its reason (#407).
 
 ## [0.7.2] - 2026-09-30
 

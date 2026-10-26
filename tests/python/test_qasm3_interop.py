@@ -4,7 +4,8 @@ Interoperability of the OpenQASM 3 profile with Qiskit, in both directions.
 Supported (tested) versions: Qiskit 2.5.2 with qiskit-qasm3-import 0.6.0
 (``requirements-dev.txt``). That Polypus reads Qiskit's output as Qiskit
 does is a tested property of these versions and circuits, not a general
-guarantee.
+guarantee. CI runs this file with that Qiskit in one leg, where the pinned
+fixtures must match, and with the latest Qiskit in the others.
 
 - Qiskit → Polypus: ``qasm3.dumps`` output — the pinned fixtures and a set
   generated here (QAOA, ``efficient_su2``, ``real_amplitudes``,
@@ -25,6 +26,7 @@ e^{-iπ/4}) — computed from Qiskit's definitions. Counts and their bit order
 """
 
 import math
+import os
 
 import numpy as np
 import polypus
@@ -40,6 +42,24 @@ ATOL = 1e-10
 SHOTS = 64
 RNG = np.random.default_rng(236)
 BINDINGS = 3
+
+# CI's fixtures leg installs the Qiskit that wrote the fixtures and sets this to
+# 1, so another Qiskit fails the pinned-fixture test there instead of skipping.
+REQUIRE_FIXTURES_QISKIT = "POLYPUS_REQUIRE_FIXTURES_QISKIT"
+
+
+def require_fixtures_qiskit():
+    """Skip unless the installed Qiskit is the one that wrote the fixtures;
+    under ``POLYPUS_REQUIRE_FIXTURES_QISKIT=1``, fail instead."""
+    if qiskit.__version__ == qasm3_fixtures.QISKIT_VERSION:
+        return
+    message = (
+        f"the fixtures are pinned for Qiskit {qasm3_fixtures.QISKIT_VERSION}; "
+        f"Qiskit {qiskit.__version__} is installed"
+    )
+    if os.environ.get(REQUIRE_FIXTURES_QISKIT) == "1":
+        pytest.fail(f"{message}, and {REQUIRE_FIXTURES_QISKIT}=1 requires it")
+    pytest.skip(message)
 
 
 def exported_name(param) -> str:
@@ -206,13 +226,22 @@ FIXTURE_INPUTS = {
 # ─────────────────────────────── Fixtures ───────────────────────────────
 
 
-@pytest.mark.skipif(
-    qiskit.__version__ != qasm3_fixtures.QISKIT_VERSION,
-    reason=f"the fixtures are pinned for Qiskit {qasm3_fixtures.QISKIT_VERSION}",
-)
 @pytest.mark.parametrize("name", sorted(qasm3_fixtures.FIXTURES))
 def test_the_pinned_fixtures_are_what_qiskit_writes(name):
+    require_fixtures_qiskit()
     assert qasm3_fixtures.dumps(name) == qasm3_fixtures.pinned(name)
+
+
+def test_another_qiskit_fails_the_pinned_fixtures_where_they_are_required(
+    monkeypatch,
+):
+    monkeypatch.setattr(qasm3_fixtures, "QISKIT_VERSION", "0.0.0")
+    monkeypatch.setenv(REQUIRE_FIXTURES_QISKIT, "1")
+    with pytest.raises(pytest.fail.Exception, match=REQUIRE_FIXTURES_QISKIT):
+        require_fixtures_qiskit()
+    monkeypatch.delenv(REQUIRE_FIXTURES_QISKIT)
+    with pytest.raises(pytest.skip.Exception, match="pinned for Qiskit 0.0.0"):
+        require_fixtures_qiskit()
 
 
 @pytest.mark.parametrize("name", sorted(qasm3_fixtures.FIXTURES))
