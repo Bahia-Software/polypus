@@ -51,7 +51,7 @@ echo "# qubits='$QUBITS'  reps=$REPS  out=$OUT  build=$BUILD"
 
 # ---- build the extension in RELEASE (perf claims are about release) ----------
 if [[ "$BUILD" == "1" ]]; then
-    maturin develop --release --features extension-module
+    maturin develop --release
 fi
 
 # ---- run --------------------------------------------------------------------

@@ -27,7 +27,7 @@ pub struct PhotonInteractionModel;
 
 impl PhotonInteractionModel {
     /// Macroscopic cross-section (m⁻¹) contribution from one channel,
-    /// straight from the medium's embedded ENDF-6 data.
+    /// straight from the medium's ENDF-6 data.
     fn macroscopic_cross_section(
         &self,
         medium: &dyn Medium,

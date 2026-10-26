@@ -491,25 +491,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "iter-read"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,7 +825,6 @@ version = "0.7.2"
 name = "polypus-evaluation"
 version = "0.7.2"
 dependencies = [
- "log",
  "polypus-circuit",
  "polypus-infrastructure",
  "polypus-observable",
@@ -862,7 +842,6 @@ dependencies = [
  "polypus-backend",
  "polypus-backend-conformance",
  "polypus-circuit",
- "polypus-observable",
  "polypus-sim",
  "polypus-subprocess-backend",
  "pyo3",
@@ -887,7 +866,6 @@ dependencies = [
 name = "polypus-observable"
 version = "0.7.2"
 dependencies = [
- "log",
  "rand 0.10.3",
  "rayon",
 ]
@@ -907,7 +885,6 @@ version = "0.7.2"
 dependencies = [
  "log",
  "polypus-infrastructure",
- "polypus-observable",
  "polypus-optimizers",
 ]
 
@@ -916,9 +893,7 @@ name = "polypus-physics"
 version = "0.7.2"
 dependencies = [
  "csv",
- "include_dir",
  "log",
- "ndarray",
  "plotters",
  "rand 0.10.3",
  "serde",
