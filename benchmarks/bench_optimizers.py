@@ -125,7 +125,9 @@ the result it is scored on and counts every stage's final batch. A last table
 then compares ``final_params`` with ``best_params`` per optimizer: the mean
 paired change in ratio, ± its standard error, the runs whose
 ``final_params`` is another candidate, how many of those it is better in,
-the worst change, and the largest |final bias| of a run.
+the worst change, and the largest |final bias| of a run. The final values
+are printed to four decimals, since a re-evaluation with many shots leaves
+little bias to show.
 
 Usage
 -----
@@ -638,10 +640,10 @@ def paired(runs, reference):
     return mean_and_error(diffs), f"{100 * share / len(diffs):.0f} %"
 
 
-def mean_and_error(diffs):
-    """The mean of ``diffs`` ± its standard error."""
+def mean_and_error(diffs, digits=3):
+    """The mean of ``diffs`` ± its standard error, to ``digits`` decimals."""
     se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
-    return f"{statistics.fmean(diffs):+.3f} ± {se:.3f}"
+    return f"{statistics.fmean(diffs):+.{digits}f} ± {se:.{digits}f}"
 
 
 def summarise(rows, optimizers):
@@ -670,7 +672,7 @@ def summarise(rows, optimizers):
             f"| {mean('batches'):.0f} | {mean('seconds'):.2f} |"
         )
         if final:
-            line += f" {mean('final_ratio'):.3f} | {mean('final_bias'):+.3f} |"
+            line += f" {mean('final_ratio'):.3f} | {mean('final_bias'):+.4f} |"
         lines.append(line)
     references = [name for name in ("lshade", "adam", "spsa") if name in by]
     if references:
@@ -713,12 +715,13 @@ def summarise(rows, optimizers):
             moved = [
                 r["final_ratio"] - r["ratio"] for r in runs if not r["final_is_best"]
             ]
-            change = mean_and_error([r["final_ratio"] - r["ratio"] for r in runs])
-            worst = f"{min(moved):+.3f}" if moved else "—"
+            changes = [r["final_ratio"] - r["ratio"] for r in runs]
+            change = mean_and_error(changes, digits=4)
+            worst = f"{min(moved):+.4f}" if moved else "—"
             largest = max(abs(r["final_bias"]) for r in runs)
             lines.append(
                 f"| {name} | {change} | {len(moved)} of {len(runs)} "
-                f"| {sum(m > 0 for m in moved)} | {worst} | {largest:.3f} |"
+                f"| {sum(m > 0 for m in moved)} | {worst} | {largest:.4f} |"
             )
     return "\n".join(lines)
 

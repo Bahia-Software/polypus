@@ -347,7 +347,7 @@ def test_quick_mode_reports_the_final_values(tmp_path):
     )
     # One run per instance of the quick mode's two.
     assert re.search(
-        r"^\| rand1bin \| [+-]\d\.\d{3} ± \d\.\d{3} \| \d of 2 \| ", stdout, re.M
+        r"^\| rand1bin \| [+-]\d\.\d{4} ± \d\.\d{4} \| \d of 2 \| ", stdout, re.M
     )
 
 
