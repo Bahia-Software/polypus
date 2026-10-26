@@ -58,6 +58,16 @@ pub enum OptimizerError {
         /// Number of fitness values the oracle actually returned.
         got: usize,
     },
+    /// A [`GradientOracle::gradient_batch`](crate::GradientOracle::gradient_batch)
+    /// returned a component that is not finite (Adam). The update adds the
+    /// gradient to the parameters, so a `NaN` or an infinity would leave them
+    /// non-finite for the rest of the run.
+    NonFiniteGradient {
+        /// The first non-finite component's parameter index.
+        index: usize,
+        /// Its value.
+        value: f64,
+    },
     /// A configuration value is outside its valid domain: QNG's
     /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
     /// report `-inf`), `finite_difference_step` (must be finite and `> 0`),
@@ -101,6 +111,10 @@ impl fmt::Display for OptimizerError {
             OptimizerError::OracleLengthMismatch { expected, got } => write!(
                 f,
                 "evaluation oracle returned {got} fitness value(s) for {expected} candidate(s); it must return exactly one value per candidate, in order"
+            ),
+            OptimizerError::NonFiniteGradient { index, value } => write!(
+                f,
+                "gradient oracle returned {value} for parameter {index}; every component must be finite"
             ),
             OptimizerError::InvalidConfig { parameter, reason } => {
                 write!(f, "invalid {parameter}: {reason}")
