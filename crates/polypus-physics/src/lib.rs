@@ -60,3 +60,37 @@ pub mod particle;
 
 #[cfg(feature = "plotters")]
 pub(crate) mod fonts;
+
+/// Test support shared by this crate's modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// A scratch directory under the system temp dir, removed on drop (also on
+    /// panic). Its name holds the process id and a tag unique to the test, so
+    /// neither parallel tests nor concurrent runs on a shared machine write to
+    /// the same path.
+    pub(crate) struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        pub(crate) fn new(tag: &str) -> ScratchDir {
+            let dir =
+                std::env::temp_dir().join(format!("polypus-physics-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create the scratch directory");
+            ScratchDir(dir)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            // Report, never panic: a panic while unwinding aborts the test run.
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                eprintln!("could not remove {}: {e}", self.0.display());
+            }
+        }
+    }
+}
