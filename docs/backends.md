@@ -646,20 +646,22 @@ the foreign-rejection and fault checks and skips the behavioural group.
 ## Conformance of the built-in backends
 
 We ran the battery against Polypus's own four backends
-([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs)),
-so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
+([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs),
+and [`qmio_conformance.rs`](../crates/polypus-infrastructure/tests/qmio_conformance.rs)
+for QMIO), so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
 **every failure is documented here before any fix**. The behavioural checks pass for
 every runnable backend; the interesting results are all in error classification, and
 they trace exactly the **recoverable-vs-fatal** split between the Rust-native backends
 (which fail *in Rust* with a typed variant) and the seal-delegating backends (which
 have no failure variants of their own).
 
-> **These results are a one-off manual run, not a continuous CI guard.** Only the
-> pure-Rust `native_backend_conforms` test runs on every build; the Local, CUNQA and
-> QMIO tests are `#[ignore]`d (they need Aer / SLURM / the qmio feature, and Aer is
-> fragile off the main thread). The table below is the record of running them by hand
-> for this phase — re-run them (commands are on each test) when touching a backend;
-> do not read them as verified on each build.
+> **Only the Native and Local (Aer) rows are continuous CI guards.** The pure-Rust
+> `native_backend_conforms` test runs on every build, and CI's Python job runs
+> `local_aer_backend_conformance` once the wheel is installed. The CUNQA and QMIO tests
+> are `#[ignore]`d (they need SLURM or the qmio feature) and CI does not run them: their
+> rows are the record of running them by hand for this phase — re-run them (commands
+> are on each test) when touching those backends; do not read them as verified on each
+> build.
 
 | Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
 |---|---|---|---|---|---|---|
