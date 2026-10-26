@@ -209,6 +209,36 @@ impl AlgorithmSPSA {
         )
     }
 
+    /// Check the preconditions of [`AlgorithmSPSAArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: the configuration
+    /// listed on [`AlgorithmSPSAArgs`], then `initial_point` (`dimensions`
+    /// finite values). `train` and `qml.train` call it before any backend
+    /// exists.
+    pub fn check_preconditions(
+        max_iters: u32,
+        resamplings: u32,
+        perturbation: f64,
+        target_step: f64,
+        alpha: f64,
+        gamma: f64,
+        eval_interval: u32,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        validate(
+            max_iters,
+            dimensions,
+            resamplings,
+            perturbation,
+            target_step,
+            alpha,
+            gamma,
+            eval_interval,
+        )?;
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     /// Whether iteration `k` (from 1) of a run of `max_iters` measures its θ:
     /// the first, every `eval_interval` after it, and the last.
     fn measures(k: u32, max_iters: u32, eval_interval: u32) -> bool {
@@ -233,18 +263,18 @@ impl AlgorithmSPSA {
             initial_point,
         } = args;
 
-        validate(
+        Self::check_preconditions(
             max_iters,
-            dimensions,
             resamplings,
             perturbation,
             target_step,
             alpha,
             gamma,
             eval_interval,
+            dimensions,
+            initial_point.as_deref(),
         )?;
         let dims = dimensions as usize;
-        check_initial_point(initial_point.as_deref(), dims)?;
         // Draw θ₀ in [0, 2π), or start at the caller's point: θ₀ is drawn
         // either way, so the RNG stream does not depend on it.
         let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(0.0..TAU)).collect();
