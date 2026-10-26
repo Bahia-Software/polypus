@@ -81,6 +81,93 @@ jobs:
       - name: Verify Cargo.lock is in sync with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+  # Dependencies the workspace declares but never uses add build time and
+  # advisory surface. cargo-machete reads the manifests and sources only; a
+  # false positive goes in `[package.metadata.cargo-machete] ignored`.
+  machete:
+    name: cargo-machete (unused dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - name: Install cargo-machete
+        run: cargo install --locked cargo-machete@0.9.2
+      - run: cargo machete
+
+  # The jobs above build against Cargo.lock, which holds the newest versions
+  # at the time of the last update, never the floors that the manifests allow
+  # (`rand = "0.10"` accepts 0.10.0). Resolve every direct dependency to its
+  # declared minimum (`-Z direct-minimal-versions`, nightly-only; transitive
+  # dependencies get the lowest versions those allow) and check the build.
+  # Raise a floor in the manifest when this fails.
+  rust-minimal-versions:
+    name: Rust dependency floors
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NIGHTLY: nightly-2026-10-22
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PyO3's build script needs a Python interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install Rust (rust-toolchain.toml, and nightly for the resolver)
+        run: |
+          rustup toolchain install --no-self-update
+          rustup toolchain install "$NIGHTLY" --profile minimal --no-self-update
+      - name: Resolve direct dependencies to their floors
+        run: cargo "+$NIGHTLY" update -Z direct-minimal-versions
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check (workspace, default features)
+        run: cargo check --workspace --all-targets
+      - name: Check (optional features)
+        run: |
+          cargo check -p polypus-physics --all-features --all-targets
+          cargo check -p polypus-sim --features parallel --all-targets
+          cargo check -p polypus --features qmio --all-targets
+
+  # The Python counterpart: `python-tests` installs the newest release in
+  # each declared range. Here the build backend (`[build-system] requires`)
+  # and the wheel's `[project] dependencies` resolve to their floors on the
+  # floor Python, and the test suite runs against them. Their own
+  # dependencies resolve to the newest compatible releases.
+  python-floors:
+    name: test (Python 3.10, dependency floors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      # `uv build --resolution` does not apply to build requirements, so
+      # install them at their floors and build without isolation.
+      - name: Build the wheel with the lowest allowed maturin
+        run: |
+          uv pip install --system tomli==2.5.0
+          python -c 'import tomli; print("\n".join(tomli.load(open("pyproject.toml", "rb"))["build-system"]["requires"]))' > "$RUNNER_TEMP/build-requirements.txt"
+          uv pip install --system --resolution lowest-direct -r "$RUNNER_TEMP/build-requirements.txt"
+          maturin --version
+          maturin build --release --out dist
+      # The test requirements (requirements-dev.txt) resolve together with
+      # the wheel's, so their floors (pytest, qiskit-qasm3-import) are tested
+      # too.
+      - name: Install the lowest allowed runtime and test dependencies, then the wheel
+        run: |
+          uv pip install --system --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
+          uv pip install --system --no-deps dist/polypus_quantum-*.whl
+          uv pip list --system
+      - name: Run Python tests
+        run: pytest tests/python -rs --strict-markers
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

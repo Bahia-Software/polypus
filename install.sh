@@ -178,7 +178,7 @@ fi
 info "Checking maturin..."
 if ! python -m maturin --version &>/dev/null; then
     warn "maturin not found — installing..."
-    pip install "maturin>=1.8,<2.0" || error "Failed to install maturin."
+    pip install "maturin>=1.9.2,<2.0" || error "Failed to install maturin."
 fi
 success "maturin $(python -m maturin --version)"
 
