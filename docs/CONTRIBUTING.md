@@ -83,6 +83,18 @@ cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets --
 cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+cargo machete                              # unused dependencies (needs cargo-machete)
+```
+
+Declared dependency floors (the `rust-minimal-versions` and `python-floors`
+jobs). The first rewrites `Cargo.lock`; restore it afterwards with
+`git checkout Cargo.lock`. The second needs a fresh environment on Python 3.10
+and installs the build requirements at their floors first (see the job):
+
+```bash
+cargo +nightly-2026-10-22 update -Z direct-minimal-versions
+cargo check --workspace --all-targets
+uv pip install --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
 ```
 
 Rust tests:
@@ -99,7 +111,7 @@ CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
   cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
   cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
-cargo test --locked -p polypus-logger      # no log-level feature
+cargo test --locked -p polypus-logger --features debug-logs   # the wheel's log level
 cargo test --locked -p polypus-infrastructure --features qmio
 cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
 cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
@@ -192,6 +204,21 @@ the public rules passed. A post-merge finding cannot undo the publication.
 The check covers the net diff only, not every intermediate commit nor the
 existing history, and does not replace checking your own changes before
 pushing.
+
+## Code quality dashboard
+
+`.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
+request and push to `main` (configuration in `sonar-project.properties`):
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes, the clippy
+report, and Python coverage of `python/` from the pytest suite. Rust reached
+only through the Python extension is not counted. It is informational: no
+check is required and the quality gate does not fail the run. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded. Python coverage locally, with the wheel installed:
+
+```bash
+python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
+```
 
 ## Lint policy
 

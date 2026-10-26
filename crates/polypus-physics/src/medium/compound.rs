@@ -1,4 +1,4 @@
-//! A material defined by a real chemical formula, backed by embedded
+//! A material defined by a real chemical formula, backed by tabulated
 //! ENDF-6 photon cross-sections rather than an analytic approximation.
 
 use std::collections::HashMap;
@@ -36,9 +36,9 @@ impl PhotonChannel {
     }
 }
 
-/// A material defined by a real chemical formula (e.g. `"H2O"`,
-/// `"Fe2O3"`), whose photon cross-sections come from embedded ENDF-6
-/// evaluations rather than an analytic approximation — see
+/// A material defined by a real chemical formula (e.g. `"H2O"`, `"Fe2O3"`),
+/// whose photon cross-sections come from tabulated ENDF-6 evaluations (read
+/// from the data directory) rather than an analytic approximation — see
 /// [`crate::interactions::photon::mass_attenuation_coefficients`].
 #[derive(Debug, Clone)]
 pub struct CompoundMedium {
