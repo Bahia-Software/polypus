@@ -41,7 +41,7 @@ _POPULATION = 200
 
 
 class _BatchProbe:
-    """Records the circuits carried by each backend call and the parallelism it reports."""
+    """Records each backend call's circuit count and reported parallelism."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -65,9 +65,10 @@ def _probing_seam(probe):
     a bitstring of the circuit's own classical width (contract C-3), so the Rust
     side and the user ``expectation_function`` see a well-formed payload.
 
-    ``max_parallel_experiments`` is ``min(available_parallelism(), memory budget /
-    statevector size)``. The default budget never binds for this test's 2-qubit
-    circuits, so it carries Rust's own ``available_parallelism()``.
+    ``max_parallel_experiments`` is ``max(1, min(available_parallelism(), memory
+    budget / statevector size))``. With ``POLYPUS_MEM_BUDGET`` unset the budget
+    never binds for this test's 2-qubit circuits, so it carries Rust's own
+    ``available_parallelism()``.
     """
 
     def run_qcs(_infrastructure, **kwargs):
@@ -83,7 +84,9 @@ def _candidate_window(parallelism):
     """The oracle's in-flight window, in candidates.
 
     Mirrors ``candidate_window_size`` in ``crates/polypus-evaluation/src/qml_oracle.rs``
-    (``CONCURRENCY_MULTIPLIER × available_parallelism()``). ``parallelism`` must be
+    (``CONCURRENCY_MULTIPLIER × available_parallelism()``; ``LocalBackend`` reports
+    an unbounded ``max_concurrency`` and one training row keeps the memory bound
+    above that, so neither applies here). ``parallelism`` must be
     the value Rust computed, as read off the seam, not one derived in Python: on
     Linux ``available_parallelism()`` also honours the cgroup CPU quota, so
     ``os.sched_getaffinity`` overstates it in a ``--cpus`` container or on a
@@ -131,14 +134,17 @@ def test_qml_train_bounds_the_population_into_windows(monkeypatch):
     assert len(result.best_params) == len(ansatz.parameters)
     assert probe.calls >= 1, "the training run never reached the backend"
 
-    # One training row means one circuit per candidate, so a window of candidates
-    # reaches the backend as that many circuits. The largest call is one full window
-    # (or the whole population, on a machine whose window already covers it) — never
-    # the eager whole-population batch this fix replaced.
+    # The window is derived only from the parallelism Rust reported, which must not
+    # vary between calls.
     assert len(probe.parallelism) == 1, (
         f"the backend reported a varying parallelism {sorted(probe.parallelism)}"
     )
     (parallelism,) = probe.parallelism
+
+    # One training row means one circuit per candidate, so a window of candidates
+    # reaches the backend as that many circuits. The largest call is one full window
+    # (or the whole population, on a machine whose window already covers it) — never
+    # the eager whole-population batch this fix replaced.
     expected_max = min(_candidate_window(parallelism), _POPULATION)
     assert probe.max_circuits_in_a_call == expected_max, (
         f"the largest backend call carried {probe.max_circuits_in_a_call} circuits; "
