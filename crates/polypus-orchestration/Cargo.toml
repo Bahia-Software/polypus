@@ -15,5 +15,4 @@ description = "Orchestration layer for Polypus: the pure, Python-free policy mid
 # and re-raises it verbatim), so this crate never names `pyo3` or `PyErr`.
 polypus-infrastructure = { workspace = true }
 polypus-optimizers = { workspace = true }
-polypus-observable = { workspace = true }
 log = { workspace = true }
