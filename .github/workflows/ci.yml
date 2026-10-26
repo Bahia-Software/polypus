@@ -224,6 +224,31 @@ jobs:
           cargo check --locked -p polypus-infrastructure --features qmio --all-targets
           cargo check --locked -p polypus --features qmio --all-targets
 
+  # Package every crate and build it from its .crate against the others, as
+  # `cargo publish` does on a release tag. A packaging error (a file outside the
+  # crate, a dependency without a version, a missing readme or license, a crate
+  # that only builds with features another member enables) would otherwise
+  # surface mid-publish, with the earlier crates already on crates.io. Needs
+  # cargo 1.90+ (not-yet-published workspace versions), which
+  # rust-toolchain.toml provides.
+  package:
+    name: cargo package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The PyO3 crates' build scripts need an interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo package --workspace
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo package --workspace --locked
+
   test:
     name: test (Rust)
     runs-on: ubuntu-latest
