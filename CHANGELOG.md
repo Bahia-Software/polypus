@@ -71,8 +71,10 @@ Changes on `main` since 0.7.2.
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
   source, the exact parameter-shift gradient, which `QmlOracleFactory` hands
-  to Adam through the run's `Oracles`. Both sources share the candidate
-  windows. With a minibatch the `Oracles` also carry a full-dataset view
+  to Adam through the run's `Oracles`. Without a minibatch the gradient also
+  returns the parameters' fitness from its own batch
+  (`GradientOracle::value_and_gradient`), so an Adam iteration on a native
+  model is one call. Both sources share the candidate windows. With a minibatch the `Oracles` also carry a full-dataset view
   (`Oracles::full_evaluation`): Adam scores its parameters on it and takes
   only the gradient from the minibatch, and the other optimizers'
   `best_fitness` is re-scored on it at the end.

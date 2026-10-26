@@ -300,10 +300,33 @@ impl GradientOracle for QmlOracle {
             return vec![0.0; dims];
         }
         match self.try_gradient(theta) {
-            Ok(gradient) => gradient,
+            Ok((_, gradient)) => gradient,
             Err(e) => {
                 self.errors.record(Box::new(e), &self.config.id);
                 vec![0.0; dims]
+            }
+        }
+    }
+
+    /// `θ`'s fitness and the exact gradient from one call: the gradient's
+    /// circuits start with `θ`'s own (C-11 (e)), so Adam need not score `θ`
+    /// apart. Only on every sample: under a minibatch those circuits are the
+    /// minibatch's, while Adam tracks its best on the full set (C-5), so this is
+    /// `None` and Adam scores `θ` with its own oracle. A failure is recorded and
+    /// returns finite sentinels, as [`gradient_batch`](Self::gradient_batch)
+    /// does.
+    fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
+        if self.minibatch.is_some() {
+            return None;
+        }
+        if self.errors.failed() {
+            return Some((0.0, vec![0.0; dims]));
+        }
+        match self.try_gradient(theta) {
+            Ok(measured) => Some(measured),
+            Err(e) => {
+                self.errors.record(Box::new(e), &self.config.id);
+                Some((0.0, vec![0.0; dims]))
             }
         }
     }
@@ -646,10 +669,12 @@ impl QmlOracle {
         Ok(probabilities)
     }
 
-    /// Fallible core of [`GradientOracle::gradient_batch`]: the native source's
+    /// Fallible core of [`GradientOracle::gradient_batch`] and
+    /// [`GradientOracle::value_and_gradient`]: the native source's
     /// [`gradient_circuits`](QmlProblem::gradient_circuits), run in one planner
-    /// call (or exactly), turned into `∂fitness/∂θ` by the problem.
-    fn try_gradient(&self, theta: &[f64]) -> Result<Vec<f64>, EvaluationError> {
+    /// call (or exactly), turned by the problem into `θ`'s fitness, from the
+    /// base circuits that lead the batch, and `∂fitness/∂θ`.
+    fn try_gradient(&self, theta: &[f64]) -> Result<(f64, Vec<f64>), EvaluationError> {
         let QmlSource::Native { problem, exact } = &self.source else {
             return Err(EvaluationError::Qml(QmlError::NoExactGradient {
                 reason: "the training circuits are Qiskit circuits, which polypus cannot \
@@ -667,11 +692,24 @@ impl QmlOracle {
             .into_iter()
             .map(BoundCircuit::Native)
             .collect();
+        // The base circuits lead the batch, one per sample, exactly as
+        // `bind_batch` returns them.
+        let n = problem.num_circuits();
         Ok(match exact {
             Some(native) => {
-                problem.gradient_from_probabilities(&self.run_exact(native, &bound)?)?
+                let probabilities = self.run_exact(native, &bound)?;
+                (
+                    problem.fitness_from_probabilities(&probabilities[..n])?,
+                    problem.gradient_from_probabilities(&probabilities)?,
+                )
             }
-            None => problem.gradient_from_counts(&self.run_sampled(&bound)?)?,
+            None => {
+                let counts = self.run_sampled(&bound)?;
+                (
+                    problem.fitness_from_counts(&counts[..n])?,
+                    problem.gradient_from_counts(&counts)?,
+                )
+            }
         })
     }
 }
@@ -1504,6 +1542,10 @@ class Bound:
         );
         assert_eq!(oracle.evaluate_batch_full(&candidates), vec![0.0; 3]);
         assert_eq!(
+            oracle.value_and_gradient(&candidates[0], problem.num_params()),
+            Some((0.0, vec![0.0; problem.num_params()]))
+        );
+        assert_eq!(
             backend.call_sizes().len(),
             calls,
             "no backend call after the failure"
@@ -1575,6 +1617,65 @@ class Bound:
         assert_eq!(a.len(), dims);
         assert!(a.iter().all(|g| g.is_finite()));
         assert_eq!(a, b);
+    }
+
+    /// `value_and_gradient` reads `θ`'s fitness from the base circuits that lead
+    /// the gradient's own batch: value and gradient are the problem's on the
+    /// same counts a backend with the same seed gives for that one batch, so
+    /// `θ` is not run apart.
+    #[test]
+    fn native_value_and_gradient_reads_theta_from_the_gradient_batch() {
+        let problem = native_problem(4);
+        let theta = &native_candidates(&problem, 1)[0];
+        let dims = problem.num_params();
+        let (value, gradient) = native_oracle(&problem, false, None, 21)
+            .value_and_gradient(theta, dims)
+            .expect("without a minibatch the oracle scores θ");
+        let counts = NativeStatevectorBackend::new(21)
+            .run_circuits(
+                &bound(problem.gradient_circuits(theta).unwrap()),
+                &config(2000),
+            )
+            .unwrap();
+        let n = problem.num_circuits();
+        assert_eq!(value, problem.fitness_from_counts(&counts[..n]).unwrap());
+        assert_eq!(gradient, problem.gradient_from_counts(&counts).unwrap());
+    }
+
+    /// In exact mode the value is, bit for bit, what the oracle's own
+    /// `evaluate_batch` returns for `θ` (the C-5 requirement), and the gradient
+    /// is `gradient_batch`'s.
+    #[test]
+    fn native_exact_value_and_gradient_match_the_separate_calls() {
+        let problem = native_problem(4);
+        let theta = &native_candidates(&problem, 1)[0];
+        let dims = problem.num_params();
+        let oracle = native_oracle(&problem, true, None, 0);
+        let (value, gradient) = oracle
+            .value_and_gradient(theta, dims)
+            .expect("without a minibatch the oracle scores θ");
+        assert_eq!(value, oracle.evaluate_batch(std::slice::from_ref(theta))[0]);
+        assert_eq!(gradient, oracle.gradient_batch(theta, dims));
+    }
+
+    /// Under a minibatch the gradient's base circuits are the minibatch's, not
+    /// the full set Adam tracks with, so the oracle declines and draws nothing:
+    /// the next call still takes the first minibatch.
+    #[test]
+    fn a_minibatch_keeps_theta_out_of_the_native_gradient() {
+        let problem = native_problem(6);
+        let theta = &native_candidates(&problem, 1)[0];
+        let oracle = native_oracle(&problem, true, Some(MinibatchConfig::new(2, 9)), 0);
+        assert_eq!(oracle.value_and_gradient(theta, problem.num_params()), None);
+        let fitness = oracle
+            .try_evaluate_windowed(std::slice::from_ref(theta), 1)
+            .unwrap();
+        let first = problem.subset(&minibatch_indices(6, 9, 0, 2)).unwrap();
+        let probabilities = exact_probabilities(first.bind_batch(theta).unwrap());
+        assert_eq!(
+            fitness[0],
+            first.fitness_from_probabilities(&probabilities).unwrap()
+        );
     }
 
     #[test]

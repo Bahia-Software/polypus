@@ -961,12 +961,14 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     (`polypus-orchestration`): the exact one when the factory provides it,
     otherwise a `FiniteDifferenceGradient` of the evaluation oracle with
     `AdamConfig::finite_difference_step`. `QmlOracleFactory` provides the
-    exact parameter-shift gradient for a native QML model (C-11); neither it,
-    for Qiskit circuits, nor `VqcOracleFactory` provides one otherwise, so
-    those runs take the finite difference, built over the run's evaluation
-    oracle so that `θ`'s value is that oracle's. The CUNQA walltime projection (`Method::run_shape_over`) counts
-    one batch per iteration with the finite difference, and two (`θ`, then the
-    gradient) with an exact gradient. The watch forwards every call,
+    exact parameter-shift gradient for a native QML model, which also scores
+    `θ` through `value_and_gradient` when there is no minibatch, so such an
+    iteration is one call (C-11 (f)); neither it, for Qiskit circuits, nor
+    `VqcOracleFactory` provides a gradient otherwise, so those runs take the
+    finite difference, built over the run's evaluation oracle so that `θ`'s
+    value is that oracle's. The CUNQA walltime projection
+    (`Method::run_shape_over`) counts one batch per iteration with the finite
+    difference, and two (`θ`, then the gradient) with an exact gradient. The watch forwards every call,
     `value_and_gradient` included, counted as a batch only when it returns a
     value, so Adam sends the same batches with and without it; an exact
     gradient that scores `θ` itself makes an iteration one batch, which the
@@ -1631,7 +1633,15 @@ batching and distribution are the oracle's concern.
   one finite fitness per candidate (C-5), sampled through the planner or, in
   exact mode, from `NativeStatevectorBackend::run_circuits_exact` (C-3's exact
   probabilities, same memory budget and windows). It is also the run's
-  `GradientOracle`, for Adam. With a minibatch, one subset of the samples is
+  `GradientOracle`, for Adam. Without a minibatch its `value_and_gradient`
+  returns `θ`'s fitness, read from the base circuits that lead the gradient's
+  batch, with the gradient, so an Adam iteration is one call and `θ`'s circuits
+  run once; in exact mode that value is, bit for bit, what `evaluate_batch`
+  returns for `θ`. With a minibatch it returns `None` (those base circuits are
+  the minibatch's, and Adam tracks its best on every sample), and Adam scores
+  `θ` apart. The walltime projection, which counts two calls per Adam
+  iteration with an exact gradient, then overestimates, as C-5 allows. With a
+  minibatch, one subset of the samples is
   drawn per call, from the run's seed and a call counter, and shared by every
   candidate of an `evaluate_batch` and by the base and every shift of a
   gradient; `evaluate_full` scores every sample (the minibatch rules of C-5).
