@@ -211,8 +211,14 @@ class _Nevergrad:
         self.pending: Optional[list[Any]] = None
         self.rows: list[list[float]] = []
         if initial_point is not None:
+            # NumPy comes with Qiskit, and Nevergrad needs it too.
+            import numpy as np
+
             point = _point(initial_point, optimizer.dimension)
-            optimizer.suggest(point)
+            # An array, the value of Nevergrad's ``Array`` parametrization;
+            # Nevergrad 1.0 takes a list too, but its documentation passes
+            # arrays.
+            optimizer.suggest(np.asarray(point, dtype=float))
 
     def ask(self) -> list[list[float]]:
         if self.pending is None:

@@ -356,6 +356,9 @@ class TestNevergradAdapter:
     def test_the_initial_point_is_suggested(self):
         optimizer = FakeNevergrad()
         adapter = from_nevergrad(optimizer, batch_size=2, initial_point=(0.5, 1.5))
+        (suggested,) = optimizer.suggested
+        # As an array of floats, the value of an ``Array`` parametrization.
+        assert isinstance(suggested, np.ndarray) and suggested.dtype == float
         assert adapter.ask()[0] == [0.5, 1.5]
 
     @pytest.mark.parametrize(
