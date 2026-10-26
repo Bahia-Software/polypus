@@ -72,7 +72,7 @@ Usage:
     python benchmarks/bench_controlled.py --smoke
 
 Needs the extension built in **release** (perf claims are about release):
-    CONDA_PREFIX=$CONDA_PREFIX maturin develop --release --features extension-module
+    CONDA_PREFIX=$CONDA_PREFIX maturin develop --release
 """
 
 import argparse

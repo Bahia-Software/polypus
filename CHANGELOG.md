@@ -201,6 +201,11 @@ Changes on `main` since 0.7.2.
   `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
   `initial_point` as its last argument and `TrainFlow` has an `initial_point`
   field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** the `polypus` crate has no default features, so it no
+  longer enables `log/max_level_info` for every dependent; choose a level with
+  `info-logs` or `debug-logs`. The wheel is built with `debug-logs`, so
+  `init_logger(level="debug")` shows the optimizers' progress without a
+  rebuild. The log-level aliases in `.cargo/config.toml` are removed (#414).
 - **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
   `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
   `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
@@ -227,6 +232,16 @@ Changes on `main` since 0.7.2.
   `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
   workflow type-checks every example against the typing stubs and runs the
   local ones (#406).
+- `max_cut_qaoa.py` reads every counts key with qubit 0 rightmost: the mean
+  cut behind the approximation ratio and the plotted cut read it reversed,
+  which showed only on graphs that are not symmetric under node reversal (from
+  `--qubits 5`). The script now checks the mapping against Qiskit's key
+  order before it trains (#445).
+- `infraestructures.py` compares Aer and the native backend on the
+  Hamming-weight distribution, against a total-variation bound derived from the
+  shot count, and exits with an error on a mismatch. The full 4096-outcome
+  distribution with a fixed 0.05 threshold reported a mismatch on every run,
+  since two samples of 8192 shots differ by about 0.23 (#446).
 - The README quickstart runs on the native backend (`backend="polypus"`), so it
   no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
   to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in

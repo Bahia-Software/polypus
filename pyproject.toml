@@ -1,5 +1,8 @@
 [build-system]
-requires = ["maturin>=1.8,<2.0"]
+# 1.9.2 is the first maturin that writes `license` as a PEP 639
+# License-Expression (1.8.0 and 1.8.1 cannot parse `license-files`). CI builds
+# with this floor (python-floors job).
+requires = ["maturin>=1.9.2,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -61,7 +64,10 @@ Issues = "https://github.com/Bahia-Software/polypus/issues"
 "Rust crate (crates.io)" = "https://crates.io/crates/polypus"
 
 [tool.maturin]
-features = ["extension-module"]
+# `debug-logs` sets the compile-time log ceiling of the wheel (the crate has no
+# default level): `init_logger(level="debug")` then shows optimizer progress,
+# and `trace!` stays compiled out. The runtime level filters below it.
+features = ["extension-module", "debug-logs"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
 # Keep the import name `polypus` even though the distribution is `polypus-quantum`
@@ -119,3 +125,15 @@ markers = [
     "integration: tests that execute real quantum circuits (require AerSimulator)",
     "vqc: tests that train variational quantum circuits (slow)",
 ]
+
+# Coverage of the Python packages the wheel ships (sonar.yml). Tests run
+# against the installed wheel, so `coverage combine` maps site-packages back
+# to python/ and the XML report carries repo-relative paths.
+[tool.coverage.run]
+source_pkgs = ["polypus", "polypus_python"]
+parallel = true
+relative_files = true
+
+[tool.coverage.paths]
+polypus = ["python/polypus", "*/site-packages/polypus"]
+polypus_python = ["python/polypus_python", "*/site-packages/polypus_python"]

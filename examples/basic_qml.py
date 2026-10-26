@@ -10,10 +10,7 @@ from qiskit.circuit import ParameterVector, QuantumCircuit
 from qiskit.circuit.library import real_amplitudes
 
 # Install the logger sink so the internal Rust log records are written to a file.
-# NOTE: optimizer progress is logged at DEBUG level, and the default build
-# compiles those out (feature "info-logs" => log/max_level_info). To capture it,
-# build with debug logging enabled:
-#   maturin develop --no-default-features --features "extension-module,debug-logs"
+# Optimizer progress is logged at DEBUG level; pass level="debug" to capture it.
 polypus.init_logger(level="info", file="logs/basic_qml.log")
 
 # Two separable blobs in [0, pi]^2: class 0 near (0.6, 0.6), class 1 near (2.5, 2.5).
