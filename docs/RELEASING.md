@@ -81,9 +81,11 @@ PyPI: the release gate, every wheel and sdist build and their smoke tests.
   jobs" on the tag's workflow run. crates.io rate-limits brand-new crates (a
   burst of a few, then one every ten minutes); `cargo publish` reports this as
   a 429, and a re-run later continues where it stopped.
-- **Checking a change locally.** `cargo package --workspace --locked` builds
-  and verifies every `.crate` against the others without uploading. It needs
-  cargo 1.90 or newer to resolve not-yet-published workspace versions.
+- **Checking a change.** `cargo package --workspace --locked` builds and
+  verifies every `.crate` against the others without uploading. It needs
+  cargo 1.90 or newer to resolve not-yet-published workspace versions. CI's
+  `cargo package` job runs it on every push to `main` and on pull requests
+  that touch a manifest, `Cargo.lock`, a build script, a readme or a license.
 
 ## Resolved (kept for context)
 
