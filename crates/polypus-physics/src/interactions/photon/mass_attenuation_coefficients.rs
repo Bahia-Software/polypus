@@ -50,8 +50,9 @@ fn read_endf_contents(dir: &Path, z: u32) -> Result<String, PhysicsError> {
         z,
         message: format!(
             "could not read {}: {e}. Set {ENDF_DATA_DIR_VAR} to the folder \
-             containing the ENDF-6 .txt files, or place them at \
-             reference-data/endf-epdl-2023 relative to the workspace root.",
+             containing the ENDF-6 .txt files (reference-data/endf-epdl-2023 \
+             in https://github.com/Bahia-Software/polypus; see the \
+             polypus-physics crate docs).",
             path.display()
         ),
     })

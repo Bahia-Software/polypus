@@ -21,8 +21,20 @@
 //! from a local directory. The data is not part of the crate and is never
 //! downloaded. The directory is `POLYPUS_ENDF_DATA_DIR` if set, otherwise
 //! `reference-data/endf-epdl-2023/` of the Polypus repository, which holds the
-//! files and their provenance. Outside a checkout, point
-//! `POLYPUS_ENDF_DATA_DIR` at a copy of that folder.
+//! files and their provenance. Outside a checkout (e.g. a dependency from
+//! crates.io), fetch that folder and point `POLYPUS_ENDF_DATA_DIR` at it:
+//!
+//! ```text
+//! git clone --depth 1 --filter=blob:none --sparse \
+//!     https://github.com/Bahia-Software/polypus.git polypus-data
+//! git -C polypus-data sparse-checkout set reference-data/endf-epdl-2023
+//! export POLYPUS_ENDF_DATA_DIR=$PWD/polypus-data/reference-data/endf-epdl-2023
+//! ```
+//!
+//! The files are the unmodified IAEA evaluations, so downloading
+//! `https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{Z:03}000` as
+//! `ZA{Z:03}000.txt` for the elements you use works too. The example below
+//! needs the data.
 //!
 //! ## Classical Monte Carlo — 1.25 MeV photon in water
 //!
