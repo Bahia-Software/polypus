@@ -42,8 +42,8 @@ the number of parameters):
                 0.2 and target step 1.2 on QAOA, 0.1 and 0.63 (the defaults)
                 on the HEA
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
-                iteration: perturbation 0.1 and target step 0.63 (the
-                defaults) on both
+                iteration, with spsa's perturbation and target step on each
+                problem, so the two differ only in the perturbations
 
 Momentum's learning rate depends on the scale of the cost, so its rate and
 step are tuned per problem: they are the values the review that proposed Adam
@@ -155,14 +155,12 @@ PROBLEMS = ("qaoa", "hea")
 MOMENTUM = {"qaoa": (0.03, 0.4), "hea": (0.1, 0.4)}
 # adam-x3's runs use seeds s, s + RESTART_SEED_STEP, s + 2 RESTART_SEED_STEP.
 RESTART_SEED_STEP = 1_000_000
-# SPSA's perturbations per iteration and (perturbation, target step) per
+# SPSA's perturbations per iteration, and its (perturbation, target step) per
 # problem, as tuned on the reserved instances 100-109 in the review that
-# proposed SPSA (#396).
+# proposed SPSA (#396) with one perturbation; spsa-k8 takes the same, so the
+# two rows differ only in the perturbations.
 SPSA_RESAMPLINGS = {"spsa": 1, "spsa-k8": 8}
-SPSA = {
-    "qaoa": {"spsa": (0.2, 1.2), "spsa-k8": (0.1, 0.63)},
-    "hea": {"spsa": (0.1, 0.63), "spsa-k8": (0.1, 0.63)},
-}
+SPSA = {"qaoa": (0.2, 1.2), "hea": (0.1, 0.63)}
 # The circuits of SPSA's calibration batch, before its first iteration.
 SPSA_CALIBRATION = 50
 
@@ -357,7 +355,7 @@ def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
         )
     if name in SPSA_RESAMPLINGS:
         resamplings = SPSA_RESAMPLINGS[name]
-        perturbation, target_step = SPSA[problem][name]
+        perturbation, target_step = SPSA[problem]
         return polypus.SPSA(
             max_iters=spsa_iterations(budget, resamplings),
             resamplings=resamplings,

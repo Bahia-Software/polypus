@@ -237,7 +237,8 @@ def test_the_budget_fixes_every_generation_count():
     assert (spsa.alpha, spsa.gamma, spsa.eval_interval) == (0.602, 0.101, 20)
     k8 = script.make_method("spsa-k8", 6, 1500, 30, 3, "qaoa")
     assert (k8.max_iters, k8.resamplings) == (90, 8)
-    assert (k8.perturbation, k8.target_step) == (0.1, 0.63)
+    # The same steps as spsa, so the two differ only in K.
+    assert (k8.perturbation, k8.target_step) == (0.2, 1.2)
     for name in ("spsa", "spsa-k8"):
         hea = script.make_method(name, 30, 5000, 30, 3, "hea")
         assert (hea.perturbation, hea.target_step) == (0.1, 0.63)

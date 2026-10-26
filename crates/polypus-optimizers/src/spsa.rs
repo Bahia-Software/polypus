@@ -408,9 +408,13 @@ fn calibrated_gain(values: &[f64], c: f64, target_step: f64) -> f64 {
             return a;
         }
     }
+    // A failed evaluation leaves the oracle answering placeholders, which can
+    // look like a flat landscape; the run then ends with that error, so the
+    // warning names both causes rather than asserting a flat one.
     log::warn!(
         "SPSA calibration: the {} gradient estimates at the starting point have no usable \
-         magnitude ({} of them finite); using a = target_step = {target_step}",
+         magnitude ({} of them finite), as on a flat landscape or after a failed evaluation, \
+         whose error ends the run; using a = target_step = {target_step}",
         values.len() / 2,
         magnitudes.len(),
     );

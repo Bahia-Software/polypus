@@ -14,9 +14,8 @@ use pyo3::prelude::*;
 /// `max_iters` iterations and reports `converged=False`. The settings are
 /// validated when `train`/`qml.train` starts, before any circuit runs: an
 /// invalid one raises `ValueError` (contract C-5).
-#[pyclass(module = "polypus")]
-#[allow(clippy::upper_case_acronyms)]
-pub struct SPSA {
+#[pyclass(module = "polypus", name = "SPSA")]
+pub struct Spsa {
     /// Iterations, each one batch of `2·resamplings` circuits (plus one when
     /// the parameters are measured), after the calibration batch; the final
     /// parameters cost one circuit more. At least 1.
@@ -61,7 +60,7 @@ pub struct SPSA {
 }
 
 #[pymethods]
-impl SPSA {
+impl Spsa {
     #[new]
     #[pyo3(signature = (max_iters = 300, resamplings = 1, perturbation = 0.1, target_step = 0.63, alpha = 0.602, gamma = 0.101, eval_interval = 20, seed = None))]
     pub fn new(
@@ -74,7 +73,7 @@ impl SPSA {
         eval_interval: u32,
         seed: Option<u64>,
     ) -> Self {
-        SPSA {
+        Spsa {
             max_iters,
             resamplings,
             perturbation,
