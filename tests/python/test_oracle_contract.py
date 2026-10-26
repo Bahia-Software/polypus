@@ -237,9 +237,9 @@ class TestOracleContractC5Cmaes:
 
 
 class TestOracleContractC5Adam:
-    """The same guarantees for ``polypus.Adam``: its finite-difference stencil
-    and the updated ``θ`` are both evaluation-oracle batches, so each must
-    surface a bad value as a typed error."""
+    """The same guarantees for ``polypus.Adam``: each iteration's batch of ``θ``
+    and its finite-difference stencil is an evaluation-oracle batch, so a bad
+    value in it, ``θ``'s own included, must surface as a typed error."""
 
     @staticmethod
     def _train(parametrized_circuit, expectation_fn, ident, **kwargs):
@@ -275,8 +275,9 @@ class TestOracleContractC5Adam:
     def test_non_finite_value_in_the_update_raises_evaluation_error(
         self, parametrized_circuit, monkeypatch
     ):
-        """The stencil sees only finite values; the single-candidate batch
-        that scores the updated ``θ`` measures a bitstring whose value is NaN."""
+        """The first iteration sees only finite values; in the second batch,
+        the updated ``θ`` (its first circuit) measures a bitstring whose value
+        is NaN while its stencil stays finite."""
         import polypus
         import polypus_python
 
@@ -284,9 +285,12 @@ class TestOracleContractC5Adam:
 
         def fake_run_qcs(infrastructure, **kwargs):
             sizes.append(len(kwargs["qcs"]))
-            # The stencil holds 2 circuits for one parameter; the update 1.
-            bitstring = "1" if len(kwargs["qcs"]) == 1 else "0"
-            return [{bitstring: kwargs["shots"]} for _ in kwargs["qcs"]]
+            # Each batch holds θ and the 2 stencil circuits of one parameter.
+            update = len(sizes) == 2
+            return [
+                {"1" if update and i == 0 else "0": kwargs["shots"]}
+                for i in range(len(kwargs["qcs"]))
+            ]
 
         monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
         with pytest.raises(polypus.EvaluationError):
@@ -295,7 +299,32 @@ class TestOracleContractC5Adam:
                 lambda b: float("nan") if b == "1" else 1.0,
                 "adam_late_nan",
             )
-        assert sizes == [2, 1], sizes
+        assert sizes == [3, 3], sizes
+
+    def test_non_finite_value_at_the_final_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step Adam measures the final ``θ`` in a batch of its
+        own, a single circuit; a NaN there is an evaluation error too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "adam_final_nan",
+            )
+        # A flat fitness stops the run after its second step (patience 1).
+        assert sizes == [3, 3, 1], sizes
 
     def test_short_seam_result_is_a_typed_error(
         self, parametrized_circuit, simple_expectation_fn, monkeypatch

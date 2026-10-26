@@ -14,25 +14,37 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
-- `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
+- `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
-  finite_difference_step=0.1, seed=None)`, accepted by `train` and
-  `qml.train`: gradient ascent with Adam. Each iteration takes a central
-  finite difference of the fitness, one batch of `2·dimensions` circuits, then
-  scores the updated parameters. Invalid settings raise `ValueError` before
-  any circuit runs (#394).
+  finite_difference_step=0.2, rule="adam", seed=None)`, accepted by `train`
+  and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
+  (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
+  current parameters and the central finite difference around them, so no
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
+  does not depend on the scale of the cost; `rule="momentum"` is Polyak's
+  heavy-ball momentum, whose learning rate does. A seeded run over a backend
+  whose results do not depend on the platform reproduces on every platform
+  (C-7). Invalid settings, an unknown `rule` included, raise `ValueError`
+  before any circuit runs. See the training guide for the finite-difference
+  step and for starting from a global search (#395).
 - Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
   exact gradient when it has one); Adam uses the exact gradient or a finite
-  difference of the evaluation, and the CUNQA walltime warning times its
-  gradient too (#394).
-- Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
-  by a new `GradientOracle` contract (the fitness gradient, uphill), with the
-  same fitness-stagnation stop as DE and CMA-ES. A gradient of the wrong
-  length, or with a non-finite component (the new
-  `OptimizerError::NonFiniteGradient`), is an error. `FiniteDifferenceGradient`
-  turns any `EvaluationOracle` into a `GradientOracle` by central differences,
-  in one batch per gradient (#394).
+  difference of the evaluation, and the CUNQA walltime warning counts one
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
+- Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
+  `AdamRule`, driven by a new `GradientOracle` contract (the fitness
+  gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.
+  A gradient of the wrong length, or with a non-finite component (the new
+  `OptimizerError::NonFiniteGradient`), is an error.
+  `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+  `GradientOracle` by central differences, in one batch per gradient, and
+  through `GradientOracle::value_and_gradient` scores the parameters in the
+  same batch (#394, #395).
 - `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
   `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
   does and converts it with CUNQA's own converter, without raising QPUs; the
@@ -81,11 +93,11 @@ Changes on `main` since 0.7.2.
   otherwise `ValueError` before anything runs. DE (every `strategy`)
   evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
   population; PSO as its first particle, which must lie within `bounds`; QNG
-  and Adam start from it; CMA-ES centres its first run on it and keeps its
-  `sigma0`, so a refinement wants a smaller one. Without it every optimizer
-  behaves as before, seeded runs included (#395). In Rust, each optimizer's
-  `check_preconditions` checks its configuration and then the point without
-  running anything, and `polypus_orchestration::Method::check_preconditions`
+  starts from it and Adam evaluates it first; CMA-ES centres its first run on
+  it and keeps its `sigma0`, so a refinement wants a smaller one. Without it
+  every optimizer behaves as before, seeded runs included (#395). In Rust, each
+  optimizer's `check_preconditions` checks its configuration and then the point
+  without running anything, and `polypus_orchestration::Method::check_preconditions`
   calls the one the method names.
 
 ### Changed

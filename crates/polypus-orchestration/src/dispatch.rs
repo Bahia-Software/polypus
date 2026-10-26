@@ -20,7 +20,7 @@
 
 use polypus_optimizers::finite_difference;
 use polypus_optimizers::{
-    AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
+    AdamRule, AlgorithmAdam, AlgorithmAdamArgs, FiniteDifferenceGradient, GradientOracle,
 };
 use polypus_optimizers::{AlgorithmCmaEs, AlgorithmCmaEsArgs};
 use polypus_optimizers::{
@@ -80,7 +80,7 @@ pub struct CmaesConfig {
 /// Adam configuration, mirroring the `polypus.Adam` object (see [`DeConfig`]).
 /// The gradient comes from the run's [`Oracles`]; when they carry no exact one,
 /// dispatch takes a central finite difference of the evaluation oracle with
-/// `finite_difference_step`.
+/// `finite_difference_step`, which scores θ in the same batch as its stencil.
 pub struct AdamConfig {
     pub max_iters: u32,
     pub learning_rate: f64,
@@ -91,6 +91,9 @@ pub struct AdamConfig {
     pub tolerance: f64,
     pub patience: u32,
     pub finite_difference_step: f64,
+    /// How the gradient becomes a step (`polypus.Adam(rule=...)`);
+    /// [`AdamRule::Adam`] is Kingma and Ba's Adam.
+    pub rule: AdamRule,
 }
 
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
@@ -184,6 +187,7 @@ impl Method {
                     cfg.beta1,
                     cfg.beta2,
                     cfg.epsilon,
+                    cfg.patience,
                     cfg.bounds,
                     dimensions,
                     initial_point,
@@ -375,7 +379,8 @@ pub fn dispatch_optimizer(
 }
 
 /// Adam: the gradient is the exact one when the oracles carry it, otherwise a
-/// finite difference of `evaluation`, which also tracks the best solution.
+/// finite difference of `evaluation`, which scores θ with its stencil in one
+/// batch per iteration.
 fn dispatch_adam(
     cfg: AdamConfig,
     evaluation: Box<dyn EvaluationOracle>,
@@ -388,7 +393,9 @@ fn dispatch_adam(
         match gradient {
             Some(gradient) => (gradient, evaluation),
             None => {
-                // The finite difference and the tracking share one oracle.
+                // The finite difference and the tracking share one oracle: θ's
+                // value comes from the difference's batch, and Adam reports it
+                // as the run's fitness (C-5).
                 let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
                 let difference = FiniteDifferenceGradient::new(
                     Arc::clone(&evaluation),
@@ -409,6 +416,7 @@ fn dispatch_adam(
         dimensions,
         tolerance: cfg.tolerance,
         patience: cfg.patience,
+        rule: cfg.rule,
         seed: Some(seed),
         initial_point,
     })
@@ -724,10 +732,10 @@ mod tests {
     }
 
     /// Dispatch hands `initial_point` to every `Method`: it is the first
-    /// candidate of the first batch (DE, PSO), the centre of the first
-    /// gradient stencil (QNG, and Adam's finite difference, whose first
-    /// candidate is θ₀ + h·e₀) and the first mean (CMA-ES, whose candidates
-    /// all sit on it with a tiny σ₀).
+    /// candidate of the first batch (DE, PSO, and Adam, whose batch is θ₀ and
+    /// then its finite-difference stencil), the centre of the first gradient
+    /// stencil (QNG, whose first candidate is θ₀ + h·e₀) and the first mean
+    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -781,6 +789,7 @@ mod tests {
                     tolerance: 0.0,
                     patience: 10,
                     finite_difference_step: step,
+                    rule: AdamRule::Adam,
                 }),
             ),
         ];
@@ -800,7 +809,7 @@ mod tests {
                 .clone()
                 .expect("the oracle was called");
             let expected = match name {
-                "QNG" | "Adam" => vec![point[0] + step, point[1], point[2]],
+                "QNG" => vec![point[0] + step, point[1], point[2]],
                 _ => point.clone(),
             };
             let tolerance = if name == "CMA-ES" { 1e-6 } else { 0.0 };
@@ -930,6 +939,7 @@ mod tests {
                 tolerance: 0.0,
                 patience: 10,
                 finite_difference_step,
+                rule: AdamRule::Adam,
             })
         };
         let adam_cases: Vec<Case> = vec![
@@ -941,6 +951,14 @@ mod tests {
             (
                 "Adam, rate 0",
                 Box::new(move || adam(0.1, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Adam, patience 0",
+                Box::new(move || match adam(0.1, 0.05) {
+                    Method::Adam(cfg) => Method::Adam(AdamConfig { patience: 0, ..cfg }),
+                    other => other,
+                }),
                 short.clone(),
             ),
             (
@@ -1028,6 +1046,7 @@ mod tests {
             tolerance: 0.0,
             patience: 1_000,
             finite_difference_step: 1e-4,
+            rule: AdamRule::Adam,
         })
     }
 
@@ -1071,14 +1090,13 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
-        // Each iteration: one finite-difference stencil (2·dims candidates) and
-        // the single tracked candidate, on the same oracle.
+        // Each iteration: one batch on the same oracle, θ and its
+        // finite-difference stencil (2·dims + 1 candidates); then the final θ
+        // alone.
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), 2 * outcome.iterations_run);
-        assert!(
-            sizes.chunks_exact(2).all(|pair| pair == [6, 1]),
-            "{sizes:?}"
-        );
+        let mut expected = vec![7; outcome.iterations_run];
+        expected.push(1);
+        assert_eq!(sizes, expected);
     }
 
     #[test]
@@ -1100,8 +1118,58 @@ mod tests {
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
         assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
-        // No stencil: the evaluation oracle only tracks, one candidate a call.
-        assert!(sizes(&log).iter().all(|&n| n == 1));
+        // No stencil: the evaluation oracle only scores θ, one candidate a call,
+        // once per iteration and once more for the final θ.
+        let sizes = sizes(&log);
+        assert_eq!(sizes.len(), outcome.iterations_run + 1);
+        assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
+    }
+
+    /// The configured rule reaches the optimizer: dispatch runs what
+    /// `AlgorithmAdam` runs with that rule over a finite difference of the
+    /// same oracle, and the two rules run differently.
+    #[test]
+    fn adam_rule_reaches_the_optimizer() {
+        let dispatched = |rule| {
+            let (oracle, _) = recorder();
+            let method = match adam_method(20) {
+                Method::Adam(cfg) => Method::Adam(AdamConfig { rule, ..cfg }),
+                other => other,
+            };
+            dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None)
+                .unwrap_or_else(|_| panic!("a valid Adam run must succeed"))
+        };
+        let direct = |rule| {
+            let (oracle, _) = recorder();
+            let oracle: Arc<dyn EvaluationOracle> = Arc::new(*oracle);
+            let gradient = FiniteDifferenceGradient::new(Arc::clone(&oracle), 1e-4)
+                .expect("a finite, positive step is valid");
+            AlgorithmAdam
+                .optimize(AlgorithmAdamArgs {
+                    oracle: Box::new(oracle),
+                    gradient_oracle: Box::new(gradient),
+                    max_iters: 20,
+                    learning_rate: 0.05,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    epsilon: 1e-8,
+                    bounds: (-2.0, 2.0),
+                    dimensions: 3,
+                    tolerance: 0.0,
+                    patience: 1_000,
+                    rule,
+                    seed: Some(1),
+                    initial_point: None,
+                })
+                .expect("a valid Adam configuration runs")
+        };
+        for rule in [AdamRule::Adam, AdamRule::Momentum] {
+            assert_eq!(dispatched(rule), direct(rule), "{rule}");
+        }
+        assert_ne!(
+            dispatched(AdamRule::Adam).best_params,
+            dispatched(AdamRule::Momentum).best_params
+        );
     }
 
     #[test]

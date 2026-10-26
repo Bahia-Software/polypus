@@ -11,8 +11,9 @@
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
 //! - [`AlgorithmCmaEs`] — Covariance Matrix Adaptation Evolution Strategy
 //!   (CMA-ES), with optional IPOP restarts
-//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation), gradient ascent
-//!   driven by a [`GradientOracle`]
+//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation), or Polyak's
+//!   heavy-ball momentum ([`AdamRule`]), gradient ascent driven by a
+//!   [`GradientOracle`]
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
 //! Python interpreter. They only depend on these input contracts:
@@ -94,7 +95,7 @@ mod rng;
 mod shade;
 mod util;
 
-pub use adam::{AlgorithmAdam, AlgorithmAdamArgs};
+pub use adam::{AdamRule, AlgorithmAdam, AlgorithmAdamArgs};
 pub use cmaes::{AlgorithmCmaEs, AlgorithmCmaEsArgs, CmaEsBatchSchedule};
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,

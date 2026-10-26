@@ -1,14 +1,99 @@
-//! Adam optimizer (adaptive moment estimation).
+//! Adam optimizer (adaptive moment estimation), with Polyak's heavy-ball
+//! momentum as an alternative update rule ([`AdamRule`]).
+//!
+//! References:
+//!
+//! - D. P. Kingma and J. Ba, "Adam: A Method for Stochastic Optimization",
+//!   ICLR 2015, arXiv:1412.6980: the [`AdamRule::Adam`] update and its bias
+//!   corrections.
+//! - B. T. Polyak, "Some methods of speeding up the convergence of iteration
+//!   methods", USSR Computational Mathematics and Mathematical Physics 4(5),
+//!   1964: the heavy ball of [`AdamRule::Momentum`].
+//! - B. D. M. Jones, L. Mineh and A. Montanaro, "Benchmarking a wide range of
+//!   optimisers for solving the Fermi-Hubbard model using the variational
+//!   quantum eigensolver", Quantum Sci. Technol. 10(4), 045032 (2025),
+//!   arXiv:2411.13742: with finite-difference gradients under shot noise,
+//!   momentum and Adam reach the best final precision, and the difference
+//!   step matters (`0.4` works, `0.01` ruins the gradient). `polypus.Adam`
+//!   defaults to a step of `0.2` and a `learning_rate` of `0.1`.
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_initial_point, check_oracle_len, fitness_stagnated};
+use crate::util::{check_initial_point, check_oracle_len, fitness_stagnated, BestMeasured};
 use rand::{Rng, RngExt};
+use std::fmt;
+use std::str::FromStr;
 
 /// Adam optimizer (Kingma and Ba, 2015).
 pub struct AlgorithmAdam;
+
+/// How [`AlgorithmAdam`] turns the gradient `g` into a step (`polypus.Adam(rule=...)`).
+///
+/// - [`Adam`](Self::Adam), the default: Kingma and Ba's Adam. Bias-corrected
+///   running averages of `g` and of `g²` scale each parameter's step to about
+///   `learning_rate`, whatever the scale of the cost, so one configuration
+///   suits costs of different scales.
+/// - [`Momentum`](Self::Momentum): Polyak's heavy ball, with `beta1` as the
+///   momentum μ: a velocity `v ← μ·v + learning_rate·g` is added to `θ`. The
+///   step grows with `g`, so the learning rate that works depends on the
+///   scale of the cost. `beta2` and `epsilon` are not used (they are still
+///   validated).
+///
+/// The names `polypus.Adam(rule=...)` accepts are [`as_str`](Self::as_str)
+/// and parse back with [`FromStr`]:
+///
+/// ```
+/// use polypus_optimizers::AdamRule;
+///
+/// assert_eq!("momentum".parse::<AdamRule>(), Ok(AdamRule::Momentum));
+/// assert_eq!(AdamRule::default().as_str(), "adam");
+/// assert!("Adam".parse::<AdamRule>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AdamRule {
+    /// Adam: bias-corrected, moment-normalised steps.
+    #[default]
+    Adam,
+    /// Polyak's heavy-ball momentum.
+    Momentum,
+}
+
+impl AdamRule {
+    /// The rule's name, as `polypus.Adam(rule=...)` takes it: `"adam"` or
+    /// `"momentum"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdamRule::Adam => "adam",
+            AdamRule::Momentum => "momentum",
+        }
+    }
+}
+
+impl fmt::Display for AdamRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AdamRule {
+    type Err = OptimizerError;
+
+    /// Parse one of the names [`as_str`](Self::as_str) returns. Matching is
+    /// exact; any other string is [`OptimizerError::InvalidConfig`] for
+    /// `rule`, which the Python binding raises as `ValueError`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "adam" => Ok(AdamRule::Adam),
+            "momentum" => Ok(AdamRule::Momentum),
+            other => Err(OptimizerError::InvalidConfig {
+                parameter: "rule",
+                reason: format!("must be \"adam\" or \"momentum\", got {other:?}"),
+            }),
+        }
+    }
+}
 
 /// Arguments for the Adam optimizer.
 ///
@@ -19,30 +104,58 @@ pub struct AlgorithmAdam;
 /// needs no [`VarianceOracle`](crate::VarianceOracle): its per-parameter step
 /// size comes from running averages of the gradient and of its square.
 ///
+/// Each iteration measures the current `θ` and the gradient there, then steps
+/// by [`rule`](AlgorithmAdamArgs::rule), so
+/// [`max_iters`](AlgorithmAdamArgs::max_iters) counts steps.
+/// When the gradient oracle scores `θ` in its own batch
+/// ([`GradientOracle::value_and_gradient`]), that is one call: with a
+/// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient), one batch of
+/// `2·dimensions + 1` candidates, `θ` first. Otherwise `oracle` scores `θ`
+/// and then the gradient oracle is asked for the gradient. After the last
+/// step, the `max_iters`-th or the one before the stagnation stop, `oracle`
+/// scores the `θ` it reached in one batch of one candidate, so every
+/// gradient feeds a measured step. `best_params` is the measured `θ` with the
+/// best fitness (a `NaN` never wins), and `fitness_history` holds the best
+/// measured up to each iteration, the final `θ` counted in the last entry.
+///
 /// # Preconditions
 ///
 /// Checked before any RNG draw or oracle call
 /// ([`OptimizerError::InvalidConfig`] or [`OptimizerError::InvalidBounds`]):
-/// `max_iters >= 1` (Adam evaluates nothing before its first step, so zero
-/// iterations could not report a real `best_fitness`), `dimensions >= 1`,
-/// `learning_rate` finite and `> 0`, `beta1` and `beta2` in `[0, 1)` (at `1`
-/// the bias correction divides by zero), `epsilon` finite and `> 0`,
-/// `bounds` finite with `lb < ub` (the initial `θ` is drawn uniformly from it),
-/// and `initial_point`, when given, `dimensions` finite values.
+/// `max_iters >= 1` (a run of no steps would only measure its starting
+/// point), `dimensions >= 1`, `learning_rate` finite and `> 0`, `beta1` and
+/// `beta2` in `[0, 1)` (at `1` the bias correction divides by zero), `epsilon`
+/// finite and `> 0` (with either rule, although momentum uses neither `beta2`
+/// nor `epsilon`), `patience >= 1` (the stagnation rule compares the best
+/// fitness with `patience` iterations earlier, and `0` would compare an
+/// iteration with itself), `bounds` finite with `lb < ub` (the initial `θ` is
+/// drawn uniformly from it), and `initial_point`, when given, `dimensions`
+/// finite values.
 pub struct AlgorithmAdamArgs {
-    /// Maps parameter vectors to fitness values (higher is better). Called once
-    /// per iteration, on the updated `θ`, to track the best solution.
+    /// Maps parameter vectors to fitness values (higher is better). Scores `θ`
+    /// once per iteration to track the best solution, unless the gradient
+    /// oracle scores it, and the final `θ` after the last step.
     pub oracle: Box<dyn EvaluationOracle>,
-    /// `∇fitness(θ)`, uphill (see [`GradientOracle`]); the update adds it.
+    /// `∇fitness(θ)`, uphill (see [`GradientOracle`]); the update adds it. One
+    /// that also returns `θ`'s fitness
+    /// ([`value_and_gradient`](GradientOracle::value_and_gradient)) must take
+    /// it from [`oracle`](AlgorithmAdamArgs::oracle), since Adam reports it as
+    /// measured (C-5): a [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)
+    /// over an [`Arc`](std::sync::Arc) shared with it.
     pub gradient_oracle: Box<dyn GradientOracle>,
+    /// Steps at most, each after measuring `θ` and the gradient there.
     pub max_iters: u32,
-    /// Step size applied to the bias-corrected, moment-normalised update.
+    /// Step size applied to the bias-corrected, moment-normalised update; with
+    /// [`AdamRule::Momentum`], the factor of the gradient in the velocity.
     pub learning_rate: f64,
-    /// Decay rate of the first moment (running mean of the gradient).
+    /// Decay rate of the first moment (running mean of the gradient); with
+    /// [`AdamRule::Momentum`], the momentum μ.
     pub beta1: f64,
     /// Decay rate of the second moment (running mean of the squared gradient).
+    /// Unused by [`AdamRule::Momentum`].
     pub beta2: f64,
     /// Added to the denominator of the update so it never divides by zero.
+    /// Unused by [`AdamRule::Momentum`].
     pub epsilon: f64,
     pub bounds: (f64, f64),
     pub dimensions: u32,
@@ -51,16 +164,20 @@ pub struct AlgorithmAdamArgs {
     /// ends, in the oracle's fitness units: the stagnation rule of contract C-5,
     /// the same as DE's and CMA-ES's.
     pub tolerance: f64,
-    /// Iterations over which the best-fitness improvement is measured; no run
-    /// ends on stagnation before it has run `patience + 1` iterations.
+    /// Iterations over which the best-fitness improvement is measured, at
+    /// least 1; no run ends on stagnation before it has run `patience + 1`
+    /// iterations.
     pub patience: u32,
+    /// How the gradient becomes a step: Adam (the default) or Polyak's
+    /// momentum.
+    pub rule: AdamRule,
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
     /// Optional initial `θ`, one value per dimension, all finite; it may lie
     /// outside `bounds`, which only shape the random draw (θ is never clamped).
-    /// The first gradient is taken at it. `None` draws `θ` uniformly from
-    /// `bounds`.
+    /// It is the first `θ` measured, and the first gradient is taken at it.
+    /// `None` draws `θ` uniformly from `bounds`.
     pub initial_point: Option<Vec<f64>>,
 }
 
@@ -82,7 +199,8 @@ impl AlgorithmAdam {
         String::from(
             "Trains a variational quantum circuit with Adam: gradient ascent with a \
              per-parameter step size adapted from running averages of the gradient and its \
-             square, with bias correction. Stops early when the best fitness stagnates.",
+             square, with bias correction, or with Polyak's heavy-ball momentum. Stops \
+             early when the best fitness stagnates.",
         )
     }
 
@@ -98,11 +216,20 @@ impl AlgorithmAdam {
         beta1: f64,
         beta2: f64,
         epsilon: f64,
+        patience: u32,
         bounds: (f64, f64),
         dimensions: u32,
         initial_point: Option<&[f64]>,
     ) -> Result<(), OptimizerError> {
-        validate(max_iters, dimensions, learning_rate, beta1, beta2, epsilon)?;
+        validate(
+            max_iters,
+            dimensions,
+            learning_rate,
+            beta1,
+            beta2,
+            epsilon,
+            patience,
+        )?;
         let (lb, ub) = bounds;
         // The same check as QNG's: `lb >= ub` is empty, and a non-finite bound
         // (`NaN` fails every comparison, an infinity would make the sampler panic)
@@ -129,6 +256,7 @@ impl AlgorithmAdam {
             dimensions,
             tolerance,
             patience,
+            rule,
             seed: _,
             initial_point,
         } = args;
@@ -139,6 +267,7 @@ impl AlgorithmAdam {
             beta1,
             beta2,
             epsilon,
+            patience,
             bounds,
             dimensions,
             initial_point.as_deref(),
@@ -153,8 +282,13 @@ impl AlgorithmAdam {
         let mut theta = initial_point.unwrap_or(drawn);
         let mut m = vec![0.0_f64; dims];
         let mut v = vec![0.0_f64; dims];
-        let mut best_fitness = f64::NEG_INFINITY;
-        let mut best_theta = theta.clone();
+        // β₁ᵗ and β₂ᵗ, one product each per iteration rather than `powi`, whose
+        // rounding Rust leaves unspecified: with only +, −, ×, ÷ and `sqrt`,
+        // all correctly rounded in IEEE 754, a seeded run reproduces bit for
+        // bit on every platform (C-7).
+        let mut beta1_t = 1.0_f64;
+        let mut beta2_t = 1.0_f64;
+        let mut best = BestMeasured::new();
         let mut iterations_run = 0usize;
         let mut converged = false;
         // Best fitness after each iteration (see
@@ -164,49 +298,81 @@ impl AlgorithmAdam {
         for iteration in 0..max_iters as usize {
             iterations_run = iteration + 1;
 
-            // ── 1. Gradient, uphill, one component per parameter ──────────────
-            let grad = gradient_oracle.gradient_batch(&theta, dims);
+            // ── 1. θ's fitness and the gradient there, uphill ─────────────────
+            // One call when the gradient oracle scores θ in its own batch (a
+            // finite-difference stencil); otherwise θ is scored here first.
+            let (fitness, grad) = match gradient_oracle.value_and_gradient(&theta, dims) {
+                Some(measured) => measured,
+                None => {
+                    let fitness = oracle.evaluate_batch(std::slice::from_ref(&theta));
+                    check_oracle_len(1, fitness.len())?;
+                    (fitness[0], gradient_oracle.gradient_batch(&theta, dims))
+                }
+            };
             check_oracle_len(dims, grad.len())?;
             // A non-finite component would leave θ non-finite from here on (C-5).
             if let Some((index, &value)) = grad.iter().enumerate().find(|(_, g)| !g.is_finite()) {
                 return Err(OptimizerError::NonFiniteGradient { index, value });
             }
-
-            // ── 2. Bias-corrected moment update (t is 1-based) ────────────────
-            let t = iteration as i32 + 1;
-            let bias1 = 1.0 - beta1.powi(t);
-            let bias2 = 1.0 - beta2.powi(t);
-            for i in 0..dims {
-                m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
-                v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
-                let m_hat = m[i] / bias1;
-                let v_hat = v[i] / bias2;
-                theta[i] += learning_rate * m_hat / (v_hat.sqrt() + epsilon);
-            }
-
-            // ── 3. Score the new θ and track the best solution ────────────────
-            let fitness = oracle.evaluate_batch(std::slice::from_ref(&theta));
-            check_oracle_len(1, fitness.len())?;
-            let fitness = fitness[0];
             log::debug!("Iteration {iteration}: fitness {fitness:.4}");
-            if fitness > best_fitness {
-                best_fitness = fitness;
-                best_theta = theta.clone();
-            }
+
+            // ── 2. Track the best measured θ ──────────────────────────────────
+            best.offer(&theta, fitness);
             // The running best, not this iteration's fitness: a gradient step can
             // overshoot, and the history must be non-decreasing with the reported
             // best as its last entry (C-5).
-            fitness_history.push(best_fitness);
+            fitness_history.push(best.value());
+
+            // ── 3. Step uphill by the rule ────────────────────────────────────
+            match rule {
+                // Bias-corrected moment update (t is 1-based).
+                AdamRule::Adam => {
+                    beta1_t *= beta1;
+                    beta2_t *= beta2;
+                    let bias1 = 1.0 - beta1_t;
+                    let bias2 = 1.0 - beta2_t;
+                    for i in 0..dims {
+                        m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
+                        v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
+                        let m_hat = m[i] / bias1;
+                        let v_hat = v[i] / bias2;
+                        theta[i] += learning_rate * m_hat / (v_hat.sqrt() + epsilon);
+                    }
+                }
+                // Heavy ball: `m` is the velocity and β₁ its momentum.
+                AdamRule::Momentum => {
+                    for i in 0..dims {
+                        m[i] = beta1 * m[i] + learning_rate * grad[i];
+                        theta[i] += m[i];
+                    }
+                }
+            }
 
             // ── 4. Stop when the best fitness stagnates (C-5) ─────────────────
+            // Judged on the θs measured so far; the θ this step reached is
+            // measured below, like the last iteration's.
             if fitness_stagnated(&fitness_history, tolerance, patience, iteration) {
                 converged = true;
                 break;
             }
         }
 
+        // ── 5. Measure the θ the last step reached ───────────────────────────
+        // One candidate, so no gradient goes into an unmeasured step; its value
+        // joins the last iteration's entry, which stays the reported best (C-5).
+        let fitness = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        check_oracle_len(1, fitness.len())?;
+        log::debug!("Final θ: fitness {:.4}", fitness[0]);
+        best.offer(&theta, fitness[0]);
+        if let Some(last) = fitness_history.last_mut() {
+            *last = best.value();
+        }
+
+        // `max_iters >= 1` and every iteration measures θ before it steps, so
+        // `best` holds a measured θ.
+        let (best_params, best_fitness) = best.into_parts();
         Ok(OptimizationOutcome {
-            best_params: best_theta,
+            best_params,
             best_fitness,
             iterations_run,
             converged,
@@ -223,6 +389,7 @@ fn validate(
     beta1: f64,
     beta2: f64,
     epsilon: f64,
+    patience: u32,
 ) -> Result<(), OptimizerError> {
     let invalid = |parameter: &'static str, reason: String| {
         Err(OptimizerError::InvalidConfig { parameter, reason })
@@ -230,7 +397,8 @@ fn validate(
     if max_iters == 0 {
         return invalid(
             "max_iters",
-            "must be at least 1 (0 iterations never evaluates the objective)".to_string(),
+            "must be at least 1 (a run of no steps would only measure its starting point)"
+                .to_string(),
         );
     }
     if dimensions == 0 {
@@ -252,6 +420,14 @@ fn validate(
     }
     if !epsilon.is_finite() || epsilon <= 0.0 {
         return invalid("epsilon", format!("must be finite and > 0, got {epsilon}"));
+    }
+    if patience == 0 {
+        return invalid(
+            "patience",
+            "must be at least 1 (iterations back to compare the best fitness with; 0 \
+             would compare an iteration with itself)"
+                .to_string(),
+        );
     }
     Ok(())
 }
