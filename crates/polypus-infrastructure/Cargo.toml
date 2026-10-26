@@ -21,7 +21,6 @@ qmio = ["dep:zeromq", "dep:serde-pickle", "dep:serde_json", "dep:tokio"]
 polypus-backend = { workspace = true }
 polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
-polypus-observable = { workspace = true }
 # PyO3 for the GIL-touching backends (Aer/CUNQA/QMIO seams) and for carrying a
 # `PyErr` verbatim in `BackendError::Seam`. This crate never defines the
 # extension module, so it does not enable `pyo3/extension-module`; the top-level
