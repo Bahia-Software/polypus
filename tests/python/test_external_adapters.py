@@ -426,7 +426,8 @@ class TestPycmaAdapter:
     def test_a_batch_not_told_is_offered_again(self):
         es = FakeES()
         adapter = from_pycma(es)
-        assert adapter.ask() == adapter.ask()
+        first = adapter.ask()
+        assert adapter.ask() == first
         assert len(es.asked) == 1
 
     def test_a_tell_that_fails_keeps_the_generation_pending(self):
