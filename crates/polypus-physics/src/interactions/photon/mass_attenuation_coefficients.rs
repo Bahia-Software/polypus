@@ -10,15 +10,15 @@ use std::sync::OnceLock;
 /// The environment variable that overrides the ENDF-6 data directory.
 const ENDF_DATA_DIR_VAR: &str = "POLYPUS_ENDF_DATA_DIR";
 
-/// Directory containing the pre-downloaded ENDF-6 evaluations, resolved at
-/// runtime. This crate never downloads data over the network.
+/// Directory containing the ENDF-6 evaluations, resolved at runtime. The data
+/// is not packaged with this crate, and it never downloads anything.
 ///
 /// Checked in order:
-/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — an absolute path to the folder
-///    containing the `ZA{Z:03}000.txt` files.
-/// 2. `reference-data/endf-epdl-2023/`, relative to this workspace's root
-///    — the default location within this repository, so the env var only
-///    needs setting if that layout ever changes.
+/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — the folder containing the
+///    `ZA{Z:03}000.txt` files.
+/// 2. `reference-data/endf-epdl-2023/` of the Polypus repository, located
+///    relative to this crate's source: valid only in a checkout, so users of
+///    the crates.io package must set the variable.
 fn external_endf_data_dir() -> PathBuf {
     endf_data_dir(std::env::var(ENDF_DATA_DIR_VAR).ok())
 }
@@ -37,7 +37,7 @@ fn endf_data_dir(override_dir: Option<String>) -> PathBuf {
 }
 
 /// Returns the raw contents of the ENDF-6 evaluation for `z`, reading it
-/// from a pre-downloaded local file. Never downloads anything — see
+/// from a local file. Never downloads anything — see
 /// [`external_endf_data_dir`].
 fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
     read_endf_contents(&external_endf_data_dir(), z)
@@ -50,8 +50,9 @@ fn read_endf_contents(dir: &Path, z: u32) -> Result<String, PhysicsError> {
         z,
         message: format!(
             "could not read {}: {e}. Set {ENDF_DATA_DIR_VAR} to the folder \
-             containing the ENDF-6 .txt files, or place them at \
-             reference-data/endf-epdl-2023 relative to the workspace root.",
+             containing the ENDF-6 .txt files (reference-data/endf-epdl-2023 \
+             in https://github.com/Bahia-Software/polypus; see the \
+             polypus-physics crate docs).",
             path.display()
         ),
     })
@@ -176,24 +177,22 @@ fn atomic_mass(z: u32) -> Option<f64> {
     ATOMIC_MASSES.get((z - 1) as usize).copied()
 }
 
-/// The parsed identity and raw contents of one ENDF-6 evaluation, fetched
+/// The parsed identity and raw contents of one ENDF-6 evaluation, read
 /// (and cached) on demand.
 struct EndfEntry {
     z: u32,
     contents: String,
 }
 
-/// The set of ENDF-6 evaluations fetched so far in this process, keyed by
-/// chemical symbol. Grows incrementally as elements are requested — unlike
-/// the old embedded-data design, there is no fixed set of 100 to index
-/// upfront.
+/// The set of ENDF-6 evaluations read so far in this process, keyed by
+/// chemical symbol. Grows incrementally as elements are requested.
 fn endf_index() -> &'static Mutex<HashMap<String, EndfEntry>> {
     static INDEX: OnceLock<Mutex<HashMap<String, EndfEntry>>> = OnceLock::new();
     INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Returns the (Z, raw contents) of a chemical element's ENDF-6 evaluation,
-/// downloading and caching it on first use.
+/// reading it from the data directory and caching it on first use.
 fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
     let z = z_for_symbol(symbol).ok_or_else(|| PhysicsError::UnknownElement {
         symbol: symbol.to_string(),
@@ -222,9 +221,9 @@ fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
 }
 
 /// Chemical symbol for each Z from 1 to 100, in order. Used to translate a
-/// symbol to its atomic number before downloading the corresponding
-/// ENDF-6 evaluation — this table alone is embedded in the binary (a few
-/// KB), unlike the full ENDF-6 data, which is fetched on demand.
+/// symbol to its atomic number before reading the corresponding
+/// ENDF-6 evaluation — this table alone is compiled into the binary (a few
+/// KB), unlike the full ENDF-6 data, which is read on demand.
 const ELEMENT_SYMBOLS: [&str; 100] = [
     "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl",
     "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As",
@@ -236,7 +235,7 @@ const ELEMENT_SYMBOLS: [&str; 100] = [
 ];
 
 /// Looks up an element's atomic number from its chemical symbol
-/// (e.g. `"Fe"` → `26`), without needing any ENDF-6 data downloaded yet.
+/// (e.g. `"Fe"` → `26`), without reading any ENDF-6 data.
 pub fn z_for_symbol(symbol: &str) -> Option<u32> {
     ELEMENT_SYMBOLS
         .iter()
@@ -335,7 +334,7 @@ fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<CrossSectionPoin
 }
 
 /// Returns the raw (energy, cross-section) points for a given element and
-/// ENDF-6 reaction type, straight from the embedded evaluation.
+/// ENDF-6 reaction type, straight from the evaluation.
 pub fn cross_section_for_element(
     symbol: &str,
     mt: u32,
@@ -346,7 +345,7 @@ pub fn cross_section_for_element(
 }
 
 /// Computes the mass attenuation coefficient mu_m = sigma_t * N_A / A for a
-/// single element, from its embedded ENDF-6 evaluation.
+/// single element, from its ENDF-6 evaluation.
 ///
 /// `symbol` is the chemical symbol (e.g. `"Fe"`), and `mt` is the ENDF-6
 /// reaction type to read (501 = total, 522 = photoelectric, 504 =
@@ -728,7 +727,7 @@ mod tests {
 
     #[test]
     fn requesting_an_element_adds_it_to_the_index() {
-        let _ = endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let _ = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let index = endf_index().lock().unwrap();
         assert!(index.contains_key("H"));
     }
@@ -775,16 +774,14 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_has_2021_points() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         assert_eq!(points.len(), 2021);
     }
 
     #[test]
     fn hydrogen_total_cross_section_first_point() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let first = &points[0];
         assert_eq!(first.energy_ev, 1.0);
@@ -793,8 +790,7 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_last_point() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let last = points.last().unwrap();
         assert_eq!(last.energy_ev, 100_000_000_000.0);
@@ -803,8 +799,7 @@ mod tests {
 
     #[test]
     fn unknown_mt_channel_errors() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let result = read_section(&contents, 23, 999);
         assert!(matches!(
             result,
