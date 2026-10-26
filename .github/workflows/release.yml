@@ -454,6 +454,13 @@ jobs:
           python-version: "3.11"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
+      # Build every .crate against the others before anything is uploaded. On
+      # the Trusted Publishing path the uploads then skip their own
+      # verification build, which would not fit in the token's 30 minutes.
+      - name: Package and verify every crate
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo package --workspace --locked
       - name: Publish plan
         run: |
           args=()

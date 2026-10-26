@@ -12,10 +12,13 @@ so a failed run can simply be re-run.
 crates.io Trusted Publishing cannot create a crate: its first version must be
 published with an API token. With --trusted-publishing, the run stops before
 publishing anything if a crate is not on crates.io yet, instead of failing
-halfway through the order.
+halfway through the order. Its token expires after 30 minutes, so each crate is
+then uploaded without the verification build (`--no-verify`): the release job
+runs `cargo package --workspace` before it authenticates.
 
-    python .github/scripts/publish_crates.py           # publish (needs CARGO_REGISTRY_TOKEN)
-    python .github/scripts/publish_crates.py --plan    # print the order and status only
+    python .github/scripts/publish_crates.py                       # publish with CARGO_REGISTRY_TOKEN
+    python .github/scripts/publish_crates.py --trusted-publishing  # publish with a Trusted Publishing token
+    python .github/scripts/publish_crates.py --plan [--trusted-publishing]  # print the order and status only
 """
 
 import argparse
@@ -134,7 +137,10 @@ def main():
             continue
         # `cargo publish` waits until the new version is in the index, so the
         # next crate can resolve it.
-        subprocess.run(["cargo", "publish", "--locked", "-p", name], check=True)
+        cmd = ["cargo", "publish", "--locked", "-p", name]
+        if args.trusted_publishing:
+            cmd.append("--no-verify")
+        subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":

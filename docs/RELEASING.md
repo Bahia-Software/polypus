@@ -89,7 +89,9 @@ PyPI: the release gate, every wheel and sdist build and their smoke tests.
   2. For each of the thirteen crates, on
      `https://crates.io/crates/<crate>/settings`, add a GitHub trusted
      publisher: owner `Bahia-Software`, repository `polypus`, workflow
-     filename `release.yml`, environment `crates-io`.
+     filename `release.yml`, environment `crates-io`. A crate left out makes
+     the run stop at it with a 403, after its dependencies are uploaded:
+     configure it and use "Re-run failed jobs".
   3. Optional, per crate on the same page: enable "Require trusted
      publishing", so crates.io refuses API tokens for that crate.
   4. Delete the `CARGO_REGISTRY_TOKEN` secret from the repository
@@ -110,8 +112,8 @@ PyPI: the release gate, every wheel and sdist build and their smoke tests.
 - **Checking a change.** `cargo package --workspace --locked` builds and
   verifies every `.crate` against the others without uploading. It needs
   cargo 1.90 or newer to resolve not-yet-published workspace versions. CI's
-  `cargo package` job runs it on every push to `main` and on pull requests
-  that touch a manifest, `Cargo.lock`, a build script, a readme or a license.
+  `cargo package` job runs it on every pull request and push to `main`, and
+  `publish-crates` runs it again before uploading anything.
 
 ## Resolved (kept for context)
 
