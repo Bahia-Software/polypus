@@ -162,6 +162,11 @@ Changes on `main` since 0.7.2.
   `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
   workflow type-checks every example against the typing stubs and runs the
   local ones (#406).
+- `max_cut_qaoa.py` reads every counts key with qubit 0 rightmost: the mean
+  cut behind the approximation ratio and the plotted cut read it reversed,
+  which showed only on graphs that are not symmetric under node reversal (from
+  `--qubits 5`). The script now checks the mapping against Qiskit's key
+  order before it trains (#445).
 - The README quickstart runs on the native backend (`backend="polypus"`), so it
   no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
   to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
