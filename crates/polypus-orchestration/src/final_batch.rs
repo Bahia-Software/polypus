@@ -32,13 +32,14 @@ impl Method {
     /// re-evaluates, at most: the five best distinct candidates for a
     /// population method (DE with every strategy, PSO and CMA-ES), which scores
     /// many points per generation, and only `best_params` for a local method
-    /// (QNG, Adam and SPSA), whose other measured points are earlier, worse
-    /// iterates. `best_params` is always one of them, and the batch is smaller
-    /// when the run scored fewer distinct candidates.
+    /// (QNG, Adam, SPSA and Rotosolve), whose other measured points are
+    /// earlier, worse iterates or their neighbours. `best_params` is always
+    /// one of them, and the batch is smaller when the run scored fewer
+    /// distinct candidates.
     pub fn final_candidates(&self) -> usize {
         match self {
             Method::De(_) | Method::Pso(_) | Method::Cmaes(_) => POPULATION_FINAL_CANDIDATES,
-            Method::Qng(..) | Method::Adam(_) | Method::Spsa(_) => 1,
+            Method::Qng(..) | Method::Adam(_) | Method::Spsa(_) | Method::Rotosolve(_) => 1,
         }
     }
 }
@@ -253,7 +254,9 @@ pub(crate) fn final_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::{AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, SpsaConfig};
+    use crate::dispatch::{
+        AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+    };
     use polypus_optimizers::{AdamRule, DeStrategy, VarianceOracle};
 
     /// One call: its candidates and the shots it asked for (`None`: the
@@ -532,6 +535,15 @@ mod tests {
                     alpha: 0.602,
                     gamma: 0.101,
                     eval_interval: 1,
+                }),
+                1,
+            ),
+            (
+                Method::Rotosolve(RotosolveConfig {
+                    sweeps: 1,
+                    reevaluate_every: 1,
+                    tolerance: 0.0,
+                    patience: 1,
                 }),
                 1,
             ),

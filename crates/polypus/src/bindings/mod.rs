@@ -15,6 +15,7 @@ pub mod logging;
 pub mod observable;
 pub mod pso;
 pub mod qng;
+pub mod rotosolve;
 pub mod spsa;
 
 use adam::Adam;
@@ -27,6 +28,7 @@ use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
+use rotosolve::Rotosolve;
 use spsa::Spsa;
 
 use crate::evaluation::{
@@ -42,7 +44,7 @@ use crate::infrastructure::{
 };
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, FinalEvaluation, Method, OracleError, PsoConfig, QngConfig,
-    Resources, RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow, TrainOutcome,
+    Resources, RotosolveConfig, RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow, TrainOutcome,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -282,8 +284,8 @@ fn outcome_to_train_result(
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
-/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` instance; otherwise a fresh
-/// OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
+/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance;
+/// otherwise a fresh OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
 /// value both drives the optimizer and is reported back in the [`TrainResult`],
 /// so the run can be replayed.
 fn resolve_optimizer_seed(
@@ -363,8 +365,9 @@ fn log_training_start(
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
-/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` it is (`None` if it is none of them — the type
-/// error is surfaced later by the dispatch that actually runs the optimizer).
+/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` it is (`None` if it is none
+/// of them — the type error is surfaced later by the dispatch that actually runs the
+/// optimizer).
 fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         return de.seed;
@@ -384,7 +387,56 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
         return spsa.seed;
     }
+    if let Ok(rotosolve) = method.extract::<PyRef<Rotosolve>>() {
+        return rotosolve.seed;
+    }
     None
+}
+
+/// Whether `method` is a `polypus.Rotosolve`, which only some circuits and
+/// objectives qualify for.
+fn is_rotosolve(method: &Bound<'_, PyAny>) -> bool {
+    method.extract::<PyRef<Rotosolve>>().is_ok()
+}
+
+/// The `ValueError` for a circuit Rotosolve cannot train, with the first
+/// reason the check found.
+fn rotosolve_circuit_error(reason: &str) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "polypus.Rotosolve cannot train this circuit: {reason}. Rotosolve needs every \
+         trainable parameter to be exactly one angle of an rx, ry, rz, rxx, rzz, p, u1, u, \
+         u2 or u3 gate (also ryy, rzx, or the θ of an r, in a Qiskit circuit), as ±θ + c, \
+         so that the fitness is a sinusoid of each parameter; train this circuit with \
+         another optimizer"
+    ))
+}
+
+/// Check, before anything runs, that `polypus.Rotosolve` can train `circuit`
+/// (issue #398): every trainable parameter the angle of exactly one
+/// single-Pauli rotation, as `±θ + c`. A `polypus.Circuit` is checked in
+/// Rust ([`ParameterizedCircuit::check_single_frequency`]); a Qiskit circuit
+/// by `polypus_python.rotosolve`, with `trainable` its trainable parameters
+/// (`None`: all of them; `qml.train` passes the ansatz's).
+///
+/// [`ParameterizedCircuit::check_single_frequency`]: crate::circuit::ParameterizedCircuit::check_single_frequency
+fn check_rotosolve_circuit(
+    circuit: &Bound<'_, PyAny>,
+    source: Option<&CircuitSource>,
+    trainable: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    if let Some(CircuitSource::Native(native)) = source {
+        return native
+            .check_single_frequency()
+            .map_err(|problem| rotosolve_circuit_error(&problem.to_string()));
+    }
+    let py = circuit.py();
+    let problem = PyModule::import(py, "polypus_python.rotosolve")?
+        .getattr("single_frequency_problem")?
+        .call1((circuit, trainable))?;
+    if problem.is_none() {
+        return Ok(());
+    }
+    Err(rotosolve_circuit_error(&problem.extract::<String>()?))
 }
 
 /// Check the optimizer's preconditions, `initial_point` included, before
@@ -463,9 +515,10 @@ fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Opti
 /// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
 /// makes the FFI boundary report the real cause instead of that garbage.
 ///
-/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam/SPSA branch through here, so this is
-/// also where the run's completion is logged — once, on the success path only
-/// (an oracle failure was already logged at `error!` where it was recorded).
+/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam/SPSA/Rotosolve branch
+/// through here, so this is also where the run's completion is logged — once,
+/// on the success path only (an oracle failure was already logged at `error!`
+/// where it was recorded).
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
 /// reported duration covers the whole call.
 ///
@@ -517,8 +570,8 @@ fn finish_optimization(
     outcome_to_train_result(py, outcome, final_evaluation, seed, id)
 }
 
-/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` object into a pyo3-free
-/// [`Method`].
+/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` / `Rotosolve` object into a
+/// pyo3-free [`Method`].
 ///
 /// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
 /// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
@@ -601,9 +654,17 @@ fn method_from_pyclass(
             eval_interval: spsa.eval_interval,
         }));
     }
+    if let Ok(rotosolve) = method.extract::<PyRef<Rotosolve>>() {
+        return Ok(Method::Rotosolve(RotosolveConfig {
+            sweeps: rotosolve.sweeps,
+            reevaluate_every: rotosolve.reevaluate_every,
+            tolerance: rotosolve.tolerance,
+            patience: rotosolve.patience,
+        }));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, polypus.CMAES, \
-         polypus.Adam, or polypus.SPSA",
+         polypus.Adam, polypus.SPSA, or polypus.Rotosolve",
     ))
 }
 
@@ -1517,7 +1578,11 @@ pub fn run_quantum_circuit<'py>(
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
-/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, `Adam`, or `SPSA`.
+/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, `Adam`, `SPSA`, or
+/// `Rotosolve`. Rotosolve trains only a circuit whose every parameter is the
+/// angle of exactly one single-Pauli rotation, as `±θ + c`: the circuit is
+/// checked before anything runs, and a circuit that does not qualify raises
+/// `ValueError` naming the first gate or parameter that does not.
 ///
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
@@ -1544,7 +1609,8 @@ pub fn run_quantum_circuit<'py>(
 /// within the PSO `bounds`; QNG and Adam start from it as θ₀; CMA-ES centres
 /// its first run on it (restarts start elsewhere), with its `sigma0`
 /// unchanged; SPSA starts from it as θ₀ and centres its calibration batch on
-/// it. Without it every optimizer starts as before (contract C-5).
+/// it; Rotosolve starts from it as θ₀, the first point it measures. Without it
+/// every optimizer starts as before (contract C-5).
 ///
 /// `final_shots` (default `None`) re-evaluates the best candidates once the
 /// optimizer has stopped, in one more batch with that many shots per circuit:
@@ -1661,6 +1727,11 @@ pub fn train<'py>(
                  serialization); got a Qiskit circuit. Build it with polypus.Circuit",
             ));
         }
+    }
+    // Rotosolve's step is exact only on single-frequency circuits: checked
+    // before any backend, and so any CUNQA allocation, exists.
+    if is_rotosolve(&method) {
+        check_rotosolve_circuit(&qc, Some(&circuit_source), None)?;
     }
     let backend_config = build_backend_config(
         &infrastructure,
@@ -1859,6 +1930,12 @@ fn bind_feature_rows<'py>(
 /// given point of the ansatz weights, as in [`train`]: `dimensions` finite
 /// numbers, otherwise `ValueError` before anything runs.
 ///
+/// With `method=polypus.Rotosolve(...)`, every ansatz parameter must be the
+/// angle of exactly one single-Pauli rotation, as `±θ + c`; the feature map's
+/// parameters are bound to each row, so they may appear anywhere. A
+/// `polypus.SampleCost`, which is not an average of a cost per bitstring, is
+/// rejected too. Both raise `ValueError` before anything runs.
+///
 /// `final_shots` (keyword-only, default `None`) re-evaluates the best
 /// candidates with that many shots once the optimizer has stopped, as in
 /// [`train`]: every training circuit of each candidate runs with them, and
@@ -1968,7 +2045,29 @@ pub fn qml_train<'py>(
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
     let py = feature_map.py();
 
+    // Rotosolve needs a fitness that averages a cost per bitstring, which a
+    // `SampleCost` (a function of each sample's whole distribution) is not.
+    let rotosolve = is_rotosolve(&method);
+    if rotosolve
+        && expectation_function
+            .extract::<PyRef<'_, SampleCost>>()
+            .is_ok()
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "polypus.Rotosolve cannot train with a polypus.SampleCost: Rotosolve needs a \
+             fitness that averages a cost per bitstring over the shots, so that it is a \
+             sinusoid of each parameter, and a SampleCost scores each sample's whole \
+             distribution. Use a callable (bitstring, label) -> float or a \
+             polypus.CachedCost, or another optimizer",
+        ));
+    }
+
     let composed = compose_qml_template(&feature_map, &ansatz)?;
+    // Only the ansatz is trained: the feature map's parameters are bound to
+    // each row below, so they are constants wherever they appear.
+    if rotosolve {
+        check_rotosolve_circuit(&composed, None, Some(&ansatz.getattr("parameters")?))?;
+    }
     // Pre-bind each sample, leaving the ansatz parameters for the optimizer.
     let qcs = bind_feature_rows(&composed, &feature_map, &x_train, "x_train")?;
 
@@ -2263,6 +2362,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CMAES>()?;
     m.add_class::<Adam>()?;
     m.add_class::<Spsa>()?;
+    m.add_class::<Rotosolve>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
     expr::register(m)?;
@@ -4127,6 +4227,73 @@ mod tests {
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
             assert!(err.to_string().contains("polypus.SPSA"), "{err}");
+        });
+    }
+
+    /// `polypus.Rotosolve` parses into `Method::Rotosolve` with every field,
+    /// its pinned seed is the C-7 fallback, and a non-method object's
+    /// `TypeError` names it.
+    #[test]
+    fn rotosolve_reaches_the_method_and_its_seed_is_read() {
+        Python::initialize();
+        Python::attach(|py| {
+            let rotosolve = Py::new(py, Rotosolve::new(7, 3, 0.25, 4, Some(99)))
+                .expect("the pyclass instantiates");
+            let bound = rotosolve.bind(py);
+            assert!(is_rotosolve(bound.as_any()));
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+                Ok(Method::Rotosolve(cfg)) => {
+                    assert_eq!(cfg.sweeps, 7);
+                    assert_eq!(cfg.reevaluate_every, 3);
+                    assert_eq!(cfg.tolerance, 0.25);
+                    assert_eq!(cfg.patience, 4);
+                }
+                _ => panic!("a polypus.Rotosolve parses into Method::Rotosolve"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            assert!(!is_rotosolve(not_a_method.as_any()));
+            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.Rotosolve"), "{err}");
+        });
+    }
+
+    /// A native circuit is checked in Rust: one that qualifies passes, and the
+    /// first problem of one that does not is the `ValueError`'s reason.
+    #[test]
+    fn a_native_circuit_is_checked_for_rotosolve_in_rust() {
+        use crate::circuit::{Param, ParameterizedCircuit};
+        Python::initialize();
+        Python::attach(|py| {
+            let unused = 0_i32.into_pyobject(py).unwrap();
+            let good = CircuitSource::Native(
+                ParameterizedCircuit::new(2)
+                    .ry(0, Param(0))
+                    .cx(0, 1)
+                    .rz(1, Param(1)),
+            );
+            assert!(check_rotosolve_circuit(unused.as_any(), Some(&good), None).is_ok());
+            let bad = CircuitSource::Native(ParameterizedCircuit::new(2).ry(0, Param(0)).crx(
+                0,
+                1,
+                Param(1),
+            ));
+            let err = check_rotosolve_circuit(unused.as_any(), Some(&bad), None)
+                .expect_err("a controlled rotation does not qualify");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.starts_with(
+                    "polypus.Rotosolve cannot train this circuit: parameter 1 ('theta_1') is \
+                     an angle of 'crx' (instruction 1), which is not a rotation generated by a \
+                     single Pauli operator. Rotosolve needs"
+                ),
+                "{message}"
+            );
         });
     }
 }

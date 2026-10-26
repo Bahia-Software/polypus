@@ -49,6 +49,7 @@ __all__ = [
     "CMAES",
     "Adam",
     "SPSA",
+    "Rotosolve",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -89,7 +90,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -262,6 +263,22 @@ class SPSA:
         eval_interval: int = 20,
         seed: Optional[int] = None,
     ) -> SPSA: ...
+
+@final
+class Rotosolve:
+    sweeps: int
+    reevaluate_every: int
+    tolerance: float
+    patience: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        sweeps: int = 10,
+        reevaluate_every: int = 5,
+        tolerance: float = 0.01,
+        patience: int = 2,
+        seed: Optional[int] = None,
+    ) -> Rotosolve: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 

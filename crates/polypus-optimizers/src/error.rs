@@ -79,7 +79,9 @@ pub enum OptimizerError {
     /// `beta1`/`beta2` (in `[0, 1)`) or `epsilon` (finite, `> 0`); or SPSA's
     /// `max_iters`, `dimensions`, `resamplings` and `eval_interval` (each
     /// ≥ 1), `perturbation` and `target_step` (finite, `> 0`), `alpha` (in
-    /// `(0.5, 1]`) or `gamma` (`> 0`, with `alpha − gamma > 0.5`); or a
+    /// `(0.5, 1]`) or `gamma` (`> 0`, with `alpha − gamma > 0.5`); or
+    /// Rotosolve's `sweeps`, `dimensions`, `reevaluate_every` and `patience`
+    /// (each ≥ 1) or `tolerance` (finite, `>= 0`); or a
     /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)'s
     /// `finite_difference_step` (finite, `> 0`); or any optimizer's
     /// `initial_point` (`dimensions` finite values, within `bounds` for PSO).

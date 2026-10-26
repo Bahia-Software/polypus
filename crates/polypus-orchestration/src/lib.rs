@@ -36,7 +36,7 @@ mod walltime;
 
 pub use dispatch::{
     dispatch_optimizer, AdamConfig, BoxedError, CmaesConfig, DeConfig, Method, OracleError,
-    OracleErrorSlot, Oracles, PsoConfig, QngConfig, SpsaConfig,
+    OracleErrorSlot, Oracles, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
 };
 pub use flow::{FinalEvaluation, Flow, OracleFactory, RunCircuitFlow, TrainFlow, TrainOutcome};
 pub use scheduler::{Resources, Scheduler};

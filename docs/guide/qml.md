@@ -57,6 +57,8 @@ def log_likelihood(counts, label):
 expectation_function = polypus.SampleCost(log_likelihood)
 ```
 
+`polypus.Rotosolve` needs a fitness that averages a cost per bitstring, so it does not train with a `SampleCost`: `qml.train` raises `ValueError` before anything runs. It trains the ansatz only, so the feature map's gates are free; see [Rotosolve](training.md#rotosolve).
+
 Integer labels (Python or NumPy ints and bools) reach your function as `int`; if any label is not an integer, all of them arrive as `float` (regression targets). `y_train` is validated before anything runs: a length other than the number of rows, a `NaN`/`inf`, a string or a one-hot row is rejected with the offending index. Without `y_train`, one `expectation_function(bitstring)` is shared by every sample, as before.
 
 ## Prediction

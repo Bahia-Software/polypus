@@ -7,17 +7,17 @@
 //! (wrapped into `[0, 2π)` for DE), the rest of that batch is what the same
 //! seed gives without a point, CMA-ES centres its first generation on it, QNG
 //! starts its gradient stencil at it, Adam measures it first, SPSA centres its
-//! calibration on it and then measures it first, and a rejected point reaches
-//! no oracle.
+//! calibration on it and then measures it first, Rotosolve measures it first
+//! and steps from it, and a rejected point reaches no oracle.
 
 use polypus_optimizers::{
     AdamRule, AlgorithmAdam, AlgorithmAdamArgs, AlgorithmCmaEs, AlgorithmCmaEsArgs,
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, AlgorithmPSO,
-    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, AlgorithmSPSA, AlgorithmSPSAArgs, DeStrategy,
-    EvaluationOracle, FiniteDifferenceGradient, OptimizationOutcome, Optimizer, OptimizerError,
-    VarianceOracle,
+    AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, AlgorithmRotosolve, AlgorithmRotosolveArgs,
+    AlgorithmSPSA, AlgorithmSPSAArgs, DeStrategy, EvaluationOracle, FiniteDifferenceGradient,
+    OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::sync::{Arc, Mutex};
 
 const STRATEGIES: [DeStrategy; 3] = [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade];
@@ -229,6 +229,23 @@ fn spsa_args(
     }
 }
 
+fn rotosolve_args(
+    oracle: Box<dyn EvaluationOracle>,
+    initial_point: Option<Vec<f64>>,
+    seed: u64,
+) -> AlgorithmRotosolveArgs {
+    AlgorithmRotosolveArgs {
+        oracle,
+        sweeps: 2,
+        reevaluate_every: 2,
+        tolerance: 0.0,
+        patience: 1,
+        dimensions: 3,
+        seed: Some(seed),
+        initial_point,
+    }
+}
+
 /// The central-difference stencil around `theta`:
 /// `[θ + h·e₀, θ − h·e₀, θ + h·e₁, …]`.
 fn stencil(theta: &[f64], h: f64) -> Vec<Vec<f64>> {
@@ -278,7 +295,11 @@ fn optimizers() -> Vec<(String, Runner)> {
     all.push(("QNG".to_string(), qng));
     all.push(("CMA-ES".to_string(), cmaes));
     all.push(("Adam".to_string(), adam));
+    let rotosolve: Runner = Box::new(|oracle, point, seed| {
+        AlgorithmRotosolve.optimize(rotosolve_args(oracle, point, seed))
+    });
     all.push(("SPSA".to_string(), spsa));
+    all.push(("Rotosolve".to_string(), rotosolve));
     all
 }
 
@@ -440,6 +461,60 @@ fn spsa_from_the_point_its_seed_draws_is_the_run_without_one() {
 }
 
 #[test]
+fn rotosolve_measures_the_point_first_and_steps_its_first_coordinate_from_it() {
+    // Rotosolve takes no bounds and does not wrap the point: it is θ₀ as it
+    // is, and only the coordinates it updates are wrapped.
+    let point = vec![-5.0, 0.5, 9.0];
+    let (oracle, batches) = recorder(quadratic);
+    AlgorithmRotosolve
+        .optimize(rotosolve_args(oracle, Some(point.clone()), 17))
+        .expect("a finite point outside [0, 2π) is accepted");
+    let batches = batches.lock().unwrap().clone();
+    let shifted = |x: &[f64], j: usize, by: f64| {
+        let mut y = x.to_vec();
+        y[j] += by;
+        y
+    };
+    assert_eq!(
+        batches[0],
+        [
+            point.clone(),
+            shifted(&point, 0, FRAC_PI_2),
+            shifted(&point, 0, -FRAC_PI_2)
+        ]
+    );
+    // The second step moves along the second coordinate, from a point whose
+    // first coordinate is now in [0, 2π) and whose others are untouched.
+    let x = &batches[1][0];
+    assert_eq!(batches[1].len(), 2);
+    assert!((0.0..TAU).contains(&x[0]), "{x:?}");
+    assert_eq!(batches[1][1][0], x[0]);
+    assert_eq!(x[1..], [point[1] + FRAC_PI_2, point[2]]);
+    assert_eq!(batches[1][1][1..], [point[1] - FRAC_PI_2, point[2]]);
+}
+
+/// Rotosolve draws θ₀ with or without a point and the point only replaces it,
+/// so a run from the very θ₀ its seed draws is the run without a point, batch
+/// for batch and bit for bit.
+#[test]
+fn rotosolve_from_the_point_its_seed_draws_is_the_run_without_one() {
+    let run = |point| {
+        let (oracle, batches) = recorder(rough);
+        let outcome = AlgorithmRotosolve
+            .optimize(rotosolve_args(oracle, point, 17))
+            .expect("valid Rotosolve args optimize successfully");
+        let batches = batches.lock().unwrap().clone();
+        (outcome, batches)
+    };
+    let (without, without_batches) = run(None);
+    let drawn = without_batches[0][0].clone();
+    assert!(drawn.iter().all(|x| (0.0..TAU).contains(x)), "{drawn:?}");
+    let (with, with_batches) = run(Some(drawn));
+    assert_eq!(with_batches, without_batches);
+    assert_eq!(with, without);
+}
+
+#[test]
 fn cmaes_centres_its_first_generation_on_the_point() {
     // With a tiny step size every candidate of the first generation is the
     // mean, which is the point wrapped into [0, 2π): two of its coordinates
@@ -530,7 +605,7 @@ fn cmaes_restarts_sample_what_they_would_without_a_point() {
 fn de_and_pso_keep_a_point_at_the_optimum() {
     let optimum = vec![1.0, 1.0, 1.0];
     for (name, optimize) in optimizers() {
-        if ["QNG", "CMA-ES", "Adam", "SPSA"].contains(&name.as_str()) {
+        if ["QNG", "CMA-ES", "Adam", "SPSA", "Rotosolve"].contains(&name.as_str()) {
             continue;
         }
         let (oracle, _) = recorder(quadratic);
@@ -658,6 +733,17 @@ fn the_other_configuration_errors_are_reported_first() {
         }),
         Err(OptimizerError::InvalidConfig {
             parameter: "resamplings",
+            ..
+        })
+    ));
+    let (oracle, _) = recorder(quadratic);
+    assert!(matches!(
+        AlgorithmRotosolve.optimize(AlgorithmRotosolveArgs {
+            patience: 0,
+            ..rotosolve_args(oracle, bad(), 1)
+        }),
+        Err(OptimizerError::InvalidConfig {
+            parameter: "patience",
             ..
         })
     ));

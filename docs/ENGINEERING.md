@@ -23,7 +23,7 @@ with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` 
 | `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
-| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA) behind evaluation and gradient oracles | No |
+| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
 | `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |

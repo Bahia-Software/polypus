@@ -14,6 +14,38 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.Rotosolve(sweeps=10, reevaluate_every=5, tolerance=0.01,
+  patience=2, seed=None)`, accepted by `train` and `qml.train`: the
+  Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
+  value reuse of the NFT method of Nakanishi, Fujii and Todo (Phys. Rev.
+  Research, 2020). When every trainable parameter is the angle of exactly
+  one single-Pauli rotation (any angle of `u`, `u2` or `u3` included, which
+  are `rz·ry·rz`, and in a Qiskit circuit the angle θ of `r`) and the cost
+  is an average over the shots, the
+  fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
+  at a time to its maximum, in closed form. Each step is one batch of two
+  circuits, plus the current parameters on the first step and every
+  `reevaluate_every` steps, and after the last step the parameters it
+  reached are measured alone; `best_params` is the best of the points
+  measured. The run stops after `patience` sweeps that improve the best by
+  less than `tolerance`, or after `sweeps` sweeps. `train` and `qml.train`
+  check the circuit before anything runs (a `polypus.Circuit` or a Qiskit
+  circuit; in `qml.train` the ansatz only) and raise `ValueError` naming the
+  first gate or parameter that does not qualify; `qml.train` also rejects a
+  `polypus.SampleCost`. An `initial_point` is the first point measured. A
+  seeded run reproduces on the same platform only, as with CMA-ES. Invalid
+  settings raise `ValueError` before any circuit runs (#398).
+- Rotosolve in training runs (Rust, `polypus-orchestration`):
+  `Method::Rotosolve` with `RotosolveConfig`. The CUNQA walltime warning
+  counts `sweeps × dimensions` steps and the final point as one more;
+  `final_shots` re-evaluates
+  `best_params` alone (#398).
+- Rotosolve in `polypus-optimizers`: `AlgorithmRotosolve` and
+  `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;
+  and in `polypus-circuit`, `ParameterizedCircuit::check_single_frequency`
+  with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
+  qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
+  check of a Qiskit circuit take the same angles and gates (#398).
 - `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
   once the optimizer has stopped, its best candidates are re-evaluated in
   one more batch with that many shots per circuit, `best_params` and, for
@@ -153,6 +185,9 @@ Changes on `main` since 0.7.2.
   calls the one the method names.
 
 ### Changed
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
+  it (#398).
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
   (`"subprocess"` or a third-party one), a `noise_model` or a `sim_method`
   other than `"automatic"` raises `ValueError` instead of being ignored, and so
