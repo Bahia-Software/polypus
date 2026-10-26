@@ -316,6 +316,9 @@ Changes on `main` since 0.7.2.
   `final_shots` field (`None` keeps the previous behaviour), and its
   `Flow::Output` is `TrainOutcome`, whose `optimization` field is the
   `OptimizationOutcome` it returned before (#397).
+- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has a new variant,
+  `NonFiniteGradient`, and is `#[non_exhaustive]`; a `match` on it outside its
+  crate needs a wildcard arm, and later variants are not breaking (#394).
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
