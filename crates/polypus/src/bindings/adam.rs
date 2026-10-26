@@ -8,12 +8,15 @@ use pyo3::prelude::*;
 /// Each iteration sends one batch of `2·dimensions + 1` circuits: the current
 /// parameters, whose fitness is the iteration's, and the central finite
 /// difference around them with step `finite_difference_step`, which gives the
-/// gradient. `best_params` is the best of the parameters measured. The settings
+/// gradient for the iteration's step. After the last step, one more circuit
+/// measures the parameters it reached, so every step is measured.
+/// `best_params` is the best of the parameters measured. The settings
 /// are validated when `train`/`qml.train` starts, before any circuit runs: an
 /// invalid one raises `ValueError` (contract C-5).
 #[pyclass(module = "polypus")]
 pub struct Adam {
-    /// Iterations, each one batch of `2·dimensions + 1` circuits. At least 1.
+    /// Iterations, each one batch of `2·dimensions + 1` circuits and one step;
+    /// the final parameters cost one circuit more. At least 1.
     #[pyo3(get, set)]
     pub max_iters: u32,
     /// Step size, finite and `> 0`. Defaults to `0.1`, not deep learning's
@@ -43,8 +46,8 @@ pub struct Adam {
     /// iterations below which the run ends (DE's rule, contract C-5).
     #[pyo3(get, set)]
     pub tolerance: f64,
-    /// Iterations over which the best-fitness improvement is measured.
-    /// Defaults to 20.
+    /// Iterations over which the best-fitness improvement is measured, at
+    /// least 1. Defaults to 20.
     #[pyo3(get, set)]
     pub patience: u32,
     /// Step of the central finite difference that estimates the gradient,
@@ -111,7 +114,11 @@ impl Adam {
     /// `"momentum"` (Polyak's heavy ball, with `beta1` as the momentum: a
     /// velocity `beta1·v + learning_rate·gradient` is added to the
     /// parameters, so the `learning_rate` that works depends on the scale of
-    /// the cost; `beta2` and `epsilon` are unused).
+    /// the cost; `beta2` and `epsilon` are unused). With the defaults a
+    /// steady gradient `g` moves the parameters by
+    /// `learning_rate / (1 − beta1)·g = 1.0·g` per iteration, which diverges
+    /// on costs of hundreds, such as a QUBO's energies: lower `learning_rate`
+    /// in proportion to the cost, or keep `"adam"`.
     #[getter]
     fn rule(&self) -> &'static str {
         self.rule.as_str()

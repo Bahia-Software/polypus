@@ -48,8 +48,10 @@ Changes on `main` since 0.7.2.
   and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
   (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
   current parameters and the central finite difference around them, so no
-  QPU waits on a one-circuit batch, and `best_params` is the best of the
-  parameters measured. `rule="adam"` is Kingma and Ba's Adam, whose step
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
   does not depend on the scale of the cost; `rule="momentum"` is Polyak's
   heavy-ball momentum, whose learning rate does. A seeded run over a backend
   whose results do not depend on the platform reproduces on every platform
@@ -60,7 +62,8 @@ Changes on `main` since 0.7.2.
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
   exact gradient when it has one); Adam uses the exact gradient or a finite
   difference of the evaluation, and the CUNQA walltime warning counts one
-  batch per iteration, plus the call to an exact gradient (#394, #395).
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
 - Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
   `AdamRule`, driven by a new `GradientOracle` contract (the fitness
   gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.

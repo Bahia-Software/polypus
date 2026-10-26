@@ -56,15 +56,16 @@ impl Method {
     /// population in one batch the size of a generation's, so it counts as one;
     /// a QNG iteration is a gradient batch plus a single-candidate batch; an
     /// Adam iteration is one batch, θ and its finite-difference stencil
-    /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over));
-    /// an SPSA iteration is one batch of its perturbations (and θ when it is
-    /// measured), after one leading calibration batch of 50 circuits, which
-    /// the watch does not time as the first iteration, and its final θ, one
-    /// candidate, counts as one more iteration. SPSA's first iteration
-    /// measures θ, so it holds `2K + 1` circuits where most hold `2K`, for
-    /// `K` perturbations: when the circuits run one after another (one QPU),
-    /// the projection can be up to `(2K + 1) / 2K` of the real time, 1.5×
-    /// with one perturbation; when a whole batch runs in one round, the
+    /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over)),
+    /// and its final θ, one candidate after the last step, counts as one more
+    /// iteration; an SPSA iteration is one batch of its perturbations (and θ
+    /// when it is measured), after one leading calibration batch of 50
+    /// circuits, which the watch does not time as the first iteration, and its
+    /// final θ, one candidate, counts as one more iteration too. SPSA's first
+    /// iteration measures θ, so it holds `2K + 1` circuits where most hold
+    /// `2K`, for `K` perturbations: when the circuits run one after another
+    /// (one QPU), the projection can be up to `(2K + 1) / 2K` of the real time,
+    /// 1.5× with one perturbation; when a whole batch runs in one round, the
     /// iterations are not overestimated.
     ///
     /// Every DE strategy makes one batch per generation. L-SHADE spends the
@@ -107,9 +108,11 @@ impl Method {
             },
             // One batch of 2·d + 1 per iteration: θ, whose value is the
             // iteration's fitness, and the finite-difference stencil around it.
+            // After the last step the final θ is scored alone; a full iteration
+            // bounds it.
             Method::Adam(cfg) => RunShape {
                 batches_per_generation: 1,
-                generations: u64::from(cfg.max_iters),
+                generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 0,
                 unit: "iterations",
             },
@@ -128,7 +131,8 @@ impl Method {
 
     /// [`run_shape`](Self::run_shape) for a run over `oracles`. An exact
     /// gradient is one more call per Adam iteration: Adam scores θ on the
-    /// evaluation oracle, then asks the gradient oracle. An exact gradient
+    /// evaluation oracle, then asks the gradient oracle. The final θ is then
+    /// one call counted as two. An exact gradient
     /// that scores θ itself ([`GradientOracle::value_and_gradient`]) makes an
     /// iteration one call, which cannot be told in advance, so the projection
     /// then overestimates (see [`Watched`]).
@@ -841,9 +845,10 @@ mod tests {
         }
     }
 
-    /// `run_shape_over` counts exactly the batches Adam sends when it does not
-    /// stop early: one per iteration with the finite difference, and with an
-    /// exact gradient the scored θ plus the gradient's call.
+    /// `run_shape_over` counts the batches Adam sends when it does not stop
+    /// early: one per iteration with the finite difference, and with an exact
+    /// gradient the scored θ plus the gradient's call, then the final θ, one
+    /// batch, which the exact gradient's shape counts as two.
     #[test]
     fn adam_run_shape_counts_the_batches_the_optimizer_sends() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
@@ -874,9 +879,10 @@ mod tests {
                     dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
                 let label = format!("exact gradient {exact}, {max_iters} iterations");
                 assert!(outcome.is_some_and(|o| !o.converged), "{label}");
+                assert_eq!(shape.generations, u64::from(max_iters) + 1, "{label}");
                 assert_eq!(
                     *batches.lock().unwrap(),
-                    shape.generations * u64::from(shape.batches_per_generation),
+                    shape.generations * u64::from(shape.batches_per_generation) - u64::from(exact),
                     "{label}"
                 );
             }
@@ -921,8 +927,8 @@ mod tests {
 
     /// The watch forwards every call, so Adam over an exact gradient sends the
     /// same batches with and without it: one per iteration when the gradient
-    /// scores θ itself, two (θ, then the gradient) when it does not. Only the
-    /// second matches `run_shape_over`; the first is below it.
+    /// scores θ itself, two (θ, then the gradient) when it does not, and the
+    /// final θ. `run_shape_over` counts two per iteration either way.
     #[test]
     fn adam_sends_the_same_batches_with_and_without_the_watch() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
@@ -958,7 +964,7 @@ mod tests {
                 assert!(outcome.is_some_and(|o| !o.converged), "{label}");
                 assert_eq!(shape.batches_per_generation, 2, "{label}");
                 let per_iteration = if scores_theta { 1 } else { 2 };
-                assert_eq!(*batches.lock().unwrap(), 7 * per_iteration, "{label}");
+                assert_eq!(*batches.lock().unwrap(), 7 * per_iteration + 1, "{label}");
             }
         }
     }
@@ -1341,7 +1347,7 @@ mod tests {
             })),
         };
         let method = Method::Adam(crate::AdamConfig {
-            max_iters: 101,
+            max_iters: 100,
             learning_rate: 0.1,
             beta1: 0.9,
             beta2: 0.999,
@@ -1353,7 +1359,7 @@ mod tests {
             rule: polypus_optimizers::AdamRule::Adam,
         });
         // On its own, an Adam iteration is the one batch of θ and its stencil;
-        // the exact gradient adds its call.
+        // the exact gradient adds its call. The final θ counts as the 101st.
         assert_eq!(
             method.run_shape(),
             RunShape {
@@ -1373,6 +1379,9 @@ mod tests {
             Arc::clone(&clock),
         );
         let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
+        // Installs the test logger before anything can warn, when this test
+        // runs on its own.
+        assert!(logged_for(run_id).is_empty());
         // An iteration as Adam makes it. The gradient does not score θ, and
         // that call scored nothing, so it is not a batch: were it counted, the
         // first iteration would end with θ's batch and take 0:00:10.
@@ -1431,7 +1440,7 @@ mod tests {
                 per_call: Duration::from_secs(60),
             })),
         };
-        let method = adam(101);
+        let method = adam(100);
         let oracles = watched(
             oracles,
             Duration::from_secs(3 * 3600),
@@ -1447,7 +1456,8 @@ mod tests {
         );
         assert!(logged_for(run_id).is_empty());
         gradient.value_and_gradient(&[0.5, 0.25], 2);
-        // Two iterations of 1 min, projected as 101 of 2 min: 3:22:00.
+        // Two iterations of 1 min, projected as 100 and the final θ, 101 of
+        // 2 min: 3:22:00.
         let logged = logged_for(run_id);
         assert_eq!(logged.len(), 1, "{logged:?}");
         assert!(
