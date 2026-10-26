@@ -69,7 +69,7 @@ def test_debug_level_shows_optimizer_progress(tmp_path):
         "import polypus\n"
         f"polypus.init_logger(level='debug', file={str(log)!r})\n"
         "polypus.train(polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all(), "
-        "polypus.DE(generations=30, population_size=4), shots=8, n_qpus=1, "
+        "polypus.DE(generations=5, population_size=4, patience=2), shots=8, n_qpus=1, "
         "dimensions=1, expectation_function=lambda b: float(b == '1'), "
         "infrastructure='local', nodes=1, cores_per_qpu=1, id='debuglog', "
         "backend='polypus', seed=1)\n"

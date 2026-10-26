@@ -167,9 +167,10 @@ jobs:
       # so `polypus` builds without extension-module (see the clippy note).
       # Cargo unifies features across the members, so this pass compiles e.g.
       # polypus-sim with `parallel`, which `polypus` enables; the steps below
-      # cover the other feature sets and profiles. `polypus-subprocess-backend`'s integration tests spawn a
-      # Python worker; they resolve `python3` (provided by the setup-python step
-      # in this job) and skip gracefully if none is found.
+      # cover the other feature sets and profiles. `polypus-subprocess-backend`'s
+      # integration tests spawn a Python worker; they resolve `python3`
+      # (provided by the setup-python step in this job) and skip gracefully if
+      # none is found.
       - name: Test the workspace (default features)
         run: cargo test --locked --workspace
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,

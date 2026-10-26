@@ -118,10 +118,9 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 /// time by `polypus`'s `*-logs` Cargo features (forwarded to `polypus-logger`).
 /// The wheel is built with `debug-logs` (`[tool.maturin] features` in
 /// `pyproject.toml`), so `level="trace"` behaves as `"debug"`. Capturing
-/// `trace!` records needs a build with `trace-logs` instead of `debug-logs`
-/// (`log` refuses two `max_level_*` features in one build):
-/// `maturin develop --release --features "extension-module trace-logs"` after
-/// removing `debug-logs` from `pyproject.toml`.
+/// `trace!` records needs a build with `trace-logs` instead:
+/// `maturin develop --release --features "extension-module trace-logs"` (a
+/// `--features` list on the command line replaces the one in `pyproject.toml`).
 ///
 /// # Re-initialization
 /// A global logger can be installed only once per process. A second call (e.g.
