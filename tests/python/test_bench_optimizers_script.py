@@ -5,7 +5,8 @@ optimizer end to end, within budget, and its exact scoring agrees with the
 fitness the optimizers see.
 
 The runs go through a subprocess because the script replaces
-``polypus_python.run_qcs`` with its evaluation meter.
+``polypus_python.run_qcs`` with its evaluation meter; the test that runs it
+in-process restores the seam with ``monkeypatch``.
 """
 
 import importlib.util
@@ -15,6 +16,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import polypus
+import polypus_python
 import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.vqc]
@@ -54,10 +57,31 @@ def test_quick_mode_runs_every_optimizer_within_budget(tmp_path):
         assert 0 < run["evaluations"] <= scenario["budget"], run
         assert 0 < run["batches"] <= run["evaluations"], run
         assert 0.0 < run["ratio"] <= 1.0, run
-    # The table prints a row per optimizer, the baseline without a delta.
+    # The table prints a row per optimizer, the baseline without a delta,
+    # then the differences from L-SHADE and from Adam, each without its own.
     for name in script.OPTIMIZERS:
-        assert f"| {name} |" in stdout
+        assert stdout.count(f"| {name} |") == 2
     assert "| rand1bin | " in stdout and "| — | — |" in stdout
+    assert "| Optimizer | Δ vs lshade | wins | Δ vs adam | wins |" in stdout
+    assert "| lshade | — | — | " in stdout and "| — | — |\n| momentum |" in stdout
+    assert "lshade-adam: its Adam stage changed the ratio" in stdout
+    # The chained optimizers spend one budget over their stages.
+    for run in runs:
+        stages = run.get("stages")
+        if run["optimizer"] == "lshade-adam":
+            assert [s["optimizer"] for s in stages] == ["lshade", "adam"], run
+            assert stages[0]["evaluations"] <= scenario["budget"] // 2, run
+            assert run["ratio"] == stages[1]["ratio"], run
+        elif run["optimizer"] == "adam-x3":
+            assert [s["optimizer"] for s in stages] == ["adam"] * 3, run
+            assert len({s["seed"] for s in stages}) == 3, run
+            best = max(stages, key=lambda s: s["best_fitness"])
+            assert run["ratio"] == best["ratio"], run
+        else:
+            assert stages is None, run
+            continue
+        assert sum(s["evaluations"] for s in stages) == run["evaluations"], run
+        assert sum(s["batches"] for s in stages) == run["batches"], run
 
 
 def test_exact_shots_score_what_the_optimizer_saw(tmp_path):
@@ -67,6 +91,114 @@ def test_exact_shots_score_what_the_optimizer_saw(tmp_path):
     report, _ = _run(tmp_path, "--scenario", "1:exact:120", "--only", "cmaes")
     for run in report["scenarios"][0]["runs"]:
         assert abs(run["bias"]) < 1e-3, run
+
+
+def test_quick_hea_scenario_runs_every_optimizer_within_budget(tmp_path):
+    script = _load_script()
+    report, stdout = _run(tmp_path, "--scenario", "hea:2:64:200")
+    (scenario,) = report["scenarios"]
+    assert scenario["problem"] == "hea"
+    assert scenario["parameters"] == 6 * 3
+    runs = scenario["runs"]
+    assert {r["optimizer"] for r in runs} == set(script.OPTIMIZERS)
+    for run in runs:
+        assert 0 < run["evaluations"] <= scenario["budget"], run
+        assert 0.0 < run["ratio"] <= 1.0, run
+    assert "## HEA reps = 2 (18 parameters), n = 6," in stdout
+
+
+def test_lshade_then_adam_refines_from_the_lshade_point(monkeypatch):
+    """The hybrid's Adam stage starts from L-SHADE's best point, gets the
+    evaluations L-SHADE left, and the run is scored on Adam's result."""
+    script = _load_script()
+    # run_one installs its meter as the local seam; restore it afterwards.
+    monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
+    train, calls = script.train, []
+
+    def spy(instance, method, shots, seed, initial_point=None):
+        result = train(instance, method, shots, seed, initial_point)
+        calls.append((method, initial_point, result))
+        return result
+
+    monkeypatch.setattr(script, "train", spy)
+    instance = script.Instance(nodes=6, layers=1, seed=3)
+    run = script.run_one(instance, "lshade-adam", 64, 120, 8, 3, seed=3)
+    (lshade, start, explore), (adam, initial_point, refine) = calls
+    assert isinstance(lshade, polypus.DE) and lshade.strategy == "lshade"
+    assert lshade.population_size * (lshade.generations + 1) <= 120 // 2
+    assert start is None
+    assert isinstance(adam, polypus.Adam) and adam.rule == "adam"
+    assert initial_point == explore.best_params
+    lshade_spent = run["stages"][0]["evaluations"]
+    # Each Adam iteration is a batch of 2d + 1; the final point is one more.
+    assert adam.max_iters == (120 - lshade_spent - 1) // (2 * instance.dimensions + 1)
+    assert run["evaluations"] <= 120
+    exact = instance.expected_cut(refine.best_params) / instance.max_cut
+    assert run["ratio"] == pytest.approx(exact)
+
+
+def test_adam_x3_makes_three_runs_that_share_the_budget(monkeypatch):
+    script = _load_script()
+    monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
+    train, calls = script.train, []
+
+    def spy(instance, method, shots, seed, initial_point=None):
+        result = train(instance, method, shots, seed, initial_point)
+        calls.append((method, seed, result))
+        return result
+
+    monkeypatch.setattr(script, "train", spy)
+    instance = script.Instance(nodes=6, layers=1, seed=5)
+    run = script.run_one(instance, "adam-x3", 64, 120, 8, 3, seed=5)
+    assert len(calls) == 3
+    assert all(isinstance(m, polypus.Adam) and m.rule == "adam" for m, _, _ in calls)
+    assert len({seed for _, seed, _ in calls}) == 3
+    batch = 2 * instance.dimensions + 1
+    assert run["evaluations"] == sum(m.max_iters * batch + 1 for m, _, _ in calls)
+    assert run["evaluations"] <= 120
+    best = max((r for _, _, r in calls), key=lambda r: r.best_fitness)
+    exact = instance.expected_cut(best.best_params) / instance.max_cut
+    assert run["ratio"] == pytest.approx(exact)
+
+
+def test_hea_has_one_ry_per_parameter_in_three_layers():
+    """reps = 2: three RY layers of n parameters, each angle in exactly one
+    RY, a CZ chain between consecutive layers, and the same qubit order as
+    the cut table."""
+    script = _load_script()
+    nodes = 6
+    instance = script.Instance(nodes=nodes, layers=2, seed=4, problem="hea")
+    assert instance.dimensions == nodes * 3
+    assert instance.circuit.num_params == nodes * 3
+    # Angle k is the RY of qubit k mod n in layer k div n.
+    qasm = instance.circuit.to_qasm2([float(k) for k in range(nodes * 3)])
+    for k in range(nodes * 3):
+        assert qasm.count(f"ry({float(k)}) q[{k % nodes}];") == 1
+    assert qasm.count("ry(") == nodes * 3
+    assert qasm.count("cz ") == 2 * (nodes - 1)
+    # |0>^n cuts nothing; RY(π) on the first layer prepares a basis state.
+    assert instance.expected_cut([0.0] * nodes * 3) == pytest.approx(0.0)
+    bits = [1, 0, 1, 1, 0, 0]
+    angles = [np.pi * b for b in bits] + [0.0] * nodes * 2
+    index = sum(b << q for q, b in enumerate(bits))
+    assert instance.expected_cut(angles) == pytest.approx(instance.cuts[index])
+    assert instance.cuts[index] > 0
+    # The same graph as QAOA's instance of the same seed.
+    assert instance.edges == script.Instance(nodes=nodes, layers=1, seed=4).edges
+
+
+def test_scenarios_name_their_problem():
+    script = _load_script()
+    assert script.parse_scenario("3:256:1500") == ("qaoa", 3, 256, 1500)
+    assert script.parse_scenario("hea:2:256:5000") == ("hea", 2, 256, 5000)
+    assert script.parse_scenario("qaoa:3:exact:1500") == (
+        "qaoa",
+        3,
+        script.EXACT_SHOTS,
+        1500,
+    )
+    full = script.parse_args(["--full"]).scenario
+    assert ("hea", 2, 256, 5000) in full and len(full) == 5
 
 
 def test_graphs_are_3_regular_and_the_cut_table_matches_them():
@@ -88,3 +220,51 @@ def test_the_budget_fixes_every_generation_count():
     assert cmaes.generations == 1500 // 9 and cmaes.population_size is None
     ipop = script.make_method("cmaes-ipop", 6, 1500, 30, 3)
     assert ipop.restarts == 3 and ipop.tolerance == pytest.approx(0.01)
+    # Adam: one batch of 2d + 1 per iteration and the final point, the class
+    # defaults.
+    adam = script.make_method("adam", 6, 1500, 30, 3)
+    assert adam.max_iters == 1499 // 13 and adam.rule == "adam"
+    assert (adam.learning_rate, adam.finite_difference_step) == (0.1, 0.2)
+    assert adam.tolerance == 0.0
+    assert script.make_method("adam", 30, 5000, 30, 3).max_iters == 4999 // 61
+    assert script.make_method("adam", 30, 62, 30, 3).max_iters == 1
+    # Momentum's rate is tuned per problem.
+    qaoa = script.make_method("momentum", 6, 1500, 30, 3, "qaoa")
+    hea = script.make_method("momentum", 30, 5000, 30, 3, "hea")
+    assert qaoa.rule == hea.rule == "momentum"
+    assert (qaoa.learning_rate, qaoa.finite_difference_step) == (0.03, 0.4)
+    assert (hea.learning_rate, hea.finite_difference_step) == (0.1, 0.4)
+    with pytest.raises(ValueError, match="does not fit one Adam iteration"):
+        script.make_method("adam", 30, 61, 30, 3)
+
+
+@pytest.mark.parametrize(
+    ("name", "budget"),
+    [
+        ("rand1bin", 7),
+        ("cmaes", 8),
+        ("adam", 13),
+        # L-SHADE fits in half of 16, but Adam not in the other half.
+        ("lshade-adam", 16),
+        # Adam fits in 40, but not in a third of it.
+        ("adam-x3", 40),
+    ],
+)
+def test_a_budget_too_small_for_an_optimizer_is_an_error_before_any_run(
+    capsys, monkeypatch, name, budget
+):
+    """d = 6 (QAOA p = 3): an Adam iteration and its final point take 14
+    evaluations, a CMA-ES generation 9 and a population 8."""
+    script = _load_script()
+    script.check_budget(name, 6, 2 * budget, 8)
+    with pytest.raises(ValueError, match=f"^{name}: "):
+        script.check_budget(name, 6, budget, 8)
+    ran = []
+    monkeypatch.setattr(script, "run_one", lambda *args: ran.append(args))
+    with pytest.raises(SystemExit) as exit_:
+        script.main(
+            ["--scenario", f"3:64:{budget}", "--only", name, "--de-population", "8"]
+        )
+    assert exit_.value.code == 2
+    assert ran == []
+    assert f"3, {budget} evaluations" in capsys.readouterr().err

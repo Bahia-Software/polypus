@@ -164,7 +164,7 @@ The covariance matrix adaptation evolution strategy (Hansen's tutorial, arXiv:16
 
 A run also ends when its distribution degenerates: its spread collapses below `1e-12·sigma0` or grows beyond `1e4·sigma0`, its covariance becomes ill-conditioned (condition number above `1e14`), or a value is no longer finite. Either way the next restart starts if one is left; otherwise the optimisation stops with `converged=True`. If the generations run out first, `converged` is `False`. `iterations_run` counts the generations of all runs. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
-**Batch size and QPUs.** Each generation is one batch of `population_size` circuits, spread over the `n_qpus` QPUs. The default population is small, so a CMA-ES run takes many sequential batches and leaves QPUs idle when they outnumber it. Raising `population_size` to fill them did not pay off in the benchmark below, and neither did `restarts`; see [Choosing an optimizer](#choosing-an-optimizer). All runs share `generations`, so restarts trade generations of one run for runs with larger batches.
+**Batch size and QPUs.** Each generation is one batch of `population_size` circuits, spread over the `n_qpus` QPUs. The default population is small, so a CMA-ES run takes many sequential batches and leaves QPUs idle when they outnumber it. Raising `population_size` to fill them lowered its mean ratio in the benchmark below, and `restarts` did not help either; see [Choosing an optimizer](#choosing-an-optimizer). All runs share `generations`, so restarts trade generations of one run for runs with larger batches.
 
 With `infrastructure="cunqa"`, the walltime warning projects the first generation over `generations`. With `restarts`, it assumes the worst case, a restart after every generation until none are left. Because the population doubles at each restart, the projection can be well above the usual run time.
 
@@ -212,7 +212,7 @@ Any other `rule` raises `ValueError`.
 
 `best_params` is the measured point with the best fitness and `fitness_history` the best fitness measured up to each iteration. After the last step, whether `max_iters` ran out or the run stagnated, one more circuit measures the parameters it reached, which count in the last entry, so no gradient is spent on a step that is never measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
-**A local method.** Adam and momentum climb to an optimum near where they start, so on a landscape with many local optima one run can end in a poor one. Start them from a global search's result, such as an L-SHADE run's `best_params`, with `initial_point` (see [Starting point](#starting-point)), or run them a few times with different seeds and keep the best.
+**A local method.** Adam and momentum climb to an optimum near where they start, so on a landscape with many local optima one run can end in a poor one. Start them from a global search's result, such as an L-SHADE run's `best_params`, with `initial_point` (see [Starting point](#starting-point)), or run them a few times with different seeds and keep the best. In [Choosing an optimizer](#choosing-an-optimizer), starting from L-SHADE was the more reliable of the two.
 
 **Reproducibility.** With either rule Adam's steps use only basic arithmetic and square roots, so, as with DE and unlike CMA-ES, a seeded run over a backend whose results do not depend on the platform reproduces exactly everywhere.
 
@@ -236,63 +236,141 @@ CMA-ES and QNG never evaluate the point itself. CMA-ES samples around it; QNG es
 
 PSO's default `bounds` are `(-π, π)`, while DE and CMA-ES return points in `[0, 2π)`, so starting PSO from their `best_params` raises `ValueError` as soon as a value passes π. Pass bounds that contain the point, such as `polypus.PSO(bounds=(0, 2 * math.pi))`, or subtract 2π from every value above π first: the angles are the same, as DE and CMA-ES assume when they wrap.
 
-A broad search followed by a local refinement from its best point:
+**Explore, then refine.** A global search followed by a local refinement from its best point was the most reliable pattern in [Choosing an optimizer](#choosing-an-optimizer): L-SHADE with half of the evaluation budget, then Adam from its `best_params` with the other half. A complete example, QAOA with p = 1 for MaxCut on a 4-node ring:
 
 ```python
+import polypus
+
+edges = [(0, 1), (1, 2), (2, 3), (0, 3)]
+cost = polypus.Qubo(  # the cut: x_a + x_b - 2 x_a x_b per edge
+    4, linear=[(i, 2.0) for i in range(4)], quadratic=[(a, b, -2.0) for a, b in edges]
+)
+qc = polypus.Circuit(4)
+for q in range(4):
+    qc.h(q)
+for a, b in edges:
+    qc.rzz(a, b, polypus.Param(0))  # γ
+for q in range(4):
+    qc.rx(q, 2 * polypus.Param(1))  # β
+qc = qc.measure_all()
+
+dimensions = 2
+budget = 1500  # circuit evaluations for both phases
 common = dict(
-    shots=1024,
+    shots=256,
     n_qpus=1,
-    dimensions=2,
+    dimensions=dimensions,
     expectation_function=cost,
     infrastructure="local",
     nodes=1,
     cores_per_qpu=1,
-    id="qaoa",
+    id="maxcut",
+    backend="polypus",
 )
+# Explore: L-SHADE spends population_size × (generations + 1), half the budget.
 explore = polypus.train(
-    qc, polypus.DE(strategy="lshade", generations=100, population_size=50), **common
+    qc,
+    polypus.DE(
+        strategy="lshade",
+        population_size=30,
+        generations=budget // 2 // 30 - 1,
+        tolerance=0.0,
+    ),
+    **common,
+    seed=1,
 )
+# Refine: Adam from L-SHADE's best point, 2 × dimensions + 1 circuits an iteration
+# and one for the point it ends at.
 refine = polypus.train(
     qc,
-    polypus.CMAES(generations=50, sigma0=0.3),
+    polypus.Adam(max_iters=(budget // 2 - 1) // (2 * dimensions + 1), tolerance=0.0),
     **common,
+    seed=1,
     initial_point=explore.best_params,
 )
+print(explore.best_fitness, refine.best_fitness)
 ```
+
+`tolerance=0.0` turns the early stop off, so each phase spends its share of the budget, as in the benchmark. CMA-ES with a small `sigma0` can do the refining instead, as above.
+
+**Restarts.** Without a global search, run Adam from a few random points, each with a share of the budget, and keep the run with the best `best_fitness`:
+
+```python
+runs = [
+    polypus.train(
+        qc,
+        polypus.Adam(
+            max_iters=(budget // 3 - 1) // (2 * dimensions + 1), tolerance=0.0
+        ),
+        **common,
+        seed=seed,
+    )
+    for seed in (1, 2, 3)
+]
+best = max(runs, key=lambda run: run.best_fitness)
+```
+
+In the benchmark, three runs raised the worst instance at p = 5, where single runs sometimes ended in a poor optimum, but their mean there was within noise of one run's. With 500 evaluations and on the HEA they did worse, a third of the budget being too short for each run, and starting from L-SHADE had the higher mean in every scenario.
 
 ## Choosing an optimizer
 
-[`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains QAOA for MaxCut on random 3-regular graphs of 10 nodes with each optimizer at the same evaluation budget. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
+[`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains two circuits for MaxCut on random 3-regular graphs of 10 nodes, with each optimizer at the same evaluation budget: QAOA with depth p = 3 or 5 (6 or 10 parameters), and a hardware-efficient ansatz (HEA) of three layers of RY on every qubit with a linear chain of CZ between them (Qiskit's `TwoLocal` with `ry`, `cz`, `entanglement="linear"` and `reps=2`), 30 parameters. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. Adam uses its defaults on both circuits. Momentum uses a learning rate tuned for each circuit on separate instances, 0.03 for QAOA and 0.1 for the HEA, with a `finite_difference_step` of 0.4. "L-SHADE, then Adam" gives half the budget to L-SHADE and the rest to Adam, started from L-SHADE's `best_params`; "Adam ×3" gives a third to each of three Adam runs with different seeds and keeps the one with the best `best_fitness`. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
 
-Paired difference in approximation ratio from the classic DE (`rand1bin`), with its standard error, and the share of instances where the optimizer did better:
+Paired difference in approximation ratio from the classic DE (`rand1bin`), with its standard error, and the share of instances where the optimizer did better; the best mean of each scenario is in bold:
 
-| Optimizer | p = 3, 256 shots, 1500 evals | p = 3, 2^20 shots, 1500 evals | p = 5, 256 shots, 3000 evals | p = 3, 256 shots, 500 evals |
-|---|---|---|---|---|
-| `DE()` (ratio) | 0.862 | 0.860 | 0.871 | 0.843 |
-| `DE(strategy="shade")` | +0.001 ± 0.003 (50 %) | +0.006 ± 0.003 (67 %) | +0.015 ± 0.003 (80 %) | +0.006 ± 0.006 (57 %) |
-| `DE(strategy="lshade")` | **+0.017 ± 0.003 (90 %)** | **+0.030 ± 0.004 (97 %)** | **+0.037 ± 0.004 (93 %)** | +0.008 ± 0.005 (65 %) |
-| `CMAES()` | +0.012 ± 0.005 (67 %) | +0.020 ± 0.006 (70 %) | +0.016 ± 0.007 (63 %) | +0.002 ± 0.005 (60 %) |
-| `CMAES(population_size=30)` | −0.001 ± 0.004 (53 %) | −0.000 ± 0.004 (43 %) | +0.005 ± 0.005 (57 %) | +0.000 ± 0.004 (47 %) |
-| `CMAES(restarts=3)` | −0.005 ± 0.005 (30 %) | +0.003 ± 0.004 (57 %) | −0.003 ± 0.004 (57 %) | −0.005 ± 0.005 (53 %) |
+| Optimizer | p = 3, 256 shots, 1500 evals | p = 3, 2^20 shots, 1500 evals | p = 5, 256 shots, 3000 evals | p = 3, 256 shots, 500 evals | HEA, 256 shots, 5000 evals |
+|---|---|---|---|---|---|
+| `DE()` (ratio) | 0.862 | 0.860 | 0.871 | 0.843 | 0.783 |
+| `DE(strategy="shade")` | +0.001 ± 0.003 (50 %) | +0.006 ± 0.003 (67 %) | +0.015 ± 0.003 (80 %) | +0.006 ± 0.006 (57 %) | +0.106 ± 0.007 (100 %) |
+| `DE(strategy="lshade")` | +0.017 ± 0.003 (90 %) | +0.030 ± 0.004 (97 %) | +0.037 ± 0.004 (93 %) | +0.008 ± 0.005 (65 %) | +0.153 ± 0.007 (100 %) |
+| `CMAES()` | +0.020 ± 0.004 (77 %) | +0.037 ± 0.004 (97 %) | +0.038 ± 0.006 (90 %) | +0.005 ± 0.006 (53 %) | +0.170 ± 0.017 (90 %) |
+| `CMAES(population_size=30)` | +0.011 ± 0.005 (60 %) | +0.010 ± 0.004 (67 %) | +0.010 ± 0.006 (53 %) | −0.000 ± 0.004 (43 %) | +0.133 ± 0.019 (80 %) |
+| `CMAES(restarts=3)` | +0.004 ± 0.004 (60 %) | +0.009 ± 0.006 (60 %) | −0.002 ± 0.004 (43 %) | +0.001 ± 0.005 (53 %) | +0.015 ± 0.014 (53 %) |
+| `Adam()` | +0.031 ± 0.004 (90 %) | +0.032 ± 0.004 (93 %) | +0.050 ± 0.011 (93 %) | +0.036 ± 0.003 (100 %) | +0.197 ± 0.009 (100 %) |
+| `Adam(rule="momentum")`, tuned rate | +0.033 ± 0.003 (97 %) | +0.038 ± 0.004 (87 %) | +0.066 ± 0.004 (100 %) | +0.039 ± 0.004 (100 %) | +0.201 ± 0.009 (100 %) |
+| L-SHADE, then `Adam()` | **+0.043 ± 0.004 (97 %)** | **+0.039 ± 0.004 (97 %)** | **+0.071 ± 0.004 (100 %)** | **+0.045 ± 0.005 (97 %)** | **+0.214 ± 0.007 (100 %)** |
+| `Adam()` ×3 | +0.030 ± 0.004 (87 %) | +0.036 ± 0.004 (97 %) | +0.064 ± 0.004 (100 %) | +0.025 ± 0.005 (87 %) | +0.177 ± 0.008 (100 %) |
 
-Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots:
+The lowest ratio of the 30 instances, where a local method's occasional poor optimum shows:
 
-| Optimizer | Batches, 1500 evals | Batches, 3000 evals | Bias, p = 3 | Bias, p = 5 |
-|---|---|---|---|---|
-| `DE()` | 50 | 100 | +0.003 | +0.004 |
-| `DE(strategy="shade")` | 50 | 100 | +0.007 | +0.008 |
-| `DE(strategy="lshade")` | 115 | 232 | +0.009 | +0.011 |
-| `CMAES()` | 166 | 300 | +0.013 | +0.009 |
-| `CMAES(population_size=30)` | 50 | 100 | +0.006 | +0.007 |
-| `CMAES(restarts=3)` | 87 | 114 | +0.006 | +0.004 |
+| Optimizer | p = 3, 256 shots, 1500 evals | p = 3, 2^20 shots, 1500 evals | p = 5, 256 shots, 3000 evals | p = 3, 256 shots, 500 evals | HEA, 256 shots, 5000 evals |
+|---|---|---|---|---|---|
+| `DE()` | 0.793 | 0.758 | 0.822 | 0.760 | 0.675 |
+| `DE(strategy="shade")` | 0.801 | 0.806 | 0.815 | 0.797 | 0.843 |
+| `DE(strategy="lshade")` | 0.802 | 0.831 | 0.830 | 0.813 | 0.834 |
+| `CMAES()` | 0.820 | 0.836 | 0.807 | 0.739 | 0.740 |
+| `CMAES(population_size=30)` | 0.788 | 0.792 | 0.822 | 0.788 | 0.737 |
+| `CMAES(restarts=3)` | 0.754 | 0.790 | 0.818 | 0.746 | 0.694 |
+| `Adam()` | 0.817 | 0.784 | 0.661 | 0.792 | 0.844 |
+| `Adam(rule="momentum")`, tuned rate | 0.823 | 0.824 | 0.861 | 0.813 | 0.845 |
+| L-SHADE, then `Adam()` | 0.852 | 0.850 | 0.918 | 0.799 | 0.991 |
+| `Adam()` ×3 | 0.818 | 0.823 | 0.898 | 0.776 | 0.835 |
+
+Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots. An Adam batch holds `2 × dimensions + 1` circuits, 13, 21 and 61 here, and its last holds the one circuit of the point it ends at.
+
+| Optimizer | Batches, 1500 evals | Batches, 3000 evals | Batches, HEA | Bias, p = 3 | Bias, p = 5 | Bias, HEA |
+|---|---|---|---|---|---|---|
+| `DE()` | 50 | 100 | 166 | +0.003 | +0.004 | +0.006 |
+| `DE(strategy="shade")` | 50 | 100 | 166 | +0.007 | +0.008 | +0.011 |
+| `DE(strategy="lshade")` | 115 | 232 | 385 | +0.009 | +0.011 | +0.014 |
+| `CMAES()` | 166 | 300 | 357 | +0.019 | +0.015 | +0.004 |
+| `CMAES(population_size=30)` | 50 | 100 | 166 | +0.008 | +0.008 | +0.004 |
+| `CMAES(restarts=3)` | 90 | 115 | 116 | +0.008 | +0.002 | +0.007 |
+| `Adam()` | 116 | 143 | 82 | +0.015 | +0.012 | +0.002 |
+| `Adam(rule="momentum")`, tuned rate | 116 | 143 | 82 | +0.013 | +0.011 | +0.002 |
+| L-SHADE, then `Adam()` | 115 | 187 | 234 | +0.013 | +0.011 | +0.002 |
+| `Adam()` ×3 | 118 | 145 | 84 | +0.011 | +0.009 | +0.004 |
 
 What the data says:
 
-- **With a budget of 1500 evaluations or more, use `polypus.DE(strategy="lshade")`.** It had the best ratio in every scenario, beat the classic DE on 90 to 97 % of the instances, and its lead was largest with 10 parameters (p = 5).
-- **CMA-ES with its default population helps less than L-SHADE and is less consistent.** It gained 1.2 to 2.0 points over the classic DE but won only 63 to 70 % of the instances, and it took the most sequential batches, about three times the classic DE's.
-- **Don't enlarge CMA-ES's population to fill QPUs.** With a population of 30 it was no better than the classic DE: at a fixed budget, larger batches leave fewer generations to adapt. IPOP restarts did not help either at these budgets.
-- **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
-- **With 500 evaluations no optimizer was clearly better than the classic DE.**
-- **The reported `best_fitness` is optimistic under shot noise,** and more so for the adaptive optimizers, which pick their best from more noisy estimates: by up to 1.3 % of the maximum cut with 256 shots. Re-evaluate `best_params` with more shots when the value itself matters.
+- **Explore with L-SHADE, then refine with Adam.** Half the budget to `DE(strategy="lshade")` and the other half to `Adam()` from its `best_params` ([Starting point](#starting-point)) gave the best mean ratio in all five scenarios, 500 evaluations included, and beat the classic DE on 97 to 100 % of the instances. Its lowest ratio was the highest of all the optimizers in four scenarios (0.918 with p = 5, 0.991 on the HEA), and its Adam phase improved on L-SHADE's half-budget result on every instance. Its lead over Adam alone was 0.007 to 0.021, more than two standard errors with 256 shots at p = 3 and 1500 evaluations (+0.012 ± 0.004) and on the HEA (+0.016 ± 0.007), and about two or fewer elsewhere. On the HEA the two were even on most instances, and the lead came from the few where Adam alone ended low.
+- **Adam alone, with its defaults, is a strong single run with one configuration for both circuits.** It beat L-SHADE on average in every scenario: clearly with 256 shots at p = 3 (+0.014 ± 0.004 at 1500 evaluations, +0.028 ± 0.004 at 500) and on the HEA (+0.044 ± 0.007), within noise with 2^20 shots (+0.003 ± 0.004) and at p = 5 (+0.013 ± 0.011). As a local method it occasionally ends in a poor optimum: its lowest ratio was 0.661 with p = 5 and 0.784 with 2^20 shots, against 0.830 and 0.831 for L-SHADE. Its batches grow with the parameters, so with 30 it sent the fewest of all (82, against 385 for L-SHADE).
+- **Use momentum only with a learning rate tuned to the problem.** With rates tuned on separate instances it matched Adam within noise (0.003 to 0.016 higher), and its lowest ratio at p = 5 was 0.861, against Adam's 0.661. Its rate depends on the scale of the cost (see [Adam](#adam)), so these figures are its best case; Adam needed no tuning.
+- **Don't restart Adam by default.** Three runs on a third of the budget each raised the worst instance at p = 5 (lowest ratio 0.898, against 0.661 for one run), but their mean was within noise of one run's there (+0.014 ± 0.011), with 2^20 shots (+0.004 ± 0.003) and with 256 shots at p = 3 and 1500 evaluations (−0.001 ± 0.003). They were behind one run at 500 evaluations (−0.010 ± 0.003) and on the HEA (−0.020 ± 0.007), where a third of the budget was too short. Starting from L-SHADE had the higher mean in every scenario.
+- **CMA-ES with its default population is competitive with L-SHADE.** Its paired difference from L-SHADE was within two standard errors in every scenario: about even with 256 shots (+0.003 ± 0.005 at p = 3, +0.001 ± 0.006 at p = 5), slightly ahead with 2^20 shots (+0.007 ± 0.004) and on the HEA (+0.017 ± 0.016). It was less consistent on the HEA, beating the classic DE on 90 % of the instances where L-SHADE beat it on all, with a lowest ratio of 0.740 against 0.834. On QAOA it sent the most sequential batches and, at 1500 and 3000 evaluations, had the largest winner's curse.
+- **Don't enlarge CMA-ES's population to fill QPUs, and don't count on IPOP restarts.** With a population of 30, CMA-ES's mean ratio was below its default population's in every scenario, by 0.005 to 0.037, though still about 0.01 above the classic DE's at 1500 and 3000 evaluations. IPOP restarts stayed within 0.01 of the classic DE on QAOA and gained +0.015 ± 0.014 on the HEA, against +0.170 without them.
+- **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters and 10.6 with 30, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
+- **With 500 evaluations only the Adam-based optimizers were clearly better than the classic DE,** by 0.025 to 0.045; the DE strategies and CMA-ES gained 0.008 at most.
+- **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. Re-evaluate `best_params` with more shots when the value itself matters.
 
-These results cover QAOA MaxCut only, at 10 nodes and depth 3 to 5, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently. Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario LAYERS:SHOTS:BUDGET`, to check. The figures above come from that command at commit `1ea087b` (Polypus 0.7.2) on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30.
+These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates were tuned for these two circuits. CMA-ES's rows may differ on another platform or build; see its reproducibility note under [CMA-ES](#cma-es). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE and from Adam, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio. `--json FILE` also writes the per-instance results.
