@@ -1130,12 +1130,21 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     check it before anything runs (no backend, no CUNQA allocation) and
     raise `ValueError` with the first problem: for a `polypus.Circuit`,
     `ParameterizedCircuit::check_single_frequency` (`polypus-circuit`; the
-    gates `rx`, `ry`, `rz`, `rxx`, `rzz`, `p`, `u1`, each parameter in exactly
-    one angle with coefficient exactly ±1 and no other parameter); for a
-    Qiskit circuit, `polypus_python.rotosolve` (the same rules, with `ryy`
-    and `rzx`, composite gates read through their definitions, and in
-    `qml.train` only the ansatz's parameters trained, the feature map's being
-    constants). `qml.train` also rejects a `polypus.SampleCost`, a function
+    gates `rx`, `ry`, `rz`, `rxx`, `rzz`, `p`, `u1`, and every angle of `u`,
+    `u2` and `u3`, which are `rz(φ)·ry(θ)·rz(λ)` up to a global phase; each
+    parameter in exactly one angle, with coefficient exactly ±1 and no other
+    parameter, the coefficients computed in written order: `+`, `−` and `·`
+    or `/` by a constant, any other operation on a parameter rejected); for a
+    Qiskit circuit, `polypus_python.rotosolve` (the same gates, with `ryy`,
+    `rzx` and the angle θ of `r`, not its φ, which turns the rotation's axis;
+    composite gates read through their definitions; in `qml.train` only the
+    ansatz's parameters trained, the feature map's being constants). Qiskit
+    simplifies some expressions as it builds them, so the Python check takes
+    a coefficient from Qiskit's derivative and then checks that the angle is
+    `±θ + c` at values of θ from −10⁶ to 10⁶, which rejects an angle that is
+    that only on part of the line (`abs(θ)`, `exp(log(θ))`); an expression
+    Qiskit folds back to `±θ + c` (`θ·x/x`, `θ**1`) is accepted, which the
+    Rust check, without simplification, rejects. `qml.train` also rejects a `polypus.SampleCost`, a function
     of each sample's whole distribution. Controlled rotations are rejected,
     `cp` and `cu1` included, and so is every custom gate of a
     `polypus.Circuit`, with or without a body, and a Qiskit gate whose

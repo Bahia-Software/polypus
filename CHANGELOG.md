@@ -19,7 +19,9 @@ Changes on `main` since 0.7.2.
   Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
   value reuse of the NFT method of Nakanishi, Fujii and Todo (Phys. Rev.
   Research, 2020). When every trainable parameter is the angle of exactly
-  one single-Pauli rotation and the cost is an average over the shots, the
+  one single-Pauli rotation (any angle of `u`, `u2` or `u3` included, which
+  are `rz·ry·rz`, and in a Qiskit circuit the angle θ of `r`) and the cost
+  is an average over the shots, the
   fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
   at a time to its maximum, in closed form. Each step is one batch of two
   circuits, plus the current parameters on the first step and every
@@ -42,7 +44,8 @@ Changes on `main` since 0.7.2.
   `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;
   and in `polypus-circuit`, `ParameterizedCircuit::check_single_frequency`
   with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
-  qualifies (#398).
+  qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
+  check of a Qiskit circuit take the same angles and gates (#398).
 - `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
   once the optimizer has stopped, its best candidates are re-evaluated in
   one more batch with that many shots per circuit, `best_params` and, for

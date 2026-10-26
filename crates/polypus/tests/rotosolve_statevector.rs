@@ -14,8 +14,8 @@ use polypus_sim::{Simulator, StatevectorSimulator};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::{Arc, Mutex};
 
-/// A 3-qubit circuit with every single-frequency gate, entanglers between
-/// them and one angle `−θ₇ + π/2`.
+/// A 3-qubit circuit with every single-frequency gate, each angle of `u3`
+/// and `u2` included, entanglers between them and one angle `−θ₇ + π/2`.
 fn ansatz() -> ParameterizedCircuit {
     let mut qc = ParameterizedCircuit::new(3);
     let shifted = qc
@@ -35,6 +35,10 @@ fn ansatz() -> ParameterizedCircuit {
         .ry(2, shifted)
         .h(1)
         .cx(2, 0)
+        .u(0, Param(8), Param(9), Param(10))
+        .cx(0, 1)
+        .u2(1, Param(11), Param(12))
+        .h(2)
 }
 
 /// A cost per bitstring with no symmetry, so the landscape is not flat.
@@ -94,7 +98,7 @@ fn every_step_lands_on_the_exact_maximum_along_its_parameter() {
     let circuit = ansatz();
     assert_eq!(circuit.check_single_frequency(), Ok(()));
     let dims = circuit.num_params();
-    assert_eq!(dims, 8);
+    assert_eq!(dims, 13);
     let oracle = Exact {
         circuit: Arc::new(circuit.clone()),
         batches: Arc::default(),

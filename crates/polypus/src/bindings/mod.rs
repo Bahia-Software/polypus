@@ -404,9 +404,10 @@ fn is_rotosolve(method: &Bound<'_, PyAny>) -> bool {
 fn rotosolve_circuit_error(reason: &str) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(format!(
         "polypus.Rotosolve cannot train this circuit: {reason}. Rotosolve needs every \
-         trainable parameter to be the angle of exactly one rx, ry, rz, rxx, rzz, p or u1 \
-         gate (also ryy or rzx in a Qiskit circuit), as ±θ + c, so that the fitness is a \
-         sinusoid of each parameter; train this circuit with another optimizer"
+         trainable parameter to be exactly one angle of an rx, ry, rz, rxx, rzz, p, u1, u, \
+         u2 or u3 gate (also ryy, rzx, or the θ of an r, in a Qiskit circuit), as ±θ + c, \
+         so that the fitness is a sinusoid of each parameter; train this circuit with \
+         another optimizer"
     ))
 }
 
