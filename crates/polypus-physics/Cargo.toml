@@ -16,13 +16,11 @@ name = "polypus_physics"
 
 [dependencies]
 rand    = { workspace = true, features = ["std_rng"] }
-ndarray = { workspace = true }
 serde   = { workspace = true, optional = true }
 # Logging *facade* only (no sink): Monte Carlo run diagnostics are emitted
 # through `log::*!` and stay no-ops until the app layer installs a logger. This
 # crate never depends on `polypus-logger`.
 log     = { workspace = true }
-include_dir = "0.7.4"
 csv = { version = "1", optional = true }
 plotters = { version = "0.3.7", default-features = false, features = [
     "bitmap_backend",
