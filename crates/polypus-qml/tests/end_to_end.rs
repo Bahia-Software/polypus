@@ -137,6 +137,7 @@ fn native_training_reaches_perfect_train_accuracy() {
             // stopping.
             patience: 150,
             seed: Some(7),
+            initial_point: None,
         })
         .expect("DE optimizes successfully");
 

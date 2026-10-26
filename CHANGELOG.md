@@ -34,34 +34,52 @@ Changes on `main` since 0.7.2.
   defaults, and `backend=None` is the native simulator on `local`. Options are
   strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
   circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
-- `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
+- `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
   epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
-  finite_difference_step=0.1, seed=None)`, accepted by `train` and
-  `qml.train`: gradient ascent with Adam. Without an exact gradient (`train`
-  and Qiskit `qml.train`) each iteration takes a central finite difference of
-  the fitness, one batch of `2·dimensions` circuits, then scores the updated
-  parameters. Invalid settings raise `ValueError` before any circuit runs.
+  finite_difference_step=0.2, rule="adam", seed=None)`, accepted by `train`
+  and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
+  (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
+  current parameters and the central finite difference around them, so no
+  QPU waits on a one-circuit batch, and `best_params` is the best of the
+  parameters measured. `rule="adam"` is Kingma and Ba's Adam, whose step
+  does not depend on the scale of the cost; `rule="momentum"` is Polyak's
+  heavy-ball momentum, whose learning rate does. A seeded run over a backend
+  whose results do not depend on the platform reproduces on every platform
+  (C-7). Invalid settings, an unknown `rule` included, raise `ValueError`
+  before any circuit runs. See the training guide for the finite-difference
+  step and for starting from a global search (#395).
 - Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
-  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, an exact
-  gradient when it has one, and a full-dataset view under a minibatch); Adam
-  uses the exact gradient or a finite difference of the evaluation, and the
-  CUNQA walltime warning times its gradient too. With a minibatch, Adam tracks
-  its best on the full dataset, and the other optimizers' `best_fitness` is
-  re-scored on it at the end.
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
+  exact gradient when it has one); Adam uses the exact gradient or a finite
+  difference of the evaluation, and the CUNQA walltime warning counts one
+  batch per iteration, plus the call to an exact gradient (#394, #395).
+- Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
+  `AdamRule`, driven by a new `GradientOracle` contract (the fitness
+  gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.
+  `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+  `GradientOracle` by central differences, in one batch per gradient, and
+  through `GradientOracle::value_and_gradient` scores the parameters in the
+  same batch (#394, #395).
+- `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
+  `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
+  does and converts it with CUNQA's own converter, without raising QPUs; the
+  QMIO entry reports a build without the `qmio` feature, a Qiskit circuit and a
+  program that is not a terminal-measurement circuit. The keyword-only
+  `resources=True` also checks the native qubit ceiling and memory budget, with
+  the message of the error the run raises.
 - The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
   well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
   per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
-  source, the exact parameter-shift gradient. Both sources share the
-  candidate windows.
+  source, the exact parameter-shift gradient, which `QmlOracleFactory` hands
+  to Adam through the run's `Oracles`. Both sources share the candidate
+  windows. With a minibatch the `Oracles` also carry a full-dataset view
+  (`Oracles::full_evaluation`): Adam scores its parameters on it and takes
+  only the gradient from the minibatch, and the other optimizers'
+  `best_fitness` is re-scored on it at the end.
 - `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
   probabilities of each circuit, keyed like its counts, with no sampling and
   the same memory budget and windows as `run_circuits`. Only for a
   full-register read-out.
-- Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
-  by a new `GradientOracle` contract (the fitness gradient, uphill), with the
-  same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
-  turns any `EvaluationOracle` into a `GradientOracle` by central differences,
-  in one batch per gradient.
 - `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
   datasets with deterministic splits and feature scaling; layered variational
   models (angle, amplitude, IQP and basis encoders, a hardware-efficient
@@ -109,6 +127,15 @@ Changes on `main` since 0.7.2.
   DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
   (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
+- `initial_point` in `train` and `qml.train` (keyword-only in `qml.train`)
+  starts the search from a given point, such as an earlier run's
+  `best_params`: `dimensions` finite numbers as a list, tuple or NumPy array,
+  otherwise `ValueError` before anything runs. DE (every `strategy`)
+  evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
+  population; PSO as its first particle, which must lie within `bounds`; QNG
+  starts from it and Adam evaluates it first; CMA-ES centres its first run on
+  it and keeps its `sigma0`, so a refinement wants a smaller one. Without it
+  every optimizer behaves as before, seeded runs included (#395).
 
 ### Changed
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
@@ -173,6 +200,20 @@ Changes on `main` since 0.7.2.
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs`,
+  `AlgorithmPSOArgs`, `AlgorithmQNGArgs` and `AlgorithmCmaEsArgs` have an
+  `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
+  `initial_point` as its last argument and `TrainFlow` has an `initial_point`
+  field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
+  `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
+  `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
+  works, and `Method` has an `Adam` variant.
+- `rust-toolchain.toml` pins the Rust that CI and the release builds use
+  (1.99.1), and that rustup selects in a checkout; a new Rust release can no
+  longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
+  does not include the file. Fuzzing and Miri use a dated nightly, and the
+  docs, release and tutorial-sync jobs have a timeout (#415).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -180,6 +221,24 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
+- The README quickstart runs on the native backend (`backend="polypus"`), so it
+  no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
+  to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
+  static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
+  Troubleshooting section for the error (#392).
+- The `polypus-physics` tests cover the `POLYPUS_ENDF_DATA_DIR` override
+  without setting the variable, which raced the tests that read it and cache
+  what they read, and write their files to per-process scratch directories
+  instead of fixed paths in the temp directory. The crate no longer contains
+  `unsafe` (#420).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
@@ -235,6 +294,17 @@ Changes on `main` since 0.7.2.
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
+- CI runs every push to `main` to completion: the next push cancelled it, and
+  the release gate needs a successful push run for the commit it publishes
+  (#403).
+- CI tests the whole workspace (`cargo test --workspace`), so a crate added to
+  it is tested without editing the workflow, which listed the crates by hand
+  (#412).
+- CI runs tests it skipped without notice: the pinned-fixture test of the
+  OpenQASM 3 interop with Qiskit (contract C-10), in a leg with the Qiskit
+  that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
+  battery against Aer. There a missing tool fails those tests instead of
+  skipping them, and pytest lists every skip with its reason (#407).
 
 ## [0.7.2] - 2026-09-30
 

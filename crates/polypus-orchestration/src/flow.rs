@@ -106,13 +106,17 @@ pub trait OracleFactory {
 pub struct TrainFlow<F: OracleFactory> {
     /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
     pub factory: F,
-    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG/CMAES`
-    /// object; `Qng` carries its variance oracle).
+    /// Chosen optimizer + its config (built at the edge from the
+    /// `polypus.DE/PSO/QNG/CMAES/Adam` object; `Qng` carries its variance oracle).
     pub method: Method,
     /// Free-parameter count validated at the edge.
     pub dimensions: u32,
     /// Optimizer RNG seed (contract C-7).
     pub seed: u64,
+    /// Optional starting point of the search, `dimensions` values (contract
+    /// C-5), validated at the edge and again by the optimizer; `None` starts as
+    /// before.
+    pub initial_point: Option<Vec<f64>>,
     /// Shared failure slot: the oracle records into it, `dispatch_optimizer` takes
     /// it, and the edge downcasts + re-raises.
     pub errors: OracleErrorSlot,
@@ -151,6 +155,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             self.dimensions,
             &self.errors,
             self.seed,
+            self.initial_point,
         )
     }
 }
@@ -360,6 +365,7 @@ mod tests {
             }),
             dimensions: 3,
             seed: 7,
+            initial_point: None,
             errors: OracleErrorSlot::new(),
         };
         // `OracleError` does not implement `Debug`, so match rather than
@@ -439,6 +445,7 @@ mod tests {
             }),
             dimensions: 2,
             seed: 7,
+            initial_point: None,
             errors: OracleErrorSlot::new(),
         };
         assert!(scheduler.run(flow).is_ok(), "the train flow must run");

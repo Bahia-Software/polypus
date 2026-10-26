@@ -60,7 +60,9 @@ pub trait VarianceOracle: Send + Sync {
 /// [`VarianceOracle`], it keeps the one extra quantity a gradient method needs
 /// behind a trait, so how it is computed (an exact parameter shift, a finite
 /// difference, an analytic formula) stays with the caller. Every component must
-/// be finite, as every fitness value must be.
+/// be finite, as every fitness value must be. An implementation that scores
+/// candidates to compute its gradient can also return the fitness at `θ` from
+/// the same batch ([`value_and_gradient`](GradientOracle::value_and_gradient)).
 pub trait GradientOracle: Send + Sync {
     /// `∂fitness/∂θ[param_index]` at `theta`.
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64;
@@ -73,6 +75,37 @@ pub trait GradientOracle: Send + Sync {
     fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
         (0..dims).map(|k| self.gradient(theta, k)).collect()
     }
+
+    /// The fitness at `theta` and the `dims` gradient components there,
+    /// measured in one call, or `None` when this oracle does not score `theta`
+    /// itself.
+    ///
+    /// [`AlgorithmAdam`](crate::AlgorithmAdam) calls it once per iteration.
+    /// With `None`, the default, Adam scores `theta` with its own
+    /// [`EvaluationOracle`] and then calls
+    /// [`gradient_batch`](GradientOracle::gradient_batch): two calls, which is
+    /// all an implementation that only computes the gradient needs to support.
+    /// One whose gradient is itself a batch of circuits (a finite-difference
+    /// stencil, a parameter shift) can put `theta` in that batch and return its
+    /// value here, so that an iteration is a single batch;
+    /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient) does.
+    ///
+    /// The optimizer reports the value as a fitness it measured (contract C-5),
+    /// so it must come from the optimizer's own [`EvaluationOracle`]: build the
+    /// implementation over that oracle, shared through an
+    /// [`Arc`](std::sync::Arc). The gradient follows
+    /// [`gradient_batch`](GradientOracle::gradient_batch)'s contract. `None`
+    /// must mean that nothing was scored, since a caller that counts batches
+    /// does not count that call.
+    ///
+    /// A training run's CUNQA walltime projection (`polypus-orchestration`)
+    /// cannot tell in advance whether an exact gradient overrides this, so it
+    /// counts two calls per Adam iteration. With an override an iteration is
+    /// one call, and the projection times two iterations as one: it
+    /// overestimates, never underestimates.
+    fn value_and_gradient(&self, _theta: &[f64], _dims: usize) -> Option<(f64, Vec<f64>)> {
+        None
+    }
 }
 
 /// A shared gradient oracle is a gradient oracle: one object can serve as both
@@ -84,5 +117,9 @@ impl<T: GradientOracle + ?Sized> GradientOracle for std::sync::Arc<T> {
 
     fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
         (**self).gradient_batch(theta, dims)
+    }
+
+    fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
+        (**self).value_and_gradient(theta, dims)
     }
 }

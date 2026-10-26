@@ -1,11 +1,11 @@
 import polypus
-from qiskit.circuit.library import QFT
+from qiskit.synthesis import synth_qft_full
 
 polypus.init_logger(run_name="polypus_cunqa_basic")
 
 # QFT definition
 n_qubits = 5
-qft_circuit = QFT(n_qubits, inverse=False).decompose()
+qft_circuit = synth_qft_full(n_qubits)
 qft_circuit.measure_all()
 
 # 1. Single Run Local
@@ -20,14 +20,14 @@ result = polypus.run_quantum_circuit(
 )
 print(result)
 
-# 3. Single Run QMIO
+# 3. Single Run CUNQA
 print("Calling Polypus CUNQA with 1 qpu")
-result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infrastructure="qmio")
+result = polypus.run_quantum_circuit(qft_circuit, shots=1000, infrastructure="cunqa")
 print(result)
 
 # 4. Distribute by shots
-print("Calling Polypus Single Run for 10 QPUs")
+print("Calling Polypus CUNQA with 10 qpus")
 result = polypus.run_quantum_circuit(
-    qft_circuit, shots=10000, infrastructure="qmio", n_qpus=10
+    qft_circuit, shots=10000, infrastructure="cunqa", n_qpus=10
 )
 print(result)

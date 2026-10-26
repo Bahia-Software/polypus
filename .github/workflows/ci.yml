@@ -5,10 +5,13 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref to save minutes.
+# Pull requests: one group per PR, so a new push cancels the run it supersedes.
+# Pushes to main: one group per run, never cancelled. The release gate
+# (release.yml) needs a completed push run for the exact commit it publishes,
+# and a shared group would cancel a queued run as soon as a newer one queued.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CI only reads the repo; keep the default token read-only.
 permissions:
@@ -17,6 +20,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Rust: every job but MSRV, fuzz and Miri uses the toolchain rust-toolchain.toml
+# pins; `rustup toolchain install` without a name installs it with the
+# components listed there. Those three set RUSTUP_TOOLCHAIN, which overrides
+# the file in every step.
 jobs:
   fmt:
     name: rustfmt
@@ -24,9 +31,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
-        with:
-          components: rustfmt
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - run: cargo fmt --all --check
 
   # Python lint + formatting (packages, tests, benchmarks, examples).
@@ -70,7 +76,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - name: Verify Cargo.lock is in sync with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
@@ -85,9 +92,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
-        with:
-          components: clippy
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Default features only. Do NOT add --all-features here: the `polypus`
       # crate's `extension-module` feature tells PyO3 not to link libpython,
@@ -111,12 +117,18 @@ jobs:
     name: MSRV (1.85)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The MSRV, overriding rust-toolchain.toml in every step.
+      RUSTUP_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@69084b241933c14c2fa24234c4596f11a2655339 # tip of 1.85.0 branch
+      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check (workspace, default features)
         run: cargo check --locked --workspace --all-targets
@@ -129,6 +141,10 @@ jobs:
     name: test (Rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The QIR tests that assemble with llvm-as fail without it instead of
+      # skipping (LLVM is installed below).
+      POLYPUS_REQUIRE_LLVM_AS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PyO3 links libpython at build time, and the PyO3-touching crates' tests
@@ -137,13 +153,33 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      # llvm-as checks that the QIR export is valid LLVM IR.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Every workspace member, with no hand-maintained list: a crate added to
+      # the workspace is tested without touching this file. Default features,
+      # so `polypus` builds without extension-module (see the clippy note).
+      # Cargo unifies features across the members, so this pass compiles e.g.
+      # polypus-sim with `parallel` and polypus-logger with `info-logs`, which
+      # other members enable; the steps below cover the other feature sets and
+      # profiles. `polypus-subprocess-backend`'s integration tests spawn a
+      # Python worker; they resolve `python3` (provided by the setup-python step
+      # in this job) and skip gracefully if none is found.
+      - name: Test the workspace (default features)
+        run: cargo test --locked --workspace
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
-      # whose results must be bit-identical to the sequential path).
-      # `polypus-subprocess-backend` is pyo3-free (belongs here), but its
-      # integration tests spawn a Python worker; they resolve `python3` (provided by
-      # the setup-python step in this job) and skip gracefully if none is found.
+      # whose results must be bit-identical to the sequential path). The one
+      # hand-maintained list (docs/CONTRIBUTING.md): `--workspace --all-features`
+      # would enable `polypus`'s extension-module. The crates that link
+      # libpython stay out: `polypus-infrastructure` and `polypus-evaluation`
+      # (their seams touch the GIL), `polypus-orchestration` (pyo3-free, but it
+      # links libpython through polypus-infrastructure) and `polypus`.
       - name: Test pure-Rust crates (all features)
         run: >
           cargo test --locked
@@ -169,31 +205,18 @@ jobs:
       # `polypus-logger`'s features are mutually-exclusive log-level selectors
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
       # feature), not independent toggles — `--all-features` sets several at
-      # once and the `log` crate refuses to compile. Test it with no features.
-      - name: Test polypus-logger
+      # once and the `log` crate refuses to compile. The workspace pass builds
+      # it with `info-logs`; test it with no features too.
+      - name: Test polypus-logger (no features)
         run: cargo test --locked -p polypus-logger
-      # `polypus-infrastructure` links libpython like `polypus` (its backend
-      # seams touch the GIL), so it is tested here — default features and the
-      # optional qmio backend — not in the pure-Rust group above.
-      - name: Test polypus-infrastructure (default features)
-        run: cargo test --locked -p polypus-infrastructure
+      # The optional QMIO backend lives in `polypus-infrastructure`; `polypus`
+      # forwards the feature to it.
       - name: Test polypus-infrastructure (qmio backend)
         run: cargo test --locked -p polypus-infrastructure --features qmio
-      # `polypus-orchestration` is pyo3-free but links libpython transitively (via
-      # polypus-infrastructure), so it is tested here, not in the pure-Rust group.
-      - name: Test polypus-orchestration
-        run: cargo test --locked -p polypus-orchestration
-      # `polypus-evaluation` touches pyo3 (Qiskit binding, Python callbacks), so
-      # like `polypus` it links libpython and is tested here.
-      - name: Test polypus-evaluation
-        run: cargo test --locked -p polypus-evaluation
-      # `polypus` with default features — NOT extension-module (see clippy note).
-      - name: Test polypus (default features)
-        run: cargo test --locked -p polypus
       - name: Test polypus (qmio backend)
         run: cargo test --locked -p polypus --features qmio
       # The two backend templates are standalone crates (their own `[workspace]`),
-      # so `cargo test --workspace` above does not reach them; run each explicitly.
+      # so the workspace pass above does not reach them; run each explicitly.
       # Both certify themselves against the conformance battery. The Python one spawns
       # a worker through the subprocess bridge and skips gracefully without an
       # interpreter (setup-python above provides one).
@@ -216,7 +239,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build docs (no deploy)
         run: cargo doc --locked --workspace --no-deps
@@ -240,7 +264,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install maturin
         run: python -m pip install --upgrade maturin
@@ -254,27 +279,47 @@ jobs:
   # Python test suite. Mirrors install.sh and the manual README instructions:
   # install dev deps, then build & install the single `polypus-quantum` wheel
   # (the `polypus` extension plus the bundled `polypus_python` helpers), then run
-  # pytest. Runs at the floor and latest supported Python versions.
+  # pytest. Runs at the floor and latest supported Python versions with the
+  # latest Qiskit, and on 3.12 with the Qiskit that wrote the OpenQASM 3 interop
+  # fixtures (contract C-10), whose test skips with any other.
   # ---------------------------------------------------------------------------
   python-tests:
-    name: test (Python ${{ matrix.python-version }})
+    name: test (Python ${{ matrix.python-version }}${{ matrix.qiskit == 'fixtures' && ', Qiskit of the C-10 fixtures' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
+        include:
+          - python-version: "3.12"
+            qiskit: fixtures
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      # llvm-as checks that the QIR bitcode export is valid LLVM.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip maturin pytest
           pip install -r requirements-dev.txt
+      # The version tests/python/qasm3_fixtures.py names; the wheel below keeps
+      # it, since it satisfies the wheel's own Qiskit requirement.
+      - name: Install the Qiskit of the OpenQASM 3 fixtures
+        if: matrix.qiskit == 'fixtures'
+        working-directory: tests/python
+        run: |
+          version=$(python -c 'import qasm3_fixtures; print(qasm3_fixtures.QISKIT_VERSION)')
+          pip install "qiskit==$version"
       # One wheel now carries both the `polypus` extension and the bundled
       # `polypus_python` helpers (the extension imports `polypus_python` at its
       # execution seams via PyModule::import). Installing the wheel also pulls the
@@ -288,8 +333,14 @@ jobs:
       # Python — this catches syntax rot without running them.
       - name: Compile-check examples and benchmarks
         run: python -m compileall -q examples benchmarks
+      # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
+      # variables turn the skips of tests that back a contract into failures:
+      # a missing llvm-as, and in the fixtures leg another Qiskit.
       - name: Run Python tests
-        run: pytest tests/python
+        env:
+          POLYPUS_REQUIRE_LLVM_AS: "1"
+          POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
+        run: pytest tests/python -rs --strict-markers
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
       # missing parameter, a changed default or a name the stubs do not declare.
@@ -305,6 +356,19 @@ jobs:
           python -m mypy.stubtest polypus
           --allowlist tests/python/stubtest_allowlist.txt
           --mypy-config-file tests/python/stubtest_mypy.ini
+      # The conformance battery against the Aer backend
+      # (polypus-infrastructure/tests/conformance.rs) needs Qiskit Aer and the
+      # wheel's polypus_python, so it is #[ignore]d in the Rust job and runs
+      # here. One OpenMP thread: Aer is fragile when it fans experiments out
+      # from a cargo-test thread.
+      - name: Conformance battery against the Aer backend
+        if: matrix.python-version == '3.13'
+        env:
+          OMP_NUM_THREADS: "1"
+          POLYPUS_REQUIRE_AER: "1"
+        run: >
+          cargo test --locked -p polypus-infrastructure --test conformance
+          -- --ignored --exact local_aer_backend_conformance --nocapture
 
   # Execute every tutorial notebook headless against this PR's own build, so a
   # broken notebook (a stale API call, a typo introduced while editing) fails
@@ -324,7 +388,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install build tooling
         run: python -m pip install --upgrade pip maturin
@@ -358,12 +423,20 @@ jobs:
     name: fuzz (from_qasm2, from_qasm3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # A dated nightly, overriding rust-toolchain.toml in every step. Bump it
+      # deliberately, together with the miri job's.
+      RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f0d5300ba8908d942c808f4d31c08471d7798ba3 # tip of nightly branch
+      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Pinned like the nightly: a newer cargo-fuzz may need a newer Rust.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --locked --version 0.13.2
       # Seeds from the committed corpora (fuzz/corpus/<target>). A crash or
       # OOM fails the job; a clean 60s run per target passes.
       - name: Run libFuzzer on from_qasm2 (60s budget)
@@ -387,11 +460,14 @@ jobs:
     timeout-minutes: 30
     env:
       MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks"
+      # The fuzz job's dated nightly.
+      RUSTUP_TOOLCHAIN: nightly-2026-10-22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@f0d5300ba8908d942c808f4d31c08471d7798ba3 # tip of nightly branch
-        with:
-          components: miri, rust-src
+      - name: Install Rust ${{ env.RUSTUP_TOOLCHAIN }} with Miri
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo miri setup
       - name: Miri (kernel unit tests, parallel)

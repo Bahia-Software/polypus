@@ -1096,6 +1096,7 @@ impl Model {
             dimensions,
             seed: effective_seed,
             errors: errors.clone(),
+            initial_point: None,
         };
         // GIL released for the run, as in `train`; the interrupt token keeps
         // Ctrl+C prompt between waves.

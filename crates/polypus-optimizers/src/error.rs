@@ -58,7 +58,7 @@ pub enum OptimizerError {
         /// Number of fitness values the oracle actually returned.
         got: usize,
     },
-    /// A scalar configuration value is outside its valid domain: QNG's
+    /// A configuration value is outside its valid domain: QNG's
     /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
     /// report `-inf`), `finite_difference_step` (must be finite and `> 0`),
     /// `tikhonov_reg` (must be finite and `>= 0`) or `learning_rate` (must be
@@ -68,8 +68,9 @@ pub enum OptimizerError {
     /// `max_iters` (≥ 1), `dimensions` (≥ 1), `learning_rate` (finite, `> 0`),
     /// `beta1`/`beta2` (in `[0, 1)`) or `epsilon` (finite, `> 0`); or a
     /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)'s
-    /// `finite_difference_step` (finite, `> 0`). Detected
-    /// before any RNG draw or oracle call, so a bad config maps to a
+    /// `finite_difference_step` (finite, `> 0`); or any optimizer's
+    /// `initial_point` (`dimensions` finite values, within `bounds` for PSO).
+    /// Detected before any RNG draw or oracle call, so a bad config maps to a
     /// `PyValueError` at the seam rather than producing a `NaN`/`inf` result.
     /// (Empty or non-finite `bounds` keep their own
     /// [`InvalidBounds`](OptimizerError::InvalidBounds) variant.)

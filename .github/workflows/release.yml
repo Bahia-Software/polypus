@@ -17,6 +17,9 @@
 #   Environment: `pypi` for PyPI, `testpypi` for TestPyPI (must match below).
 #
 # No abi3 is used, so wheels are built per CPython version (3.10–3.13).
+#
+# Rust is the version rust-toolchain.toml pins: maturin-action reads that file,
+# and `publish-crates` installs it.
 name: Release
 
 on:
@@ -142,6 +145,7 @@ jobs:
     name: wheels (linux ${{ matrix.target }})
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -182,6 +186,7 @@ jobs:
     name: wheels (macos-arm64 py${{ matrix.python-version }})
     needs: gate
     runs-on: macos-14
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -205,6 +210,7 @@ jobs:
     name: wheels (windows py${{ matrix.python-version }})
     needs: gate
     runs-on: windows-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -228,6 +234,7 @@ jobs:
     name: sdist
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build sdist
@@ -311,6 +318,7 @@ jobs:
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/p/polypus-quantum
@@ -333,6 +341,7 @@ jobs:
     needs: [linux, macos, windows, sdist, smoke]
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: testpypi
       url: https://test.pypi.org/p/polypus-quantum
@@ -376,12 +385,15 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # tip of stable branch
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
       - name: Publish plan
         run: python .github/scripts/publish_crates.py --plan
       - name: Publish in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # Each crate's verification build is a one-off.
+          CARGO_INCREMENTAL: "0"
         run: |
           if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
             echo "::error::The CARGO_REGISTRY_TOKEN secret is not set"

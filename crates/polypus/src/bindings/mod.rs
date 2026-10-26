@@ -361,6 +361,51 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     None
 }
 
+/// Check the `initial_point` of `train`/`qml.train` before anything runs: one
+/// finite value per optimization dimension and, for PSO, within its `bounds`
+/// (contract C-5). The optimizers check the same again once the backend
+/// exists; here a wrong point raises `ValueError` before any QPU is requested,
+/// with the optimizer's own message. Bounds that PSO itself rejects are left
+/// to it, so that error keeps its precedence.
+fn validate_initial_point(
+    initial_point: Option<&[f64]>,
+    dimensions: u32,
+    method: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let Some(point) = initial_point else {
+        return Ok(());
+    };
+    let invalid = |reason: String| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid initial_point: {reason}"))
+    };
+    if point.len() != dimensions as usize {
+        return Err(invalid(format!(
+            "must have one value per dimension ({dimensions}), got {}",
+            point.len()
+        )));
+    }
+    if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(invalid(format!(
+            "every value must be finite, got {value} at index {index}"
+        )));
+    }
+    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
+        let (lb, ub) = pso.bounds;
+        if lb.is_finite() && ub.is_finite() && lb < ub {
+            if let Some((index, value)) = point
+                .iter()
+                .enumerate()
+                .find(|(_, x)| !(lb..=ub).contains(*x))
+            {
+                return Err(invalid(format!(
+                    "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Turn an optimizer result into the value the Python entry point returns.
 ///
 /// An oracle failure recorded in `errors` takes precedence over the optimizer's
@@ -488,6 +533,7 @@ fn method_from_pyclass(
             tolerance: adam.tolerance,
             patience: adam.patience,
             finite_difference_step: adam.finite_difference_step,
+            rule: adam.rule,
         }));
     }
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -831,10 +877,21 @@ fn build_qmio_registered(
     _backend: &str,
     _options: Option<HashMap<String, OptionValue>>,
 ) -> PyResult<BackendConfig> {
-    Err(pyo3::exceptions::PyValueError::new_err(
-        "the 'qmio' infrastructure requires compiling polypus with --features qmio",
-    ))
+    Err(pyo3::exceptions::PyValueError::new_err(QMIO_NOT_COMPILED))
 }
+
+/// Why `infrastructure="qmio"` fails in a build without the `qmio` feature;
+/// `backend_compatibility` reports the same text.
+#[cfg(not(feature = "qmio"))]
+const QMIO_NOT_COMPILED: &str =
+    "the 'qmio' infrastructure requires compiling polypus with --features qmio";
+
+/// Why `run_quantum_circuit(..., infrastructure="qmio")` rejects a Qiskit
+/// `QuantumCircuit`; `backend_compatibility` reports the same text.
+const QMIO_REJECTS_QISKIT: &str =
+    "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
+     serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
+     2.0 string";
 
 /// Why `run_quantum_circuit(..., backend="polypus")` rejects a Qiskit
 /// `QuantumCircuit`; `backend_compatibility` reports the same text.
@@ -1270,11 +1327,7 @@ pub fn run_quantum_circuit<'py>(
     // The QMIO path serialises circuits to QASM/QIR in Rust (GIL-free) and cannot
     // read a Qiskit QuantumCircuit, whose gates are only accessible via Python.
     if infrastructure == "qmio" && bound_qc.is_foreign() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "the 'qmio' infrastructure runs entirely in Rust (GIL-free) and cannot \
-             serialize a Qiskit QuantumCircuit; pass a polypus.Circuit or an OpenQASM \
-             2.0 string",
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err(QMIO_REJECTS_QISKIT));
     }
     // Resolve the shot-sampling seed. Every simulated backend (native, Aer,
     // CUNQA's simulated QPUs) is seeded by Polypus; `qmio` is real hardware, so
@@ -1417,6 +1470,15 @@ pub fn run_quantum_circuit<'py>(
 /// a path separator, a shell metacharacter — raises `ValueError` naming the
 /// offending character, before the UUID suffix is generated.
 ///
+/// `initial_point` (default `None`) starts the search from a given point, such
+/// as the `best_params` of an earlier run: a list, tuple or NumPy array of
+/// `dimensions` finite numbers, otherwise `ValueError` before anything runs.
+/// DE (every `strategy`) evaluates it, wrapped into `[0, 2π)`, as the first
+/// member of its initial population; PSO as its first particle, which must lie
+/// within the PSO `bounds`; QNG and Adam start from it as θ₀; CMA-ES centres
+/// its first run on it (restarts start elsewhere), with its `sigma0`
+/// unchanged. Without it every optimizer starts as before (contract C-5).
+///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
 /// waiting for the run to finish. An exception raised by
@@ -1455,7 +1517,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1474,6 +1536,7 @@ pub fn train<'py>(
     fusion: Option<bool>,
     options: Option<OptionsArg>,
     walltime: Option<String>,
+    initial_point: Option<Vec<f64>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1496,6 +1559,7 @@ pub fn train<'py>(
             )));
         }
     }
+    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
     if is_native_backend(backend) {
@@ -1582,6 +1646,7 @@ pub fn train<'py>(
         method: method_enum,
         dimensions,
         seed: effective_seed,
+        initial_point,
         errors: errors.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
@@ -1707,6 +1772,10 @@ fn bind_feature_rows<'py>(
 /// characters (contract C-9) — and an invalid prefix raises `ValueError`
 /// naming the offending character.
 ///
+/// `initial_point` (keyword-only, default `None`) starts the search from a
+/// given point of the ansatz weights, as in [`train`]: `dimensions` finite
+/// numbers, otherwise `ValueError` before anything runs.
+///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
 /// finish, and an exception raised by `expectation_function` propagates as
@@ -1750,7 +1819,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1771,6 +1840,7 @@ pub fn qml_train<'py>(
     options: Option<OptionsArg>,
     walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
+    initial_point: Option<Vec<f64>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1804,6 +1874,7 @@ pub fn qml_train<'py>(
             "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
         )));
     }
+    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
@@ -1903,6 +1974,7 @@ pub fn qml_train<'py>(
         method: method_enum,
         dimensions,
         seed: effective_seed,
+        initial_point,
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
@@ -2695,6 +2767,7 @@ mod tests {
                     tolerance: 1e-9,
                     patience: 20,
                     seed: Some(seed),
+                    initial_point: None,
                 })
                 .expect("valid DE args optimize successfully")
         };
@@ -2738,6 +2811,57 @@ mod tests {
                 Ok(Method::De(cfg)) => assert_eq!(cfg.strategy, DeStrategy::LShade),
                 _ => panic!("a polypus.DE parses into Method::De"),
             }
+        });
+    }
+
+    /// `polypus.Adam(rule=...)` rejects an unknown name with `ValueError`
+    /// when it is passed or set, before any run, naming the valid ones.
+    #[test]
+    fn adam_rule_is_validated_when_passed_or_set() {
+        Python::initialize();
+        Python::attach(|py| {
+            let new = |rule| {
+                Adam::new(
+                    100,
+                    0.05,
+                    0.9,
+                    0.999,
+                    1e-8,
+                    (-1.0, 1.0),
+                    0.01,
+                    20,
+                    0.1,
+                    rule,
+                    None,
+                )
+            };
+            let err = new("Momentum").err().expect("an unknown rule is rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+
+            let adam = Py::new(py, new("adam").unwrap()).unwrap();
+            let bound = adam.bind(py);
+            let err = bound
+                .setattr("rule", "nesterov")
+                .expect_err("an unknown rule is rejected when set");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "adam",
+                "a rejected name leaves the rule unchanged"
+            );
+            bound.setattr("rule", "momentum").unwrap();
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "momentum"
+            );
         });
     }
 
@@ -3841,6 +3965,7 @@ mod tests {
     /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
     #[test]
     fn adam_reaches_the_method_and_its_seed_is_read() {
+        use polypus_optimizers::AdamRule;
         Python::initialize();
         Python::attach(|py| {
             let adam = Py::new(
@@ -3855,8 +3980,10 @@ mod tests {
                     0.5,
                     7,
                     0.05,
+                    "momentum",
                     Some(99),
-                ),
+                )
+                .expect("a valid rule"),
             )
             .expect("the pyclass instantiates");
             let bound = adam.bind(py);
@@ -3872,6 +3999,7 @@ mod tests {
                     assert_eq!(cfg.tolerance, 0.5);
                     assert_eq!(cfg.patience, 7);
                     assert_eq!(cfg.finite_difference_step, 0.05);
+                    assert_eq!(cfg.rule, AdamRule::Momentum);
                 }
                 _ => panic!("a polypus.Adam parses into Method::Adam"),
             }

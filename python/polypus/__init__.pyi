@@ -92,6 +92,9 @@ _Method = Union[DE, PSO, QNG, CMAES, Adam]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
+# `Adam.rule`: how the gradient becomes a step (bindings/adam.rs). Any other
+# name raises `ValueError`.
+_AdamRule = Literal["adam", "momentum"]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
@@ -107,6 +110,8 @@ class _CalibrationOutcome(TypedDict):
 class _CompatibilityReport(TypedDict):
     aer: list[str]
     polypus: list[str]
+    cunqa: list[str]
+    qmio: list[str]
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -216,13 +221,13 @@ class Adam:
     bounds: tuple[float, float]
     tolerance: float
     patience: int
-    # Used only when the run has no exact gradient (`train`, Qiskit `qml.train`).
     finite_difference_step: float
+    rule: _AdamRule
     seed: Optional[int]
     def __new__(
         cls,
         max_iters: int = 100,
-        learning_rate: float = 0.05,
+        learning_rate: float = 0.1,
         beta1: float = 0.9,
         beta2: float = 0.999,
         epsilon: float = 1e-8,
@@ -230,7 +235,8 @@ class Adam:
         bounds: tuple[float, float] = ...,
         tolerance: float = 0.01,
         patience: int = 20,
-        finite_difference_step: float = 0.1,
+        finite_difference_step: float = 0.2,
+        rule: _AdamRule = "adam",
         seed: Optional[int] = None,
     ) -> Adam: ...
 
@@ -480,6 +486,7 @@ def train(
     fusion: Optional[bool] = None,
     options: Optional[dict[str, str]] = None,
     walltime: Optional[str] = None,
+    initial_point: Optional[_FloatVector] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],
@@ -513,4 +520,6 @@ def calibrate_parallel_threshold(force: bool = False) -> _CalibrationOutcome: ..
 def backend_cleanup_failures() -> int: ...
 def backend_compatibility(
     circuit: Union[Circuit, str, QuantumCircuit],
+    *,
+    resources: bool = False,
 ) -> _CompatibilityReport: ...

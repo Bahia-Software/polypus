@@ -17,15 +17,7 @@ import sys
 import types
 
 import pytest
-
-# `SUPPORTED_QISKIT_OPERATIONS` of CUNQA 3.0.0 (`cunqa/circuit/ir.py`).
-CUNQA_OPERATIONS = {
-    "unitary", "ryy", "rz", "z", "p", "rxx", "rx", "cx", "id", "x", "sxdg", "u1",
-    "ccy", "rzz", "rzx", "ry", "s", "cu", "crz", "ecr", "t", "ccx", "y", "cswap",
-    "r", "sdg", "csx", "crx", "ccz", "u3", "u2", "u", "cp", "tdg", "sx", "cu1",
-    "swap", "cy", "cry", "cz", "h", "cu3", "measure", "if_else", "barrier", "reset",
-    "save_state", "set_statevector",
-}  # fmt: skip
+from fake_cunqa import CUNQA_OPERATIONS
 
 H = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[5];\n'
 

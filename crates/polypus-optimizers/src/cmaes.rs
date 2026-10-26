@@ -5,7 +5,9 @@ use crate::linalg::symmetric_eigen;
 use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_oracle_len, recent_improvement, stagnated};
+use crate::util::{
+    check_initial_point, check_oracle_len, recent_improvement, stagnated, wrap_angle,
+};
 use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
 use std::cmp::Ordering;
@@ -37,7 +39,8 @@ use std::fmt;
 /// unwrapped in ℝ^d, so the covariance adapts across the `0`/`2π` seam, and
 /// each candidate is wrapped into `[0, 2π)` only when it is handed to the
 /// oracle (`f(x) = f(x mod 2π)`). The initial mean is drawn uniformly from
-/// `[0, 2π)` and the returned `best_params` is the wrapped candidate the
+/// `[0, 2π)`, or is [`initial_point`](AlgorithmCmaEsArgs::initial_point)
+/// wrapped into it, and the returned `best_params` is the wrapped candidate the
 /// oracle scored.
 ///
 /// The largest coordinate standard deviation, `σ·max_i √C_ii`, is capped at
@@ -113,6 +116,7 @@ use std::fmt;
 ///         patience: 30,
 ///         restarts: 0,
 ///         seed: Some(7),
+///         initial_point: None,
 ///     })
 ///     .expect("valid arguments optimize successfully");
 ///
@@ -145,6 +149,7 @@ pub struct AlgorithmCmaEs;
 /// - `population_size >= 2` when given: μ = ⌊λ/2⌋ must be at least 1.
 /// - `restarts` small enough that the largest population, `λ₀·2^restarts`,
 ///   fits in a `u32` like `population_size`.
+/// - `initial_point`, when given, holds `dimensions` finite values.
 pub struct AlgorithmCmaEsArgs {
     /// Oracle that maps parameter vectors to fitness values (higher is better).
     pub oracle: Box<dyn EvaluationOracle>,
@@ -181,6 +186,14 @@ pub struct AlgorithmCmaEsArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional mean of the first run, one value per dimension, all finite,
+    /// wrapped into `[0, 2π)` so a far angle keeps its precision. The
+    /// uniform mean is still drawn and then replaced, so the rest of the run
+    /// draws what it would without a point, and every IPOP restart draws a
+    /// fresh mean as usual. `sigma0` is not adjusted: to refine around a good
+    /// point rather than explore from it, pass a smaller `sigma0` too.
+    /// `None` draws the first mean uniformly from `[0, 2π)`.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 impl AlgorithmCmaEs {
@@ -231,10 +244,12 @@ impl AlgorithmCmaEs {
             patience,
             restarts,
             seed: _,
+            mut initial_point,
         } = args;
 
         let schedule = validate(dimensions, population_size, generations, sigma0, restarts)?;
         let n = dimensions as usize;
+        check_initial_point(initial_point.as_deref(), n)?;
         let budget = generations as usize;
         let patience = patience as usize;
 
@@ -248,7 +263,14 @@ impl AlgorithmCmaEs {
             // `validate` keeps every population this loop can reach within u32.
             let lambda = schedule.population(run) as usize;
             let strategy = Strategy::new(n, lambda);
-            let mean: Array1<f64> = (0..n).map(|_| rng.random_range(0.0..TAU)).collect();
+            let drawn: Array1<f64> = (0..n).map(|_| rng.random_range(0.0..TAU)).collect();
+            // The first run starts at the caller's point, if any, wrapped like
+            // every candidate so a huge angle keeps its precision; the mean is
+            // drawn anyway so the RNG stream does not depend on it, and every
+            // restart draws a fresh one.
+            let mean = initial_point
+                .take()
+                .map_or(drawn, |point| point.into_iter().map(wrap_angle).collect());
             let mut dist = Distribution::new(mean, sigma0);
             let mut run_best = Incumbent::new();
             let mut run_history: Vec<f64> = Vec::new();
@@ -876,17 +898,6 @@ fn ranking(fitness: &[f64]) -> Vec<usize> {
     order
 }
 
-/// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a
-/// tiny negative `x` (the exact result rounds up); that is the same angle as 0.
-fn wrap_angle(x: f64) -> f64 {
-    let wrapped = x.rem_euclid(TAU);
-    if wrapped >= TAU {
-        0.0
-    } else {
-        wrapped
-    }
-}
-
 /// A standard normal draw by the Box–Muller transform (the crate has no
 /// `rand_distr`). `1 − u` lies in `(0, 1]`, so the logarithm is finite.
 fn standard_normal<R: Rng>(rng: &mut R) -> f64 {
@@ -1038,23 +1049,6 @@ mod tests {
         assert_eq!((best.fitness, best.params.clone()), (0.5, vec![4.0]));
         best.offer(0.25, &[6.0]);
         assert_eq!(best.params, vec![4.0]);
-    }
-
-    #[test]
-    fn wrap_angle_stays_in_the_half_open_circle() {
-        assert_eq!(wrap_angle(0.0), 0.0);
-        assert_eq!(wrap_angle(-0.0), 0.0);
-        assert_eq!(wrap_angle(TAU), 0.0);
-        assert_eq!(wrap_angle(-TAU), 0.0);
-        assert_eq!(wrap_angle(1.0 + TAU), (1.0 + TAU).rem_euclid(TAU));
-        // rem_euclid rounds this up to 2π exactly; the wrap folds it to 0.
-        assert_eq!((-1e-20f64).rem_euclid(TAU), TAU);
-        assert_eq!(wrap_angle(-1e-20), 0.0);
-        for x in [-1e9, -7.5, -1e-300, 3.0, 6.283_185_307_179_585, 1e12] {
-            let w = wrap_angle(x);
-            assert!((0.0..TAU).contains(&w), "{x} -> {w}");
-        }
-        assert!(wrap_angle(f64::NAN).is_nan());
     }
 
     #[test]

@@ -54,6 +54,7 @@ fn valid_args() -> AlgorithmQNGArgs {
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 1e-3,
         seed: Some(42),
+        initial_point: None,
     }
 }
 
