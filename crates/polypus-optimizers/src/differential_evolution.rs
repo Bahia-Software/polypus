@@ -201,6 +201,29 @@ impl AlgorithmDifferentialEvolution {
     /// strategy shares it; 4 is also the size L-SHADE shrinks towards.
     pub(crate) const MIN_POPULATION: usize = 4;
 
+    /// Check the preconditions of [`AlgorithmDifferentialEvolutionArgs`] that
+    /// every strategy checks before any RNG draw or oracle call, in the same
+    /// order, without running anything: `population_size` at least 4, then
+    /// `initial_point` (`dimensions` finite values). `train` and `qml.train`
+    /// call it before any backend exists.
+    pub fn check_preconditions(
+        population_size: u32,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        // Sampling 3 distinct other members needs `popsize >= 4`: rejected
+        // with a typed error instead of the out-of-bounds `sel[2]` panic that
+        // fired one line into the trial loop.
+        let popsize = population_size as usize;
+        if popsize < Self::MIN_POPULATION {
+            return Err(OptimizerError::PopulationTooSmall {
+                got: popsize,
+                min: Self::MIN_POPULATION,
+            });
+        }
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     /// Run Differential Evolution with the given `strategy`.
     ///
     /// [`DeStrategy::Rand1Bin`] is exactly [`Optimizer::optimize`]: the same
@@ -281,17 +304,9 @@ impl AlgorithmDifferentialEvolution {
         let dims = dimensions as usize;
         let patience = patience as usize;
 
-        // Precondition (documented on the struct): sampling 3 distinct other
-        // members needs `popsize >= 4`. Reject *before* any RNG draw or oracle
-        // call so the caller gets a typed error instead of the out-of-bounds
-        // `sel[2]` panic that fired one line into the trial loop.
-        if popsize < Self::MIN_POPULATION {
-            return Err(OptimizerError::PopulationTooSmall {
-                got: popsize,
-                min: Self::MIN_POPULATION,
-            });
-        }
-        check_initial_point(initial_point.as_deref(), dims)?;
+        // Preconditions (documented on the struct), before any RNG draw or
+        // oracle call.
+        Self::check_preconditions(population_size, dimensions, initial_point.as_deref())?;
 
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));

@@ -34,7 +34,7 @@ use crate::differential_evolution::{
 };
 use crate::error::OptimizerError;
 use crate::outcome::OptimizationOutcome;
-use crate::util::{argmax, check_initial_point, check_oracle_len, fitness_stagnated, wrap_angle};
+use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle};
 use rand::{Rng, RngExt};
 use std::f64::consts::{PI, TAU};
 
@@ -362,16 +362,14 @@ pub(crate) fn run_with_rng<R: Rng>(
     let dims = dimensions as usize;
     let patience = patience as usize;
 
-    // Same precondition as DE/rand/1/bin, checked before any RNG draw or oracle
-    // call. It also covers what current-to-pbest/1 needs: a donor other than the
-    // parent and a second one other than both.
-    if initial < MIN_POPULATION {
-        return Err(OptimizerError::PopulationTooSmall {
-            got: initial,
-            min: MIN_POPULATION,
-        });
-    }
-    check_initial_point(initial_point.as_deref(), dims)?;
+    // The same preconditions as DE/rand/1/bin, checked before any RNG draw or
+    // oracle call. The population bound also covers what current-to-pbest/1
+    // needs: a donor other than the parent and a second one other than both.
+    AlgorithmDifferentialEvolution::check_preconditions(
+        population_size,
+        dimensions,
+        initial_point.as_deref(),
+    )?;
 
     // The same draws, in the same order, as DE/rand/1/bin's initialisation, and
     // the same replacement of the first member by the caller's point.
