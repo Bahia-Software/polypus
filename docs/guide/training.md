@@ -193,7 +193,7 @@ A gradient method: it climbs the fitness along its gradient, estimated by centra
 | `rule` | Step |
 |---|---|
 | `"adam"` (default) | Adam (Kingma and Ba, arXiv:1412.6980): bias-corrected running averages of the gradient and of its square scale each parameter's step to about `learning_rate` radians, whatever the scale of the cost, so one configuration suits problems whose costs differ in scale |
-| `"momentum"` | Polyak's heavy ball (1964): a velocity, `beta1 × velocity + learning_rate × gradient`, is added to the parameters. The step grows with the gradient, so the `learning_rate` that works depends on the scale of the cost: a rate tuned on one problem can make another, with a larger cost, diverge. `beta2` and `epsilon` are not used |
+| `"momentum"` | Polyak's heavy ball (1964): a velocity, `beta1 × velocity + learning_rate × gradient`, is added to the parameters. The step grows with the gradient, so the `learning_rate` that works depends on the scale of the cost: a rate tuned on one problem can make another, with a larger cost, diverge. With the defaults (`learning_rate=0.1`, `beta1=0.9`) a steady gradient `g` moves the parameters by `learning_rate / (1 − beta1) × g = 1.0 × g` per iteration, so on a cost of hundreds, such as a QUBO's energies, steps of hundreds of radians diverge: lower `learning_rate` in proportion to the cost, or keep `"adam"`. `beta2` and `epsilon` are not used |
 
 Any other `rule` raises `ValueError`.
 

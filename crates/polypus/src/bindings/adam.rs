@@ -111,7 +111,11 @@ impl Adam {
     /// `"momentum"` (Polyak's heavy ball, with `beta1` as the momentum: a
     /// velocity `beta1·v + learning_rate·gradient` is added to the
     /// parameters, so the `learning_rate` that works depends on the scale of
-    /// the cost; `beta2` and `epsilon` are unused).
+    /// the cost; `beta2` and `epsilon` are unused). With the defaults a
+    /// steady gradient `g` moves the parameters by
+    /// `learning_rate / (1 − beta1)·g = 1.0·g` per iteration, which diverges
+    /// on costs of hundreds, such as a QUBO's energies: lower `learning_rate`
+    /// in proportion to the cost, or keep `"adam"`.
     #[getter]
     fn rule(&self) -> &'static str {
         self.rule.as_str()
