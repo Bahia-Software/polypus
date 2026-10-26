@@ -14,6 +14,30 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
+  once the optimizer has stopped, its best candidates are re-evaluated in
+  one more batch with that many shots per circuit, `best_params` and, for
+  DE, PSO and CMA-ES, the four best other distinct candidates they scored.
+  The new `TrainResult.final_params` is the one with the highest value and
+  `final_fitness` that value; both are `None` without it. This reduces the
+  winner's curse of `best_fitness`, the best of many noisy estimates:
+  `final_fitness` is a fresh estimate, without bias when `best_params` is
+  re-evaluated alone, and slightly optimistic still as the highest of five.
+  `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
+  `fitness_history` are the optimizer's, and a seeded run sends the same
+  batches with and without `final_shots`. The final batch is sampled with a
+  seed derived from the run's, so on Aer and CUNQA, which seed each circuit
+  from its position in the call, it does not repeat the training's counts
+  for a candidate at the same position. `best_params` and `best_fitness` are
+  logged before it, and as a warning if it fails. A value that is not an
+  integer `>= 1` raises `ValueError` before anything runs. The batch is not
+  part of the CUNQA walltime projection (#397).
+- The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
+  (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
+  implement by putting the shots in every task and sending the batch with
+  `polypus_infrastructure::final_batch_params`; `TrainFlow::final_shots`,
+  `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
+  (`polypus-orchestration`) (#397).
 - `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
   target_step=0.63, alpha=0.602, gamma=0.101, eval_interval=20, seed=None)`,
   accepted by `train` and `qml.train`: Spall's simultaneous perturbation
@@ -212,6 +236,10 @@ Changes on `main` since 0.7.2.
   works, and `Method` has an `Adam` variant.
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
   so an exhaustive `match` on it needs an arm for it (#396).
+- **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has a
+  `final_shots` field (`None` keeps the previous behaviour), and its
+  `Flow::Output` is `TrainOutcome`, whose `optimization` field is the
+  `OptimizationOutcome` it returned before (#397).
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist

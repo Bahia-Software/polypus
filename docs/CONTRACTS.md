@@ -773,6 +773,93 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `tests/python/test_determinism_baseline.py` are unchanged.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
+- **Final re-evaluation (`final_shots`).** `train(..., final_shots=None)`,
+  `qml.train(..., final_shots=None)` (keyword-only) and the
+  `final_shots: Option<u32>` field of `TrainFlow` (`polypus-orchestration`)
+  re-evaluate the optimizer's best candidates once it has stopped, in one
+  more batch with `final_shots` shots per circuit.
+  - `EvaluationOracle::evaluate_batch_with_shots(candidates, shots)` has
+    `evaluate_batch`'s contract (exactly `candidates.len()` finite values, in
+    order) with every circuit measured with `shots` shots. Its default calls
+    `evaluate_batch`, which is exact for an oracle without shots; `VqcOracle`
+    and `QmlOracle` put `shots` in every `CircuitTask` of the batch, every
+    training circuit of each candidate for QML, and the Planner reads them
+    from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
+    calls it.
+  - Seed: `VqcOracle` and `QmlOracle` send the batch with
+    `polypus_infrastructure::final_batch_params(config)`, the run's
+    `RunParams` with the seed replaced by SplitMix64's first output from it.
+    Aer seeds each circuit from the seed and its position in the call alone,
+    and CUNQA each QPU from `seed + k` (C-7), so with the run's seed a
+    candidate re-evaluated at the position it was scored at, as `best_params`
+    at index 0 is for QNG, Adam and SPSA, would get the training's random
+    numbers: the same counts with the same shots. With the derived seed the
+    batch's shot noise is independent of the training's, and a seeded run
+    still reproduces it. The native backend seeds circuits from its own
+    counter, which the batch continues, and does not read the seed.
+  - Preconditions: an integer from 1 to 4294967295. `train` and `qml.train`
+    raise `ValueError` for anything else (0, a negative, a `float`, a `bool`,
+    a `str`) before anything runs (no backend, no CUNQA allocation), next to
+    the `initial_point` check; a NumPy integer is accepted. In Rust,
+    `Some(0)` is `OptimizerError::InvalidConfig` for `final_shots` before the
+    oracle is built.
+  - Which candidates: during the run the optimizer scores through a
+    decorator that keeps the best distinct candidates it saw. Only finite
+    values enter; candidates are distinct by their exact bits, a candidate
+    scored again keeps its best value, and equal values rank by the order
+    the candidates were scored (batch by batch, in batch order), so the
+    choice is deterministic. The batch is `best_params` first, then the best
+    others, up to `Method::final_candidates()`: 5 for DE (every strategy),
+    PSO and CMA-ES, 1 (`best_params` alone) for QNG, Adam and SPSA; fewer
+    when the run scored fewer distinct finite candidates.
+  - Postconditions: the batch is sent only after the optimizer returned a
+    result, whatever stopped it (its budget, convergence); an optimizer error
+    or an interrupt skips it, and a failure or an interrupt in the batch is
+    raised as in any batch, with no result. `TrainResult.final_params` is the
+    candidate with the highest re-evaluated value (the earlier on a tie, so
+    `best_params`; a `NaN` never wins over a number) and `final_fitness` that
+    value; if every value is `NaN`, which only a custom Rust oracle can
+    return, they are `best_params` and `NaN`, with a warning. Both are `None`
+    without `final_shots`. `final_fitness` is a fresh estimate of the value of
+    `final_params` with `final_shots` shots: without bias when the batch holds
+    `best_params` alone, and slightly optimistic when it holds several, being
+    the highest of them, though far less than `best_fitness`, the highest of
+    the whole run. `best_params`, `best_fitness` (still the value the
+    optimizer measured for `best_params`), `fitness_history`,
+    `iterations_run` and `converged` are the optimizer's, unchanged; before
+    the batch, the run logs them (`best_params` and `best_fitness` at full
+    precision) at `INFO`, and again as a `WARNING` if the batch fails, since
+    the run then returns no result; in Rust,
+    `TrainOutcome::optimization` is the `OptimizationOutcome` and
+    `FinalEvaluation` holds the batch (`candidates`, `values`, `shots`) and
+    its choice. The batch comes after every circuit the optimizer sent, so
+    with the same seed everything before it is bit for bit the run without
+    `final_shots` (C-7). It is not counted in `iterations_run` or
+    `fitness_history`, and not in the CUNQA walltime projection.
+  - Enforced by the unit tests in
+    `crates/polypus-orchestration/src/final_batch.rs` (the five best
+    distinct finite candidates, `NaN` and infinities, repeats, `-0.0`, ties,
+    `best_params` first, `Method::final_candidates` for every variant, the
+    winner, a `NaN` and an all-`NaN` batch, a wrong length),
+    `final_shots_add_one_batch_after_an_unchanged_run` in `src/flow.rs`
+    (every optimizer, with and without a walltime watch, over an oracle
+    whose noise depends on the candidates scored before, as the native
+    backend's does: the same batches and outcome, then one batch with the
+    shots and the expected candidates) with the error, interrupt, optimizer
+    error, failing final batch, its warning and `Some(0)` tests there,
+    `the_final_batch_derives_its_seed_from_the_runs` in
+    `crates/polypus-infrastructure/src/execution_config.rs`,
+    `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
+    `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
+    `QmlOracle` (the shots and the derived seed in every wave), the trait's
+    tests in
+    `crates/polypus-optimizers/src/objective.rs`, and
+    `tests/python/test_final_shots.py` (the `ValueError`s before the CUNQA
+    seam, the final batch of every optimizer through both entry points at
+    the seam: its shots, its seed, its candidates, the winner and the
+    unchanged batches before it; an error, an interrupt and a failing final
+    batch; a real Aer run whose final batch is measured afresh; and seeded
+    native runs unchanged with a final value measured with `final_shots`).
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
   stagnation*, not on population-spread collapse. With `fitness_history[g]` the
   best fitness at the end of generation `g` (0-indexed; DE maximises, so this
@@ -1206,7 +1293,15 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `a/k^α` and `c/k^γ` call `powf`, which is not guaranteed correctly rounded
   either, so it reproduces on the same platform and build only;
   `crates/polypus-optimizers/tests/spsa.rs` compares two runs instead of
-  pinning one.
+  pinning one. With `final_shots` (C-5) the final batch is sent after every
+  circuit of the optimizer: the native backend's circuit indices, and so its
+  per-circuit seeds, continue after the optimizer's, and Aer and CUNQA get
+  the run's seed on every call of the optimizer, so a seeded run gives the
+  same `best_params`, `best_fitness` and `fitness_history` with and without
+  it. The final batch reaches Aer and CUNQA with a seed derived from the
+  run's (`final_batch_params`, C-5), since theirs would otherwise measure a
+  candidate at the position it was scored at with the training's random
+  numbers; it reproduces too.
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
@@ -1234,7 +1329,10 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   internally (`predict_<n_qpus>_<infrastructure>_<uuid>`).
 - `train` / `qml.train` return a **`TrainResult`** exposing the full
   optimization outcome — `best_params` (`list[float]`), `best_fitness` (float),
-  `iterations_run` (int), `converged` (bool) — plus `seed` (int, the effective
+  `iterations_run` (int), `converged` (bool), `fitness_history`
+  (`list[float]`) — and the final re-evaluation, `final_params`
+  (`list[float] | None`) and `final_fitness` (`float | None`), both `None`
+  without `final_shots` (C-5), plus `seed` (int, the effective
   seed used) and `id` (str, the effective run id: the caller-supplied `id`
   prefix suffixed with a UUID v4 for uniqueness — a label for logging /
   SLURM / temp-file identification only, never for correlating runs by content;

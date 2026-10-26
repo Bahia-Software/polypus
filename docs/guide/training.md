@@ -37,6 +37,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `backend` | `"aer"` (default) or `"polypus"` for `infrastructure="local"` |
 | `seed` | Optional RNG seed. Without one, a seed is drawn from OS entropy and reported in the result. |
 | `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
+| `final_shots` | Optional shots per circuit for one last batch that re-evaluates the best candidates after the optimizer stops: an integer `>= 1`. See [Final re-evaluation](#final-re-evaluation). |
 
 Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function` propagates as itself.
 
@@ -50,6 +51,8 @@ Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An except
 | `best_fitness` | Fitness at those parameters |
 | `iterations_run` | Iterations actually run, early stopping included |
 | `converged` | Whether the convergence criterion was met |
+| `final_params` | With `final_shots`, the re-evaluated candidate with the best value; otherwise `None` |
+| `final_fitness` | With `final_shots`, its value with `final_shots` shots; otherwise `None` |
 | `seed` | The effective seed; pass it back as `seed=...` to reproduce the run |
 | `id` | The effective run id |
 
@@ -364,6 +367,41 @@ best = max(runs, key=lambda run: run.best_fitness)
 
 In the benchmark, three runs raised the worst instance at p = 5, where single runs sometimes ended in a poor optimum, but their mean there was within noise of one run's. With 500 evaluations and on the HEA they did worse, a third of the budget being too short for each run, and starting from L-SHADE had the higher mean in every scenario.
 
+## Final re-evaluation
+
+Under shot noise, `best_fitness` overstates the value of `best_params`. An optimizer keeps the best of many noisy estimates, and the best estimate is more often one that came out high by chance: the winner's curse. With 256 shots it reached 1.9 % of the maximum cut in the [benchmark](#choosing-an-optimizer), with local optimizers as well as population-based ones. `final_shots` reduces it: there, with `final_shots=4096`, the bias of `final_fitness` was at most 0.15 % on average. Once the optimizer has stopped, its best candidates are evaluated once more, in one batch with `final_shots` shots per circuit, and the result goes to two fields of its own:
+
+```python
+result = polypus.train(
+    qc,
+    polypus.DE(strategy="lshade", generations=100, population_size=30),
+    shots=256,
+    n_qpus=1,
+    dimensions=dimensions,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="maxcut",
+    final_shots=4096,
+)
+result.final_params  # the re-evaluated candidate with the best value
+result.final_fitness  # its value with 4096 shots
+```
+
+| Optimizer | Candidates re-evaluated |
+|---|---|
+| `DE` (every `strategy`), `PSO`, `CMAES` | `best_params` and the four best other distinct candidates the run scored |
+| `QNG`, `Adam`, `SPSA` | `best_params` |
+
+`final_params` is the candidate with the highest re-evaluated value, `best_params` on a tie. Re-evaluating the best few candidates of a population, as Novák et al. recommend, lets the run pick one whose value with many shots beats `best_params`, which may have come first only by its noise. `final_fitness` is then the highest of a few fresh estimates, so it is still slightly optimistic, though far less than `best_fitness`, the highest of the whole run; when `best_params` is re-evaluated alone, it has no bias. `best_params`, `best_fitness` and `fitness_history` remain what the optimizer found: a seeded run sends the same batches with and without `final_shots`, and then the final batch. Without it, `final_params` and `final_fitness` are `None`.
+
+`final_shots` must be an integer `>= 1`; anything else, such as `0`, `4096.0` or `True`, raises `ValueError` before anything runs. `qml.train` takes it as a keyword argument and runs every training circuit of each candidate with those shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. It is sampled with a seed of its own, derived from the run's, so its values are independent of the training's and a seeded run still reproduces them. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises. The run logs `best_params` and `best_fitness` before the batch (at `INFO`) and again as a warning if it fails, so the optimizer's result can still be read from the log.
+
+**References.**
+
+- V. Novák, S. Illésová, T. Bezděk, I. Zelinka and M. Beseda, "Reliable Optimization Under Noise in Quantum Variational Algorithms", arXiv:2511.08289 (2025).
+
 ## Choosing an optimizer
 
 [`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains two circuits for MaxCut on random 3-regular graphs of 10 nodes, with each optimizer at the same evaluation budget: QAOA with depth p = 3 or 5 (6 or 10 parameters), and a hardware-efficient ansatz (HEA) of three layers of RY on every qubit with a linear chain of CZ between them (Qiskit's `TwoLocal` with `ry`, `cz`, `entanglement="linear"` and `reps=2`), 30 parameters. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. Adam uses its defaults on both circuits. Momentum uses a learning rate tuned for each circuit on separate instances, 0.03 for QAOA and 0.1 for the HEA, with a `finite_difference_step` of 0.4. "L-SHADE, then Adam" gives half the budget to L-SHADE and the rest to Adam, started from L-SHADE's `best_params`; "Adam ×3" gives a third to each of three Adam runs with different seeds and keeps the one with the best `best_fitness`. SPSA runs with one perturbation per iteration and with eight (`resamplings=8`), both with the settings tuned with one perturbation on separate instances, so the two differ only in the perturbations: `perturbation=0.2` and `target_step=1.2` on QAOA, the defaults (0.1 and 0.63) on the HEA; each makes as many iterations as fit the budget after its calibration. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
@@ -432,6 +470,6 @@ What the data says:
 - **Don't enlarge CMA-ES's population to fill QPUs, and don't count on IPOP restarts.** With a population of 30, CMA-ES's mean ratio was below its default population's in every scenario, by 0.005 to 0.037, though still about 0.01 above the classic DE's at 1500 and 3000 evaluations. IPOP restarts stayed within 0.01 of the classic DE on QAOA and gained +0.015 ± 0.014 on the HEA, against +0.170 without them.
 - **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters and 10.6 with 30, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
 - **With 500 evaluations only the Adam-based optimizers were clearly better than the classic DE,** by 0.025 to 0.045; the DE strategies and CMA-ES gained 0.008 at most.
-- **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. SPSA measures its parameters only every 20 iterations, so it picks from fewer estimates: 0.4 to 1.0 % on QAOA and 0.1 % on the HEA. Re-evaluate `best_params` with more shots when the value itself matters.
+- **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. SPSA measures its parameters only every 20 iterations, so it picks from fewer estimates: 0.4 to 1.0 % on QAOA and 0.1 % on the HEA. Pass `final_shots` when the value itself matters ([Final re-evaluation](#final-re-evaluation)): with `final_shots=4096`, 16 times the training shots, `final_fitness` was within 0.15 % of the exact value of `final_params` on average for every optimizer in every scenario, and within 0.6 % in every run. For Adam and SPSA it is a fresh estimate of `best_params`, without bias: its mean error was 0.07 % at most in every scenario. For DE and CMA-ES it is the highest of five noisy values, so it stays slightly optimistic, by up to 0.15 % (CMA-ES at p = 3 with 1500 evaluations). Their `final_params` was another candidate than `best_params` in 6 to 24 runs of 30, and a better one in 154 of those 179 runs (worse by 0.0033 at most otherwise); their mean ratio rose in every scenario, by +0.0010 ± 0.0006 (the classic DE at p = 3 with 1500 evaluations) to +0.0050 ± 0.0010 (L-SHADE on the HEA).
 
-These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates and SPSA's steps were tuned for these two circuits. CMA-ES's and SPSA's rows may differ on another platform or build; see the reproducibility notes under [CMA-ES](#cma-es) and [SPSA](#spsa). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs), and the SPSA rows from `--full --only rand1bin lshade adam spsa spsa-k8` at commit `0973cf8` on the same platform, whose `rand1bin`, `lshade` and `adam` runs were identical to the first run's. The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE, from Adam and from SPSA, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio. `--json FILE` also writes the per-instance results.
+These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates and SPSA's steps were tuned for these two circuits. CMA-ES's and SPSA's rows may differ on another platform or build; see the reproducibility notes under [CMA-ES](#cma-es) and [SPSA](#spsa). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs), and the SPSA rows from `--full --only rand1bin lshade adam spsa spsa-k8` at commit `0973cf8` on the same platform, whose `rand1bin`, `lshade` and `adam` runs were identical to the first run's. The `final_shots` figures come from `--full --scenario 3:256:1500 5:256:3000 3:256:500 hea:2:256:5000 --only rand1bin lshade cmaes adam spsa --final-shots 4096` at commit `4a06b46` on the same platform, whose ratios, biases and batches were identical to those runs'. The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE, from Adam and from SPSA, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio; with `--final-shots`, also the ratio of `final_params`, the bias of `final_fitness` on average and at its largest, the paired change of ratio from `best_params` to `final_params`, and how many runs returned another candidate, how many of those it was better in, and the worst change among them. `--json FILE` also writes the per-instance results.

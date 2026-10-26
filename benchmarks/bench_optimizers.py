@@ -104,6 +104,31 @@ A second table gives the paired differences from ``lshade``, from ``adam`` and
 from ``spsa`` when they ran, and a last line how ``lshade-adam``'s Adam stage
 changed the ratio of its L-SHADE stage.
 
+``--final-shots N`` passes ``final_shots=N`` to every ``polypus.train``
+call: once each optimizer has stopped, its best candidates (``best_params``
+and, for DE, PSO and CMA-ES, four more) are re-evaluated in one batch with N
+shots per circuit. The meter lets that batch through outside the budget,
+with N shots and a sampling stream of its own, so every batch before it, and
+so the ``best_params`` rows, are those of the run without it; it counts the
+batch apart. N must differ from the scenario's shots, which is how the meter
+tells the final batch. Two more columns are then reported:
+
+  final ratio  mean exact approximation ratio of ``final_params``
+  final bias   mean (``final_fitness`` − exact value of ``final_params``) /
+               max cut
+
+and every run in the JSON gets ``final_shots``, ``final_fitness``,
+``final_ratio``, ``final_bias``, ``final_evaluations`` and ``final_batches``
+(the final batch's circuits and calls) and ``final_is_best``
+(``final_params == best_params``). A chained run reports the final values of
+the result it is scored on and counts every stage's final batch. A last table
+then compares ``final_params`` with ``best_params`` per optimizer: the mean
+paired change in ratio, ± its standard error, the runs whose
+``final_params`` is another candidate, how many of those it is better in,
+the worst change, and the largest |final bias| of a run. The final values
+are printed to four decimals, since a re-evaluation with many shots leaves
+little bias to show.
+
 Usage
 -----
   python benchmarks/bench_optimizers.py                  # QAOA p=3, 256 shots, 1500 evals, 10 instances
@@ -113,6 +138,7 @@ Usage
   python benchmarks/bench_optimizers.py --scenario 3:exact:1500   # 2^20 shots
   python benchmarks/bench_optimizers.py --scenario hea:2:256:5000 # the 30-parameter HEA
   python benchmarks/bench_optimizers.py --only rand1bin adam lshade-adam --json results.json
+  python benchmarks/bench_optimizers.py --only lshade cmaes adam --final-shots 4096
 
 Every run is written to ``--json``; those of ``lshade-adam`` and ``adam-x3``
 also list their ``stages``, the evaluations, batches, reported fitness and
@@ -262,30 +288,45 @@ class Instance:
 
 class Meter:
     """Replacement for ``polypus_python.run_qcs``: simulates each circuit of
-    a batch natively and samples its shots, while the run is within its
-    evaluation budget; past it, a batch measures the empty cut."""
+    a batch natively and samples the shots each call asks for, while the run
+    is within its evaluation budget; past it, a batch measures the empty cut.
 
-    def __init__(self, nodes, budget, seed):
+    With ``final_shots``, a call with those shots is a final batch: it is
+    simulated outside the budget, counted apart, and sampled from a stream of
+    its own, so the optimizer's batches sample exactly as without it."""
+
+    def __init__(self, nodes, budget, seed, final_shots=None):
         self.nodes = nodes
         self.budget = budget
         self.rng = np.random.default_rng(seed)
+        self.final_shots = final_shots
+        self.final_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(1)[0])
         self.evaluations = 0
         self.batches = 0
         self.refused = 0
+        self.final_evaluations = 0
+        self.final_batches = 0
         self.keys = [format(k, f"0{nodes}b") for k in range(2**nodes)]
 
     def __call__(self, infrastructure, **kwargs):
         qcs, shots = kwargs["qcs"], kwargs["shots"]
+        if self.final_shots is not None and shots == self.final_shots:
+            self.final_evaluations += len(qcs)
+            self.final_batches += 1
+            return self.sample(qcs, shots, self.final_rng)
         if self.evaluations + len(qcs) > self.budget:
             self.refused += len(qcs)
             return [{"0" * self.nodes: shots} for _ in qcs]
         self.evaluations += len(qcs)
         self.batches += 1
+        return self.sample(qcs, shots, self.rng)
+
+    def sample(self, qcs, shots, rng):
         results = []
         for qasm in qcs:
             state = polypus.statevector(polypus.Circuit.from_qasm2(qasm))
             probabilities = np.abs(state) ** 2
-            counts = self.rng.multinomial(shots, probabilities / probabilities.sum())
+            counts = rng.multinomial(shots, probabilities / probabilities.sum())
             results.append({self.keys[k]: int(c) for k, c in enumerate(counts) if c})
         return results
 
@@ -413,7 +454,7 @@ def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
     raise ValueError(f"unknown optimizer {name!r}")
 
 
-def train(instance, method, shots, seed, initial_point=None):
+def train(instance, method, shots, seed, initial_point=None, final_shots=None):
     """One ``polypus.train`` run of ``method`` on ``instance``, through the
     local seam."""
     return polypus.train(
@@ -430,6 +471,7 @@ def train(instance, method, shots, seed, initial_point=None):
         backend="aer",
         seed=seed,
         initial_point=initial_point,
+        final_shots=final_shots,
     )
 
 
@@ -437,21 +479,27 @@ def train_stage(instance, name, method, shots, seed, meter, stages, **kwargs):
     """``train``, recording in ``stages`` what the run spent and found."""
     evaluations, batches = meter.evaluations, meter.batches
     result = train(instance, method, shots, seed, **kwargs)
-    stages.append(
-        {
-            "optimizer": name,
-            "seed": seed,
-            "evaluations": meter.evaluations - evaluations,
-            "batches": meter.batches - batches,
-            "iterations_run": result.iterations_run,
-            "best_fitness": result.best_fitness,
-            "ratio": instance.expected_cut(result.best_params) / instance.max_cut,
-        }
-    )
+    stage = {
+        "optimizer": name,
+        "seed": seed,
+        "evaluations": meter.evaluations - evaluations,
+        "batches": meter.batches - batches,
+        "iterations_run": result.iterations_run,
+        "best_fitness": result.best_fitness,
+        "ratio": instance.expected_cut(result.best_params) / instance.max_cut,
+    }
+    if result.final_params is not None:
+        stage["final_fitness"] = result.final_fitness
+        stage["final_ratio"] = (
+            instance.expected_cut(result.final_params) / instance.max_cut
+        )
+    stages.append(stage)
     return result
 
 
-def lshade_then_adam(instance, shots, budget, population, restarts, seed, meter):
+def lshade_then_adam(
+    instance, shots, budget, population, restarts, seed, meter, final_shots=None
+):
     """L-SHADE explores with half the budget, then Adam refines its best
     point with the evaluations left. The run is Adam's."""
     stages = []
@@ -464,6 +512,7 @@ def lshade_then_adam(instance, shots, budget, population, restarts, seed, meter)
         seed,
         meter,
         stages,
+        final_shots=final_shots,
     )
     refine = train_stage(
         instance,
@@ -474,11 +523,22 @@ def lshade_then_adam(instance, shots, budget, population, restarts, seed, meter)
         meter,
         stages,
         initial_point=explore.best_params,
+        final_shots=final_shots,
     )
     return refine, stages
 
 
-def adam_restarts(instance, shots, budget, population, restarts, seed, meter, runs=3):
+def adam_restarts(
+    instance,
+    shots,
+    budget,
+    population,
+    restarts,
+    seed,
+    meter,
+    final_shots=None,
+    runs=3,
+):
     """``runs`` Adam runs with different seeds, each with an equal share of
     the evaluations still left; the best reported ``best_fitness`` wins.
 
@@ -496,6 +556,7 @@ def adam_restarts(instance, shots, budget, population, restarts, seed, meter, ru
             seed + RESTART_SEED_STEP * k,
             meter,
             stages,
+            final_shots=final_shots,
         )
         if best is None or result.best_fitness > best.best_fitness:
             best = result
@@ -505,20 +566,35 @@ def adam_restarts(instance, shots, budget, population, restarts, seed, meter, ru
 CHAINED = {"lshade-adam": lshade_then_adam, "adam-x3": adam_restarts}
 
 
-def run_one(instance, name, shots, budget, population, restarts, seed):
-    meter = Meter(instance.nodes, budget, seed=10_000 + seed)
+def run_one(
+    instance, name, shots, budget, population, restarts, seed, final_shots=None
+):
+    if final_shots is not None and final_shots == shots:
+        raise ValueError(
+            f"final_shots ({final_shots}) must differ from the scenario's shots, "
+            "which is how the meter tells the final batch"
+        )
+    meter = Meter(instance.nodes, budget, seed=10_000 + seed, final_shots=final_shots)
     polypus_python.run_qcs = meter
     start = time.perf_counter()
     if name in CHAINED:
         result, stages = CHAINED[name](
-            instance, shots, budget, population, restarts, seed, meter
+            instance,
+            shots,
+            budget,
+            population,
+            restarts,
+            seed,
+            meter,
+            final_shots=final_shots,
         )
         iterations_run = sum(stage["iterations_run"] for stage in stages)
     else:
         method = make_method(
             name, instance.dimensions, budget, population, restarts, instance.problem
         )
-        result, stages = train(instance, method, shots, seed), None
+        result = train(instance, method, shots, seed, final_shots=final_shots)
+        stages = None
         iterations_run = result.iterations_run
     elapsed = time.perf_counter() - start
     if name != "cmaes-ipop" and meter.refused:
@@ -534,6 +610,19 @@ def run_one(instance, name, shots, budget, population, restarts, seed):
         "iterations_run": iterations_run,
         "seconds": elapsed,
     }
+    if final_shots is not None:
+        final_exact = instance.expected_cut(result.final_params)
+        row.update(
+            {
+                "final_shots": final_shots,
+                "final_fitness": result.final_fitness,
+                "final_ratio": final_exact / instance.max_cut,
+                "final_bias": (result.final_fitness - final_exact) / instance.max_cut,
+                "final_evaluations": meter.final_evaluations,
+                "final_batches": meter.final_batches,
+                "final_is_best": result.final_params == result.best_params,
+            }
+        )
     if stages is not None:
         row["stages"] = stages
     return row
@@ -547,12 +636,14 @@ def paired(runs, reference):
     (both by instance), ± its standard error, and the share of instances where
     ``runs`` did better (ties count half)."""
     diffs = [runs[s]["ratio"] - reference[s]["ratio"] for s in runs]
-    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
     share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
-    return (
-        f"{statistics.fmean(diffs):+.3f} ± {se:.3f}",
-        f"{100 * share / len(diffs):.0f} %",
-    )
+    return mean_and_error(diffs), f"{100 * share / len(diffs):.0f} %"
+
+
+def mean_and_error(diffs, digits=3):
+    """The mean of ``diffs`` ± its standard error, to ``digits`` decimals."""
+    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
+    return f"{statistics.fmean(diffs):+.{digits}f} ± {se:.{digits}f}"
 
 
 def summarise(rows, optimizers):
@@ -561,10 +652,11 @@ def summarise(rows, optimizers):
         for name in optimizers
     }
     base = by.get(BASELINE)
+    final = any("final_ratio" in r for r in rows)
     lines = [
         "| Optimizer | ratio | lowest | Δ vs rand1bin | wins | bias | evals | batches "
-        "| time (s) |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| time (s) |" + (" final ratio | final bias |" if final else ""),
+        "|---|---|---|---|---|---|---|---|---|" + ("---|---|" if final else ""),
     ]
     for name in optimizers:
         runs = list(by[name].values())
@@ -574,11 +666,14 @@ def summarise(rows, optimizers):
             delta, wins = "—", "—"
         else:
             delta, wins = paired(by[name], base)
-        lines.append(
+        line = (
             f"| {name} | {mean('ratio'):.3f} | {lowest:.3f} | {delta} | {wins} "
             f"| {mean('bias'):+.3f} | {mean('evaluations'):.0f} "
             f"| {mean('batches'):.0f} | {mean('seconds'):.2f} |"
         )
+        if final:
+            line += f" {mean('final_ratio'):.3f} | {mean('final_bias'):+.4f} |"
+        lines.append(line)
     references = [name for name in ("lshade", "adam", "spsa") if name in by]
     if references:
         lines += [
@@ -608,7 +703,38 @@ def summarise(rows, optimizers):
             f"{statistics.fmean(gains):+.3f} on average ({min(gains):+.3f} at worst) "
             f"and raised it on {sum(g > 0 for g in gains)} of {len(gains)} instances.",
         ]
+    if final:
+        lines += [
+            "",
+            "| Optimizer | final − best ratio | other candidate | better | worst "
+            "| largest final bias |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name in optimizers:
+            runs = list(by[name].values())
+            moved = [
+                r["final_ratio"] - r["ratio"] for r in runs if not r["final_is_best"]
+            ]
+            changes = [r["final_ratio"] - r["ratio"] for r in runs]
+            change = mean_and_error(changes, digits=4)
+            worst = f"{min(moved):+.4f}" if moved else "—"
+            largest = max(abs(r["final_bias"]) for r in runs)
+            lines.append(
+                f"| {name} | {change} | {len(moved)} of {len(runs)} "
+                f"| {sum(m > 0 for m in moved)} | {worst} | {largest:.4f} |"
+            )
     return "\n".join(lines)
+
+
+def positive_int(text):
+    """An integer >= 1, for ``--final-shots``."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected an integer >= 1, got {text!r}")
+    return value
 
 
 def parse_scenario(text):
@@ -699,6 +825,14 @@ def parse_args(argv=None):
         action="store_true",
         help="smoke run: 6 nodes, scenario 1:64:120, 2 instances, P = 8",
     )
+    p.add_argument(
+        "--final-shots",
+        type=positive_int,
+        default=None,
+        metavar="N",
+        help="re-evaluate each run's best candidates with N shots once it stops "
+        "(polypus.train's final_shots), outside the budget (default: off)",
+    )
     p.add_argument("--json", type=Path, default=None, help="write every run here")
     args = p.parse_args(argv)
     if args.full:
@@ -757,6 +891,7 @@ def main(argv=None):
                         args.de_population,
                         args.restarts,
                         seed,
+                        final_shots=args.final_shots,
                     )
                 )
         print(summarise(rows, optimizers), flush=True)
@@ -770,6 +905,7 @@ def main(argv=None):
                 "budget": budget,
                 "de_population": args.de_population,
                 "restarts": args.restarts,
+                "final_shots": args.final_shots,
                 "runs": rows,
             }
         )
