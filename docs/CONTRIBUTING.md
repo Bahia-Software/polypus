@@ -83,6 +83,18 @@ cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets --
 cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+cargo machete                              # unused dependencies (needs cargo-machete)
+```
+
+Declared dependency floors (the `rust-minimal-versions` and `python-floors`
+jobs). The first rewrites `Cargo.lock`; restore it afterwards with
+`git checkout Cargo.lock`. The second needs a fresh environment on Python 3.10
+and installs the build requirements at their floors first (see the job):
+
+```bash
+cargo +nightly-2026-10-22 update -Z direct-minimal-versions
+cargo check --workspace --all-targets
+uv pip install --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
 ```
 
 Rust tests:

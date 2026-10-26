@@ -152,7 +152,7 @@ jobs:
       # install them at their floors and build without isolation.
       - name: Build the wheel with the lowest allowed maturin
         run: |
-          uv pip install --system tomli
+          uv pip install --system tomli==2.5.0
           python -c 'import tomli; print("\n".join(tomli.load(open("pyproject.toml", "rb"))["build-system"]["requires"]))' > "$RUNNER_TEMP/build-requirements.txt"
           uv pip install --system --resolution lowest-direct -r "$RUNNER_TEMP/build-requirements.txt"
           maturin --version
