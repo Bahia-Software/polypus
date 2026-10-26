@@ -92,10 +92,7 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 /// * `level` — `off`/`error`/`warn`/`info`/`debug`/`trace`. This is the
 ///   **runtime** level: it can only lower the compile-time ceiling, never raise
 ///   it (see "Compile-time level ceiling" below). Optimizer progress is emitted
-///   at `debug`, so to capture it pass `"debug"` **and** build with
-///   `--no-default-features --features debug-logs` — the default `info-logs`
-///   build compiles `debug!`/`trace!` out entirely, so `level="debug"` alone
-///   captures nothing.
+///   at `debug`; pass `"debug"` to capture it.
 /// * `format` — `"text"` or `"json"`.
 /// * `file` — explicit path to a log file, used **verbatim** (no timestamp is
 ///   appended). Missing parent directories are created; the file is opened in
@@ -118,16 +115,13 @@ fn warn_logger_already_installed(py: Python<'_>) -> PyResult<()> {
 ///
 /// # Compile-time level ceiling
 /// `level` is a *runtime* filter and can only lower the ceiling fixed at build
-/// time by `polypus`'s `*-logs` Cargo features (default `info-logs`, forwarded to
-/// `polypus-logger`). Under the default build, `debug!`/`trace!` records are
-/// compiled out, so `init_logger(level="debug")` will **not** capture debug
-/// output — including optimizer per-generation progress. `log` treats its
-/// `max_level_*` features as mutually exclusive (a hard compile error if more
-/// than one is active), so raising the ceiling means **disabling** the default
-/// first, not adding to it:
-/// `maturin develop --release --no-default-features --features "extension-module debug-logs"`.
-/// Adding `debug-logs` on top of the default `info-logs` *without*
-/// `--no-default-features` leaves both active at once and fails to build.
+/// time by `polypus`'s `*-logs` Cargo features (forwarded to `polypus-logger`).
+/// The wheel is built with `debug-logs` (`[tool.maturin] features` in
+/// `pyproject.toml`), so `level="trace"` behaves as `"debug"`. Capturing
+/// `trace!` records needs a build with `trace-logs` instead of `debug-logs`
+/// (`log` refuses two `max_level_*` features in one build):
+/// `maturin develop --release --features "extension-module trace-logs"` after
+/// removing `debug-logs` from `pyproject.toml`.
 ///
 /// # Re-initialization
 /// A global logger can be installed only once per process. A second call (e.g.
