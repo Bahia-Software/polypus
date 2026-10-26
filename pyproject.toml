@@ -1,5 +1,8 @@
 [build-system]
-requires = ["maturin>=1.8,<2.0"]
+# 1.9.2 is the first maturin that writes `license` as a PEP 639
+# License-Expression (1.8.0 and 1.8.1 cannot parse `license-files`). CI builds
+# with this floor (python-floors job).
+requires = ["maturin>=1.9.2,<2.0"]
 build-backend = "maturin"
 
 [project]
