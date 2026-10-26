@@ -323,8 +323,9 @@ class TestStartingPoint:
                 assert got == pytest.approx(want, abs=1e-12)
         elif name == "spsa":
             # 25 pairs θ₀ ± c·Δ around θ₀ = POINT, Δ of ±1 components, then
-            # the first iteration measures θ₀ first. (The QML oracle may split
-            # a batch into windows, so the circuits are read in order.)
+            # the first iteration measures θ₀ first, with one pair, and the
+            # final θ is one circuit. (The QML oracle may split a batch into
+            # windows, so the circuits are read in order.)
             sent = [candidate(qc) for batch in batches for qc in batch]
             calibration = sent[:50]
             for plus, minus in zip(calibration[::2], calibration[1::2]):
@@ -335,7 +336,7 @@ class TestStartingPoint:
                     [SPSA_STEP] * DIMENSIONS, abs=1e-12
                 )
             assert sent[50] == pytest.approx(POINT, abs=1e-12)
-            assert len(sent) == 50 + 3
+            assert len(sent) == 50 + 3 + 1
         elif name == "cmaes":
             # 4 + floor(3 ln 2) = 6 candidates, all on the first mean.
             assert len(first) == 6

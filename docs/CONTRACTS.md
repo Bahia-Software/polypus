@@ -997,18 +997,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - Iteration `k = 1, …, max_iters` makes **one** `evaluate_batch`, its length
     checked: `K = resamplings` fresh pairs `[θ_k + c_k·Δ, θ_k − c_k·Δ]`,
     `2K` candidates, headed by `θ_k` itself (`2K + 1`) on the first
-    iteration, every `eval_interval` iterations after it and on the last. It
-    steps `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and
-    `ĝ_k` the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
-    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays.
+    iteration and every `eval_interval` iterations after it. It steps
+    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and `ĝ_k`
+    the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
+    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays. After the last step,
+    one `evaluate_batch` of one candidate, its length checked, measures the
+    `θ` it reached, so the last iteration's pairs feed a measured step.
   - `best_params` is the measured `θ_k` with the best fitness and
     `best_fitness` the value the oracle returned for it (the perturbed
     candidates never count), kept as Adam's: the first measurement, then only
     a strictly better one, so a `NaN` never wins over a number.
-    `fitness_history[k − 1]` is the best measured up to iteration `k`; the
-    first iteration measures θ₀ and the last its `θ`, so every entry is
-    defined and the last is `best_fitness`. The step after the last
-    iteration is not measured.
+    `fitness_history[k − 1]` is the best measured up to iteration `k`, the
+    final `θ` counted in the last entry; the first iteration measures θ₀, so
+    every entry is defined, and the last is `best_fitness`.
   - No early stop: the run makes `max_iters` iterations and reports
     `converged = false`, as QNG does.
   - The gains use `powf`, so a seeded run reproduces on the same platform and
@@ -1016,28 +1017,32 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - In a training run the calibration is a leading batch of the CUNQA
     walltime projection (`RunShape::leading_batches`): it is not timed, and
     its circuits count as iterations at the first iteration's pace. The
-    first iteration measures θ, `2K + 1` circuits where most iterations have
+    final `θ` counts as one more iteration, a bound on its single candidate.
+    The first iteration measures θ, `2K + 1` circuits where most iterations have
     `2K`, so when the circuits run one after another the projection can be
     up to `(2K + 1)/2K` of the real time (1.5× with `K = 1`).
   - Enforced by `crates/polypus-optimizers/tests/spsa.rs` (the calibration
     batch and the first step it sets, the flat and non-finite fallbacks and a
     non-finite pair left out; one batch of `2K` per iteration with `θ` first
-    when measured; every step against Spall's recurrence; the C-5
+    when measured, then the final `θ` alone; every step against Spall's
+    recurrence, the last included; the C-5
     postconditions against the batches the oracle saw over 25 seeds, with one
     and several perturbations; convergence on a sphere and a periodic cosine;
     seeded reproducibility; a `NaN` measurement, a non-finite estimate and an
     oracle of only `NaN`; every rejected configuration with no oracle call;
-    the oracle's length check; and a single iteration), the unit tests in
+    the oracle's length check, the final `θ`'s included; and a single
+    iteration, which steps and measures where it lands), the unit tests in
     `src/spsa.rs`, the `spsa_*` tests in
     `crates/polypus-orchestration/src/dispatch.rs` and
     `spsa_run_shape_counts_the_batches_the_optimizer_sends` with
     `the_spsa_calibration_is_not_timed_as_the_first_iteration` in
     `src/walltime.rs`. Through Python, `tests/python/test_spsa.py` pins the
-    calibration and the batches at the seam, the pairs centred on `θ`, the
+    calibration and the batches at the seam, the final `θ` included, the
+    pairs centred on `θ`, the
     configuration rejected before any batch on both entry points, the
     defaults and a native climb; the SPSA cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
-    `θ`'s own included.
+    `θ`'s own and the final `θ`'s included.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

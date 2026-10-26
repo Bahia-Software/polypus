@@ -1286,7 +1286,8 @@ mod tests {
 
     /// Dispatch hands every `SpsaConfig` field and the seed to SPSA: the
     /// outcome is the one `AlgorithmSPSA::optimize` returns for the same
-    /// arguments, after a calibration batch of 50 and one batch per iteration.
+    /// arguments, after a calibration batch of 50, one batch per iteration and
+    /// the final θ.
     #[test]
     fn spsa_dispatch_runs_the_configured_optimizer() {
         let (oracle, log) = recorder();
@@ -1299,8 +1300,8 @@ mod tests {
             None,
         )
         .unwrap_or_else(|_| panic!("a valid SPSA run must succeed"));
-        // θ heads the batches of iterations 1, 5 and 9.
-        assert_eq!(sizes(&log), [50, 7, 6, 6, 6, 7, 6, 6, 6, 7]);
+        // θ heads the batches of iterations 1, 5 and 9; the final θ is alone.
+        assert_eq!(sizes(&log), [50, 7, 6, 6, 6, 7, 6, 6, 6, 7, 1]);
         let (oracle, _) = recorder();
         let direct = AlgorithmSPSA
             .optimize(AlgorithmSPSAArgs {

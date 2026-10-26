@@ -59,7 +59,8 @@ impl Method {
     /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over));
     /// an SPSA iteration is one batch of its perturbations (and θ when it is
     /// measured), after one leading calibration batch of 50 circuits, which
-    /// the watch does not time as the first iteration. SPSA's first iteration
+    /// the watch does not time as the first iteration, and its final θ, one
+    /// candidate, counts as one more iteration. SPSA's first iteration
     /// measures θ, so it holds `2K + 1` circuits where most hold `2K`, for
     /// `K` perturbations: when the circuits run one after another (one QPU),
     /// the projection can be up to `(2K + 1) / 2K` of the real time, 1.5×
@@ -114,9 +115,11 @@ impl Method {
             },
             // One batch per iteration, 2·resamplings perturbed points and θ
             // when it is measured, after the calibration batch of 50.
+            // After the last step the final θ is scored alone; a full
+            // iteration bounds it.
             Method::Spsa(cfg) => RunShape {
                 batches_per_generation: 1,
-                generations: u64::from(cfg.max_iters),
+                generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 1,
                 unit: "iterations",
             },
@@ -973,7 +976,8 @@ mod tests {
     }
 
     /// `run_shape` counts exactly the batches SPSA sends: the leading
-    /// calibration, then one per iteration (SPSA never stops early).
+    /// calibration, then one per iteration (SPSA never stops early) and the
+    /// final θ.
     #[test]
     fn spsa_run_shape_counts_the_batches_the_optimizer_sends() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
@@ -988,6 +992,7 @@ mod tests {
             let label = format!("{max_iters} × {resamplings}, every {eval_interval}");
             assert!(outcome.is_some_and(|o| o.iterations_run == max_iters as usize));
             assert_eq!(shape.leading_batches, 1, "{label}");
+            assert_eq!(shape.generations, u64::from(max_iters) + 1, "{label}");
             assert_eq!(
                 *batches.lock().unwrap(),
                 u64::from(shape.leading_batches)
@@ -999,8 +1004,8 @@ mod tests {
 
     /// Through the watch, an SPSA run's calibration (50 circuits) is not timed
     /// as its first iteration (θ₀ and one pair, 3 circuits): at 10 s a
-    /// circuit, 300 iterations project to 30 s × (300 + 50/3) = 2:38:20, not
-    /// 500 s × 300.
+    /// circuit, 299 iterations and the final θ project to
+    /// 30 s × (300 + 50/3) = 2:38:20, not 500 s × 300.
     #[test]
     fn the_spsa_calibration_is_not_timed_as_the_first_iteration() {
         capture_logs();
@@ -1011,7 +1016,7 @@ mod tests {
             clock: Arc::clone(&clock),
             per_circuit: Duration::from_secs(10),
         });
-        let method = spsa(300, 1, 20);
+        let method = spsa(299, 1, 20);
         let oracles = watched(
             oracle.into(),
             Duration::from_secs(2 * 3600),

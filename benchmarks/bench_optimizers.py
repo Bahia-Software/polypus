@@ -62,8 +62,8 @@ without restarts ``budget / λ`` generations, and Adam ``budget / (2d + 1)``
 iterations, each one batch of the current point and the central difference
 around it. SPSA runs the most iterations that fit after its 50-circuit
 calibration: each is one batch of ``2K`` circuits for ``K`` perturbations,
-plus the current point on the first iteration, every 20th after it and the
-last (``spsa_iterations``). IPOP's batch sizes depend on when its restarts happen, so no
+plus the current point on the first iteration and every 20th after it, and
+one evaluation measures its final point (``spsa_iterations``). IPOP's batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -299,12 +299,10 @@ def adam_iterations(dimensions, budget):
 
 def spsa_evaluations(max_iters, resamplings, eval_interval=20):
     """The circuits an SPSA run sends: the calibration, then ``2K`` per
-    iteration, plus the current point on iterations 1, 1 + eval_interval, …
-    and the last."""
+    iteration, plus the current point on iterations 1, 1 + eval_interval, …,
+    and the final point after the last step."""
     measured = (max_iters - 1) // eval_interval + 1
-    if (max_iters - 1) % eval_interval:
-        measured += 1
-    return SPSA_CALIBRATION + 2 * resamplings * max_iters + measured
+    return SPSA_CALIBRATION + 2 * resamplings * max_iters + measured + 1
 
 
 def spsa_iterations(budget, resamplings):
@@ -314,8 +312,8 @@ def spsa_iterations(budget, resamplings):
         iterations -= 1
     if iterations < 1:
         raise ValueError(
-            f"a budget of {budget} evaluations does not fit SPSA's calibration "
-            f"and one iteration of {2 * resamplings + 1}"
+            f"a budget of {budget} evaluations does not fit SPSA's calibration, "
+            f"one iteration of {2 * resamplings + 1} and its final point"
         )
     return iterations
 

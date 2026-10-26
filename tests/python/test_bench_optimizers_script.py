@@ -241,7 +241,8 @@ def test_the_budget_fixes_every_generation_count():
     for name in ("spsa", "spsa-k8"):
         hea = script.make_method(name, 30, 5000, 30, 3, "hea")
         assert (hea.perturbation, hea.target_step) == (0.1, 0.63)
-    # 50 + 2·706 + 37 measurements; one iteration more would not fit.
+    # 50 + 2·706 + 36 measurements and the final point; one iteration more
+    # would not fit.
     assert script.spsa_evaluations(706, 1) == 1499
     assert script.spsa_evaluations(707, 1) == 1501
     assert script.spsa_evaluations(90, 8) == 1496
@@ -253,7 +254,8 @@ def test_the_budget_fixes_every_generation_count():
 @pytest.mark.parametrize("name", ["spsa", "spsa-k8"])
 def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
     """The meter sees exactly the circuits ``spsa_evaluations`` counts, in
-    one batch for the calibration and one per iteration."""
+    one batch for the calibration, one per iteration and one for the final
+    point."""
     script = _load_script()
     monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
     train, calls = script.train, []
@@ -271,5 +273,5 @@ def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
         method.max_iters, method.resamplings
     )
     assert run["evaluations"] <= 120
-    assert run["batches"] == method.max_iters + 1
+    assert run["batches"] == method.max_iters + 2
     assert run["iterations_run"] == method.max_iters

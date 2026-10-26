@@ -237,18 +237,18 @@ A run has three parts:
 
 1. **Calibration.** One batch of 50 circuits around the starting point θ₀, 25 random perturbations in both directions, measures how large the gradient estimates are there, and SPSA sets its gain so that the first step moves each parameter by about `target_step` radians, following Spall's guideline (1998), as Qiskit's `SPSA.calibrate` does. Each pair gives `|f₊ − f₋| / (2·perturbation)`, the size of every component of its estimate, and the gain is `target_step` over their mean. If every pair has the same fitness (a flat landscape around θ₀), the gain is `target_step` and a warning is logged.
 2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / k^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults.
-3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration, every `eval_interval` iterations after it and on the last, as Jones, Mineh and Montanaro do (arXiv:2411.13742). `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration. The step after the last iteration is not measured.
+3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration and every `eval_interval` iterations after it, as Jones, Mineh and Montanaro do (arXiv:2411.13742), and after the last step one more circuit measures the parameters it reached, so the last iteration's circuits are not wasted on a step that is never measured. `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration, the final parameters counted in the last entry.
 
 | Parameter | Description |
 |---|---|
-| `max_iters` | Iterations, each one batch of `2 × resamplings` circuits, plus one when θ is measured. At least 1 |
+| `max_iters` | Iterations, each one batch of `2 × resamplings` circuits, plus one when θ is measured; the final parameters cost one circuit more. At least 1 |
 | `resamplings` | Perturbations averaged per iteration, at least 1. Each adds two circuits to the iteration's batch |
 | `perturbation` | `c`, the size of the first perturbations in radians, finite and `> 0` |
 | `target_step` | Size of the first step on each parameter, in radians, finite and `> 0`. The default `0.63` is about `2π/10` |
 | `alpha`, `gamma` | Decay exponents of the steps and of the perturbations: `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5`, Spall's conditions for the iterates to converge |
 | `eval_interval` | Iterations between measurements of θ, at least 1 |
 
-θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `1 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `2 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, the final one included, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
 **When to prefer SPSA: many parameters, few QPUs.** An Adam iteration is one batch of `2 × dimensions + 1` circuits, 61 for 30 parameters and 401 for 200, which a single QPU runs one after another. An SPSA iteration is 2 circuits whatever the number of parameters. Its estimates are noisier than a finite difference, so it takes many cheap steps where Adam takes few expensive ones.
 

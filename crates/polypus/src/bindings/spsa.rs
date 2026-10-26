@@ -8,7 +8,8 @@ use pyo3::prelude::*;
 /// starting point that sets the gain so the first step moves each parameter by
 /// about `target_step`. Each iteration then sends one batch of
 /// `2·resamplings` circuits, plus the current parameters on the first
-/// iteration, every `eval_interval` iterations after it and on the last.
+/// iteration and every `eval_interval` iterations after it; after the last
+/// step, one more circuit measures the parameters it reached.
 /// `best_params` is the best of the parameters measured. The run always makes
 /// `max_iters` iterations and reports `converged=False`. The settings are
 /// validated when `train`/`qml.train` starts, before any circuit runs: an
@@ -17,7 +18,8 @@ use pyo3::prelude::*;
 #[allow(clippy::upper_case_acronyms)]
 pub struct SPSA {
     /// Iterations, each one batch of `2·resamplings` circuits (plus one when
-    /// the parameters are measured), after the calibration batch. At least 1.
+    /// the parameters are measured), after the calibration batch; the final
+    /// parameters cost one circuit more. At least 1.
     #[pyo3(get, set)]
     pub max_iters: u32,
     /// Random perturbations averaged per iteration, K. At least 1; `1` is
@@ -45,8 +47,9 @@ pub struct SPSA {
     #[pyo3(get, set)]
     pub gamma: f64,
     /// Iterations between measurements of the parameters themselves, at
-    /// least 1. Defaults to 20: the first iteration, every 20th after it and
-    /// the last add one circuit to their batch.
+    /// least 1. Defaults to 20: the first iteration and every 20th after it
+    /// add one circuit to their batch; the final parameters are measured
+    /// whatever the interval.
     #[pyo3(get, set)]
     pub eval_interval: u32,
     /// Optional RNG seed pinned on the optimizer object. Consumed by
