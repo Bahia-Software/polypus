@@ -14,8 +14,8 @@ use polypus_sim::{Simulator, StatevectorSimulator};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::sync::{Arc, Mutex};
 
-/// A 3-qubit circuit with every single-frequency gate, entanglers between
-/// them and one angle `−θ₇ + π/2`.
+/// A 3-qubit circuit with every single-frequency gate, each angle of `u3`
+/// and `u2` included, entanglers between them and one angle `−θ₇ + π/2`.
 fn ansatz() -> ParameterizedCircuit {
     let mut qc = ParameterizedCircuit::new(3);
     let shifted = qc
@@ -35,6 +35,10 @@ fn ansatz() -> ParameterizedCircuit {
         .ry(2, shifted)
         .h(1)
         .cx(2, 0)
+        .u(0, Param(8), Param(9), Param(10))
+        .cx(0, 1)
+        .u2(1, Param(11), Param(12))
+        .h(2)
 }
 
 /// A cost per bitstring with no symmetry, so the landscape is not flat.
@@ -75,16 +79,17 @@ impl EvaluationOracle for Exact {
     }
 }
 
-/// The point step `k` (coordinate `j`) moves from, read off its batch.
+/// The point step `k` (coordinate `j`) moves from, read off its batch; the
+/// final point's batch is the point.
 fn point_of(batch: &[Vec<f64>], j: usize) -> Vec<f64> {
     match batch {
-        [x, _, _] => x.clone(),
+        [x] | [x, _, _] => x.clone(),
         [plus, minus] => {
             let mut x = plus.clone();
             x[j] = 0.5 * (plus[j] + minus[j]);
             x
         }
-        _ => panic!("a step's batch has 2 or 3 candidates"),
+        _ => panic!("a batch has 1, 2 or 3 candidates"),
     }
 }
 
@@ -93,7 +98,7 @@ fn every_step_lands_on_the_exact_maximum_along_its_parameter() {
     let circuit = ansatz();
     assert_eq!(circuit.check_single_frequency(), Ok(()));
     let dims = circuit.num_params();
-    assert_eq!(dims, 8);
+    assert_eq!(dims, 13);
     let oracle = Exact {
         circuit: Arc::new(circuit.clone()),
         batches: Arc::default(),
@@ -111,7 +116,9 @@ fn every_step_lands_on_the_exact_maximum_along_its_parameter() {
         })
         .expect("valid Rotosolve args optimize successfully");
     let batches = oracle.batches.lock().unwrap().clone();
-    assert_eq!(batches.len(), 4 * dims);
+    // A batch per step, then the final point, where the last step moved.
+    assert_eq!(batches.len(), 4 * dims + 1);
+    assert_eq!(batches[4 * dims].len(), 1);
     let f = |x: &[f64]| expectation(&circuit, x);
     const GRID: usize = 4000;
     for k in 0..batches.len() - 1 {

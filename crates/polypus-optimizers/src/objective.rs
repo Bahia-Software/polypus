@@ -29,6 +29,12 @@ pub trait EvaluationOracle: Send + Sync {
     /// optimizer has stopped, to re-evaluate the best candidates with more
     /// shots (`final_shots` of `TrainFlow` in `polypus-orchestration`).
     ///
+    /// Its shot noise should be independent of every `evaluate_batch` call's:
+    /// the candidates it gets were scored there, and a re-evaluation with the
+    /// same random numbers would repeat their values. Polypus's oracles send
+    /// it with a seed derived from the run's
+    /// (`polypus_infrastructure::final_batch_params`).
+    ///
     /// The default calls `evaluate_batch`, which is right for an oracle
     /// without shots (an analytic function, an exact simulator), whose values
     /// do not depend on them. A custom oracle that samples shots and keeps the

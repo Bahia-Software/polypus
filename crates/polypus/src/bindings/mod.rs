@@ -31,7 +31,7 @@ use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
 use rotosolve::Rotosolve;
-use spsa::SPSA;
+use spsa::Spsa;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
@@ -393,7 +393,7 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(adam) = method.extract::<PyRef<Adam>>() {
         return adam.seed;
     }
-    if let Ok(spsa) = method.extract::<PyRef<SPSA>>() {
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
         return spsa.seed;
     }
     if let Ok(rotosolve) = method.extract::<PyRef<Rotosolve>>() {
@@ -432,9 +432,10 @@ fn is_rotosolve(method: &Bound<'_, PyAny>) -> bool {
 fn rotosolve_circuit_error(reason: &str) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(format!(
         "polypus.Rotosolve cannot train this circuit: {reason}. Rotosolve needs every \
-         trainable parameter to be the angle of exactly one rx, ry, rz, rxx, rzz, p or u1 \
-         gate (also ryy or rzx in a Qiskit circuit), as ±θ + c, so that the fitness is a \
-         sinusoid of each parameter; train this circuit with another optimizer"
+         trainable parameter to be exactly one angle of an rx, ry, rz, rxx, rzz, p, u1, u, \
+         u2 or u3 gate (also ryy, rzx, or the θ of an r, in a Qiskit circuit), as ±θ + c, \
+         so that the fitness is a sinusoid of each parameter; train this circuit with \
+         another optimizer"
     ))
 }
 
@@ -699,7 +700,7 @@ fn method_from_pyclass(
             rule: adam.rule,
         }));
     }
-    if let Ok(spsa) = method.extract::<PyRef<SPSA>>() {
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
         return Ok(Method::Spsa(SpsaConfig {
             max_iters: spsa.max_iters,
             resamplings: spsa.resamplings,
@@ -2432,7 +2433,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QNG>()?;
     m.add_class::<CMAES>()?;
     m.add_class::<Adam>()?;
-    m.add_class::<SPSA>()?;
+    m.add_class::<Spsa>()?;
     m.add_class::<Rotosolve>()?;
     m.add_class::<External>()?;
     m.add_class::<Circuit>()?;
@@ -4276,7 +4277,7 @@ mod tests {
     fn spsa_reaches_the_method_and_its_seed_is_read() {
         Python::initialize();
         Python::attach(|py| {
-            let spsa = Py::new(py, SPSA::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
+            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
                 .expect("the pyclass instantiates");
             let bound = spsa.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));

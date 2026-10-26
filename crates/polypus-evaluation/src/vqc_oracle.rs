@@ -1,6 +1,6 @@
 use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot};
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
+    final_batch_params, BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
 };
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use std::sync::Arc;
@@ -37,26 +37,28 @@ pub struct VqcOracle {
 
 impl EvaluationOracle for VqcOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        self.evaluate(candidates, self.config.shots)
+        self.evaluate(candidates, self.config.shots, &self.config)
     }
 
     /// Every circuit of the batch runs with `shots` shots instead of the run's
-    /// (`final_shots` of a training run).
+    /// (`final_shots` of a training run), and with the final batch's seed
+    /// ([`final_batch_params`]), so its shot noise is independent of the
+    /// training's.
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
-        self.evaluate(candidates, shots)
+        self.evaluate(candidates, shots, &final_batch_params(&self.config))
     }
 }
 
 impl VqcOracle {
     /// Both trait methods: one value per candidate, each circuit measured with
-    /// `shots` shots.
-    fn evaluate(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+    /// `shots` shots, every call to the backend with `config`.
+    fn evaluate(&self, candidates: &[Vec<f64>], shots: u32, config: &RunParams) -> Vec<f64> {
         // Once evaluation has failed, stop doing work: return finite sentinels
         // and let the entry point surface the recorded error.
         if self.errors.failed() {
             return vec![0.0; candidates.len()];
         }
-        match self.try_evaluate(candidates, shots) {
+        match self.try_evaluate(candidates, shots, config) {
             Ok(values) => values,
             Err(e) => {
                 // Type-erase the failure into the (pyo3-free) slot; the FFI edge
@@ -74,6 +76,7 @@ impl VqcOracle {
         &self,
         candidates: &[Vec<f64>],
         shots: u32,
+        config: &RunParams,
     ) -> Result<Vec<f64>, EvaluationError> {
         // Bind each candidate eagerly to the template (native binding is GIL-free;
         // Qiskit re-acquires the GIL internally). The concurrency/memory cap is the
@@ -98,7 +101,7 @@ impl VqcOracle {
             self.backend.as_ref(),
             &tasks,
             self.observable.as_ref(),
-            &self.config,
+            config,
             &self.cancel,
         )?;
 
@@ -192,8 +195,9 @@ mod tests {
         fail: bool,
         /// One entry per `run_circuits` call: the QASM of each circuit in it.
         calls: Mutex<Vec<Vec<String>>>,
-        /// One entry per `run_circuits` call: the shots it was asked for.
-        shots: Mutex<Vec<u32>>,
+        /// One entry per `run_circuits` call: the shots and the seed it was
+        /// asked for.
+        params: Mutex<Vec<(u32, Option<u64>)>>,
     }
 
     impl MockBackend {
@@ -202,13 +206,20 @@ mod tests {
                 batch_size,
                 fail,
                 calls: Mutex::new(Vec::new()),
-                shots: Mutex::new(Vec::new()),
+                params: Mutex::new(Vec::new()),
             }
         }
 
         /// The shots of each call so far.
         fn shots_per_call(&self) -> Vec<u32> {
-            self.shots.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            let params = self.params.lock().unwrap_or_else(|p| p.into_inner());
+            params.iter().map(|&(shots, _)| shots).collect()
+        }
+
+        /// The seed of each call so far.
+        fn seeds_per_call(&self) -> Vec<Option<u64>> {
+            let params = self.params.lock().unwrap_or_else(|p| p.into_inner());
+            params.iter().map(|&(_, seed)| seed).collect()
         }
 
         /// The per-call chunk sizes observed so far.
@@ -239,10 +250,10 @@ mod tests {
             let offset: usize = calls.iter().map(Vec::len).sum();
             calls.push(qcs.iter().map(qasm_of).collect());
             drop(calls);
-            self.shots
+            self.params
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .push(config.shots);
+                .push((config.shots, config.seed));
 
             if self.fail {
                 return Err(BackendError::Conversion("mock failure".to_string()));
@@ -401,9 +412,9 @@ mod tests {
         assert_eq!(backend.submitted_qasm(), expected);
     }
 
-    /// `evaluate_batch` measures every circuit with the run's shots and
-    /// `evaluate_batch_with_shots` with the shots it is given, in every wave,
-    /// for the same candidates in the same order.
+    /// `evaluate_batch` measures every circuit with the run's shots and seed,
+    /// and `evaluate_batch_with_shots` with the shots it is given and the final
+    /// batch's seed, in every wave, for the same candidates in the same order.
     #[test]
     fn a_batch_with_shots_puts_them_in_every_task() {
         pyo3::Python::initialize();
@@ -419,6 +430,12 @@ mod tests {
         // Two waves of 3 + 2 at the run's 16 shots, then two at 4096.
         assert_eq!(backend.shots_per_call(), vec![16, 16, 4096, 4096]);
         assert_eq!(backend.chunk_sizes(), vec![3, 2, 3, 2]);
+        let derived = final_batch_params(&oracle.config).seed;
+        assert_ne!(derived, Some(7));
+        assert_eq!(
+            backend.seeds_per_call(),
+            vec![Some(7), Some(7), derived, derived]
+        );
         // The same circuits, in candidate order.
         let submitted = backend.submitted_qasm();
         assert_eq!(submitted[..5], submitted[5..]);

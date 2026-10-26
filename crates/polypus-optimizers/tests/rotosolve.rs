@@ -3,8 +3,8 @@
 //! Like `spsa.rs`, these run without a Python interpreter. The oracles are
 //! pure functions of the candidate; the ones that record what they are handed
 //! let a test rebuild every step from what the optimizer actually sent (one
-//! batch per step), and check that nothing was sent at all when the
-//! configuration is rejected.
+//! batch per step, then the final point alone), and check that nothing was
+//! sent at all when the configuration is rejected.
 
 use polypus_optimizers::{
     AlgorithmRotosolve, AlgorithmRotosolveArgs, EvaluationOracle, OptimizationOutcome, Optimizer,
@@ -83,6 +83,23 @@ impl Recorder {
             .collect()
     }
 
+    /// The batches of the steps, after checking that the run ended with the
+    /// final point alone.
+    fn steps(&self) -> Vec<Vec<Vec<f64>>> {
+        let mut batches = self.batches();
+        let last = batches.pop().expect("a run sends batches");
+        assert_eq!(last.len(), 1, "the last batch is the final point alone");
+        batches
+    }
+
+    /// The final point, the last batch's one candidate.
+    fn final_point(&self) -> Vec<f64> {
+        let batches = self.batches();
+        let last = batches.last().expect("a run sends batches");
+        assert_eq!(last.len(), 1, "the last batch is the final point alone");
+        last[0].clone()
+    }
+
     fn values(&self) -> Vec<Vec<f64>> {
         self.log
             .lock()
@@ -124,16 +141,16 @@ fn run(args: AlgorithmRotosolveArgs) -> OptimizationOutcome {
 
 /// The point step `k` moves from, read off its batch: the head of a batch of
 /// three, or, in a batch of two, `x ± π/2·e_j` with `x_j` their midpoint (to
-/// within the rounding of `± π/2`).
+/// within the rounding of `± π/2`). The final point's batch is the point.
 fn point_of(batch: &[Vec<f64>], j: usize) -> Vec<f64> {
     match batch {
-        [x, _, _] => x.clone(),
+        [x] | [x, _, _] => x.clone(),
         [plus, minus] => {
             let mut x = plus.clone();
             x[j] = 0.5 * (plus[j] + minus[j]);
             x
         }
-        _ => panic!("a step's batch has 2 or 3 candidates, got {}", batch.len()),
+        _ => panic!("a batch has 1, 2 or 3 candidates, got {}", batch.len()),
     }
 }
 
@@ -158,7 +175,7 @@ fn grid_maximum(fitness: fn(&[f64]) -> f64, x: &[f64], j: usize) -> (f64, f64) {
 /// coordinate to the exact maximum along it, the others fixed, whether the
 /// point was measured or its value predicted by the step before: a wrong
 /// value would move the coordinate elsewhere. So the fitness of the point
-/// never decreases.
+/// never decreases. The final point is where the last step moved.
 #[test]
 fn each_step_lands_on_the_maximum_along_its_coordinate() {
     for reevaluate_every in [1, 2, 5, 1000] {
@@ -168,8 +185,9 @@ fn each_step_lands_on_the_maximum_along_its_coordinate() {
             args.sweeps = 6;
             args.reevaluate_every = reevaluate_every;
             run(args);
+            // 18 steps, then the final point.
+            assert_eq!(oracle.steps().len(), 18);
             let batches = oracle.batches();
-            assert_eq!(batches.len(), 18);
             let label = format!("every {reevaluate_every} seed {seed}");
             for k in 0..batches.len() - 1 {
                 let (j, next_j) = (k % 3, (k + 1) % 3);
@@ -242,7 +260,7 @@ fn a_flat_landscape_never_moves_the_point() {
     let mut args = rotosolve_args(&oracle, 4);
     args.sweeps = 3;
     let outcome = run(args);
-    let batches = oracle.batches();
+    let batches = oracle.steps();
     let theta0 = batches[0][0].clone();
     for (k, batch) in batches.iter().enumerate() {
         let j = k % 3;
@@ -252,6 +270,7 @@ fn a_flat_landscape_never_moves_the_point() {
         minus[j] -= FRAC_PI_2;
         assert_eq!(batch[batch.len() - 2..], [plus, minus], "step {k}");
     }
+    assert_eq!(oracle.final_point(), theta0);
     // Ties keep the first measurement.
     assert_eq!(outcome.best_params, theta0);
     assert_eq!(outcome.best_fitness, 0.0);
@@ -263,14 +282,14 @@ fn a_flat_landscape_never_moves_the_point() {
 
 /// Step `k` sends `[x + π/2·e_j, x − π/2·e_j]` with `j = k mod d`, headed by
 /// `x` on the first step and every `reevaluate_every`: the circuits per step
-/// are 3 and 2.
+/// are 3 and 2. The final point is one more batch, of one.
 #[test]
 fn each_step_is_one_batch_of_two_with_the_point_first_when_measured() {
     for (reevaluate_every, sizes) in [
-        (5, vec![3, 2, 2, 2, 2, 3, 2, 2, 2, 2, 3, 2]),
-        (1, vec![3; 12]),
-        (4, vec![3, 2, 2, 2, 3, 2, 2, 2, 3, 2, 2, 2]),
-        (100, [vec![3], vec![2; 11]].concat()),
+        (5, vec![3, 2, 2, 2, 2, 3, 2, 2, 2, 2, 3, 2, 1]),
+        (1, [vec![3; 12], vec![1]].concat()),
+        (4, vec![3, 2, 2, 2, 3, 2, 2, 2, 3, 2, 2, 2, 1]),
+        (100, [vec![3], vec![2; 11], vec![1]].concat()),
     ] {
         let oracle = Recorder::new(rough);
         let mut args = rotosolve_args(&oracle, 9);
@@ -286,7 +305,7 @@ fn each_step_is_one_batch_of_two_with_the_point_first_when_measured() {
         );
         assert_eq!(outcome.iterations_run, 12, "{label}");
         assert!(!outcome.converged, "{label}");
-        for (k, batch) in batches.iter().enumerate() {
+        for (k, batch) in oracle.steps().iter().enumerate() {
             let j = k % 3;
             let x = point_of(batch, j);
             let (plus, minus) = (&batch[batch.len() - 2], &batch[batch.len() - 1]);
@@ -303,23 +322,29 @@ fn each_step_is_one_batch_of_two_with_the_point_first_when_measured() {
     }
 }
 
-/// A one-parameter, one-sweep run is one batch of three.
+/// A one-parameter, one-sweep run is one batch of three, then the point it
+/// moved to, measured alone. Its one history entry holds both.
 #[test]
-fn one_step_measures_theta0_and_its_two_neighbours() {
+fn one_step_measures_theta0_its_two_neighbours_and_where_it_lands() {
     let oracle = Recorder::new(rough);
     let mut args = rotosolve_args(&oracle, 7);
     args.sweeps = 1;
     args.dimensions = 1;
     let outcome = run(args);
     let batches = oracle.batches();
-    let values = oracle.values();
-    assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].len(), 3);
-    let best = (0..3).fold(0, |b, i| if values[0][i] > values[0][b] { i } else { b });
-    assert_eq!(outcome.best_params, batches[0][best]);
-    assert_eq!(outcome.best_fitness, values[0][best]);
+    assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [3, 1]);
+    let measured: Vec<(Vec<f64>, f64)> = batches
+        .concat()
+        .into_iter()
+        .zip(oracle.values().concat())
+        .collect();
+    let best = (1..4).fold(0, |b, i| if measured[i].1 > measured[b].1 { i } else { b });
+    assert_eq!(outcome.best_params, measured[best].0);
+    assert_eq!(outcome.best_fitness, measured[best].1);
     assert_eq!(outcome.fitness_history, vec![outcome.best_fitness]);
     assert_eq!(outcome.iterations_run, 1);
+    // The step moved θ₀; the final point is not one of the three it measured.
+    assert_ne!(batches[1][0], batches[0][0]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -329,7 +354,7 @@ fn one_step_measures_theta0_and_its_two_neighbours() {
 /// C-5 against the batches the oracle saw, over 25 seeds: every candidate is
 /// a measured point, `best_params` the first with the best value,
 /// `best_fitness` the oracle's value for it, and `fitness_history[k]` the
-/// best measured up to step `k`.
+/// best measured up to step `k`, the last entry with the final point too.
 #[test]
 fn best_params_fitness_invariant_holds_across_seeds() {
     let mut not_last = false;
@@ -341,7 +366,7 @@ fn best_params_fitness_invariant_holds_across_seeds() {
         let outcome = run(args);
         let batches = oracle.batches();
         let label = format!("seed {seed}");
-        assert_eq!(batches.len(), 24, "{label}");
+        assert_eq!(oracle.steps().len(), 24, "{label}");
         assert_eq!(outcome.iterations_run, 24, "{label}");
         assert_eq!(outcome.fitness_history.len(), 24, "{label}");
         let mut running = f64::NEG_INFINITY;
@@ -353,12 +378,16 @@ fn best_params_fitness_invariant_holds_across_seeds() {
                     first_best = Some(candidate);
                 }
             }
-            assert_eq!(outcome.fitness_history[k], running, "{label} step {k}");
+            // The last step's entry holds the final point's batch too.
+            if k < 23 {
+                assert_eq!(outcome.fitness_history[k], running, "{label} step {k}");
+            }
         }
+        assert_eq!(outcome.fitness_history.last(), Some(&running), "{label}");
         assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
         assert_eq!(outcome.best_fitness, rough(&outcome.best_params), "{label}");
         assert_eq!(first_best, Some(&outcome.best_params), "{label}");
-        not_last |= !batches[23].contains(&outcome.best_params);
+        not_last |= !batches[23..].concat().contains(&outcome.best_params);
     }
     assert!(not_last, "no run's best was found before its last step");
 }
@@ -395,7 +424,7 @@ fn patience_counts_whole_sweeps() {
         args.patience = patience;
         let outcome = run(args);
         let steps = 3 * patience as usize;
-        assert_eq!(oracle.batches().len(), steps, "patience {patience}");
+        assert_eq!(oracle.steps().len(), steps, "patience {patience}");
         assert_eq!(outcome.iterations_run, steps, "patience {patience}");
         assert_eq!(outcome.fitness_history, vec![0.0; steps]);
         assert!(outcome.converged, "patience {patience}");
@@ -698,7 +727,8 @@ impl EvaluationOracle for Short {
 
 #[test]
 fn a_wrong_length_from_the_oracle_is_an_error() {
-    for (short_from, expected) in [(0, 3), (1, 2), (5, 3)] {
+    // Batch 30 is the final point's, after the 30 steps of 10 sweeps.
+    for (short_from, expected) in [(0, 3), (1, 2), (5, 3), (30, 1)] {
         let oracle = Recorder::new(cosine);
         let args = AlgorithmRotosolveArgs {
             oracle: Box::new(Short {

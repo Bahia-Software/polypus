@@ -12,8 +12,9 @@ re-evaluated in one more batch with ``final_shots`` shots per circuit:
 distinct candidates they scored. The batch tests run the real training loops on Aer
 with ``polypus_python.run_qcs`` replaced by a fake that scores each circuit
 by its parameters, records every circuit with its shots and value, and so
-checks which candidates the final batch holds, with which shots, which one
-wins, and that every batch before it is the one sent without the option. The
+checks which candidates the final batch holds, with which shots and seed,
+which one wins, and that every batch before it is the one sent without the
+option. A real Aer run checks that the final batch is measured afresh. The
 native tests check the same seeded run with and without the option on the
 real shot sampling, and that the final value was measured with
 ``final_shots``.
@@ -175,17 +176,20 @@ def _probability(candidate):
     return (1.0 + math.sin(3.0 * a + 1.3) * math.cos(2.0 * b - 0.4)) / 2.0
 
 
-def _record(monkeypatch, candidate, width):
+def _record(monkeypatch, candidate, width, calls=None):
     """Replace the local seam with a fake that measures all ones on
     ``round(shots · p)`` shots, ``p`` a fixed function of the circuit's
     candidate, and records ``(candidate, shots, value)`` for every circuit
-    in the order sent, ``value`` being the fitness ``_all_ones`` gives."""
+    in the order sent, ``value`` being the fitness ``_all_ones`` gives, and
+    ``(shots, seed)`` for every call in ``calls`` when it is a list."""
     import polypus_python
 
     sent = []
 
     def fake_run_qcs(infrastructure, **kwargs):
         shots, results = kwargs["shots"], []
+        if calls is not None:
+            calls.append((shots, kwargs.get("seed")))
         for qc in kwargs["qcs"]:
             params = candidate(qc)
             ones = round(shots * _probability(params))
@@ -350,6 +354,26 @@ class TestFinalBatch:
         assert result.final_params == final[winner][0]
         assert f"final_fitness={result.final_fitness}" in repr(result)
 
+    @pytest.mark.parametrize("entry", ENTRY_POINTS)
+    def test_the_final_batch_has_a_seed_of_its_own(self, monkeypatch, entry):
+        # Aer seeds each circuit from the seed and its position in the call,
+        # so with the run's seed the final batch would measure best_params,
+        # at index 0 as Adam scored it, with the training's random numbers.
+        run, candidate, width = ENTRY_POINTS[entry]
+        seeds = []
+        for _ in range(2):
+            calls = []
+            _record(monkeypatch, candidate, width, calls)
+            run(_method("adam"), final_shots=FINAL_SHOTS)
+            *scored, final = calls
+            assert scored and all(call == (SHOTS, 11) for call in scored)
+            shots, seed = final
+            assert shots == FINAL_SHOTS
+            assert seed not in (None, 11)
+            seeds.append(seed)
+        # Derived from the run's seed, the same in every run.
+        assert seeds[0] == seeds[1]
+
     def test_an_error_in_the_run_skips_the_final_batch(self, monkeypatch):
         sent = _record(monkeypatch, _vqc_candidate, DIMENSIONS)
         calls = []
@@ -437,6 +461,44 @@ def _native_train(name, **kwargs):
         seed=7,
         **kwargs,
     )
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+def test_an_aer_run_measures_the_final_batch_afresh():
+    """With the training's shots, the final batch measures Adam's
+    ``best_params`` at index 0 as the training did. Had it the run's seed,
+    Aer would sample the same counts and ``final_fitness`` would be
+    ``best_fitness`` in every run; with its own seed it is a fresh estimate,
+    which a seeded run still reproduces. All ones has a probability of about
+    1/2 at the starting point, so two estimates with 1024 shots rarely
+    agree."""
+    import polypus
+
+    def run(seed):
+        return polypus.train(
+            _circuit(),
+            polypus.Adam(max_iters=1),
+            shots=1024,
+            n_qpus=1,
+            dimensions=DIMENSIONS,
+            expectation_function=_all_ones,
+            infrastructure="local",
+            nodes=1,
+            cores_per_qpu=1,
+            id="final_shots_aer",
+            backend="aer",
+            seed=seed,
+            initial_point=[2.0, 2.0],
+            final_shots=1024,
+        )
+
+    results = [run(seed) for seed in (11, 12, 13)]
+    assert all(r.final_params == r.best_params for r in results)
+    assert any(r.final_fitness != r.best_fitness for r in results)
+    again = run(11)
+    assert again.best_fitness == results[0].best_fitness
+    assert again.final_fitness == results[0].final_fitness
 
 
 @pytest.mark.integration

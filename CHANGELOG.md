@@ -53,11 +53,14 @@ Changes on `main` since 0.7.2.
   Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
   value reuse of the NFT method of Nakanishi, Fujii and Todo (Phys. Rev.
   Research, 2020). When every trainable parameter is the angle of exactly
-  one single-Pauli rotation and the cost is an average over the shots, the
+  one single-Pauli rotation (any angle of `u`, `u2` or `u3` included, which
+  are `rz·ry·rz`, and in a Qiskit circuit the angle θ of `r`) and the cost
+  is an average over the shots, the
   fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
   at a time to its maximum, in closed form. Each step is one batch of two
   circuits, plus the current parameters on the first step and every
-  `reevaluate_every` steps; `best_params` is the best of the points
+  `reevaluate_every` steps, and after the last step the parameters it
+  reached are measured alone; `best_params` is the best of the points
   measured. The run stops after `patience` sweeps that improve the best by
   less than `tolerance`, or after `sweeps` sweeps. `train` and `qml.train`
   check the circuit before anything runs (a `polypus.Circuit` or a Qiskit
@@ -68,13 +71,15 @@ Changes on `main` since 0.7.2.
   settings raise `ValueError` before any circuit runs (#398).
 - Rotosolve in training runs (Rust, `polypus-orchestration`):
   `Method::Rotosolve` with `RotosolveConfig`. The CUNQA walltime warning
-  counts `sweeps × dimensions` steps; `final_shots` re-evaluates
+  counts `sweeps × dimensions` steps and the final point as one more;
+  `final_shots` re-evaluates
   `best_params` alone (#398).
 - Rotosolve in `polypus-optimizers`: `AlgorithmRotosolve` and
   `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;
   and in `polypus-circuit`, `ParameterizedCircuit::check_single_frequency`
   with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
-  qualifies (#398).
+  qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
+  check of a Qiskit circuit take the same angles and gates (#398).
 - `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
   once the optimizer has stopped, its best candidates are re-evaluated in
   one more batch with that many shots per circuit, `best_params` and, for
@@ -86,12 +91,17 @@ Changes on `main` since 0.7.2.
   re-evaluated alone, and slightly optimistic still as the highest of five.
   `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
   `fitness_history` are the optimizer's, and a seeded run sends the same
-  batches with and without `final_shots`. A value that is not an integer `>= 1` raises `ValueError`
-  before anything runs. The batch is not part of the CUNQA walltime
-  projection (#397).
+  batches with and without `final_shots`. The final batch is sampled with a
+  seed derived from the run's, so on Aer and CUNQA, which seed each circuit
+  from its position in the call, it does not repeat the training's counts
+  for a candidate at the same position. `best_params` and `best_fitness` are
+  logged before it, and as a warning if it fails. A value that is not an
+  integer `>= 1` raises `ValueError` before anything runs. The batch is not
+  part of the CUNQA walltime projection (#397).
 - The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
   (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
-  implement by putting the shots in every task; `TrainFlow::final_shots`,
+  implement by putting the shots in every task and sending the batch with
+  `polypus_infrastructure::final_batch_params`; `TrainFlow::final_shots`,
   `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
   (`polypus-orchestration`) (#397).
 - `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
@@ -105,8 +115,10 @@ Changes on `main` since 0.7.2.
   each parameter by about `target_step`, as Qiskit's `SPSA.calibrate` does.
   Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
   fills more QPUs and averages that many estimates; the parameters are
-  measured in the same batch on the first iteration, every `eval_interval`
-  iterations and on the last, and `best_params` is the best of them. The run
+  measured in the same batch on the first iteration and every
+  `eval_interval` iterations, and after the last step one circuit measures
+  the parameters it reached, so every step is measured; `best_params` is the
+  best of them. The run
   makes `max_iters` iterations and reports `converged=False`. An
   `initial_point` is the centre of the calibration and the first point
   measured. A seeded run reproduces on the same platform only, as with
@@ -116,7 +128,8 @@ Changes on `main` since 0.7.2.
   (#396).
 - SPSA in training runs (Rust, `polypus-orchestration`): `Method::Spsa` with
   `SpsaConfig`. The CUNQA walltime warning leaves the calibration batch out
-  of the timing and adds its circuits at the first iteration's pace (#396).
+  of the timing and adds its circuits at the first iteration's pace, and
+  counts the final parameters as one more iteration (#396).
 - SPSA in `polypus-optimizers`: `AlgorithmSPSA` and `AlgorithmSPSAArgs`,
   with an `initial_point` like every optimizer (#396).
 - `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
@@ -125,8 +138,10 @@ Changes on `main` since 0.7.2.
   and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
   (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
   current parameters and the central finite difference around them, so no
-  QPU waits on a one-circuit batch, and `best_params` is the best of the
-  parameters measured. `rule="adam"` is Kingma and Ba's Adam, whose step
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
   does not depend on the scale of the cost; `rule="momentum"` is Polyak's
   heavy-ball momentum, whose learning rate does. A seeded run over a backend
   whose results do not depend on the platform reproduces on every platform
@@ -137,7 +152,8 @@ Changes on `main` since 0.7.2.
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
   exact gradient when it has one); Adam uses the exact gradient or a finite
   difference of the evaluation, and the CUNQA walltime warning counts one
-  batch per iteration, plus the call to an exact gradient (#394, #395).
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
 - Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
   `AdamRule`, driven by a new `GradientOracle` contract (the fitness
   gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.
