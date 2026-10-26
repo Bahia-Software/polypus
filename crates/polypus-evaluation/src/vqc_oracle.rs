@@ -2,7 +2,7 @@ use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, Or
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
 };
-use polypus_orchestration::{OracleFactory, Resources};
+use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use std::sync::Arc;
 
 /// Oracle for standard VQC training.
@@ -127,7 +127,7 @@ impl OracleFactory for VqcOracleFactory {
         resources: &Resources,
         cancel: &CancelToken,
         errors: &OracleErrorSlot,
-    ) -> Box<dyn EvaluationOracle> {
+    ) -> Oracles {
         Box::new(VqcOracle {
             circuit: self.circuit,
             config: Arc::clone(&resources.config),
@@ -137,6 +137,7 @@ impl OracleFactory for VqcOracleFactory {
             cancel: cancel.clone(),
             errors: errors.clone(),
         })
+        .into()
     }
 }
 

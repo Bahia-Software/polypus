@@ -14,6 +14,25 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.Adam(max_iters=100, learning_rate=0.05, beta1=0.9, beta2=0.999,
+  epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
+  finite_difference_step=0.1, seed=None)`, accepted by `train` and
+  `qml.train`: gradient ascent with Adam. Each iteration takes a central
+  finite difference of the fitness, one batch of `2·dimensions` circuits, then
+  scores the updated parameters. Invalid settings raise `ValueError` before
+  any circuit runs (#394).
+- Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
+  exact gradient when it has one); Adam uses the exact gradient or a finite
+  difference of the evaluation, and the CUNQA walltime warning times its
+  gradient too (#394).
+- Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
+  by a new `GradientOracle` contract (the fitness gradient, uphill), with the
+  same fitness-stagnation stop as DE and CMA-ES. A gradient of the wrong
+  length, or with a non-finite component (the new
+  `OptimizerError::NonFiniteGradient`), is an error. `FiniteDifferenceGradient`
+  turns any `EvaluationOracle` into a `GradientOracle` by central differences,
+  in one batch per gradient (#394).
 - `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
   `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
   does and converts it with CUNQA's own converter, without raising QPUs; the
@@ -62,9 +81,9 @@ Changes on `main` since 0.7.2.
   otherwise `ValueError` before anything runs. DE (every `strategy`)
   evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
   population; PSO as its first particle, which must lie within `bounds`; QNG
-  starts from it; CMA-ES centres its first run on it and keeps its `sigma0`,
-  so a refinement wants a smaller one. Without it every optimizer behaves as
-  before, seeded runs included (#395). In Rust, each optimizer's
+  and Adam start from it; CMA-ES centres its first run on it and keeps its
+  `sigma0`, so a refinement wants a smaller one. Without it every optimizer
+  behaves as before, seeded runs included (#395). In Rust, each optimizer's
   `check_preconditions` checks its configuration and then the point without
   running anything, and `polypus_orchestration::Method::check_preconditions`
   calls the one the method names.
@@ -147,6 +166,10 @@ Changes on `main` since 0.7.2.
   `info-logs` or `debug-logs`. The wheel is built with `debug-logs`, so
   `init_logger(level="debug")` shows the optimizers' progress without a
   rebuild. The log-level aliases in `.cargo/config.toml` are removed (#414).
+- **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
+  `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
+  `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
+  works, and `Method` has an `Adam` variant.
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist

@@ -4,6 +4,7 @@ use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
 
+pub mod adam;
 pub mod calibration;
 pub mod circuit;
 pub mod cmaes;
@@ -15,6 +16,7 @@ pub mod observable;
 pub mod pso;
 pub mod qng;
 
+use adam::Adam;
 use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
 use cmaes::CMAES;
@@ -37,8 +39,8 @@ use crate::infrastructure::{
     ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
-    CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow,
-    Scheduler, TrainFlow,
+    AdamConfig, CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources,
+    RunCircuitFlow, Scheduler, TrainFlow,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -256,7 +258,7 @@ fn outcome_to_train_result(
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
-/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh
+/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance; otherwise a fresh
 /// OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
 /// value both drives the optimizer and is reported back in the [`TrainResult`],
 /// so the run can be replayed.
@@ -337,7 +339,7 @@ fn log_training_start(
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
-/// whichever of `DE`/`PSO`/`QNG`/`CMAES` it is (`None` if it is none of them — the type
+/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam` it is (`None` if it is none of them — the type
 /// error is surfaced later by the dispatch that actually runs the optimizer).
 fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -351,6 +353,9 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     }
     if let Ok(cmaes) = method.extract::<PyRef<CMAES>>() {
         return cmaes.seed;
+    }
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        return adam.seed;
     }
     None
 }
@@ -384,7 +389,7 @@ fn validate_method(
 /// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
 /// makes the FFI boundary report the real cause instead of that garbage.
 ///
-/// Both entry points funnel every DE/PSO/QNG/CMAES branch through here, so this is
+/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam branch through here, so this is
 /// also where the run's completion is logged — once, on the success path only
 /// (an oracle failure was already logged at `error!` where it was recorded).
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
@@ -433,7 +438,7 @@ fn finish_optimization(
     outcome_to_train_result(py, outcome, seed, id)
 }
 
-/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` object into a pyo3-free [`Method`].
+/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` object into a pyo3-free [`Method`].
 ///
 /// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
 /// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
@@ -491,8 +496,22 @@ fn method_from_pyclass(
             restarts: cmaes.restarts,
         }));
     }
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        return Ok(Method::Adam(AdamConfig {
+            max_iters: adam.max_iters,
+            learning_rate: adam.learning_rate,
+            beta1: adam.beta1,
+            beta2: adam.beta2,
+            epsilon: adam.epsilon,
+            bounds: adam.bounds,
+            tolerance: adam.tolerance,
+            patience: adam.patience,
+            finite_difference_step: adam.finite_difference_step,
+        }));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.CMAES",
+        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, polypus.CMAES, \
+         or polypus.Adam",
     ))
 }
 
@@ -1406,7 +1425,7 @@ pub fn run_quantum_circuit<'py>(
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
-/// `method` must be an instance of `DE`, `PSO`, `QNG`, or `CMAES`.
+/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, or `Adam`.
 ///
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
@@ -1429,9 +1448,9 @@ pub fn run_quantum_circuit<'py>(
 /// `dimensions` finite numbers, otherwise `ValueError` before anything runs.
 /// DE (every `strategy`) evaluates it, wrapped into `[0, 2π)`, as the first
 /// member of its initial population; PSO as its first particle, which must lie
-/// within the PSO `bounds`; QNG starts from it as θ₀; CMA-ES centres its first
-/// run on it (restarts start elsewhere), with its `sigma0` unchanged. Without
-/// it every optimizer starts as before (contract C-5).
+/// within the PSO `bounds`; QNG and Adam start from it as θ₀; CMA-ES centres
+/// its first run on it (restarts start elsewhere), with its `sigma0`
+/// unchanged. Without it every optimizer starts as before (contract C-5).
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -2124,6 +2143,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PSO>()?;
     m.add_class::<QNG>()?;
     m.add_class::<CMAES>()?;
+    m.add_class::<Adam>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
     expr::register(m)?;
@@ -3853,6 +3873,54 @@ mod tests {
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
             assert!(err.to_string().contains("polypus.CMAES"), "{err}");
+        });
+    }
+
+    /// `polypus.Adam` parses into `Method::Adam` with every field, its pinned
+    /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
+    #[test]
+    fn adam_reaches_the_method_and_its_seed_is_read() {
+        Python::initialize();
+        Python::attach(|py| {
+            let adam = Py::new(
+                py,
+                Adam::new(
+                    40,
+                    0.2,
+                    0.8,
+                    0.99,
+                    1e-6,
+                    (-1.0, 2.0),
+                    0.5,
+                    7,
+                    0.05,
+                    Some(99),
+                ),
+            )
+            .expect("the pyclass instantiates");
+            let bound = adam.bind(py);
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+                Ok(Method::Adam(cfg)) => {
+                    assert_eq!(cfg.max_iters, 40);
+                    assert_eq!(cfg.learning_rate, 0.2);
+                    assert_eq!(cfg.beta1, 0.8);
+                    assert_eq!(cfg.beta2, 0.99);
+                    assert_eq!(cfg.epsilon, 1e-6);
+                    assert_eq!(cfg.bounds, (-1.0, 2.0));
+                    assert_eq!(cfg.tolerance, 0.5);
+                    assert_eq!(cfg.patience, 7);
+                    assert_eq!(cfg.finite_difference_step, 0.05);
+                }
+                _ => panic!("a polypus.Adam parses into Method::Adam"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.Adam"), "{err}");
         });
     }
 }

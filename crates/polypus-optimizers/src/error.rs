@@ -49,12 +49,24 @@ pub enum OptimizerError {
     /// so a short (or long) return would otherwise panic with an out-of-bounds
     /// index deep inside the optimization loop. Also raised when a
     /// [`VarianceOracle::variance_diagonal`](crate::VarianceOracle::variance_diagonal)
-    /// returns a diagonal whose length is not the number of dimensions (QNG).
+    /// returns a diagonal whose length is not the number of dimensions (QNG), or
+    /// a [`GradientOracle::gradient_batch`](crate::GradientOracle::gradient_batch)
+    /// a gradient of the wrong length (Adam).
     OracleLengthMismatch {
         /// Number of candidates submitted (the required length).
         expected: usize,
         /// Number of fitness values the oracle actually returned.
         got: usize,
+    },
+    /// A [`GradientOracle::gradient_batch`](crate::GradientOracle::gradient_batch)
+    /// returned a component that is not finite (Adam). The update adds the
+    /// gradient to the parameters, so a `NaN` or an infinity would leave them
+    /// non-finite for the rest of the run.
+    NonFiniteGradient {
+        /// The first non-finite component's parameter index.
+        index: usize,
+        /// Its value.
+        value: f64,
     },
     /// A configuration value is outside its valid domain: QNG's
     /// `max_iters` (must be ≥ 1; `0` never evaluates the objective and would
@@ -62,11 +74,15 @@ pub enum OptimizerError {
     /// `tikhonov_reg` (must be finite and `>= 0`) or `learning_rate` (must be
     /// finite); or CMA-ES's `dimensions` (≥ 1), `generations` (≥ 1),
     /// `sigma0` (finite, in `(0, 2π]`), `population_size` (≥ 2 when given) or
-    /// `restarts` (the largest population must fit in a `u32`); or any
-    /// optimizer's `initial_point` (`dimensions` finite values, within
-    /// `bounds` for PSO). Detected before any RNG draw or oracle call, so a
-    /// bad config maps to a `PyValueError` at the seam rather than producing a
-    /// `NaN`/`inf` result. (Empty or non-finite `bounds` keep their own
+    /// `restarts` (the largest population must fit in a `u32`); or Adam's
+    /// `max_iters` (≥ 1), `dimensions` (≥ 1), `learning_rate` (finite, `> 0`),
+    /// `beta1`/`beta2` (in `[0, 1)`) or `epsilon` (finite, `> 0`); or a
+    /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)'s
+    /// `finite_difference_step` (finite, `> 0`); or any optimizer's
+    /// `initial_point` (`dimensions` finite values, within `bounds` for PSO).
+    /// Detected before any RNG draw or oracle call, so a bad config maps to a
+    /// `PyValueError` at the seam rather than producing a `NaN`/`inf` result.
+    /// (Empty or non-finite `bounds` keep their own
     /// [`InvalidBounds`](OptimizerError::InvalidBounds) variant.)
     InvalidConfig {
         /// The offending parameter's name.
@@ -90,6 +106,10 @@ impl fmt::Display for OptimizerError {
             OptimizerError::OracleLengthMismatch { expected, got } => write!(
                 f,
                 "evaluation oracle returned {got} fitness value(s) for {expected} candidate(s); it must return exactly one value per candidate, in order"
+            ),
+            OptimizerError::NonFiniteGradient { index, value } => write!(
+                f,
+                "gradient oracle returned {value} for parameter {index}; every component must be finite"
             ),
             OptimizerError::InvalidConfig { parameter, reason } => {
                 write!(f, "invalid {parameter}: {reason}")

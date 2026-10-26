@@ -5,7 +5,7 @@ use crate::{
 use polypus_infrastructure::{
     BoundCircuit, CancelToken, CircuitTask, Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
-use polypus_orchestration::{OracleFactory, Resources};
+use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use pyo3::prelude::*;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -369,7 +369,7 @@ impl OracleFactory for QmlOracleFactory {
         resources: &Resources,
         cancel: &CancelToken,
         errors: &OracleErrorSlot,
-    ) -> Box<dyn EvaluationOracle> {
+    ) -> Oracles {
         Box::new(QmlOracle {
             training_circuits: self.training_circuits,
             config: Arc::clone(&resources.config),
@@ -379,6 +379,7 @@ impl OracleFactory for QmlOracleFactory {
             cancel: cancel.clone(),
             errors: errors.clone(),
         })
+        .into()
     }
 }
 

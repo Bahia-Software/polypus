@@ -185,7 +185,7 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG), multiplies it by the generation budget and logs one `warn` if
+iteration for QNG and Adam), multiplies it by the generation budget and logs one `warn` if
 the projection exceeds the walltime:
 
 ```text

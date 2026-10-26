@@ -25,7 +25,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | Parameter | Description |
 |---|---|
 | `qc` | Parameterized circuit: a `polypus.Circuit` with `polypus.Param(i)` angles, or a Qiskit `QuantumCircuit` |
-| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG` or `polypus.CMAES` |
+| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES` or `polypus.Adam` |
 | `shots` | Shots per circuit execution |
 | `n_qpus` | Number of QPUs the population is spread over |
 | `dimensions` | Number of variational parameters |
@@ -170,6 +170,37 @@ With `infrastructure="cunqa"`, the walltime warning projects the first generatio
 
 **Reproducibility.** A seed reproduces a CMA-ES run exactly on the same machine and build. Across operating systems or CPU architectures it may not: CMA-ES's own steps use exponentials, logarithms and cosines from the platform's math library, whose last bit can differ, and a one-bit difference early on can lead a run to a different optimum. DE's steps use only basic arithmetic, so a DE run over a backend whose results do not depend on the platform is reproducible everywhere; the native simulator's `sin`/`cos` add the same caveat to every optimizer.
 
+### Adam
+
+```python
+polypus.Adam(
+    max_iters=100,
+    learning_rate=0.05,
+    beta1=0.9,
+    beta2=0.999,
+    epsilon=1e-8,
+    bounds=(-math.pi, math.pi),
+    tolerance=0.01,
+    patience=20,
+    finite_difference_step=0.1,
+    seed=None,
+)
+```
+
+Adam (Kingma and Ba, arXiv:1412.6980) climbs the fitness along its gradient, with a step per parameter scaled by running averages of the gradient and of its square. Each iteration estimates the gradient by central differences: one batch of `2 × dimensions` circuits, `θ ± finite_difference_step` along each parameter, then one circuit for the updated parameters. Shot noise enters the estimate through the difference of two fitness values divided by `2 × finite_difference_step`, so a smaller step needs more shots.
+
+| Parameter | Description |
+|---|---|
+| `max_iters` | Iterations, each one gradient and one evaluation. At least 1 |
+| `learning_rate` | Step size, finite and `> 0`. The default `0.05` is sized for rotation angles in radians rather than network weights, so it is larger than deep learning's usual `0.001` |
+| `beta1`, `beta2` | Decay of the running averages of the gradient and of its square, in `[0, 1)` |
+| `epsilon` | Added to the denominator for numerical stability, finite and `> 0` |
+| `bounds` | Range the initial parameters are drawn from, finite with `lower < upper`. The run itself is not confined to it |
+| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` iterations, as with DE |
+| `finite_difference_step` | Step of the central difference, finite and `> 0` |
+
+`best_params` is the best evaluated point and `fitness_history` the best fitness after each iteration. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+
 ## Starting point
 
 By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
@@ -180,12 +211,13 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `PSO` | Makes it the position of the first particle, the first candidate evaluated; the other particles are drawn as without it. Every value must lie within `bounds`, since positions are clamped to them, otherwise `ValueError` before anything runs |
 | `QNG` | Starts from it: the first batch estimates the gradient around it, without evaluating the point itself. It may lie outside `bounds`, which only limit the random start |
 | `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
+| `Adam` | Starts from it, like `QNG`: the first batch estimates the gradient around it, without evaluating the point itself. It may lie outside `bounds`, which only limit the random start |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 
 CMA-ES keeps its `sigma0`. With the default `π/2`, two standard deviations already span the whole circle, so the first generation explores around the point rather than refining it; to refine around a point, pass a smaller `sigma0` too, such as `0.3`. IPOP restarts start from a new random mean, not from the point.
 
-CMA-ES and QNG never evaluate the point itself. CMA-ES samples around it; QNG estimates the gradient around it, and the first value it keeps is that of the point after one step. Their `best_fitness` can therefore come out below the one the point had in the earlier run.
+CMA-ES, QNG and Adam never evaluate the point itself. CMA-ES samples around it; QNG and Adam estimate the gradient around it, and the first value they keep is that of the point after one step. Their `best_fitness` can therefore come out below the one the point had in the earlier run.
 
 PSO's default `bounds` are `(-π, π)`, while DE and CMA-ES return points in `[0, 2π)`, so starting PSO from their `best_params` raises `ValueError` as soon as a value passes π. Pass bounds that contain the point, such as `polypus.PSO(bounds=(0, 2 * math.pi))`, or subtract 2π from every value above π first: the angles are the same, as DE and CMA-ES assume when they wrap.
 

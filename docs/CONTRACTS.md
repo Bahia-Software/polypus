@@ -714,16 +714,16 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   `initial_point` as below.
 - **Starting point (`initial_point`).** Every optimizer takes an optional
   starting point: the `initial_point: Option<Vec<f64>>` field of
-  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`
-  and `AlgorithmCmaEsArgs`, the last argument of `dispatch_optimizer`, and
-  `train(..., initial_point=None)` / `qml.train(..., initial_point=None)` in
-  Python.
+  `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`,
+  `AlgorithmCmaEsArgs` and `AlgorithmAdamArgs`, the last argument of
+  `dispatch_optimizer`, and `train(..., initial_point=None)` /
+  `qml.train(..., initial_point=None)` in Python.
   - Preconditions: exactly `dimensions` values, every one finite, and for PSO
     every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
-    bounds, so a point outside them would be moved). QNG takes any finite
-    point: its `bounds` only shape the random draw. Each optimizer checks this
-    after its other preconditions, whose errors come first, and before any RNG
-    draw or oracle call, as `OptimizerError::InvalidConfig` for
+    bounds, so a point outside them would be moved). QNG and Adam take any
+    finite point: their `bounds` only shape the random draw. Each optimizer
+    checks this after its other preconditions, whose errors come first, and
+    before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
     `initial_point`. Each optimizer's `check_preconditions` makes these checks,
     configuration and point, in that order, without running anything;
     `Method::check_preconditions` in `polypus-orchestration` calls the one the
@@ -737,7 +737,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     the first batch and every other member is the one drawn without it. PSO:
     it is the first particle's position (its velocity is the drawn one), so
     likewise the first candidate of the first batch. QNG: it is θ₀, so the
-    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. CMA-ES:
+    first batch is the finite-difference stencil `θ₀ ± h·eᵢ` around it. Adam:
+    it is θ₀, where the first gradient is taken, so with a
+    `FiniteDifferenceGradient` the first batch is the same stencil. CMA-ES:
     the point, wrapped into `[0, 2π)` like every candidate, is the mean of the
     first run, IPOP restarts draw a fresh mean as without it, and `sigma0` is
     not changed. Every other postcondition of this contract holds
@@ -745,9 +747,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     for bit what it was before `initial_point` existed.
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
     batch of PSO and every DE strategy against the same seed without a point,
-    QNG's stencil around the point, CMA-ES's first generation, a far point
-    that still moves, and its restarts against the same seed without a point,
-    the rejections before
+    QNG's and Adam's stencil around the point, Adam's run from the θ₀ its
+    seed draws against the run without a point, CMA-ES's first generation, a
+    far point that still moves, and its restarts against the same seed
+    without a point, the rejections before
     any oracle call and their precedence, PSO's bounds, the postconditions
     over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
     bits they had before it), the `check_initial_point` unit tests in
@@ -867,6 +870,53 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     through Python by `tests/python/test_cmaes.py` (configuration rejected
     before any batch, batch sizes and restarts at the seam) and the CMA-ES
     cases of `tests/python/test_oracle_contract.py`.
+- **Adam** (`AlgorithmAdam`, exposed as `polypus.Adam`: Kingma and Ba's Adam
+  with bias correction, ascending the fitness) and its **`GradientOracle`**.
+  - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
+    finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
+    convention as `EvaluationOracle`). A wrong length is
+    `OptimizerError::OracleLengthMismatch`, and a non-finite component
+    `OptimizerError::NonFiniteGradient` (its index and value), before `θ`
+    moves.
+  - Preconditions, each an error before any RNG draw or oracle call:
+    `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
+    `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`
+    (`InvalidConfig`), `bounds` finite with `lb < ub` (`InvalidBounds`), and
+    `initial_point` as under *Starting point* above.
+  - The initial `θ` is `initial_point` when given, otherwise drawn uniformly
+    from `bounds`, and is not wrapped afterwards. Each iteration asks the
+    gradient oracle once and scores the updated `θ` in one `evaluate_batch` of
+    one candidate, its length checked.
+    `best_params`/`best_fitness` are the best scored `θ`, `fitness_history` the
+    best so far after each iteration.
+  - A run ends on fitness stagnation, the rule above with `patience` counted in
+    iterations, and then reports `converged = true`.
+  - `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+    `GradientOracle` by central differences with a step `h` (finite and `> 0`):
+    one `evaluate_batch` of `2·dims` candidates,
+    `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`, per gradient. It approximates; an exact
+    gradient is its own `GradientOracle`. If the wrapped oracle returns the
+    wrong number of values, or a parameter index is out of range for `θ`, the
+    gradient is empty, without a panic, so Adam reports the length mismatch. An `Arc` of an oracle is an oracle, so one scorer can feed both.
+  - Enforced by `crates/polypus-optimizers/tests/adam.rs` (the C-5
+    postconditions against the batches the oracle saw over 25 seeds, one
+    gradient and one single-candidate batch per iteration, stagnation,
+    reproducibility, every rejected configuration with no oracle call, the
+    gradient length and finiteness checks, and the finite-difference stencil,
+    its accuracy, its step validation, a broken wrapped oracle and an index
+    out of range).
+  - In a training run the gradient comes from the run's `Oracles`
+    (`polypus-orchestration`): the exact one when the factory provides it,
+    otherwise a `FiniteDifferenceGradient` of the evaluation oracle with
+    `AdamConfig::finite_difference_step`. Neither `VqcOracleFactory` nor
+    `QmlOracleFactory` provides one, so their runs take the finite difference.
+    Enforced by the `adam_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and the walltime watch of
+    an Adam iteration in `src/walltime.rs`. Through Python,
+    `tests/python/test_adam.py` pins the batches at the seam (the stencil of
+    `2·dims` circuits, then the updated `θ`), the configuration rejected before
+    any batch, and both entry points; the Adam cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in either batch.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -999,7 +1049,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
   so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
@@ -1016,7 +1066,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance) or while drawing the random bytes of
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance) or while drawing the random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.

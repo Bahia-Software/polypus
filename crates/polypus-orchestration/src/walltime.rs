@@ -14,9 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use polypus_optimizers::{CmaEsBatchSchedule, EvaluationOracle};
+use std::sync::Arc;
 
-use crate::dispatch::Method;
+use polypus_optimizers::{CmaEsBatchSchedule, EvaluationOracle, GradientOracle};
+
+use crate::dispatch::{Method, Oracles};
 
 /// Source of the current time, injectable so tests can drive a fake clock.
 pub(crate) trait Clock: Send + Sync {
@@ -80,6 +82,13 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations),
                 unit: "generations",
+            },
+            // Like QNG: a gradient (exact, or a finite-difference batch) and the
+            // single-candidate batch that tracks the best solution.
+            Method::Adam(cfg) => RunShape {
+                batches_per_generation: 2,
+                generations: u64::from(cfg.max_iters),
+                unit: "iterations",
             },
         }
     }
@@ -242,19 +251,77 @@ impl<C: Clock> WalltimeWatch<C> {
     }
 }
 
-impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
-    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+impl<C: Clock> WalltimeWatch<C> {
+    /// Run `call` as one of the generation's batches: timed until the first
+    /// generation is complete, then passed straight through.
+    fn observe<T>(&self, call: impl FnOnce() -> T) -> T {
         if self.done.load(Ordering::Relaxed) {
-            return self.inner.evaluate_batch(candidates);
+            return call();
         }
         self.state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .started
             .get_or_insert_with(|| self.clock.now());
-        let scores = self.inner.evaluate_batch(candidates);
+        let out = call();
         self.after_batch();
-        scores
+        out
+    }
+}
+
+impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        self.observe(|| self.inner.evaluate_batch(candidates))
+    }
+}
+
+/// Another of the run's oracles behind the same [`WalltimeWatch`], so its calls
+/// count as batches of the generation the watch times: an exact gradient, one
+/// batch of an Adam iteration.
+struct Watched<T: ?Sized, C: Clock> {
+    watch: Arc<WalltimeWatch<C>>,
+    inner: Box<T>,
+}
+
+impl<C: Clock> GradientOracle for Watched<dyn GradientOracle, C> {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        self.watch
+            .observe(|| self.inner.gradient(theta, param_index))
+    }
+
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        self.watch
+            .observe(|| self.inner.gradient_batch(theta, dims))
+    }
+}
+
+/// `oracles` behind one [`WalltimeWatch`] for `method`'s call pattern.
+pub(crate) fn watched<C: Clock + 'static>(
+    oracles: Oracles,
+    walltime: Duration,
+    method: &Method,
+    dimensions: u32,
+    run_id: &str,
+    clock: C,
+) -> Oracles {
+    let watch = Arc::new(
+        WalltimeWatch::new(
+            oracles.evaluation,
+            walltime,
+            method.run_shape(),
+            run_id,
+            clock,
+        )
+        .with_growth(method.growth(dimensions)),
+    );
+    Oracles {
+        gradient: oracles.gradient.map(|inner| {
+            Box::new(Watched {
+                watch: Arc::clone(&watch),
+                inner,
+            }) as Box<dyn GradientOracle>
+        }),
+        evaluation: Box::new(watch),
     }
 }
 
@@ -766,5 +833,79 @@ mod tests {
                 Some(1 + 2 + 4 + 47 * 8)
             );
         }
+    }
+
+    /// An exact gradient that takes `per_call` on the fake clock.
+    struct SlowGradient {
+        clock: Arc<FakeClock>,
+        per_call: Duration,
+    }
+
+    impl GradientOracle for SlowGradient {
+        fn gradient(&self, _theta: &[f64], _param_index: usize) -> f64 {
+            self.clock.advance(self.per_call);
+            0.0
+        }
+        fn gradient_batch(&self, _theta: &[f64], dims: usize) -> Vec<f64> {
+            self.clock.advance(self.per_call);
+            vec![0.0; dims]
+        }
+    }
+
+    /// An Adam iteration with an exact gradient is the gradient plus the tracked
+    /// candidate: the watch times both, so a slow gradient is not missed.
+    #[test]
+    fn an_adam_iteration_counts_its_exact_gradient() {
+        let run_id = "walltime-watch-adam";
+        let clock = FakeClock::new();
+        let oracles = Oracles {
+            evaluation: Box::new(SlowOracle {
+                clock: Arc::clone(&clock),
+                per_batch: Duration::from_secs(10),
+            }),
+            gradient: Some(Box::new(SlowGradient {
+                clock: Arc::clone(&clock),
+                per_call: Duration::from_secs(110),
+            })),
+        };
+        let method = Method::Adam(crate::AdamConfig {
+            max_iters: 101,
+            learning_rate: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            bounds: (0.0, 1.0),
+            tolerance: 0.0,
+            patience: 10,
+            finite_difference_step: 1e-3,
+        });
+        assert_eq!(
+            method.run_shape(),
+            RunShape {
+                batches_per_generation: 2,
+                generations: 101,
+                unit: "iterations",
+            }
+        );
+        let oracles = watched(
+            oracles,
+            Duration::from_secs(3 * 3600),
+            &method,
+            2,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
+        gradient.gradient_batch(&[0.0, 0.0], 2);
+        oracles.evaluation.evaluate_batch(&[vec![0.0, 0.0]]);
+        // 101 iterations of 2 min (110 s + 10 s) is 3:22:00, past the 3 h walltime.
+        let logged = logged_for(run_id);
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(
+            logged[0].contains("101 iterations took 0:02:00"),
+            "{}",
+            logged[0]
+        );
+        assert!(logged[0].contains("3:22:00"), "{}", logged[0]);
     }
 }

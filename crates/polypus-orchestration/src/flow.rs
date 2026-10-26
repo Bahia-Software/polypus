@@ -7,11 +7,11 @@
 //! here with the [`Scheduler`](crate::Scheduler) that runs it.
 
 use polypus_infrastructure::{BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError};
-use polypus_optimizers::{EvaluationOracle, OptimizationOutcome};
+use polypus_optimizers::OptimizationOutcome;
 
-use crate::dispatch::{dispatch_optimizer, Method, OracleError, OracleErrorSlot};
+use crate::dispatch::{dispatch_optimizer, Method, OracleError, OracleErrorSlot, Oracles};
 use crate::scheduler::Resources;
-use crate::walltime::{SystemClock, WalltimeWatch};
+use crate::walltime::{watched, SystemClock};
 
 /// A unit of orchestratable work run by [`Scheduler::run`](crate::Scheduler::run).
 ///
@@ -86,15 +86,16 @@ impl Flow for RunCircuitFlow {
 /// flow keeps the factory's auto-derived thread markers and the `polypus` edge can
 /// move it across `py.detach` without this crate ever naming `pyo3`.
 pub trait OracleFactory {
-    /// Assemble the oracle from the run context. Called once, inside
+    /// Assemble the run's [`Oracles`] from the run context. Called once, inside
     /// [`Flow::run`] — after the [`Scheduler`](crate::Scheduler) has created the
-    /// [`CancelToken`], so the oracle captures the exact token this run cancels on.
+    /// [`CancelToken`], so the oracles capture the exact token this run cancels on.
+    /// A factory with only an evaluation oracle returns it `.into()`.
     fn build(
         self,
         resources: &Resources,
         cancel: &CancelToken,
         errors: &OracleErrorSlot,
-    ) -> Box<dyn EvaluationOracle>;
+    ) -> Oracles;
 }
 
 /// Variational training as a [`Flow`]: build the oracle from an [`OracleFactory`],
@@ -105,8 +106,8 @@ pub trait OracleFactory {
 pub struct TrainFlow<F: OracleFactory> {
     /// Builds the candidate-scoring oracle at run time (VQC/QML/… lives here).
     pub factory: F,
-    /// Chosen optimizer + its config (built at the edge from the `polypus.DE/PSO/QNG/CMAES`
-    /// object; `Qng` carries its variance oracle).
+    /// Chosen optimizer + its config (built at the edge from the
+    /// `polypus.DE/PSO/QNG/CMAES/Adam` object; `Qng` carries its variance oracle).
     pub method: Method,
     /// Free-parameter count validated at the edge.
     pub dimensions: u32,
@@ -134,24 +135,23 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
         // and the per-run `CancelToken` both exist, so the oracle captures the exact
         // token this run cancels on — while the *order* still lives with the
         // scheduler that runs it.
-        let oracle = self.factory.build(resources, cancel, &self.errors);
-        // Only a backend whose allocation expires (CUNQA) gets the overrun watch.
-        let oracle: Box<dyn EvaluationOracle> = match resources.backend.walltime() {
-            Some(walltime) => Box::new(
-                WalltimeWatch::new(
-                    oracle,
-                    walltime,
-                    self.method.run_shape(),
-                    &resources.config.id,
-                    SystemClock,
-                )
-                .with_growth(self.method.growth(self.dimensions)),
+        let oracles = self.factory.build(resources, cancel, &self.errors);
+        // Only a backend whose allocation expires (CUNQA) gets the overrun watch,
+        // which times every oracle of the run as one watch.
+        let oracles = match resources.backend.walltime() {
+            Some(walltime) => watched(
+                oracles,
+                walltime,
+                &self.method,
+                self.dimensions,
+                &resources.config.id,
+                SystemClock,
             ),
-            None => oracle,
+            None => oracles,
         };
         dispatch_optimizer(
             self.method,
-            oracle,
+            oracles,
             self.dimensions,
             &self.errors,
             self.seed,
@@ -167,6 +167,7 @@ mod tests {
     use polypus_infrastructure::{
         BackendError, OptLevel, Planner, PlannerRequirements, QuantumBackend, RunParams,
     };
+    use polypus_optimizers::EvaluationOracle;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -329,9 +330,9 @@ mod tests {
             _resources: &Resources,
             _cancel: &CancelToken,
             _errors: &OracleErrorSlot,
-        ) -> Box<dyn EvaluationOracle> {
+        ) -> Oracles {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            Box::new(StubOracle)
+            Box::new(StubOracle).into()
         }
     }
 
@@ -412,8 +413,8 @@ mod tests {
             _resources: &Resources,
             _cancel: &CancelToken,
             _errors: &OracleErrorSlot,
-        ) -> Box<dyn EvaluationOracle> {
-            Box::new(SleepyOracle)
+        ) -> Oracles {
+            Box::new(SleepyOracle).into()
         }
     }
 
