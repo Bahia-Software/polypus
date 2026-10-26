@@ -25,7 +25,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | Parameter | Description |
 |---|---|
 | `qc` | Parameterized circuit: a `polypus.Circuit` with `polypus.Param(i)` angles, or a Qiskit `QuantumCircuit` |
-| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES` or `polypus.Adam` |
+| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam` or `polypus.SPSA` |
 | `shots` | Shots per circuit execution |
 | `n_qpus` | Number of QPUs the population is spread over |
 | `dimensions` | Number of variational parameters |
@@ -216,6 +216,57 @@ Any other `rule` raises `ValueError`.
 
 **Reproducibility.** With either rule Adam's steps use only basic arithmetic and square roots, so, as with DE and unlike CMA-ES, a seeded run over a backend whose results do not depend on the platform reproduces exactly everywhere.
 
+### SPSA
+
+```python
+polypus.SPSA(
+    max_iters=300,
+    resamplings=1,
+    perturbation=0.1,
+    target_step=0.63,
+    alpha=0.602,
+    gamma=0.101,
+    eval_interval=20,
+    seed=None,
+)
+```
+
+Simultaneous perturbation stochastic approximation (Spall, 1992) is a gradient method whose cost per step does not grow with the number of parameters. It moves every parameter at once by `±c_k`, with random signs `Δ`, and estimates the gradient from the difference of the two fitness values, `(f(θ + c_k·Δ) − f(θ − c_k·Δ)) / (2·c_k) · Δ`: two circuits per estimate, where Adam's finite difference takes `2 × dimensions`. It is a common choice on hardware: in Bonet-Monroig et al.'s comparison of four optimizers on small chemistry and materials problems (arXiv:2111.13454), SPSA did best with default settings, and CMA-ES matched or beat it only once its hyperparameters were tuned for each problem.
+
+A run has three parts:
+
+1. **Calibration.** One batch of 50 circuits around the starting point θ₀, 25 random perturbations in both directions, measures how large the gradient estimates are there, and SPSA sets its gain so that the first step moves each parameter by about `target_step` radians, following Spall's guideline (1998), as Qiskit's `SPSA.calibrate` does. Each pair gives `|f₊ − f₋| / (2·perturbation)`, the size of every component of its estimate, and the gain is `target_step` over their mean. If every pair has the same fitness (a flat landscape around θ₀), the gain is `target_step` and a warning is logged.
+2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / k^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults.
+3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration and every `eval_interval` iterations after it, as Jones, Mineh and Montanaro do (arXiv:2411.13742), and after the last step one more circuit measures the parameters it reached, so the last iteration's circuits are not wasted on a step that is never measured. `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration, the final parameters counted in the last entry.
+
+| Parameter | Description |
+|---|---|
+| `max_iters` | Iterations, each one batch of `2 × resamplings` circuits, plus one when θ is measured; the final parameters cost one circuit more. At least 1 |
+| `resamplings` | Perturbations averaged per iteration, at least 1. Each adds two circuits to the iteration's batch |
+| `perturbation` | `c`, the size of the first perturbations in radians, finite and `> 0` |
+| `target_step` | Size of the first step on each parameter, in radians, finite and `> 0`. The default `0.63` is about `2π/10` |
+| `alpha`, `gamma` | Decay exponents of the steps and of the perturbations: `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5`, Spall's conditions for the iterates to converge |
+| `eval_interval` | Iterations between measurements of θ, at least 1 |
+
+θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `2 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, the final one included, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+
+**When to prefer SPSA: many parameters, few QPUs.** An Adam iteration is one batch of `2 × dimensions + 1` circuits, 61 for 30 parameters and 401 for 200, which a single QPU runs one after another. An SPSA iteration is 2 circuits whatever the number of parameters. Its estimates are noisier than a finite difference, so it takes many cheap steps where Adam takes few expensive ones.
+
+**`resamplings` fills the QPUs.** With one perturbation per iteration, each batch is 2 circuits, so a run on many QPUs leaves most of them idle and takes as many sequential rounds as iterations. `resamplings=K` makes each batch `2K` circuits, spread over the QPUs, and averages `K` estimates, so each step is less noisy and the same budget takes `K` times fewer rounds. Set `2 × resamplings` close to `n_qpus`. The rounds saved can cost quality: in [Choosing an optimizer](#choosing-an-optimizer), eight perturbations per iteration, with the same steps as one, were below one perturbation with 256 shots at p = 3 and within noise of it elsewhere, never above it.
+
+**Tune `target_step` and `perturbation`.** The calibration sets the scale of the steps, but the result still depends on both. A `target_step` too large jumps between optima, one too small crawls. A small `perturbation` lets shot noise swamp the difference of the two fitness values, which is divided by `2 × c_k`, as with Adam's finite-difference step. Try a few values on instances of your problem kept apart from the ones you report: in [Choosing an optimizer](#choosing-an-optimizer), SPSA on QAOA used `perturbation=0.2` and `target_step=1.2`, tuned that way with one perturbation per iteration.
+
+**SPSA needs budget.** The calibration takes 50 circuits before the first step, and the steps that follow are small and noisy, so with a small budget SPSA can end below a global search: with 500 evaluations in [Choosing an optimizer](#choosing-an-optimizer), one perturbation per iteration was within noise of the classic DE and eight were below it. Like Adam, it is a local method: [Starting point](#starting-point) shows how to start it from a global search's result.
+
+**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / k^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
+
+**References.**
+
+- J. C. Spall, "Multivariate stochastic approximation using a simultaneous perturbation gradient approximation", IEEE Transactions on Automatic Control 37(3), 332–341 (1992).
+- J. C. Spall, "Implementation of the simultaneous perturbation algorithm for stochastic optimization", IEEE Transactions on Aerospace and Electronic Systems 34(3), 817–823 (1998).
+- B. D. M. Jones, L. Mineh and A. Montanaro, "Benchmarking a wide range of optimisers for solving the Fermi-Hubbard model using the variational quantum eigensolver", Quantum Science and Technology 10(4), 045032 (2025), arXiv:2411.13742.
+- X. Bonet-Monroig, H. Wang, D. Vermetten, B. Senjean, C. Moussa, T. Bäck, V. Dunjko and T. E. O'Brien, "Performance comparison of optimization methods on variational quantum algorithms", Physical Review A 107, 032407 (2023), arXiv:2111.13454.
+
 ## Starting point
 
 By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
@@ -227,6 +278,7 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `QNG` | Starts from it: the first batch estimates the gradient around it, without evaluating the point itself. It may lie outside `bounds`, which only limit the random start |
 | `CMAES` | Makes it, wrapped into `[0, 2π)`, the mean of the first run: the first generation is sampled around it with step size `sigma0` |
 | `Adam` | Starts from it and evaluates it first: the first batch is the point, then the finite-difference stencil that estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
+| `SPSA` | Starts from it: the calibration batch is centred on it, and the first iteration measures it first. It is taken as given, not wrapped into `[0, 2π)` |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 
@@ -314,7 +366,7 @@ In the benchmark, three runs raised the worst instance at p = 5, where single ru
 
 ## Choosing an optimizer
 
-[`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains two circuits for MaxCut on random 3-regular graphs of 10 nodes, with each optimizer at the same evaluation budget: QAOA with depth p = 3 or 5 (6 or 10 parameters), and a hardware-efficient ansatz (HEA) of three layers of RY on every qubit with a linear chain of CZ between them (Qiskit's `TwoLocal` with `ry`, `cz`, `entanglement="linear"` and `reps=2`), 30 parameters. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. Adam uses its defaults on both circuits. Momentum uses a learning rate tuned for each circuit on separate instances, 0.03 for QAOA and 0.1 for the HEA, with a `finite_difference_step` of 0.4. "L-SHADE, then Adam" gives half the budget to L-SHADE and the rest to Adam, started from L-SHADE's `best_params`; "Adam ×3" gives a third to each of three Adam runs with different seeds and keeps the one with the best `best_fitness`. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
+[`benchmarks/bench_optimizers.py`](../../benchmarks/bench_optimizers.py) trains two circuits for MaxCut on random 3-regular graphs of 10 nodes, with each optimizer at the same evaluation budget: QAOA with depth p = 3 or 5 (6 or 10 parameters), and a hardware-efficient ansatz (HEA) of three layers of RY on every qubit with a linear chain of CZ between them (Qiskit's `TwoLocal` with `ry`, `cz`, `entanglement="linear"` and `reps=2`), 30 parameters. The 30 instances are paired: each is one graph, run by every optimizer with the same seed. The score is the exact approximation ratio of the returned `best_params`, the expected cut from the statevector divided by the maximum cut, so shot noise in `best_fitness` does not flatter it. DE uses a population of 30, and early stopping is off except for CMA-ES with restarts, whose restarts need it. Adam uses its defaults on both circuits. Momentum uses a learning rate tuned for each circuit on separate instances, 0.03 for QAOA and 0.1 for the HEA, with a `finite_difference_step` of 0.4. "L-SHADE, then Adam" gives half the budget to L-SHADE and the rest to Adam, started from L-SHADE's `best_params`; "Adam ×3" gives a third to each of three Adam runs with different seeds and keeps the one with the best `best_fitness`. SPSA runs with one perturbation per iteration and with eight (`resamplings=8`), both with the settings tuned with one perturbation on separate instances, so the two differ only in the perturbations: `perturbation=0.2` and `target_step=1.2` on QAOA, the defaults (0.1 and 0.63) on the HEA; each makes as many iterations as fit the budget after its calibration. The circuits run on Polypus's native simulator, through a meter that counts every evaluation and stops each optimizer at the budget.
 
 Paired difference in approximation ratio from the classic DE (`rand1bin`), with its standard error, and the share of instances where the optimizer did better; the best mean of each scenario is in bold:
 
@@ -330,6 +382,8 @@ Paired difference in approximation ratio from the classic DE (`rand1bin`), with 
 | `Adam(rule="momentum")`, tuned rate | +0.033 ± 0.003 (97 %) | +0.038 ± 0.004 (87 %) | +0.066 ± 0.004 (100 %) | +0.039 ± 0.004 (100 %) | +0.201 ± 0.009 (100 %) |
 | L-SHADE, then `Adam()` | **+0.043 ± 0.004 (97 %)** | **+0.039 ± 0.004 (97 %)** | **+0.071 ± 0.004 (100 %)** | **+0.045 ± 0.005 (97 %)** | **+0.214 ± 0.007 (100 %)** |
 | `Adam()` ×3 | +0.030 ± 0.004 (87 %) | +0.036 ± 0.004 (97 %) | +0.064 ± 0.004 (100 %) | +0.025 ± 0.005 (87 %) | +0.177 ± 0.008 (100 %) |
+| `SPSA()`, tuned steps | +0.032 ± 0.005 (87 %) | +0.030 ± 0.009 (90 %) | +0.039 ± 0.011 (83 %) | +0.009 ± 0.009 (63 %) | +0.194 ± 0.011 (100 %) |
+| `SPSA(resamplings=8)`, the same steps | +0.009 ± 0.008 (77 %) | +0.008 ± 0.012 (77 %) | +0.032 ± 0.011 (93 %) | −0.035 ± 0.017 (43 %) | +0.190 ± 0.011 (100 %) |
 
 The lowest ratio of the 30 instances, where a local method's occasional poor optimum shows:
 
@@ -345,8 +399,10 @@ The lowest ratio of the 30 instances, where a local method's occasional poor opt
 | `Adam(rule="momentum")`, tuned rate | 0.823 | 0.824 | 0.861 | 0.813 | 0.845 |
 | L-SHADE, then `Adam()` | 0.852 | 0.850 | 0.918 | 0.799 | 0.991 |
 | `Adam()` ×3 | 0.818 | 0.823 | 0.898 | 0.776 | 0.835 |
+| `SPSA()`, tuned steps | 0.782 | 0.671 | 0.666 | 0.701 | 0.845 |
+| `SPSA(resamplings=8)`, the same steps | 0.689 | 0.647 | 0.668 | 0.563 | 0.841 |
 
-Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots. An Adam batch holds `2 × dimensions + 1` circuits, 13, 21 and 61 here, and its last holds the one circuit of the point it ends at.
+Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots. An Adam batch holds `2 × dimensions + 1` circuits, 13, 21 and 61 here, and its last holds the one circuit of the point it ends at. An SPSA batch holds 2 or 16 circuits, plus the parameters every 20 iterations, after a calibration batch of 50 and before the one circuit of its final parameters.
 
 | Optimizer | Batches, 1500 evals | Batches, 3000 evals | Batches, HEA | Bias, p = 3 | Bias, p = 5 | Bias, HEA |
 |---|---|---|---|---|---|---|
@@ -360,6 +416,8 @@ Sequential batches each optimizer sent, the rounds that cost time when the QPUs 
 | `Adam(rule="momentum")`, tuned rate | 116 | 143 | 82 | +0.013 | +0.011 | +0.002 |
 | L-SHADE, then `Adam()` | 115 | 187 | 234 | +0.013 | +0.011 | +0.002 |
 | `Adam()` ×3 | 118 | 145 | 84 | +0.011 | +0.009 | +0.004 |
+| `SPSA()`, tuned steps | 708 | 1440 | 2416 | +0.010 | +0.007 | +0.001 |
+| `SPSA(resamplings=8)`, the same steps | 92 | 185 | 310 | +0.004 | +0.005 | +0.001 |
 
 What the data says:
 
@@ -367,10 +425,13 @@ What the data says:
 - **Adam alone, with its defaults, is a strong single run with one configuration for both circuits.** It beat L-SHADE on average in every scenario: clearly with 256 shots at p = 3 (+0.014 ± 0.004 at 1500 evaluations, +0.028 ± 0.004 at 500) and on the HEA (+0.044 ± 0.007), within noise with 2^20 shots (+0.003 ± 0.004) and at p = 5 (+0.013 ± 0.011). As a local method it occasionally ends in a poor optimum: its lowest ratio was 0.661 with p = 5 and 0.784 with 2^20 shots, against 0.830 and 0.831 for L-SHADE. Its batches grow with the parameters, so with 30 it sent the fewest of all (82, against 385 for L-SHADE).
 - **Use momentum only with a learning rate tuned to the problem.** With rates tuned on separate instances it matched Adam within noise (0.003 to 0.016 higher), and its lowest ratio at p = 5 was 0.861, against Adam's 0.661. Its rate depends on the scale of the cost (see [Adam](#adam)), so these figures are its best case; Adam needed no tuning.
 - **Don't restart Adam by default.** Three runs on a third of the budget each raised the worst instance at p = 5 (lowest ratio 0.898, against 0.661 for one run), but their mean was within noise of one run's there (+0.014 ± 0.011), with 2^20 shots (+0.004 ± 0.003) and with 256 shots at p = 3 and 1500 evaluations (−0.001 ± 0.003). They were behind one run at 500 evaluations (−0.010 ± 0.003) and on the HEA (−0.020 ± 0.007), where a third of the budget was too short. Starting from L-SHADE had the higher mean in every scenario.
-- **CMA-ES with its default population is competitive with L-SHADE.** Its paired difference from L-SHADE was within two standard errors in every scenario: about even with 256 shots (+0.003 ± 0.005 at p = 3, +0.001 ± 0.006 at p = 5), slightly ahead with 2^20 shots (+0.007 ± 0.004) and on the HEA (+0.017 ± 0.016). It was less consistent on the HEA, beating the classic DE on 90 % of the instances where L-SHADE beat it on all, with a lowest ratio of 0.740 against 0.834. On QAOA it sent the most sequential batches and, at 1500 and 3000 evaluations, had the largest winner's curse.
+- **SPSA with one perturbation per iteration was within noise of Adam once its steps were tuned.** With 1500 evaluations or more its paired difference from Adam was within noise in every scenario (+0.001 ± 0.005 at p = 3 with 256 shots, −0.003 ± 0.008 with 2^20, −0.011 ± 0.015 at p = 5, −0.003 ± 0.011 on the HEA), and it beat the classic DE on 83 to 100 % of the instances. Like Adam it sometimes ended in a poor optimum, with a lowest ratio of 0.671 with 2^20 shots and 0.666 at p = 5. On the 30-parameter HEA both SPSA variants ended level with Adam (0.977 and 0.973, against 0.981) and about 0.02 below L-SHADE then Adam. Every optimizer here has the same evaluations and is scored at the end, so the benchmark does not show whether SPSA's cheaper steps reach a good ratio sooner with many parameters.
+- **SPSA needs budget.** With 500 evaluations, after its 50-circuit calibration, one perturbation per iteration gained only +0.009 ± 0.009 over the classic DE, 0.027 ± 0.009 below Adam, and eight perturbations per iteration, 27 iterations in all, ended below the classic DE (−0.035 ± 0.017, about two standard errors), with a lowest ratio of 0.563.
+- **`resamplings=8` cuts SPSA's sequential batches about eightfold, at a cost in quality.** With the same steps as one perturbation per iteration, it sent 92 batches at 1500 evaluations instead of 708 (116 for Adam), each of 16 or 17 circuits, a single round on 17 QPUs. Its mean was below one perturbation's with 256 shots at p = 3 (−0.022 ± 0.006 at 1500 evaluations, ahead on 27 % of the instances; −0.043 ± 0.012 at 500) and within noise of it elsewhere (−0.021 ± 0.014 with 2^20 shots, −0.007 ± 0.016 at p = 5, −0.005 ± 0.012 on the HEA), never above it: averaging eight perturbations did not make up for eight times fewer steps. Its lowest ratio at p = 3 was 0.689 with 256 shots and 0.647 with 2^20. Use it when sequential rounds, not evaluations, limit the run.
+- **CMA-ES with its default population is competitive with L-SHADE.** Its paired difference from L-SHADE was within two standard errors in every scenario: about even with 256 shots (+0.003 ± 0.005 at p = 3, +0.001 ± 0.006 at p = 5), slightly ahead with 2^20 shots (+0.007 ± 0.004) and on the HEA (+0.017 ± 0.016). It was less consistent on the HEA, beating the classic DE on 90 % of the instances where L-SHADE beat it on all, with a lowest ratio of 0.740 against 0.834. On QAOA it sent the most sequential batches of the population-based optimizers and, at 1500 and 3000 evaluations, had the largest winner's curse.
 - **Don't enlarge CMA-ES's population to fill QPUs, and don't count on IPOP restarts.** With a population of 30, CMA-ES's mean ratio was below its default population's in every scenario, by 0.005 to 0.037, though still about 0.01 above the classic DE's at 1500 and 3000 evaluations. IPOP restarts stayed within 0.01 of the classic DE on QAOA and gained +0.015 ± 0.014 on the HEA, against +0.170 without them.
 - **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters and 10.6 with 30, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
 - **With 500 evaluations only the Adam-based optimizers were clearly better than the classic DE,** by 0.025 to 0.045; the DE strategies and CMA-ES gained 0.008 at most.
-- **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. Re-evaluate `best_params` with more shots when the value itself matters.
+- **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. SPSA measures its parameters only every 20 iterations, so it picks from fewer estimates: 0.4 to 1.0 % on QAOA and 0.1 % on the HEA. Re-evaluate `best_params` with more shots when the value itself matters.
 
-These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates were tuned for these two circuits. CMA-ES's rows may differ on another platform or build; see its reproducibility note under [CMA-ES](#cma-es). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE and from Adam, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio. `--json FILE` also writes the per-instance results.
+These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates and SPSA's steps were tuned for these two circuits. CMA-ES's and SPSA's rows may differ on another platform or build; see the reproducibility notes under [CMA-ES](#cma-es) and [SPSA](#spsa). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs), and the SPSA rows from `--full --only rand1bin lshade adam spsa spsa-k8` at commit `0973cf8` on the same platform, whose `rand1bin`, `lshade` and `adam` runs were identical to the first run's. The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE, from Adam and from SPSA, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio. `--json FILE` also writes the per-instance results.

@@ -6,7 +6,7 @@
 //! either the oracle's recorded failure or the optimizer's own config error).
 //! That triplication now lives here once:
 //! [`dispatch_optimizer`] takes a pyo3-free [`Method`] (the binding parses the
-//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam` object into it and builds the QNG
+//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` object into it and builds the QNG
 //! variance oracle), runs the matching optimizer, and returns an
 //! [`OracleError`] the binding converts back into a `PyErr`.
 //!
@@ -28,6 +28,7 @@ use polypus_optimizers::{
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
     OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
+use polypus_optimizers::{AlgorithmSPSA, AlgorithmSPSAArgs};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
@@ -96,6 +97,20 @@ pub struct AdamConfig {
     pub rule: AdamRule,
 }
 
+/// SPSA configuration, mirroring the `polypus.SPSA` object (see [`DeConfig`]).
+/// The run starts with one calibration batch of 50 circuits, then makes one
+/// batch of `2·resamplings` circuits per iteration, plus the parameters
+/// themselves every `eval_interval` iterations.
+pub struct SpsaConfig {
+    pub max_iters: u32,
+    pub resamplings: u32,
+    pub perturbation: f64,
+    pub target_step: f64,
+    pub alpha: f64,
+    pub gamma: f64,
+    pub eval_interval: u32,
+}
+
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
 /// variance oracle (built from the Python callback at the binding boundary), so
 /// dispatch stays Python-free.
@@ -105,6 +120,7 @@ pub enum Method {
     Qng(QngConfig, Box<dyn VarianceOracle>),
     Cmaes(CmaesConfig),
     Adam(AdamConfig),
+    Spsa(SpsaConfig),
 }
 
 /// What a training run evaluates through: built by an
@@ -173,6 +189,17 @@ impl Method {
                 cfg.generations,
                 cfg.sigma0,
                 cfg.restarts,
+                initial_point,
+            ),
+            Method::Spsa(cfg) => AlgorithmSPSA::check_preconditions(
+                cfg.max_iters,
+                cfg.resamplings,
+                cfg.perturbation,
+                cfg.target_step,
+                cfg.alpha,
+                cfg.gamma,
+                cfg.eval_interval,
+                dimensions,
                 initial_point,
             ),
             // The step first: dispatch builds the finite difference before it
@@ -374,6 +401,19 @@ pub fn dispatch_optimizer(
             seed: Some(seed),
             initial_point,
         }),
+        Method::Spsa(cfg) => AlgorithmSPSA.optimize(AlgorithmSPSAArgs {
+            oracle,
+            max_iters: cfg.max_iters,
+            resamplings: cfg.resamplings,
+            perturbation: cfg.perturbation,
+            target_step: cfg.target_step,
+            alpha: cfg.alpha,
+            gamma: cfg.gamma,
+            eval_interval: cfg.eval_interval,
+            dimensions,
+            seed: Some(seed),
+            initial_point,
+        }),
     };
     finish(result, errors)
 }
@@ -437,7 +477,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log::logged_for;
+    use crate::test_log::{capture_logs, logged_for};
     use std::fmt;
 
     // The slot is type-erased, so these exercise it with a trivial pure error —
@@ -514,6 +554,7 @@ mod tests {
     #[test]
     fn record_logs_only_the_error_it_stores() {
         let run_id = "oracle-error-slot-logs-only-the-stored-error";
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         slot.record(boxed("first"), run_id);
@@ -564,6 +605,7 @@ mod tests {
 
         let run_id = "oracle-error-slot-formats-outside-the-lock";
         // The format only happens when an `ERROR` line will be written.
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         let (formatting_tx, formatting_rx) = mpsc::channel();
@@ -734,8 +776,9 @@ mod tests {
     /// Dispatch hands `initial_point` to every `Method`: it is the first
     /// candidate of the first batch (DE, PSO, and Adam, whose batch is θ₀ and
     /// then its finite-difference stencil), the centre of the first gradient
-    /// stencil (QNG, whose first candidate is θ₀ + h·e₀) and the first mean
-    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀).
+    /// stencil (QNG, whose first candidate is θ₀ + h·e₀), the first mean
+    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀) and the centre
+    /// of the calibration (SPSA, whose first candidate is θ₀ + c·Δ₁).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -792,6 +835,7 @@ mod tests {
                     rule: AdamRule::Adam,
                 }),
             ),
+            ("SPSA", spsa_method(2, 1)),
         ];
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             methods.push((strategy.as_str(), de_method(strategy)));
@@ -808,6 +852,16 @@ mod tests {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
                 .expect("the oracle was called");
+            if name == "SPSA" {
+                // The first calibration point, θ₀ + c·Δ₁ with Δ₁ of ±1s.
+                for (x, p) in first.iter().zip(&point) {
+                    assert!(
+                        ((x - p).abs() - SPSA_PERTURBATION).abs() < 1e-12,
+                        "{first:?}"
+                    );
+                }
+                continue;
+            }
             let expected = match name {
                 "QNG" => vec![point[0] + step, point[1], point[2]],
                 _ => point.clone(),
@@ -973,6 +1027,40 @@ mod tests {
             ),
         ];
         cases.extend(adam_cases);
+        let spsa = |max_iters, alpha| {
+            Method::Spsa(SpsaConfig {
+                max_iters,
+                resamplings: 1,
+                perturbation: 0.1,
+                target_step: 0.63,
+                alpha,
+                gamma: 0.101,
+                eval_interval: 1,
+            })
+        };
+        let spsa_cases: Vec<Case> = vec![
+            (
+                "SPSA, max_iters 0",
+                Box::new(move || spsa(0, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, alpha NaN",
+                Box::new(move || spsa(2, f64::NAN)),
+                short.clone(),
+            ),
+            (
+                "SPSA, short point",
+                Box::new(move || spsa(2, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, valid",
+                Box::new(move || spsa(2, 0.602)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(spsa_cases);
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             cases.push((
                 "DE, population 2",
@@ -1187,6 +1275,78 @@ mod tests {
                 assert_eq!(parameter, "finite_difference_step")
             }
             _ => panic!("expected an InvalidConfig for the step"),
+        }
+        assert!(sizes(&log).is_empty());
+    }
+
+    // ── SPSA ──────────────────────────────────────────────────────────────────
+
+    const SPSA_PERTURBATION: f64 = 0.1;
+
+    fn spsa_method(max_iters: u32, resamplings: u32) -> Method {
+        Method::Spsa(SpsaConfig {
+            max_iters,
+            resamplings,
+            perturbation: SPSA_PERTURBATION,
+            target_step: 0.63,
+            alpha: 0.602,
+            gamma: 0.101,
+            eval_interval: 4,
+        })
+    }
+
+    /// Dispatch hands every `SpsaConfig` field and the seed to SPSA: the
+    /// outcome is the one `AlgorithmSPSA::optimize` returns for the same
+    /// arguments, after a calibration batch of 50, one batch per iteration and
+    /// the final θ.
+    #[test]
+    fn spsa_dispatch_runs_the_configured_optimizer() {
+        let (oracle, log) = recorder();
+        let dispatched = dispatch_optimizer(
+            spsa_method(9, 3),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid SPSA run must succeed"));
+        // θ heads the batches of iterations 1, 5 and 9; the final θ is alone.
+        assert_eq!(sizes(&log), [50, 7, 6, 6, 6, 7, 6, 6, 6, 7, 1]);
+        let (oracle, _) = recorder();
+        let direct = AlgorithmSPSA
+            .optimize(AlgorithmSPSAArgs {
+                oracle,
+                max_iters: 9,
+                resamplings: 3,
+                perturbation: SPSA_PERTURBATION,
+                target_step: 0.63,
+                alpha: 0.602,
+                gamma: 0.101,
+                eval_interval: 4,
+                dimensions: 3,
+                seed: Some(4),
+                initial_point: None,
+            })
+            .expect("a valid SPSA configuration runs");
+        assert_eq!(dispatched, direct);
+    }
+
+    #[test]
+    fn spsa_rejects_an_invalid_configuration_before_any_batch() {
+        let (oracle, log) = recorder();
+        let method = match spsa_method(10, 1) {
+            Method::Spsa(cfg) => Method::Spsa(SpsaConfig {
+                eval_interval: 0,
+                ..cfg
+            }),
+            other => other,
+        };
+        match dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "eval_interval")
+            }
+            _ => panic!("expected an InvalidConfig for eval_interval"),
         }
         assert!(sizes(&log).is_empty());
     }

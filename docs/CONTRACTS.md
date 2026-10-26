@@ -715,13 +715,14 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
 - **Starting point (`initial_point`).** Every optimizer takes an optional
   starting point: the `initial_point: Option<Vec<f64>>` field of
   `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`,
-  `AlgorithmCmaEsArgs` and `AlgorithmAdamArgs`, the last argument of
-  `dispatch_optimizer`, and `train(..., initial_point=None)` /
+  `AlgorithmCmaEsArgs`, `AlgorithmAdamArgs` and `AlgorithmSPSAArgs`, the last
+  argument of `dispatch_optimizer`, and `train(..., initial_point=None)` /
   `qml.train(..., initial_point=None)` in Python.
   - Preconditions: exactly `dimensions` values, every one finite, and for PSO
     every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
     bounds, so a point outside them would be moved). QNG and Adam take any
-    finite point: their `bounds` only shape the random draw. Each optimizer
+    finite point: their `bounds` only shape the random draw. SPSA, which has
+    no `bounds`, takes any finite point too. Each optimizer
     checks this after its other preconditions, whose errors come first, and
     before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
     `initial_point`. Each optimizer's `check_preconditions` makes these checks,
@@ -744,7 +745,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     batch. CMA-ES:
     the point, wrapped into `[0, 2π)` like every candidate, is the mean of the
     first run, IPOP restarts draw a fresh mean as without it, and `sigma0` is
-    not changed. Every other postcondition of this contract holds
+    not changed. SPSA: it is θ₀, unwrapped, the centre of the calibration
+    batch and the first candidate of the first iteration's batch, its first
+    measurement. Every other postcondition of this contract holds
     with a point. Without one (`None`, the default) every optimizer is bit
     for bit what it was before `initial_point` existed.
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
@@ -753,6 +756,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     stencil, Adam's run from the θ₀ its
     seed draws against the run without a point, CMA-ES's first generation, a
     far point that still moves, and its restarts against the same seed
+    without a point, SPSA's calibration centred on the point and the point
+    measured first, SPSA's run from the θ₀ its seed draws against the run
     without a point, the rejections before
     any oracle call and their precedence, PSO's bounds, the postconditions
     over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
@@ -982,6 +987,75 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     rejected before any batch, the defaults, and both entry points; the Adam
     cases of `tests/python/test_oracle_contract.py` cover a bad value in a
     batch, the updated `θ`'s own and the final `θ`'s included.
+- **SPSA** (`AlgorithmSPSA`, exposed as `polypus.SPSA`: Spall's
+  simultaneous perturbation stochastic approximation, ascending the fitness,
+  with a calibrated first step).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG draw
+    or oracle call, in this order: `max_iters >= 1`, `dimensions >= 1`,
+    `resamplings >= 1`, `perturbation` and `target_step` finite and `> 0`,
+    `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5` (Spall's
+    conditions on the gains), `eval_interval >= 1`, then `initial_point` as
+    under *Starting point* above.
+  - θ₀ is `initial_point` when given, otherwise drawn uniformly from
+    `[0, 2π)`; the iterates are not wrapped. The first call is the
+    calibration: one `evaluate_batch` of 50 candidates, 25 pairs
+    `[θ₀ + c·Δᵢ, θ₀ − c·Δᵢ]` with ±1 perturbations `Δᵢ` and `c` the
+    `perturbation`. Each pair gives `|f₊ − f₋|/(2c)`, the magnitude of every
+    component of its gradient estimate; the gain is
+    `a = target_step / mean`, the mean over the pairs whose magnitude is
+    finite (a non-finite value, or an overflow, leaves its pair out). With no
+    such pair, a zero mean (a flat landscape), a non-finite mean or a
+    non-finite `a`, `a = target_step` and a warning is logged; the run goes
+    on.
+  - Iteration `k = 1, …, max_iters` makes **one** `evaluate_batch`, its length
+    checked: `K = resamplings` fresh pairs `[θ_k + c_k·Δ, θ_k − c_k·Δ]`,
+    `2K` candidates, headed by `θ_k` itself (`2K + 1`) on the first
+    iteration and every `eval_interval` iterations after it. It steps
+    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and `ĝ_k`
+    the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
+    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays. After the last step,
+    one `evaluate_batch` of one candidate, its length checked, measures the
+    `θ` it reached, so the last iteration's pairs feed a measured step.
+  - `best_params` is the measured `θ_k` with the best fitness and
+    `best_fitness` the value the oracle returned for it (the perturbed
+    candidates never count), kept as Adam's: the first measurement, then only
+    a strictly better one, so a `NaN` never wins over a number.
+    `fitness_history[k − 1]` is the best measured up to iteration `k`, the
+    final `θ` counted in the last entry; the first iteration measures θ₀, so
+    every entry is defined, and the last is `best_fitness`.
+  - No early stop: the run makes `max_iters` iterations and reports
+    `converged = false`, as QNG does.
+  - The gains use `powf`, so a seeded run reproduces on the same platform and
+    build only, as CMA-ES's (C-7).
+  - In a training run the calibration is a leading batch of the CUNQA
+    walltime projection (`RunShape::leading_batches`): it is not timed, and
+    its circuits count as iterations at the first iteration's pace. The
+    final `θ` counts as one more iteration, a bound on its single candidate.
+    The first iteration measures θ, `2K + 1` circuits where most iterations have
+    `2K`, so when the circuits run one after another the projection can be
+    up to `(2K + 1)/2K` of the real time (1.5× with `K = 1`).
+  - Enforced by `crates/polypus-optimizers/tests/spsa.rs` (the calibration
+    batch and the first step it sets, the flat and non-finite fallbacks and a
+    non-finite pair left out; one batch of `2K` per iteration with `θ` first
+    when measured, then the final `θ` alone; every step against Spall's
+    recurrence, the last included; the C-5
+    postconditions against the batches the oracle saw over 25 seeds, with one
+    and several perturbations; convergence on a sphere and a periodic cosine;
+    seeded reproducibility; a `NaN` measurement, a non-finite estimate and an
+    oracle of only `NaN`; every rejected configuration with no oracle call;
+    the oracle's length check, the final `θ`'s included; and a single
+    iteration, which steps and measures where it lands), the unit tests in
+    `src/spsa.rs`, the `spsa_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and
+    `spsa_run_shape_counts_the_batches_the_optimizer_sends` with
+    `the_spsa_calibration_is_not_timed_as_the_first_iteration` in
+    `src/walltime.rs`. Through Python, `tests/python/test_spsa.py` pins the
+    calibration and the batches at the seam, the final `θ` included, the
+    pairs centred on `θ`, the
+    configuration rejected before any batch on both entry points, the
+    defaults and a native climb; the SPSA cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in a batch,
+    `θ`'s own and the final `θ`'s included.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -1114,7 +1188,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   job (making population init / mutation deterministic, inside the pure-Rust
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
-  on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance; otherwise a fresh OS-entropy value. On the
+  on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` instance; otherwise a fresh OS-entropy value. On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
   so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
@@ -1128,7 +1202,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   rounded in IEEE 754 (its bias corrections are running products, not
   powers), so a seeded run over a platform-independent backend reproduces
   bit for bit on every platform; `crates/polypus-optimizers/tests/adam.rs`
-  pins one per rule.
+  pins one per rule. A seeded `SPSA` run carries CMA-ES's caveat: its gains
+  `a/k^α` and `c/k^γ` call `powf`, which is not guaranteed correctly rounded
+  either, so it reproduces on the same platform and build only;
+  `crates/polypus-optimizers/tests/spsa.rs` compares two runs instead of
+  pinning one.
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
@@ -1136,7 +1214,7 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance) or while drawing the random bytes of
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` instance) or while drawing the random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.

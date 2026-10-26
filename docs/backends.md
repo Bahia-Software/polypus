@@ -185,7 +185,7 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG and Adam), multiplies it by the generation budget and logs one `warn` if
+iteration for QNG, Adam and SPSA), multiplies it by the generation budget and logs one `warn` if
 the projection exceeds the walltime:
 
 ```text
@@ -196,6 +196,17 @@ runs out. Raise `walltime` or lower the generations.
 
 The projection is an upper bound, since early stopping only shortens a run. Nothing
 is enforced, and backends that return `None` are not timed at all.
+
+SPSA's calibration, one batch of 50 circuits before its first iteration, is not timed:
+it is far larger than an iteration's `2 × resamplings` circuits, so timing it as the
+first iteration would inflate the projection. The projection adds its circuits at the
+first iteration's pace instead, and the warning says so ("with the 50 circuits sent
+before it at that pace"). The first iteration also measures the parameters, so it
+holds `2 × resamplings + 1` circuits where most iterations hold `2 × resamplings`.
+When a QPU runs the circuits one after another, the projection can therefore be up
+to `(2K + 1) / 2K` of the real time for `K = resamplings`: 1.5 times with
+`resamplings=1`, about 1.06 times with `resamplings=8`. When a whole batch runs in
+one round, on `2K + 1` QPUs or more, the iterations are not overestimated.
 
 ### Cancellation
 

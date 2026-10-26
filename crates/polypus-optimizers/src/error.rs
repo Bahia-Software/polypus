@@ -76,7 +76,10 @@ pub enum OptimizerError {
     /// `sigma0` (finite, in `(0, 2π]`), `population_size` (≥ 2 when given) or
     /// `restarts` (the largest population must fit in a `u32`); or Adam's
     /// `max_iters` (≥ 1), `dimensions` (≥ 1), `learning_rate` (finite, `> 0`),
-    /// `beta1`/`beta2` (in `[0, 1)`) or `epsilon` (finite, `> 0`); or a
+    /// `beta1`/`beta2` (in `[0, 1)`) or `epsilon` (finite, `> 0`); or SPSA's
+    /// `max_iters`, `dimensions`, `resamplings` and `eval_interval` (each
+    /// ≥ 1), `perturbation` and `target_step` (finite, `> 0`), `alpha` (in
+    /// `(0.5, 1]`) or `gamma` (`> 0`, with `alpha − gamma > 0.5`); or a
     /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)'s
     /// `finite_difference_step` (finite, `> 0`); or any optimizer's
     /// `initial_point` (`dimensions` finite values, within `bounds` for PSO).

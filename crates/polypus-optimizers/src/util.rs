@@ -6,7 +6,8 @@
 //! crate's public API, so the module is `pub(crate)`-scoped. Every optimizer,
 //! [`AlgorithmQNG`](crate::AlgorithmQNG) included, checks its optional starting
 //! point with [`check_initial_point`], DE and CMA-ES share [`wrap_angle`], and
-//! [`AlgorithmAdam`](crate::AlgorithmAdam) keeps its best point with
+//! [`AlgorithmAdam`](crate::AlgorithmAdam) and
+//! [`AlgorithmSPSA`](crate::AlgorithmSPSA) keep their best point with
 //! [`BestMeasured`].
 //! Each helper is a small, single-purpose free function that used to be inlined
 //! (and duplicated) inside the optimizer loops. The behaviour is preserved

@@ -15,6 +15,7 @@ pub mod logging;
 pub mod observable;
 pub mod pso;
 pub mod qng;
+pub mod spsa;
 
 use adam::Adam;
 use calibration::calibrate_parallel_threshold;
@@ -26,6 +27,7 @@ use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
+use spsa::Spsa;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
@@ -40,7 +42,7 @@ use crate::infrastructure::{
 };
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources,
-    RunCircuitFlow, Scheduler, TrainFlow,
+    RunCircuitFlow, Scheduler, SpsaConfig, TrainFlow,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -258,7 +260,7 @@ fn outcome_to_train_result(
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
-/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam` instance; otherwise a fresh
+/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` instance; otherwise a fresh
 /// OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
 /// value both drives the optimizer and is reported back in the [`TrainResult`],
 /// so the run can be replayed.
@@ -339,7 +341,7 @@ fn log_training_start(
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
-/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam` it is (`None` if it is none of them — the type
+/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA` it is (`None` if it is none of them — the type
 /// error is surfaced later by the dispatch that actually runs the optimizer).
 fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(de) = method.extract::<PyRef<DE>>() {
@@ -356,6 +358,9 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     }
     if let Ok(adam) = method.extract::<PyRef<Adam>>() {
         return adam.seed;
+    }
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
+        return spsa.seed;
     }
     None
 }
@@ -389,7 +394,7 @@ fn validate_method(
 /// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
 /// makes the FFI boundary report the real cause instead of that garbage.
 ///
-/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam branch through here, so this is
+/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam/SPSA branch through here, so this is
 /// also where the run's completion is logged — once, on the success path only
 /// (an oracle failure was already logged at `error!` where it was recorded).
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
@@ -438,7 +443,8 @@ fn finish_optimization(
     outcome_to_train_result(py, outcome, seed, id)
 }
 
-/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` object into a pyo3-free [`Method`].
+/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` object into a pyo3-free
+/// [`Method`].
 ///
 /// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
 /// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
@@ -510,9 +516,20 @@ fn method_from_pyclass(
             rule: adam.rule,
         }));
     }
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
+        return Ok(Method::Spsa(SpsaConfig {
+            max_iters: spsa.max_iters,
+            resamplings: spsa.resamplings,
+            perturbation: spsa.perturbation,
+            target_step: spsa.target_step,
+            alpha: spsa.alpha,
+            gamma: spsa.gamma,
+            eval_interval: spsa.eval_interval,
+        }));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, polypus.CMAES, \
-         or polypus.Adam",
+         polypus.Adam, or polypus.SPSA",
     ))
 }
 
@@ -1426,7 +1443,7 @@ pub fn run_quantum_circuit<'py>(
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
-/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, or `Adam`.
+/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, `Adam`, or `SPSA`.
 ///
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
@@ -1451,7 +1468,8 @@ pub fn run_quantum_circuit<'py>(
 /// member of its initial population; PSO as its first particle, which must lie
 /// within the PSO `bounds`; QNG and Adam start from it as θ₀; CMA-ES centres
 /// its first run on it (restarts start elsewhere), with its `sigma0`
-/// unchanged. Without it every optimizer starts as before (contract C-5).
+/// unchanged; SPSA starts from it as θ₀ and centres its calibration batch on
+/// it. Without it every optimizer starts as before (contract C-5).
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -2145,6 +2163,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QNG>()?;
     m.add_class::<CMAES>()?;
     m.add_class::<Adam>()?;
+    m.add_class::<Spsa>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
     expr::register(m)?;
@@ -3977,6 +3996,38 @@ mod tests {
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
             assert!(err.to_string().contains("polypus.Adam"), "{err}");
+        });
+    }
+
+    /// `polypus.SPSA` parses into `Method::Spsa` with every field, its pinned
+    /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
+    #[test]
+    fn spsa_reaches_the_method_and_its_seed_is_read() {
+        Python::initialize();
+        Python::attach(|py| {
+            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
+                .expect("the pyclass instantiates");
+            let bound = spsa.bind(py);
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+                Ok(Method::Spsa(cfg)) => {
+                    assert_eq!(cfg.max_iters, 40);
+                    assert_eq!(cfg.resamplings, 8);
+                    assert_eq!(cfg.perturbation, 0.2);
+                    assert_eq!(cfg.target_step, 1.2);
+                    assert_eq!(cfg.alpha, 1.0);
+                    assert_eq!(cfg.gamma, 0.25);
+                    assert_eq!(cfg.eval_interval, 5);
+                }
+                _ => panic!("a polypus.SPSA parses into Method::Spsa"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.SPSA"), "{err}");
         });
     }
 }

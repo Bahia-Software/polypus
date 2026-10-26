@@ -11,6 +11,7 @@ in-process restores the seam with ``monkeypatch``.
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -58,12 +59,17 @@ def test_quick_mode_runs_every_optimizer_within_budget(tmp_path):
         assert 0 < run["batches"] <= run["evaluations"], run
         assert 0.0 < run["ratio"] <= 1.0, run
     # The table prints a row per optimizer, the baseline without a delta,
-    # then the differences from L-SHADE and from Adam, each without its own.
+    # then the differences from L-SHADE, from Adam and from SPSA, each without
+    # its own.
     for name in script.OPTIMIZERS:
         assert stdout.count(f"| {name} |") == 2
     assert "| rand1bin | " in stdout and "| — | — |" in stdout
-    assert "| Optimizer | Δ vs lshade | wins | Δ vs adam | wins |" in stdout
-    assert "| lshade | — | — | " in stdout and "| — | — |\n| momentum |" in stdout
+    assert (
+        "| Optimizer | Δ vs lshade | wins | Δ vs adam | wins | Δ vs spsa | wins |"
+        in stdout
+    )
+    assert "| lshade | — | — | " in stdout and "| — | — |\n| spsa-k8 |" in stdout
+    assert re.search(r"^\| adam \| [^|]+ \| [^|]+ \| — \| — \| ", stdout, re.M)
     assert "lshade-adam: its Adam stage changed the ratio" in stdout
     # The chained optimizers spend one budget over their stages.
     for run in runs:
@@ -236,6 +242,53 @@ def test_the_budget_fixes_every_generation_count():
     assert (hea.learning_rate, hea.finite_difference_step) == (0.1, 0.4)
     with pytest.raises(ValueError, match="does not fit one Adam iteration"):
         script.make_method("adam", 30, 61, 30, 3)
+    # SPSA: the most iterations whose calibration, 2K circuits each and the
+    # measurements of θ fit, with the settings tuned per problem.
+    spsa = script.make_method("spsa", 6, 1500, 30, 3, "qaoa")
+    assert (spsa.max_iters, spsa.resamplings) == (706, 1)
+    assert (spsa.perturbation, spsa.target_step) == (0.2, 1.2)
+    assert (spsa.alpha, spsa.gamma, spsa.eval_interval) == (0.602, 0.101, 20)
+    k8 = script.make_method("spsa-k8", 6, 1500, 30, 3, "qaoa")
+    assert (k8.max_iters, k8.resamplings) == (90, 8)
+    # The same steps as spsa, so the two differ only in K.
+    assert (k8.perturbation, k8.target_step) == (0.2, 1.2)
+    for name in ("spsa", "spsa-k8"):
+        hea = script.make_method(name, 30, 5000, 30, 3, "hea")
+        assert (hea.perturbation, hea.target_step) == (0.1, 0.63)
+    # 50 + 2·706 + 36 measurements and the final point; one iteration more
+    # would not fit.
+    assert script.spsa_evaluations(706, 1) == 1499
+    assert script.spsa_evaluations(707, 1) == 1501
+    assert script.spsa_evaluations(90, 8) == 1496
+    assert script.spsa_evaluations(91, 8) > 1500
+    with pytest.raises(ValueError, match="does not fit SPSA's calibration"):
+        script.make_method("spsa-k8", 6, 66, 30, 3)
+
+
+@pytest.mark.parametrize("name", ["spsa", "spsa-k8"])
+def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
+    """The meter sees exactly the circuits ``spsa_evaluations`` counts, in
+    one batch for the calibration, one per iteration and one for the final
+    point."""
+    script = _load_script()
+    monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
+    train, calls = script.train, []
+
+    def spy(instance, method, shots, seed, initial_point=None):
+        calls.append(method)
+        return train(instance, method, shots, seed, initial_point)
+
+    monkeypatch.setattr(script, "train", spy)
+    instance = script.Instance(nodes=6, layers=1, seed=2)
+    run = script.run_one(instance, name, 64, 120, 8, 3, seed=2)
+    (method,) = calls
+    assert isinstance(method, polypus.SPSA)
+    assert run["evaluations"] == script.spsa_evaluations(
+        method.max_iters, method.resamplings
+    )
+    assert run["evaluations"] <= 120
+    assert run["batches"] == method.max_iters + 2
+    assert run["iterations_run"] == method.max_iters
 
 
 @pytest.mark.parametrize(
@@ -248,13 +301,16 @@ def test_the_budget_fixes_every_generation_count():
         ("lshade-adam", 16),
         # Adam fits in 40, but not in a third of it.
         ("adam-x3", 40),
+        ("spsa", 53),
+        ("spsa-k8", 67),
     ],
 )
 def test_a_budget_too_small_for_an_optimizer_is_an_error_before_any_run(
     capsys, monkeypatch, name, budget
 ):
     """d = 6 (QAOA p = 3): an Adam iteration and its final point take 14
-    evaluations, a CMA-ES generation 9 and a population 8."""
+    evaluations, a CMA-ES generation 9, a population 8, and SPSA's calibration,
+    first iteration and final point 52 + 2K."""
     script = _load_script()
     script.check_budget(name, 6, 2 * budget, 8)
     with pytest.raises(ValueError, match=f"^{name}: "):
