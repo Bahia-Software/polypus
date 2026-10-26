@@ -34,7 +34,7 @@ log = { workspace = true }
 zeromq = { version = "0.6", optional = true }
 serde-pickle = { version = "1.2", optional = true }
 serde_json = { workspace = true, optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"], optional = true }
+tokio = { version = "1.44", features = ["rt", "rt-multi-thread", "time", "net", "sync"], optional = true }
 
 # The subprocess bridge, registered as the built-in `"subprocess"` backend by
 # `register_builtin_backends`. Pyo3-free, so it does not widen this crate's FFI
