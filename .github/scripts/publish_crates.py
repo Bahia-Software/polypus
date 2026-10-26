@@ -9,6 +9,11 @@ too). Ties break alphabetically, so the order is stable. Crates marked
 Idempotent: a crate whose version is already in the crates.io index is skipped,
 so a failed run can simply be re-run.
 
+crates.io Trusted Publishing cannot create a crate: its first version must be
+published with an API token. With --trusted-publishing, the run stops before
+publishing anything if a crate is not on crates.io yet, instead of failing
+halfway through the order.
+
     python .github/scripts/publish_crates.py           # publish (needs CARGO_REGISTRY_TOKEN)
     python .github/scripts/publish_crates.py --plan    # print the order and status only
 """
@@ -102,18 +107,31 @@ def main():
         action="store_true",
         help="print the order and status, publish nothing",
     )
+    parser.add_argument(
+        "--trusted-publishing",
+        action="store_true",
+        help="the token comes from Trusted Publishing: refuse to start if a crate is new",
+    )
     args = parser.parse_args()
 
     order = publish_order(workspace_crates())
+    published = {pkg["name"]: published_versions(pkg["name"]) for pkg in order}
+    new = [name for name, versions in published.items() if not versions]
+    if new and args.trusted_publishing:
+        sys.exit(
+            f"not on crates.io yet: {', '.join(new)}. Trusted Publishing cannot "
+            "create crates; publish their first version with an API token "
+            "(docs/RELEASING.md)."
+        )
     for pkg in order:
         name, version = pkg["name"], pkg["version"]
-        if version in published_versions(name):
+        if version in published[name]:
             print(f"skip     {name} {version} (already on crates.io)", flush=True)
             continue
+        note = " (new crate)" if name in new else ""
+        print(f"publish  {name} {version}{note}", flush=True)
         if args.plan:
-            print(f"publish  {name} {version}", flush=True)
             continue
-        print(f"publish  {name} {version}", flush=True)
         # `cargo publish` waits until the new version is in the index, so the
         # next crate can resolve it.
         subprocess.run(["cargo", "publish", "--locked", "-p", name], check=True)

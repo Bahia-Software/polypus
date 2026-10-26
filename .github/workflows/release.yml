@@ -1,8 +1,8 @@
 # Build the `polypus-quantum` distribution (the `polypus` PyO3 extension plus the
 # bundled `polypus_python` helpers) for every supported platform and publish it
 # to PyPI via Trusted Publishing (OIDC — no API tokens stored in the repo). On a
-# tag, the Rust crates are also published to crates.io (`publish-crates`, with
-# the CARGO_REGISTRY_TOKEN secret).
+# tag, the Rust crates are also published to crates.io (`publish-crates`, via
+# Trusted Publishing, or the CARGO_REGISTRY_TOKEN secret while one is set).
 #
 #   • Push a tag `vX.Y.Z`   → build everything and publish to PyPI and crates.io.
 #   • Either way the `gate` job runs first (tag ↔ Cargo.toml version, green
@@ -422,8 +422,13 @@ jobs:
   # as PyPI. Every workspace crate is published, in dependency order (dev-deps
   # included), by .github/scripts/publish_crates.py; versions already on
   # crates.io are skipped, so "Re-run failed jobs" resumes a partial publish.
-  # Needs the CARGO_REGISTRY_TOKEN secret (repository or `crates-io`
-  # environment); the token is only exposed to the publish step.
+  #
+  # Authentication: crates.io Trusted Publishing (OIDC, no stored token) when no
+  # CARGO_REGISTRY_TOKEN secret is set (repository or `crates-io` environment),
+  # that secret otherwise. Trusted Publishing cannot create a crate, so a release
+  # that adds one needs the secret; without it the plan step refuses to start
+  # rather than leave the crate set half-published. One-time setup:
+  # docs/RELEASING.md#cratesio. The token is only exposed to the publish step.
   publish-crates:
     name: Publish to crates.io
     needs: [gate, linux, macos, windows, sdist, sdist-smoke, smoke]
@@ -435,6 +440,9 @@ jobs:
       url: https://crates.io/crates/polypus
     permissions:
       contents: read
+      id-token: write   # OIDC token for crates.io Trusted Publishing
+    env:
+      USE_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -447,18 +455,26 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
       - name: Publish plan
-        run: python .github/scripts/publish_crates.py --plan
+        run: |
+          args=()
+          if [[ "$USE_TOKEN" != true ]]; then
+            echo "No CARGO_REGISTRY_TOKEN secret: using crates.io Trusted Publishing"
+            args=(--trusted-publishing)
+          fi
+          python .github/scripts/publish_crates.py --plan "${args[@]}"
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: auth
+        if: env.USE_TOKEN != 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish in dependency order
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
           # Each crate's verification build is a one-off.
           CARGO_INCREMENTAL: "0"
         run: |
-          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
-            echo "::error::The CARGO_REGISTRY_TOKEN secret is not set"
-            exit 1
-          fi
-          python .github/scripts/publish_crates.py
+          args=()
+          [[ "$USE_TOKEN" == true ]] || args=(--trusted-publishing)
+          python .github/scripts/publish_crates.py "${args[@]}"
 
   # ── Post-publish clean-room smoke test ──────────────────────────────────────
   # Guarantee `pip install polypus-quantum` works for someone with NO relation to
