@@ -25,8 +25,11 @@ Changes on `main` since 0.7.2.
   `max_evaluations`, which is neither evaluated nor told, so the budget is
   never exceeded. A row that is not `dimensions` finite real numbers (a
   `bool` or a complex number is not one) raises `ValueError` naming its
-  batch and row, and an exception from `ask()` or
-  `tell()`, `KeyboardInterrupt` included, is raised as itself.
+  batch and row; a batch and a row are read only up to one row or value
+  too many, so an endless iterator cannot hang the run. An exception from
+  `ask()` or `tell()`, `KeyboardInterrupt` included, is raised as itself.
+  `External` takes part in garbage collection, so an optimizer that refers
+  back to it is freed.
   `best_params` is the best candidate Polypus measured, `iterations_run`
   counts the batches, and `final_shots` re-evaluates five candidates. The
   library owns its seed and its start: `External` has no `seed` (the run's

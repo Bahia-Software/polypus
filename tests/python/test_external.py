@@ -20,11 +20,13 @@ simulator over several seeds. Seeded reproducibility is in
 ``test_final_shots.py``.
 """
 
+import gc
 import itertools
 import math
 import re
 import threading
 import warnings
+import weakref
 
 import numpy as np
 import pytest
@@ -270,6 +272,19 @@ class TestTheObject:
         with pytest.raises(TypeError, match="or polypus.External"):
             _train(object())
 
+    def test_a_cycle_through_the_optimizer_is_collected(self):
+        """An optimizer that holds its own ``External`` makes a cycle, which
+        the garbage collector frees: ``External`` traverses its optimizer and
+        clears it."""
+        optimizer = RandomSearch(DIMENSIONS)
+        optimizer.external = _external(optimizer, 10)
+        assert gc.is_tracked(optimizer.external)
+        assert gc.get_referents(optimizer.external) == [optimizer]
+        gone = weakref.ref(optimizer)
+        del optimizer
+        gc.collect()
+        assert gone() is None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Before anything runs
@@ -493,7 +508,15 @@ class TestBatches:
         ("row", "reason"),
         [
             ([0.5], "it has 1 values, expected one per dimension (2)"),
-            ([0.5, 0.5, 0.5], "it has 3 values, expected one per dimension (2)"),
+            (
+                [0.5, 0.5, 0.5],
+                "it has more than 2 values, expected one per dimension (2)",
+            ),
+            # An endless row is read only one value past the dimensions.
+            (
+                itertools.repeat(0.5),
+                "it has more than 2 values, expected one per dimension (2)",
+            ),
             ([0.5, float("nan")], "its value at index 1 is NaN; every value must be"),
             ([float("inf"), 0.5], "its value at index 0 is inf; every value must be"),
             ([0.5, "x"], "its value at index 1 is 'x', not a number"),
@@ -510,6 +533,7 @@ class TestBatches:
         ids=[
             "short",
             "long",
+            "endless",
             "nan",
             "inf",
             "str",

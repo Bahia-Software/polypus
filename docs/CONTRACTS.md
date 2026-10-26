@@ -1310,8 +1310,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `float()` refuses), is a `ValueError` with the same wording, raised by
     the conversion before the bridge sees the batch; a batch is read only up
     to one row past the budget left, so an endless iterator ends the run as
-    any batch over the budget does, and a pending Ctrl+C is checked before
-    each row.
+    any batch over the budget does, a row only up to one value past
+    `dimensions`, so an endless row is a row too long (`it has more than d
+    values`), and a pending Ctrl+C is checked before each row. `External`
+    takes part in Python's garbage collection (`__traverse__` and
+    `__clear__` of its optimizer), so an optimizer that holds its `External`
+    is freed with it.
   - A first `ask()` that proposes nothing (`OptimizerError::ExternalOptimizer`)
     and a first batch larger than `max_evaluations` (`InvalidConfig` for
     `max_evaluations`) are errors before any oracle call: nothing was
@@ -1351,17 +1355,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     in `src/final_batch.rs`, the flow tests of every method in `src/flow.rs`,
     the unit tests in `crates/polypus/src/bindings/external.rs` (the
     conversions, bools, complex numbers and huge integers refused, a batch
-    read up to one row past the budget, the recorded exception class, the
-    configuration checks), `method_is_send_and_sync` in
+    read up to one row past the budget and a row up to one value past
+    `dimensions`, the recorded exception class, the configuration checks),
+    `method_is_send_and_sync` in
     `crates/polypus-orchestration/src/dispatch.rs`,
     `tests/python/test_external.py` (the object, the `ValueError`s before
     the seam is reached, one batch per `ask` on `train` and `qml.train`, the
-    budget, the rows, the exceptions, the calling thread, reuse, the spread
-    over the QPUs, and the outcome against what `tell` received over 5
-    seeds), and `tests/python/test_external_adapters.py` (the adapters
-    against fakes of each library's public API and, where installed, through
-    the bridge with Optuna's TPE, Nevergrad and pycma, their values negated
-    for the minimising ones); the External cases of
+    budget, the rows, an endless row, the exceptions, the calling thread,
+    reuse, the spread over the QPUs, a reference cycle collected, and the
+    outcome against what `tell` received over 5 seeds), and
+    `tests/python/test_external_adapters.py` (the adapters against fakes of
+    each library's public API and, where installed, through the bridge with
+    Optuna's TPE, Nevergrad and pycma, their values negated for the
+    minimising ones); the External cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
     which the library is not told.
 

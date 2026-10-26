@@ -484,7 +484,7 @@ fn validate_method(
     // A throwaway `Method`: the checks read only its configuration, never the
     // QNG variance oracle or the External optimizer, so its error slot and run
     // id are placeholders.
-    let parsed = method_from_pyclass(method, &OracleErrorSlot::new(), "")?;
+    let parsed = method_from_pyclass(method, dimensions, &OracleErrorSlot::new(), "")?;
     // `External`'s point is refused below, with the message that names the
     // adapters, rather than with dispatch's.
     let point = match parsed {
@@ -630,12 +630,14 @@ fn finish_optimization(
 /// `External` object into a pyo3-free [`Method`].
 ///
 /// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here, and
-/// the `External` optimizer into a [`PyAskTell`](external::PyAskTell) — the only
-/// Python touches — so [`dispatch_optimizer`] itself stays Python-free. A
-/// non-method object is a `TypeError`, exactly as the previous inline dispatch
-/// (shared now by both `train` and `qml_train`).
+/// the `External` optimizer into a [`PyAskTell`](external::PyAskTell), which
+/// reads each row up to one value past `dimensions` — the only Python touches —
+/// so [`dispatch_optimizer`] itself stays Python-free. A non-method object is a
+/// `TypeError`, exactly as the previous inline dispatch (shared now by both
+/// `train` and `qml_train`).
 fn method_from_pyclass(
     method: &Bound<'_, PyAny>,
+    dimensions: u32,
     errors: &OracleErrorSlot,
     run_id: &str,
 ) -> PyResult<Method> {
@@ -720,7 +722,8 @@ fn method_from_pyclass(
         }));
     }
     if let Ok(external) = method.extract::<PyRef<External>>() {
-        let (max_evaluations, optimizer) = external.for_run(method.py(), errors, run_id);
+        let (max_evaluations, optimizer) =
+            external.for_run(method.py(), dimensions, errors, run_id);
         return Ok(Method::External(
             ExternalConfig { max_evaluations },
             Box::new(optimizer),
@@ -1856,7 +1859,7 @@ pub fn train<'py>(
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
-    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
     // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
     // and validate the pairing up front.
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
@@ -2218,7 +2221,7 @@ pub fn qml_train<'py>(
         Some((objective, labels)) => QmlObjective::Supervised { objective, labels },
         None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
     };
-    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
@@ -3065,7 +3068,7 @@ mod tests {
                 "a rejected name leaves the strategy unchanged"
             );
             bound.setattr("strategy", "lshade").unwrap();
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::De(cfg)) => assert_eq!(cfg.strategy, DeStrategy::LShade),
                 _ => panic!("a polypus.DE parses into Method::De"),
             }
@@ -4192,7 +4195,7 @@ mod tests {
                 .expect("the pyclass instantiates");
             let bound = cmaes.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Cmaes(cfg)) => {
                     assert_eq!(cfg.generations, 40);
                     assert_eq!(cfg.population_size, Some(12));
@@ -4204,14 +4207,14 @@ mod tests {
                 _ => panic!("a polypus.CMAES parses into Method::Cmaes"),
             }
             bound.setattr("population_size", py.None()).unwrap();
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Cmaes(cfg)) => assert_eq!(cfg.population_size, None),
                 _ => panic!("a polypus.CMAES parses into Method::Cmaes"),
             }
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
             assert_eq!(method_seed(not_a_method.as_any()), None);
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
@@ -4246,7 +4249,7 @@ mod tests {
             .expect("the pyclass instantiates");
             let bound = adam.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Adam(cfg)) => {
                     assert_eq!(cfg.max_iters, 40);
                     assert_eq!(cfg.learning_rate, 0.2);
@@ -4263,7 +4266,7 @@ mod tests {
             }
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
@@ -4281,7 +4284,7 @@ mod tests {
                 .expect("the pyclass instantiates");
             let bound = spsa.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Spsa(cfg)) => {
                     assert_eq!(cfg.max_iters, 40);
                     assert_eq!(cfg.resamplings, 8);
@@ -4295,7 +4298,7 @@ mod tests {
             }
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
@@ -4315,7 +4318,7 @@ mod tests {
             let bound = rotosolve.bind(py);
             assert!(is_rotosolve(bound.as_any()));
             assert_eq!(method_seed(bound.as_any()), Some(99));
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Rotosolve(cfg)) => {
                     assert_eq!(cfg.sweeps, 7);
                     assert_eq!(cfg.reevaluate_every, 3);
@@ -4327,7 +4330,7 @@ mod tests {
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
             assert!(!is_rotosolve(not_a_method.as_any()));
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
@@ -4357,7 +4360,7 @@ mod tests {
             )
             .expect("the pyclass instantiates");
             assert_eq!(method_seed(external.as_any()), None);
-            match method_from_pyclass(external.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(external.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::External(cfg, _)) => assert_eq!(cfg.max_evaluations, 12),
                 _ => panic!("a polypus.External parses into Method::External"),
             }
@@ -4379,7 +4382,7 @@ mod tests {
             );
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.to_string().contains("or polypus.External"), "{err}");

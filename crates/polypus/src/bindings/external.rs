@@ -18,6 +18,7 @@
 use pyo3::exceptions::{PyAttributeError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyList};
+use pyo3::{PyTraverseError, PyVisit};
 
 use crate::evaluation::{EvaluationError, OracleErrorSlot};
 use crate::infrastructure::{attach_or, InterpreterUnavailable};
@@ -42,7 +43,8 @@ use polypus_optimizers::{AskTell, AskTellError};
 /// batch, or before a batch that would take the evaluations past
 /// `max_evaluations`: that batch is neither evaluated nor told, so the budget
 /// is never exceeded; a batch is read only up to one row past the budget
-/// left, so an endless iterator does not hang the run. A row that is not
+/// left, and a row up to one value past `dimensions`, so an endless iterator
+/// does not hang the run. A row that is not
 /// `dimensions` finite real numbers (a `bool` or a complex number is not one)
 /// stops the run with `ValueError` naming its batch and row, before the batch
 /// is evaluated. An exception raised in `ask()` or `tell()`,
@@ -72,6 +74,9 @@ use polypus_optimizers::{AskTell, AskTellError};
 /// `max_evaluations` must be an integer `>= 1` (not a `bool` or a `float`),
 /// otherwise `ValueError`; an `optimizer` without callable `ask` and `tell`
 /// raises `TypeError`. Both are checked here and whenever they are set.
+///
+/// `External` takes part in Python's garbage collection, so an optimizer that
+/// refers back to its `External` (a cycle) is freed with it.
 #[pyclass(module = "polypus")]
 pub struct External {
     optimizer: Py<PyAny>,
@@ -115,15 +120,31 @@ impl External {
         self.max_evaluations = parse_max_evaluations(&max_evaluations)?;
         Ok(())
     }
+
+    /// The garbage collector's traversal: the optimizer is the one Python
+    /// object an `External` holds.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.optimizer)
+    }
+
+    /// Break a reference cycle through the optimizer: the collector calls it
+    /// on an `External` it is about to free, and the optimizer is replaced by
+    /// `None`.
+    fn __clear__(&mut self) {
+        let none = Python::attach(|py| py.None());
+        drop(std::mem::replace(&mut self.optimizer, none));
+    }
 }
 
 impl External {
     /// The configuration and the [`AskTell`] a run of this object dispatches:
-    /// `max_evaluations`, and the optimizer adapted for the run `run_id`,
-    /// recording its failures in `errors`.
+    /// `max_evaluations`, and the optimizer adapted for the run `run_id` of a
+    /// circuit with `dimensions` parameters, recording its failures in
+    /// `errors`.
     pub(crate) fn for_run(
         &self,
         py: Python<'_>,
+        dimensions: u32,
         errors: &OracleErrorSlot,
         run_id: &str,
     ) -> (u64, PyAskTell) {
@@ -135,6 +156,7 @@ impl External {
                 run_id: run_id.to_string(),
                 asked: 0,
                 remaining: self.max_evaluations,
+                dimensions: usize::try_from(dimensions).unwrap_or(usize::MAX),
             },
         )
     }
@@ -192,6 +214,9 @@ pub(crate) struct PyAskTell {
     /// candidates told. A batch is read up to one row past it, enough for the
     /// bridge to see that it does not fit.
     remaining: u64,
+    /// The values a row must have, one per parameter. A row is read up to one
+    /// value past them, enough to tell that it is too long.
+    dimensions: usize,
 }
 
 /// What `ask`/`tell` return once the run has failed; the slot holds the cause.
@@ -218,6 +243,7 @@ impl AskTell for PyAskTell {
         }
         let batch = self.asked;
         let limit = usize::try_from(self.remaining.saturating_add(1)).unwrap_or(usize::MAX);
+        let dimensions = self.dimensions;
         let optimizer = &self.optimizer;
         let proposed = attach_or(
             || Err(EvaluationError::from(InterpreterUnavailable)),
@@ -225,7 +251,7 @@ impl AskTell for PyAskTell {
                 let call = || {
                     py.check_signals()?;
                     let proposed = optimizer.bind(py).call_method0("ask")?;
-                    rows_of(&proposed, batch, limit)
+                    rows_of(&proposed, batch, limit, dimensions)
                 };
                 call().map_err(|e| EvaluationError::Python(e.into()))
             },
@@ -271,17 +297,20 @@ impl AskTell for PyAskTell {
 /// The rows of the batch `ask()` returned, as `f64`s: `None` for `None`, else
 /// the rows of the iterable, at most `limit` of them: a batch with more does
 /// not fit the budget whatever its length, so an endless iterator is not read
-/// to its end. A pending Ctrl+C is checked before each row. A result or a row
-/// that is not iterable, or a value that is not a real number (see
-/// [`Reals::value`]), is a `ValueError` naming the batch and the row; the
-/// row's length and the values' finiteness are the bridge's checks, with the
-/// same message. An exception other than the ones that say "not iterable" or
-/// "not a number" (one raised inside a generator, a `KeyboardInterrupt`)
-/// propagates unchanged.
+/// to its end. Each row is read up to one value past `dimensions`, so an
+/// endless row (an `itertools.repeat`) is not read to its end either: one
+/// value more is a `ValueError` that says the row is too long. A pending
+/// Ctrl+C is checked before each row. A result or a row that is not iterable,
+/// or a value that is not a real number (see [`Reals::value`]), is a
+/// `ValueError` naming the batch and the row; a row too short and the values'
+/// finiteness are the bridge's checks, with the same message. An exception
+/// other than the ones that say "not iterable" or "not a number" (one raised
+/// inside a generator, a `KeyboardInterrupt`) propagates unchanged.
 fn rows_of(
     proposed: &Bound<'_, PyAny>,
     batch: usize,
     limit: usize,
+    dimensions: usize,
 ) -> PyResult<Option<Vec<Vec<f64>>>> {
     if proposed.is_none() {
         return Ok(None);
@@ -324,6 +353,15 @@ fn rows_of(
         };
         let mut point = Vec::new();
         for (i, value) in values.enumerate() {
+            if i == dimensions {
+                return Err(invalid(
+                    r,
+                    format!(
+                        "it has more than {dimensions} values, expected one per dimension \
+                         ({dimensions})"
+                    ),
+                ));
+            }
             match reals.value(&value?)? {
                 Ok(x) => point.push(x),
                 Err(reason) => {
@@ -448,7 +486,9 @@ class Scripted:
             10_i64.into_pyobject(optimizer.py()).unwrap().into_any(),
         )
         .expect("a valid External");
-        external.for_run(optimizer.py(), errors, "external-test").1
+        external
+            .for_run(optimizer.py(), 2, errors, "external-test")
+            .1
     }
 
     /// `ask()`'s rows reach the bridge as `f64`s, whatever iterable holds them,
@@ -601,7 +641,7 @@ class Failing:
             ];
             for (source, message) in cases {
                 let proposed = py.eval(source, None, None).unwrap();
-                let err = rows_of(&proposed, 0, 10).expect_err("not rows of numbers");
+                let err = rows_of(&proposed, 0, 10, 2).expect_err("not rows of numbers");
                 assert!(err.is_instance_of::<PyValueError>(py), "{err}");
                 assert_eq!(err.value(py).to_string(), message);
             }
@@ -610,12 +650,12 @@ class Failing:
                 .eval(c"[[3, __import__('fractions').Fraction(1, 4)]]", None, None)
                 .unwrap();
             assert_eq!(
-                rows_of(&proposed, 0, 10).unwrap(),
+                rows_of(&proposed, 0, 10, 2).unwrap(),
                 Some(vec![vec![3.0, 0.25]])
             );
             // The batch number is the one given.
             let proposed = py.eval(c"[['a']]", None, None).unwrap();
-            let err = rows_of(&proposed, 4, 10).expect_err("not a number");
+            let err = rows_of(&proposed, 4, 10, 2).expect_err("not a number");
             assert!(err.value(py).to_string().contains("row 0 of batch 4"));
             // An exception raised while iterating keeps its class.
             let module = module(
@@ -624,7 +664,7 @@ class Failing:
                 "external_generator",
             );
             let proposed = module.getattr("rows").unwrap().call0().unwrap();
-            let err = rows_of(&proposed, 0, 10).expect_err("the generator raised");
+            let err = rows_of(&proposed, 0, 10, 2).expect_err("the generator raised");
             assert!(
                 err.is_instance_of::<pyo3::exceptions::PyOSError>(py),
                 "{err}"
@@ -659,7 +699,7 @@ class Endless:
             );
             let optimizer = module.getattr("Endless").unwrap().call0().unwrap();
             let proposed = optimizer.call_method0("rows").unwrap();
-            let rows = rows_of(&proposed, 0, 3).unwrap().expect("rows");
+            let rows = rows_of(&proposed, 0, 3, 1).unwrap().expect("rows");
             assert_eq!(rows.len(), 3);
             let read: usize = optimizer.getattr("read").unwrap().extract().unwrap();
             assert_eq!(read, 3, "no row past the limit is read");
@@ -673,6 +713,51 @@ class Endless:
             let second = py.detach(|| bridge.ask()).unwrap().expect("rows");
             assert_eq!(second.len(), 7);
             assert!(!errors.failed());
+        });
+    }
+
+    /// A row is read up to one value past `dimensions`, so an endless row
+    /// (`itertools.repeat`) stops there as a row too long, before the bridge
+    /// sees it; a row of `dimensions` values is read whole.
+    #[test]
+    fn a_row_is_read_up_to_one_value_past_the_dimensions() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = module(
+                py,
+                "\
+import itertools
+
+class Counted:
+    def __init__(self):
+        self.read = 0
+    def __iter__(self):
+        for _ in itertools.count():
+            self.read += 1
+            yield 0.5
+",
+                "external_endless_row",
+            );
+            let row = module.getattr("Counted").unwrap().call0().unwrap();
+            let proposed = PyList::new(py, [&row]).unwrap();
+            let err = rows_of(proposed.as_any(), 0, 10, 3).expect_err("the row is too long");
+            assert!(err.is_instance_of::<PyValueError>(py), "{err}");
+            assert_eq!(
+                err.value(py).to_string(),
+                "invalid candidate in row 0 of batch 0 from the external optimizer's ask() \
+                 (both 0-based): it has more than 3 values, expected one per dimension (3)"
+            );
+            let read: usize = row.getattr("read").unwrap().extract().unwrap();
+            assert_eq!(read, 4, "no value past dimensions + 1 is read");
+            let repeat = py
+                .eval(c"[__import__('itertools').repeat(0.5)]", None, None)
+                .unwrap();
+            assert!(rows_of(&repeat, 0, 10, 3).is_err());
+            let exact = py.eval(c"[(0.5, 1.5, 2.5)]", None, None).unwrap();
+            assert_eq!(
+                rows_of(&exact, 0, 10, 3).unwrap(),
+                Some(vec![vec![0.5, 1.5, 2.5]])
+            );
         });
     }
 
