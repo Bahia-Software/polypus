@@ -10,9 +10,28 @@ works end-to-end through the same entry points as Qiskit circuits:
 """
 
 import math
+import os
 import sys
 
 import pytest
+
+# CI installs LLVM and sets this to 1, so a missing `llvm-as` fails the QIR
+# bitcode test there instead of skipping it.
+REQUIRE_LLVM_AS = "POLYPUS_REQUIRE_LLVM_AS"
+
+
+def qir_bitcode_or_skip(circuit) -> bytes:
+    """``circuit.to_qir_bitcode()``; skips the test when ``llvm-as`` is not on
+    PATH, or fails it under ``POLYPUS_REQUIRE_LLVM_AS=1``."""
+    try:
+        return circuit.to_qir_bitcode()
+    except ValueError as exc:
+        if "llvm-as" in str(exc) and "not found" in str(exc):
+            if os.environ.get(REQUIRE_LLVM_AS) == "1":
+                pytest.fail(f"{exc}, and {REQUIRE_LLVM_AS}=1 requires it")
+            pytest.skip("llvm-as not found on PATH")
+        raise
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Construction + QASM export (no backend required)
@@ -84,15 +103,21 @@ class TestCircuitConstruction:
     def test_to_qir_bitcode_returns_bytes_when_llvm_as_available(self):
         import polypus
 
-        try:
-            bitcode = polypus.Circuit(2).h(0).cx(0, 1).measure_all().to_qir_bitcode()
-        except ValueError as exc:
-            if "llvm-as" in str(exc) and "not found" in str(exc):
-                pytest.skip("llvm-as not found on PATH")
-            raise
-
+        bitcode = qir_bitcode_or_skip(polypus.Circuit(2).h(0).cx(0, 1).measure_all())
         assert isinstance(bitcode, (bytes, bytearray))
         assert bitcode[:4] == b"BC\xc0\xde"
+
+    def test_a_missing_llvm_as_fails_where_it_is_required(self, monkeypatch, tmp_path):
+        import polypus
+
+        circuit = polypus.Circuit(1).h(0)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        monkeypatch.setenv(REQUIRE_LLVM_AS, "1")
+        with pytest.raises(pytest.fail.Exception, match=REQUIRE_LLVM_AS):
+            qir_bitcode_or_skip(circuit)
+        monkeypatch.delenv(REQUIRE_LLVM_AS)
+        with pytest.raises(pytest.skip.Exception, match="llvm-as not found"):
+            qir_bitcode_or_skip(circuit)
 
     def test_to_qir_bitcode_wrong_param_count_raises_valueerror(self):
         import polypus

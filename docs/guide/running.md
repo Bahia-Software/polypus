@@ -95,4 +95,26 @@ All Polypus exceptions derive from `polypus.PolypusError`.
 
 Polypus is written not to panic. If a Rust panic does happen, it is a bug: it reaches Python as `pyo3_runtime.PanicException`, which derives from `BaseException`, so neither `except Exception` nor `except polypus.PolypusError` catches it. Please report it.
 
+## Troubleshooting
+
+### `import qiskit_aer` fails with "cannot allocate memory in static TLS block"
+
+```text
+ImportError: .../qiskit_aer.libs/libgomp-<hash>.so.1.0.0: cannot allocate memory in static TLS block
+```
+
+Aer bundles its own OpenMP runtime, `libgomp`, which needs room in glibc's static TLS reserve when Python loads it. If the libraries loaded before it have filled the reserve, the import fails, and so does every run on `backend="aer"`, the default. Polypus is not involved: `import qiskit_aer` alone fails the same way. Qiskit 2.6.0 is a known cause, for instance on the `python:3.10-slim` to `python:3.12-slim` images (Debian 13, glibc 2.41); Qiskit 2.6.1 fixes it ([Qiskit/qiskit#17213](https://github.com/Qiskit/qiskit/issues/17213)):
+
+```bash
+pip install --upgrade "qiskit>=2.6.1"
+```
+
+Otherwise, run on the native simulator, `backend="polypus"`, which does not load Aer, or enlarge the reserve before Python starts:
+
+```bash
+export GLIBC_TUNABLES=glibc.rtld.optional_static_tls=16384
+```
+
+The dynamic loader reads the variable when the process starts, so setting it in `os.environ` from Python has no effect. In a Dockerfile, set it with `ENV`.
+
 [Writing a backend](../backends.md) documents the backend contract in detail.
