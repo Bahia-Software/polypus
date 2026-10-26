@@ -50,9 +50,12 @@ spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
 
 Budgets. DE runs ``budget / P - 1`` generations after its initial population
 (L-SHADE spends the same budget in more, smaller generations), CMA-ES
-without restarts ``budget / λ`` generations, and Adam ``budget / (2d + 1)``
+without restarts ``budget / λ`` generations, and Adam ``(budget − 1) / (2d + 1)``
 iterations, each one batch of the current point and the central difference
-around it. IPOP's batch sizes depend on when its restarts happen, so no
+around it, then one evaluation of the point its last step reached. Every
+optimizer's budget is checked before the first run, so a budget too small for
+one of them (``adam-x3``'s third must hold an Adam iteration and its final
+point) is an error before anything runs. IPOP's batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -75,6 +78,7 @@ still left (a third of the budget for the first), with seeds ``s``,
 Reported per optimizer, over the instances:
 
   ratio        mean exact approximation ratio of ``best_params``
+  lowest       the lowest exact approximation ratio of the instances
   Δ vs DE      mean paired difference from ``rand1bin``, ± its standard error
   wins         share of instances where it beats ``rand1bin`` (ties count half)
   bias         mean (reported ``best_fitness`` − exact value) / max cut: the
@@ -83,6 +87,10 @@ Reported per optimizer, over the instances:
   batches      mean batches sent within the budget: the sequential rounds,
                which is what costs time when the QPUs outnumber a batch
   time         mean wall-clock seconds per run on this machine
+
+A second table gives the paired differences from ``lshade`` and from ``adam``
+when they ran, and a last line how ``lshade-adam``'s Adam stage changed the
+ratio of its L-SHADE stage.
 
 Usage
 -----
@@ -176,6 +184,11 @@ class Instance:
     ansatz with ``layers`` = reps, parameter ``layer·n + q`` the RY angle of
     qubit ``q`` in RY layer ``layer`` (0 to reps)."""
 
+    @staticmethod
+    def parameters(problem, nodes, layers):
+        """The circuit's number of parameters, without building it."""
+        return 2 * layers if problem == "qaoa" else nodes * (layers + 1)
+
     def __init__(self, nodes, layers, seed, problem="qaoa"):
         if problem not in PROBLEMS:
             raise ValueError(f"unknown problem {problem!r}")
@@ -198,8 +211,8 @@ class Instance:
             quadratic=[(a, b, -2.0) for a, b in self.edges],
         )
         qc = polypus.Circuit(nodes)
+        self.dimensions = self.parameters(problem, nodes, layers)
         if problem == "qaoa":
-            self.dimensions = 2 * layers
             for q in range(nodes):
                 qc.h(q)
             for k in range(layers):
@@ -209,7 +222,6 @@ class Instance:
                 for q in range(nodes):
                     qc.rx(q, 2 * beta)
         else:
-            self.dimensions = nodes * (layers + 1)
             for layer in range(layers + 1):
                 if layer:
                     for q in range(nodes - 1):
@@ -264,14 +276,47 @@ def default_lambda(dimensions):
 
 
 def adam_iterations(dimensions, budget):
-    """Adam's iterations within ``budget``: one batch of 2d + 1 each."""
-    iterations = budget // (2 * dimensions + 1)
+    """Adam's iterations within ``budget``: one batch of 2d + 1 each, then one
+    evaluation of the final point."""
+    iterations = (budget - 1) // (2 * dimensions + 1)
     if iterations < 1:
         raise ValueError(
-            f"a budget of {budget} evaluations does not fit one Adam batch of "
-            f"{2 * dimensions + 1}"
+            f"a budget of {budget} evaluations does not fit one Adam iteration "
+            f"of {2 * dimensions + 1} and its final point"
         )
     return iterations
+
+
+def check_budget(name, dimensions, budget, population):
+    """Raise ``ValueError`` when ``budget`` cannot run ``name``: checked for
+    every optimizer before the first run, so that a small budget does not stop
+    the benchmark half-way, its results unwritten. A chained optimizer's later
+    stages get at least the share checked here: L-SHADE spends at most half
+    the budget, and each Adam run at most its share."""
+    try:
+        if name in ("rand1bin", "shade", "lshade", "cmaes-P"):
+            if budget < population:
+                raise ValueError(
+                    f"a budget of {budget} evaluations does not fit one "
+                    f"population of {population}"
+                )
+        elif name in ("cmaes", "cmaes-ipop"):
+            if budget < default_lambda(dimensions):
+                raise ValueError(
+                    f"a budget of {budget} evaluations does not fit one "
+                    f"generation of {default_lambda(dimensions)}"
+                )
+        elif name in ("adam", "momentum"):
+            adam_iterations(dimensions, budget)
+        elif name == "lshade-adam":
+            check_budget("lshade", dimensions, budget // 2, population)
+            adam_iterations(dimensions, budget - budget // 2)
+        elif name == "adam-x3":
+            adam_iterations(dimensions, budget // 3)
+        else:
+            raise ValueError("unknown optimizer")
+    except ValueError as err:
+        raise ValueError(f"{name}: {err}") from None
 
 
 def make_method(name, dimensions, budget, population, restarts, problem="qaoa"):
@@ -443,6 +488,19 @@ def run_one(instance, name, shots, budget, population, restarts, seed):
 # ── Report ───────────────────────────────────────────────────────────────────
 
 
+def paired(runs, reference):
+    """The mean paired difference in ratio of ``runs`` from ``reference``
+    (both by instance), ± its standard error, and the share of instances where
+    ``runs`` did better (ties count half)."""
+    diffs = [runs[s]["ratio"] - reference[s]["ratio"] for s in runs]
+    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
+    share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
+    return (
+        f"{statistics.fmean(diffs):+.3f} ± {se:.3f}",
+        f"{100 * share / len(diffs):.0f} %",
+    )
+
+
 def summarise(rows, optimizers):
     by = {
         name: {r["instance"]: r for r in rows if r["optimizer"] == name}
@@ -450,28 +508,52 @@ def summarise(rows, optimizers):
     }
     base = by.get(BASELINE)
     lines = [
-        "| Optimizer | ratio | Δ vs rand1bin | wins | bias | evals | batches | time (s) |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Optimizer | ratio | lowest | Δ vs rand1bin | wins | bias | evals | batches "
+        "| time (s) |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for name in optimizers:
         runs = list(by[name].values())
         mean = lambda key: statistics.fmean(r[key] for r in runs)  # noqa: E731
+        lowest = min(r["ratio"] for r in runs)
         if base is None or name == BASELINE:
             delta, wins = "—", "—"
         else:
-            diffs = [by[name][s]["ratio"] - base[s]["ratio"] for s in by[name]]
-            se = (
-                statistics.stdev(diffs) / math.sqrt(len(diffs))
-                if len(diffs) > 1
-                else 0.0
-            )
-            delta = f"{statistics.fmean(diffs):+.3f} ± {se:.3f}"
-            share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
-            wins = f"{100 * share / len(diffs):.0f} %"
+            delta, wins = paired(by[name], base)
         lines.append(
-            f"| {name} | {mean('ratio'):.3f} | {delta} | {wins} | {mean('bias'):+.3f} "
-            f"| {mean('evaluations'):.0f} | {mean('batches'):.0f} | {mean('seconds'):.2f} |"
+            f"| {name} | {mean('ratio'):.3f} | {lowest:.3f} | {delta} | {wins} "
+            f"| {mean('bias'):+.3f} | {mean('evaluations'):.0f} "
+            f"| {mean('batches'):.0f} | {mean('seconds'):.2f} |"
         )
+    references = [name for name in ("lshade", "adam") if name in by]
+    if references:
+        lines += [
+            "",
+            "| Optimizer | "
+            + " | ".join(f"Δ vs {name} | wins" for name in references)
+            + " |",
+            "|---|" + "---|---|" * len(references),
+        ]
+        for name in optimizers:
+            cells = []
+            for reference in references:
+                cells += (
+                    ["—", "—"]
+                    if name == reference
+                    else list(paired(by[name], by[reference]))
+                )
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    if "lshade-adam" in by:
+        gains = [
+            run["stages"][1]["ratio"] - run["stages"][0]["ratio"]
+            for run in by["lshade-adam"].values()
+        ]
+        lines += [
+            "",
+            f"lshade-adam: its Adam stage changed the ratio of its L-SHADE stage by "
+            f"{statistics.fmean(gains):+.3f} on average ({min(gains):+.3f} at worst) "
+            f"and raised it on {sum(g > 0 for g in gains)} of {len(gains)} instances.",
+        ]
     return "\n".join(lines)
 
 
@@ -589,6 +671,17 @@ def main(argv=None):
     for key, value in env.items():
         print(f"- {key}: {value}")
     seeds = range(args.first_instance, args.first_instance + args.instances)
+    problems = []
+    for problem, layers, _, budget in args.scenario:
+        dimensions = Instance.parameters(problem, args.nodes, layers)
+        for name in optimizers:
+            try:
+                check_budget(name, dimensions, budget, args.de_population)
+            except ValueError as err:
+                problems.append(f"{problem}:{layers}, {budget} evaluations: {err}")
+    if problems:
+        print("[bench-optimizers] ERROR: " + "; ".join(problems), file=sys.stderr)
+        sys.exit(2)
     report = {"environment": env, "scenarios": []}
     for problem, layers, shots, budget in args.scenario:
         shots_label = "2^20" if shots == EXACT_SHOTS else str(shots)
