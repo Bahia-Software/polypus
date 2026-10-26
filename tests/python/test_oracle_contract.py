@@ -483,6 +483,33 @@ class TestOracleContractC5Rotosolve:
         # θ and its two neighbours, the two neighbours alone, then θ again.
         assert sizes == [3, 2, 3], sizes
 
+    def test_non_finite_value_at_the_final_point_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step Rotosolve measures the point it reached in a
+        batch of its own, a single circuit; a NaN there is an evaluation error
+        too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "roto_final_nan",
+            )
+        # A flat fitness stops the run after two sweeps of one step (patience
+        # 2), the first with θ measured.
+        assert sizes == [3, 2, 1], sizes
+
     def test_short_seam_result_is_a_typed_error(
         self, parametrized_circuit, simple_expectation_fn, monkeypatch
     ):

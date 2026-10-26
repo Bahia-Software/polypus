@@ -110,11 +110,12 @@ def test_quick_hea_scenario_runs_every_optimizer_within_budget(tmp_path):
     assert "## HEA reps = 2 (18 parameters), n = 6," in stdout
     assert "not applicable" not in stdout
     # Rotosolve spends five sweeps of 18 steps: 2 circuits each, plus the
-    # current point on every fifth step.
+    # current point on every fifth step, then the final point alone.
     for run in runs:
         if run["optimizer"] == "rotosolve":
-            assert run["evaluations"] == 2 * 90 + 18 == 198, run
-            assert run["batches"] == run["iterations_run"] == 90, run
+            assert run["evaluations"] == 2 * 90 + 18 + 1 == 199, run
+            assert run["iterations_run"] == 90, run
+            assert run["batches"] == 90 + 1, run
 
 
 def test_lshade_then_adam_refines_from_the_lshade_point(monkeypatch):
@@ -262,14 +263,15 @@ def test_the_budget_fixes_every_generation_count():
     assert script.spsa_evaluations(91, 8) > 1500
     with pytest.raises(ValueError, match="does not fit SPSA's calibration"):
         script.make_method("spsa-k8", 6, 66, 30, 3)
-    # Rotosolve: the most sweeps of d steps whose 2 circuits each and the
-    # measurements of the current point (every fifth step) fit.
+    # Rotosolve: the most sweeps of d steps whose 2 circuits each, the
+    # measurements of the current point (every fifth step) and the final
+    # point fit.
     roto = script.make_method("rotosolve", 30, 5000, 30, 3, "hea")
     assert isinstance(roto, polypus.Rotosolve)
     assert (roto.sweeps, roto.reevaluate_every, roto.tolerance) == (75, 5, 0.0)
-    assert script.rotosolve_evaluations(75, 30) == 4500 + 450 == 4950
+    assert script.rotosolve_evaluations(75, 30) == 4500 + 450 + 1 == 4951
     assert script.rotosolve_evaluations(76, 30) > 5000
-    assert script.rotosolve_evaluations(1, 7) == 14 + 2
+    assert script.rotosolve_evaluations(1, 7) == 14 + 2 + 1
     assert script.make_method("rotosolve", 18, 200, 8, 3, "hea").sweeps == 5
     with pytest.raises(ValueError, match="does not fit one Rotosolve sweep"):
         script.make_method("rotosolve", 30, 65, 30, 3, "hea")

@@ -76,7 +76,8 @@ plus the current point on the first iteration, every 20th after it and the
 last (``spsa_iterations``). Rotosolve runs the most sweeps of ``d``
 coordinate steps that fit: each step is one batch of the two circuits
 with its coordinate shifted by ±π/2, plus the current point on the first
-step and every fifth after it (``rotosolve_sweeps``). IPOP's batch sizes depend on when its restarts happen, so no
+step and every fifth after it, and the final point after the last step
+(``rotosolve_sweeps``). IPOP's batch sizes depend on when its restarts happen, so no
 generation count fixes its budget in advance. Instead every batch goes through
 a meter that replaces the local seam
 (``polypus_python.run_qcs``): it simulates each circuit on Polypus's native
@@ -380,9 +381,10 @@ def spsa_iterations(budget, resamplings):
 def rotosolve_evaluations(sweeps, dimensions):
     """The circuits a Rotosolve run of ``sweeps`` sweeps sends: two per
     coordinate step, plus the current point on the first step and every
-    ``ROTOSOLVE_REEVALUATE``-th after it."""
+    ``ROTOSOLVE_REEVALUATE``-th after it, and the final point after the
+    last step."""
     steps = sweeps * dimensions
-    return 2 * steps + -(-steps // ROTOSOLVE_REEVALUATE)
+    return 2 * steps + -(-steps // ROTOSOLVE_REEVALUATE) + 1
 
 
 def rotosolve_sweeps(dimensions, budget):

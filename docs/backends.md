@@ -212,9 +212,11 @@ holds `2 × resamplings + 1` circuits where most iterations hold `2 × resamplin
 
 Rotosolve's budget is `sweeps × dimensions` steps, each one batch: the two neighbours
 of the parameters along one of them, and the parameters themselves on the first step
-and every `reevaluate_every` steps. The first step is timed, with its 3 circuits where
-most steps hold 2. Its warning counts steps and asks to lower the sweeps ("the first
-of up to 300 steps took ... Raise `walltime` or lower the sweeps.").
+and every `reevaluate_every` steps. After the last step the parameters it reached are
+measured alone, which the projection counts as one more step. The first step is timed,
+with its 3 circuits where most steps hold 2. Its warning counts steps and asks to lower
+the sweeps ("the first of up to 301 steps took ... Raise `walltime` or lower the
+sweeps.").
 
 For both, the timed batch holds `n + 1` circuits where most hold `n`: `n = 2K` for
 SPSA with `K = resamplings`, `n = 2` for Rotosolve. On `Q` QPUs it takes

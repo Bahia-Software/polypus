@@ -23,7 +23,8 @@ Changes on `main` since 0.7.2.
   fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
   at a time to its maximum, in closed form. Each step is one batch of two
   circuits, plus the current parameters on the first step and every
-  `reevaluate_every` steps; `best_params` is the best of the points
+  `reevaluate_every` steps, and after the last step the parameters it
+  reached are measured alone; `best_params` is the best of the points
   measured. The run stops after `patience` sweeps that improve the best by
   less than `tolerance`, or after `sweeps` sweeps. `train` and `qml.train`
   check the circuit before anything runs (a `polypus.Circuit` or a Qiskit
@@ -34,7 +35,8 @@ Changes on `main` since 0.7.2.
   settings raise `ValueError` before any circuit runs (#398).
 - Rotosolve in training runs (Rust, `polypus-orchestration`):
   `Method::Rotosolve` with `RotosolveConfig`. The CUNQA walltime warning
-  counts `sweeps × dimensions` steps; `final_shots` re-evaluates
+  counts `sweeps × dimensions` steps and the final point as one more;
+  `final_shots` re-evaluates
   `best_params` alone (#398).
 - Rotosolve in `polypus-optimizers`: `AlgorithmRotosolve` and
   `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;

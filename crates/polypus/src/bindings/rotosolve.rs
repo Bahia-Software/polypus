@@ -19,7 +19,8 @@ use pyo3::prelude::*;
 /// previous one predicted for the current point, and measures the point
 /// again (a third circuit) on the first step and every `reevaluate_every`
 /// steps, so shot noise does not build up. A sweep visits every parameter once,
-/// in order. `best_params` is the best of the points measured. The run stops
+/// in order. After the last step, the point it reached is measured too, one
+/// more circuit. `best_params` is the best of the points measured. The run stops
 /// after `patience` consecutive sweeps that improve the best measured fitness
 /// by less than `tolerance`, or after `sweeps` sweeps. The settings are
 /// validated when `train`/`qml.train` starts, before any circuit runs: an

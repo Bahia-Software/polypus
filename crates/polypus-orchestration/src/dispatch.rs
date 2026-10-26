@@ -1418,7 +1418,7 @@ mod tests {
 
     /// Dispatch hands every `RotosolveConfig` field and the seed to Rotosolve:
     /// the outcome is the one `AlgorithmRotosolve::optimize` returns for the
-    /// same arguments, after one batch per step.
+    /// same arguments, after one batch per step and the final point.
     #[test]
     fn rotosolve_dispatch_runs_the_configured_optimizer() {
         let (oracle, log) = recorder();
@@ -1431,8 +1431,8 @@ mod tests {
             None,
         )
         .unwrap_or_else(|_| panic!("a valid Rotosolve run must succeed"));
-        // θ heads the batches of steps 0, 4 and 8.
-        assert_eq!(sizes(&log), [3, 2, 2, 2, 3, 2, 2, 2, 3]);
+        // θ heads the batches of steps 0, 4 and 8; the final point is alone.
+        assert_eq!(sizes(&log), [3, 2, 2, 2, 3, 2, 2, 2, 3, 1]);
         let (oracle, _) = recorder();
         let direct = AlgorithmRotosolve
             .optimize(AlgorithmRotosolveArgs {

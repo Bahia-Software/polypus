@@ -75,16 +75,17 @@ impl EvaluationOracle for Exact {
     }
 }
 
-/// The point step `k` (coordinate `j`) moves from, read off its batch.
+/// The point step `k` (coordinate `j`) moves from, read off its batch; the
+/// final point's batch is the point.
 fn point_of(batch: &[Vec<f64>], j: usize) -> Vec<f64> {
     match batch {
-        [x, _, _] => x.clone(),
+        [x] | [x, _, _] => x.clone(),
         [plus, minus] => {
             let mut x = plus.clone();
             x[j] = 0.5 * (plus[j] + minus[j]);
             x
         }
-        _ => panic!("a step's batch has 2 or 3 candidates"),
+        _ => panic!("a batch has 1, 2 or 3 candidates"),
     }
 }
 
@@ -111,7 +112,9 @@ fn every_step_lands_on_the_exact_maximum_along_its_parameter() {
         })
         .expect("valid Rotosolve args optimize successfully");
     let batches = oracle.batches.lock().unwrap().clone();
-    assert_eq!(batches.len(), 4 * dims);
+    // A batch per step, then the final point, where the last step moved.
+    assert_eq!(batches.len(), 4 * dims + 1);
+    assert_eq!(batches[4 * dims].len(), 1);
     let f = |x: &[f64]| expectation(&circuit, x);
     const GRID: usize = 4000;
     for k in 0..batches.len() - 1 {

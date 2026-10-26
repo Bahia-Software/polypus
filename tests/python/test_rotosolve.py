@@ -597,7 +597,8 @@ class TestTraining:
         result = _train(
             _native(), polypus.Rotosolve(sweeps=3, reevaluate_every=4, tolerance=0)
         )
-        assert sizes == [3, 2, 2, 2, 3, 2]
+        # Then the point the last step reached, alone.
+        assert sizes == [3, 2, 2, 2, 3, 2, 1]
         assert result.iterations_run == 6
         assert not result.converged
         assert len(result.fitness_history) == 6
@@ -608,8 +609,9 @@ class TestTraining:
 
         sizes = _record_batches(monkeypatch)
         result = _qml_train(polypus.Rotosolve(sweeps=1))
-        # Two samples, so a step's three or two candidates are 6 or 4 circuits.
-        assert sum(sizes) == 2 * (3 + 2)
+        # Two samples, so a step's three or two candidates are 6 or 4
+        # circuits, and the final point 2.
+        assert sum(sizes) == 2 * (3 + 2 + 1)
         assert result.iterations_run == 2
 
     def test_it_climbs_to_the_maximum_on_the_native_backend(self):

@@ -74,7 +74,13 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 /// `best_fitness` the value the oracle returned for it. Predicted values
 /// never compete. `fitness_history` has one entry per step, the best measured
 /// up to it; the first step measures θ₀, so no entry is the `-∞` of nothing
-/// measured, and the last is `best_fitness`. The point after the last step is not measured.
+/// measured, and the last is `best_fitness`.
+///
+/// After the last step, whether the run used its sweeps or stopped early, one
+/// more batch of one candidate measures the point it reached, which competes
+/// for `best_params` like any measured point; its value joins the last entry
+/// of `fitness_history`. The stop is decided before it, so that entry can be
+/// higher than the one the stop judged.
 ///
 /// When `f₀`, `f₊`, `f₋` or the step is not finite, the coordinate is left as
 /// it is; the value of `x` is then unchanged, and a non-finite one stays until
@@ -329,6 +335,15 @@ impl AlgorithmRotosolve {
                 converged = true;
                 break;
             }
+        }
+
+        // ── 4. Measure the point the last step reached ───────────────────────
+        let fitness = oracle.evaluate_batch(std::slice::from_ref(&x));
+        check_oracle_len(1, fitness.len())?;
+        log::debug!("Final point: fitness {:.4}", fitness[0]);
+        best.offer(&x, fitness[0]);
+        if let Some(last) = fitness_history.last_mut() {
+            *last = best.value();
         }
 
         // `sweeps >= 1`, `dimensions >= 1` and the first step measures θ₀, so

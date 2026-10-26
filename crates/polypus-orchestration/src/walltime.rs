@@ -72,7 +72,9 @@ impl Method {
     /// `K` perturbations. A Rotosolve step is one batch of `x ± π/2` along one
     /// of the `dimensions` parameters, so a run is at most
     /// `sweeps × dimensions` steps; its first step, and every
-    /// `reevaluate_every`-th, also measures `x`, 3 circuits where most hold 2.
+    /// `reevaluate_every`-th, also measures `x`, 3 circuits where most hold 2,
+    /// and the final point, one candidate after the last step, counts as one
+    /// more step.
     /// For both, the first batch holds `n + 1` circuits where most hold `n`:
     /// on `Q` QPUs it takes `⌈(n + 1)/Q⌉` rounds where most take `⌈n/Q⌉`, so
     /// the projection stays an upper bound but can reach
@@ -140,10 +142,11 @@ impl Method {
                 unit: "iterations",
                 setting: "iterations",
             },
-            // One batch per step, every parameter once per sweep.
+            // One batch per step, every parameter once per sweep. After the
+            // last step the final point is scored alone; a full step bounds it.
             Method::Rotosolve(cfg) => RunShape {
                 batches_per_generation: 1,
-                generations: u64::from(cfg.sweeps) * u64::from(dimensions),
+                generations: u64::from(cfg.sweeps) * u64::from(dimensions) + 1,
                 leading_batches: 0,
                 unit: "steps",
                 setting: "sweeps",
@@ -1084,8 +1087,8 @@ mod tests {
     }
 
     /// `run_shape` counts exactly the batches Rotosolve sends when it does not
-    /// stop early: one per step, `sweeps × dimensions` steps, and nothing
-    /// before the first.
+    /// stop early: one per step, `sweeps × dimensions` steps, nothing before
+    /// the first, and the final point after the last.
     #[test]
     fn rotosolve_run_shape_counts_the_batches_the_optimizer_sends() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
@@ -1109,15 +1112,17 @@ mod tests {
                 outcome.is_some_and(|o| !o.converged && o.iterations_run == steps),
                 "{label}"
             );
+            assert_eq!(shape.generations, steps as u64 + 1, "{label}");
             assert_eq!(*batches.lock().unwrap(), shape.generations, "{label}");
         }
     }
 
     /// Through the watch, a Rotosolve run is projected from its first step,
     /// which also measures θ₀: at 10 s a circuit, 3 circuits, so 100 sweeps of
-    /// 3 parameters project to 30 s × 300 = 2:30:00. Most steps hold 2
-    /// circuits, so the run itself takes (300 × 2 + 60) × 10 s = 1:50:00: on
-    /// one QPU the projection overestimates, as `run_shape` says.
+    /// 3 parameters and the final point project to 30 s × 301 = 2:30:30. Most
+    /// steps hold 2 circuits, so the run itself takes (300 × 2 + 60 + 1) ×
+    /// 10 s = 1:50:10: on one QPU the projection overestimates, as `run_shape`
+    /// says.
     #[test]
     fn a_rotosolve_run_is_projected_from_its_first_step() {
         capture_logs();
@@ -1142,13 +1147,13 @@ mod tests {
         assert!(outcome.is_ok());
         assert_eq!(
             clock.now().saturating_duration_since(start),
-            Duration::from_secs(6600)
+            Duration::from_secs(6610)
         );
         assert_eq!(
             logged_for(run_id),
             vec![format!(
-                "run {run_id}: the first of up to 300 steps took 0:00:30, so the optimisation \
-                 may take up to 2:30:00, beyond the 2:00:00 walltime; the QPUs are released \
+                "run {run_id}: the first of up to 301 steps took 0:00:30, so the optimisation \
+                 may take up to 2:30:30, beyond the 2:00:00 walltime; the QPUs are released \
                  when it runs out. Raise `walltime` or lower the sweeps."
             )]
         );

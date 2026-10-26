@@ -1157,7 +1157,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     strictly better one, so a `NaN` never wins over a number; predicted
     values never compete. `fitness_history[k]` is the best measured up to
     step `k`; step 0 measures θ₀, so no entry is `-∞`, and the last is
-    `best_fitness`. The point after the last step is not measured.
+    `best_fitness`. After the last step, whether the run used its sweeps or
+    stopped early, one more `evaluate_batch` of one candidate, its length
+    checked, measures the point it reached; it competes for `best_params`
+    like any measured point and its value joins the last entry of
+    `fitness_history`. The stop is decided before it, so that entry can be
+    higher than the one the stop judged.
   - Stopping in whole sweeps (`d` steps): with `B₀` the value measured for
     θ₀ and `B_s` the best measured at the end of sweep `s`, the run stops at
     the end of the sweep that makes `patience` consecutive sweeps with
@@ -1167,17 +1172,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `iterations_run` counts steps.
   - The step calls `atan2` and `hypot`, so a seeded run reproduces on the
     same platform and build only, as CMA-ES's (C-7).
-  - In a training run the CUNQA walltime projection counts `sweeps × d`
-    steps of one batch each, with no leading batch, and its warning asks to
-    lower `sweeps`. The first step measures `x`, 3 circuits where most steps
-    have 2, so on `Q` QPUs the projection stays an upper bound but can reach
+  - In a training run the CUNQA walltime projection counts `sweeps × d + 1`
+    steps of one batch each, the final point as a step, with no leading
+    batch, and its warning asks to lower `sweeps`. The first step measures
+    `x`, 3 circuits where most steps have 2, so on `Q` QPUs the projection
+    stays an upper bound but can reach
     `⌈3/Q⌉ / ⌈2/Q⌉` of the real time: 1.5× on one QPU, 2× on two, 1× on
     three or more.
   - Enforced by `crates/polypus-optimizers/tests/rotosolve.rs` (each step on
     the maximum along its coordinate of a coupled sinusoid against a grid,
     for several `reevaluate_every`; a separable sinusoid solved in one sweep;
     a flat landscape that never moves; one batch of 2 per step with `x` first
-    when measured; the C-5 postconditions against the batches the oracle saw
+    when measured, then the final point alone, where the last step moved;
+    the C-5 postconditions against the batches the oracle saw
     over 25 seeds; seeded reproducibility; patience counted in sweeps, a
     reset by an improving sweep and by a `NaN` improvement; a `NaN` for `x`,
     a `NaN` beside it, an infinite value and an oracle of only `NaN`; every
