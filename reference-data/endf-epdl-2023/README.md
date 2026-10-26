@@ -3,7 +3,7 @@
 The 100 raw ENDF-6/EPDL2023 evaluations (`ZA{Z:03}000.txt`, Z = 1–100) that
 `polypus-physics` reads at runtime, unmodified from:
 
-https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{Z:03d}000
+https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{Z:03}000
 
 `polypus-physics` never downloads data and does not embed or package these
 files. It reads them from `POLYPUS_ENDF_DATA_DIR` if set, otherwise from this
@@ -18,8 +18,8 @@ git -C polypus-data sparse-checkout set reference-data/endf-epdl-2023
 export POLYPUS_ENDF_DATA_DIR=$PWD/polypus-data/reference-data/endf-epdl-2023
 ```
 
-Downloading only the elements you need from the IAEA URL above, saved as
-`ZA{Z:03}000.txt`, works too. See the "ENDF-6 photon data" section of the
+Saving only the elements you need from the IAEA URL above with a browser (the
+site refuses scripted downloads), as `ZA{Z:03}000.txt`, works too. See the "ENDF-6 photon data" section of the
 `polypus-physics` crate docs.
 
 Source, references and licensing: [PROVENANCE.md](PROVENANCE.md).

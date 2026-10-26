@@ -14,11 +14,11 @@ const ENDF_DATA_DIR_VAR: &str = "POLYPUS_ENDF_DATA_DIR";
 /// is not packaged with this crate, and it never downloads anything.
 ///
 /// Checked in order:
-/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — an absolute path to the folder
-///    containing the `ZA{Z:03}000.txt` files.
-/// 2. `reference-data/endf-epdl-2023/`, relative to this workspace's root
-///    — the default location within this repository, so the env var only
-///    needs setting if that layout ever changes.
+/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — the folder containing the
+///    `ZA{Z:03}000.txt` files.
+/// 2. `reference-data/endf-epdl-2023/` of the Polypus repository, located
+///    relative to this crate's source: valid only in a checkout, so users of
+///    the crates.io package must set the variable.
 fn external_endf_data_dir() -> PathBuf {
     endf_data_dir(std::env::var(ENDF_DATA_DIR_VAR).ok())
 }
