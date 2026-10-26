@@ -2,6 +2,8 @@
 
 # Script for running max_cut_qaoa for all methods from MIN_QUBITS to MAX_QUBITS
 
+MAX_CUT_QAOA="$(dirname "$0")/../max_cut_qaoa.py"
+
 MIN_QUBITS=4
 MAX_QUBITS=6
 
@@ -18,7 +20,7 @@ for method in "${METHODS[@]}"; do
     
     for qubits in $(seq $MIN_QUBITS $MAX_QUBITS); do
         echo "Running max_cut_qaoa with $qubits qubits using $method method..."
-        python examples/max_cut_qaoa.py --qubits $qubits --method $method --cores_per_qpu 9
+        python "$MAX_CUT_QAOA" --qubits $qubits --method $method --cores_per_qpu 9
         echo ""
         sleep 2
     done

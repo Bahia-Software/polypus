@@ -1,8 +1,9 @@
+import csv
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 # from qmiotools.integrations.qiskitqmio import FakeQmio
-import pandas as pd
 from qiskit import QuantumCircuit, transpile
 from qmiotools.integrations.qiskitqmio import QmioBackend
 
@@ -71,11 +72,17 @@ if __name__ == "__main__":
     run_experiments(3, 17)
 
     # Create plot using the csv and save fig
-    df = pd.read_csv("qft_results.csv", sep="|")
+    with open("qft_results.csv", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="|"))
     plt.figure(figsize=(10, 6))
-    for method in df["method"].unique():
-        subset = df[df["method"] == method]
-        plt.plot(subset["n_qubits"], subset["time"], marker="o", label=method)
+    for method in dict.fromkeys(row["method"] for row in rows):
+        subset = [row for row in rows if row["method"] == method]
+        plt.plot(
+            [int(row["n_qubits"]) for row in subset],
+            [float(row["time"]) for row in subset],
+            marker="o",
+            label=method,
+        )
     plt.title("Execution Time of Inverse QFT on Qmio")
     plt.xlabel("Number of Qubits")
     plt.ylabel("Execution Time (seconds)")
