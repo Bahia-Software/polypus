@@ -72,9 +72,11 @@ polypus-evaluation = { path = "crates/polypus-evaluation", version = "0.7.2" }
 polypus-logger     = { path = "crates/polypus-logger", version = "0.7.2" }
 
 # Shared external dependencies pinned once for the whole workspace.
+# Each requirement is a tested floor: the `rust-minimal-versions` CI job builds
+# with every direct dependency at its minimum, so raise one when that job fails.
 # `log` is the logging facade every crate emits through; the concrete sink lives
 # in `polypus-logger`, which additionally enables its `std` feature.
-log                = "0.4"
+log                = "0.4.8"
 # UUID v4 run-id suffix (bindings layer), built from bytes `polypus-infrastructure`
 # draws fallibly: no `v4` feature, so `Uuid::new_v4` (panics if `getrandom` fails,
 # #264) is absent by default; `zeromq` (`qmio`) re-enables it, clippy.toml forbids it.
@@ -87,8 +89,8 @@ rand               = "0.10"
 # pyo3-free; `nix` wraps the POSIX process controls the bridge needs (the
 # `PR_SET_PDEATHSIG` orphan guard and `kill` for out-of-band cancellation) in
 # audited safe functions, so the bridge carries no hand-written FFI `unsafe`.
-serde              = { version = "1", features = ["derive"] }
-serde_json         = "1"
+serde              = { version = "1.0.209", features = ["derive"] }
+serde_json         = "1.0.127"
 nix                = { version = "0.31", features = ["signal", "process"] }
 # PyO3 for the crates that touch Python (`polypus`, `polypus-infrastructure`,
 # `polypus-evaluation`): one pyo3 in the graph. rust-numpy releases are pinned
@@ -101,7 +103,7 @@ numpy              = "0.29"
 rayon              = "1"
 # Complex amplitudes of the statevector; pyo3's `num-complex` feature converts
 # the same type, so both must stay on one major.
-num-complex        = "0.4"
+num-complex        = "0.4.6"
 ndarray            = "0.17"
 
 # Release profile posture — set explicitly rather than left to Cargo's defaults.

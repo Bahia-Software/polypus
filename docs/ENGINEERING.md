@@ -389,8 +389,10 @@ boundary stays out-of-process and explicit; see
 - Every heavy or optional dependency goes behind a feature.
   `extension-module` controls linking of the PyO3 extension. Declare features
   additively and don't enable them implicitly.
-- The only default features are the compile-time log-level toggles
-  (`info-logs` et al.), which forward to `polypus-logger`.
+- No crate has default features. The compile-time log-level toggles
+  (`info-logs` et al., forwarded to `polypus-logger`) are global to a build and
+  mutually exclusive, so only the final artifact picks one: the wheel uses
+  `debug-logs` (`[tool.maturin] features` in `pyproject.toml`).
 
 ## 7. Interoperability notes (beyond contract C-2)
 

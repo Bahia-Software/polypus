@@ -6,7 +6,8 @@ Both backends run the *same* native ``polypus.Circuit`` through the *same*
 entry points — only ``backend=`` changes — so the comparison is apples to
 apples. We check two things:
 
-  1. Correctness: the measured distributions agree (total-variation distance).
+  1. Correctness: the measured distributions agree (total-variation distance
+     of the Hamming-weight distributions, within the sampling noise).
   2. Performance: wall-clock time for a single run and for a full training loop,
      where the native backend's GIL-free, QASM-free path is expected to help.
 
@@ -16,6 +17,7 @@ comparison.)
 """
 
 import itertools
+import math
 import time
 
 import polypus
@@ -55,6 +57,28 @@ def total_variation(a, b, shots):
     """Total-variation distance between two count dicts (0 = identical)."""
     keys = set(a) | set(b)
     return 0.5 * sum(abs(a.get(k, 0) - b.get(k, 0)) for k in keys) / shots
+
+
+def hamming_weights(counts):
+    """Counts per number of ones. On the complete graph the cut depends only on
+    the Hamming weight, so this keeps what the cost sees in N_QUBITS + 1 bins,
+    which SHOTS resolves; the 2**N_QUBITS outcomes get about two shots each."""
+    weights: dict[int, int] = {}
+    for key, n in counts.items():
+        w = key.count("1")
+        weights[w] = weights.get(w, 0) + n
+    return weights
+
+
+def tvd_threshold(shots, bins, false_alarm=1e-6):
+    """TVD that two samples of `shots` shots from the same distribution over
+    `bins` outcomes exceed with probability below `false_alarm`.
+
+    Bretagnolle-Huber-Carol: P(TVD(sample, p) >= eps) <= 2**bins *
+    exp(-2 * shots * eps**2). Bound each sample by eps at false_alarm / 2 and
+    add the two by the triangle inequality."""
+    eps = math.sqrt((bins * math.log(2) + math.log(2 / false_alarm)) / (2 * shots))
+    return 2 * eps
 
 
 def maxcut_value(bitstring):
@@ -109,9 +133,17 @@ counts_native = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="polypus"
 ).counts[0]
 
-tvd = total_variation(counts_aer, counts_native, SHOTS)
-print(f"\nTotal-variation distance (Aer vs polypus): {tvd:.4f}")
-print("  -> distributions agree" if tvd < 0.05 else "  -> MISMATCH")
+tvd = total_variation(
+    hamming_weights(counts_aer), hamming_weights(counts_native), SHOTS
+)
+threshold = tvd_threshold(SHOTS, N_QUBITS + 1)
+print(
+    f"\nTotal-variation distance of the Hamming weights (Aer vs polypus): "
+    f"{tvd:.4f} (sampling-noise bound {threshold:.4f})"
+)
+if tvd > threshold:
+    raise SystemExit("  -> MISMATCH: the backends sample different distributions")
+print("  -> distributions agree")
 
 exp_aer = sum(maxcut_value(k) * v for k, v in counts_aer.items()) / SHOTS
 exp_native = sum(maxcut_value(k) * v for k, v in counts_native.items()) / SHOTS
