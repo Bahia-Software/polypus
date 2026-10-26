@@ -293,6 +293,10 @@ impl AlgorithmAdam {
                 }
             };
             check_oracle_len(dims, grad.len())?;
+            // A non-finite component would leave θ non-finite from here on (C-5).
+            if let Some((index, &value)) = grad.iter().enumerate().find(|(_, g)| !g.is_finite()) {
+                return Err(OptimizerError::NonFiniteGradient { index, value });
+            }
             log::debug!("Iteration {iteration}: fitness {fitness:.4}");
 
             // ── 2. Track the best measured θ ──────────────────────────────────

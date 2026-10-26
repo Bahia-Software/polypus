@@ -292,6 +292,40 @@ fn a_gradient_of_the_wrong_length_is_an_error() {
     );
 }
 
+/// The bowl's exact gradient with `self.0` in place of component 1.
+struct Poisoned(f64);
+
+impl GradientOracle for Poisoned {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        self.gradient_batch(theta, theta.len())[param_index]
+    }
+
+    fn gradient_batch(&self, theta: &[f64], _dims: usize) -> Vec<f64> {
+        let mut gradient = bowl_gradient(theta);
+        gradient[1] = self.0;
+        gradient
+    }
+}
+
+#[test]
+fn a_non_finite_gradient_is_an_error() {
+    // C-5: every component finite. A `NaN` would leave θ `NaN` and the run
+    // would still end `Ok`.
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let err = AlgorithmAdam
+            .optimize(args(Recorder::new(bowl), Poisoned(bad), 0))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OptimizerError::NonFiniteGradient { index: 1, value }
+                    if value.to_bits() == bad.to_bits()
+            ),
+            "{err:?}"
+        );
+    }
+}
+
 // --- FiniteDifferenceGradient -------------------------------------------------
 
 #[test]
@@ -403,6 +437,21 @@ fn a_broken_oracle_behind_the_finite_difference_is_reported() {
         ),
         "{err:?}"
     );
+}
+
+#[test]
+fn finite_difference_never_panics_on_a_parameter_out_of_range() {
+    // `dims` past the point's length, or a `param_index` past it, asks for
+    // no candidate and reads as a broken oracle does.
+    let oracle = Recorder::new(bowl);
+    let fd = FiniteDifferenceGradient::new(oracle.clone(), 1e-3).unwrap();
+    assert!(fd.gradient_batch(&[0.1, 0.2], 3).is_empty());
+    assert!(fd.gradient(&[0.1, 0.2], 2).is_nan());
+    assert!(fd.gradient(&[0.1, 0.2], usize::MAX).is_nan());
+    let (value, gradient) = fd.value_and_gradient(&[0.1, 0.2], 3).unwrap();
+    assert!(value.is_nan() && gradient.is_empty());
+    assert!(oracle.batches().is_empty());
+    assert_eq!(fd.gradient_batch(&[0.1, 0.2], 2).len(), 2);
 }
 
 /// Both an oracle and its gradient, like an oracle that computes its own exact
@@ -641,17 +690,30 @@ fn always_nan(_: &[f64]) -> f64 {
 
 #[test]
 fn an_oracle_that_only_returns_nan_does_not_panic() {
+    // With a finite gradient, a NaN improvement is never below `tolerance`, so
+    // the run goes on to the end, and the best is the first θ measured, with
+    // the NaN it got.
     let oracle = Recorder::new(always_nan);
-    let mut args = fd_args(&oracle, 0.2, 3);
-    args.max_iters = 12;
-    let outcome = AlgorithmAdam.optimize(args).unwrap();
-    // A NaN improvement is never below `tolerance`, so the run goes on to the
-    // end, and the best is the first θ measured, with the NaN it got.
+    let mut exact = args(oracle.clone(), ExactGradient::new(bowl_gradient), 3);
+    exact.max_iters = 12;
+    let outcome = AlgorithmAdam.optimize(exact).unwrap();
     assert_eq!(outcome.iterations_run, 12);
     assert!(!outcome.converged);
     assert_eq!(outcome.best_params, oracle.batches()[0][0]);
     assert!(outcome.best_fitness.is_nan());
     assert_eq!(outcome.fitness_history.len(), 12);
+
+    // Over a finite difference the gradient is NaN too, which ends the run
+    // after its first batch.
+    let oracle = Recorder::new(always_nan);
+    let mut args = fd_args(&oracle, 0.2, 3);
+    args.max_iters = 12;
+    let err = AlgorithmAdam.optimize(args).unwrap_err();
+    assert!(
+        matches!(err, OptimizerError::NonFiniteGradient { index: 0, value } if value.is_nan()),
+        "{err:?}"
+    );
+    assert_eq!(oracle.batches().len(), 1);
 }
 
 /// [`bowl`] with plain products, so its value is bit-identical on every
