@@ -982,29 +982,35 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     implementation computes it with that oracle, shared through an `Arc`.
   - Preconditions, each an error before any RNG draw or oracle call:
     `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
-    `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`
-    (`InvalidConfig`, with either rule, although momentum uses neither
-    `beta2` nor `epsilon`), `bounds` finite with `lb < ub` (`InvalidBounds`),
+    `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`,
+    `patience >= 1` (`InvalidConfig`, with either rule, although momentum
+    uses neither `beta2` nor `epsilon`; a `patience` of 0 would compare an
+    iteration with itself), `bounds` finite with `lb < ub` (`InvalidBounds`),
     and `initial_point` as under *Starting point* above. `AdamRule` parses
     only `"adam"` and `"momentum"` (`InvalidConfig` for `rule` otherwise);
     `polypus.Adam(rule=...)` raises `ValueError` for any other name when it
     is passed or set.
   - The initial `θ` is `initial_point` when given, otherwise drawn uniformly
     from `bounds`, and is not wrapped afterwards. Each iteration measures the
-    current `θ` and the gradient there, then steps. When the gradient oracle
-    scores `θ` (`value_and_gradient`), that is **one call**: with a
+    current `θ` and the gradient there, then steps, so `max_iters` counts
+    steps. When the gradient oracle scores `θ` (`value_and_gradient`), that
+    is **one call**: with a
     `FiniteDifferenceGradient`, one `evaluate_batch` of `2·dims + 1`
     candidates, `[θ, θ+h·e₀, θ−h·e₀, …]`. Otherwise Adam scores `θ` in one
     `evaluate_batch` of one candidate, its length checked, and then calls
     `gradient_batch`. The gradient's length and finiteness are checked either
-    way, before the step.
+    way, before the step. After the last step, the `max_iters`-th or the one
+    after which the run stagnated, Adam scores the `θ` it reached in one
+    `evaluate_batch` of one candidate, its length checked, so every gradient
+    feeds a measured step.
   - `best_params` is the measured `θ` with the best fitness and `best_fitness`
     the value the oracle returned for it; `fitness_history[t]` is the best
-    measured up to iteration `t`. The first measurement is kept and later
-    ones only when strictly better, so a `NaN` never wins over a number (a run
+    measured up to iteration `t`, the final `θ` counted in the last entry.
+    The first measurement is kept and later ones only when strictly better,
+    so a `NaN` never wins over a number (a run
     that only measures `NaN` reports its first `θ` and that `NaN`, unless its
     gradient is `NaN` too, as a finite difference of those values is, which is
-    `NonFiniteGradient`). The step after the last measurement is not measured.
+    `NonFiniteGradient`).
   - `AdamRule::Adam` steps `θ += learning_rate·m̂/(√v̂ + epsilon)`, with the
     bias corrections `1 − β₁ᵗ` and `1 − β₂ᵗ` carried as running products.
     `AdamRule::Momentum` steps `v ← beta1·v + learning_rate·g`, `θ += v`, so
@@ -1012,7 +1018,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     and `sqrt`, so a seeded run over a backend whose results do not depend on
     the platform reproduces bit for bit on every platform (C-7).
   - A run ends on fitness stagnation, the rule above with `patience` counted in
-    iterations, and then reports `converged = true`.
+    iterations, and then reports `converged = true`. The rule is checked
+    after each step, on the `θ`s measured up to it; the `θ` that step
+    reached is then measured as above, and can raise the last entry.
   - `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
     `GradientOracle` by central differences with a step `h` (finite and `> 0`):
     one `evaluate_batch` of `2·dims` candidates,
@@ -1024,16 +1032,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     an oracle is an oracle, so one scorer can feed both, and must when the
     adapter returns `θ`'s value.
   - Enforced by `crates/polypus-optimizers/tests/adam.rs` (one batch of `θ`
-    and its stencil per iteration; the C-5 postconditions against the batches
-    the oracle saw over 25 seeds, with each rule and with an exact gradient,
-    which is scored as one single-candidate batch per iteration; convergence
-    on a sphere and a periodic cosine with each rule; a `NaN` fitness, never
+    and its stencil per iteration, then the final `θ` alone, after a single
+    iteration and after the stagnation stop too; the C-5 postconditions
+    against the batches the oracle saw over 25 seeds, with each rule and with
+    an exact gradient, which is scored as one single-candidate batch per
+    iteration and one for the final `θ`; convergence on a sphere and a
+    periodic cosine with each rule; a `NaN` fitness, never
     the best, and an oracle of only `NaN`; the initial point as the first `θ`;
     stagnation; a seeded run of each rule pinned bit for bit; Adam's update
     against a reference of Kingma and Ba's Algorithm 1; momentum's
     recurrence, its scale dependence and its unused `beta2` and `epsilon`;
-    the rule names; every rejected configuration with no oracle call; the
-    gradient length and finiteness checks; and the finite-difference stencil,
+    the rule names; every rejected configuration, `patience = 0` included,
+    with no oracle call; the gradient length and finiteness checks; and the
+    finite-difference stencil,
     `θ` first in `value_and_gradient`, its accuracy, its step validation, a
     broken wrapped oracle and an index out of range) and the `BestMeasured`
     unit tests in `src/util.rs`.
@@ -1045,22 +1056,24 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     built over the run's evaluation oracle so that `θ`'s value is that
     oracle's. The CUNQA walltime projection (`Method::run_shape_over`) counts
     one batch per iteration with the finite difference, and two (`θ`, then the
-    gradient) with an exact gradient. The watch forwards every call,
+    gradient) with an exact gradient, and the final `θ` as one more
+    iteration, a bound on its single candidate. The watch forwards every call,
     `value_and_gradient` included, counted as a batch only when it returns a
     value, so Adam sends the same batches with and without it; an exact
     gradient that scores `θ` itself makes an iteration one batch, which the
     projection cannot tell in advance, so it then overestimates. Enforced by
     the `adam_*` tests in `crates/polypus-orchestration/src/dispatch.rs` (the
-    rule reaches the optimizer, one batch of `2·dims + 1` per iteration) and
-    in `src/walltime.rs` (the projection counts exactly the batches sent, the
-    same batches with and without the watch, the watch of an iteration with
-    an exact gradient, and a forwarded `value_and_gradient` timed as a
-    batch). Through Python,
-    `tests/python/test_adam.py` pins the batches at the seam (one batch of
-    `θ` and its stencil per iteration, with each rule), the configuration and
-    an unknown `rule` rejected before any batch, the defaults, and both entry
-    points; the Adam cases of `tests/python/test_oracle_contract.py` cover a
-    bad value in a batch, the updated `θ`'s own included.
+    rule reaches the optimizer, one batch of `2·dims + 1` per iteration and
+    the final `θ`) and in `src/walltime.rs` (the projection counts the batches
+    sent, exactly with the finite difference and one more with an exact
+    gradient, the same batches with and without the watch, the watch of an
+    iteration with an exact gradient, and a forwarded `value_and_gradient`
+    timed as a batch). Through Python, `tests/python/test_adam.py` pins the
+    batches at the seam (one batch of `θ` and its stencil per iteration, then
+    the final `θ`, with each rule), the configuration and an unknown `rule`
+    rejected before any batch, the defaults, and both entry points; the Adam
+    cases of `tests/python/test_oracle_contract.py` cover a bad value in a
+    batch, the updated `θ`'s own and the final `θ`'s included.
 - **SPSA** (`AlgorithmSPSA`, exposed as `polypus.SPSA`: Spall's
   simultaneous perturbation stochastic approximation, ascending the fitness,
   with a calibrated first step).
@@ -1084,18 +1097,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - Iteration `k = 1, …, max_iters` makes **one** `evaluate_batch`, its length
     checked: `K = resamplings` fresh pairs `[θ_k + c_k·Δ, θ_k − c_k·Δ]`,
     `2K` candidates, headed by `θ_k` itself (`2K + 1`) on the first
-    iteration, every `eval_interval` iterations after it and on the last. It
-    steps `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and
-    `ĝ_k` the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
-    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays.
+    iteration and every `eval_interval` iterations after it. It steps
+    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and `ĝ_k`
+    the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
+    `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays. After the last step,
+    one `evaluate_batch` of one candidate, its length checked, measures the
+    `θ` it reached, so the last iteration's pairs feed a measured step.
   - `best_params` is the measured `θ_k` with the best fitness and
     `best_fitness` the value the oracle returned for it (the perturbed
     candidates never count), kept as Adam's: the first measurement, then only
     a strictly better one, so a `NaN` never wins over a number.
-    `fitness_history[k − 1]` is the best measured up to iteration `k`; the
-    first iteration measures θ₀ and the last its `θ`, so every entry is
-    defined and the last is `best_fitness`. The step after the last
-    iteration is not measured.
+    `fitness_history[k − 1]` is the best measured up to iteration `k`, the
+    final `θ` counted in the last entry; the first iteration measures θ₀, so
+    every entry is defined, and the last is `best_fitness`.
   - No early stop: the run makes `max_iters` iterations and reports
     `converged = false`, as QNG does.
   - The gains use `powf`, so a seeded run reproduces on the same platform and
@@ -1103,28 +1117,32 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - In a training run the calibration is a leading batch of the CUNQA
     walltime projection (`RunShape::leading_batches`): it is not timed, and
     its circuits count as iterations at the first iteration's pace. The
-    first iteration measures θ, `2K + 1` circuits where most iterations have
+    final `θ` counts as one more iteration, a bound on its single candidate.
+    The first iteration measures θ, `2K + 1` circuits where most iterations have
     `2K`, so when the circuits run one after another the projection can be
     up to `(2K + 1)/2K` of the real time (1.5× with `K = 1`).
   - Enforced by `crates/polypus-optimizers/tests/spsa.rs` (the calibration
     batch and the first step it sets, the flat and non-finite fallbacks and a
     non-finite pair left out; one batch of `2K` per iteration with `θ` first
-    when measured; every step against Spall's recurrence; the C-5
+    when measured, then the final `θ` alone; every step against Spall's
+    recurrence, the last included; the C-5
     postconditions against the batches the oracle saw over 25 seeds, with one
     and several perturbations; convergence on a sphere and a periodic cosine;
     seeded reproducibility; a `NaN` measurement, a non-finite estimate and an
     oracle of only `NaN`; every rejected configuration with no oracle call;
-    the oracle's length check; and a single iteration), the unit tests in
+    the oracle's length check, the final `θ`'s included; and a single
+    iteration, which steps and measures where it lands), the unit tests in
     `src/spsa.rs`, the `spsa_*` tests in
     `crates/polypus-orchestration/src/dispatch.rs` and
     `spsa_run_shape_counts_the_batches_the_optimizer_sends` with
     `the_spsa_calibration_is_not_timed_as_the_first_iteration` in
     `src/walltime.rs`. Through Python, `tests/python/test_spsa.py` pins the
-    calibration and the batches at the seam, the pairs centred on `θ`, the
+    calibration and the batches at the seam, the final `θ` included, the
+    pairs centred on `θ`, the
     configuration rejected before any batch on both entry points, the
     defaults and a native climb; the SPSA cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
-    `θ`'s own included.
+    `θ`'s own and the final `θ`'s included.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),

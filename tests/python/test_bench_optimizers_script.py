@@ -11,6 +11,7 @@ in-process restores the seam with ``monkeypatch``.
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -57,10 +58,19 @@ def test_quick_mode_runs_every_optimizer_within_budget(tmp_path):
         assert 0 < run["evaluations"] <= scenario["budget"], run
         assert 0 < run["batches"] <= run["evaluations"], run
         assert 0.0 < run["ratio"] <= 1.0, run
-    # The table prints a row per optimizer, the baseline without a delta.
+    # The table prints a row per optimizer, the baseline without a delta,
+    # then the differences from L-SHADE, from Adam and from SPSA, each without
+    # its own.
     for name in script.OPTIMIZERS:
-        assert f"| {name} |" in stdout
+        assert stdout.count(f"| {name} |") == 2
     assert "| rand1bin | " in stdout and "| — | — |" in stdout
+    assert (
+        "| Optimizer | Δ vs lshade | wins | Δ vs adam | wins | Δ vs spsa | wins |"
+        in stdout
+    )
+    assert "| lshade | — | — | " in stdout and "| — | — |\n| spsa-k8 |" in stdout
+    assert re.search(r"^\| adam \| [^|]+ \| [^|]+ \| — \| — \| ", stdout, re.M)
+    assert "lshade-adam: its Adam stage changed the ratio" in stdout
     # The chained optimizers spend one budget over their stages.
     for run in runs:
         stages = run.get("stages")
@@ -126,7 +136,8 @@ def test_lshade_then_adam_refines_from_the_lshade_point(monkeypatch):
     assert isinstance(adam, polypus.Adam) and adam.rule == "adam"
     assert initial_point == explore.best_params
     lshade_spent = run["stages"][0]["evaluations"]
-    assert adam.max_iters == (120 - lshade_spent) // (2 * instance.dimensions + 1)
+    # Each Adam iteration is a batch of 2d + 1; the final point is one more.
+    assert adam.max_iters == (120 - lshade_spent - 1) // (2 * instance.dimensions + 1)
     assert run["evaluations"] <= 120
     exact = instance.expected_cut(refine.best_params) / instance.max_cut
     assert run["ratio"] == pytest.approx(exact)
@@ -149,7 +160,7 @@ def test_adam_x3_makes_three_runs_that_share_the_budget(monkeypatch):
     assert all(isinstance(m, polypus.Adam) and m.rule == "adam" for m, _, _ in calls)
     assert len({seed for _, seed, _ in calls}) == 3
     batch = 2 * instance.dimensions + 1
-    assert run["evaluations"] == sum(m.max_iters * batch for m, _, _ in calls)
+    assert run["evaluations"] == sum(m.max_iters * batch + 1 for m, _, _ in calls)
     assert run["evaluations"] <= 120
     best = max((r for _, _, r in calls), key=lambda r: r.best_fitness)
     exact = instance.expected_cut(best.best_params) / instance.max_cut
@@ -215,20 +226,22 @@ def test_the_budget_fixes_every_generation_count():
     assert cmaes.generations == 1500 // 9 and cmaes.population_size is None
     ipop = script.make_method("cmaes-ipop", 6, 1500, 30, 3)
     assert ipop.restarts == 3 and ipop.tolerance == pytest.approx(0.01)
-    # Adam: one batch of 2d + 1 per iteration, the class defaults.
+    # Adam: one batch of 2d + 1 per iteration and the final point, the class
+    # defaults.
     adam = script.make_method("adam", 6, 1500, 30, 3)
-    assert adam.max_iters == 1500 // 13 and adam.rule == "adam"
+    assert adam.max_iters == 1499 // 13 and adam.rule == "adam"
     assert (adam.learning_rate, adam.finite_difference_step) == (0.1, 0.2)
     assert adam.tolerance == 0.0
-    assert script.make_method("adam", 30, 5000, 30, 3).max_iters == 5000 // 61
+    assert script.make_method("adam", 30, 5000, 30, 3).max_iters == 4999 // 61
+    assert script.make_method("adam", 30, 62, 30, 3).max_iters == 1
     # Momentum's rate is tuned per problem.
     qaoa = script.make_method("momentum", 6, 1500, 30, 3, "qaoa")
     hea = script.make_method("momentum", 30, 5000, 30, 3, "hea")
     assert qaoa.rule == hea.rule == "momentum"
     assert (qaoa.learning_rate, qaoa.finite_difference_step) == (0.03, 0.4)
     assert (hea.learning_rate, hea.finite_difference_step) == (0.1, 0.4)
-    with pytest.raises(ValueError, match="does not fit one Adam batch"):
-        script.make_method("adam", 30, 60, 30, 3)
+    with pytest.raises(ValueError, match="does not fit one Adam iteration"):
+        script.make_method("adam", 30, 61, 30, 3)
     # SPSA: the most iterations whose calibration, 2K circuits each and the
     # measurements of θ fit, with the settings tuned per problem.
     spsa = script.make_method("spsa", 6, 1500, 30, 3, "qaoa")
@@ -237,11 +250,13 @@ def test_the_budget_fixes_every_generation_count():
     assert (spsa.alpha, spsa.gamma, spsa.eval_interval) == (0.602, 0.101, 20)
     k8 = script.make_method("spsa-k8", 6, 1500, 30, 3, "qaoa")
     assert (k8.max_iters, k8.resamplings) == (90, 8)
-    assert (k8.perturbation, k8.target_step) == (0.1, 0.63)
+    # The same steps as spsa, so the two differ only in K.
+    assert (k8.perturbation, k8.target_step) == (0.2, 1.2)
     for name in ("spsa", "spsa-k8"):
         hea = script.make_method(name, 30, 5000, 30, 3, "hea")
         assert (hea.perturbation, hea.target_step) == (0.1, 0.63)
-    # 50 + 2·706 + 37 measurements; one iteration more would not fit.
+    # 50 + 2·706 + 36 measurements and the final point; one iteration more
+    # would not fit.
     assert script.spsa_evaluations(706, 1) == 1499
     assert script.spsa_evaluations(707, 1) == 1501
     assert script.spsa_evaluations(90, 8) == 1496
@@ -253,7 +268,8 @@ def test_the_budget_fixes_every_generation_count():
 @pytest.mark.parametrize("name", ["spsa", "spsa-k8"])
 def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
     """The meter sees exactly the circuits ``spsa_evaluations`` counts, in
-    one batch for the calibration and one per iteration."""
+    one batch for the calibration, one per iteration and one for the final
+    point."""
     script = _load_script()
     monkeypatch.setattr(polypus_python, "run_qcs", polypus_python.run_qcs)
     train, calls = script.train, []
@@ -271,7 +287,7 @@ def test_spsa_spends_what_its_iterations_count(monkeypatch, name):
         method.max_iters, method.resamplings
     )
     assert run["evaluations"] <= 120
-    assert run["batches"] == method.max_iters + 1
+    assert run["batches"] == method.max_iters + 2
     assert run["iterations_run"] == method.max_iters
 
 
@@ -325,3 +341,38 @@ def test_quick_mode_reports_the_final_values(tmp_path):
             assert run["final_evaluations"] == 6, run
             assert run["final_ratio"] == run["stages"][1]["final_ratio"], run
     assert "final ratio | final bias |" in stdout
+
+
+@pytest.mark.parametrize(
+    ("name", "budget"),
+    [
+        ("rand1bin", 7),
+        ("cmaes", 8),
+        ("adam", 13),
+        # L-SHADE fits in half of 16, but Adam not in the other half.
+        ("lshade-adam", 16),
+        # Adam fits in 40, but not in a third of it.
+        ("adam-x3", 40),
+        ("spsa", 53),
+        ("spsa-k8", 67),
+    ],
+)
+def test_a_budget_too_small_for_an_optimizer_is_an_error_before_any_run(
+    capsys, monkeypatch, name, budget
+):
+    """d = 6 (QAOA p = 3): an Adam iteration and its final point take 14
+    evaluations, a CMA-ES generation 9, a population 8, and SPSA's calibration,
+    first iteration and final point 52 + 2K."""
+    script = _load_script()
+    script.check_budget(name, 6, 2 * budget, 8)
+    with pytest.raises(ValueError, match=f"^{name}: "):
+        script.check_budget(name, 6, budget, 8)
+    ran = []
+    monkeypatch.setattr(script, "run_one", lambda *args: ran.append(args))
+    with pytest.raises(SystemExit) as exit_:
+        script.main(
+            ["--scenario", f"3:64:{budget}", "--only", name, "--de-population", "8"]
+        )
+    assert exit_.value.code == 2
+    assert ran == []
+    assert f"3, {budget} evaluations" in capsys.readouterr().err

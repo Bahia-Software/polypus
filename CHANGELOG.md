@@ -49,8 +49,10 @@ Changes on `main` since 0.7.2.
   each parameter by about `target_step`, as Qiskit's `SPSA.calibrate` does.
   Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
   fills more QPUs and averages that many estimates; the parameters are
-  measured in the same batch on the first iteration, every `eval_interval`
-  iterations and on the last, and `best_params` is the best of them. The run
+  measured in the same batch on the first iteration and every
+  `eval_interval` iterations, and after the last step one circuit measures
+  the parameters it reached, so every step is measured; `best_params` is the
+  best of them. The run
   makes `max_iters` iterations and reports `converged=False`. An
   `initial_point` is the centre of the calibration and the first point
   measured. A seeded run reproduces on the same platform only, as with
@@ -60,7 +62,8 @@ Changes on `main` since 0.7.2.
   (#396).
 - SPSA in training runs (Rust, `polypus-orchestration`): `Method::Spsa` with
   `SpsaConfig`. The CUNQA walltime warning leaves the calibration batch out
-  of the timing and adds its circuits at the first iteration's pace (#396).
+  of the timing and adds its circuits at the first iteration's pace, and
+  counts the final parameters as one more iteration (#396).
 - SPSA in `polypus-optimizers`: `AlgorithmSPSA` and `AlgorithmSPSAArgs`,
   with an `initial_point` like every optimizer (#396).
 - `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
@@ -69,8 +72,10 @@ Changes on `main` since 0.7.2.
   and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
   (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
   current parameters and the central finite difference around them, so no
-  QPU waits on a one-circuit batch, and `best_params` is the best of the
-  parameters measured. `rule="adam"` is Kingma and Ba's Adam, whose step
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
   does not depend on the scale of the cost; `rule="momentum"` is Polyak's
   heavy-ball momentum, whose learning rate does. A seeded run over a backend
   whose results do not depend on the platform reproduces on every platform
@@ -81,7 +86,8 @@ Changes on `main` since 0.7.2.
   `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
   exact gradient when it has one); Adam uses the exact gradient or a finite
   difference of the evaluation, and the CUNQA walltime warning counts one
-  batch per iteration, plus the call to an exact gradient (#394, #395).
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
 - Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
   `AdamRule`, driven by a new `GradientOracle` contract (the fitness
   gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.

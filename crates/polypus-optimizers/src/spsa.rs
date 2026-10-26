@@ -74,15 +74,16 @@ use std::f64::consts::TAU;
 /// # Measuring θ (contract C-5)
 ///
 /// SPSA never evaluates θ_k for its step, so θ_k heads its iteration's batch
-/// (`2K + 1` candidates, no extra call) on the first iteration, every
+/// (`2K + 1` candidates, no extra call) on the first iteration and every
 /// [`eval_interval`](AlgorithmSPSAArgs::eval_interval) iterations after it
-/// (`k = 1, 1 + eval_interval, …`) and on the last. `best_params` is the
-/// measured θ_k with the best fitness and `best_fitness` the value the oracle
-/// returned for it (a `NaN` never wins); the perturbed candidates never count.
-/// `fitness_history` holds, for each iteration, the best measured up to it:
-/// the first iteration measures θ₀, so every entry is defined, and the last
-/// iteration measures its θ, so the history ends at `best_fitness`. The step
-/// after the last iteration is not measured.
+/// (`k = 1, 1 + eval_interval, …`). After the last step, one batch of one
+/// candidate measures the θ it reached, so the last iteration's pairs feed a
+/// measured step. `best_params` is the measured θ with the best fitness and
+/// `best_fitness` the value the oracle returned for it (a `NaN` never wins);
+/// the perturbed candidates never count. `fitness_history` holds, for each
+/// iteration, the best measured up to it, the final θ counted in the last
+/// entry: the first iteration measures θ₀, so every entry is defined, and
+/// the history ends at `best_fitness`.
 ///
 /// There is no early stop: the run makes `max_iters` iterations and, like
 /// [`AlgorithmQNG`](crate::AlgorithmQNG), reports `converged = false`.
@@ -152,7 +153,8 @@ pub struct AlgorithmSPSAArgs {
     /// Maps parameter vectors to fitness values (higher is better).
     pub oracle: Box<dyn EvaluationOracle>,
     /// Iterations, each one `evaluate_batch` call of `2·resamplings`
-    /// candidates, plus θ_k when it is measured.
+    /// candidates, plus θ_k when it is measured, and one step. The final θ is
+    /// one call of one candidate more.
     pub max_iters: u32,
     /// Perturbations `K` per iteration: each iteration's batch holds `2K`
     /// candidates (`2K + 1` when it measures θ_k), and its gradient estimate
@@ -170,7 +172,8 @@ pub struct AlgorithmSPSAArgs {
     /// Decay exponent `γ` of the perturbation `c_k = c / k^γ`.
     pub gamma: f64,
     /// θ_k is measured, first in its iteration's batch, on the first
-    /// iteration, every `eval_interval` iterations after it, and on the last.
+    /// iteration and every `eval_interval` iterations after it; the final θ
+    /// is measured whatever the interval.
     pub eval_interval: u32,
     /// Number of parameters.
     pub dimensions: u32,
@@ -239,10 +242,10 @@ impl AlgorithmSPSA {
         check_initial_point(initial_point, dimensions as usize, None)
     }
 
-    /// Whether iteration `k` (from 1) of a run of `max_iters` measures its θ:
-    /// the first, every `eval_interval` after it, and the last.
-    fn measures(k: u32, max_iters: u32, eval_interval: u32) -> bool {
-        k == max_iters || (k - 1) % eval_interval == 0
+    /// Whether iteration `k` (from 1) measures its θ: the first, and every
+    /// `eval_interval` after it.
+    fn measures(k: u32, eval_interval: u32) -> bool {
+        (k - 1) % eval_interval == 0
     }
 
     fn run_with_rng<R: Rng>(
@@ -300,7 +303,7 @@ impl AlgorithmSPSA {
             let a_k = a / f64::from(k).powf(alpha);
             let c_k = perturbation / f64::from(k).powf(gamma);
             let deltas: Vec<Vec<f64>> = (0..resamplings).map(|_| rademacher(rng, dims)).collect();
-            let measured = Self::measures(k, max_iters, eval_interval);
+            let measured = Self::measures(k, eval_interval);
 
             // ── 1. One batch: θ_k when it is measured, then the K pairs ─────────
             let mut batch = Vec::with_capacity(2 * resamplings + usize::from(measured));
@@ -318,8 +321,7 @@ impl AlgorithmSPSA {
                 &values[..]
             };
             // The running best of the measured θs: the first iteration measures
-            // θ₀, and the last one its θ, so the history ends at the reported
-            // best (C-5).
+            // θ₀, so no entry is the `-∞` of nothing measured (C-5).
             fitness_history.push(best.value());
 
             // ── 2. Step uphill along the mean of the K estimates ─────────────────
@@ -342,6 +344,18 @@ impl AlgorithmSPSA {
                     *x += a_k * (g / count);
                 }
             }
+        }
+
+        // ── Measure the θ the last step reached ─────────────────────────────────
+        // One candidate, so the last pairs do not go into an unmeasured step;
+        // its value joins the last iteration's entry, which ends the history at
+        // the reported best (C-5).
+        let values = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        check_oracle_len(1, values.len())?;
+        log::debug!("Final θ: fitness {:.4}", values[0]);
+        best.offer(&theta, values[0]);
+        if let Some(last) = fitness_history.last_mut() {
+            *last = best.value();
         }
 
         // `max_iters >= 1` and the first iteration measures θ₀, so `best` holds
@@ -394,9 +408,13 @@ fn calibrated_gain(values: &[f64], c: f64, target_step: f64) -> f64 {
             return a;
         }
     }
+    // A failed evaluation leaves the oracle answering placeholders, which can
+    // look like a flat landscape; the run then ends with that error, so the
+    // warning names both causes rather than asserting a flat one.
     log::warn!(
         "SPSA calibration: the {} gradient estimates at the starting point have no usable \
-         magnitude ({} of them finite); using a = target_step = {target_step}",
+         magnitude ({} of them finite), as on a flat landscape or after a failed evaluation, \
+         whose error ends the run; using a = target_step = {target_step}",
         values.len() / 2,
         magnitudes.len(),
     );
@@ -481,18 +499,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theta_is_measured_first_every_interval_and_last() {
+    fn theta_is_measured_first_and_every_interval() {
         let measured: Vec<u32> = (1..=23)
-            .filter(|&k| AlgorithmSPSA::measures(k, 23, 5))
-            .collect();
-        assert_eq!(measured, [1, 6, 11, 16, 21, 23]);
-        // A last iteration on the interval is measured once.
-        let measured: Vec<u32> = (1..=21)
-            .filter(|&k| AlgorithmSPSA::measures(k, 21, 5))
+            .filter(|&k| AlgorithmSPSA::measures(k, 5))
             .collect();
         assert_eq!(measured, [1, 6, 11, 16, 21]);
-        assert!((1..=4).all(|k| AlgorithmSPSA::measures(k, 4, 1)));
-        assert!(AlgorithmSPSA::measures(1, 1, 20));
+        assert!((1..=4).all(|k| AlgorithmSPSA::measures(k, 1)));
+        assert!(AlgorithmSPSA::measures(1, 20));
     }
 
     #[test]
