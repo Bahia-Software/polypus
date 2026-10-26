@@ -19,7 +19,7 @@ export POLYPUS_ENDF_DATA_DIR=$PWD/polypus-data/reference-data/endf-epdl-2023
 ```
 
 Saving only the elements you need from the IAEA URL above with a browser (the
-site refuses scripted downloads), as `ZA{Z:03}000.txt`, works too. See the "ENDF-6 photon data" section of the
+site may refuse non-browser clients), as `ZA{Z:03}000.txt`, works too. See the "ENDF-6 photon data" section of the
 `polypus-physics` crate docs.
 
 Source, references and licensing: [PROVENANCE.md](PROVENANCE.md).

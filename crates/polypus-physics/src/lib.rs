@@ -34,7 +34,7 @@
 //! The files are the unmodified IAEA evaluations, so saving
 //! `https://www-nds.iaea.org/epics/ENDF2023/EPDL.ELEMENTS/ZA{Z:03}000` from a
 //! browser as `ZA{Z:03}000.txt` for the elements you use works too (the site
-//! refuses scripted downloads). The example below needs the data.
+//! may refuse non-browser clients). The example below needs the data.
 //!
 //! ## Classical Monte Carlo — 1.25 MeV photon in water
 //!
