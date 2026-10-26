@@ -3,11 +3,12 @@
 use crate::constants::{AVOGADRO, BARN_TO_CM2};
 use crate::error::PhysicsError;
 use std::collections::{BTreeMap, HashMap};
-#[cfg(feature = "csv-export")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::OnceLock;
+
+/// The environment variable that overrides the ENDF-6 data directory.
+const ENDF_DATA_DIR_VAR: &str = "POLYPUS_ENDF_DATA_DIR";
 
 /// Directory containing the pre-downloaded ENDF-6 evaluations, resolved at
 /// runtime. This crate never downloads data over the network.
@@ -19,7 +20,14 @@ use std::sync::OnceLock;
 ///    — the default location within this repository, so the env var only
 ///    needs setting if that layout ever changes.
 fn external_endf_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("POLYPUS_ENDF_DATA_DIR") {
+    endf_data_dir(std::env::var(ENDF_DATA_DIR_VAR).ok())
+}
+
+/// [`external_endf_data_dir`] for a given value of the variable (`None` when
+/// it is unset), so tests cover the override without mutating the process
+/// environment, which other tests read concurrently.
+fn endf_data_dir(override_dir: Option<String>) -> PathBuf {
+    if let Some(dir) = override_dir {
         return PathBuf::from(dir);
     }
     PathBuf::from(concat!(
@@ -32,11 +40,16 @@ fn external_endf_data_dir() -> PathBuf {
 /// from a pre-downloaded local file. Never downloads anything — see
 /// [`external_endf_data_dir`].
 fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
-    let path = external_endf_data_dir().join(format!("ZA{z:03}000.txt"));
+    read_endf_contents(&external_endf_data_dir(), z)
+}
+
+/// Reads the ENDF-6 evaluation for `z` from the data directory `dir`.
+fn read_endf_contents(dir: &Path, z: u32) -> Result<String, PhysicsError> {
+    let path = dir.join(format!("ZA{z:03}000.txt"));
     std::fs::read_to_string(&path).map_err(|e| PhysicsError::EndfDataNotFound {
         z,
         message: format!(
-            "could not read {}: {e}. Set POLYPUS_ENDF_DATA_DIR to the folder \
+            "could not read {}: {e}. Set {ENDF_DATA_DIR_VAR} to the folder \
              containing the ENDF-6 .txt files, or place them at \
              reference-data/endf-epdl-2023 relative to the workspace root.",
             path.display()
@@ -711,6 +724,7 @@ pub fn mu_m_for_compound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
 
     #[test]
     fn requesting_an_element_adds_it_to_the_index() {
@@ -971,19 +985,20 @@ mod tests {
     #[test]
     fn write_element_csv_produces_a_file() {
         let (z, a, points) = mu_m_for_element("H", 501).unwrap();
-        let path = std::env::temp_dir().join("H_mu_m_test.csv");
+        let scratch = ScratchDir::new("element-csv");
+        let path = scratch.path().join("H_mu_m_test.csv");
         write_element_csv("H", z, a, &points, &path).unwrap();
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("Element,H"));
-        println!("CSV written to: {}", path.display());
     }
 
     #[cfg(feature = "csv-export")]
     #[test]
     fn write_compound_csv_produces_a_file() {
         let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
-        let path = std::env::temp_dir().join("H2O_mu_m_test.csv");
+        let scratch = ScratchDir::new("compound-csv");
+        let path = scratch.path().join("H2O_mu_m_test.csv");
         write_compound_csv("H2O", &result, &path).unwrap();
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
@@ -1014,23 +1029,24 @@ mod tests {
         }
     }
 
+    /// Through `endf_data_dir`, not `std::env::set_var`: other tests in this
+    /// process read the variable concurrently and cache what they read.
     #[test]
     fn env_var_overrides_default_data_dir() {
-        let temp_dir = std::env::temp_dir().join("polypus_endf_override_test");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        std::fs::write(temp_dir.join("ZA001000.txt"), "custom test content").unwrap();
+        let scratch = ScratchDir::new("endf-override");
+        std::fs::write(scratch.path().join("ZA001000.txt"), "custom test content").unwrap();
+        let value = scratch.path().to_str().unwrap().to_owned();
 
-        // SAFETY: no other test in this process reads/writes this exact
-        // variable concurrently — tests in this crate run in the same process
-        // but each uses distinct env vars/fixtures.
-        unsafe {
-            std::env::set_var("POLYPUS_ENDF_DATA_DIR", &temp_dir);
-        }
-        let contents = fetch_endf_contents(1).unwrap();
-        unsafe {
-            std::env::remove_var("POLYPUS_ENDF_DATA_DIR");
-        }
+        let dir = endf_data_dir(Some(value));
 
-        assert_eq!(contents, "custom test content");
+        assert_eq!(dir, scratch.path());
+        assert_eq!(read_endf_contents(&dir, 1).unwrap(), "custom test content");
+    }
+
+    #[test]
+    fn unset_env_var_falls_back_to_the_reference_data() {
+        let dir = endf_data_dir(None);
+        assert!(dir.ends_with("reference-data/endf-epdl-2023"));
+        assert!(dir.join("ZA001000.txt").is_file());
     }
 }
