@@ -88,13 +88,25 @@ For development, `maturin develop --release` installs both packages in editable 
 import polypus
 
 bell = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
-result = polypus.run_quantum_circuit(bell, shots=1000, infrastructure="local", n_qpus=4)
+result = polypus.run_quantum_circuit(
+    bell, shots=1000, infrastructure="local", backend="polypus", n_qpus=4
+)
 
 result.counts  # one counts dict per QPU
 result.merged_counts  # e.g. {'00': 487, '11': 513}
 ```
 
-Qiskit `QuantumCircuit` objects and OpenQASM 2.0 strings are accepted the same way.
+`backend="polypus"` is the native Rust simulator, which does not load Qiskit Aer. OpenQASM 2.0 strings are accepted the same way.
+
+**Run it on Qiskit Aer**
+
+```python
+result = polypus.run_quantum_circuit(
+    bell, shots=1000, infrastructure="local", backend="aer"
+)
+```
+
+Aer is the default `backend`. It also runs Qiskit `QuantumCircuit` objects and noise models; see [Choosing a local backend](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md#choosing-a-local-backend). If `import qiskit_aer` fails with `cannot allocate memory in static TLS block`, see [Troubleshooting](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md#troubleshooting).
 
 **Train a QAOA circuit for MaxCut**
 
@@ -128,6 +140,7 @@ result = polypus.train(
     dimensions=2,
     expectation_function=cut,
     infrastructure="local",
+    backend="polypus",
     nodes=1,
     cores_per_qpu=1,
     id="maxcut",
@@ -135,7 +148,7 @@ result = polypus.train(
 result.best_params, result.best_fitness
 ```
 
-To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam` or `polypus.SPSA`; to run on CUNQA, set `infrastructure="cunqa"`. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go step by step from a first circuit to variational training, covering gates, Qiskit and OpenQASM interoperability, local and cluster execution, and classic algorithms along the way; [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
+To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam` or `polypus.SPSA`; to run on CUNQA, set `infrastructure="cunqa"` and remove `backend="polypus"`, since CUNQA's QPUs run Aer. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go step by step from a first circuit to variational training, covering gates, Qiskit and OpenQASM interoperability, local and cluster execution, and classic algorithms along the way; [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
 
 ## Backends
 
@@ -152,7 +165,7 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`
 
 | Topic | Covers |
 |---|---|
-| [Running circuits](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md) | `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors |
+| [Running circuits](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md) | `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors, troubleshooting |
 | [Variational training](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/training.md) | `train` parameters, `TrainResult`, cost functions, DE, PSO, QNG, CMA-ES, Adam and SPSA |
 | [Quantum machine learning](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/qml.md) | `qml.train` with labels, `SampleCost`, `qml.predict` |
 | [Circuits and interchange](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/circuits.md) | `polypus.Circuit`, the Rust builder, OpenQASM 2 and 3, QIR |

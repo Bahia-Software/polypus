@@ -3,12 +3,12 @@ import time
 import polypus
 
 tic = time.time()
-bell = polypus.Circuit(1).x(0).measure_all()
+circuit = polypus.Circuit(1).x(0).measure_all()
 tac = time.time()
 print(f"Time to create circuit: {tac - tic} seconds")
-print(bell)
+print(circuit)
 tic = time.time()
-counts = polypus.run_quantum_circuit(bell, shots=10000, infrastructure="qmio")
+result = polypus.run_quantum_circuit(circuit, shots=10000, infrastructure="qmio")
 tac = time.time()
-print(counts)
+print(result.counts[0])
 print(f"Execution time: {tac - tic} seconds")

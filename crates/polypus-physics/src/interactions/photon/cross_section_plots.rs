@@ -120,11 +120,13 @@ pub fn plot_element_cross_sections(symbol: &str, path: &Path) -> Result<(), Phys
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
 
     #[cfg(feature = "plotters")]
     #[test]
     fn plot_element_cross_sections_produces_a_png() {
-        let path = std::env::temp_dir().join("Fe_cross_sections_test.png");
+        let scratch = ScratchDir::new("cross-sections-png");
+        let path = scratch.path().join("Fe_cross_sections_test.png");
         plot_element_cross_sections("Fe", &path).unwrap();
         assert!(path.exists());
         assert!(std::fs::metadata(&path).unwrap().len() > 0);

@@ -1,6 +1,6 @@
 # User guide
 
-- [Running circuits](running.md): `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors
+- [Running circuits](running.md): `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors, troubleshooting
 - [Variational training](training.md): `train` parameters, `TrainResult`, cost functions, DE, PSO, QNG, CMA-ES, Adam and SPSA
 - [Quantum machine learning](qml.md): `qml.train` with labels, `SampleCost`, `qml.predict`
 - [Circuits and interchange](circuits.md): `polypus.Circuit`, the Rust builder, OpenQASM 2 and 3, QIR

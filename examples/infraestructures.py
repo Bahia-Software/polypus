@@ -175,25 +175,21 @@ for q in range(N_QUBITS):
     ansatz = ansatz.rx(q, polypus.Param(1))
 ansatz = ansatz.measure_all()
 
-train_kw = dict(
-    shots=1024,
-    n_qpus=1,
-    dimensions=2,
-    expectation_function=maxcut_value,
-    infrastructure="local",
-    nodes=1,
-    cores_per_qpu=1,
-)
-
 
 def time_train(backend):
     t0 = time.perf_counter()
     result = polypus.train(
         ansatz,
         polypus.DE(generations=15, population_size=20, tolerance=1e-6),
+        shots=1024,
+        n_qpus=1,
+        dimensions=2,
+        expectation_function=maxcut_value,
+        infrastructure="local",
+        nodes=1,
+        cores_per_qpu=1,
         id=f"qaoa_{backend}",
         backend=backend,
-        **train_kw,
     )
     # train now returns a TrainResult (contract C-7); the tuned angles are in
     # .best_params, alongside .best_fitness / .iterations_run / .converged / .seed.
