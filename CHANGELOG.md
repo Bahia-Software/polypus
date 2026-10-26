@@ -28,7 +28,9 @@ Changes on `main` since 0.7.2.
   gradient too (#394).
 - Adam in `polypus-optimizers`: `AlgorithmAdam` and `AlgorithmAdamArgs`, driven
   by a new `GradientOracle` contract (the fitness gradient, uphill), with the
-  same fitness-stagnation stop as DE and CMA-ES. `FiniteDifferenceGradient`
+  same fitness-stagnation stop as DE and CMA-ES. A gradient of the wrong
+  length, or with a non-finite component (the new
+  `OptimizerError::NonFiniteGradient`), is an error. `FiniteDifferenceGradient`
   turns any `EvaluationOracle` into a `GradientOracle` by central differences,
   in one batch per gradient (#394).
 - `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to

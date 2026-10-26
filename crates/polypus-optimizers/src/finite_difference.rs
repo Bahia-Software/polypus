@@ -2,6 +2,7 @@
 
 use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, GradientOracle};
+use std::ops::Range;
 
 /// Check a finite-difference step as [`FiniteDifferenceGradient::new`] does,
 /// without an oracle: finite and `> 0` ([`OptimizerError::InvalidConfig`] for
@@ -28,10 +29,12 @@ pub fn check_step(step: f64) -> Result<(), OptimizerError> {
 /// candidate in **one** [`evaluate_batch`](EvaluationOracle::evaluate_batch)
 /// call of `2·dims` candidates, laid out `[θ+h·e₀, θ−h·e₀, θ+h·e₁, θ−h·e₁, …]`,
 /// so a backend sees a single batch per gradient. If the wrapped oracle breaks
-/// its length contract, `gradient_batch` returns an empty vector, which the
-/// optimizer reports as [`OptimizerError::OracleLengthMismatch`], and
-/// [`gradient`](GradientOracle::gradient) returns `NaN`; the mismatch is logged
-/// at `error` level either way.
+/// its length contract, or a parameter index is out of range for `θ` (`dims`
+/// greater than its length), `gradient_batch` returns an empty vector, which
+/// the optimizer reports as [`OptimizerError::OracleLengthMismatch`], and
+/// [`gradient`](GradientOracle::gradient) returns `NaN`, without a panic; it is
+/// logged at `error` level either way, and an index out of range calls no
+/// oracle.
 ///
 /// To score candidates with the same oracle that feeds the optimizer, share it
 /// through an [`Arc`](std::sync::Arc), which is an [`EvaluationOracle`] too.
@@ -55,8 +58,18 @@ impl<O: EvaluationOracle> FiniteDifferenceGradient<O> {
     }
 
     /// Score the stencil around `theta` for `indices`, one batch, and return
-    /// one component per index (empty if the oracle broke its length contract).
-    fn stencil(&self, theta: &[f64], indices: impl Iterator<Item = usize>) -> Vec<f64> {
+    /// one component per index (empty if an index is out of range for `theta`
+    /// or the oracle broke its length contract).
+    fn stencil(&self, theta: &[f64], indices: Range<usize>) -> Vec<f64> {
+        if indices.end > theta.len() {
+            log::error!(
+                "finite-difference gradient: parameter {} is out of range for a point of {} \
+                 value(s)",
+                indices.start.max(theta.len()),
+                theta.len()
+            );
+            return Vec::new();
+        }
         let h = self.step;
         let candidates: Vec<Vec<f64>> = indices
             .flat_map(|i| {
@@ -85,7 +98,7 @@ impl<O: EvaluationOracle> FiniteDifferenceGradient<O> {
 
 impl<O: EvaluationOracle> GradientOracle for FiniteDifferenceGradient<O> {
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
-        self.stencil(theta, std::iter::once(param_index))
+        self.stencil(theta, param_index..param_index.saturating_add(1))
             .first()
             .copied()
             .unwrap_or(f64::NAN)

@@ -875,7 +875,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
     finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
     convention as `EvaluationOracle`). A wrong length is
-    `OptimizerError::OracleLengthMismatch`.
+    `OptimizerError::OracleLengthMismatch`, and a non-finite component
+    `OptimizerError::NonFiniteGradient` (its index and value), before `θ`
+    moves.
   - Preconditions, each an error before any RNG draw or oracle call:
     `max_iters >= 1`, `dimensions >= 1`, `learning_rate` finite and `> 0`,
     `beta1` and `beta2` in `[0, 1)`, `epsilon` finite and `> 0`
@@ -894,14 +896,15 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     one `evaluate_batch` of `2·dims` candidates,
     `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`, per gradient. It approximates; an exact
     gradient is its own `GradientOracle`. If the wrapped oracle returns the
-    wrong number of values the gradient is empty, so Adam reports the length
-    mismatch. An `Arc` of an oracle is an oracle, so one scorer can feed both.
+    wrong number of values, or a parameter index is out of range for `θ`, the
+    gradient is empty, without a panic, so Adam reports the length mismatch. An `Arc` of an oracle is an oracle, so one scorer can feed both.
   - Enforced by `crates/polypus-optimizers/tests/adam.rs` (the C-5
     postconditions against the batches the oracle saw over 25 seeds, one
     gradient and one single-candidate batch per iteration, stagnation,
     reproducibility, every rejected configuration with no oracle call, the
-    gradient length check, and the finite-difference stencil, its accuracy,
-    its step validation and a broken wrapped oracle).
+    gradient length and finiteness checks, and the finite-difference stencil,
+    its accuracy, its step validation, a broken wrapped oracle and an index
+    out of range).
   - In a training run the gradient comes from the run's `Oracles`
     (`polypus-orchestration`): the exact one when the factory provides it,
     otherwise a `FiniteDifferenceGradient` of the evaluation oracle with

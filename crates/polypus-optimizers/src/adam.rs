@@ -167,6 +167,10 @@ impl AlgorithmAdam {
             // ── 1. Gradient, uphill, one component per parameter ──────────────
             let grad = gradient_oracle.gradient_batch(&theta, dims);
             check_oracle_len(dims, grad.len())?;
+            // A non-finite component would leave θ non-finite from here on (C-5).
+            if let Some((index, &value)) = grad.iter().enumerate().find(|(_, g)| !g.is_finite()) {
+                return Err(OptimizerError::NonFiniteGradient { index, value });
+            }
 
             // ── 2. Bias-corrected moment update (t is 1-based) ────────────────
             let t = iteration as i32 + 1;
