@@ -414,7 +414,9 @@ class TestQiskitCircuits:
         qc.measure(1, 1)
         report = _report(qc)
         assert len(report["aer"]) == 1
-        assert 'unable to synthesize "opaque_thing"' in report["aer"][0]
+        # Qiskit 2.0 words it "Unable to translate the operations ...", later
+        # releases 'unable to synthesize "opaque_thing"'; both name the gate.
+        assert '"opaque_thing"' in report["aer"][0]
         _assert_coherent(qc, report)
 
     @pytest.mark.parametrize("control_flow", [False, True])

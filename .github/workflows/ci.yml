@@ -157,11 +157,13 @@ jobs:
           uv pip install --system --resolution lowest-direct -r "$RUNNER_TEMP/build-requirements.txt"
           maturin --version
           maturin build --release --out dist
-      - name: Install the lowest allowed runtime dependencies, then the wheel
+      # The test requirements (requirements-dev.txt) resolve together with
+      # the wheel's, so their floors (pytest, qiskit-qasm3-import) are tested
+      # too.
+      - name: Install the lowest allowed runtime and test dependencies, then the wheel
         run: |
-          uv pip install --system --resolution lowest-direct -r pyproject.toml
+          uv pip install --system --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
           uv pip install --system --no-deps dist/polypus_quantum-*.whl
-          uv pip install --system pytest
           uv pip list --system
       - name: Run Python tests
         run: pytest tests/python -rs --strict-markers
