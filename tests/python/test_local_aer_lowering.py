@@ -885,6 +885,7 @@ class TestLoweringOfAProgramRunAgain:
         assert lowered[1].count_ops()["ch"] == 2
 
     def test_concurrent_runs_of_a_program_agree(self):
+        import sys
         from concurrent.futures import ThreadPoolExecutor
 
         import polypus_python.local as local
@@ -893,14 +894,41 @@ class TestLoweringOfAProgramRunAgain:
         src = _program("declared_gate")
         expected = Local().run_qcs(qcs=[src], shots=200, seed=3)
         local._LOWERED_QASM.clear()
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            results = list(
-                pool.map(
-                    lambda _: Local().run_qcs(qcs=[src], shots=200, seed=3), range(8)
+        # A short switch interval makes the threads interleave inside the
+        # passes, where Qiskit 2.0 raced on the session equivalence library
+        # (issue #468).
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(
+                    pool.map(
+                        lambda _: Local().run_qcs(qcs=[src], shots=200, seed=3),
+                        range(8),
+                    )
                 )
-            )
+        finally:
+            sys.setswitchinterval(interval)
         assert all(r == expected for r in results)
         assert len(local._LOWERED_QASM) == 1
+
+    def test_the_passes_run_under_the_session_equivalence_lock(self, monkeypatch):
+        """Qiskit 2.0 cannot share its session equivalence library between
+        threads (issue #468): the lowering holds the lock while it runs."""
+        import polypus_python.local as local
+        from qiskit.transpiler import PassManager
+
+        held = []
+        original = PassManager.run
+
+        def spy(self, *args, **kwargs):
+            held.append(local._SESSION_EQUIVALENCE_LOCK.locked())
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(PassManager, "run", spy)
+        _run(_program("declared_gate"), shots=20)
+        assert held == [True]
+        assert not local._SESSION_EQUIVALENCE_LOCK.locked()
 
 
 class TestLoweredQasmCacheBounds:

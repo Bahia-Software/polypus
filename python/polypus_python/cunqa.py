@@ -36,7 +36,12 @@ except ImportError:
     to_ir = None
 
 from .infrastructure import Infraestructure  # noqa: E402
-from .local import _c3_counts, _outside_basis, _with_full_readout  # noqa: E402
+from .local import (  # noqa: E402
+    _SESSION_EQUIVALENCE_LOCK,
+    _c3_counts,
+    _outside_basis,
+    _with_full_readout,
+)
 
 
 @lru_cache(maxsize=1)
@@ -60,13 +65,16 @@ def _lower_to_cunqa_basis(qc):
     boundary of contract C-2 as in ``local.py``: rewrite only
     (``optimization_level=0``: no reordering or merging), only when needed (a circuit CUNQA
     converts is handed over as it is), never touching the exported QASM. With a
-    CUNQA that does not publish the list, the circuit is forwarded unchanged."""
+    CUNQA that does not publish the list, the circuit is forwarded unchanged.
+    ``transpile`` uses Qiskit's session equivalence library, so it runs under
+    the lock ``local.py`` takes for it (issue #468)."""
     if SUPPORTED_QISKIT_OPERATIONS is None:
         return qc
     supported, basis_gates = _cunqa_basis()
     if not _outside_basis(qc, supported):
         return qc
-    return transpile(qc, basis_gates=basis_gates, optimization_level=0)
+    with _SESSION_EQUIVALENCE_LOCK:
+        return transpile(qc, basis_gates=basis_gates, optimization_level=0)
 
 
 def _prepare(qc):
