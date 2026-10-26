@@ -586,3 +586,73 @@ class TestOracleContractC5Rotosolve:
         assert not result.converged
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5External:
+    """The same guarantees for ``polypus.External``: each ``ask()`` is an
+    evaluation-oracle batch, so a bad value in any of them must surface as a
+    typed error, and the library is not told it."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, optimizer=None):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        if optimizer is None:
+            optimizer = RandomSearch(_DIMENSIONS, sizes=(3,))
+        return polypus.train(
+            parametrized_circuit,
+            polypus.External(optimizer, 12),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        optimizer = RandomSearch(_DIMENSIONS, sizes=(3,))
+        try:
+            self._train(
+                parametrized_circuit, lambda _b: value, "ext_non_finite", optimizer
+            )
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+        assert len(optimizer.asked) == 1
+        assert optimizer.told == []
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "ext_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(parametrized_circuit, simple_expectation_fn, "ext_valid")
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert result.iterations_run == 4
+        assert not result.converged
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness

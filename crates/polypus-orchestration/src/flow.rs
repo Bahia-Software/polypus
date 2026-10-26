@@ -696,10 +696,48 @@ mod tests {
         }
     }
 
+    /// A seeded random search over `[-π, π)²` as an external ask/tell
+    /// optimizer: `rows` points per `ask()`, never ending on its own.
+    struct RandomAskTell {
+        state: u64,
+        rows: usize,
+    }
+
+    impl RandomAskTell {
+        /// SplitMix64, mapped to `[-π, π)`.
+        fn next(&mut self) -> f64 {
+            self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
+            (2.0 * unit - 1.0) * std::f64::consts::PI
+        }
+    }
+
+    impl polypus_optimizers::AskTell for RandomAskTell {
+        fn ask(&mut self) -> Result<Option<Vec<Vec<f64>>>, polypus_optimizers::AskTellError> {
+            Ok(Some(
+                (0..self.rows)
+                    .map(|_| vec![self.next(), self.next()])
+                    .collect(),
+            ))
+        }
+        fn tell(
+            &mut self,
+            _candidates: &[Vec<f64>],
+            _values: &[f64],
+        ) -> Result<(), polypus_optimizers::AskTellError> {
+            Ok(())
+        }
+    }
+
     /// A small run of every optimizer, with its name.
     fn every_method() -> Vec<(&'static str, Method)> {
         use crate::{
-            AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+            AdamConfig, CmaesConfig, DeConfig, ExternalConfig, PsoConfig, QngConfig,
+            RotosolveConfig, SpsaConfig,
         };
         use polypus_optimizers::{AdamRule, DeStrategy};
         let bounds = (-std::f64::consts::PI, std::f64::consts::PI);
@@ -791,6 +829,15 @@ mod tests {
                     tolerance: 0.0,
                     patience: 1,
                 }),
+            ),
+            (
+                "external",
+                Method::External(
+                    ExternalConfig {
+                        max_evaluations: 20,
+                    },
+                    Box::new(RandomAskTell { state: 5, rows: 4 }),
+                ),
             ),
         ]);
         methods

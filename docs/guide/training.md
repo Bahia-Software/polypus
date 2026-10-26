@@ -25,7 +25,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | Parameter | Description |
 |---|---|
 | `qc` | Parameterized circuit: a `polypus.Circuit` with `polypus.Param(i)` angles, or a Qiskit `QuantumCircuit` |
-| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam`, `polypus.SPSA` or `polypus.Rotosolve` |
+| `method` | `polypus.DE`, `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam`, `polypus.SPSA`, `polypus.Rotosolve`, or `polypus.External` for an optimizer from another library or of your own |
 | `shots` | Shots per circuit execution |
 | `n_qpus` | Number of QPUs the population is spread over |
 | `dimensions` | Number of variational parameters |
@@ -39,7 +39,7 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
 | `final_shots` | Optional shots per circuit for one last batch that re-evaluates the best candidates after the optimizer stops: an integer `>= 1`. See [Final re-evaluation](#final-re-evaluation). |
 
-Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function` propagates as itself.
+Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function`, or by the `ask()` or `tell()` of an [external optimizer](#external-optimizers), propagates as itself.
 
 ## The result
 
@@ -323,6 +323,157 @@ In `qml.train` only the ansatz is trained: the feature map's parameters are boun
 - M. Ostaszewski, E. Grant and M. Benedetti, "Structure optimization for parameterized quantum circuits", Quantum 5, 391 (2021), doi:10.22331/q-2021-01-28-391, arXiv:1905.09692.
 - K. M. Nakanishi, K. Fujii and S. Todo, "Sequential minimal optimization for quantum-classical hybrid algorithms", Physical Review Research 2, 043158 (2020), doi:10.1103/PhysRevResearch.2.043158, arXiv:1903.12166.
 
+### External optimizers
+
+```python
+polypus.External(optimizer, max_evaluations)
+```
+
+`polypus.External` runs an optimizer that is not part of Polypus through the same scheduler as the others: a library you install, such as Optuna, Nevergrad or pycma, or an object of your own. The optimizer only has to work in ask/tell form: `ask()` proposes a batch of candidates, Polypus evaluates the batch, and `tell(candidates, values)` hands back their values. Each `ask()` is one batch, spread over the `n_qpus` QPUs like a DE generation, so an optimizer that proposes several candidates at a time keeps several QPUs busy.
+
+**The protocol.** `optimizer` is any object with two methods:
+
+- `ask()` returns the next batch: an iterable of rows, such as a list of lists or a 2-D NumPy array, each row one finite number per circuit parameter. `None` or an empty batch means the optimizer is done.
+- `tell(candidates, values)` receives the rows of that batch, as a `list[list[float]]`, and their fitness, as a `list[float]` in the same order. Its return value is ignored.
+
+The values are fitness to **maximise**, as for every Polypus optimizer. Optuna minimises unless the study is created with `direction="maximize"`, and Nevergrad and pycma always minimise, so their values must be negated: the adapters in `polypus.external`, below, do it for you. `polypus.external.AskTell` is the protocol as a `typing.Protocol`, for type checkers.
+
+**The budget.** `max_evaluations`, an integer `>= 1`, is the most candidates a run evaluates. It is required, since some libraries never say they are done. The run stops:
+
+- when `ask()` returns `None` or an empty batch, and then `converged` is `True`;
+- when the budget is spent, without asking again, or before a batch that would take the run past `max_evaluations`: that batch is neither evaluated nor told, so the budget is never exceeded, and `converged` is `False`.
+
+A first `ask()` that proposes nothing, and a first batch larger than `max_evaluations`, raise `ValueError`: nothing was evaluated, so there is no result. With an optimizer that asks for a fixed number of candidates per batch, make `max_evaluations` a multiple of it, or the remainder is not spent.
+
+**What is checked.** Every row must be one finite real number per parameter. A row of another length, a `NaN`, an infinity or a value that is not a real number (a `bool`, including a NumPy bool array's, a complex number, or an integer too large for a float) raises `ValueError` naming the batch and the row (both counted from 0), before that batch is evaluated, and the run stops. Polypus reads a batch only up to one row past the budget left, so an endless iterator ends the run like any batch that does not fit, and a row only up to one value past the number of parameters, so an endless row raises the `ValueError` of a row too long. An exception raised in `ask()` or `tell()`, `KeyboardInterrupt` included, stops the run and reaches the caller of `train` as itself, as one raised by `expectation_function` does; Ctrl+C during a batch stops the run before the optimizer's next call. `External` raises `TypeError` for an `optimizer` without callable `ask` and `tell`, and `ValueError` for a `max_evaluations` that is not an integer `>= 1` (`0`, `100.0` or `True`), when it is built or the attribute is set.
+
+| Parameter | Description |
+|---|---|
+| `optimizer` | The ask/tell object: an adapter from `polypus.external`, or your own |
+| `max_evaluations` | Candidates evaluated at most over a run, an integer `>= 1` |
+
+**The result.** `best_params` and `best_fitness` are the best candidate Polypus measured and the value it measured, whatever the library would recommend as its own best. `fitness_history` has one entry per batch, the best value measured up to it, and `iterations_run` counts the batches evaluated and told.
+
+**Seed and starting point.** `External` has no `seed`: the library owns its randomness, so seed it where you build it, as the examples below do. The `seed` of `train` still fixes the shot sampling and is reported in `result.seed`, so a deterministic optimizer on a seeded native run reproduces it exactly; whether a library is deterministic once seeded is up to the library. The start is the library's too: `initial_point` with `External` raises `ValueError` before anything runs. Give the start to the library instead: `from_optuna` and `from_nevergrad` take an `initial_point`, and pycma's start is the `x0` of `CMAEvolutionStrategy`.
+
+**Threads and reuse.** As in every training run, the GIL is released while the run goes on. `ask()` and `tell()` run on the thread that called `train`, which holds the GIL only during each call, so other Python threads run while a batch is evaluated. `External` keeps your object, not a copy: a second run with it continues from the library's state (an Optuna study keeps its trials, a pycma strategy its generation), and `max_evaluations` counts each run's evaluations on their own. A pycma strategy that has stopped proposes nothing, so a second run with it raises `ValueError`. Do not share one optimizer between two runs at the same time.
+
+With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and leaves out the time the library itself takes in `ask()` and `tell()` (see [Allocation walltime](../backends.md#allocation-walltime)), which for a model-based library can be much of the run.
+
+None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there). `polypus.external` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
+
+```python
+import math
+
+import numpy as np
+import polypus
+from polypus.external import from_nevergrad, from_optuna, from_pycma
+
+common = dict(
+    shots=1024,
+    n_qpus=4,
+    dimensions=6,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    seed=42,  # fixes the shot sampling; each library has its own seed
+)
+```
+
+**Optuna (TPE).** `from_optuna(study, dimensions, batch_size, bounds=(0, 2π), initial_point=None)` asks the study for `batch_size` trials per batch (`study.ask()`) and suggests one float per parameter in each, named `x0`, `x1`, … (`trial.suggest_float` within `bounds`), then tells each trial its value (`study.tell`), negated when the study minimises. A study with several objectives raises `ValueError`. Optuna's `TPESampler` is a form of Bayesian optimization: it builds a model of the values the trials returned and draws the next trials from it, after `n_startup_trials` random ones (10 by default in Optuna 5.0.0, the version checked here). With `constant_liar=True`, the default in Optuna 5.0 and passed explicitly below for older versions, it penalizes the trials still waiting for their values, so it avoids proposing the trials of one batch close to each other. Optuna never says it is done, so `max_evaluations` ends the run: make it a multiple of `batch_size`, since the trials of an untold remainder stay in the study as `RUNNING` trials, which TPE with `constant_liar=True` keeps penalising, until a later run with the same adapter tells them. `initial_point` is enqueued as the study's first trial (`study.enqueue_trial`).
+
+```python
+import optuna
+
+study = optuna.create_study(
+    direction="maximize",
+    sampler=optuna.samplers.TPESampler(seed=7, constant_liar=True),
+)
+result = polypus.train(
+    qc,
+    polypus.External(
+        from_optuna(study, dimensions=6, batch_size=4), max_evaluations=200
+    ),
+    id="tpe",
+    **common,
+)
+len(study.trials)  # 200, each with the value Polypus measured
+```
+
+**Nevergrad.** `from_nevergrad(optimizer, batch_size=None, initial_point=None)` asks the optimizer for `batch_size` candidates per batch, by default its `num_workers`, and tells each `-value`. When the optimizer has a `budget`, the run ends once that many candidates have been asked, the last batch cut to fit; without one, `max_evaluations` ends it. `initial_point` is suggested to the optimizer (`optimizer.suggest`), so it is the first candidate. Any optimizer of `ng.optimizers` works the same way; this example uses `TBPSA`, which Nevergrad's documentation (version 1.0.12, the one checked here) describes as suited to noisy objectives, and seeds the parametrization's `random_state`:
+
+```python
+import nevergrad as ng
+
+parametrization = ng.p.Array(shape=(6,)).set_bounds(0, 2 * math.pi)
+parametrization.random_state = np.random.RandomState(7)
+optimizer = ng.optimizers.TBPSA(
+    parametrization=parametrization, budget=200, num_workers=4
+)
+result = polypus.train(
+    qc,
+    polypus.External(from_nevergrad(optimizer), max_evaluations=200),
+    id="nevergrad",
+    **common,
+)
+```
+
+**pycma.** `from_pycma(es)` asks a `cma.CMAEvolutionStrategy` for one generation per batch (`es.ask()`, `popsize` candidates) and tells it `-value` (`es.tell`). The run ends when `es.stop()` reports one of the strategy's termination criteria, such as `maxfevals`, or at `max_evaluations`. The start is the strategy's `x0` and its step size `sigma0`:
+
+```python
+import cma
+
+es = cma.CMAEvolutionStrategy(
+    6 * [math.pi], 0.5, {"seed": 7, "popsize": 8, "maxfevals": 200}
+)
+result = polypus.train(
+    qc,
+    polypus.External(from_pycma(es), max_evaluations=200),
+    id="pycma",
+    **common,
+)
+```
+
+**An optimizer of your own** needs only the two methods. This one samples around the best point it has been told, and halves its step after a batch that found nothing better:
+
+```python
+class LocalSearch:
+    def __init__(self, dimensions, size=4, step=0.5, seed=0):
+        self.rng = np.random.default_rng(seed)
+        self.best = self.rng.uniform(0, 2 * math.pi, dimensions)
+        self.best_value = -math.inf
+        self.size = size
+        self.step = step
+
+    def ask(self):
+        if self.step < 0.01:
+            return None  # done: the run stops with converged=True
+        noise = self.rng.normal(size=(self.size, len(self.best)))
+        return self.best + self.step * noise  # a 2-D NumPy array, one row per candidate
+
+    def tell(self, candidates, values):
+        i = int(np.argmax(values))
+        if values[i] > self.best_value:
+            self.best, self.best_value = np.array(candidates[i]), values[i]
+        else:
+            self.step /= 2
+
+
+result = polypus.train(
+    qc,
+    polypus.External(LocalSearch(dimensions=6), max_evaluations=400),
+    id="local-search",
+    **common,
+)
+```
+
+**When to prefer an external optimizer: a method Polypus does not have.** Bayesian optimization, such as Optuna's TPE, spends computation choosing each candidate from a model of the values measured so far, to need fewer evaluations; that suits a small budget or circuits that are expensive to run. Tibaldi, Vodola, Tignone and Ercolessi (2023) apply Bayesian optimization with a Gaussian-process model to QAOA's parameters; TPE is a different model. Neither `polypus.External` nor any library is benchmarked: [Choosing an optimizer](#choosing-an-optimizer) has no row for them, so measure on your own problem before choosing one. Between two batches the QPUs wait for the optimizer: for `ask()` and `tell()`, each a Python call, and for the library's own computation, which in a model-based method grows with the candidates it has seen. With fast circuits that can take most of the run. A batch of `n_qpus` candidates, or a multiple of it, fills every QPU in whole rounds: set `batch_size` (Optuna), `num_workers` (Nevergrad) or `popsize` (pycma) accordingly.
+
+**References.**
+
+- S. Tibaldi, D. Vodola, E. Tignone and E. Ercolessi, "Bayesian Optimization for QAOA", IEEE Transactions on Quantum Engineering 4, 1–11 (2023), doi:10.1109/TQE.2023.3325167, arXiv:2209.03824.
+
 ## Starting point
 
 By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
@@ -336,6 +487,7 @@ By default every optimizer starts from random parameters. `initial_point` makes 
 | `Adam` | Starts from it and evaluates it first: the first batch is the point, then the finite-difference stencil that estimates the gradient around it. It may lie outside `bounds`, which only limit the random start |
 | `SPSA` | Starts from it: the calibration batch is centred on it, and the first iteration measures it first. It is taken as given, not wrapped into `[0, 2π)` |
 | `Rotosolve` | Starts from it and measures it first: the first batch is the point, then its two neighbours at `±π/2` along the first parameter. It is taken as given; a parameter is wrapped into `[0, 2π)` when a step moves it |
+| `External` | Refuses it with `ValueError` before anything runs: the library chooses its start. Pass the point to `from_optuna` or `from_nevergrad` as their `initial_point`, or as the `x0` of pycma's `CMAEvolutionStrategy` (see [External optimizers](#external-optimizers)) |
 
 Without `initial_point`, every optimizer starts as before and a seeded run reproduces exactly. With one, a run reproduces with the same seed and the same point; the result does not echo the point, so keep it with the seed.
 
@@ -445,7 +597,7 @@ result.final_fitness  # its value with 4096 shots
 
 | Optimizer | Candidates re-evaluated |
 |---|---|
-| `DE` (every `strategy`), `PSO`, `CMAES` | `best_params` and the four best other distinct candidates the run scored |
+| `DE` (every `strategy`), `PSO`, `CMAES`, `External` | `best_params` and the four best other distinct candidates the run scored |
 | `QNG`, `Adam`, `SPSA`, `Rotosolve` | `best_params` |
 
 `final_params` is the candidate with the highest re-evaluated value, `best_params` on a tie. Re-evaluating the best few candidates of a population, as Novák et al. recommend, lets the run pick one whose value with many shots beats `best_params`, which may have come first only by its noise. `final_fitness` is then the highest of a few fresh estimates, so it is still slightly optimistic, though far less than `best_fitness`, the highest of the whole run; when `best_params` is re-evaluated alone, it has no bias. `best_params`, `best_fitness` and `fitness_history` remain what the optimizer found: a seeded run sends the same batches with and without `final_shots`, and then the final batch. Without it, `final_params` and `final_fitness` are `None`.

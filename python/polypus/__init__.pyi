@@ -32,7 +32,11 @@ from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
 from . import circuits as circuits
+from . import external as external
 from . import qml as qml
+
+# What `External` runs (bindings/external.rs), typed in `polypus.external`.
+from .external import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -50,6 +54,7 @@ __all__ = [
     "Adam",
     "SPSA",
     "Rotosolve",
+    "External",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -80,6 +85,7 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
+    "external",
 ]
 
 __version__: str
@@ -90,7 +96,7 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve, External]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
@@ -279,6 +285,12 @@ class Rotosolve:
         patience: int = 2,
         seed: Optional[int] = None,
     ) -> Rotosolve: ...
+
+@final
+class External:
+    optimizer: _AskTell
+    max_evaluations: int
+    def __new__(cls, optimizer: _AskTell, max_evaluations: int) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 

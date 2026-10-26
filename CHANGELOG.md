@@ -14,6 +14,43 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
+  `qml.train`: runs an optimizer from outside Polypus, a library such as
+  Optuna, Nevergrad or pycma or an object of your own, through Polypus's
+  scheduler. The optimizer has `ask()`, which returns the next batch of rows
+  (`None` or an empty batch when it is done), and `tell(candidates, values)`,
+  which receives that batch and its fitness, to maximise. Each `ask()` is one
+  batch, spread over the QPUs. The run stops at an empty `ask()`
+  (`converged=True`) or before a batch that would take it past
+  `max_evaluations`, which is neither evaluated nor told, so the budget is
+  never exceeded. A row that is not `dimensions` finite real numbers (a
+  `bool` or a complex number is not one) raises `ValueError` naming its
+  batch and row; a batch and a row are read only up to one row or value
+  too many, so an endless iterator cannot hang the run. An exception from
+  `ask()` or `tell()`, `KeyboardInterrupt` included, is raised as itself.
+  `External` takes part in garbage collection, so an optimizer that refers
+  back to it is freed.
+  `best_params` is the best candidate Polypus measured, `iterations_run`
+  counts the batches, and `final_shots` re-evaluates five candidates. The
+  library owns its seed and its start: `External` has no `seed` (the run's
+  seed fixes the shot sampling) and `initial_point` raises `ValueError`
+  before anything runs (#399).
+- `polypus.external`, pure-Python adapters for `polypus.External`:
+  `from_optuna(study, dimensions, batch_size, bounds=(0, 2π),
+  initial_point=None)`, for example with Optuna's TPE sampler,
+  `from_nevergrad(optimizer, batch_size=None, initial_point=None)` and
+  `from_pycma(es)`, which call each library's public ask/tell methods only
+  and negate the values for a library that minimises; and `AskTell`, the
+  protocol as a `typing.Protocol`. None of the three libraries is a
+  dependency of Polypus, and the module imports none of them (#399).
+- External optimizers in training runs (Rust, `polypus-orchestration`):
+  `Method::External` with `ExternalConfig`. The CUNQA walltime warning
+  projects `max_evaluations / n` batches after a first batch of `n`
+  candidates; `final_shots` re-evaluates five candidates (#399).
+- The ask/tell bridge in `polypus-optimizers`: the `AskTell` trait, with
+  `AskTellError`, and `AlgorithmExternal` with `AlgorithmExternalArgs`,
+  which run any optimizer that implements it against an `EvaluationOracle`,
+  one oracle batch per `ask` (#399).
 - `polypus.Rotosolve(sweeps=10, reevaluate_every=5, tolerance=0.01,
   patience=2, seed=None)`, accepted by `train` and `qml.train`: the
   Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
@@ -185,6 +222,10 @@ Changes on `main` since 0.7.2.
   calls the one the method names.
 
 ### Changed
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `External`, and `polypus_optimizers::OptimizerError` two,
+  `InvalidCandidate` and `ExternalOptimizer`, so an exhaustive `match` on
+  either outside its crate must handle them (#399).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
   it (#398).

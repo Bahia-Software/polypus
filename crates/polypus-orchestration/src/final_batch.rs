@@ -36,9 +36,16 @@ impl Method {
     /// earlier, worse iterates or their neighbours. `best_params` is always
     /// one of them, and the batch is smaller when the run scored fewer
     /// distinct candidates.
+    ///
+    /// An external optimizer counts as a population method: the bridge cannot
+    /// tell how its library searches, and most of the libraries it serves
+    /// (Bayesian optimization, evolution strategies) score many distinct
+    /// points per batch.
     pub fn final_candidates(&self) -> usize {
         match self {
-            Method::De(_) | Method::Pso(_) | Method::Cmaes(_) => POPULATION_FINAL_CANDIDATES,
+            Method::De(_) | Method::Pso(_) | Method::Cmaes(_) | Method::External(..) => {
+                POPULATION_FINAL_CANDIDATES
+            }
             Method::Qng(..) | Method::Adam(_) | Method::Spsa(_) | Method::Rotosolve(_) => 1,
         }
     }
@@ -255,9 +262,10 @@ pub(crate) fn final_batch(
 mod tests {
     use super::*;
     use crate::dispatch::{
-        AdamConfig, CmaesConfig, DeConfig, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+        AdamConfig, CmaesConfig, DeConfig, ExternalConfig, PsoConfig, QngConfig, RotosolveConfig,
+        SpsaConfig,
     };
-    use polypus_optimizers::{AdamRule, DeStrategy, VarianceOracle};
+    use polypus_optimizers::{AdamRule, AskTell, AskTellError, DeStrategy, VarianceOracle};
 
     /// One call: its candidates and the shots it asked for (`None`: the
     /// oracle's own).
@@ -454,11 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn final_candidates_counts_five_for_population_methods_and_one_for_local_ones() {
+    fn final_candidates_counts_five_for_population_and_external_methods_and_one_for_local_ones() {
         struct Unit;
         impl VarianceOracle for Unit {
             fn variance(&self, _theta: &[f64], _param_index: usize) -> f64 {
                 1.0
+            }
+        }
+        struct Done;
+        impl AskTell for Done {
+            fn ask(&mut self) -> Result<Option<Vec<Vec<f64>>>, AskTellError> {
+                Ok(None)
+            }
+            fn tell(&mut self, _: &[Vec<f64>], _: &[f64]) -> Result<(), AskTellError> {
+                Ok(())
             }
         }
         let bounds = (-1.0, 1.0);
@@ -546,6 +563,10 @@ mod tests {
                     patience: 1,
                 }),
                 1,
+            ),
+            (
+                Method::External(ExternalConfig { max_evaluations: 1 }, Box::new(Done)),
+                5,
             ),
         ];
         for (method, count) in methods {

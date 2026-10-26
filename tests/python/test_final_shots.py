@@ -8,8 +8,8 @@ CUNQA.
 
 With a valid value, once the optimizer has stopped, its best candidates are
 re-evaluated in one more batch with ``final_shots`` shots per circuit:
-``best_params`` and, for DE, PSO and CMA-ES, the four best other distinct
-candidates they scored. The batch tests run the real training loops on Aer
+``best_params`` and, for DE, PSO, CMA-ES and External, the four best other
+distinct candidates they scored. The batch tests run the real training loops on Aer
 with ``polypus_python.run_qcs`` replaced by a fake that scores each circuit
 by its parameters, records every circuit with its shots and value, and so
 checks which candidates the final batch holds, with which shots and seed,
@@ -39,9 +39,10 @@ OPTIMIZERS = [
     "adam",
     "spsa",
     "rotosolve",
+    "external",
 ]
 # Re-evaluate their five best candidates; the others only best_params.
-POPULATION = {"rand1bin", "shade", "lshade", "pso", "cmaes"}
+POPULATION = {"rand1bin", "shade", "lshade", "pso", "cmaes", "external"}
 
 _RY = re.compile(r"^ry\(([^)]*)\) q\[(\d+)\];$", re.MULTILINE)
 
@@ -52,10 +53,12 @@ def _all_ones(bitstring):
 
 def _method(name):
     """A small configuration of the optimizer ``name`` (a DE strategy name,
-    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"``, ``"spsa"`` or ``"rotosolve"``).
-    Both models below qualify for Rotosolve: each trainable parameter is one
-    ``ry`` or ``rz`` angle."""
+    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"``, ``"spsa"``, ``"rotosolve"``
+    or ``"external"``). Both models below qualify for Rotosolve: each trainable
+    parameter is one ``ry`` or ``rz`` angle. ``"external"`` is a fresh seeded
+    random search, so two calls propose the same candidates."""
     import polypus
+    from ask_tell_helpers import RandomSearch
 
     if name == "pso":
         return polypus.PSO(generations=3, population_size=6)
@@ -69,6 +72,8 @@ def _method(name):
         return polypus.SPSA(max_iters=3)
     if name == "rotosolve":
         return polypus.Rotosolve(sweeps=2)
+    if name == "external":
+        return polypus.External(RandomSearch(DIMENSIONS, sizes=(4,), seed=3), 12)
     return polypus.DE(generations=3, population_size=6, strategy=name)
 
 

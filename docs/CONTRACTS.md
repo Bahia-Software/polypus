@@ -173,9 +173,23 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   **`polypus.EvaluationError`** (`qiskit_error_to_evaluation_error`) — no backend
   is involved yet — again with `module.Class: message` and `__cause__`, and with
   `ValueError`/`TypeError`/`KeyboardInterrupt` kept as they are. An exception
-  raised by the user's `expectation_function` (or variance callback) is **never**
-  retyped, even when its class is a Qiskit one: it travels in
-  `EvaluationError::Python` and re-raises verbatim.
+  raised by the user's `expectation_function` (or variance callback, or the
+  `ask()`/`tell()` of a `polypus.External` optimizer) is **never** retyped, even
+  when its class is a Qiskit one: it travels in `EvaluationError::Python` and
+  re-raises verbatim.
+- **An external optimizer (`polypus.External`, #399).** The run calls the
+  user's `ask()` and `tell()` from inside `detach`, attaching for each call
+  only (`attach_or`), on the thread that called `train`. An exception either
+  call raises, a failed conversion of what `ask()` returned (`ValueError`), or
+  a Ctrl+C pending before either call, is recorded in the run's
+  `OracleErrorSlot` as `EvaluationError::Python`; the bridge stops, and
+  `dispatch_optimizer` returns the recorded error instead of the bridge's, so
+  the edge re-raises the original exception with its class,
+  `KeyboardInterrupt` included. Once the slot holds an error (that call's, a
+  backend failure, a Ctrl+C caught between waves), neither method calls
+  Python again, so the library is never told a failed batch's values. With the
+  interpreter unavailable, either call records `InterpreterUnavailable`
+  without calling Python.
 - **How the exception travels.** Between the seam and the FFI edge it crosses
   pyo3-free layers (the planner, `OracleErrorSlot`) that may format it while the
   thread is detached, so it is carried as
@@ -290,6 +304,17 @@ shutdown); `interpreter_unavailable_in_external_maps_to_keyboard_interrupt`,
 among them); `signal_polling_cancels_when_the_interpreter_is_unavailable` and
 `statevector_cancellation_raises_keyboard_interrupt` in
 `crates/polypus/src/bindings/mod.rs`.
+An external optimizer: `an_exception_is_recorded_with_its_class`,
+`a_failed_run_calls_neither_method` and
+`an_unavailable_interpreter_is_recorded_without_calling_python` in
+`crates/polypus/src/bindings/external.rs`,
+`external_returns_the_failure_recorded_in_the_slot` in
+`crates/polypus-orchestration/src/dispatch.rs`,
+`test_an_exception_from_ask_or_tell_keeps_its_class` (a `LookupError` and a
+`KeyboardInterrupt` from either call) and `test_a_failing_cost_is_not_told` in
+`tests/python/test_external.py`, and
+`test_external_training_responds_to_sigint_promptly` in
+`tests/python/test_interrupt.py`.
 The local `run_qcs` kwarg set, with `max_memory_mb` present for a known budget,
 is pinned by `test_local_run_qcs_kwargs_*` in the same file.
 `InsufficientMemoryError` is pinned by `tests/python/test_memory_budget.py` (the
@@ -753,6 +778,15 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     Every other postcondition of this contract holds
     with a point. Without one (`None`, the default) every optimizer is bit
     for bit what it was before `initial_point` existed.
+  - `External` takes no point: the external library chooses its start, so
+    `AlgorithmExternalArgs` has no `initial_point` field, and
+    `AlgorithmExternal::check_preconditions` checks the configuration only.
+    `dispatch_optimizer` and `Method::check_preconditions` return
+    `InvalidConfig` for `initial_point` with `Method::External`, after its
+    configuration errors and before any `ask`, and `train` and `qml.train`
+    raise `ValueError` before anything runs, in place of the length and
+    finiteness checks, pointing to the `initial_point` of the
+    `polypus.external` adapters (and pycma's `x0`).
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
     batch of PSO and every DE strategy against the same seed without a point,
     QNG's stencil around the point, Adam's first batch of the point and its
@@ -814,8 +848,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     the candidates were scored (batch by batch, in batch order), so the
     choice is deterministic. The batch is `best_params` first, then the best
     others, up to `Method::final_candidates()`: 5 for DE (every strategy),
-    PSO and CMA-ES, 1 (`best_params` alone) for QNG, Adam, SPSA and
-    Rotosolve; fewer
+    PSO, CMA-ES and External (the bridge cannot tell whether the library
+    searches globally or locally), 1 (`best_params` alone) for QNG, Adam,
+    SPSA and Rotosolve; fewer
     when the run scored fewer distinct finite candidates.
   - Postconditions: the batch is sent only after the optimizer returned a
     result, whatever stopped it (its budget, convergence); an optimizer error
@@ -1246,6 +1281,97 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     seam, invalid settings before any batch, the defaults and a native
     climb); the Rotosolve cases of `tests/python/test_oracle_contract.py`
     cover a bad value in a batch, the re-measured `x` included.
+- **External** (`AlgorithmExternal`, exposed as `polypus.External`: a bridge
+  to an optimizer outside Polypus through the `AskTell` trait, `ask()` for a
+  batch and `tell(candidates, values)` for its values, maximising; the
+  bindings implement it over any Python object with those two methods, and
+  `polypus.external` adapts Optuna, Nevergrad and pycma, #399).
+  - Preconditions, each an `OptimizerError::InvalidConfig` before any `ask`
+    or oracle call, in this order: `max_evaluations >= 1`,
+    `dimensions >= 1`; `initial_point` is refused (under *Starting point*
+    above). `polypus.External` checks, when it is built and when either
+    attribute is set, that `max_evaluations` is an integer from 1 to
+    2⁶⁴ − 1 (not a `bool` or a `float`; `ValueError`) and that `optimizer`
+    has callable `ask` and `tell` (`TypeError`).
+  - Batch `k = 0, 1, …` is one `ask()`. `None` or an empty batch ends the
+    run with `converged = true`. A batch of `n` rows with
+    `spent + n > max_evaluations` ends it with `converged = false` and is
+    neither evaluated nor told, and a run that has spent exactly
+    `max_evaluations` ends without asking again (`converged = false`), so
+    the candidates evaluated never exceed `max_evaluations`. Otherwise every
+    row is checked, exactly `dimensions` values and every one finite (the
+    first that is not is `OptimizerError::InvalidCandidate { batch, row,
+    reason }`, with nothing of that batch evaluated or told), the batch is
+    **one** `evaluate_batch`, its length checked (`OracleLengthMismatch`,
+    and that batch is not told), and `tell` receives exactly those rows and
+    the oracle's values, in order. In Python a row or a batch that is not
+    iterable, or a value that is not a real number (a `bool` or a NumPy
+    `bool_`, a complex number, an `int` too large for a float, anything
+    `float()` refuses), is a `ValueError` with the same wording, raised by
+    the conversion before the bridge sees the batch; a batch is read only up
+    to one row past the budget left, so an endless iterator ends the run as
+    any batch over the budget does, a row only up to one value past
+    `dimensions`, so an endless row is a row too long (`it has more than d
+    values`), and a pending Ctrl+C is checked before each row. `External`
+    takes part in Python's garbage collection (`__traverse__` and
+    `__clear__` of its optimizer), so an optimizer that holds its `External`
+    is freed with it.
+  - A first `ask()` that proposes nothing (`OptimizerError::ExternalOptimizer`)
+    and a first batch larger than `max_evaluations` (`InvalidConfig` for
+    `max_evaluations`) are errors before any oracle call: nothing was
+    measured, so there is no result. Both, and `InvalidCandidate`, are
+    `ValueError` in Python. An error from `ask` or `tell` is
+    `ExternalOptimizer` with its message; through Python the original
+    exception is raised instead (C-1).
+  - `best_params` is the best **measured** candidate, kept with
+    `BestMeasured` in batch order (the first measurement, then only a
+    strictly better one, so a `NaN` never wins over a number), and
+    `best_fitness` the oracle's value for it, whatever the library reports
+    as its own best. `fitness_history[k]` is the best measured up to batch
+    `k`, so the last is `best_fitness`; `iterations_run` counts the batches
+    evaluated and told.
+  - No seed: the library owns its randomness and its start (C-7).
+    `Method::final_candidates()` is 5. In a training run the CUNQA walltime
+    projection counts `⌊max_evaluations / n⌋` batches after a first batch of
+    `n` candidates (at least one): exact when every batch has the first's
+    size, an upper bound to within one first batch when they grow (if a
+    batch `k` times larger takes at most `k` times as long), and possibly
+    too low when they shrink. Only the oracle call is timed, not the
+    library's own time in `ask()` and `tell()`. Its warning asks to lower
+    `max_evaluations` (`docs/backends.md`).
+  - Enforced by `crates/polypus-optimizers/tests/external.rs` (one oracle
+    batch per `ask` and its values told; `None` and an empty batch; a batch
+    over the budget neither scored nor told; the budget spent exactly and
+    never exceeded over several batch patterns; a first `ask` with nothing
+    and a first batch over the budget, with no oracle call; rows of the
+    wrong length, `NaN` and ±∞, with no oracle call; failing `ask` and
+    `tell`; the oracle's length check; the configuration rejected before any
+    `ask`; the C-5 postconditions against the batches the oracle saw over 25
+    seeds and three batch patterns; a `NaN` never winning; a deterministic
+    run), the unit tests in `src/external.rs`, the `external_*` tests in
+    `crates/polypus-orchestration/src/dispatch.rs` and `src/walltime.rs`
+    (`an_external_run_is_projected_from_its_first_batch` among them),
+    `final_candidates_counts_five_for_population_and_external_methods_and_one_for_local_ones`
+    in `src/final_batch.rs`, the flow tests of every method in `src/flow.rs`,
+    the unit tests in `crates/polypus/src/bindings/external.rs` (the
+    conversions, bools, complex numbers and huge integers refused, a batch
+    read up to one row past the budget and a row up to one value past
+    `dimensions`, the recorded exception class, the configuration checks),
+    `method_is_send_and_sync` in
+    `crates/polypus-orchestration/src/dispatch.rs`,
+    `tests/python/test_external.py` (the object, the `ValueError`s before
+    the seam is reached, one batch per `ask` on `train` and `qml.train`, the
+    budget, the rows, an endless row, the exceptions, the calling thread,
+    reuse, the spread over the QPUs, a reference cycle collected, and the
+    outcome against what `tell` received over 5 seeds), and
+    `tests/python/test_external_adapters.py` (the adapters against fakes of
+    each library's public API, and through the bridge with Optuna's TPE,
+    Nevergrad and pycma, their values negated for the minimising ones: these
+    skip when a library is not installed, but CI installs the three, pinned,
+    on its latest Python and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`, so
+    there they run); the External cases of
+    `tests/python/test_oracle_contract.py` cover a bad value in a batch,
+    which the library is not told.
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -1379,7 +1505,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `polypus-optimizers`) is independent of which backend evaluates the oracle.
   Precedence: the explicit `seed` kwarg wins; otherwise the `seed` field pinned
   on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance; otherwise a fresh OS-entropy
-  value. On the
+  value. `External` has no `seed` field (`method_seed` returns nothing for
+  it): its library owns its randomness and is seeded where the user builds
+  it, so the resolved seed only seeds shot sampling and is reported; with a
+  deterministic optimizer a seeded native run reproduces exactly
+  (`tests/python/test_seed_reproducibility.py`, the External cases). On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
   so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
@@ -1415,7 +1545,8 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
-  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance) or while drawing the
+  pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance,
+  or a `polypus.External`) or while drawing the
   random bytes of
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which

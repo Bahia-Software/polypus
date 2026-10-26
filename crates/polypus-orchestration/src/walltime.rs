@@ -6,9 +6,10 @@
 //! [`TrainFlow`](crate::TrainFlow) then wraps its oracle in a [`WalltimeWatch`],
 //! which times the first generation, projects it over the optimizer's generation
 //! budget (for CMA-ES with IPOP restarts, whose batches grow, over the bound
-//! [`Method::growth`] gives; batches sent before the first generation, such as
-//! a calibration, are not timed but added at its pace) and logs one `warn`
-//! when the projection exceeds the walltime. Backends
+//! [`Method::growth`] gives; for an external optimizer, over its evaluation
+//! budget in batches the size of its first; batches sent before the first
+//! generation, such as a calibration, are not timed but added at its pace) and
+//! logs one `warn` when the projection exceeds the walltime. Backends
 //! without a walltime get the bare oracle, so they pay nothing. The final batch
 //! of a run with `final_shots`, sent once the optimizer has stopped, is not in
 //! the projection.
@@ -40,11 +41,18 @@ impl Clock for SystemClock {
 /// How an optimizer spends its oracle calls: one generation is
 /// `batches_per_generation` consecutive `evaluate_batch` calls, and a run makes at
 /// most `generations` of them, after `leading_batches` calls that belong to no
-/// generation.
+/// generation. With an evaluation budget the generations are counted once the
+/// first is known (see [`generations_after`](Self::generations_after)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunShape {
     pub batches_per_generation: u32,
     pub generations: u64,
+    /// The run's budget in circuits, when it is set that way rather than in
+    /// generations: an external optimizer's `max_evaluations`, whose batch
+    /// size is the library's. `generations` is then the bound with batches of
+    /// one circuit, and the watch projects the budget over batches the size of
+    /// the first. `None` for every other optimizer.
+    pub evaluations: Option<u64>,
     /// Batches sent once before the first generation, unlike any generation's:
     /// a calibration. The watch does not time them as the first generation;
     /// it adds them to the projection by their circuits, at the first
@@ -55,8 +63,30 @@ pub(crate) struct RunShape {
     pub unit: &'static str,
     /// The setting the warning asks to lower, the one that bounds
     /// `generations`: the unit itself, except for Rotosolve, whose steps are
-    /// bounded by its `sweeps`.
+    /// bounded by its `sweeps`, and an external optimizer, whose batches are
+    /// bounded by its `max_evaluations`.
     pub setting: &'static str,
+}
+
+impl RunShape {
+    /// The generations of a run whose first generation held `first_circuits`
+    /// circuits: `generations`, or with an evaluation budget the generations
+    /// of that size it holds, `⌊evaluations / first_circuits⌋`. That is
+    /// exactly the batches the bridge sends when every batch has the first's
+    /// size, since it stops before the batch that would exceed the budget.
+    /// Larger later batches make it fewer: if a batch `k` times larger takes
+    /// at most `k` times as long (the assumption [`Method::growth`] makes),
+    /// the run takes at most the first batch's time × `evaluations /
+    /// first_circuits`, so the projection is an upper bound to within one
+    /// first batch, what the floor drops. Smaller later batches make it more,
+    /// each leaving QPUs idle, so the projection can fall short. Like the
+    /// leading batches, the count is known only once the first generation is.
+    pub(crate) fn generations_after(&self, first_circuits: u64) -> u64 {
+        match self.evaluations {
+            Some(budget) => (budget / first_circuits.max(1)).max(1),
+            None => self.generations,
+        }
+    }
 }
 
 impl Method {
@@ -91,6 +121,16 @@ impl Method {
     /// gives their exact number, from the schedule the optimizer itself steps.
     /// None of its batches is larger than the first, so the projection stays an
     /// upper bound.
+    ///
+    /// An external optimizer's batches are its library's `ask()`s, whose size
+    /// the bridge learns only from the first. Its shape holds the budget, and
+    /// the watch projects `⌊max_evaluations / n⌋` batches after a first batch
+    /// of `n` circuits (see [`RunShape::generations_after`]). That is exact
+    /// for batches of constant size, as pycma, Nevergrad with `num_workers`
+    /// and the Optuna adapter with its `batch_size` send; an upper bound to
+    /// within one first batch when they grow; and it can be too low when they
+    /// shrink. Only the oracle call is timed: the library's own time in `ask()`
+    /// and `tell()`, between the batches, is not in the projection.
     pub(crate) fn run_shape(&self, dimensions: u32) -> RunShape {
         match self {
             Method::De(cfg) => RunShape {
@@ -100,6 +140,7 @@ impl Method {
                     .max_generations(cfg.population_size, cfg.generations)
                     + 1,
                 leading_batches: 0,
+                evaluations: None,
                 unit: "generations",
                 setting: "generations",
             },
@@ -107,6 +148,7 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations) + 1,
                 leading_batches: 0,
+                evaluations: None,
                 unit: "generations",
                 setting: "generations",
             },
@@ -114,6 +156,7 @@ impl Method {
                 batches_per_generation: 2,
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 0,
+                evaluations: None,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -123,6 +166,7 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.generations),
                 leading_batches: 0,
+                evaluations: None,
                 unit: "generations",
                 setting: "generations",
             },
@@ -134,6 +178,7 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 0,
+                evaluations: None,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -145,6 +190,7 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 1,
+                evaluations: None,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -154,8 +200,19 @@ impl Method {
                 batches_per_generation: 1,
                 generations: u64::from(cfg.sweeps) * u64::from(dimensions) + 1,
                 leading_batches: 0,
+                evaluations: None,
                 unit: "steps",
                 setting: "sweeps",
+            },
+            // One batch per `ask()`, of a size only the first batch tells:
+            // `generations` is the bound with batches of one.
+            Method::External(cfg, _) => RunShape {
+                batches_per_generation: 1,
+                generations: cfg.max_evaluations,
+                leading_batches: 0,
+                evaluations: Some(cfg.max_evaluations),
+                unit: "batches",
+                setting: "max_evaluations",
             },
         }
     }
@@ -319,9 +376,8 @@ impl<C: Clock> WalltimeWatch<C> {
             return;
         };
         let first = self.clock.now().saturating_duration_since(started);
-        let work = self
-            .growth
-            .map_or(self.shape.generations, |g| g.first_generations) as f64
+        let generations = self.shape.generations_after(state.circuits);
+        let work = self.growth.map_or(generations, |g| g.first_generations) as f64
             + state.leading_generations();
         let projected =
             Duration::try_from_secs_f64(first.as_secs_f64() * work).unwrap_or(Duration::MAX);
@@ -334,7 +390,7 @@ impl<C: Clock> WalltimeWatch<C> {
                      beyond the {} walltime; the QPUs are released when it runs out. \
                      Raise `walltime` or lower the {} or the restarts.",
                     self.run_id,
-                    self.shape.generations,
+                    generations,
                     self.shape.unit,
                     hms(first),
                     growth.restarts,
@@ -351,7 +407,7 @@ impl<C: Clock> WalltimeWatch<C> {
                      {} walltime; the QPUs are released when it runs out. Raise `walltime` \
                      or lower the {}.",
                     self.run_id,
-                    self.shape.generations,
+                    generations,
                     self.shape.unit,
                     hms(first),
                     state.leading_circuits,
@@ -366,7 +422,7 @@ impl<C: Clock> WalltimeWatch<C> {
                  to {}, beyond the {} walltime; the QPUs are released when it runs out. \
                  Raise `walltime` or lower the {}.",
                 self.run_id,
-                self.shape.generations,
+                generations,
                 self.shape.unit,
                 hms(first),
                 hms(projected),
@@ -570,6 +626,7 @@ mod tests {
         batches_per_generation: 1,
         generations: 101,
         leading_batches: 0,
+        evaluations: None,
         unit: "generations",
         setting: "generations",
     };
@@ -644,6 +701,7 @@ mod tests {
             batches_per_generation: 2,
             generations: 50,
             leading_batches: 0,
+            evaluations: None,
             unit: "iterations",
             setting: "iterations",
         };
@@ -708,6 +766,7 @@ mod tests {
         batches_per_generation: 1,
         generations: 300,
         leading_batches: 1,
+        evaluations: None,
         unit: "iterations",
         setting: "iterations",
     };
@@ -769,6 +828,7 @@ mod tests {
             batches_per_generation: 2,
             generations: 100,
             leading_batches: 2,
+            evaluations: None,
             unit: "iterations",
             setting: "iterations",
         };
@@ -1170,6 +1230,124 @@ mod tests {
         );
     }
 
+    /// An ask/tell optimizer that proposes `rows` points of two dimensions at
+    /// every `ask()` and never ends, so only the budget stops it.
+    struct Constant {
+        rows: usize,
+    }
+
+    impl polypus_optimizers::AskTell for Constant {
+        fn ask(&mut self) -> Result<Option<Vec<Vec<f64>>>, polypus_optimizers::AskTellError> {
+            Ok(Some(vec![vec![0.5, 0.25]; self.rows]))
+        }
+        fn tell(
+            &mut self,
+            _candidates: &[Vec<f64>],
+            _values: &[f64],
+        ) -> Result<(), polypus_optimizers::AskTellError> {
+            Ok(())
+        }
+    }
+
+    fn external(max_evaluations: u64, rows: usize) -> Method {
+        Method::External(
+            crate::ExternalConfig { max_evaluations },
+            Box::new(Constant { rows }),
+        )
+    }
+
+    /// With batches of constant size, the generations the shape counts after
+    /// the first batch are exactly the batches the bridge sends: it stops
+    /// before the batch that would take it past `max_evaluations`.
+    #[test]
+    fn external_run_shape_counts_the_batches_the_bridge_sends() {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        for (max_evaluations, rows) in [(1, 1), (10, 3), (12, 4), (12, 12), (100, 7), (1000, 9)] {
+            let method = external(max_evaluations, rows);
+            let shape = method.run_shape(2);
+            assert_eq!(method.growth(2), None);
+            assert_eq!(shape.leading_batches, 0);
+            assert_eq!(shape.batches_per_generation, 1);
+            assert_eq!(shape.generations, max_evaluations);
+            assert_eq!(shape.evaluations, Some(max_evaluations));
+            assert_eq!((shape.unit, shape.setting), ("batches", "max_evaluations"));
+            let batches = Arc::new(Mutex::new(0));
+            let oracle = Box::new(CountingOracle(Arc::clone(&batches)));
+            let outcome =
+                dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3, None).ok();
+            let label = format!("{max_evaluations} evaluations in batches of {rows}");
+            let sent = *batches.lock().unwrap();
+            assert!(
+                outcome.is_some_and(|o| !o.converged && o.iterations_run as u64 == sent),
+                "{label}"
+            );
+            assert_eq!(sent, shape.generations_after(rows as u64), "{label}");
+        }
+        // Every other optimizer's generations do not depend on the first's size.
+        let rotosolve = rotosolve(3, 5).run_shape(4);
+        assert_eq!(rotosolve.evaluations, None);
+        assert_eq!(rotosolve.generations_after(7), rotosolve.generations);
+    }
+
+    /// Through the watch, an external run is projected from its first batch:
+    /// at 10 s a circuit, batches of 6 take 1 min, and a budget of 303
+    /// evaluations holds 50 of them, so the projection is 0:50:00, which is
+    /// also how long the run takes.
+    #[test]
+    fn an_external_run_is_projected_from_its_first_batch() {
+        capture_logs();
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let run_id = "walltime-watch-external";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        });
+        let method = external(303, 6);
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(40 * 60),
+            &method,
+            2,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let start = clock.now();
+        let outcome = dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None);
+        assert!(outcome.is_ok_and(|o| o.iterations_run == 50));
+        assert_eq!(
+            clock.now().saturating_duration_since(start),
+            Duration::from_secs(3000)
+        );
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 50 batches took 0:01:00, so the optimisation \
+                 may take up to 0:50:00, beyond the 0:40:00 walltime; the QPUs are released \
+                 when it runs out. Raise `walltime` or lower the max_evaluations."
+            )]
+        );
+
+        // The same run fits a walltime of an hour.
+        let quiet = "walltime-watch-external-fits";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        });
+        let method = external(303, 6);
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(3600),
+            &method,
+            2,
+            quiet,
+            Arc::clone(&clock),
+        );
+        assert!(dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).is_ok());
+        assert!(logged_for(quiet).is_empty());
+    }
+
     /// Takes `per_batch` on the fake clock and records the shots of every
     /// batch sent with shots.
     struct SlowShots {
@@ -1545,6 +1723,7 @@ mod tests {
                 batches_per_generation: 1,
                 generations: 101,
                 leading_batches: 0,
+                evaluations: None,
                 unit: "iterations",
                 setting: "iterations",
             }
