@@ -786,6 +786,17 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     training circuit of each candidate for QML, and the Planner reads them
     from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
     calls it.
+  - Seed: `VqcOracle` and `QmlOracle` send the batch with
+    `polypus_infrastructure::final_batch_params(config)`, the run's
+    `RunParams` with the seed replaced by SplitMix64's first output from it.
+    Aer seeds each circuit from the seed and its position in the call alone,
+    and CUNQA each QPU from `seed + k` (C-7), so with the run's seed a
+    candidate re-evaluated at the position it was scored at, as `best_params`
+    at index 0 is for QNG, Adam and SPSA, would get the training's random
+    numbers: the same counts with the same shots. With the derived seed the
+    batch's shot noise is independent of the training's, and a seeded run
+    still reproduces it. The native backend seeds circuits from its own
+    counter, which the batch continues, and does not read the seed.
   - Preconditions: an integer from 1 to 4294967295. `train` and `qml.train`
     raise `ValueError` for anything else (0, a negative, a `float`, a `bool`,
     a `str`) before anything runs (no backend, no CUNQA allocation), next to
@@ -815,7 +826,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     the highest of them, though far less than `best_fitness`, the highest of
     the whole run. `best_params`, `best_fitness` (still the value the
     optimizer measured for `best_params`), `fitness_history`,
-    `iterations_run` and `converged` are the optimizer's, unchanged; in Rust,
+    `iterations_run` and `converged` are the optimizer's, unchanged; before
+    the batch, the run logs them (`best_params` and `best_fitness` at full
+    precision) at `INFO`, and again as a `WARNING` if the batch fails, since
+    the run then returns no result; in Rust,
     `TrainOutcome::optimization` is the `OptimizationOutcome` and
     `FinalEvaluation` holds the batch (`candidates`, `values`, `shots`) and
     its choice. The batch comes after every circuit the optimizer sent, so
@@ -832,17 +846,20 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     whose noise depends on the candidates scored before, as the native
     backend's does: the same batches and outcome, then one batch with the
     shots and the expected candidates) with the error, interrupt, optimizer
-    error, failing final batch and `Some(0)` tests there,
+    error, failing final batch, its warning and `Some(0)` tests there,
+    `the_final_batch_derives_its_seed_from_the_runs` in
+    `crates/polypus-infrastructure/src/execution_config.rs`,
     `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
     `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
-    `QmlOracle`, the trait's tests in
+    `QmlOracle` (the shots and the derived seed in every wave), the trait's
+    tests in
     `crates/polypus-optimizers/src/objective.rs`, and
     `tests/python/test_final_shots.py` (the `ValueError`s before the CUNQA
     seam, the final batch of every optimizer through both entry points at
-    the seam: its shots, its candidates, the winner and the unchanged
-    batches before it; an error, an interrupt and a failing final batch;
-    and seeded native runs unchanged with a final value measured with
-    `final_shots`).
+    the seam: its shots, its seed, its candidates, the winner and the
+    unchanged batches before it; an error, an interrupt and a failing final
+    batch; a real Aer run whose final batch is measured afresh; and seeded
+    native runs unchanged with a final value measured with `final_shots`).
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
   stagnation*, not on population-spread collapse. With `fitness_history[g]` the
   best fitness at the end of generation `g` (0-indexed; DE maximises, so this
@@ -1261,9 +1278,12 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   pinning one. With `final_shots` (C-5) the final batch is sent after every
   circuit of the optimizer: the native backend's circuit indices, and so its
   per-circuit seeds, continue after the optimizer's, and Aer and CUNQA get
-  the same seed on every call, so a seeded run gives the same `best_params`,
-  `best_fitness` and `fitness_history` with and without it, and the final
-  batch reproduces too.
+  the run's seed on every call of the optimizer, so a seeded run gives the
+  same `best_params`, `best_fitness` and `fitness_history` with and without
+  it. The final batch reaches Aer and CUNQA with a seed derived from the
+  run's (`final_batch_params`, C-5), since theirs would otherwise measure a
+  candidate at the position it was scored at with the training's random
+  numbers; it reproduces too.
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected

@@ -25,12 +25,17 @@ Changes on `main` since 0.7.2.
   re-evaluated alone, and slightly optimistic still as the highest of five.
   `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
   `fitness_history` are the optimizer's, and a seeded run sends the same
-  batches with and without `final_shots`. A value that is not an integer `>= 1` raises `ValueError`
-  before anything runs. The batch is not part of the CUNQA walltime
-  projection (#397).
+  batches with and without `final_shots`. The final batch is sampled with a
+  seed derived from the run's, so on Aer and CUNQA, which seed each circuit
+  from its position in the call, it does not repeat the training's counts
+  for a candidate at the same position. `best_params` and `best_fitness` are
+  logged before it, and as a warning if it fails. A value that is not an
+  integer `>= 1` raises `ValueError` before anything runs. The batch is not
+  part of the CUNQA walltime projection (#397).
 - The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
   (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
-  implement by putting the shots in every task; `TrainFlow::final_shots`,
+  implement by putting the shots in every task and sending the batch with
+  `polypus_infrastructure::final_batch_params`; `TrainFlow::final_shots`,
   `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
   (`polypus-orchestration`) (#397).
 - `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,

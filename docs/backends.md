@@ -201,7 +201,8 @@ With `final_shots`, the run ends with one more batch once the optimizer has stop
 its best candidates (at most five) re-evaluated with `final_shots` shots. That batch
 is not part of the optimizer's generations, so the projection leaves it out and the
 watch passes it through untimed. Leave time for it in the walltime: if the QPUs are
-released before it runs, it fails like any batch and the run raises.
+released before it runs, it fails like any batch and the run raises, after logging
+the optimizer's `best_params` and `best_fitness` as a warning.
 
 SPSA's calibration, one batch of 50 circuits before its first iteration, is not timed:
 it is far larger than an iteration's `2 × resamplings` circuits, so timing it as the
