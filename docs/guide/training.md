@@ -199,18 +199,18 @@ Any other `rule` raises `ValueError`.
 
 | Parameter | Description |
 |---|---|
-| `max_iters` | Iterations, each one batch of `2 × dimensions + 1` circuits. At least 1 |
+| `max_iters` | Iterations, each one batch of `2 × dimensions + 1` circuits and one step; the final parameters cost one circuit more. At least 1 |
 | `learning_rate` | Step size, finite and `> 0`. The default `0.1` is sized for rotation angles in radians rather than network weights, so it is larger than deep learning's usual `0.001`. With `"momentum"`, tune it to the scale of the cost |
 | `beta1`, `beta2` | Decay of the running averages of the gradient and of its square, in `[0, 1)`. With `"momentum"`, `beta1` is the momentum and `beta2` is unused |
 | `epsilon` | Added to the denominator for numerical stability, finite and `> 0`. Unused by `"momentum"` |
 | `bounds` | Range the initial parameters are drawn from, finite with `lower < upper`. The run itself is not confined to it, and the parameters are not wrapped into `[0, 2π)` |
-| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` iterations, as with DE |
+| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` iterations, as with DE. `patience` is at least 1 |
 | `finite_difference_step` | Step of the central difference, in radians, finite and `> 0` |
 | `rule` | `"adam"` or `"momentum"`, above |
 
 **The finite-difference step matters.** Shot noise enters the gradient through the difference of two fitness values divided by `2 × finite_difference_step`, so a small step amplifies it. Jones, Mineh and Montanaro (arXiv:2411.13742) found that a step of 0.4 works and 0.01 ruins the gradient. Prefer the default `0.2` to a small step, which needs many more shots for the same accuracy.
 
-`best_params` is the measured point with the best fitness and `fitness_history` the best fitness measured up to each iteration. The step after the last iteration is not measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+`best_params` is the measured point with the best fitness and `fitness_history` the best fitness measured up to each iteration. After the last step, whether `max_iters` ran out or the run stagnated, one more circuit measures the parameters it reached, which count in the last entry, so no gradient is spent on a step that is never measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
 **A local method.** Adam and momentum climb to an optimum near where they start, so on a landscape with many local optima one run can end in a poor one. Start them from a global search's result, such as an L-SHADE run's `best_params`, with `initial_point` (see [Starting point](#starting-point)), or run them a few times with different seeds and keep the best.
 
