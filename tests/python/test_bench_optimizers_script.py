@@ -341,6 +341,14 @@ def test_quick_mode_reports_the_final_values(tmp_path):
             assert run["final_evaluations"] == 6, run
             assert run["final_ratio"] == run["stages"][1]["final_ratio"], run
     assert "final ratio | final bias |" in stdout
+    assert (
+        "| Optimizer | final − best ratio | other candidate | better | worst "
+        "| largest final bias |" in stdout
+    )
+    # One run per instance of the quick mode's two.
+    assert re.search(
+        r"^\| rand1bin \| [+-]\d\.\d{3} ± \d\.\d{3} \| \d of 2 \| ", stdout, re.M
+    )
 
 
 @pytest.mark.parametrize(

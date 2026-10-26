@@ -121,7 +121,11 @@ and every run in the JSON gets ``final_shots``, ``final_fitness``,
 ``final_ratio``, ``final_bias``, ``final_evaluations`` and ``final_batches``
 (the final batch's circuits and calls) and ``final_is_best``
 (``final_params == best_params``). A chained run reports the final values of
-the result it is scored on and counts every stage's final batch.
+the result it is scored on and counts every stage's final batch. A last table
+then compares ``final_params`` with ``best_params`` per optimizer: the mean
+paired change in ratio, ± its standard error, the runs whose
+``final_params`` is another candidate, how many of those it is better in,
+the worst change, and the largest |final bias| of a run.
 
 Usage
 -----
@@ -630,12 +634,14 @@ def paired(runs, reference):
     (both by instance), ± its standard error, and the share of instances where
     ``runs`` did better (ties count half)."""
     diffs = [runs[s]["ratio"] - reference[s]["ratio"] for s in runs]
-    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
     share = sum(1.0 if d > 0 else 0.5 if d == 0 else 0.0 for d in diffs)
-    return (
-        f"{statistics.fmean(diffs):+.3f} ± {se:.3f}",
-        f"{100 * share / len(diffs):.0f} %",
-    )
+    return mean_and_error(diffs), f"{100 * share / len(diffs):.0f} %"
+
+
+def mean_and_error(diffs):
+    """The mean of ``diffs`` ± its standard error."""
+    se = statistics.stdev(diffs) / math.sqrt(len(diffs)) if len(diffs) > 1 else 0.0
+    return f"{statistics.fmean(diffs):+.3f} ± {se:.3f}"
 
 
 def summarise(rows, optimizers):
@@ -695,6 +701,25 @@ def summarise(rows, optimizers):
             f"{statistics.fmean(gains):+.3f} on average ({min(gains):+.3f} at worst) "
             f"and raised it on {sum(g > 0 for g in gains)} of {len(gains)} instances.",
         ]
+    if final:
+        lines += [
+            "",
+            "| Optimizer | final − best ratio | other candidate | better | worst "
+            "| largest final bias |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name in optimizers:
+            runs = list(by[name].values())
+            moved = [
+                r["final_ratio"] - r["ratio"] for r in runs if not r["final_is_best"]
+            ]
+            change = mean_and_error([r["final_ratio"] - r["ratio"] for r in runs])
+            worst = f"{min(moved):+.3f}" if moved else "—"
+            largest = max(abs(r["final_bias"]) for r in runs)
+            lines.append(
+                f"| {name} | {change} | {len(moved)} of {len(runs)} "
+                f"| {sum(m > 0 for m in moved)} | {worst} | {largest:.3f} |"
+            )
     return "\n".join(lines)
 
 
