@@ -327,6 +327,14 @@ jobs:
         run: |
           maturin build --release --out dist
           pip install dist/polypus_quantum-*.whl
+      # The libraries the adapters of polypus.external wrap, so the tests that
+      # train through them (tests/python/test_external_adapters.py) run here
+      # instead of skipping; POLYPUS_REQUIRE_EXTERNAL_LIBRARIES below makes a
+      # missing one fail. Pinned, like ruff and mypy, so that a new release
+      # cannot turn CI red without a deliberate bump. Latest leg only.
+      - name: Install Optuna, Nevergrad and pycma
+        if: matrix.python-version == '3.13'
+        run: pip install optuna==5.0.0 nevergrad==1.0.12 cma==4.5.0
       # Examples and benchmarks are not executed (no __main__ guards; some
       # need optional deps like cunqa), but they must at least stay valid
       # Python — this catches syntax rot without running them.
@@ -334,11 +342,13 @@ jobs:
         run: python -m compileall -q examples benchmarks
       # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
       # variables turn the skips of tests that back a contract into failures:
-      # a missing llvm-as, and in the fixtures leg another Qiskit.
+      # a missing llvm-as, in the fixtures leg another Qiskit, and in the
+      # latest leg a missing Optuna, Nevergrad or pycma.
       - name: Run Python tests
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
           POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
+          POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.13' && '1' || '' }}
         run: pytest tests/python -rs --strict-markers
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or

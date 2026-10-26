@@ -9,12 +9,15 @@ it re-offers and the checks of its arguments. Importing ``polypus.external``
 must not import any of the libraries.
 
 The second part trains through each real library and is skipped when it is
-not installed (``pytest.importorskip``), as in CI, where none of them is: the
-values reach the minimising libraries negated, checked on what their ``tell``
-received.
+not installed, except under ``POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1``, where it
+fails instead: CI installs the three libraries, pinned, on its latest Python
+and sets it. The values reach the minimising libraries negated, checked on
+what their ``tell`` received.
 """
 
+import importlib
 import math
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +28,17 @@ from polypus.external import from_nevergrad, from_optuna, from_pycma
 
 DIMENSIONS = 2
 SHOTS = 64
+# CI installs the three libraries on its latest Python and sets this to 1, so
+# a missing one fails the tests that train through it instead of skipping.
+REQUIRE_LIBRARIES = "POLYPUS_REQUIRE_EXTERNAL_LIBRARIES"
+
+
+def _library(name):
+    """The library ``name``, imported. The test skips when it is not
+    installed, or fails under ``POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1``."""
+    if os.environ.get(REQUIRE_LIBRARIES) == "1":
+        return importlib.import_module(name)
+    return pytest.importorskip(name)
 
 
 def _all_ones(bitstring):
@@ -456,7 +470,7 @@ class TestPycmaAdapter:
 class TestOptuna:
     @pytest.mark.parametrize("direction", ["minimize", "maximize"])
     def test_tpe_through_the_bridge(self, direction):
-        optuna = pytest.importorskip("optuna")
+        optuna = _library("optuna")
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(
             direction=direction,
@@ -479,7 +493,7 @@ class TestOptuna:
         assert result.best_params == [study.best_params["x0"], study.best_params["x1"]]
 
     def test_the_same_seeds_reproduce_the_run(self):
-        optuna = pytest.importorskip("optuna")
+        optuna = _library("optuna")
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         def run():
@@ -496,7 +510,7 @@ class TestOptuna:
 @pytest.mark.integration
 class TestNevergrad:
     def test_ngopt_through_the_bridge(self):
-        ng = pytest.importorskip("nevergrad")
+        ng = _library("nevergrad")
         parametrization = ng.p.Array(shape=(DIMENSIONS,)).set_bounds(0.0, 2 * math.pi)
         parametrization.random_state = np.random.RandomState(3)
         optimizer = ng.optimizers.NGOpt(
@@ -527,7 +541,7 @@ class TestNevergrad:
 @pytest.mark.integration
 class TestPycma:
     def test_cma_es_through_the_bridge(self):
-        cma = pytest.importorskip("cma")
+        cma = _library("cma")
         es = cma.CMAEvolutionStrategy(
             [1.0, 1.0],
             0.5,

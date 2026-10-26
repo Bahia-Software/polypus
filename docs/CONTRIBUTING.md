@@ -127,7 +127,10 @@ for the QIR tests that run `llvm-as` (Rust and Python), `POLYPUS_REQUIRE_AER=1`
 for the Aer conformance battery, and `POLYPUS_REQUIRE_FIXTURES_QISKIT=1` in the
 leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
 pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
-Qiskit, where those fixture tests skip.
+Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
+Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
+so the tests of `polypus.external` that train through them run there
+(contract C-5); elsewhere they skip unless you install them.
 
 CI also builds the wheel on Linux, macOS and Windows and executes every
 notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).

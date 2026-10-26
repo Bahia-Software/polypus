@@ -1365,9 +1365,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     reuse, the spread over the QPUs, a reference cycle collected, and the
     outcome against what `tell` received over 5 seeds), and
     `tests/python/test_external_adapters.py` (the adapters against fakes of
-    each library's public API and, where installed, through the bridge with
-    Optuna's TPE, Nevergrad and pycma, their values negated for the
-    minimising ones); the External cases of
+    each library's public API, and through the bridge with Optuna's TPE,
+    Nevergrad and pycma, their values negated for the minimising ones: these
+    skip when a library is not installed, but CI installs the three, pinned,
+    on its latest Python and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`, so
+    there they run); the External cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
     which the library is not told.
 
