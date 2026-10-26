@@ -111,7 +111,7 @@ CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
   cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
   cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
-cargo test --locked -p polypus-logger      # no log-level feature
+cargo test --locked -p polypus-logger --features debug-logs   # the wheel's log level
 cargo test --locked -p polypus-infrastructure --features qmio
 cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
 cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml

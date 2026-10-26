@@ -64,7 +64,10 @@ Issues = "https://github.com/Bahia-Software/polypus/issues"
 "Rust crate (crates.io)" = "https://crates.io/crates/polypus"
 
 [tool.maturin]
-features = ["extension-module"]
+# `debug-logs` sets the compile-time log ceiling of the wheel (the crate has no
+# default level): `init_logger(level="debug")` then shows optimizer progress,
+# and `trace!` stays compiled out. The runtime level filters below it.
+features = ["extension-module", "debug-logs"]
 # The repo is a Cargo workspace; the PyO3 extension crate lives here.
 manifest-path = "crates/polypus/Cargo.toml"
 # Keep the import name `polypus` even though the distribution is `polypus-quantum`

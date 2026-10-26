@@ -253,11 +253,11 @@ jobs:
       # the workspace is tested without touching this file. Default features,
       # so `polypus` builds without extension-module (see the clippy note).
       # Cargo unifies features across the members, so this pass compiles e.g.
-      # polypus-sim with `parallel` and polypus-logger with `info-logs`, which
-      # other members enable; the steps below cover the other feature sets and
-      # profiles. `polypus-subprocess-backend`'s integration tests spawn a
-      # Python worker; they resolve `python3` (provided by the setup-python step
-      # in this job) and skip gracefully if none is found.
+      # polypus-sim with `parallel`, which `polypus` enables; the steps below
+      # cover the other feature sets and profiles. `polypus-subprocess-backend`'s
+      # integration tests spawn a Python worker; they resolve `python3`
+      # (provided by the setup-python step in this job) and skip gracefully if
+      # none is found.
       - name: Test the workspace (default features)
         run: cargo test --locked --workspace
       # Pure-Rust crates: exercise every feature (includes `parallel` in the sim,
@@ -292,9 +292,9 @@ jobs:
       # (off-logs/error-logs/.../trace-logs, each setting a `log` max_level_*
       # feature), not independent toggles — `--all-features` sets several at
       # once and the `log` crate refuses to compile. The workspace pass builds
-      # it with `info-logs`; test it with no features too.
-      - name: Test polypus-logger (no features)
-        run: cargo test --locked -p polypus-logger
+      # it with no feature; test it with the wheel's `debug-logs` too.
+      - name: Test polypus-logger (debug-logs)
+        run: cargo test --locked -p polypus-logger --features debug-logs
       # The optional QMIO backend lives in `polypus-infrastructure`; `polypus`
       # forwards the feature to it.
       - name: Test polypus-infrastructure (qmio backend)

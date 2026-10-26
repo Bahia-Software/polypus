@@ -142,6 +142,11 @@ Changes on `main` since 0.7.2.
   `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
   `initial_point` as its last argument and `TrainFlow` has an `initial_point`
   field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** the `polypus` crate has no default features, so it no
+  longer enables `log/max_level_info` for every dependent; choose a level with
+  `info-logs` or `debug-logs`. The wheel is built with `debug-logs`, so
+  `init_logger(level="debug")` shows the optimizers' progress without a
+  rebuild. The log-level aliases in `.cargo/config.toml` are removed (#414).
 - `rust-toolchain.toml` pins the Rust that CI and the release builds use
   (1.99.1), and that rustup selects in a checkout; a new Rust release can no
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
