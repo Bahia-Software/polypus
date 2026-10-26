@@ -355,49 +355,24 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     None
 }
 
-/// Check the `initial_point` of `train`/`qml.train` before anything runs: one
-/// finite value per optimization dimension and, for PSO, within its `bounds`
-/// (contract C-5). The optimizers check the same again once the backend
-/// exists; here a wrong point raises `ValueError` before any QPU is requested,
-/// with the optimizer's own message. Bounds that PSO itself rejects are left
-/// to it, so that error keeps its precedence.
-fn validate_initial_point(
-    initial_point: Option<&[f64]>,
-    dimensions: u32,
+/// Check the optimizer's preconditions, `initial_point` included, before
+/// anything runs in `train`/`qml.train` (contract C-5): every check the
+/// optimizer makes before its first RNG draw, in its order, so its
+/// configuration errors come before the point's (`dimensions` finite values,
+/// within `bounds` for PSO), through [`Method::check_preconditions`]. A failure
+/// raises `ValueError` with the optimizer's own message before any QPU is
+/// requested; a `method` that is no optimizer raises the `TypeError` of
+/// [`method_from_pyclass`].
+fn validate_method(
     method: &Bound<'_, PyAny>,
+    dimensions: u32,
+    initial_point: Option<&[f64]>,
 ) -> PyResult<()> {
-    let Some(point) = initial_point else {
-        return Ok(());
-    };
-    let invalid = |reason: String| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid initial_point: {reason}"))
-    };
-    if point.len() != dimensions as usize {
-        return Err(invalid(format!(
-            "must have one value per dimension ({dimensions}), got {}",
-            point.len()
-        )));
-    }
-    if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-        return Err(invalid(format!(
-            "every value must be finite, got {value} at index {index}"
-        )));
-    }
-    if let Ok(pso) = method.extract::<PyRef<PSO>>() {
-        let (lb, ub) = pso.bounds;
-        if lb.is_finite() && ub.is_finite() && lb < ub {
-            if let Some((index, value)) = point
-                .iter()
-                .enumerate()
-                .find(|(_, x)| !(lb..=ub).contains(*x))
-            {
-                return Err(invalid(format!(
-                    "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    // A throwaway `Method`: the checks read only its configuration, never the
+    // QNG variance oracle, so its error slot and run id are placeholders.
+    method_from_pyclass(method, &OracleErrorSlot::new(), "")?
+        .check_preconditions(dimensions, initial_point)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Turn an optimizer result into the value the Python entry point returns.
@@ -1538,7 +1513,7 @@ pub fn train<'py>(
             )));
         }
     }
-    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    validate_method(&method, dimensions, initial_point.as_deref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
     if is_native_backend(backend) {
@@ -1851,7 +1826,7 @@ pub fn qml_train<'py>(
             "dimensions ({dimensions}) does not match the ansatz's free parameters ({num_ansatz_params})"
         )));
     }
-    validate_initial_point(initial_point.as_deref(), dimensions, &method)?;
+    validate_method(&method, dimensions, initial_point.as_deref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
