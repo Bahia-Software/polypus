@@ -279,10 +279,11 @@ explore = polypus.train(
     **common,
     seed=1,
 )
-# Refine: Adam from L-SHADE's best point, 2 × dimensions + 1 circuits an iteration.
+# Refine: Adam from L-SHADE's best point, 2 × dimensions + 1 circuits an iteration
+# and one for the point it ends at.
 refine = polypus.train(
     qc,
-    polypus.Adam(max_iters=budget // 2 // (2 * dimensions + 1), tolerance=0.0),
+    polypus.Adam(max_iters=(budget // 2 - 1) // (2 * dimensions + 1), tolerance=0.0),
     **common,
     seed=1,
     initial_point=explore.best_params,
@@ -298,7 +299,9 @@ print(explore.best_fitness, refine.best_fitness)
 runs = [
     polypus.train(
         qc,
-        polypus.Adam(max_iters=budget // 3 // (2 * dimensions + 1), tolerance=0.0),
+        polypus.Adam(
+            max_iters=(budget // 3 - 1) // (2 * dimensions + 1), tolerance=0.0
+        ),
         **common,
         seed=seed,
     )
@@ -307,7 +310,7 @@ runs = [
 best = max(runs, key=lambda run: run.best_fitness)
 ```
 
-In the benchmark, three runs raised the worst instance at p = 5, where single runs sometimes ended in a poor optimum, but their mean there was within noise of one run's. With 256 shots at p = 3 and on the HEA they did worse, a third of the budget being too short for each run, and starting from L-SHADE had the higher mean in every scenario.
+In the benchmark, three runs raised the worst instance at p = 5, where single runs sometimes ended in a poor optimum, but their mean there was within noise of one run's. With 500 evaluations and on the HEA they did worse, a third of the budget being too short for each run, and starting from L-SHADE had the higher mean in every scenario.
 
 ## Choosing an optimizer
 
@@ -323,10 +326,10 @@ Paired difference in approximation ratio from the classic DE (`rand1bin`), with 
 | `CMAES()` | +0.020 ± 0.004 (77 %) | +0.037 ± 0.004 (97 %) | +0.038 ± 0.006 (90 %) | +0.005 ± 0.006 (53 %) | +0.170 ± 0.017 (90 %) |
 | `CMAES(population_size=30)` | +0.011 ± 0.005 (60 %) | +0.010 ± 0.004 (67 %) | +0.010 ± 0.006 (53 %) | −0.000 ± 0.004 (43 %) | +0.133 ± 0.019 (80 %) |
 | `CMAES(restarts=3)` | +0.004 ± 0.004 (60 %) | +0.009 ± 0.006 (60 %) | −0.002 ± 0.004 (43 %) | +0.001 ± 0.005 (53 %) | +0.015 ± 0.014 (53 %) |
-| `Adam()` | +0.030 ± 0.004 (90 %) | +0.032 ± 0.004 (93 %) | +0.050 ± 0.011 (93 %) | +0.035 ± 0.004 (97 %) | +0.197 ± 0.009 (100 %) |
-| `Adam(rule="momentum")`, tuned rate | +0.033 ± 0.003 (97 %) | +0.038 ± 0.004 (87 %) | +0.066 ± 0.004 (100 %) | +0.037 ± 0.004 (100 %) | +0.201 ± 0.009 (100 %) |
-| L-SHADE, then `Adam()` | **+0.043 ± 0.004 (97 %)** | **+0.039 ± 0.004 (97 %)** | **+0.071 ± 0.004 (100 %)** | **+0.044 ± 0.005 (97 %)** | **+0.214 ± 0.007 (100 %)** |
-| `Adam()` ×3 | +0.024 ± 0.004 (83 %) | +0.036 ± 0.004 (97 %) | +0.066 ± 0.004 (100 %) | +0.023 ± 0.005 (77 %) | +0.171 ± 0.009 (100 %) |
+| `Adam()` | +0.031 ± 0.004 (90 %) | +0.032 ± 0.004 (93 %) | +0.050 ± 0.011 (93 %) | +0.036 ± 0.003 (100 %) | +0.197 ± 0.009 (100 %) |
+| `Adam(rule="momentum")`, tuned rate | +0.033 ± 0.003 (97 %) | +0.038 ± 0.004 (87 %) | +0.066 ± 0.004 (100 %) | +0.039 ± 0.004 (100 %) | +0.201 ± 0.009 (100 %) |
+| L-SHADE, then `Adam()` | **+0.043 ± 0.004 (97 %)** | **+0.039 ± 0.004 (97 %)** | **+0.071 ± 0.004 (100 %)** | **+0.045 ± 0.005 (97 %)** | **+0.214 ± 0.007 (100 %)** |
+| `Adam()` ×3 | +0.030 ± 0.004 (87 %) | +0.036 ± 0.004 (97 %) | +0.064 ± 0.004 (100 %) | +0.025 ± 0.005 (87 %) | +0.177 ± 0.008 (100 %) |
 
 The lowest ratio of the 30 instances, where a local method's occasional poor optimum shows:
 
@@ -340,10 +343,10 @@ The lowest ratio of the 30 instances, where a local method's occasional poor opt
 | `CMAES(restarts=3)` | 0.754 | 0.790 | 0.818 | 0.746 | 0.694 |
 | `Adam()` | 0.817 | 0.784 | 0.661 | 0.792 | 0.844 |
 | `Adam(rule="momentum")`, tuned rate | 0.823 | 0.824 | 0.861 | 0.813 | 0.845 |
-| L-SHADE, then `Adam()` | 0.852 | 0.850 | 0.918 | 0.790 | 0.991 |
-| `Adam()` ×3 | 0.786 | 0.822 | 0.907 | 0.784 | 0.829 |
+| L-SHADE, then `Adam()` | 0.852 | 0.850 | 0.918 | 0.799 | 0.991 |
+| `Adam()` ×3 | 0.818 | 0.823 | 0.898 | 0.776 | 0.835 |
 
-Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots. An Adam batch holds `2 × dimensions + 1` circuits: 13, 21 and 61 here.
+Sequential batches each optimizer sent, the rounds that cost time when the QPUs outnumber a batch, and the winner's curse: how far the reported `best_fitness` overstated the exact value of `best_params`, as a share of the maximum cut, with 256 shots. An Adam batch holds `2 × dimensions + 1` circuits, 13, 21 and 61 here, and its last holds the one circuit of the point it ends at.
 
 | Optimizer | Batches, 1500 evals | Batches, 3000 evals | Batches, HEA | Bias, p = 3 | Bias, p = 5 | Bias, HEA |
 |---|---|---|---|---|---|---|
@@ -353,21 +356,21 @@ Sequential batches each optimizer sent, the rounds that cost time when the QPUs 
 | `CMAES()` | 166 | 300 | 357 | +0.019 | +0.015 | +0.004 |
 | `CMAES(population_size=30)` | 50 | 100 | 166 | +0.008 | +0.008 | +0.004 |
 | `CMAES(restarts=3)` | 90 | 115 | 116 | +0.008 | +0.002 | +0.007 |
-| `Adam()` | 115 | 142 | 81 | +0.015 | +0.012 | +0.002 |
-| `Adam(rule="momentum")`, tuned rate | 115 | 142 | 81 | +0.013 | +0.011 | +0.002 |
-| L-SHADE, then `Adam()` | 114 | 186 | 233 | +0.013 | +0.011 | +0.002 |
-| `Adam()` ×3 | 115 | 142 | 81 | +0.013 | +0.008 | +0.004 |
+| `Adam()` | 116 | 143 | 82 | +0.015 | +0.012 | +0.002 |
+| `Adam(rule="momentum")`, tuned rate | 116 | 143 | 82 | +0.013 | +0.011 | +0.002 |
+| L-SHADE, then `Adam()` | 115 | 187 | 234 | +0.013 | +0.011 | +0.002 |
+| `Adam()` ×3 | 118 | 145 | 84 | +0.011 | +0.009 | +0.004 |
 
 What the data says:
 
-- **Explore with L-SHADE, then refine with Adam.** Half the budget to `DE(strategy="lshade")` and the other half to `Adam()` from its `best_params` ([Starting point](#starting-point)) gave the best mean ratio in all five scenarios, 500 evaluations included, and beat the classic DE on 97 to 100 % of the instances. Its lowest ratio was the highest of all the optimizers in four scenarios (0.918 with p = 5, 0.991 on the HEA), and its Adam phase improved on L-SHADE's half-budget result on every instance. Its lead over Adam alone was 0.007 to 0.022, more than two standard errors with 256 shots at p = 3 and 1500 evaluations (+0.013 ± 0.004) and on the HEA (+0.017 ± 0.007), and about two or fewer elsewhere. On the HEA the two were even on most instances, and the lead came from the few where Adam alone ended low.
-- **Adam alone, with its defaults, is a strong single run with one configuration for both circuits.** It beat L-SHADE on average in every scenario: clearly with 256 shots at p = 3 (+0.013 ± 0.004 at 1500 evaluations, +0.027 ± 0.004 at 500) and on the HEA (+0.044 ± 0.007), within noise with 2^20 shots (+0.003 ± 0.004) and at p = 5 (+0.012 ± 0.011). As a local method it occasionally ends in a poor optimum: its lowest ratio was 0.661 with p = 5 and 0.784 with 2^20 shots, against 0.830 and 0.831 for L-SHADE. Its batches grow with the parameters, so with 30 it sent the fewest of all (81, against 385 for L-SHADE).
-- **Use momentum only with a learning rate tuned to the problem.** With rates tuned on separate instances it matched Adam within noise (0.002 to 0.016 higher), and its lowest ratio at p = 5 was 0.861, against Adam's 0.661. Its rate depends on the scale of the cost (see [Adam](#adam)), so these figures are its best case; Adam needed no tuning.
-- **Don't restart Adam by default.** Three runs on a third of the budget each raised the worst instance at p = 5 (lowest ratio 0.907, against 0.661 for one run), but their mean was within noise of one run's there (+0.016 ± 0.011) and with 2^20 shots (+0.004 ± 0.003). With 256 shots at p = 3 they were behind one run (−0.006 ± 0.003 at 1500 evaluations, −0.011 ± 0.003 at 500), and on the HEA too (−0.026 ± 0.008), where a third of the budget was too short. Starting from L-SHADE had the higher mean in every scenario.
+- **Explore with L-SHADE, then refine with Adam.** Half the budget to `DE(strategy="lshade")` and the other half to `Adam()` from its `best_params` ([Starting point](#starting-point)) gave the best mean ratio in all five scenarios, 500 evaluations included, and beat the classic DE on 97 to 100 % of the instances. Its lowest ratio was the highest of all the optimizers in four scenarios (0.918 with p = 5, 0.991 on the HEA), and its Adam phase improved on L-SHADE's half-budget result on every instance. Its lead over Adam alone was 0.007 to 0.021, more than two standard errors with 256 shots at p = 3 and 1500 evaluations (+0.012 ± 0.004) and on the HEA (+0.016 ± 0.007), and about two or fewer elsewhere. On the HEA the two were even on most instances, and the lead came from the few where Adam alone ended low.
+- **Adam alone, with its defaults, is a strong single run with one configuration for both circuits.** It beat L-SHADE on average in every scenario: clearly with 256 shots at p = 3 (+0.014 ± 0.004 at 1500 evaluations, +0.028 ± 0.004 at 500) and on the HEA (+0.044 ± 0.007), within noise with 2^20 shots (+0.003 ± 0.004) and at p = 5 (+0.013 ± 0.011). As a local method it occasionally ends in a poor optimum: its lowest ratio was 0.661 with p = 5 and 0.784 with 2^20 shots, against 0.830 and 0.831 for L-SHADE. Its batches grow with the parameters, so with 30 it sent the fewest of all (82, against 385 for L-SHADE).
+- **Use momentum only with a learning rate tuned to the problem.** With rates tuned on separate instances it matched Adam within noise (0.003 to 0.016 higher), and its lowest ratio at p = 5 was 0.861, against Adam's 0.661. Its rate depends on the scale of the cost (see [Adam](#adam)), so these figures are its best case; Adam needed no tuning.
+- **Don't restart Adam by default.** Three runs on a third of the budget each raised the worst instance at p = 5 (lowest ratio 0.898, against 0.661 for one run), but their mean was within noise of one run's there (+0.014 ± 0.011), with 2^20 shots (+0.004 ± 0.003) and with 256 shots at p = 3 and 1500 evaluations (−0.001 ± 0.003). They were behind one run at 500 evaluations (−0.010 ± 0.003) and on the HEA (−0.020 ± 0.007), where a third of the budget was too short. Starting from L-SHADE had the higher mean in every scenario.
 - **CMA-ES with its default population is competitive with L-SHADE.** Its paired difference from L-SHADE was within two standard errors in every scenario: about even with 256 shots (+0.003 ± 0.005 at p = 3, +0.001 ± 0.006 at p = 5), slightly ahead with 2^20 shots (+0.007 ± 0.004) and on the HEA (+0.017 ± 0.016). It was less consistent on the HEA, beating the classic DE on 90 % of the instances where L-SHADE beat it on all, with a lowest ratio of 0.740 against 0.834. On QAOA it sent the most sequential batches and, at 1500 and 3000 evaluations, had the largest winner's curse.
 - **Don't enlarge CMA-ES's population to fill QPUs, and don't count on IPOP restarts.** With a population of 30, CMA-ES's mean ratio was below its default population's in every scenario, by 0.005 to 0.037, though still about 0.01 above the classic DE's at 1500 and 3000 evaluations. IPOP restarts stayed within 0.01 of the classic DE on QAOA and gained +0.015 ± 0.014 on the HEA, against +0.170 without them.
 - **With many QPUs, when sequential rounds dominate the run time,** `strategy="shade"` keeps the classic DE's batch size and number of rounds and still gained 1.5 points with 10 parameters and 10.6 with 30, though almost nothing with 6 at 256 shots. L-SHADE needs about 2.3 times the rounds of the classic DE for its larger gain.
-- **With 500 evaluations only the Adam-based optimizers were clearly better than the classic DE,** by 0.023 to 0.044; the DE strategies and CMA-ES gained 0.008 at most.
+- **With 500 evaluations only the Adam-based optimizers were clearly better than the classic DE,** by 0.025 to 0.045; the DE strategies and CMA-ES gained 0.008 at most.
 - **The reported `best_fitness` is optimistic under shot noise,** because it is the best of many noisy estimates: by up to 1.9 % of the maximum cut with 256 shots, for CMA-ES at p = 3. Adam's `best_params` is the best point it measured, so Adam has the same bias: 1.0 to 1.5 % on QAOA with 256 shots, a little more than L-SHADE's and more than the classic DE's, and 0.2 % on the HEA. Re-evaluate `best_params` with more shots when the value itself matters.
 
-These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates were tuned for these two circuits. CMA-ES's rows may differ on another platform or build; see its reproducibility note under [CMA-ES](#cma-es). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `83a0bbd` (Polypus 0.7.2) on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The printed table gives the differences from the classic DE; the lowest ratios and the differences from L-SHADE or Adam quoted above come from the per-instance results that `--json FILE` writes.
+These results cover MaxCut only, on 10 nodes, with QAOA at depth 3 to 5 and one 30-parameter hardware-efficient ansatz, on a noiseless simulator with shot sampling. Other problems, more parameters or hardware noise may rank the optimizers differently, and momentum's learning rates were tuned for these two circuits. CMA-ES's rows may differ on another platform or build; see its reproducibility note under [CMA-ES](#cma-es). Run `python benchmarks/bench_optimizers.py --full`, or a scenario of your own with `--scenario [hea:]LAYERS:SHOTS:BUDGET`, to check. The tables come from that command at commit `d08f4e3`, after Polypus 0.7.2, which has no Adam, on Linux x86_64 with an Intel Xeon at 2.10 GHz (4 CPUs). The 500-evaluation scenario gives a population of 30 only 480 evaluations, 16 batches of 30. The command prints every figure quoted here: for each scenario, each optimizer's ratio, lowest ratio, paired difference from the classic DE, bias and batches, its paired differences from L-SHADE and from Adam, and how much the Adam stage of "L-SHADE, then Adam" changed its L-SHADE stage's ratio. `--json FILE` also writes the per-instance results.
