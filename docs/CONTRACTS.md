@@ -745,9 +745,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     finite point: their `bounds` only shape the random draw. Each optimizer
     checks this after its other preconditions, whose errors come first, and
     before any RNG draw or oracle call, as `OptimizerError::InvalidConfig` for
-    `initial_point`. `train` and `qml.train` check the same (length,
-    finiteness and PSO's bounds) themselves before anything runs (no backend,
-    no CUNQA allocation), raising `ValueError` with the optimizer's message.
+    `initial_point`. Each optimizer's `check_preconditions` makes these checks,
+    configuration and point, in that order, without running anything;
+    `Method::check_preconditions` in `polypus-orchestration` calls the one the
+    method names, and `train` and `qml.train` call it before anything runs (no
+    backend, no CUNQA allocation), raising `ValueError` with the optimizer's
+    message, so a configuration error comes first there too.
   - Postconditions: the optimizer draws everything exactly as without a
     point, then the point replaces part of it, so the RNG stream is
     unchanged. DE (every strategy): the point, wrapped into `[0, 2π)`, is the
@@ -775,10 +778,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     any oracle call and their precedence, PSO's bounds, the postconditions
     over 10 seeds, and PSO's and QNG's outcome without a point pinned to the
     bits they had before it), the `check_initial_point` unit tests in
-    `src/util.rs`, `initial_point_reaches_every_optimizer` in
+    `src/util.rs`, `initial_point_reaches_every_optimizer` and
+    `check_preconditions_agrees_with_dispatch` in
     `crates/polypus-orchestration/src/dispatch.rs`, and
     `tests/python/test_initial_point.py` (the `ValueError`s, PSO's bounds
-    included, before the CUNQA seam is reached, the first candidates every optimizer sends through
+    included, before the CUNQA seam is reached, a configuration error before
+    the point's, the first candidates every optimizer sends through
     `train` and `qml.train`, and a `best_params` list, tuple or NumPy array
     as the point). The pinned `"rand1bin"` outcome and
     `tests/python/test_determinism_baseline.py` are unchanged.
@@ -898,7 +903,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `GradientOracle::gradient_batch(theta, dims)` returns **exactly `dims`
     finite values**, `∂fitness/∂θ` in parameter order, uphill (the same sign
     convention as `EvaluationOracle`). A wrong length is
-    `OptimizerError::OracleLengthMismatch`.
+    `OptimizerError::OracleLengthMismatch`, and a non-finite component
+    `OptimizerError::NonFiniteGradient` (its index and value), before `θ`
+    moves.
   - `GradientOracle::value_and_gradient(theta, dims)` returns `θ`'s fitness
     and the gradient from one call, or `None` (the default) when the oracle
     does not score `θ` itself. The value must be the one Adam's own
@@ -920,13 +927,15 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `FiniteDifferenceGradient`, one `evaluate_batch` of `2·dims + 1`
     candidates, `[θ, θ+h·e₀, θ−h·e₀, …]`. Otherwise Adam scores `θ` in one
     `evaluate_batch` of one candidate, its length checked, and then calls
-    `gradient_batch`. The gradient's length is checked either way.
+    `gradient_batch`. The gradient's length and finiteness are checked either
+    way, before the step.
   - `best_params` is the measured `θ` with the best fitness and `best_fitness`
     the value the oracle returned for it; `fitness_history[t]` is the best
     measured up to iteration `t`. The first measurement is kept and later
     ones only when strictly better, so a `NaN` never wins over a number (a run
-    that only measures `NaN` reports its first `θ` and that `NaN`). The step
-    after the last measurement is not measured.
+    that only measures `NaN` reports its first `θ` and that `NaN`, unless its
+    gradient is `NaN` too, as a finite difference of those values is, which is
+    `NonFiniteGradient`). The step after the last measurement is not measured.
   - `AdamRule::Adam` steps `θ += learning_rate·m̂/(√v̂ + epsilon)`, with the
     bias corrections `1 − β₁ᵗ` and `1 − β₂ᵗ` carried as running products.
     `AdamRule::Momentum` steps `v ← beta1·v + learning_rate·g`, `θ += v`, so
@@ -940,9 +949,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     one `evaluate_batch` of `2·dims` candidates,
     `[θ+h·e₀, θ−h·e₀, θ+h·e₁, …]`, per gradient, and `θ` in front of them for
     `value_and_gradient`. It approximates; an exact gradient is its own
-    `GradientOracle`. If the wrapped oracle returns the wrong number of values
-    the gradient is empty, so Adam reports the length mismatch. An `Arc` of an
-    oracle is an oracle, so one scorer can feed both, and must when the
+    `GradientOracle`. If the wrapped oracle returns the wrong number of
+    values, or a parameter index is out of range for `θ`, the gradient is
+    empty, without a panic, so Adam reports the length mismatch. An `Arc` of
+    an oracle is an oracle, so one scorer can feed both, and must when the
     adapter returns `θ`'s value.
   - Enforced by `crates/polypus-optimizers/tests/adam.rs` (one batch of `θ`
     and its stencil per iteration; the C-5 postconditions against the batches
@@ -954,9 +964,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     against a reference of Kingma and Ba's Algorithm 1; momentum's
     recurrence, its scale dependence and its unused `beta2` and `epsilon`;
     the rule names; every rejected configuration with no oracle call; the
-    gradient length check; and the finite-difference stencil, `θ` first in
-    `value_and_gradient`, its accuracy, its step validation and a broken
-    wrapped oracle) and the `BestMeasured` unit tests in `src/util.rs`.
+    gradient length and finiteness checks; and the finite-difference stencil,
+    `θ` first in `value_and_gradient`, its accuracy, its step validation, a
+    broken wrapped oracle and an index out of range) and the `BestMeasured`
+    unit tests in `src/util.rs`.
   - In a training run the gradient comes from the run's `Oracles`
     (`polypus-orchestration`): the exact one when the factory provides it,
     otherwise a `FiniteDifferenceGradient` of the evaluation oracle with

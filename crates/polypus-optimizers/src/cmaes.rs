@@ -230,6 +230,24 @@ impl AlgorithmCmaEs {
         4 + (3.0 * d.ln()).floor() as u32
     }
 
+    /// Check the preconditions of [`AlgorithmCmaEsArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: the configuration
+    /// listed on [`AlgorithmCmaEsArgs`], then `initial_point` (`dimensions`
+    /// finite values). `train` and `qml.train` call it before any backend
+    /// exists.
+    pub fn check_preconditions(
+        dimensions: u32,
+        population_size: Option<u32>,
+        generations: u32,
+        sigma0: f64,
+        restarts: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        validate(dimensions, population_size, generations, sigma0, restarts)?;
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
+
     fn run_with_rng<R: Rng>(
         args: AlgorithmCmaEsArgs,
         rng: &mut R,
@@ -249,7 +267,7 @@ impl AlgorithmCmaEs {
 
         let schedule = validate(dimensions, population_size, generations, sigma0, restarts)?;
         let n = dimensions as usize;
-        check_initial_point(initial_point.as_deref(), n)?;
+        check_initial_point(initial_point.as_deref(), n, None)?;
         let budget = generations as usize;
         let patience = patience as usize;
 
