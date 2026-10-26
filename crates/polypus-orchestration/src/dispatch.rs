@@ -187,6 +187,7 @@ impl Method {
                     cfg.beta1,
                     cfg.beta2,
                     cfg.epsilon,
+                    cfg.patience,
                     cfg.bounds,
                     dimensions,
                     initial_point,
@@ -953,6 +954,14 @@ mod tests {
                 short.clone(),
             ),
             (
+                "Adam, patience 0",
+                Box::new(move || match adam(0.1, 0.05) {
+                    Method::Adam(cfg) => Method::Adam(AdamConfig { patience: 0, ..cfg }),
+                    other => other,
+                }),
+                short.clone(),
+            ),
+            (
                 "Adam, short point",
                 Box::new(move || adam(0.1, 0.05)),
                 short.clone(),
@@ -1082,10 +1091,12 @@ mod tests {
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
         // Each iteration: one batch on the same oracle, θ and its
-        // finite-difference stencil (2·dims + 1 candidates).
+        // finite-difference stencil (2·dims + 1 candidates); then the final θ
+        // alone.
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), outcome.iterations_run);
-        assert!(sizes.iter().all(|&n| n == 7), "{sizes:?}");
+        let mut expected = vec![7; outcome.iterations_run];
+        expected.push(1);
+        assert_eq!(sizes, expected);
     }
 
     #[test]
@@ -1108,9 +1119,9 @@ mod tests {
         assert_near_the_optimum(&outcome);
         assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
         // No stencil: the evaluation oracle only scores θ, one candidate a call,
-        // once per iteration.
+        // once per iteration and once more for the final θ.
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), outcome.iterations_run);
+        assert_eq!(sizes.len(), outcome.iterations_run + 1);
         assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
     }
 
