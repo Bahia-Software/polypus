@@ -850,37 +850,38 @@ fn adam_is_kingma_and_bas_update() {
 
 // --- The momentum rule ---------------------------------------------------------
 
-/// A constant uphill gradient.
-fn constant_gradient(_: &[f64]) -> Vec<f64> {
-    vec![1.0, -2.0, 0.5]
-}
-
 /// [`bowl_gradient`] of a cost a hundred times larger.
 fn hundredfold_bowl_gradient(x: &[f64]) -> Vec<f64> {
     bowl_gradient(x).iter().map(|g| 100.0 * g).collect()
 }
 
-/// With a constant gradient `g`, momentum's θs follow Polyak's heavy ball
-/// exactly: `v ← μ·v + learning_rate·g`, `θ ← θ + v`, with μ = `beta1`.
+/// Momentum's θs follow Polyak's heavy ball, `v ← μ·v + learning_rate·g(θ)`,
+/// `θ ← θ + v` with μ = `beta1`, with the gradient taken at each θ: the
+/// bowl's, which changes as θ moves.
 #[test]
 fn momentum_is_polyaks_heavy_ball() {
     let oracle = Recorder::new(bowl);
-    let mut args = args(oracle.clone(), ExactGradient::new(constant_gradient), 5);
+    let mut args = args(oracle.clone(), ExactGradient::new(bowl_gradient), 5);
     args.rule = AdamRule::Momentum;
     args.max_iters = 8;
     let (learning_rate, momentum) = (args.learning_rate, args.beta1);
     AlgorithmAdam.optimize(args).unwrap();
     let measured: Vec<Vec<f64>> = oracle.batches().concat();
     assert_eq!(measured.len(), 8);
-    let g = constant_gradient(&[]);
     let mut theta = measured[0].clone();
     let mut velocity = [0.0; 3];
     for next in &measured[1..] {
+        let g = bowl_gradient(&theta);
         for ((v, x), gi) in velocity.iter_mut().zip(theta.iter_mut()).zip(&g) {
             *v = momentum * *v + learning_rate * gi;
             *x += *v;
         }
-        assert_eq!(*next, theta);
+        for (got, want) in next.iter().zip(&theta) {
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "{next:?} vs {theta:?}"
+            );
+        }
     }
 }
 
