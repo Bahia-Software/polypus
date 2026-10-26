@@ -193,6 +193,21 @@ The check covers the net diff only, not every intermediate commit nor the
 existing history, and does not replace checking your own changes before
 pushing.
 
+## Code quality dashboard
+
+`.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
+request and push to `main` (configuration in `sonar-project.properties`):
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes, the clippy
+report, and Python coverage of `python/` from the pytest suite. Rust reached
+only through the Python extension is not counted. It is informational: no
+check is required and the quality gate does not fail the run. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded. Python coverage locally, with the wheel installed:
+
+```bash
+python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
+```
+
 ## Lint policy
 
 `clippy.toml` only tunes lint thresholds/behaviour. Lint *levels* are set in CI
