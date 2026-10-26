@@ -236,20 +236,23 @@ def main():
     trained = model.bind(result.best_params)
     train_predictions = trained.predict(train, exact=True)
     test_predictions = trained.predict(test, exact=True)
+    # `labels` is None only for a dataset built without labels; these have them.
+    train_labels, test_labels = train.labels or [], test.labels or []
     print(
-        f"Train accuracy: {accuracy(train_predictions, train.labels):.1%} "
+        f"Train accuracy: {accuracy(train_predictions, train_labels):.1%} "
         f"({train.num_samples} flowers)"
     )
     print(
-        f"Test accuracy:  {accuracy(test_predictions, test.labels):.1%} "
+        f"Test accuracy:  {accuracy(test_predictions, test_labels):.1%} "
         f"({test.num_samples} flowers never seen in training)\n"
     )
 
     print("Test predictions:")
-    for predicted, actual in zip(test_predictions, test.labels):
+    # An argmax readout predicts class indices.
+    for predicted, actual in zip(test_predictions, test_labels):
         mark = "✅" if predicted == actual else "❌"
         print(
-            f"  {mark} predicted {SPECIES[predicted]:<10} "
+            f"  {mark} predicted {SPECIES[int(predicted)]:<10} "
             f"(actual {SPECIES[int(actual)]})"
         )
 

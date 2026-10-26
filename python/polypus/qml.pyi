@@ -5,7 +5,17 @@
 # are checked.
 
 from os import PathLike
-from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, final
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Literal,
+    Optional,
+    Sequence,
+    Union,
+    final,
+    overload,
+)
 
 import numpy.typing as npt
 from qiskit import QuantumCircuit
@@ -195,6 +205,45 @@ class TrainedModel:
         seed: Optional[int] = None,
         exact: bool = False,
     ) -> list[Union[int, float]]: ...
+    # Counts (`RunResult`) by default; exact probabilities (`ExactResult`) with
+    # `exact=True`.
+    @overload
+    def run(
+        self,
+        x: Union[_DatasetRows, Dataset],
+        *,
+        shots: int = 1024,
+        infrastructure: str = "local",
+        n_qpus: int = 1,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        options: Optional[dict[str, str]] = None,
+        sim_method: str = "automatic",
+        noise_model: Optional[NoiseModel] = None,
+        backend: Optional[str] = None,
+        seed: Optional[int] = None,
+        exact: Literal[False] = False,
+    ) -> RunResult: ...
+    @overload
+    def run(
+        self,
+        x: Union[_DatasetRows, Dataset],
+        *,
+        shots: int = 1024,
+        infrastructure: str = "local",
+        n_qpus: int = 1,
+        nodes: int = 1,
+        cores_per_qpu: int = 2,
+        walltime: Optional[str] = None,
+        options: Optional[dict[str, str]] = None,
+        sim_method: str = "automatic",
+        noise_model: Optional[NoiseModel] = None,
+        backend: Optional[str] = None,
+        seed: Optional[int] = None,
+        exact: Literal[True],
+    ) -> ExactResult: ...
+    @overload
     def run(
         self,
         x: Union[_DatasetRows, Dataset],
