@@ -44,7 +44,8 @@ the number of parameters):
                 on the HEA
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
                 iteration, with spsa's perturbation and target step on each
-                problem, so the two differ only in the perturbations
+                problem, so their settings differ only in the perturbations;
+                the averaged estimate is smaller, so its steps are shorter
   rotosolve     polypus.Rotosolve(), the HEA only: as many sweeps as the
                 budget allows, the current point re-measured every fifth
                 step (the default)
@@ -210,7 +211,8 @@ RESTART_SEED_STEP = 1_000_000
 # SPSA's perturbations per iteration, and its (perturbation, target step) per
 # problem, as tuned on the reserved instances 100-109 in the review that
 # proposed SPSA (#396) with one perturbation; spsa-k8 takes the same, so the
-# two rows differ only in the perturbations.
+# two rows' settings differ only in the perturbations (spsa-k8's steps are
+# shorter, its averaged estimate being smaller).
 SPSA_RESAMPLINGS = {"spsa": 1, "spsa-k8": 8}
 SPSA = {"qaoa": (0.2, 1.2), "hea": (0.1, 0.63)}
 # The circuits of SPSA's calibration batch, before its first iteration.

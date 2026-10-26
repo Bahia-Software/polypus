@@ -5,8 +5,9 @@ use pyo3::prelude::*;
 /// circuits per random perturbation, whatever the number of parameters.
 ///
 /// The run starts with one calibration batch of 50 circuits around the
-/// starting point that sets the gain so the first step moves each parameter by
-/// about `target_step`. Each iteration then sends one batch of
+/// starting point that sets the gain so that, with `resamplings=1`, the first
+/// step moves each parameter by about `target_step`; with more perturbations
+/// their average is smaller, so the first step is shorter. Each iteration then sends one batch of
 /// `2·resamplings` circuits, plus the current parameters on the first
 /// iteration and every `eval_interval` iterations after it; after the last
 /// step, one more circuit measures the parameters it reached.
@@ -32,9 +33,10 @@ pub struct Spsa {
     /// one ruins the estimate.
     #[pyo3(get, set)]
     pub perturbation: f64,
-    /// Size in radians of the first step on each parameter, finite and `> 0`,
-    /// which the calibration batch turns into the gain `a`. Defaults to
-    /// `0.63`. Later steps shrink as `1/k^alpha`.
+    /// Size in radians of the first step on each parameter with
+    /// `resamplings=1`, finite and `> 0`, which the calibration batch turns
+    /// into the gain `a`; with more perturbations the first step is shorter.
+    /// Defaults to `0.63`. Later steps shrink as `1/k^alpha`.
     #[pyo3(get, set)]
     pub target_step: f64,
     /// Decay exponent of the step gain, in `(0.5, 1]`. Defaults to Spall's

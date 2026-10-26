@@ -114,8 +114,10 @@ Changes on `main` since 0.7.2.
   `c/k^gamma` and practical exponents (1998). It estimates the gradient from
   two circuits per random perturbation whatever the number of parameters,
   so it suits many parameters and few QPUs. A calibration batch of 50
-  circuits around the starting point sets the gain so the first step moves
-  each parameter by about `target_step`, as Qiskit's `SPSA.calibrate` does.
+  circuits around the starting point sets the gain so that, with
+  `resamplings=1`, the first step moves each parameter by about
+  `target_step`, as Qiskit's `SPSA.calibrate` does; with more perturbations
+  the first step is shorter.
   Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
   fills more QPUs and averages that many estimates; the parameters are
   measured in the same batch on the first iteration and every

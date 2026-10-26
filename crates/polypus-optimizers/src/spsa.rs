@@ -55,9 +55,11 @@ use std::f64::consts::TAU;
 ///    [`perturbation`](AlgorithmSPSAArgs::perturbation). Each pair gives the
 ///    magnitude `|f₊ − f₋| / (2c)`, which every component of that pair's
 ///    estimate `ĝᵢ` shares, `Δᵢ` being ±1; their mean is `mean|ĝ|`, and
-///    `a = target_step / mean|ĝ|`. The first gain `a₁` is `a`, so the first
-///    step moves each parameter by about
-///    [`target_step`](AlgorithmSPSAArgs::target_step). A pair whose magnitude
+///    `a = target_step / mean|ĝ|`. The first gain `a₁` is `a`, so with
+///    `resamplings = 1` the first step moves each parameter by about
+///    [`target_step`](AlgorithmSPSAArgs::target_step). With `K > 1` the
+///    first step is shorter: the mean of `K` estimates is smaller on average
+///    than one estimate, whose magnitude set `a`. A pair whose magnitude
 ///    is not finite (a non-finite value, or an overflow) is left out of the
 ///    mean. When no magnitude is left, their mean is zero (a flat landscape
 ///    around θ₀) or not finite, or `a` is not finite, `a = target_step`, as if
@@ -82,8 +84,9 @@ use std::f64::consts::TAU;
 /// `best_fitness` the value the oracle returned for it (a `NaN` never wins);
 /// the perturbed candidates never count. `fitness_history` holds, for each
 /// iteration, the best measured up to it, the final θ counted in the last
-/// entry: the first iteration measures θ₀, so every entry is defined, and
-/// the history ends at `best_fitness`.
+/// entry: the first iteration measures θ₀, so no entry is the `-∞`
+/// placeholder (a `NaN` measurement can appear), and the history ends at
+/// `best_fitness`.
 ///
 /// There is no early stop: the run makes `max_iters` iterations and, like
 /// [`AlgorithmQNG`](crate::AlgorithmQNG), reports `converged = false`.
@@ -164,8 +167,10 @@ pub struct AlgorithmSPSAArgs {
     /// The perturbation size `c`, in radians: the calibration's, and
     /// `c_k = c / k^γ` in iteration `k`.
     pub perturbation: f64,
-    /// The magnitude, in radians, of each parameter's first step, which sets
-    /// `a` through the calibration.
+    /// The magnitude, in radians, of each parameter's first step with
+    /// `resamplings = 1`, which sets `a` through the calibration. With more
+    /// perturbations the averaged estimate is smaller, so the first step is
+    /// shorter.
     pub target_step: f64,
     /// Decay exponent `α` of the step gain `a_k = a / k^α`.
     pub alpha: f64,
