@@ -348,21 +348,8 @@ pub fn dispatch_optimizer(
         evaluation: oracle,
         gradient,
     } = oracles.into();
-    let method = match method {
-        Method::Adam(cfg) => {
-            return dispatch_adam(
-                cfg,
-                oracle,
-                gradient,
-                dimensions,
-                errors,
-                seed,
-                initial_point,
-            )
-        }
-        other => other,
-    };
     let result = match method {
+        Method::Adam(cfg) => dispatch_adam(cfg, oracle, gradient, dimensions, seed, initial_point),
         Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
             cfg.strategy,
             AlgorithmDifferentialEvolutionArgs {
@@ -426,12 +413,6 @@ pub fn dispatch_optimizer(
             seed: Some(seed),
             initial_point,
         }),
-        // Routed to `dispatch_adam` above; total rather than a panic, which must
-        // never reach the FFI edge.
-        Method::Adam(_) => Err(OptimizerError::InvalidConfig {
-            parameter: "method",
-            reason: "Adam is dispatched separately".to_string(),
-        }),
     };
     finish(result, errors)
 }
@@ -444,10 +425,9 @@ fn dispatch_adam(
     evaluation: Box<dyn EvaluationOracle>,
     gradient: Option<Box<dyn GradientOracle>>,
     dimensions: u32,
-    errors: &OracleErrorSlot,
     seed: u64,
     initial_point: Option<Vec<f64>>,
-) -> Result<OptimizationOutcome, OracleError> {
+) -> Result<OptimizationOutcome, OptimizerError> {
     let (gradient_oracle, tracking): (Box<dyn GradientOracle>, Box<dyn EvaluationOracle>) =
         match gradient {
             Some(gradient) => (gradient, evaluation),
@@ -459,12 +439,11 @@ fn dispatch_adam(
                 let difference = FiniteDifferenceGradient::new(
                     Arc::clone(&evaluation),
                     cfg.finite_difference_step,
-                )
-                .map_err(OracleError::Config)?;
+                )?;
                 (Box::new(difference), Box::new(evaluation))
             }
         };
-    let result = AlgorithmAdam.optimize(AlgorithmAdamArgs {
+    AlgorithmAdam.optimize(AlgorithmAdamArgs {
         oracle: tracking,
         gradient_oracle,
         max_iters: cfg.max_iters,
@@ -479,8 +458,7 @@ fn dispatch_adam(
         rule: cfg.rule,
         seed: Some(seed),
         initial_point,
-    });
-    finish(result, errors)
+    })
 }
 
 /// An oracle failure recorded during the run is the root cause; surface it
