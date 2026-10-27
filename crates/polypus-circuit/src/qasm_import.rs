@@ -1845,6 +1845,7 @@ mod tests {
         assert_eq!(names.len(), before, "duplicate spelling in BUILTIN_GATES");
         for gate in BUILTIN_GATES {
             assert!(std::ptr::eq(builtin_gate(gate.name).unwrap(), gate));
+            assert_eq!(format!("{gate:?}"), format!("BuiltinGate({})", gate.name));
         }
         assert!(builtin_gate("ccz").is_none());
     }

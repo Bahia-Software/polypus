@@ -820,6 +820,167 @@ fn constructs_outside_the_profile_are_rejected_on_their_line() {
     }
 }
 
+/// Malformed programs: each production names the token that breaks it, on
+/// its line (line 5 is the first statement after [`program`]'s preamble).
+#[test]
+fn malformed_statements_name_the_token_that_does_not_fit() {
+    let cases: &[(&str, usize, &str)] = &[
+        // Statements and declarations.
+        ("1;", 5, "expected a statement, found '1'"),
+        ("$0;", 5, "physical qubits ('$0') are not supported"),
+        (
+            "include stdgates;",
+            5,
+            "expected a file name, found 'stdgates'",
+        ),
+        (
+            "qubit[n] r;",
+            5,
+            "expected an integer literal register size, found 'n'",
+        ),
+        (
+            "qubit[99999999999999999999] r;",
+            5,
+            "register size '99999999999999999999' is out of range",
+        ),
+        ("qubit[2 r;", 5, "expected ']', found 'r'"),
+        ("qubit[2] 3;", 5, "expected a register name, found '3'"),
+        ("qubit[2] r, s;", 5, "expected ';', found ','"),
+        (
+            "gate g a { }\nqubit g;",
+            6,
+            "'g' is already declared as a gate",
+        ),
+        (
+            "input float[] a;",
+            5,
+            "only float[64] inputs are supported (Polypus angles are binary64), found float[…]",
+        ),
+        ("input float[64] a b;", 5, "expected ';', found 'b'"),
+        // Operands.
+        ("x ;", 5, "expected a quantum register, found ';'"),
+        (
+            "x \"q\";",
+            5,
+            "expected a quantum register, found a string literal",
+        ),
+        ("x $q;", 5, "unexpected character '$'"),
+        (
+            "x q[i];",
+            5,
+            "only an integer literal can index 'q', found 'i'",
+        ),
+        (
+            "x q[99999999999999999999];",
+            5,
+            "index '99999999999999999999' of 'q' is out of range",
+        ),
+        ("x q[0, 1];", 5, "index lists of 'q' are not supported"),
+        ("x q[0 1];", 5, "expected ']', found '1'"),
+        (
+            "x q[0][1];",
+            5,
+            "'q' is a register of single qubits or bits: arrays are not supported",
+        ),
+        // Calls, measurements and barriers.
+        ("x q[0] q[1];", 5, "expected ',' or ';', found 'q'"),
+        ("rx(0.5 0.2) q[0];", 5, "expected ',' or ')', found '0.2'"),
+        (
+            "c q[0];",
+            5,
+            "unsupported gate 'c': 'c' is a bit register, not a gate",
+        ),
+        (
+            "gate g a { }\ng q[0], q[1];",
+            6,
+            "gate 'g' expects 1 argument(s), found 2",
+        ),
+        (
+            "q = measure q[0];",
+            5,
+            "'q' is a qubit register, not a bit register",
+        ),
+        ("d = measure q[0];", 5, "undeclared classical register 'd'"),
+        ("c[0] measure q[0];", 5, "expected '=', found 'measure'"),
+        ("measure q[0] c[0];", 5, "expected '->', found 'c'"),
+        ("barrier q[0] q[1];", 5, "expected ',' or ';', found 'q'"),
+        // Angle expressions.
+        ("rx(,) q[0];", 5, "expected an expression, found ','"),
+        (
+            "rx($0) q[0];",
+            5,
+            "physical qubits ('$0') are not supported",
+        ),
+        ("rx(1e) q[0];", 5, "invalid number literal"),
+        (
+            "input float[64] a;\nrx(a[0]) q[0];",
+            6,
+            "indexing 'a' is not supported: inputs are scalar floats",
+        ),
+        // Gate declarations and bodies.
+        ("gate g(s t) a { }", 5, "expected ',' or ')', found 't'"),
+        (
+            "gate g 1 { }",
+            5,
+            "expected a qubit argument name, found '1'",
+        ),
+        ("gate g a;", 5, "expected ',' or '{', found ';'"),
+        (
+            "gate g a {\n  1;\n}",
+            6,
+            "'1' is not allowed inside the body of gate 'g'",
+        ),
+        (
+            "gate g a {\n  rx(0.5 0.2) a;\n}",
+            6,
+            "expected ',' or ')', found '0.2'",
+        ),
+        (
+            "gate g a {\n  rx(a) a;\n}",
+            6,
+            "'a' is a qubit argument, not a value",
+        ),
+        (
+            "gate g a {\n  rx(q) a;\n}",
+            6,
+            "'q' is a qubit register, not a value",
+        ),
+        (
+            "gate g a {\n  x $0;\n}",
+            6,
+            "physical qubits ('$0') are not supported",
+        ),
+        (
+            "gate g a {\n  x 1;\n}",
+            6,
+            "expected a qubit argument, found '1'",
+        ),
+        (
+            "gate g a, b {\n  cx a b;\n}",
+            6,
+            "expected ',' or ';', found 'b'",
+        ),
+    ];
+    for &(statements, line, fragment) in cases {
+        let (got_line, message) = rejected(&program(statements));
+        assert!(
+            message.contains(fragment),
+            "{statements:?}: {message:?} lacks {fragment:?}"
+        );
+        assert_eq!(got_line, line, "{statements:?}: {message}");
+    }
+    // A string still open where the source ends, and a stdgates.inc name
+    // taken before the include.
+    let (line, message) = rejected("OPENQASM 3.0;\ninclude \"stdgates.inc");
+    assert_eq!((line, message.as_str()), (2, "unterminated string literal"));
+    let (line, message) = rejected("OPENQASM 3.0;\ngate h a { }\ninclude \"stdgates.inc\";\n");
+    assert_eq!(line, 3);
+    assert!(
+        message.contains("'h' is already declared, so \"stdgates.inc\" cannot define it"),
+        "{message}"
+    );
+}
+
 #[test]
 fn the_version_must_be_3() {
     let (line, message) = rejected("OPENQASM 2.0;\nqreg q[1];\n");
