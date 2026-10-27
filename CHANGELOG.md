@@ -271,8 +271,18 @@ Changes on `main` since 0.7.2.
   optimizer's `check_preconditions` checks its configuration and then the point
   without running anything, and `polypus_orchestration::Method::check_preconditions`
   calls the one the method names.
+- `polypus.ConfigurationError`, a `polypus.PolypusError` that is also a
+  `ValueError`. Every argument and configuration check of `run_quantum_circuit`,
+  `train`, `qml.train` and `qml.predict` raises it (an unknown `infrastructure`,
+  a bad `walltime`, an optimizer setting, `options` on `local`/`cunqa`, …), as
+  do `polypus.DE(strategy=...)`, `polypus.Adam(rule=...)` and the argument
+  checks of the `polypus.external` adapters, so `except polypus.PolypusError`
+  catches them and `except ValueError` still does (#418).
 
 ### Changed
+- Argument and configuration errors are now `polypus.ConfigurationError`, a
+  `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
+  `except ValueError` now catches them (#418).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `External`, so an exhaustive `match` on it outside its crate must handle
   it (#399).
@@ -382,6 +392,13 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- `train` and `qml.train` convert `expectation_function` before creating the
+  backend, so an invalid one no longer requests a CUNQA allocation (`qraise`)
+  before failing; the optimizer configuration was already checked first.
+  `qml.train` rejects `infrastructure="qmio"` before anything runs, like
+  `qml.predict`. The stubs type `options` as a `dict` of `str` or
+  `list`/`tuple` of `str` values, which the runtime accepts, so mypy accepts
+  `options={"command": [...]}` (#418).
 - Runs on the local Aer backend or on CUNQA from several threads at once no
   longer panic with `Already mutably borrowed: PyBorrowError` on Qiskit 2.0.
   The circuit lowering shares Qiskit's session equivalence library between

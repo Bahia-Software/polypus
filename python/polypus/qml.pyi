@@ -30,6 +30,7 @@ from . import (
     TrainResult,
     _FloatVector,
     _Method,
+    _Options,
 )
 
 __all__ = [
@@ -333,7 +334,7 @@ def train(
     noise_model: Optional[NoiseModel] = None,
     backend: str = "aer",
     seed: Optional[int] = None,
-    options: Optional[dict[str, str]] = None,
+    options: Optional[_Options] = None,
     walltime: Optional[str] = None,
     *,
     y_train: Optional[Iterable[float]] = None,

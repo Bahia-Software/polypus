@@ -329,8 +329,8 @@ your default. A value of the other shape (a list where you read a string, or the
 reverse) is a `BackendError::Conversion` naming the key; propagate it with `?`
 rather than defaulting, so a configuration mistake surfaces as
 `polypus.BackendError` instead of being silently ignored. An unknown name yields
-`BackendError::UnknownInfrastructure` (a clean `ValueError` at the FFI edge), never a
-panic or a silent fallthrough.
+`BackendError::UnknownInfrastructure` (`polypus.ConfigurationError`, a
+`ValueError`, at the FFI edge), never a panic or a silent fallthrough.
 
 > **Migrating from `option()` (breaking change since v0.7.2).** `BackendBuildContext::option` is
 > gone and `options` is now `HashMap<String, OptionValue>`

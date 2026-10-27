@@ -23,6 +23,7 @@ import subprocess
 import sys
 
 import numpy as np
+import polypus
 import pytest
 from polypus.external import from_nevergrad, from_optuna, from_pycma
 
@@ -292,6 +293,7 @@ class TestOptunaAdapter:
             ({"bounds": (1.0, 1.0)}, "bounds must be finite with low < high"),
             ({"bounds": (0.0, math.inf)}, "bounds must be finite with low < high"),
             ({"bounds": 3}, "bounds must be two numbers (low, high), got 3"),
+            ({"initial_point": ["a", 0.5]}, "must be 2 numbers, got ['a', 0.5]"),
             ({"initial_point": [0.5]}, "must have one value per dimension (2), got 1"),
             ({"initial_point": [0.5, math.nan]}, "every value must be finite"),
             ({"initial_point": [0.5, 7.0]}, "must lie within bounds"),
@@ -300,14 +302,18 @@ class TestOptunaAdapter:
     def test_invalid_arguments_raise(self, kwargs, message):
         arguments = {"dimensions": 2, "batch_size": 2, **kwargs}
         study = FakeStudy()
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(polypus.ConfigurationError, match=re.escape(message)):
             from_optuna(study, **arguments)
         assert study.queue == []
 
     def test_a_study_with_several_objectives_raises(self):
-        with pytest.raises(ValueError, match="single-objective study, got one with 2"):
+        with pytest.raises(
+            polypus.ConfigurationError, match="single-objective study, got one with 2"
+        ):
             from_optuna(FakeStudy("MINIMIZE", "MAXIMIZE"), 2, 2)
-        with pytest.raises(ValueError, match="maximizes or minimizes, got NOT_SET"):
+        with pytest.raises(
+            polypus.ConfigurationError, match="maximizes or minimizes, got NOT_SET"
+        ):
             from_optuna(FakeStudy("NOT_SET"), 2, 2)
 
     def test_a_run_through_the_bridge(self):
@@ -385,7 +391,7 @@ class TestNevergradAdapter:
     )
     def test_invalid_arguments_raise(self, kwargs, message):
         optimizer = FakeNevergrad()
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(polypus.ConfigurationError, match=message):
             from_nevergrad(optimizer, **kwargs)
         assert optimizer.suggested == []
 

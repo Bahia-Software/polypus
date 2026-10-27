@@ -47,6 +47,7 @@ __all__ = [
     "NativeCircuitError",
     "InsufficientMemoryError",
     "EvaluationError",
+    "ConfigurationError",
     "DE",
     "PSO",
     "QNG",
@@ -103,6 +104,9 @@ _DeStrategy = Literal["rand1bin", "shade", "lshade"]
 # `Adam.rule`: how the gradient becomes a step (bindings/adam.rs). Any other
 # name raises `ValueError`.
 _AdamRule = Literal["adam", "momentum"]
+# `options` of a registry-backed backend: each value a `str` or a list/tuple of
+# `str` (docs/adr/0005-registry-option-values.md).
+_Options = dict[str, Union[str, list[str], tuple[str, ...]]]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
@@ -130,6 +134,7 @@ class QmioError(BackendError): ...
 class NativeCircuitError(BackendError): ...
 class InsufficientMemoryError(BackendError): ...
 class EvaluationError(PolypusError): ...
+class ConfigurationError(PolypusError, ValueError): ...
 
 # ── Optimizers ──────────────────────────────────────────────────────────────
 
@@ -540,7 +545,7 @@ def train(
     backend: str = "aer",
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
-    options: Optional[dict[str, str]] = None,
+    options: Optional[_Options] = None,
     walltime: Optional[str] = None,
     initial_point: Optional[_FloatVector] = None,
     final_shots: Optional[int] = None,
@@ -557,7 +562,7 @@ def run_quantum_circuit(
     backend: str = "aer",
     seed: Optional[int] = None,
     fusion: Optional[bool] = None,
-    options: Optional[dict[str, str]] = None,
+    options: Optional[_Options] = None,
     walltime: Optional[str] = None,
 ) -> RunResult: ...
 def statevector(

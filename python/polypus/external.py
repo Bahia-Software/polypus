@@ -52,17 +52,27 @@ class AskTell(Protocol):
     def tell(self, candidates: list[list[float]], values: list[float], /) -> object: ...
 
 
+def _configuration_error(message: str) -> ValueError:
+    """A ``polypus.ConfigurationError``, imported here because the extension
+    is loaded after this module."""
+    from polypus import ConfigurationError
+
+    return ConfigurationError(message)
+
+
 def _positive_int(value: Any, name: str) -> int:
     """``value`` as an ``int >= 1``; a ``bool`` or a non-integer is a
-    ``ValueError``."""
+    ``polypus.ConfigurationError``."""
     if isinstance(value, bool):
-        raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+        raise _configuration_error(f"{name} must be an integer >= 1, got {value!r}")
     try:
         number = operator.index(value)
     except TypeError:
-        raise ValueError(f"{name} must be an integer >= 1, got {value!r}") from None
+        raise _configuration_error(
+            f"{name} must be an integer >= 1, got {value!r}"
+        ) from None
     if number < 1:
-        raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+        raise _configuration_error(f"{name} must be an integer >= 1, got {value!r}")
     return number
 
 
@@ -71,11 +81,11 @@ def _bounds(bounds: Any) -> tuple[float, float]:
     try:
         low, high = (float(b) for b in bounds)
     except (TypeError, ValueError):
-        raise ValueError(
+        raise _configuration_error(
             f"bounds must be two numbers (low, high), got {bounds!r}"
         ) from None
     if not (math.isfinite(low) and math.isfinite(high) and low < high):
-        raise ValueError(
+        raise _configuration_error(
             f"bounds must be finite with low < high, got ({low!r}, {high!r})"
         )
     return low, high
@@ -88,22 +98,22 @@ def _point(
     try:
         values = [float(x) for x in point]
     except (TypeError, ValueError):
-        raise ValueError(
+        raise _configuration_error(
             f"invalid initial_point: must be {dimensions} numbers, got {point!r}"
         ) from None
     if len(values) != dimensions:
-        raise ValueError(
+        raise _configuration_error(
             f"invalid initial_point: must have one value per dimension "
             f"({dimensions}), got {len(values)}"
         )
     for index, value in enumerate(values):
         if not math.isfinite(value):
-            raise ValueError(
+            raise _configuration_error(
                 f"invalid initial_point: every value must be finite, got {value} "
                 f"at index {index}"
             )
         if bounds is not None and not bounds[0] <= value <= bounds[1]:
-            raise ValueError(
+            raise _configuration_error(
                 f"invalid initial_point: every value must lie within bounds "
                 f"[{bounds[0]}, {bounds[1]}], got {value} at index {index}"
             )
@@ -154,13 +164,13 @@ class _Optuna:
         self.low, self.high = _bounds(bounds)
         directions = list(study.directions)
         if len(directions) != 1:
-            raise ValueError(
+            raise _configuration_error(
                 "from_optuna needs a single-objective study, got one with "
                 f"{len(directions)} directions"
             )
         name = getattr(directions[0], "name", str(directions[0]))
         if name not in ("MAXIMIZE", "MINIMIZE"):
-            raise ValueError(
+            raise _configuration_error(
                 f"from_optuna needs a study that maximizes or minimizes, got {name}"
             )
         # Polypus maximises: a study that minimises is told -value.

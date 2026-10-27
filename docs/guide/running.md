@@ -86,6 +86,7 @@ A circuit without measurements is read out on all its qubits by both backends.
 
 All Polypus exceptions derive from `polypus.PolypusError`.
 
+- An invalid argument or configuration of `run_quantum_circuit`, `train`, `qml.train` or `qml.predict` raises `polypus.ConfigurationError`, which is also a `ValueError`: an unknown `infrastructure`, a bad `walltime`, an optimizer setting such as `DE(population_size=3)`, an `options` dict on a backend that takes none. `train` and `qml.train` check all of them, the optimizer included, before creating the backend, so on CUNQA no allocation is requested for a run that cannot start. A value of the wrong type is a `TypeError`.
 - A Qiskit or Aer failure during a run raises `polypus.BackendError`, with the original exception as its `__cause__`.
 - A Qiskit failure while `train`, `qml.train` or `qml.predict` prepares or binds your circuits (for example an ansatz wider than the feature map) raises `polypus.EvaluationError` the same way.
 - An exception raised by your own `expectation_function` reaches you unchanged.
