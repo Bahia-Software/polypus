@@ -1577,7 +1577,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   deterministic optimizer a seeded native run reproduces exactly
   (`tests/python/test_seed_reproducibility.py`, the External cases). On the
   native, Aer, and CUNQA backends the resolved seed *also* seeds shot sampling,
-  so a `train()` run on any of them is reproducible end-to-end; `qml.train` is
+  so a `train()` run on any of them is reproducible end-to-end, in another
+  process too: every cost reducer sums a counts map in ascending bitstring
+  order, never in `HashMap` order, which differs per process (#401;
+  `TestReplayInFreshInterpreter` in `test_seed_reproducibility.py` replays
+  seeded native runs in fresh interpreters); `qml.train` is
   Qiskit/Aer-only (native rejected), and since Aer shot noise is now seeded
   too, its reproducibility guarantee covers both the optimizer trajectory and
   Aer's sampling. A seeded `CMAES` run reproduces on the same platform and

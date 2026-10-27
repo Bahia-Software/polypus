@@ -331,6 +331,9 @@ boundary stays out-of-process and explicit; see
   `polypus-optimizers`). Results must be deterministic given a seed. Don't
   introduce nondeterminism: iteration order over a `HashMap` affecting
   results, unseeded RNG, parallelism that changes reduction order, etc.
+  A floating-point reduction over a `HashMap`/`HashSet` therefore accumulates
+  in sorted-key order, never in iteration order (which differs per map and per
+  process): the cost reducers sum a counts map in ascending bitstring order.
 - **Angle expressions** (`polypus_circuit::expr`) are evaluated exactly as
   written: the same floating-point operations in source order, with no
   reassociation and no folding of constant subexpressions (only an expression
@@ -341,8 +344,9 @@ boundary stays out-of-process and explicit; see
   recursively, so their depth cannot overflow the stack; construction bounds
   their size and their nesting as written.
 - In numeric tests, compare with a tolerance (epsilon), not exact float
-  equality — **except** the QASM round-trip, which is byte-identical
-  (contract C-2).
+  equality — **except** where bit-identity is the property under test: the
+  QASM round-trip (contract C-2), parallel == sequential, and a reduction's
+  independence from iteration order.
 - Use `f64` and `num-complex::Complex64` consistently with the rest of the
   simulator.
 

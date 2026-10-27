@@ -70,6 +70,12 @@ pub trait CostObservable: Send + Sync {
     ///
     /// Contract: an empty per-candidate map (or one whose counts sum to zero)
     /// yields `0.0`, matching the historical Python aggregation.
+    ///
+    /// The result must not depend on the maps' iteration order, which `HashMap`
+    /// randomises per map and per process: floating-point addition is not
+    /// associative, so a sum taken in that order can change in the last bit from
+    /// one run to the next. The reducers in this crate sum each candidate's terms
+    /// in ascending bitstring order.
     fn expectation_batch(
         &self,
         counts: &[HashMap<String, u64>],
