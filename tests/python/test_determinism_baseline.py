@@ -32,6 +32,11 @@ Two tiers, split by whether a vector is *provably* stable across platforms:
   phase, to enforce the plan's byte-identical requirement. It is byte-exact when
   it runs.
 
+* **Fresh-process tier** (always runs, CI included): the same native trainings,
+  run here and in a fresh interpreter of the same build, must agree byte for
+  byte. That holds on any platform, so CI checks on every leg that a seed
+  replays a training in another process (contract C-7, #407).
+
 Regenerate the fixture (only on a deliberate, reviewed behaviour change) with::
 
     POLYPUS_DETERMINISM_STRICT=1 python tests/python/test_determinism_baseline.py
@@ -41,6 +46,8 @@ which rewrites ``determinism_vectors.json`` next to this file.
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -270,6 +277,22 @@ class TestSameBuildStrict:
         assert capture_native_train() == fixture
 
 
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestSameBuildFreshProcess:
+    """The strict tier's trainings replay byte for byte in another process."""
+
+    def test_native_train_replays_in_a_fresh_process(self):
+        proc = subprocess.run(
+            [sys.executable, __file__, "--print-native-train"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout.splitlines()[-1]) == capture_native_train()
+
+
 def _regenerate():
     """Rewrite the fixture from the current build. Requires strict mode so it is
     never triggered by accident from a plain pytest run."""
@@ -297,4 +320,7 @@ def _regenerate():
 
 
 if __name__ == "__main__":
-    _regenerate()
+    if sys.argv[1:] == ["--print-native-train"]:
+        print(json.dumps(capture_native_train()))
+    else:
+        _regenerate()

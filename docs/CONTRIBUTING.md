@@ -146,6 +146,14 @@ so the tests of `polypus.ask_tell` that train through them run there
 the floors of the pip extras of the same names in `pyproject.toml`, which a
 test checks: bump a pin and its floor together.
 
+Every Python leg also sets `POLYPUS_ALLOWED_SKIPS` to the tests it may skip,
+separated by spaces: a file (`test_cunqa_real.py`) or a class or test in it
+(`test_determinism_baseline.py::TestSameBuildStrict`; a test covers its
+parametrized cases). Any other skip fails the run and is listed at its end
+(`tests/python/skip_guard.py`), as is an entry that matched no skip, which
+does not fail it. A test that needs something a leg lacks either gets it
+installed there or goes on that leg's list in `.github/workflows/ci.yml`.
+
 CI also builds the wheel on Linux, macOS and Windows and executes every
 notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
 Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the

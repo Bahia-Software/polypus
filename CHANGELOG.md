@@ -585,6 +585,12 @@ Changes on `main` since 0.7.2.
 - Rust: `dispatch_optimizer` checks Adam's `finite_difference_step` with an
   exact gradient too, as `Method::check_preconditions` does, so the two
   agree whatever oracles the run has (#467).
+- A Python test that CI skips now fails the run unless the leg's
+  `POLYPUS_ALLOWED_SKIPS` lists it (`tests/python/skip_guard.py`), so a test
+  that backs a contract cannot stop running unnoticed. The floors leg installs
+  LLVM too, and every leg replays the seeded native trainings of the C-7
+  determinism baseline in a second process and compares them byte for byte
+  (#407).
 
 ## [0.7.2] - 2026-09-30
 
