@@ -12,6 +12,8 @@ These exercise issue #34 / #56's acceptance criteria from Python:
   / seed, and the ``DE``/``PSO``/``QNG``/``CMAES``/``Adam``/``SPSA``/``Rotosolve``
   ``seed`` field feeds the precedence. ``External`` has no ``seed`` field: its
   library owns its seed, and the run's seed fixes the shot sampling only.
+* A seeded ``train`` replays bit-for-bit in a fresh interpreter, including costs
+  whose count-weighted sums are inexact.
 
 CUNQA's simulated QPUs (``infrastructure="cunqa"``) get the same seed forwarding
 as Aer, offset per QPU. It is pinned against a fake CUNQA SDK in
@@ -25,6 +27,10 @@ mocks ``polypus_python.run_qcs`` to make the oracle's expectation values fixed
 regardless of the (still-seeded) Aer sampling underneath, isolating the
 assertions to the optimizer RNG that ``seed`` controls.
 """
+
+import json
+import subprocess
+import sys
 
 import pytest
 
@@ -599,3 +605,83 @@ class TestQmlTrainSeed:
         r3 = self._qml_train(None, method())
         assert r3.seed != 123
         assert r3.best_params != r1.best_params
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Replay in a fresh interpreter — the seed alone must reproduce a run in another
+# process, including costs whose count-weighted sums are inexact
+# ─────────────────────────────────────────────────────────────────────────────
+
+# One seeded native `train` per (cost kind, optimizer), printed as exact float
+# hex. The per-bitstring costs are not dyadic, so a count-weighted sum rounds
+# differently depending on the order its terms are added in, and Rust's HashMap
+# iteration order changes from one process to the next. QNG's finite-difference
+# gradient carries a last-bit difference in any fitness into the parameters.
+_REPLAY = """
+import json
+import polypus
+
+VALUES = {"000": 0.3, "001": 0.9, "010": 0.3, "011": 0.1,
+          "100": 0.2, "101": 0.2, "110": 0.7, "111": 0.3}
+
+
+def cost(bitstring):
+    return VALUES[bitstring]
+
+
+COSTS = {
+    "callable": cost,
+    "cached": polypus.CachedCost(cost),
+    "qubo": polypus.Qubo(3, linear=[(0, 0.1), (1, 0.2), (2, 0.7)],
+                         quadratic=[(0, 1, 0.3), (1, 2, 0.1), (0, 2, 0.2)]),
+    "ising": polypus.Ising(3, fields=[(0, 0.1), (1, 0.2), (2, 0.7)],
+                           couplings=[(0, 1, 0.3), (1, 2, 0.1), (0, 2, 0.2)]),
+}
+P = polypus.Param
+circuit = (polypus.Circuit(3).ry(0, P(0)).ry(1, P(1)).ry(2, P(2))
+           .cx(0, 1).cx(1, 2).measure_all())
+
+
+def methods():
+    yield "de", polypus.DE(generations=8, population_size=10, tolerance=1e-12,
+                           patience=50)
+    yield "qng", polypus.QNG(variance_function=lambda theta, a: 0.5, max_iters=6,
+                             bounds=(0.0, 3.141592653589793), learning_rate=0.1)
+
+
+out = {}
+for kind, expectation_function in COSTS.items():
+    for name, method in methods():
+        r = polypus.train(circuit, method, shots=500, n_qpus=1, dimensions=3,
+                          expectation_function=expectation_function,
+                          infrastructure="local", nodes=1, cores_per_qpu=1,
+                          id="replay", backend="polypus", seed=11)
+        out.setdefault(kind, {})[name] = {
+            "best_params": [v.hex() for v in r.best_params],
+            "best_fitness": r.best_fitness.hex(),
+            "fitness_history": [v.hex() for v in r.fitness_history],
+        }
+print(json.dumps(out))
+"""
+
+
+def _replay_in_fresh_interpreter():
+    proc = subprocess.run(
+        [sys.executable, "-c", _REPLAY], capture_output=True, text=True, timeout=300
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+@pytest.fixture(scope="module")
+def two_replays():
+    return _replay_in_fresh_interpreter(), _replay_in_fresh_interpreter()
+
+
+@pytest.mark.integration
+@pytest.mark.vqc
+class TestReplayInFreshInterpreter:
+    @pytest.mark.parametrize("kind", ["callable", "cached", "qubo", "ising"])
+    def test_same_seed_reproduces_outcome(self, two_replays, kind):
+        first, second = two_replays
+        assert first[kind] == second[kind]

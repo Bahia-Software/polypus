@@ -283,6 +283,13 @@ Changes on `main` since 0.7.2.
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
   `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
   `except ValueError` now catches them (#418).
+- **BREAKING:** `polypus.Qubo`, `polypus.Ising` and a Python cost function sum
+  each candidate's count-weighted cost in ascending bitstring order instead of
+  `HashMap` iteration order, which differs between processes, and the cost
+  function is called in that order. The cost sums no longer depend on the
+  process, so a seeded native `train` replays bit for bit in another process
+  (contract C-7); fitness values of costs with inexact sums can move in the
+  last bit (#401).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `External`, so an exhaustive `match` on it outside its crate must handle
   it (#399).
