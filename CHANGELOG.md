@@ -333,6 +333,12 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- Runs on the local Aer backend or on CUNQA from several threads at once no
+  longer panic with `Already mutably borrowed: PyBorrowError` on Qiskit 2.0.
+  The circuit lowering shares Qiskit's session equivalence library between
+  threads, and Qiskit 2.0's `BasisTranslator` cannot share it; Polypus now
+  lowers one circuit at a time, which costs no parallelism since the passes
+  hold the GIL (#468).
 - The examples run as shipped. `polypus_cunqa_basic.py` passed
   `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
   teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
