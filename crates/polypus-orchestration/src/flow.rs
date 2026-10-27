@@ -483,6 +483,8 @@ mod tests {
                 tolerance: 0.0,
                 patience: 10,
                 strategy: polypus_optimizers::DeStrategy::Rand1Bin,
+                mutation_factor: None,
+                crossover_rate: None,
             }),
             dimensions: 3,
             seed: 7,
@@ -566,6 +568,8 @@ mod tests {
                 tolerance: 0.0,
                 patience: 10,
                 strategy: polypus_optimizers::DeStrategy::Rand1Bin,
+                mutation_factor: None,
+                crossover_rate: None,
             }),
             dimensions: 2,
             seed: 7,
@@ -758,6 +762,8 @@ mod tests {
                             tolerance: 0.0,
                             patience: 100,
                             strategy,
+                            mutation_factor: None,
+                            crossover_rate: None,
                         }),
                     )
                 })
@@ -1009,6 +1015,8 @@ mod tests {
             tolerance: 0.0,
             patience: 10,
             strategy: polypus_optimizers::DeStrategy::Rand1Bin,
+            mutation_factor: None,
+            crossover_rate: None,
         });
         let result = noisy_run(method, factory, Some(4096), None);
         assert!(matches!(

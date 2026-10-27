@@ -18,7 +18,7 @@
 
 use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 /// NaN-safe argmax over a fitness slice.
 ///
@@ -269,6 +269,17 @@ pub(crate) fn wrap_angle(x: f64) -> f64 {
     }
 }
 
+/// The difference of two angles `x` as the shortest signed arc, in `(−π, π]`:
+/// members at 0.05 and 6.23 rad are 0.1 rad apart, not 6.18.
+pub(crate) fn wrap_difference(x: f64) -> f64 {
+    let wrapped = wrap_angle(x);
+    if wrapped > PI {
+        wrapped - TAU
+    } else {
+        wrapped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +462,21 @@ mod tests {
         // patience 0 compares the last generation with itself.
         assert_eq!(recent_improvement(&[1.0], 0), Some(0.0));
         assert_eq!(recent_improvement(&[], 0), None);
+    }
+
+    #[test]
+    fn wrap_difference_is_the_shortest_signed_arc() {
+        assert_eq!(wrap_difference(0.0), 0.0);
+        assert_eq!(wrap_difference(PI), PI);
+        assert_eq!(wrap_difference(-PI), PI);
+        assert_eq!(wrap_difference(0.5), 0.5);
+        assert_eq!(wrap_difference(-0.5), -0.5);
+        assert!((wrap_difference(6.23 - 0.05) - (6.23 - 0.05 - TAU)).abs() < 1e-15);
+        assert!((wrap_difference(0.05 - 6.23) - (0.05 - 6.23 + TAU)).abs() < 1e-15);
+        for x in [-10.0, -TAU, -4.0, -1.0, 1.0, 4.0, TAU, 10.0] {
+            let d = wrap_difference(x);
+            assert!(d > -PI && d <= PI, "{x} -> {d}");
+        }
     }
 
     #[test]

@@ -146,6 +146,10 @@ class DE:
     patience: int
     seed: Optional[int]
     strategy: _DeStrategy
+    # DE/rand/1/bin's F in (0, 2] and CR in [0, 1]; None means 0.8 and 0.7.
+    # "shade" and "lshade" adapt both and raise ValueError for a value.
+    mutation_factor: Optional[float]
+    crossover_rate: Optional[float]
     def __new__(
         cls,
         generations: int = 100,
@@ -154,6 +158,8 @@ class DE:
         patience: int = 20,
         seed: Optional[int] = None,
         strategy: _DeStrategy = "rand1bin",
+        mutation_factor: Optional[float] = None,
+        crossover_rate: Optional[float] = None,
     ) -> DE: ...
 
 @final

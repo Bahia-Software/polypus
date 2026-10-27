@@ -36,6 +36,12 @@ Changes on `main` since 0.7.2.
   defaults, and `backend=None` is the native simulator on `local`. Options are
   strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
   circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
+- `polypus.DE(mutation_factor=None, crossover_rate=None)`: DE/rand/1/bin's
+  `F`, in `(0, 2]`, and `CR`, in `[0, 1]`; `None` keeps 0.8 and 0.7. A value
+  out of range, or any value with `strategy="shade"` or `"lshade"`, which
+  adapt both, raises `polypus.ConfigurationError` when the object is built or
+  the attribute set. Rust: `AlgorithmDifferentialEvolution::check_rates` and the
+  `DEFAULT_MUTATION_FACTOR` and `DEFAULT_CROSSOVER_RATE` constants (#410).
 - `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
   `qml.train`: runs an optimizer from outside Polypus, a library such as
   Optuna, Nevergrad or pycma or an object of your own, through Polypus's
@@ -283,6 +289,22 @@ Changes on `main` since 0.7.2.
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
   `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
   `except ValueError` now catches them (#418).
+- **BREAKING:** `polypus.Qubo`, `polypus.Ising` and a Python cost function sum
+  each candidate's count-weighted cost in ascending bitstring order instead of
+  `HashMap` iteration order, which differs between processes, and the cost
+  function is called in that order. The cost sums no longer depend on the
+  process, so a seeded native `train` replays bit for bit in another process
+  (contract C-7); fitness values of costs with inexact sums can move in the
+  last bit (#401).
+- **BREAKING:** `polypus.DE` treats the parameters as angles: every strategy
+  takes a difference between two members as the shorter arc, in `(−π, π]`,
+  so an optimum near 0 converges as well as one at π. `"rand1bin"` always
+  takes one coordinate of a trial from the mutant, so no trial is a plain
+  copy of its parent. Seeded DE results change (#410).
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs` and
+  `polypus_orchestration::DeConfig` have the fields `mutation_factor` and
+  `crossover_rate`, and `AlgorithmDifferentialEvolution::check_preconditions`
+  takes the strategy and both rates (#410).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `External`, so an exhaustive `match` on it outside its crate must handle
   it (#399).

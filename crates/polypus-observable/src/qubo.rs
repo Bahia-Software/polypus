@@ -193,10 +193,16 @@ impl QuboObservable {
 
     /// Count-weighted mean of `f` over one candidate's counts. Empty counts (or
     /// counts summing to zero) yield `0.0`.
+    ///
+    /// Summed in ascending bitstring order so the result does not depend on
+    /// `HashMap` iteration order.
     fn expectation_one(&self, counts: &HashMap<String, u64>) -> Result<f64, ObservableError> {
+        let mut outcomes: Vec<(&str, u64)> =
+            counts.iter().map(|(key, &n)| (key.as_str(), n)).collect();
+        outcomes.sort_unstable_by(|a, b| a.0.cmp(b.0));
         let mut num = 0.0f64;
         let mut den = 0u64;
-        for (key, &n) in counts {
+        for (key, n) in outcomes {
             num += self.eval_bits(key)? * n as f64;
             den += n;
         }
@@ -279,6 +285,24 @@ mod tests {
             .expectation_batch(&[counts(&[("1", 3), ("0", 1)])])
             .unwrap();
         assert!((ev[0] - (-0.75)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mean_does_not_depend_on_hashmap_iteration_order() {
+        // "001" -> 0.1, "010" -> 0.2, "100" -> 0.7: not dyadic, so the sum depends
+        // on the order its terms are added in. Four shots make the division by the
+        // shot count exact, so that difference reaches the mean.
+        let obs =
+            QuboObservable::new(3, vec![(0, 0.1), (1, 0.2), (2, 0.7)], vec![], 0.0, 1.0).unwrap();
+        let ascending = ((0.1 * 2.0 + 0.2) + 0.7) / 4.0;
+        assert_ne!(ascending, ((0.2 + 0.7) + 0.1 * 2.0) / 4.0);
+        // Each map gets its own `RandomState`, hence its own iteration order.
+        let batch: Vec<_> = (0..128)
+            .map(|_| counts(&[("001", 2), ("010", 1), ("100", 1)]))
+            .collect();
+        for ev in obs.expectation_batch(&batch).unwrap() {
+            assert_eq!(ev, ascending, "summed in ascending bitstring order");
+        }
     }
 
     #[test]

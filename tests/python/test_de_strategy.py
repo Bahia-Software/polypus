@@ -112,6 +112,89 @@ class TestDeStrategyOption:
         assert de.strategy == "rand1bin"
 
 
+class TestDeRates:
+    """``mutation_factor`` (F) and ``crossover_rate`` (CR) of DE/rand/1/bin."""
+
+    def test_default_is_none(self):
+        import polypus
+
+        de = polypus.DE()
+        assert de.mutation_factor is None
+        assert de.crossover_rate is None
+
+    def test_rates_round_trip(self):
+        import polypus
+
+        de = polypus.DE(mutation_factor=0.5, crossover_rate=0.9)
+        assert (de.mutation_factor, de.crossover_rate) == (0.5, 0.9)
+        de.mutation_factor = 1.2
+        de.crossover_rate = None
+        assert (de.mutation_factor, de.crossover_rate) == (1.2, None)
+
+    def test_rates_come_after_strategy_positionally(self):
+        import polypus
+
+        de = polypus.DE(10, 8, 0.05, 7, 3, "rand1bin", 0.6, 0.4)
+        assert (de.mutation_factor, de.crossover_rate) == (0.6, 0.4)
+
+    @pytest.mark.parametrize(
+        "kwargs, name",
+        [
+            ({"mutation_factor": 0.0}, "mutation_factor"),
+            ({"mutation_factor": 2.5}, "mutation_factor"),
+            ({"mutation_factor": float("nan")}, "mutation_factor"),
+            ({"crossover_rate": -0.1}, "crossover_rate"),
+            ({"crossover_rate": float("inf")}, "crossover_rate"),
+            ({"strategy": "shade", "mutation_factor": 0.5}, "mutation_factor"),
+            ({"strategy": "lshade", "crossover_rate": 0.5}, "crossover_rate"),
+        ],
+    )
+    def test_invalid_rates_raise_value_error(self, kwargs, name):
+        import polypus
+
+        with pytest.raises(ValueError, match=f"invalid {name}"):
+            polypus.DE(**kwargs)
+
+    def test_a_failed_assignment_keeps_the_previous_values(self):
+        import polypus
+
+        de = polypus.DE(mutation_factor=0.5)
+        with pytest.raises(ValueError, match="invalid mutation_factor"):
+            de.mutation_factor = 3.0
+        with pytest.raises(ValueError, match="set it to None before switching"):
+            de.strategy = "shade"
+        assert (de.mutation_factor, de.strategy) == (0.5, "rand1bin")
+
+    @pytest.mark.parametrize("name", ["mutation_factor", "crossover_rate"])
+    def test_an_adaptive_strategy_rejects_a_rate_set_later(self, name):
+        import polypus
+
+        de = polypus.DE(strategy="shade")
+        with pytest.raises(ValueError, match=f"invalid {name}"):
+            setattr(de, name, 0.5)
+        assert getattr(de, name) is None
+        setattr(de, name, None)
+
+    @pytest.mark.integration
+    @pytest.mark.vqc
+    def test_rates_reach_the_optimizer(self, monkeypatch):
+        # The first generation's trials are built with F and CR, so they show
+        # whether the rates reached the optimizer whatever the fitness.
+        import polypus
+
+        def trials(**rates):
+            batches = _record_batches(monkeypatch)
+            method = polypus.DE(generations=2, population_size=8, **rates)
+            _train(method, seed=5, ident="de_rates")
+            return batches[1]
+
+        default = trials()
+        assert trials(mutation_factor=0.8, crossover_rate=0.7) == default
+        # One parameter: j_rand always takes it from the mutant, so CR has no
+        # effect here (the Rust tests cover it).
+        assert trials(mutation_factor=0.3) != default
+
+
 @pytest.mark.integration
 @pytest.mark.vqc
 class TestDeStrategyBatches:

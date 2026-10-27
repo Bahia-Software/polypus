@@ -882,6 +882,8 @@ mod tests {
             tolerance: 0.0,
             patience: 10,
             strategy,
+            mutation_factor: None,
+            crossover_rate: None,
         })
     }
 
@@ -943,6 +945,8 @@ mod tests {
                     tolerance: 0.0,
                     patience: 1,
                     strategy,
+                    mutation_factor: None,
+                    crossover_rate: None,
                 });
                 let shape = method.run_shape(2);
                 let batches = Arc::new(Mutex::new(0));

@@ -138,6 +138,8 @@ fn native_training_reaches_perfect_train_accuracy() {
             patience: 150,
             seed: Some(7),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("DE optimizes successfully");
 
