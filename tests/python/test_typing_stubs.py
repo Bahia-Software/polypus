@@ -17,12 +17,14 @@ import pytest
 
 # Each stubbed module of the package, with its stub relative to the package dir.
 # The submodules are created by the extension at import time (they are not
-# files), so their stubs are the only on-disk description of them.
+# files), so their stubs are the only on-disk description of them, except
+# `polypus.external`, a pure-Python module typed inline.
 STUBS = {
     "polypus": "__init__.pyi",
     "polypus.qml": "qml.pyi",
     "polypus.circuits": "circuits/__init__.pyi",
     "polypus.circuits.templates": "circuits/templates.pyi",
+    "polypus.external": "external.py",
 }
 
 

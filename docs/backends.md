@@ -185,8 +185,9 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG), multiplies it by the generation budget and logs one `warn` if
-the projection exceeds the walltime:
+iteration for QNG, Adam and SPSA, the first step for Rotosolve, the first batch for an
+external optimizer), multiplies it by the generation budget and logs one `warn` if the
+projection exceeds the walltime:
 
 ```text
 run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
@@ -196,6 +197,53 @@ runs out. Raise `walltime` or lower the generations.
 
 The projection is an upper bound, since early stopping only shortens a run. Nothing
 is enforced, and backends that return `None` are not timed at all.
+
+With `final_shots`, the run ends with one more batch once the optimizer has stopped:
+its best candidates (at most five) re-evaluated with `final_shots` shots. That batch
+is not part of the optimizer's generations, so the projection leaves it out and the
+watch passes it through untimed. Leave time for it in the walltime: if the QPUs are
+released before it runs, it fails like any batch and the run raises, after logging
+the optimizer's `best_params` and `best_fitness` as a warning.
+
+SPSA's calibration, one batch of 50 circuits before its first iteration, is not timed:
+it is far larger than an iteration's `2 × resamplings` circuits, so timing it as the
+first iteration would inflate the projection. The projection adds its circuits at the
+first iteration's pace instead, and the warning says so ("with the 50 circuits sent
+before it at that pace"). The first iteration also measures the parameters, so it
+holds `2 × resamplings + 1` circuits where most iterations hold `2 × resamplings`.
+
+Rotosolve's budget is `sweeps × dimensions` steps, each one batch: the two neighbours
+of the parameters along one of them, and the parameters themselves on the first step
+and every `reevaluate_every` steps. After the last step the parameters it reached are
+measured alone, which the projection counts as one more step. The first step is timed,
+with its 3 circuits where most steps hold 2. Its warning counts steps and asks to lower
+the sweeps ("the first of up to 301 steps took ... Raise `walltime` or lower the
+sweeps.").
+
+For both, the timed batch holds `n + 1` circuits where most hold `n`: `n = 2K` for
+SPSA with `K = resamplings`, `n = 2` for Rotosolve. On `Q` QPUs it takes
+`⌈(n + 1)/Q⌉` rounds where most batches take `⌈n/Q⌉`, so the projection stays an
+upper bound but can reach `⌈(n + 1)/Q⌉ / ⌈n/Q⌉` times the real time: `(n + 1)/n` on
+one QPU (1.5 times for Rotosolve and `resamplings=1`, about 1.06 times with
+`resamplings=8`), twice on `n` QPUs (2 for Rotosolve and `resamplings=1`, 16 with
+`resamplings=8`), and not at all on `n + 1` QPUs or more.
+
+An external optimizer (`polypus.External`) has a budget in candidates,
+`max_evaluations`, and batches whose size is the library's, known only once the run
+has started. The first batch is timed, and with `n` candidates in it the projection
+counts `⌊max_evaluations / n⌋` batches (at least one): exactly the batches the run
+sends when every batch has the first's size, as pycma's generations do, and Optuna's
+and Nevergrad's through the `polypus.external` adapters, whose batches hold
+`batch_size` and `num_workers` candidates. When later batches are larger, the run
+sends fewer, and if a batch `k` times larger takes at most `k` times as long, the
+projection stays an upper bound to within one first batch, the remainder the floor
+drops. When they are smaller, the run sends more, each leaving QPUs idle, and the
+projection can be too low. A library that stops early only shortens the run. Only
+the batch's evaluation is timed: the library's own time in `ask()` and `tell()`,
+between the batches, is not in the projection, and for a model-based method, which
+computes its next candidates from all the values it has seen, it can take much of
+the run. Its warning counts batches and asks to lower `max_evaluations` ("the first
+of up to 50 batches took ... Raise `walltime` or lower the max_evaluations.").
 
 ### Cancellation
 
@@ -619,20 +667,22 @@ the foreign-rejection and fault checks and skips the behavioural group.
 ## Conformance of the built-in backends
 
 We ran the battery against Polypus's own four backends
-([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs)),
-so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
+([`crates/polypus-infrastructure/tests/conformance.rs`](../crates/polypus-infrastructure/tests/conformance.rs),
+and [`qmio_conformance.rs`](../crates/polypus-infrastructure/tests/qmio_conformance.rs)
+for QMIO), so "your backend passes it" is anchored to "ours do too". Following the phase's rule,
 **every failure is documented here before any fix**. The behavioural checks pass for
 every runnable backend; the interesting results are all in error classification, and
 they trace exactly the **recoverable-vs-fatal** split between the Rust-native backends
 (which fail *in Rust* with a typed variant) and the seal-delegating backends (which
 have no failure variants of their own).
 
-> **These results are a one-off manual run, not a continuous CI guard.** Only the
-> pure-Rust `native_backend_conforms` test runs on every build; the Local, CUNQA and
-> QMIO tests are `#[ignore]`d (they need Aer / SLURM / the qmio feature, and Aer is
-> fragile off the main thread). The table below is the record of running them by hand
-> for this phase — re-run them (commands are on each test) when touching a backend;
-> do not read them as verified on each build.
+> **Only the Native and Local (Aer) rows are continuous CI guards.** The pure-Rust
+> `native_backend_conforms` test runs on every build, and CI's Python job runs
+> `local_aer_backend_conformance` once the wheel is installed. The CUNQA and QMIO tests
+> are `#[ignore]`d (they need SLURM or the qmio feature) and CI does not run them: their
+> rows are the record of running them by hand for this phase — re-run them (commands
+> are on each test) when touching those backends; do not read them as verified on each
+> build.
 
 | Backend | How it ran | Behaviour | Unresponsive | Aborted | Clean error | Foreign→Unsupported |
 |---|---|---|---|---|---|---|
@@ -699,7 +749,7 @@ space, cutting the key from the left in declaration order, which misplaces the c
 seal joins the key back into one bitstring (issue #304). Both were checked on a real
 CUNQA 3.0.0 family with `tests/python/test_cunqa_real.py`.
 
-### Which built-in backend can run a circuit: `polypus.backend_compatibility`
+### Which backend can run a circuit: `polypus.backend_compatibility`
 
 The native backend runs terminal-measurement circuits only (contract C-4,
 [ADR 0001](adr/0001-terminal-measurements.md)); Aer also runs dynamic ones (`reset`,
@@ -722,7 +772,11 @@ reset q[0];
 measure q[0] -> c[0];
 """
 report = polypus.backend_compatibility(qasm)
-# {"aer": [], "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."]}
+# {"aer": [],
+#  "polypus": ["native backend could not parse OpenQASM 2.0: ... 'reset' is not supported ..."],
+#  "cunqa": [],  # with CUNQA installed
+#  "qmio": ["the 'qmio' infrastructure requires compiling polypus with --features qmio",
+#           "could not build a circuit for QMIO: ... 'reset' is not supported ..."]}
 backend = "polypus" if not report["polypus"] else "aer"
 result = polypus.run_quantum_circuit(
     qasm, shots=1000, infrastructure="local", backend=backend
@@ -749,10 +803,36 @@ target (a `noise_model` to `cx`, `id`, `rz`, `sx` and the gates it names), not w
 Aer runs, so neither changes the lowering. A `box` is refused with one fixed message,
 the same in the check and the run. A circuit with free parameters, a `polypus.Circuit`
 or a Qiskit `QuantumCircuit`, is rejected by the run with a `ValueError` ("unbound
-parameters") before any backend sees it, and both entries give that message. The check is **structural**: it runs and connects to nothing,
-and does not check resources (the qubit ceiling, memory), so an accepted circuit can
-still fail for lack of them. Enforced by `tests/python/test_backend_compatibility.py`,
-which runs every circuit it classifies to confirm the verdict.
+parameters") before any backend sees it, and every entry gives that message first.
+
+The CUNQA entry (issue #254) follows the CUNQA path up to the point where it would send
+the circuit: the seal prepares it as a run does (parsed, lowered into what CUNQA
+converts, read out in full when it measures nothing) and hands it to CUNQA's own
+converter (`cunqa.circuit.ir.to_ir`, CUNQA 3.x), as CUNQA's `run` does first, so a
+rejection is the error the run would raise: CUNQA 3.0.0 takes an `if` only with
+condition value 1 and no `else`, for instance. If CUNQA cannot be imported (it is a
+site-installed dependency, see `POLYPUS_CUNQA_PATH`), that is the reason. No QPU is
+raised, so a QPU's size is not checked.
+
+The QMIO entry reports what the QMIO path refuses before it sends a program: every
+circuit in a build without the `qmio` feature (the default wheel), a Qiskit
+`QuantumCircuit`, and a program that cannot be built as a terminal-measurement circuit
+(`reset`, `if`, a gate after a measurement, a syntax error), with the message the QIR
+program formats raise. QMIO targets the QIR Base Profile (ADR 0001); the default
+OpenQASM format forwards OpenQASM text as it is, so with it such a program reaches
+QMIO's compiler without this check.
+
+The check runs and connects to nothing. By default it is **structural**, so an accepted
+circuit can still fail for lack of resources. With `resources=True`, a circuit the
+native backend accepts structurally is also checked against its qubit ceiling (30) and
+the statevector memory budget (`POLYPUS_MEM_BUDGET`, issue #215), and a failure is
+reported with the message of the error the run raises (`polypus.NativeCircuitError`,
+`polypus.InsufficientMemoryError`). Only the native entry checks resources: Aer
+measures its own memory need at run time, which depends on the simulation method.
+Enforced by `tests/python/test_backend_compatibility.py`, which runs every circuit it
+classifies to confirm the verdict (CUNQA through the fake SDK of
+`tests/python/fake_cunqa.py`, with CUNQA 3.0.0's converter rules), and on a real CUNQA
+family by the opt-in `tests/python/test_cunqa_real.py`.
 
 ### QMIO — native wire backend
 

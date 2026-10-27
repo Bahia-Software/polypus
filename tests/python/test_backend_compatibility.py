@@ -1,12 +1,18 @@
 """
-``polypus.backend_compatibility`` — the structural pre-check (issue #218).
+``polypus.backend_compatibility`` — the pre-check (issues #218 and #254).
 
-For each local backend (``"aer"``, ``"polypus"``) it lists the reasons that
-backend would reject a circuit; an empty list means the backend accepts it. The
-native entry is decided by the same code that runs the circuit (the OpenQASM
-importer, the Qiskit-circuit guard), so every "accepts" is checked here by
-running the circuit, and every "rejects" by running it and matching the reason.
-Nothing is executed by the check itself.
+For each backend (``"aer"``, ``"polypus"``, ``"cunqa"``, ``"qmio"``) it lists the
+reasons that backend would reject a circuit; an empty list means the backend
+accepts it. Each entry is decided by the code the run uses (the OpenQASM
+importer, the Qiskit-circuit guards, the Aer rewrite, the CUNQA seal), so every
+"accepts" is checked here by running the circuit, and every "rejects" by
+running it and matching the reason. Nothing is executed by the check itself.
+
+CUNQA is the fake SDK of ``fake_cunqa.py`` with CUNQA 3.0.0's converter, so the
+``"cunqa"`` entry is decided and run the same on every host and no test reaches
+SLURM. QMIO is not compiled into the default build, so its runs fail with the
+reason the entry gives; an accepted ``"qmio"`` entry is not run (it needs a QMIO
+endpoint).
 """
 
 import re
@@ -36,22 +42,41 @@ AER_ONLY = {
 }
 
 
+# How each entry's backend is run.
+_RUN = {
+    "aer": dict(infrastructure="local", backend="aer", seed=5),
+    "polypus": dict(infrastructure="local", backend="polypus", seed=5),
+    "cunqa": dict(infrastructure="cunqa", backend="aer", seed=5),
+    "qmio": dict(infrastructure="qmio"),
+}
+
+
 def _run(circuit, backend):
     import polypus
 
-    return polypus.run_quantum_circuit(
-        circuit, shots=32, infrastructure="local", backend=backend, seed=5
-    )
+    return polypus.run_quantum_circuit(circuit, shots=32, **_RUN[backend])
 
 
-def _report(circuit):
+def _report(circuit, **kwargs):
     import polypus
 
-    report = polypus.backend_compatibility(circuit)
-    assert set(report) == {"aer", "polypus"}
+    report = polypus.backend_compatibility(circuit, **kwargs)
+    assert list(report) == ["aer", "polypus", "cunqa", "qmio"]
     assert all(isinstance(r, list) for r in report.values())
     assert all(isinstance(m, str) and m for r in report.values() for m in r)
     return report
+
+
+def _local(report):
+    """The entries of the local backends."""
+    return {backend: report[backend] for backend in ("aer", "polypus")}
+
+
+@pytest.fixture(autouse=True)
+def cunqa_sdk(monkeypatch):
+    from fake_cunqa import FakeCunqa
+
+    return FakeCunqa("3.0.0", converter=True).install(monkeypatch)
 
 
 # How the run quotes a Qiskit transpiler failure (``polypus.BackendError``'s
@@ -97,18 +122,21 @@ def _stable(message):
 
 def _assert_coherent(circuit, report):
     """Each backend the report accepts runs the circuit; each it rejects fails
-    with (one of) the reasons given."""
+    with (one of) the reasons given, or with the exception a reason quotes."""
     import polypus
 
     for backend, reasons in report.items():
         if not reasons:
-            assert sum(_run(circuit, backend).counts[0].values()) == 32
+            if backend != "qmio":
+                assert sum(_run(circuit, backend).counts[0].values()) == 32
             continue
-        with pytest.raises((polypus.PolypusError, ValueError)) as info:
+        with pytest.raises((polypus.PolypusError, ValueError, ImportError)) as info:
             _run(circuit, backend)
-        assert any(_stable(reason) in _stable(str(info.value)) for reason in reasons), (
-            f"{backend}: {info.value!s} does not state any of {reasons}"
-        )
+        raised = _stable(str(info.value))
+        quoted = f"{type(info.value).__name__}: {info.value}"
+        assert any(
+            _stable(reason) in raised or quoted in reason for reason in reasons
+        ), f"{backend}: {info.value!s} does not state any of {reasons}"
 
 
 def test_is_exported():
@@ -121,7 +149,7 @@ def test_is_exported():
 class TestQasmStrings:
     def test_valid_circuit_is_accepted_by_both(self):
         report = _report(VALID)
-        assert report == {"aer": [], "polypus": []}
+        assert _local(report) == {"aer": [], "polypus": []}
         _assert_coherent(VALID, report)
 
     @pytest.mark.parametrize("case", sorted(AER_ONLY))
@@ -153,7 +181,7 @@ class TestQasmStrings:
     def test_circuit_without_measurements_is_accepted_by_both(self):
         circuit = H + "qreg q[2];\ncreg c[3];\nx q[0];\n"
         report = _report(circuit)
-        assert report == {"aer": [], "polypus": []}
+        assert _local(report) == {"aer": [], "polypus": []}
         _assert_coherent(circuit, report)
 
 
@@ -163,7 +191,7 @@ class TestNativeCircuits:
 
         qc = polypus.Circuit(2).h(0).cx(0, 1).measure_all()
         report = _report(qc)
-        assert report == {"aer": [], "polypus": []}
+        assert _local(report) == {"aer": [], "polypus": []}
         _assert_coherent(qc, report)
 
     def test_free_parameters_are_reported_for_both(self):
@@ -171,8 +199,12 @@ class TestNativeCircuits:
 
         qc = polypus.Circuit(1).ry(0, polypus.Param(0)).measure_all()
         report = _report(qc)
+        # The run raises this first on every backend.
         for reasons in report.values():
-            assert len(reasons) == 1 and "unbound parameters" in reasons[0]
+            assert "unbound parameters" in reasons[0]
+        assert report["cunqa"] == report["aer"]
+        for reasons in _local(report).values():
+            assert len(reasons) == 1
         _assert_coherent(qc, report)
 
     @pytest.mark.parametrize(
@@ -194,7 +226,7 @@ class TestNativeCircuits:
         circuit = polypus.Circuit.from_qasm2(src)
         for given in (circuit, src):
             report = _report(given)
-            assert report == {"aer": [], "polypus": []}
+            assert _local(report) == {"aer": [], "polypus": []}
             _assert_coherent(given, report)
 
     def test_ch_gives_equivalent_counts_on_both_backends(self):
@@ -203,7 +235,7 @@ class TestNativeCircuits:
         import polypus
 
         qc = polypus.Circuit(2).x(0).ch(0, 1).measure_all()
-        assert _report(qc) == {"aer": [], "polypus": []}
+        assert _local(_report(qc)) == {"aer": [], "polypus": []}
         shots = 400
         for backend in ("aer", "polypus"):
             counts = polypus.run_quantum_circuit(
@@ -225,7 +257,7 @@ class TestNativeCircuits:
         circuit = polypus.Circuit.from_qasm2(src)
         for given in (circuit, src):
             report = _report(given)
-            assert report == {"aer": [], "polypus": []}
+            assert _local(report) == {"aer": [], "polypus": []}
             _assert_coherent(given, report)
 
 
@@ -382,7 +414,11 @@ class TestQiskitCircuits:
         qc.measure(1, 1)
         report = _report(qc)
         assert len(report["aer"]) == 1
-        assert 'unable to synthesize "opaque_thing"' in report["aer"][0]
+        # Qiskit 2.0 says "Unable to translate the operations ...", later
+        # releases 'unable to synthesize "opaque_thing"'.
+        message = report["aer"][0]
+        assert re.search("unable to (synthesize|translate)", message, re.IGNORECASE)
+        assert '"opaque_thing"' in message
         _assert_coherent(qc, report)
 
     @pytest.mark.parametrize("control_flow", [False, True])
@@ -588,9 +624,211 @@ class TestQiskitCircuits:
             assert qc == copy
 
 
-def test_check_runs_nothing(monkeypatch):
-    """Pure: no seam call, so a broken ``run_qcs`` cannot affect it, and no
-    simulation, not even for a Qiskit circuit the check rewrites."""
+CUNQA_OUTSIDE_ITS_RULES = {
+    # CUNQA 3.0.0 takes `if_else` with condition value 1 and no `else` only.
+    "condition_value": (
+        H + "qreg q[2];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[0];\n"
+        "if(c==2) x q[1];\nmeasure q[1] -> c[1];\n",
+        "Only 1 is accepted as condition",
+    ),
+}
+
+
+def _if_else():
+    """A Qiskit circuit with an ``else`` body, which CUNQA 3.0.0 rejects."""
+    from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+
+    q, c = QuantumRegister(2, "q"), ClassicalRegister(2, "c")
+    qc = QuantumCircuit(q, c)
+    qc.h(0)
+    qc.measure(0, 0)
+    with qc.if_test((c[0], 1)) as else_:
+        qc.x(1)
+    with else_:
+        qc.h(1)
+    qc.measure(1, 1)
+    return qc
+
+
+class TestCunqa:
+    def test_valid_and_dynamic_circuits_are_accepted(self):
+        for circuit in (VALID, IF, RESET):
+            report = _report(circuit)
+            assert report["cunqa"] == []
+            _assert_coherent(circuit, report)
+
+    def test_circuit_without_measurements_is_accepted(self):
+        """The seal reads it out in full (#253), so CUNQA runs it."""
+        import polypus
+
+        for circuit in (
+            polypus.Circuit(2).x(0),
+            H + "qreg q[2];\ncreg c[3];\nx q[0];\n",
+        ):
+            report = _report(circuit)
+            assert report["cunqa"] == []
+            assert _run(circuit, "cunqa").merged_counts == {"01": 32}
+
+    @pytest.mark.parametrize("case", sorted(CUNQA_OUTSIDE_ITS_RULES))
+    def test_what_its_converter_rejects_is_the_reason(self, case):
+        circuit, fragment = CUNQA_OUTSIDE_ITS_RULES[case]
+        report = _report(circuit)
+        assert report["aer"] == []
+        assert len(report["cunqa"]) == 1 and fragment in report["cunqa"][0]
+        _assert_coherent(circuit, report)
+
+    def test_an_else_body_is_rejected(self):
+        qc = _if_else()
+        report = _report(qc)
+        assert report["aer"] == []
+        assert report["cunqa"] == [
+            "if_else instruction with 'else' case is not supported for the current "
+            "version."
+        ]
+        _assert_coherent(qc, report)
+
+    def test_the_converter_sees_the_prepared_circuit(self, cunqa_sdk, monkeypatch):
+        """Lowered and read out in full, as the run sends it, and a copy."""
+        import polypus
+
+        seen = []
+        monkeypatch.setattr(cunqa_sdk, "to_ir", seen.append)
+        qc = polypus.Circuit(3).ch(0, 1).ccx(0, 1, 2)
+        assert _report(qc)["cunqa"] == []
+        (converted,) = seen
+        assert "ch" not in converted.count_ops()
+        assert converted.count_ops()["measure"] == 3
+
+    def test_an_exception_of_the_converter_is_the_reason(self, cunqa_sdk, monkeypatch):
+        def refuse(circuit):
+            raise ValueError("this vQPU converts nothing")
+
+        monkeypatch.setattr(cunqa_sdk, "to_ir", refuse)
+        report = _report(VALID)
+        assert report["cunqa"] == ["this vQPU converts nothing"]
+        _assert_coherent(VALID, report)
+
+    def test_a_qasm_parse_failure_is_the_reason(self):
+        report = _report(INVALID)
+        assert len(report["cunqa"]) == 1 and "QASM2ParseError" in report["cunqa"][0]
+        _assert_coherent(INVALID, report)
+
+    def test_missing_cunqa_is_the_reason(self, monkeypatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "cunqa.qjob", None)
+        monkeypatch.delitem(sys.modules, "polypus_python.cunqa", raising=False)
+        report = _report(VALID)
+        assert _local(report) == {"aer": [], "polypus": []}
+        (reason,) = report["cunqa"]
+        assert reason.startswith("CUNQA is not available (ModuleNotFoundError: ")
+        assert reason.endswith('so infrastructure="cunqa" cannot run')
+        _assert_coherent(VALID, report)
+
+
+class TestQmio:
+    @pytest.fixture(autouse=True)
+    def _default_build(self):
+        if _report(VALID)["qmio"] == []:
+            pytest.skip("polypus was built with the qmio feature")
+
+    NOT_COMPILED = (
+        "the 'qmio' infrastructure requires compiling polypus with --features qmio"
+    )
+
+    def test_a_build_without_the_feature_rejects_every_circuit(self):
+        import polypus
+
+        for circuit in (VALID, polypus.Circuit(2).h(0).measure_all()):
+            report = _report(circuit)
+            assert report["qmio"] == [self.NOT_COMPILED]
+            _assert_coherent(circuit, report)
+
+    def test_a_quantum_circuit_is_rejected(self):
+        from qiskit import QuantumCircuit
+
+        qc = QuantumCircuit(1)
+        qc.measure_all()
+        report = _report(qc)
+        assert report["qmio"][0] == self.NOT_COMPILED
+        assert "cannot serialize a Qiskit QuantumCircuit" in report["qmio"][1]
+        with pytest.raises(ValueError) as info:
+            _run(qc, "qmio")
+        assert str(info.value) == report["qmio"][1]
+
+    @pytest.mark.parametrize("case", sorted(AER_ONLY))
+    def test_a_dynamic_program_is_rejected(self, case):
+        circuit, fragment = AER_ONLY[case]
+        report = _report(circuit)
+        assert report["qmio"][0] == self.NOT_COMPILED
+        (reason,) = report["qmio"][1:]
+        assert reason.startswith("could not build a circuit for QMIO: ")
+        assert fragment in reason
+
+
+class TestResources:
+    WIDE = 22  # a 64 MiB statevector
+
+    def _wide(self, as_qasm):
+        import polypus
+
+        qc = polypus.Circuit(self.WIDE).h(0).measure_all()
+        return qc.to_qasm2() if as_qasm else qc
+
+    def test_resources_are_not_checked_by_default(self, monkeypatch):
+        monkeypatch.setenv("POLYPUS_MEM_BUDGET", "1M")
+        assert _report(self._wide(False))["polypus"] == []
+
+    @pytest.mark.parametrize("as_qasm", [False, True], ids=["circuit", "qasm"])
+    def test_a_statevector_over_the_memory_budget_is_rejected(
+        self, monkeypatch, as_qasm
+    ):
+        import polypus
+
+        monkeypatch.setenv("POLYPUS_MEM_BUDGET", "1M")
+        circuit = self._wide(as_qasm)
+        report = _report(circuit, resources=True)
+        (reason,) = report["polypus"]
+        assert reason.startswith(f"not enough memory for a {self.WIDE}-qubit")
+        with pytest.raises(polypus.InsufficientMemoryError) as info:
+            _run(circuit, "polypus")
+        assert str(info.value) == reason
+        # Only the native entry checks resources.
+        assert report == {**_report(circuit), "polypus": report["polypus"]}
+
+    def test_a_circuit_over_the_qubit_ceiling_is_rejected(self):
+        import polypus
+
+        qc = polypus.Circuit(31).measure_all()
+        assert _report(qc)["polypus"] == []
+        (reason,) = _report(qc, resources=True)["polypus"]
+        assert "supports at most 30" in reason
+        with pytest.raises(polypus.NativeCircuitError) as info:
+            _run(qc, "polypus")
+        assert str(info.value) == reason
+
+    def test_a_structural_rejection_is_not_followed_by_a_resource_one(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("POLYPUS_MEM_BUDGET", "1")
+        assert _report(RESET, resources=True)["polypus"] == _report(RESET)["polypus"]
+
+    def test_a_circuit_that_fits_is_accepted(self):
+        report = _report(VALID, resources=True)
+        assert report == _report(VALID)
+        _assert_coherent(VALID, report)
+
+    def test_resources_is_keyword_only(self):
+        import polypus
+
+        with pytest.raises(TypeError):
+            polypus.backend_compatibility(VALID, True)
+
+
+def test_check_runs_nothing(monkeypatch, cunqa_sdk):
+    """Pure: no seam call, so a broken ``run_qcs`` cannot affect it, no
+    simulation, not even for a Qiskit circuit the check rewrites, and no CUNQA
+    call but its converter."""
     import polypus_python
     from qiskit import QuantumCircuit
     from qiskit_aer import AerSimulator
@@ -601,11 +839,12 @@ def test_check_runs_nothing(monkeypatch):
     monkeypatch.setattr(polypus_python, "run_qcs", forbidden)
     monkeypatch.setattr(polypus_python, "connect_to_infrastructure", forbidden)
     monkeypatch.setattr(AerSimulator, "run", forbidden)
-    assert _report(VALID) == {"aer": [], "polypus": []}
+    assert _local(_report(VALID, resources=True)) == {"aer": [], "polypus": []}
     qc = QuantumCircuit(2)
     qc.ch(0, 1)
     qc.measure_all()
     assert _report(qc)["aer"] == []
+    assert cunqa_sdk.calls == [] and cunqa_sdk.runs == []
 
 
 def test_check_writes_no_log_record(tmp_path):
