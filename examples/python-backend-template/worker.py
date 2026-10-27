@@ -162,7 +162,7 @@ def _run(req, stdout):
     _write_frame(stdout, {"op": "result", "id": req.get("id"), "counts": counts})
 
 
-def main() -> int:
+def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
     stdin = sys.stdin.buffer
@@ -172,7 +172,7 @@ def main() -> int:
         req = _read_frame(stdin)
         if req is None:
             _log("stdin EOF; exiting")
-            return 0
+            return
         op = req.get("op")
         if op == "hello":
             _write_frame(stdout, {"op": "ready", "protocol": PROTOCOL_VERSION})
@@ -180,7 +180,7 @@ def main() -> int:
             _run(req, stdout)
         elif op == "shutdown":
             _log("shutdown requested")
-            return 0
+            return
         else:
             _write_frame(
                 stdout,
@@ -189,4 +189,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
