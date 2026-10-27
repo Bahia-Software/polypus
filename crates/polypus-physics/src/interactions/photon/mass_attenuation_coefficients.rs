@@ -3,23 +3,31 @@
 use crate::constants::{AVOGADRO, BARN_TO_CM2};
 use crate::error::PhysicsError;
 use std::collections::{BTreeMap, HashMap};
-#[cfg(feature = "csv-export")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-/// Directory containing the pre-downloaded ENDF-6 evaluations, resolved at
-/// runtime. This crate never downloads data over the network.
+/// The environment variable that overrides the ENDF-6 data directory.
+const ENDF_DATA_DIR_VAR: &str = "POLYPUS_ENDF_DATA_DIR";
+
+/// Directory containing the ENDF-6 evaluations, resolved at runtime. The data
+/// is not packaged with this crate, and it never downloads anything.
 ///
 /// Checked in order:
-/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — an absolute path to the folder
-///    containing the `ZA{Z:03}000.txt` files.
-/// 2. `reference-data/endf-epdl-2023/`, relative to this workspace's root
-///    — the default location within this repository, so the env var only
-///    needs setting if that layout ever changes.
+/// 1. `POLYPUS_ENDF_DATA_DIR`, if set — the folder containing the
+///    `ZA{Z:03}000.txt` files.
+/// 2. `reference-data/endf-epdl-2023/` of the Polypus repository, located
+///    relative to this crate's source: valid only in a checkout, so users of
+///    the crates.io package must set the variable.
 fn external_endf_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("POLYPUS_ENDF_DATA_DIR") {
+    endf_data_dir(std::env::var(ENDF_DATA_DIR_VAR).ok())
+}
+
+/// [`external_endf_data_dir`] for a given value of the variable (`None` when
+/// it is unset), so tests cover the override without mutating the process
+/// environment, which other tests read concurrently.
+fn endf_data_dir(override_dir: Option<String>) -> PathBuf {
+    if let Some(dir) = override_dir {
         return PathBuf::from(dir);
     }
     PathBuf::from(concat!(
@@ -29,16 +37,22 @@ fn external_endf_data_dir() -> PathBuf {
 }
 
 /// Returns the raw contents of the ENDF-6 evaluation for `z`, reading it
-/// from a pre-downloaded local file. Never downloads anything — see
+/// from a local file. Never downloads anything — see
 /// [`external_endf_data_dir`].
 fn fetch_endf_contents(z: u32) -> Result<String, PhysicsError> {
-    let path = external_endf_data_dir().join(format!("ZA{z:03}000.txt"));
+    read_endf_contents(&external_endf_data_dir(), z)
+}
+
+/// Reads the ENDF-6 evaluation for `z` from the data directory `dir`.
+fn read_endf_contents(dir: &Path, z: u32) -> Result<String, PhysicsError> {
+    let path = dir.join(format!("ZA{z:03}000.txt"));
     std::fs::read_to_string(&path).map_err(|e| PhysicsError::EndfDataNotFound {
         z,
         message: format!(
-            "could not read {}: {e}. Set POLYPUS_ENDF_DATA_DIR to the folder \
-             containing the ENDF-6 .txt files, or place them at \
-             reference-data/endf-epdl-2023 relative to the workspace root.",
+            "could not read {}: {e}. Set {ENDF_DATA_DIR_VAR} to the folder \
+             containing the ENDF-6 .txt files (reference-data/endf-epdl-2023 \
+             in https://github.com/Bahia-Software/polypus; see the \
+             polypus-physics crate docs).",
             path.display()
         ),
     })
@@ -163,24 +177,22 @@ fn atomic_mass(z: u32) -> Option<f64> {
     ATOMIC_MASSES.get((z - 1) as usize).copied()
 }
 
-/// The parsed identity and raw contents of one ENDF-6 evaluation, fetched
+/// The parsed identity and raw contents of one ENDF-6 evaluation, read
 /// (and cached) on demand.
 struct EndfEntry {
     z: u32,
     contents: String,
 }
 
-/// The set of ENDF-6 evaluations fetched so far in this process, keyed by
-/// chemical symbol. Grows incrementally as elements are requested — unlike
-/// the old embedded-data design, there is no fixed set of 100 to index
-/// upfront.
+/// The set of ENDF-6 evaluations read so far in this process, keyed by
+/// chemical symbol. Grows incrementally as elements are requested.
 fn endf_index() -> &'static Mutex<HashMap<String, EndfEntry>> {
     static INDEX: OnceLock<Mutex<HashMap<String, EndfEntry>>> = OnceLock::new();
     INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Returns the (Z, raw contents) of a chemical element's ENDF-6 evaluation,
-/// downloading and caching it on first use.
+/// reading it from the data directory and caching it on first use.
 fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
     let z = z_for_symbol(symbol).ok_or_else(|| PhysicsError::UnknownElement {
         symbol: symbol.to_string(),
@@ -209,9 +221,9 @@ fn endf_entry_for_symbol(symbol: &str) -> Result<(u32, String), PhysicsError> {
 }
 
 /// Chemical symbol for each Z from 1 to 100, in order. Used to translate a
-/// symbol to its atomic number before downloading the corresponding
-/// ENDF-6 evaluation — this table alone is embedded in the binary (a few
-/// KB), unlike the full ENDF-6 data, which is fetched on demand.
+/// symbol to its atomic number before reading the corresponding
+/// ENDF-6 evaluation — this table alone is compiled into the binary (a few
+/// KB), unlike the full ENDF-6 data, which is read on demand.
 const ELEMENT_SYMBOLS: [&str; 100] = [
     "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl",
     "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As",
@@ -223,7 +235,7 @@ const ELEMENT_SYMBOLS: [&str; 100] = [
 ];
 
 /// Looks up an element's atomic number from its chemical symbol
-/// (e.g. `"Fe"` → `26`), without needing any ENDF-6 data downloaded yet.
+/// (e.g. `"Fe"` → `26`), without reading any ENDF-6 data.
 pub fn z_for_symbol(symbol: &str) -> Option<u32> {
     ELEMENT_SYMBOLS
         .iter()
@@ -322,7 +334,7 @@ fn read_section(contents: &str, mf: u32, mt: u32) -> Result<Vec<CrossSectionPoin
 }
 
 /// Returns the raw (energy, cross-section) points for a given element and
-/// ENDF-6 reaction type, straight from the embedded evaluation.
+/// ENDF-6 reaction type, straight from the evaluation.
 pub fn cross_section_for_element(
     symbol: &str,
     mt: u32,
@@ -333,7 +345,7 @@ pub fn cross_section_for_element(
 }
 
 /// Computes the mass attenuation coefficient mu_m = sigma_t * N_A / A for a
-/// single element, from its embedded ENDF-6 evaluation.
+/// single element, from its ENDF-6 evaluation.
 ///
 /// `symbol` is the chemical symbol (e.g. `"Fe"`), and `mt` is the ENDF-6
 /// reaction type to read (501 = total, 522 = photoelectric, 504 =
@@ -711,10 +723,11 @@ pub fn mu_m_for_compound(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
 
     #[test]
     fn requesting_an_element_adds_it_to_the_index() {
-        let _ = endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let _ = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let index = endf_index().lock().unwrap();
         assert!(index.contains_key("H"));
     }
@@ -761,16 +774,14 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_has_2021_points() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         assert_eq!(points.len(), 2021);
     }
 
     #[test]
     fn hydrogen_total_cross_section_first_point() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let first = &points[0];
         assert_eq!(first.energy_ev, 1.0);
@@ -779,8 +790,7 @@ mod tests {
 
     #[test]
     fn hydrogen_total_cross_section_last_point() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let points = read_section(&contents, 23, 501).expect("MF=23 MT=501 should exist for H");
         let last = points.last().unwrap();
         assert_eq!(last.energy_ev, 100_000_000_000.0);
@@ -789,8 +799,7 @@ mod tests {
 
     #[test]
     fn unknown_mt_channel_errors() {
-        let (_z, contents) =
-            endf_entry_for_symbol("H").expect("H should download/cache successfully");
+        let (_z, contents) = endf_entry_for_symbol("H").expect("H should load/cache successfully");
         let result = read_section(&contents, 23, 999);
         assert!(matches!(
             result,
@@ -971,19 +980,20 @@ mod tests {
     #[test]
     fn write_element_csv_produces_a_file() {
         let (z, a, points) = mu_m_for_element("H", 501).unwrap();
-        let path = std::env::temp_dir().join("H_mu_m_test.csv");
+        let scratch = ScratchDir::new("element-csv");
+        let path = scratch.path().join("H_mu_m_test.csv");
         write_element_csv("H", z, a, &points, &path).unwrap();
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("Element,H"));
-        println!("CSV written to: {}", path.display());
     }
 
     #[cfg(feature = "csv-export")]
     #[test]
     fn write_compound_csv_produces_a_file() {
         let result = mu_m_for_compound("H2O", 501, 5000).unwrap();
-        let path = std::env::temp_dir().join("H2O_mu_m_test.csv");
+        let scratch = ScratchDir::new("compound-csv");
+        let path = scratch.path().join("H2O_mu_m_test.csv");
         write_compound_csv("H2O", &result, &path).unwrap();
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
@@ -1014,23 +1024,24 @@ mod tests {
         }
     }
 
+    /// Through `endf_data_dir`, not `std::env::set_var`: other tests in this
+    /// process read the variable concurrently and cache what they read.
     #[test]
     fn env_var_overrides_default_data_dir() {
-        let temp_dir = std::env::temp_dir().join("polypus_endf_override_test");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        std::fs::write(temp_dir.join("ZA001000.txt"), "custom test content").unwrap();
+        let scratch = ScratchDir::new("endf-override");
+        std::fs::write(scratch.path().join("ZA001000.txt"), "custom test content").unwrap();
+        let value = scratch.path().to_str().unwrap().to_owned();
 
-        // SAFETY: no other test in this process reads/writes this exact
-        // variable concurrently — tests in this crate run in the same process
-        // but each uses distinct env vars/fixtures.
-        unsafe {
-            std::env::set_var("POLYPUS_ENDF_DATA_DIR", &temp_dir);
-        }
-        let contents = fetch_endf_contents(1).unwrap();
-        unsafe {
-            std::env::remove_var("POLYPUS_ENDF_DATA_DIR");
-        }
+        let dir = endf_data_dir(Some(value));
 
-        assert_eq!(contents, "custom test content");
+        assert_eq!(dir, scratch.path());
+        assert_eq!(read_endf_contents(&dir, 1).unwrap(), "custom test content");
+    }
+
+    #[test]
+    fn unset_env_var_falls_back_to_the_reference_data() {
+        let dir = endf_data_dir(None);
+        assert!(dir.ends_with("reference-data/endf-epdl-2023"));
+        assert!(dir.join("ZA001000.txt").is_file());
     }
 }

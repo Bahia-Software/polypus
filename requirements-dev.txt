@@ -2,7 +2,7 @@
 # Install with: pip install -r requirements-dev.txt
 
 # Rust/Python build
-maturin>=1.8,<2.0
+maturin>=1.9.2,<2.0
 qiskit>=2.0,<3
 # Aer is the default `local` simulator backend and is exercised by the test
 # suite directly; declare it here too, not only as a runtime dependency of the

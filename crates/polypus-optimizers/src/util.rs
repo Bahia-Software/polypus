@@ -3,14 +3,22 @@
 //! These are implementation details of [`AlgorithmDifferentialEvolution`](crate::AlgorithmDifferentialEvolution),
 //! [`AlgorithmPSO`](crate::AlgorithmPSO) and (the oracle length check and the
 //! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
-//! crate's public API, so the module is `pub(crate)`-scoped. Each helper is a small,
-//! single-purpose free function that used to be inlined (and duplicated) inside
-//! the optimizer loops. The behaviour is preserved exactly — same operation
-//! order, same comparators, same diagnostics — so the determinism the tests pin
-//! (`tests/optimizers.rs`) is unaffected.
+//! crate's public API, so the module is `pub(crate)`-scoped. Every optimizer,
+//! [`AlgorithmQNG`](crate::AlgorithmQNG) included, checks its optional starting
+//! point with [`check_initial_point`], DE, CMA-ES and
+//! [`AlgorithmRotosolve`](crate::AlgorithmRotosolve) share [`wrap_angle`], and
+//! [`AlgorithmAdam`](crate::AlgorithmAdam),
+//! [`AlgorithmSPSA`](crate::AlgorithmSPSA), Rotosolve and
+//! [`AlgorithmExternal`](crate::AlgorithmExternal) keep their best point with
+//! [`BestMeasured`].
+//! Each helper is a small, single-purpose free function that used to be inlined
+//! (and duplicated) inside the optimizer loops. The behaviour is preserved
+//! exactly — same operation order, same comparators, same diagnostics — so the
+//! determinism the tests pin (`tests/optimizers.rs`) is unaffected.
 
 use crate::error::OptimizerError;
 use ndarray::{Array2, Axis};
+use std::f64::consts::TAU;
 
 /// NaN-safe argmax over a fitness slice.
 ///
@@ -152,6 +160,112 @@ pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), Optimi
         Ok(())
     } else {
         Err(OptimizerError::OracleLengthMismatch { expected, got })
+    }
+}
+
+/// Validate an optimizer's optional starting point against its `dims`
+/// parameters: exactly `dims` values, every one finite, and, when `bounds`
+/// is `Some((lb, ub))`, every one within `[lb, ub]` (PSO's, whose positions
+/// are clamped to them).
+///
+/// Each optimizer calls this from its `check_preconditions`, after its other
+/// configuration checks and before any RNG draw or oracle call, so a bad
+/// point is reported as [`OptimizerError::InvalidConfig`] for
+/// `initial_point` with nothing drawn or evaluated. `None` (no starting
+/// point) always passes.
+pub(crate) fn check_initial_point(
+    point: Option<&[f64]>,
+    dims: usize,
+    bounds: Option<(f64, f64)>,
+) -> Result<(), OptimizerError> {
+    let Some(point) = point else {
+        return Ok(());
+    };
+    let invalid = |reason: String| OptimizerError::InvalidConfig {
+        parameter: "initial_point",
+        reason,
+    };
+    if point.len() != dims {
+        return Err(invalid(format!(
+            "must have one value per dimension ({dims}), got {}",
+            point.len()
+        )));
+    }
+    if let Some((index, value)) = point.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(invalid(format!(
+            "every value must be finite, got {value} at index {index}"
+        )));
+    }
+    if let Some((lb, ub)) = bounds {
+        if let Some((index, value)) = point
+            .iter()
+            .enumerate()
+            .find(|(_, x)| !(lb..=ub).contains(*x))
+        {
+            return Err(invalid(format!(
+                "every value must lie within bounds [{lb}, {ub}], got {value} at index {index}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The best candidate an oracle has measured, and the value it returned for
+/// it, so that `best_fitness` is the oracle's value for `best_params`
+/// (contract C-5).
+///
+/// The first measurement is always kept, so a run that only ever measures
+/// `NaN` still reports a candidate it measured and the value it got. After it,
+/// a candidate replaces the best only with a strictly greater value, so a tie
+/// keeps the earlier one. A `NaN` never wins: it is greater than nothing, and
+/// any number replaces a `NaN` kept from the first measurement. Empty, it
+/// reports no parameters and `-∞`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BestMeasured {
+    best: Option<(Vec<f64>, f64)>,
+}
+
+impl BestMeasured {
+    /// Nothing measured yet.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Offer `params`, which the oracle scored `value`; returns whether it is
+    /// now the best.
+    pub(crate) fn offer(&mut self, params: &[f64], value: f64) -> bool {
+        let wins = match &self.best {
+            None => true,
+            Some((_, best)) => value > *best || (best.is_nan() && !value.is_nan()),
+        };
+        if wins {
+            self.best = Some((params.to_vec(), value));
+        }
+        wins
+    }
+
+    /// The best value so far; `-∞` before any measurement.
+    pub(crate) fn value(&self) -> f64 {
+        self.best
+            .as_ref()
+            .map_or(f64::NEG_INFINITY, |(_, value)| *value)
+    }
+
+    /// The best parameters and their value; no parameters and `-∞` before any
+    /// measurement.
+    pub(crate) fn into_parts(self) -> (Vec<f64>, f64) {
+        self.best.unwrap_or((Vec::new(), f64::NEG_INFINITY))
+    }
+}
+
+/// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a
+/// tiny negative `x` (the exact result rounds up); that is the same angle as 0.
+pub(crate) fn wrap_angle(x: f64) -> f64 {
+    let wrapped = x.rem_euclid(TAU);
+    if wrapped >= TAU {
+        0.0
+    } else {
+        wrapped
     }
 }
 
@@ -337,6 +451,135 @@ mod tests {
         // patience 0 compares the last generation with itself.
         assert_eq!(recent_improvement(&[1.0], 0), Some(0.0));
         assert_eq!(recent_improvement(&[], 0), None);
+    }
+
+    #[test]
+    fn wrap_angle_stays_in_the_half_open_circle() {
+        assert_eq!(wrap_angle(0.0), 0.0);
+        assert_eq!(wrap_angle(-0.0), 0.0);
+        assert_eq!(wrap_angle(TAU), 0.0);
+        assert_eq!(wrap_angle(-TAU), 0.0);
+        assert_eq!(wrap_angle(1.0 + TAU), (1.0 + TAU).rem_euclid(TAU));
+        // rem_euclid rounds this up to 2π exactly; the wrap folds it to 0.
+        assert_eq!((-1e-20f64).rem_euclid(TAU), TAU);
+        assert_eq!(wrap_angle(-1e-20), 0.0);
+        for x in [-1e9, -7.5, -1e-300, 3.0, 6.283_185_307_179_585, 1e12] {
+            let w = wrap_angle(x);
+            assert!((0.0..TAU).contains(&w), "{x} -> {w}");
+        }
+        assert!(wrap_angle(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn check_initial_point_accepts_none_and_a_finite_point_of_the_right_length() {
+        assert_eq!(check_initial_point(None, 3, None), Ok(()));
+        assert_eq!(
+            check_initial_point(Some(&[0.5, -7.0, 1e300]), 3, None),
+            Ok(())
+        );
+        assert_eq!(check_initial_point(Some(&[]), 0, None), Ok(()));
+    }
+
+    #[test]
+    fn check_initial_point_rejects_a_wrong_length() {
+        for point in [&[0.5][..], &[0.5, 1.0, 1.5, 2.0][..], &[][..]] {
+            assert_eq!(
+                check_initial_point(Some(point), 3, None),
+                Err(OptimizerError::InvalidConfig {
+                    parameter: "initial_point",
+                    reason: format!("must have one value per dimension (3), got {}", point.len()),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn check_initial_point_rejects_a_non_finite_value_naming_its_index() {
+        for (value, shown) in [
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            let err = check_initial_point(Some(&[0.5, 1.0, value]), 3, None)
+                .expect_err("a non-finite value is rejected");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid initial_point: every value must be finite, got {shown} at index 2"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn best_measured_is_empty_until_the_first_offer() {
+        let best = BestMeasured::new();
+        assert_eq!(best.value(), f64::NEG_INFINITY);
+        assert_eq!(best.into_parts(), (Vec::new(), f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn best_measured_keeps_the_first_offer_then_only_strict_improvements() {
+        let mut best = BestMeasured::new();
+        assert!(best.offer(&[1.0], 0.5));
+        assert!(best.offer(&[2.0], 0.75));
+        // A tie keeps the earlier candidate; a worse one changes nothing.
+        assert!(!best.offer(&[3.0], 0.75));
+        assert!(!best.offer(&[4.0], -1.0));
+        assert_eq!(best.value(), 0.75);
+        assert_eq!(best.into_parts(), (vec![2.0], 0.75));
+    }
+
+    #[test]
+    fn best_measured_never_lets_a_nan_win() {
+        let mut best = BestMeasured::new();
+        assert!(best.offer(&[1.0], f64::NEG_INFINITY));
+        assert!(!best.offer(&[2.0], f64::NAN));
+        assert_eq!(best.value(), f64::NEG_INFINITY);
+        assert!(best.offer(&[3.0], 0.0));
+        assert!(!best.offer(&[4.0], f64::NAN));
+        assert_eq!(best.into_parts(), (vec![3.0], 0.0));
+    }
+
+    #[test]
+    fn best_measured_keeps_a_first_nan_until_any_number_replaces_it() {
+        let mut best = BestMeasured::new();
+        // Only NaN measured: the first candidate and its NaN are what was
+        // measured, so they are what is reported.
+        assert!(best.offer(&[1.0], f64::NAN));
+        assert!(!best.offer(&[2.0], f64::NAN));
+        assert!(best.value().is_nan());
+        let (params, value) = best.clone().into_parts();
+        assert_eq!(params, vec![1.0]);
+        assert!(value.is_nan());
+        // Any number, even -inf, beats it.
+        assert!(best.offer(&[3.0], f64::NEG_INFINITY));
+        assert_eq!(best.into_parts(), (vec![3.0], f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn check_initial_point_checks_the_bounds_only_when_given_and_after_the_rest() {
+        let bounds = Some((-1.0, 1.0));
+        // Both ends are inside: PSO clamps positions to the closed interval.
+        assert_eq!(
+            check_initial_point(Some(&[-1.0, 0.0, 1.0]), 3, bounds),
+            Ok(())
+        );
+        let err = check_initial_point(Some(&[0.5, 1.5, -2.0]), 3, bounds)
+            .expect_err("a value outside the bounds is rejected");
+        assert_eq!(
+            err.to_string(),
+            "invalid initial_point: every value must lie within bounds [-1, 1], got 1.5 at index 1"
+        );
+        assert_eq!(
+            check_initial_point(Some(&[0.5, 1.5, -2.0]), 3, None),
+            Ok(())
+        );
+        // The length and the finiteness are reported first.
+        let err = check_initial_point(Some(&[5.0]), 3, bounds).expect_err("wrong length");
+        assert!(err.to_string().contains("one value per dimension"), "{err}");
+        let err = check_initial_point(Some(&[5.0, f64::NAN, 0.0]), 3, bounds).expect_err("NaN");
+        assert!(err.to_string().contains("must be finite"), "{err}");
     }
 
     #[test]

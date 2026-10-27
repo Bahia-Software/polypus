@@ -14,6 +14,167 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
+  `qml.train`: runs an optimizer from outside Polypus, a library such as
+  Optuna, Nevergrad or pycma or an object of your own, through Polypus's
+  scheduler. The optimizer has `ask()`, which returns the next batch of rows
+  (`None` or an empty batch when it is done), and `tell(candidates, values)`,
+  which receives that batch and its fitness, to maximise. Each `ask()` is one
+  batch, spread over the QPUs. The run stops at an empty `ask()`
+  (`converged=True`) or before a batch that would take it past
+  `max_evaluations`, which is neither evaluated nor told, so the budget is
+  never exceeded. A row that is not `dimensions` finite real numbers (a
+  `bool` or a complex number is not one) raises `ValueError` naming its
+  batch and row; a batch and a row are read only up to one row or value
+  too many, so an endless iterator cannot hang the run. An exception from
+  `ask()` or `tell()`, `KeyboardInterrupt` included, is raised as itself.
+  `External` takes part in garbage collection, so an optimizer that refers
+  back to it is freed.
+  `best_params` is the best candidate Polypus measured, `iterations_run`
+  counts the batches, and `final_shots` re-evaluates five candidates. The
+  library owns its seed and its start: `External` has no `seed` (the run's
+  seed fixes the shot sampling) and `initial_point` raises `ValueError`
+  before anything runs (#399).
+- `polypus.external`, pure-Python adapters for `polypus.External`:
+  `from_optuna(study, dimensions, batch_size, bounds=(0, 2π),
+  initial_point=None)`, for example with Optuna's TPE sampler,
+  `from_nevergrad(optimizer, batch_size=None, initial_point=None)` and
+  `from_pycma(es)`, which call each library's public ask/tell methods only
+  and negate the values for a library that minimises; and `AskTell`, the
+  protocol as a `typing.Protocol`. None of the three libraries is a
+  dependency of Polypus, and the module imports none of them (#399).
+- External optimizers in training runs (Rust, `polypus-orchestration`):
+  `Method::External` with `ExternalConfig`. The CUNQA walltime warning
+  projects `max_evaluations / n` batches after a first batch of `n`
+  candidates; `final_shots` re-evaluates five candidates (#399).
+- The ask/tell bridge in `polypus-optimizers`: the `AskTell` trait, with
+  `AskTellError`, and `AlgorithmExternal` with `AlgorithmExternalArgs`,
+  which run any optimizer that implements it against an `EvaluationOracle`,
+  one oracle batch per `ask` (#399).
+- `polypus.Rotosolve(sweeps=10, reevaluate_every=5, tolerance=0.01,
+  patience=2, seed=None)`, accepted by `train` and `qml.train`: the
+  Rotosolve of Ostaszewski, Grant and Benedetti (Quantum, 2021), with the
+  value reuse of the NFT method of Nakanishi, Fujii and Todo (Phys. Rev.
+  Research, 2020). When every trainable parameter is the angle of exactly
+  one single-Pauli rotation (any angle of `u`, `u2` or `u3` included, which
+  are `rz·ry·rz`, and in a Qiskit circuit the angle θ of `r`) and the cost
+  is an average over the shots, the
+  fitness is a sinusoid of each parameter, and Rotosolve moves one parameter
+  at a time to its maximum, in closed form. Each step is one batch of two
+  circuits, plus the current parameters on the first step and every
+  `reevaluate_every` steps, and after the last step the parameters it
+  reached are measured alone; `best_params` is the best of the points
+  measured. The run stops after `patience` sweeps that improve the best by
+  less than `tolerance`, or after `sweeps` sweeps. `train` and `qml.train`
+  check the circuit before anything runs (a `polypus.Circuit` or a Qiskit
+  circuit; in `qml.train` the ansatz only) and raise `ValueError` naming the
+  first gate or parameter that does not qualify; `qml.train` also rejects a
+  `polypus.SampleCost`. An `initial_point` is the first point measured. A
+  seeded run reproduces on the same platform only, as with CMA-ES. Invalid
+  settings raise `ValueError` before any circuit runs (#398).
+- Rotosolve in training runs (Rust, `polypus-orchestration`):
+  `Method::Rotosolve` with `RotosolveConfig`. The CUNQA walltime warning
+  counts `sweeps × dimensions` steps and the final point as one more;
+  `final_shots` re-evaluates
+  `best_params` alone (#398).
+- Rotosolve in `polypus-optimizers`: `AlgorithmRotosolve` and
+  `AlgorithmRotosolveArgs`, with an `initial_point` like every optimizer;
+  and in `polypus-circuit`, `ParameterizedCircuit::check_single_frequency`
+  with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
+  qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
+  check of a Qiskit circuit take the same angles and gates (#398).
+- `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
+  once the optimizer has stopped, its best candidates are re-evaluated in
+  one more batch with that many shots per circuit, `best_params` and, for
+  DE, PSO and CMA-ES, the four best other distinct candidates they scored.
+  The new `TrainResult.final_params` is the one with the highest value and
+  `final_fitness` that value; both are `None` without it. This reduces the
+  winner's curse of `best_fitness`, the best of many noisy estimates:
+  `final_fitness` is a fresh estimate, without bias when `best_params` is
+  re-evaluated alone, and slightly optimistic still as the highest of five.
+  `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
+  `fitness_history` are the optimizer's, and a seeded run sends the same
+  batches with and without `final_shots`. The final batch is sampled with a
+  seed derived from the run's, so on Aer and CUNQA, which seed each circuit
+  from its position in the call, it does not repeat the training's counts
+  for a candidate at the same position. `best_params` and `best_fitness` are
+  logged before it, and as a warning if it fails. A value that is not an
+  integer `>= 1` raises `ValueError` before anything runs. The batch is not
+  part of the CUNQA walltime projection (#397).
+- The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
+  (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
+  implement by putting the shots in every task and sending the batch with
+  `polypus_infrastructure::final_batch_params`; `TrainFlow::final_shots`,
+  `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
+  (`polypus-orchestration`) (#397).
+- `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
+  target_step=0.63, alpha=0.602, gamma=0.101, eval_interval=20, seed=None)`,
+  accepted by `train` and `qml.train`: Spall's simultaneous perturbation
+  stochastic approximation (1992), with his gains `a/k^alpha` and
+  `c/k^gamma` and practical exponents (1998). It estimates the gradient from
+  two circuits per random perturbation whatever the number of parameters,
+  so it suits many parameters and few QPUs. A calibration batch of 50
+  circuits around the starting point sets the gain so that, with
+  `resamplings=1`, the first step moves each parameter by about
+  `target_step`, as Qiskit's `SPSA.calibrate` does; with more perturbations
+  the first step is usually shorter.
+  Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
+  fills more QPUs and averages that many estimates; the parameters are
+  measured in the same batch on the first iteration and every
+  `eval_interval` iterations, and after the last step one circuit measures
+  the parameters it reached, so every step is measured; `best_params` is the
+  best of them. The run
+  makes `max_iters` iterations and reports `converged=False`. An
+  `initial_point` is the centre of the calibration and the first point
+  measured. A seeded run reproduces on the same platform only, as with
+  CMA-ES. Invalid settings
+  raise `ValueError` before any circuit runs. See the training guide for
+  when to prefer it and its sensitivity to `target_step` and `perturbation`
+  (#396).
+- SPSA in training runs (Rust, `polypus-orchestration`): `Method::Spsa` with
+  `SpsaConfig`. The CUNQA walltime warning leaves the calibration batch out
+  of the timing and adds its circuits at the first iteration's pace, and
+  counts the final parameters as one more iteration (#396).
+- SPSA in `polypus-optimizers`: `AlgorithmSPSA` and `AlgorithmSPSAArgs`,
+  with an `initial_point` like every optimizer (#396).
+- `polypus.Adam(max_iters=100, learning_rate=0.1, beta1=0.9, beta2=0.999,
+  epsilon=1e-8, bounds=(-math.pi, math.pi), tolerance=0.01, patience=20,
+  finite_difference_step=0.2, rule="adam", seed=None)`, accepted by `train`
+  and `qml.train`: gradient ascent, built on Kevin Pérez González's Adam
+  (#394). Each iteration is one batch of `2·dimensions + 1` circuits, the
+  current parameters and the central finite difference around them, so no
+  QPU waits on a one-circuit batch, and one step. After the last step one
+  circuit measures the parameters it reached, so every step is measured, and
+  `best_params` is the best of the parameters measured. `max_iters` and
+  `patience` are at least 1. `rule="adam"` is Kingma and Ba's Adam, whose step
+  does not depend on the scale of the cost; `rule="momentum"` is Polyak's
+  heavy-ball momentum, whose learning rate does. A seeded run over a backend
+  whose results do not depend on the platform reproduces on every platform
+  (C-7). Invalid settings, an unknown `rule` included, raise `ValueError`
+  before any circuit runs. See the training guide for the finite-difference
+  step and for starting from a global search (#395).
+- Adam in training runs (Rust, `polypus-orchestration`): `Method::Adam` with
+  `AdamConfig`. A factory now builds the run's `Oracles` (evaluation, and an
+  exact gradient when it has one); Adam uses the exact gradient or a finite
+  difference of the evaluation, and the CUNQA walltime warning counts one
+  batch per iteration, plus the call to an exact gradient, and the final
+  parameters as one more iteration (#394, #395).
+- Adam in `polypus-optimizers`: `AlgorithmAdam`, `AlgorithmAdamArgs` and
+  `AdamRule`, driven by a new `GradientOracle` contract (the fitness
+  gradient, uphill), with the same fitness-stagnation stop as DE and CMA-ES.
+  A gradient of the wrong length, or with a non-finite component (the new
+  `OptimizerError::NonFiniteGradient`), is an error.
+  `FiniteDifferenceGradient` turns any `EvaluationOracle` into a
+  `GradientOracle` by central differences, in one batch per gradient, and
+  through `GradientOracle::value_and_gradient` scores the parameters in the
+  same batch (#394, #395).
+- `polypus.backend_compatibility` reports `"cunqa"` and `"qmio"` next to
+  `"aer"` and `"polypus"` (#254). The CUNQA entry prepares the circuit as a run
+  does and converts it with CUNQA's own converter, without raising QPUs; the
+  QMIO entry reports a build without the `qmio` feature, a Qiskit circuit and a
+  program that is not a terminal-measurement circuit. The keyword-only
+  `resources=True` also checks the native qubit ceiling and memory budget, with
+  the message of the error the run raises.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with
@@ -49,8 +210,26 @@ Changes on `main` since 0.7.2.
   DE, unchanged; an unknown name raises `ValueError`. In Rust, `DeStrategy`
   (with `max_generations`) and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`.
+- `initial_point` in `train` and `qml.train` (keyword-only in `qml.train`)
+  starts the search from a given point, such as an earlier run's
+  `best_params`: `dimensions` finite numbers as a list, tuple or NumPy array,
+  otherwise `ValueError` before anything runs. DE (every `strategy`)
+  evaluates it, wrapped into `[0, 2π)`, as the first member of its initial
+  population; PSO as its first particle, which must lie within `bounds`; QNG
+  starts from it and Adam evaluates it first; CMA-ES centres its first run on
+  it and keeps its `sigma0`, so a refinement wants a smaller one. Without it
+  every optimizer behaves as before, seeded runs included (#395). In Rust, each
+  optimizer's `check_preconditions` checks its configuration and then the point
+  without running anything, and `polypus_orchestration::Method::check_preconditions`
+  calls the one the method names.
 
 ### Changed
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `External`, so an exhaustive `match` on it outside its crate must handle
+  it (#399).
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
+  `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
+  it (#398).
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
   (`"subprocess"` or a third-party one), a `noise_model` or a `sim_method`
   other than `"automatic"` raises `ValueError` instead of being ignored, and so
@@ -113,6 +292,40 @@ Changes on `main` since 0.7.2.
   memory bound.
 - **BREAKING (Rust):** `polypus_orchestration::DeConfig` has a `strategy`
   field; `DeStrategy::Rand1Bin` keeps the previous behaviour.
+- `train` and `qml.train` check the optimizer's configuration (a DE
+  `population_size` below 4, empty PSO or QNG `bounds`, an invalid CMA-ES
+  `sigma0`, ...) before any backend or CUNQA allocation exists, and before
+  `initial_point`, as the optimizer does. These `ValueError`s used to come
+  once the backend existed (#395).
+- **BREAKING (Rust):** `AlgorithmDifferentialEvolutionArgs`,
+  `AlgorithmPSOArgs`, `AlgorithmQNGArgs` and `AlgorithmCmaEsArgs` have an
+  `initial_point` field, `polypus_orchestration::dispatch_optimizer` takes
+  `initial_point` as its last argument and `TrainFlow` has an `initial_point`
+  field; `None` keeps the previous behaviour (#395).
+- **BREAKING (Rust):** the `polypus` crate has no default features, so it no
+  longer enables `log/max_level_info` for every dependent; choose a level with
+  `info-logs` or `debug-logs`. The wheel is built with `debug-logs`, so
+  `init_logger(level="debug")` shows the optimizers' progress without a
+  rebuild. The log-level aliases in `.cargo/config.toml` are removed (#414).
+- **BREAKING (Rust):** `polypus_orchestration::OracleFactory::build` returns
+  `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
+  `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
+  works, and `Method` has an `Adam` variant.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has new variants,
+  `NonFiniteGradient` (#394), `InvalidCandidate` and `ExternalOptimizer`
+  (#399), and is `#[non_exhaustive]`; a `match` on it outside its crate needs
+  a wildcard arm, and later variants are not breaking.
+- **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
+  so an exhaustive `match` on it needs an arm for it (#396).
+- **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has a
+  `final_shots` field (`None` keeps the previous behaviour), and its
+  `Flow::Output` is `TrainOutcome`, whose `optimization` field is the
+  `OptimizationOutcome` it returned before (#397).
+- `rust-toolchain.toml` pins the Rust that CI and the release builds use
+  (1.99.1), and that rustup selects in a checkout; a new Rust release can no
+  longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
+  does not include the file. Fuzzing and Miri use a dated nightly, and the
+  docs, release and tutorial-sync jobs have a timeout (#415).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -120,6 +333,40 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- Runs on the local Aer backend or on CUNQA from several threads at once no
+  longer panic with `Already mutably borrowed: PyBorrowError` on Qiskit 2.0.
+  The circuit lowering shares Qiskit's session equivalence library between
+  threads, and Qiskit 2.0's `BasisTranslator` cannot share it; Polypus now
+  lowers one circuit at a time, which costs no parallelism since the passes
+  hold the GIL (#468).
+- The examples run as shipped. `polypus_cunqa_basic.py` passed
+  `infraestructure=` (a `TypeError`) and sent its CUNQA steps to `"qmio"`, the
+  teleportation examples called `.values()` on a `RunResult`, `qft.py` needed
+  pandas and `max_cut_qaoa.py` required `--method` (it now defaults to
+  `polypus_local`). The examples that need CESGA's CUNQA or QMIO are in
+  `examples/hpc/`, and a personal run script is gone. The new `examples.yml`
+  workflow type-checks every example against the typing stubs and runs the
+  local ones (#406).
+- `max_cut_qaoa.py` reads every counts key with qubit 0 rightmost: the mean
+  cut behind the approximation ratio and the plotted cut read it reversed,
+  which showed only on graphs that are not symmetric under node reversal (from
+  `--qubits 5`). The script now checks the mapping against Qiskit's key
+  order before it trains (#445).
+- `infraestructures.py` compares Aer and the native backend on the
+  Hamming-weight distribution, against a total-variation bound derived from the
+  shot count, and exits with an error on a mismatch. The full 4096-outcome
+  distribution with a fixed 0.05 threshold reported a mismatch on every run,
+  since two samples of 8192 shots differ by about 0.23 (#446).
+- The README quickstart runs on the native backend (`backend="polypus"`), so it
+  no longer loads Qiskit Aer, which failed to import on the `python:3.10-slim`
+  to `python:3.12-slim` images with Qiskit 2.6.0 (`cannot allocate memory in
+  static TLS block`; fixed in Qiskit 2.6.1). The running guide has a new
+  Troubleshooting section for the error (#392).
+- The `polypus-physics` tests cover the `POLYPUS_ENDF_DATA_DIR` override
+  without setting the variable, which raced the tests that read it and cache
+  what they read, and write their files to per-process scratch directories
+  instead of fixed paths in the temp directory. The crate no longer contains
+  `unsafe` (#420).
 - With `infrastructure="cunqa"`, a circuit without measurements is read out on
   the full quantum register (`num_qubits`-wide keys, contract C-3) instead of
   failing with CUNQA's `key 'counts' not found` (#253), and a circuit with
@@ -175,6 +422,17 @@ Changes on `main` since 0.7.2.
 - CUNQA receives `cores_per_qpu` under the name CUNQA >= 2.4 expects.
 - Python errors and OS-entropy failures surface as typed errors, not panics.
 - Memory budget honours `K`/`M`/`G` suffixes and detects the cgroup/RAM limit.
+- CI runs every push to `main` to completion: the next push cancelled it, and
+  the release gate needs a successful push run for the commit it publishes
+  (#403).
+- CI tests the whole workspace (`cargo test --workspace`), so a crate added to
+  it is tested without editing the workflow, which listed the crates by hand
+  (#412).
+- CI runs tests it skipped without notice: the pinned-fixture test of the
+  OpenQASM 3 interop with Qiskit (contract C-10), in a leg with the Qiskit
+  that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
+  battery against Aer. There a missing tool fails those tests instead of
+  skipping them, and pytest lists every skip with its reason (#407).
 
 ## [0.7.2] - 2026-09-30
 

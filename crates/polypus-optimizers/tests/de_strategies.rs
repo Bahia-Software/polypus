@@ -164,6 +164,7 @@ fn args(
         tolerance: 1e-12,
         patience: 1_000,
         seed: Some(seed),
+        initial_point: None,
     }
 }
 
@@ -344,6 +345,7 @@ fn rand1bin_default_matches_its_pinned_outcome() {
             tolerance: case.tolerance,
             patience: case.patience,
             seed: Some(case.seed),
+            initial_point: None,
         };
         let through_trait = AlgorithmDifferentialEvolution
             .optimize(make())

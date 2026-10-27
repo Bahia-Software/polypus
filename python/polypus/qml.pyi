@@ -58,6 +58,8 @@ def train(
     walltime: Optional[str] = None,
     *,
     y_train: Optional[Iterable[float]] = None,
+    initial_point: Optional[_FloatVector] = None,
+    final_shots: Optional[int] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,

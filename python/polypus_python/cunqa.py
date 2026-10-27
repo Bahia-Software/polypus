@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 from functools import lru_cache
@@ -28,8 +29,19 @@ try:
 except ImportError:
     SUPPORTED_QISKIT_OPERATIONS = None
 
+try:
+    # The converter CUNQA's `run` applies to every circuit before sending it.
+    from cunqa.circuit.ir import to_ir  # noqa: E402
+except ImportError:
+    to_ir = None
+
 from .infrastructure import Infraestructure  # noqa: E402
-from .local import _c3_counts, _outside_basis, _with_full_readout  # noqa: E402
+from .local import (  # noqa: E402
+    _SESSION_EQUIVALENCE_LOCK,
+    _c3_counts,
+    _outside_basis,
+    _with_full_readout,
+)
 
 
 @lru_cache(maxsize=1)
@@ -53,13 +65,46 @@ def _lower_to_cunqa_basis(qc):
     boundary of contract C-2 as in ``local.py``: rewrite only
     (``optimization_level=0``: no reordering or merging), only when needed (a circuit CUNQA
     converts is handed over as it is), never touching the exported QASM. With a
-    CUNQA that does not publish the list, the circuit is forwarded unchanged."""
+    CUNQA that does not publish the list, the circuit is forwarded unchanged.
+    ``transpile`` uses Qiskit's session equivalence library, so it runs under
+    the lock ``local.py`` takes for it (issue #468)."""
     if SUPPORTED_QISKIT_OPERATIONS is None:
         return qc
     supported, basis_gates = _cunqa_basis()
     if not _outside_basis(qc, supported):
         return qc
-    return transpile(qc, basis_gates=basis_gates, optimization_level=0)
+    with _SESSION_EQUIVALENCE_LOCK:
+        return transpile(qc, basis_gates=basis_gates, optimization_level=0)
+
+
+def _prepare(qc):
+    """The circuit ``run_qcs`` sends for ``qc`` and the classical bits to read
+    its counts from (``_with_full_readout``).
+
+    Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
+    currently consume QuantumCircuit objects, so parse here, then lower what
+    CUNQA's converter does not take.
+
+    Contract C-3 reads a circuit without measurements out on the full quantum
+    register. CUNQA's vQPUs return no counts for one (CUNQA 3.0.0 fails the job
+    with "key 'counts' not found", #253), so the read-out is added here as on
+    the local Aer path, after lowering."""
+    if isinstance(qc, str):
+        qc = QuantumCircuit.from_qasm_str(qc)
+    return _with_full_readout(_lower_to_cunqa_basis(qc))
+
+
+def _convert(qc):
+    """Prepare ``qc`` as ``run_qcs`` does and convert it with CUNQA's own
+    converter, as CUNQA's ``run`` does before sending it, raising what a run
+    would raise. Nothing is sent and no QPU is needed
+    (``polypus.backend_compatibility``). With a CUNQA that does not publish its
+    converter, only the preparation is checked."""
+    prepared, _ = _prepare(qc)
+    if to_ir is not None:
+        # CUNQA's converter adds registers to the body of an `if_else`, and
+        # `prepared` may be the caller's circuit.
+        to_ir(copy.deepcopy(prepared))
 
 
 class Cunqa(Infraestructure):
@@ -105,22 +150,7 @@ class Cunqa(Infraestructure):
     def run_qcs(self, **args) -> object:
 
         family_id = args["family_id"]
-        # Native polypus circuits arrive as OpenQASM 2.0 strings; CUNQA QPUs
-        # currently consume QuantumCircuit objects, so parse here, then lower
-        # what CUNQA's converter does not take.
-        #
-        # Contract C-3 reads a circuit without measurements out on the full
-        # quantum register. CUNQA's vQPUs return no counts for one (CUNQA 3.0.0
-        # fails the job with "key 'counts' not found", #253), so the read-out
-        # is added here as on the local Aer path, after lowering.
-        prepared = [
-            _with_full_readout(
-                _lower_to_cunqa_basis(
-                    QuantumCircuit.from_qasm_str(qc) if isinstance(qc, str) else qc
-                )
-            )
-            for qc in args["qcs"]
-        ]
+        prepared = [_prepare(qc) for qc in args["qcs"]]
         qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
 

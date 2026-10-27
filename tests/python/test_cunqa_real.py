@@ -22,7 +22,9 @@ What it checks, with the native backend as the reference for the keys:
   register (``num_qubits`` wide keys);
 * #304: an imported circuit whose classical registers are wider than what it
   measures keeps the declared width, as text and as an imported
-  ``polypus.Circuit`` (OpenQASM 2 and 3).
+  ``polypus.Circuit`` (OpenQASM 2 and 3);
+* #254: ``polypus.backend_compatibility``'s ``"cunqa"`` entry, decided by CUNQA's
+  own converter, agrees with a run.
 
 Record the CUNQA version and the output in the PR when you run it. Passed on
 CUNQA 3.0.0 with Qiskit 2.5.2 (#253, #304).
@@ -42,6 +44,8 @@ pytest.importorskip("polypus_python.cunqa")
 
 import polypus  # noqa: E402
 from fake_cunqa import CIRCUIT_FORMS, WIDE_REGISTERS, circuit_in_form  # noqa: E402
+
+_QASM2 = 'OPENQASM 2.0;\ninclude "qelib1.inc";\n'
 
 pytestmark = pytest.mark.cunqa
 
@@ -105,3 +109,27 @@ def test_declared_classical_width_is_kept(name, qasm2, qasm3, key, form, n_qpus)
     result = _cunqa(qc, n_qpus, seed=5)
     _assert_c3(result, n_qpus)
     assert result.merged_counts == {key: _SHOTS}
+
+
+_DYNAMIC = "qreg q[2];\ncreg c[2];\nx q[0];\nmeasure q[0] -> c[0];\n"
+_COMPATIBILITY = {
+    "measured": _QASM2
+    + "qreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q -> c;\n",
+    "unmeasured": _QASM2 + "qreg q[2];\nx q[0];\n",
+    "reset": _QASM2 + "qreg q[1];\ncreg c[1];\nx q[0];\nreset q[0];\nmeasure q -> c;\n",
+    "if_one": _QASM2 + _DYNAMIC + "if(c==1) x q[1];\nmeasure q[1] -> c[1];\n",
+    "if_two": _QASM2 + _DYNAMIC + "if(c==2) x q[1];\nmeasure q[1] -> c[1];\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_COMPATIBILITY))
+def test_backend_compatibility_agrees_with_a_run(case):
+    # #254
+    circuit = _COMPATIBILITY[case]
+    reasons = polypus.backend_compatibility(circuit)["cunqa"]
+    if not reasons:
+        _assert_c3(_cunqa(circuit, 1, seed=7), 1)
+        return
+    with pytest.raises(Exception) as info:
+        _cunqa(circuit, 1, seed=7)
+    assert any(str(info.value) in reason for reason in reasons), (info.value, reasons)
