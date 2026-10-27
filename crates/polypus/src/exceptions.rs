@@ -114,8 +114,8 @@ pub(crate) fn configuration_error_type(py: Python<'_>) -> PyResult<&Bound<'_, Py
         namespace.set_item("__module__", "polypus")?;
         namespace.set_item(
             "__doc__",
-            "An invalid argument or configuration, rejected before anything runs: no \
-             backend exists yet and no QPU has been requested. Also a ValueError.",
+            "An invalid argument or configuration. Also a ValueError. The entry points \
+             check these before creating any backend.",
         )?;
         py.get_type::<PyType>()
             .call1(("ConfigurationError", bases, namespace))?
@@ -128,15 +128,16 @@ pub(crate) fn configuration_error_type(py: Python<'_>) -> PyResult<&Bound<'_, Py
 
 /// A `polypus.ConfigurationError` with `message`: what every argument and
 /// configuration check of the entry points raises. Needs the interpreter to
-/// look the class up; when it cannot attach (it is finalizing), a plain
-/// `ValueError` with the same message is returned instead (ENGINEERING §9).
+/// look the class up; when it cannot attach (it is finalizing) or the class
+/// cannot be built, a plain `ValueError` with the same message is returned
+/// instead (ENGINEERING §9).
 pub(crate) fn configuration_error(message: impl Into<String>) -> PyErr {
     let message = message.into();
     crate::infrastructure::attach_or(
         || PyValueError::new_err(message.clone()),
         |py| match configuration_error_type(py) {
             Ok(class) => PyErr::from_type(class.clone(), message.clone()),
-            Err(err) => err,
+            Err(_) => PyValueError::new_err(message.clone()),
         },
     )
 }

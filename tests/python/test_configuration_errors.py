@@ -114,9 +114,13 @@ class TestConfigurationErrorClass:
             ),
         ],
     )
-    def test_configuration_checks_raise_it(self, call):
+    def test_configuration_checks_raise_it(self, monkeypatch, call):
+        # `_train` defaults to CUNQA: a check that regressed past the backend
+        # must reach the fake, never a real qraise.
+        fake = FakeCunqa().install(monkeypatch)
         with pytest.raises(polypus.ConfigurationError):
             call()
+        assert fake.calls == []
 
 
 class TestQmlTrainRejectsQmio:

@@ -222,10 +222,11 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   `PolypusError` → `ConfigurationError`. Catching `polypus.PolypusError` catches
   them all.
 - **`ConfigurationError`** (issue #418) subclasses both `PolypusError` and
-  `ValueError`. Every `ValueError` the entry points raise for an argument or a
-  configuration (an unknown `infrastructure`, a bad `walltime`, an optimizer
-  setting, `OracleError::Config`, …) is one, so the `ValueError` guarantees in
-  this file still hold. `train` and `qml.train` raise them, and convert the
+  `ValueError`. Every `ValueError` that `run_quantum_circuit`, `train`,
+  `qml.train` and `qml.predict` raise for an argument or a configuration (an
+  unknown `infrastructure`, a bad `walltime`, an optimizer setting,
+  `OracleError::Config`, …) is one, so the `ValueError` guarantees in this file
+  still hold. `train` and `qml.train` make these checks, and convert the
   observable and the optimizer, before any backend exists, so on CUNQA an
   invalid configuration never reaches `qraise`.
 - **`InsufficientMemoryError`** (issue #215): a circuit that does not fit in the

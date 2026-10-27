@@ -231,6 +231,9 @@ Changes on `main` since 0.7.2.
   catches them and `except ValueError` still does (#418).
 
 ### Changed
+- Argument and configuration errors are now `polypus.ConfigurationError`, a
+  `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
+  `except ValueError` now catches them (#418).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `External`, so an exhaustive `match` on it outside its crate must handle
   it (#399).
