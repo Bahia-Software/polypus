@@ -4,7 +4,7 @@ use crate::error::OptimizerError;
 use crate::objective::{EvaluationOracle, VarianceOracle};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::check_oracle_len;
+use crate::util::{check_initial_point, check_oracle_len};
 use rand::{Rng, RngExt};
 
 /// Quantum Natural Gradient optimizer.
@@ -22,7 +22,8 @@ pub struct AlgorithmQNG;
 /// # Preconditions
 ///
 /// `bounds` must be a non-empty interval (`lb < ub`); the initial `θ` is drawn
-/// uniformly from it.
+/// uniformly from it. `initial_point`, when given, holds `dimensions` finite
+/// values.
 pub struct AlgorithmQNGArgs {
     /// Oracle that maps parameter vectors → fitness values (used for gradient + energy eval).
     pub oracle: Box<dyn EvaluationOracle>,
@@ -38,6 +39,11 @@ pub struct AlgorithmQNGArgs {
     /// Optional RNG seed. `None` (the default) uses [`rand::rng`];
     /// `Some(seed)` makes the run reproducible.
     pub seed: Option<u64>,
+    /// Optional initial `θ`, one value per dimension, all finite; it may lie
+    /// outside `bounds`, which only shape the random draw (θ is never clamped).
+    /// The first gradient batch is the finite-difference stencil around it.
+    /// `None` draws `θ` uniformly from `bounds`.
+    pub initial_point: Option<Vec<f64>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,41 +127,24 @@ fn compute_qfim_diagonal(
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AlgorithmQNG {
-    /// The optimizer's human-readable name.
-    pub fn name(&self) -> String {
-        String::from("Quantum Natural Gradient")
-    }
-
-    /// A short description of the optimizer.
-    pub fn description(&self) -> String {
-        String::from(
-            "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
-             optimizer. Gradients are estimated via a central finite-difference stencil and \
-             preconditioned by the diagonal Fubini-Study metric (QFIM).",
-        )
-    }
-
-    fn run_with_rng<R: Rng>(
-        args: AlgorithmQNGArgs,
-        rng: &mut R,
-    ) -> Result<OptimizationOutcome, OptimizerError> {
-        let AlgorithmQNGArgs {
-            oracle,
-            max_iters,
-            learning_rate,
-            finite_difference_step,
-            bounds,
-            dimensions,
-            variance_oracle,
-            tikhonov_reg,
-            seed: _,
-        } = args;
-
-        let dims = dimensions as usize;
-
-        // Validate the scalar configuration before any RNG draw or oracle call,
-        // so a bad config surfaces a typed error at the seam instead of a silent
-        // `-inf` outcome, a `NaN`/`inf` update, or a panic in the sampler.
+    /// Check the preconditions of [`AlgorithmQNGArgs`] that
+    /// [`optimize`](Optimizer::optimize) checks before any RNG draw or oracle
+    /// call, in the same order, without running anything: `max_iters`,
+    /// `finite_difference_step`, `tikhonov_reg`, `learning_rate`, `bounds`,
+    /// then `initial_point` (`dimensions` finite values, inside `bounds` or
+    /// not). `train` and `qml.train` call it before any backend exists.
+    pub fn check_preconditions(
+        max_iters: u32,
+        learning_rate: f64,
+        finite_difference_step: f64,
+        bounds: (f64, f64),
+        tikhonov_reg: f64,
+        dimensions: u32,
+        initial_point: Option<&[f64]>,
+    ) -> Result<(), OptimizerError> {
+        // The scalar configuration first, so a bad config surfaces a typed
+        // error at the seam instead of a silent `-inf` outcome, a `NaN`/`inf`
+        // update, or a panic in the sampler.
         if max_iters == 0 {
             return Err(OptimizerError::InvalidConfig {
                 parameter: "max_iters",
@@ -191,9 +180,60 @@ impl AlgorithmQNG {
         if !lb.is_finite() || !ub.is_finite() || lb >= ub {
             return Err(OptimizerError::InvalidBounds { lb, ub });
         }
+        // The bounds only shape the random draw, so the point may lie outside.
+        check_initial_point(initial_point, dimensions as usize, None)
+    }
 
-        // Initialise θ uniformly in [lb, ub)
-        let mut theta: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+    /// The optimizer's human-readable name.
+    pub fn name(&self) -> String {
+        String::from("Quantum Natural Gradient")
+    }
+
+    /// A short description of the optimizer.
+    pub fn description(&self) -> String {
+        String::from(
+            "Trains a variational quantum circuit using the Quantum Natural Gradient (QNG) \
+             optimizer. Gradients are estimated via a central finite-difference stencil and \
+             preconditioned by the diagonal Fubini-Study metric (QFIM).",
+        )
+    }
+
+    fn run_with_rng<R: Rng>(
+        args: AlgorithmQNGArgs,
+        rng: &mut R,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        let AlgorithmQNGArgs {
+            oracle,
+            max_iters,
+            learning_rate,
+            finite_difference_step,
+            bounds,
+            dimensions,
+            variance_oracle,
+            tikhonov_reg,
+            seed: _,
+            initial_point,
+        } = args;
+
+        let dims = dimensions as usize;
+
+        // Preconditions (documented on the struct), before any RNG draw or
+        // oracle call.
+        Self::check_preconditions(
+            max_iters,
+            learning_rate,
+            finite_difference_step,
+            bounds,
+            tikhonov_reg,
+            dimensions,
+            initial_point.as_deref(),
+        )?;
+        let (lb, ub) = bounds;
+
+        // Initialise θ uniformly in [lb, ub), or at the caller's point: θ is
+        // drawn either way, so the RNG stream does not depend on it.
+        let drawn: Vec<f64> = (0..dims).map(|_| rng.random_range(lb..ub)).collect();
+        let mut theta = initial_point.unwrap_or(drawn);
         let mut best_energy = f64::NEG_INFINITY;
         let mut best_theta = theta.clone();
         let mut iterations_run = 0usize;

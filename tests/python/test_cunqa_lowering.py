@@ -17,15 +17,7 @@ import sys
 import types
 
 import pytest
-
-# `SUPPORTED_QISKIT_OPERATIONS` of CUNQA 3.0.0 (`cunqa/circuit/ir.py`).
-CUNQA_OPERATIONS = {
-    "unitary", "ryy", "rz", "z", "p", "rxx", "rx", "cx", "id", "x", "sxdg", "u1",
-    "ccy", "rzz", "rzx", "ry", "s", "cu", "crz", "ecr", "t", "ccx", "y", "cswap",
-    "r", "sdg", "csx", "crx", "ccz", "u3", "u2", "u", "cp", "tdg", "sx", "cu1",
-    "swap", "cy", "cry", "cz", "h", "cu3", "measure", "if_else", "barrier", "reset",
-    "save_state", "set_statevector",
-}  # fmt: skip
+from fake_cunqa import CUNQA_OPERATIONS
 
 H = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[5];\n'
 
@@ -170,3 +162,25 @@ def test_cunqa_without_the_operation_list_gets_the_circuit_unchanged(monkeypatch
     _run_qcs([qc])
 
     assert sent[0] is qc
+
+
+def test_the_lowering_runs_under_the_session_equivalence_lock(monkeypatch):
+    """``transpile`` uses Qiskit's session equivalence library, which Qiskit 2.0
+    cannot share between threads (issue #468)."""
+    sent = _stub_cunqa(monkeypatch, CUNQA_OPERATIONS)
+    import polypus_python.cunqa as cunqa
+    from polypus_python.local import _SESSION_EQUIVALENCE_LOCK
+
+    held = []
+    original = cunqa.transpile
+
+    def spy(*args, **kwargs):
+        held.append(_SESSION_EQUIVALENCE_LOCK.locked())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cunqa, "transpile", spy)
+    _run_qcs([_program("ch")])
+
+    assert held == [True]
+    assert len(sent) == 1
+    assert not _SESSION_EQUIVALENCE_LOCK.locked()

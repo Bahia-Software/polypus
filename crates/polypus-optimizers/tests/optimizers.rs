@@ -102,6 +102,7 @@ fn de_converges_to_known_optimum() {
             tolerance: 1e-9,
             patience: 20,
             seed: Some(42),
+            initial_point: None,
         })
         .expect("valid DE args optimize successfully");
 
@@ -129,6 +130,7 @@ fn pso_converges_to_known_optimum() {
             social_weight: 1.0,
             tolerance: 1e-9,
             seed: Some(42),
+            initial_point: None,
         })
         .expect("valid PSO args optimize successfully");
 
@@ -155,6 +157,7 @@ fn qng_converges_to_known_optimum() {
             variance_oracle: Box::new(ConstVariance(1.0)),
             tikhonov_reg: 0.05,
             seed: Some(42),
+            initial_point: None,
         })
         .expect("valid QNG args optimize successfully");
 
@@ -187,6 +190,7 @@ fn de_is_deterministic_for_a_fixed_seed() {
                 tolerance: 1e-9,
                 patience: 20,
                 seed: Some(123),
+                initial_point: None,
             })
             .expect("valid DE args optimize successfully")
     };
@@ -209,6 +213,7 @@ fn pso_is_deterministic_for_a_fixed_seed() {
                 social_weight: 1.0,
                 tolerance: 1e-9,
                 seed: Some(123),
+                initial_point: None,
             })
             .expect("valid PSO args optimize successfully")
     };
@@ -239,6 +244,7 @@ fn de_early_stops_on_fitness_stagnation() {
                 tolerance: 1e-3,
                 patience,
                 seed: Some(7),
+                initial_point: None,
             })
             .expect("valid DE args optimize successfully")
     };
@@ -287,6 +293,7 @@ fn de_large_patience_never_stops_early() {
             tolerance: 1e9, // huge: any improvement is "below" it, yet patience blocks the stop
             patience: 1_000,
             seed: Some(7),
+            initial_point: None,
         })
         .expect("valid DE args optimize successfully");
     assert!(!outcome.converged, "large patience must prevent early stop");
@@ -316,6 +323,7 @@ fn pso_early_stops_on_collapse_with_symmetric_bounds() {
                 social_weight: 1.0,
                 tolerance: 0.05,
                 seed: Some(42),
+                initial_point: None,
             })
             .expect("valid PSO args optimize successfully")
     };
@@ -348,6 +356,7 @@ fn de_handles_zero_dimensions() {
             tolerance: 1e-9,
             patience: 20,
             seed: Some(1),
+            initial_point: None,
         })
         .expect("valid DE args optimize successfully");
     assert!(outcome.best_params.is_empty());
@@ -365,6 +374,7 @@ fn de_handles_minimum_population() {
             tolerance: 1e-9,
             patience: 20,
             seed: Some(1),
+            initial_point: None,
         })
         .expect("valid DE args optimize successfully");
     assert_eq!(outcome.best_params.len(), 2);
@@ -384,6 +394,7 @@ fn de_rejects_population_below_four() {
             tolerance: 1e-9,
             patience: 20,
             seed: Some(1),
+            initial_point: None,
         });
         assert!(
             matches!(
@@ -406,6 +417,7 @@ fn de_nan_fitness_does_not_panic() {
             tolerance: 1e-9,
             patience: 20,
             seed: Some(1),
+            initial_point: None,
         })
         .expect("valid DE args optimize successfully");
     assert_eq!(outcome.best_params.len(), 2);
@@ -424,6 +436,7 @@ fn de_short_oracle_returns_error_not_panic() {
         tolerance: 1e-9,
         patience: 20,
         seed: Some(1),
+        initial_point: None,
     });
     assert!(
         matches!(
@@ -451,6 +464,7 @@ fn pso_nan_fitness_does_not_panic() {
             social_weight: 1.0,
             tolerance: 1e-9,
             seed: Some(1),
+            initial_point: None,
         })
         .expect("valid PSO args optimize successfully");
     assert_eq!(outcome.best_params.len(), 2);
@@ -469,6 +483,7 @@ fn pso_short_oracle_returns_error_not_panic() {
         social_weight: 1.0,
         tolerance: 1e-9,
         seed: Some(1),
+        initial_point: None,
     });
     assert!(
         matches!(
@@ -498,6 +513,7 @@ fn qng_tikhonov_avoids_division_blowup_when_qfim_is_zero() {
             variance_oracle: Box::new(ConstVariance(0.0)),
             tikhonov_reg: 0.05,
             seed: Some(1),
+            initial_point: None,
         })
         .expect("valid QNG args optimize successfully");
     for x in &outcome.best_params {
@@ -520,6 +536,7 @@ fn qng_short_oracle_returns_error_not_panic() {
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
+        initial_point: None,
     });
     assert!(
         matches!(
@@ -550,6 +567,7 @@ fn pso_rejects_empty_bounds() {
             social_weight: 1.0,
             tolerance: 1e-9,
             seed: Some(1),
+            initial_point: None,
         });
         assert!(
             matches!(result, Err(OptimizerError::InvalidBounds { .. })),
@@ -580,6 +598,7 @@ fn pso_rejects_non_finite_bounds() {
             social_weight: 1.0,
             tolerance: 1e-9,
             seed: Some(1),
+            initial_point: None,
         });
         assert!(
             matches!(result, Err(OptimizerError::InvalidBounds { .. })),
@@ -602,6 +621,7 @@ fn qng_rejects_empty_bounds() {
         variance_oracle: Box::new(ConstVariance(1.0)),
         tikhonov_reg: 0.05,
         seed: Some(1),
+        initial_point: None,
     });
     assert!(
         matches!(result, Err(OptimizerError::InvalidBounds { .. })),
@@ -654,6 +674,7 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 tolerance: 1e-9,
                 patience: 20,
                 seed: Some(seed),
+                initial_point: None,
             })
             .expect("valid DE args optimize successfully");
         assert_reported_fitness_matches_params(
@@ -672,6 +693,7 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 tolerance: 1e-9,
                 patience: 20,
                 seed: Some(seed),
+                initial_point: None,
             })
             .expect("valid DE args optimize successfully");
         assert_reported_fitness_matches_params(
@@ -702,6 +724,7 @@ fn pso_best_params_fitness_invariant_holds_across_seeds() {
                 social_weight: 1.0,
                 tolerance: 1e-9,
                 seed: Some(seed),
+                initial_point: None,
             })
             .expect("valid PSO args optimize successfully");
         assert_reported_fitness_matches_params(
@@ -729,6 +752,7 @@ fn qng_best_params_fitness_invariant_holds_across_seeds() {
                 variance_oracle: Box::new(ConstVariance(1.0)),
                 tikhonov_reg: 0.05,
                 seed: Some(seed),
+                initial_point: None,
             })
             .expect("valid QNG args optimize successfully");
         assert_reported_fitness_matches_params(

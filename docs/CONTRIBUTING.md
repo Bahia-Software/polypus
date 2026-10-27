@@ -68,35 +68,97 @@ way.
 
 ## Running the checks
 
-Everything CI runs, you can run locally:
+These are the checks CI runs (`.github/workflows/ci.yml` and `hygiene.yml`);
+each can be run locally. They use the Rust that `rust-toolchain.toml` pins,
+which rustup selects in this checkout (`rustup toolchain install` installs
+it). Lints and builds:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                     # all crates, no hand-maintained list
+ruff check && ruff format --check          # ruff pinned in requirements-dev.txt
+cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
+cargo metadata --locked --format-version 1 > /dev/null   # Cargo.lock matches the manifests
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p polypus-infrastructure --features qmio --all-targets -- -D warnings
+cargo clippy --locked -p polypus --features qmio --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+cargo machete                              # unused dependencies (needs cargo-machete)
+```
+
+Declared dependency floors (the `rust-minimal-versions` and `python-floors`
+jobs). The first rewrites `Cargo.lock`; restore it afterwards with
+`git checkout Cargo.lock`. The second needs a fresh environment on Python 3.10
+and installs the build requirements at their floors first (see the job):
+
+```bash
+cargo +nightly-2026-10-22 update -Z direct-minimal-versions
+cargo check --workspace --all-targets
+uv pip install --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
+```
+
+Rust tests:
+
+```bash
+cargo test --locked --workspace            # every crate, default features
                                            # (polypus-subprocess-backend's tests spawn a Python
                                            #  worker; they skip gracefully if python3 is absent)
-cargo test -p polypus --features qmio      # QMIO backend (skips gracefully without QPU access)
-cargo deny check                           # licenses + advisories (needs cargo-deny, deny.toml)
-pytest tests/python                        # needs polypus installed (see Setting up)
+cargo test --locked --all-features -p polypus-circuit -p polypus-sim -p polypus-physics \
+  -p polypus-optimizers -p polypus-observable -p polypus-backend \
+  -p polypus-backend-conformance -p polypus-subprocess-backend
+                                           # pure-Rust crates, every feature
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --test memory_safety
+CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \
+  cargo test --locked --release -p polypus-sim --features parallel --lib kernels::
+cargo test --locked -p polypus-logger --features debug-logs   # the wheel's log level
+cargo test --locked -p polypus-infrastructure --features qmio
+cargo test --locked -p polypus --features qmio   # QMIO backend (skips gracefully without QPU access)
+cargo test --locked --manifest-path examples/rust-backend-template/Cargo.toml
+cargo test --locked --manifest-path examples/python-backend-template/Cargo.toml
+```
+
+Python tests, with the wheel installed (see Setting up):
+
+```bash
+python -m compileall -q examples benchmarks
+pytest tests/python -rs --strict-markers   # -rs lists every skip with its reason
 python -m mypy.stubtest polypus \
   --allowlist tests/python/stubtest_allowlist.txt \
   --mypy-config-file tests/python/stubtest_mypy.ini
                                            # typing stubs vs the installed extension
-                                           # (needs the wheel installed and mypy from
-                                           #  requirements-dev.txt)
-python .github/scripts/hygiene.py --base origin/main   # repository hygiene (commit first)
+                                           # (mypy from requirements-dev.txt)
+OMP_NUM_THREADS=1 cargo test --locked -p polypus-infrastructure --test conformance \
+  -- --ignored --exact local_aer_backend_conformance
+                                           # the conformance battery against Aer
 ```
+
+A few tests skip when what they need is missing. CI provides it and sets a
+variable that turns those skips into failures: `POLYPUS_REQUIRE_LLVM_AS=1`
+for the QIR tests that run `llvm-as` (Rust and Python), `POLYPUS_REQUIRE_AER=1`
+for the Aer conformance battery, and `POLYPUS_REQUIRE_FIXTURES_QISKIT=1` in the
+leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
+pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
+Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
+Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
+so the tests of `polypus.external` that train through them run there
+(contract C-5); elsewhere they skip unless you install them.
+
+CI also builds the wheel on Linux, macOS and Windows and executes every
+notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
+Three jobs set another toolchain with `RUSTUP_TOOLCHAIN`: `msrv` checks the
+workspace with the MSRV (`rust-version` in `Cargo.toml`), and `fuzz` and
+`miri` fuzz the OpenQASM importers and run Miri over `polypus-sim`'s `unsafe`
+kernels on a dated nightly. Their jobs in `ci.yml` show the exact commands.
 
 A green run is a **precondition** for opening a PR, not something to fix
 afterwards.
 
-> Note: we intentionally use `--workspace` instead of listing crates one by
-> one — a hand-maintained crate list silently goes stale every time a crate is
-> added or split (it already happened once). The one deliberate exception is
-> CI's all-features pass over the pure-Rust crates (see
-> `.github/workflows/ci.yml`): `--workspace --all-features` would enable
-> `extension-module`, which breaks building the test targets.
+> Note: CI tests with `--workspace` instead of listing crates one by one — a
+> hand-maintained crate list silently goes stale every time a crate is added
+> or split (it already happened once). The one deliberate exception is the
+> all-features pass over the pure-Rust crates: `--workspace --all-features`
+> would enable `extension-module`, which breaks building the test targets.
 
 Performance claims have their own bar: before claiming a speed-up, back it
 with the scripts in `benchmarks/` (`run_benchmarks.py`,
@@ -145,6 +207,21 @@ the public rules passed. A post-merge finding cannot undo the publication.
 The check covers the net diff only, not every intermediate commit nor the
 existing history, and does not replace checking your own changes before
 pushing.
+
+## Code quality dashboard
+
+`.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
+request and push to `main` (configuration in `sonar-project.properties`):
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes, the clippy
+report, and Python coverage of `python/` from the pytest suite. Rust reached
+only through the Python extension is not counted. It is informational: no
+check is required and the quality gate does not fail the run. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded. Python coverage locally, with the wheel installed:
+
+```bash
+python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
+```
 
 ## Lint policy
 

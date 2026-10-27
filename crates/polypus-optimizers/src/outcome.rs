@@ -21,7 +21,7 @@ pub struct OptimizationOutcome {
     pub iterations_run: usize,
     /// Whether the algorithm's convergence criterion was satisfied.
     ///
-    /// Optimizers without an early-stopping test (e.g. QNG) always report
+    /// Optimizers without an early-stopping test (QNG, SPSA) always report
     /// `false` — they simply exhaust their iteration budget.
     pub converged: bool,
     /// Best fitness recorded at the end of each generation/iteration, in order.

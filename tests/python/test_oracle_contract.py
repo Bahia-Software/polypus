@@ -234,3 +234,425 @@ class TestOracleContractC5Cmaes:
         assert math.isfinite(result.best_fitness)
         assert len(result.fitness_history) == result.iterations_run
         assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5Adam:
+    """The same guarantees for ``polypus.Adam``: each iteration's batch of ``θ``
+    and its finite-difference stencil is an evaluation-oracle batch, so a bad
+    value in it, ``θ``'s own included, must surface as a typed error."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, **kwargs):
+        import polypus
+
+        return polypus.train(
+            parametrized_circuit,
+            polypus.Adam(max_iters=4, tolerance=0.5, patience=1, **kwargs),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+
+        try:
+            self._train(parametrized_circuit, lambda _b: value, "adam_non_finite")
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+
+    def test_non_finite_value_in_the_update_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """The first iteration sees only finite values; in the second batch,
+        the updated ``θ`` (its first circuit) measures a bitstring whose value
+        is NaN while its stencil stays finite."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            # Each batch holds θ and the 2 stencil circuits of one parameter.
+            update = len(sizes) == 2
+            return [
+                {"1" if update and i == 0 else "0": kwargs["shots"]}
+                for i in range(len(kwargs["qcs"]))
+            ]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "adam_late_nan",
+            )
+        assert sizes == [3, 3], sizes
+
+    def test_non_finite_value_at_the_final_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step Adam measures the final ``θ`` in a batch of its
+        own, a single circuit; a NaN there is an evaluation error too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "adam_final_nan",
+            )
+        # A flat fitness stops the run after its second step (patience 1).
+        assert sizes == [3, 3, 1], sizes
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "adam_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(parametrized_circuit, simple_expectation_fn, "adam_valid")
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5SPSA:
+    """The same guarantees for ``polypus.SPSA``: its calibration batch and each
+    iteration's batch of perturbed pairs, with ``θ`` heading it when measured,
+    are evaluation-oracle batches, so a bad value in any of them must surface
+    as a typed error."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, **kwargs):
+        import polypus
+
+        return polypus.train(
+            parametrized_circuit,
+            polypus.SPSA(max_iters=4, eval_interval=2, **kwargs),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+
+        try:
+            self._train(parametrized_circuit, lambda _b: value, "spsa_non_finite")
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+
+    def test_non_finite_value_of_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """The calibration batch sees only finite values; in the second batch,
+        ``θ`` (its first circuit) measures a bitstring whose value is NaN while
+        its perturbed pair stays finite."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            theta = len(sizes) == 2
+            return [
+                {"1" if theta and i == 0 else "0": kwargs["shots"]}
+                for i in range(len(kwargs["qcs"]))
+            ]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "spsa_theta_nan",
+            )
+        # The 50 calibration circuits, then θ and one perturbed pair.
+        assert sizes == [50, 3], sizes
+
+    def test_non_finite_value_at_the_final_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step SPSA measures the final ``θ`` in a batch of its
+        own, a single circuit; a NaN there is an evaluation error too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "spsa_final_nan",
+            )
+        # The calibration, four iterations (θ on the first and the third),
+        # then the final θ.
+        assert sizes == [50, 3, 2, 3, 2, 1], sizes
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "spsa_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(parametrized_circuit, simple_expectation_fn, "spsa_valid")
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert result.iterations_run == 4
+        assert not result.converged
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5Rotosolve:
+    """The same guarantees for ``polypus.Rotosolve``: each step's batch, the
+    two neighbours of ``θ`` along one parameter with ``θ`` heading it when it
+    is measured, is an evaluation-oracle batch, so a bad value in any of them
+    must surface as a typed error."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, **kwargs):
+        import polypus
+
+        return polypus.train(
+            parametrized_circuit,
+            polypus.Rotosolve(sweeps=4, reevaluate_every=2, **kwargs),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+
+        try:
+            self._train(parametrized_circuit, lambda _b: value, "roto_non_finite")
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+
+    def test_non_finite_value_of_theta_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """The first two steps see only finite values; the third measures ``θ``
+        again (its first circuit), on a bitstring whose value is NaN while its
+        two neighbours stay finite."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            theta = len(sizes) == 3
+            return [
+                {"1" if theta and i == 0 else "0": kwargs["shots"]}
+                for i in range(len(kwargs["qcs"]))
+            ]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "roto_theta_nan",
+                # A flat landscape would otherwise stop after two sweeps.
+                tolerance=0,
+            )
+        # θ and its two neighbours, the two neighbours alone, then θ again.
+        assert sizes == [3, 2, 3], sizes
+
+    def test_non_finite_value_at_the_final_point_raises_evaluation_error(
+        self, parametrized_circuit, monkeypatch
+    ):
+        """After its last step Rotosolve measures the point it reached in a
+        batch of its own, a single circuit; a NaN there is an evaluation error
+        too."""
+        import polypus
+        import polypus_python
+
+        sizes = []
+
+        def fake_run_qcs(infrastructure, **kwargs):
+            sizes.append(len(kwargs["qcs"]))
+            final = len(kwargs["qcs"]) == 1
+            return [{"1" if final else "0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", fake_run_qcs)
+        with pytest.raises(polypus.EvaluationError):
+            self._train(
+                parametrized_circuit,
+                lambda b: float("nan") if b == "1" else 1.0,
+                "roto_final_nan",
+            )
+        # A flat fitness stops the run after two sweeps of one step (patience
+        # 2), the first with θ measured.
+        assert sizes == [3, 2, 1], sizes
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "roto_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(
+            parametrized_circuit, simple_expectation_fn, "roto_valid", tolerance=0
+        )
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert result.iterations_run == 4
+        assert not result.converged
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness
+
+
+class TestOracleContractC5External:
+    """The same guarantees for ``polypus.External``: each ``ask()`` is an
+    evaluation-oracle batch, so a bad value in any of them must surface as a
+    typed error, and the library is not told it."""
+
+    @staticmethod
+    def _train(parametrized_circuit, expectation_fn, ident, optimizer=None):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        if optimizer is None:
+            optimizer = RandomSearch(_DIMENSIONS, sizes=(3,))
+        return polypus.train(
+            parametrized_circuit,
+            polypus.External(optimizer, 12),
+            shots=_SHOTS,
+            n_qpus=_N_QPUS,
+            dimensions=_DIMENSIONS,
+            expectation_function=expectation_fn,
+            infrastructure="local",
+            nodes=_NODES,
+            cores_per_qpu=_CORES_PER_QPU,
+            id=ident,
+        )
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_value_raises_evaluation_error(
+        self, parametrized_circuit, value
+    ):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        optimizer = RandomSearch(_DIMENSIONS, sizes=(3,))
+        try:
+            self._train(
+                parametrized_circuit, lambda _b: value, "ext_non_finite", optimizer
+            )
+        except BaseException as exc:  # noqa: BLE001 - the class is the assertion
+            assert type(exc).__name__ != "PanicException"
+            assert isinstance(exc, polypus.EvaluationError), exc
+        else:
+            pytest.fail("expected the non-finite expectation value to raise")
+        assert len(optimizer.asked) == 1
+        assert optimizer.told == []
+
+    def test_short_seam_result_is_a_typed_error(
+        self, parametrized_circuit, simple_expectation_fn, monkeypatch
+    ):
+        """A backend that returns one counts map too few is a typed
+        ``polypus.PolypusError``, never a panic and never a result."""
+        import polypus
+        import polypus_python
+
+        def short_run_qcs(infrastructure, **kwargs):
+            return [{"1": kwargs["shots"]} for _ in kwargs["qcs"]][:-1]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", short_run_qcs)
+        with pytest.raises(polypus.PolypusError):
+            self._train(parametrized_circuit, simple_expectation_fn, "ext_short")
+
+    def test_valid_path_trains(self, parametrized_circuit, simple_expectation_fn):
+        result = self._train(parametrized_circuit, simple_expectation_fn, "ext_valid")
+        assert len(result.best_params) == _DIMENSIONS
+        assert math.isfinite(result.best_fitness)
+        assert result.iterations_run == 4
+        assert not result.converged
+        assert len(result.fitness_history) == result.iterations_run
+        assert result.fitness_history[-1] == result.best_fitness

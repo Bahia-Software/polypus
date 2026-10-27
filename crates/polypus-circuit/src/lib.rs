@@ -49,6 +49,7 @@ mod qasm3;
 mod qasm3_import;
 mod qasm_import;
 mod qir;
+mod single_frequency;
 pub mod templates;
 
 pub use circuit::{ConcreteCircuit, ParameterizedCircuit};
@@ -61,3 +62,4 @@ pub use gate::{
 };
 // Variant re-exports so call sites can write `Param(0)` / `Fixed(0.5)` directly.
 pub use gate::GateParam::{Fixed, Param};
+pub use single_frequency::{AngleForm, SingleFrequencyError};

@@ -26,9 +26,12 @@ extension-module = ["pyo3/extension-module"]
 # stack. The backend itself (ZeroMQ wire protocol, pickle serialisation) lives in
 # `polypus-infrastructure`; this just forwards the feature to it.
 qmio = ["polypus-infrastructure/qmio"]
-default = ["info-logs"]
+default = []
 # Compile-time max log level, forwarded to the shared `polypus-logger` crate
-# (which in turn toggles the `log` crate's global `max_level_*` features).
+# (which in turn toggles the `log` crate's global `max_level_*` features). None
+# is on by default: the features are global to a build and mutually exclusive,
+# so only the final artifact picks one. The wheel uses `debug-logs` (see
+# `[tool.maturin] features` in pyproject.toml).
 off-logs   = ["polypus-logger/off-logs"]
 error-logs = ["polypus-logger/error-logs"]
 warn-logs  = ["polypus-logger/warn-logs"]

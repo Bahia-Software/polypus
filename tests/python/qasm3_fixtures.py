@@ -8,7 +8,8 @@ installed:
     python tests/python/qasm3_fixtures.py --write
 
 ``test_qasm3_interop.py`` checks that the constructions still produce the
-pinned text under that version.
+pinned text under that version. One leg of CI's Python tests installs that
+version (``QISKIT_VERSION`` below), so the check runs there.
 """
 
 import argparse
