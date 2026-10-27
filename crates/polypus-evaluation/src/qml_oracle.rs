@@ -3,8 +3,8 @@ use crate::{
     OracleErrorSlot, SupervisedObjective,
 };
 use polypus_infrastructure::{
-    BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError, NativeStatevectorBackend,
-    Planner, QiskitCircuit, QuantumBackend, RunParams,
+    final_batch_params, BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError,
+    NativeStatevectorBackend, Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
 use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
@@ -265,12 +265,31 @@ enum Samples {
 
 impl EvaluationOracle for QmlOracle {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        self.evaluate(candidates, self.config.shots, &self.config)
+    }
+
+    /// Every circuit of the batch, each candidate on **every** training sample,
+    /// runs with `shots` shots instead of the run's (`final_shots` of a
+    /// training run), and with the final batch's seed
+    /// ([`final_batch_params`]), so its shot noise is independent of the
+    /// training's. It draws no minibatch: the final batch scores the whole
+    /// training set, and a seeded run is the same up to it.
+    fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+        self.evaluate_batch_full(candidates, shots, &final_batch_params(&self.config))
+    }
+}
+
+impl QmlOracle {
+    /// [`evaluate_batch`](EvaluationOracle::evaluate_batch): one mean per
+    /// candidate, each circuit measured with `shots` shots, every call to the
+    /// backend with `config`.
+    fn evaluate(&self, candidates: &[Vec<f64>], shots: u32, config: &RunParams) -> Vec<f64> {
         // Once evaluation has failed, stop doing work: return finite sentinels
         // and let the entry point surface the recorded error.
         if self.errors.failed() {
             return vec![0.0; candidates.len()];
         }
-        match self.try_evaluate(candidates) {
+        match self.try_evaluate(candidates, shots, config) {
             Ok(values) => values,
             Err(e) => {
                 // Type-erase the failure into the (pyo3-free) slot; the FFI edge
@@ -340,24 +359,40 @@ impl QmlOracle {
     /// Binds and submits the candidates in windows of [`candidate_window_size`]
     /// candidates so at most `window * n_train` [`BoundCircuit`]s live at once —
     /// see the type-level "Bounded in-flight circuit batch" note.
-    fn try_evaluate(&self, candidates: &[Vec<f64>]) -> Result<Vec<f64>, EvaluationError> {
-        self.try_evaluate_windowed(candidates, self.window())
+    fn try_evaluate(
+        &self,
+        candidates: &[Vec<f64>],
+        shots: u32,
+        config: &RunParams,
+    ) -> Result<Vec<f64>, EvaluationError> {
+        self.try_evaluate_windowed(candidates, self.window(), shots, config)
     }
 
     /// `theta`'s fitness on **every** training sample, whatever the minibatch:
     /// the honest final score of a minibatched run (design doc §17).
     pub fn evaluate_full(&self, theta: &[f64]) -> Result<f64, EvaluationError> {
-        let fitness = self.evaluate_samples(&[theta.to_vec()], self.window(), Samples::All)?;
+        let fitness = self.evaluate_samples(
+            &[theta.to_vec()],
+            self.window(),
+            Samples::All,
+            self.config.shots,
+            &self.config,
+        )?;
         Ok(fitness[0])
     }
 
-    /// [`evaluate_batch`](EvaluationOracle::evaluate_batch) on every training
-    /// sample, with the same failure discipline: what [`FullDataset`] serves.
-    fn evaluate_batch_full(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+    /// [`evaluate`](Self::evaluate) on every training sample, with the same
+    /// failure discipline: what [`FullDataset`] serves, and the final batch.
+    fn evaluate_batch_full(
+        &self,
+        candidates: &[Vec<f64>],
+        shots: u32,
+        config: &RunParams,
+    ) -> Vec<f64> {
         if self.errors.failed() {
             return vec![0.0; candidates.len()];
         }
-        match self.evaluate_samples(candidates, self.window(), Samples::All) {
+        match self.evaluate_samples(candidates, self.window(), Samples::All, shots, config) {
             Ok(values) => values,
             Err(e) => {
                 self.errors.record(Box::new(e), &self.config.id);
@@ -381,26 +416,40 @@ impl QmlOracle {
         &self,
         candidates: &[Vec<f64>],
         window: usize,
+        shots: u32,
+        config: &RunParams,
     ) -> Result<Vec<f64>, EvaluationError> {
         let samples = match &self.minibatch {
             Some(minibatch) => Samples::Subset(minibatch.next(self.source.num_samples())),
             None => Samples::All,
         };
-        self.evaluate_samples(candidates, window, samples)
+        self.evaluate_samples(candidates, window, samples, shots, config)
     }
 
-    /// Score `candidates` on `samples`, through the shared window loop.
+    /// Score `candidates` on `samples`, through the shared window loop, each
+    /// circuit with `shots` shots and every backend call with `config`. Exact
+    /// mode draws no shots, so it ignores both.
     fn evaluate_samples(
         &self,
         candidates: &[Vec<f64>],
         window: usize,
         samples: Samples,
+        shots: u32,
+        config: &RunParams,
     ) -> Result<Vec<f64>, EvaluationError> {
         match &self.source {
             QmlSource::Qiskit {
                 training_circuits,
                 objective,
-            } => self.evaluate_qiskit(candidates, window, training_circuits, objective, samples),
+            } => self.evaluate_qiskit(
+                candidates,
+                window,
+                training_circuits,
+                objective,
+                samples,
+                shots,
+                config,
+            ),
             QmlSource::Native { problem, exact } => {
                 let problem = subset(problem, samples)?;
                 let n = problem.num_circuits();
@@ -425,7 +474,7 @@ impl QmlOracle {
                             })
                         }
                         None => {
-                            let counts = self.run_sampled(bound)?;
+                            let counts = self.run_sampled(bound, shots, config)?;
                             per_candidate(n_candidates, n, &counts, |weights| {
                                 problem.fitness_from_counts(weights)
                             })
@@ -445,6 +494,8 @@ impl QmlOracle {
         training_circuits: &[Py<PyAny>],
         objective: &QmlObjective,
         samples: Samples,
+        shots: u32,
+        config: &RunParams,
     ) -> Result<Vec<f64>, EvaluationError> {
         // Labels are paired with circuits by position. The edge rejects a mismatch
         // up front (contract C-8); this covers direct Rust callers.
@@ -483,20 +534,24 @@ impl QmlOracle {
                 Ok(())
             },
             |bound, n_candidates| {
-                // One 2D task per circuit — uniform shots in training; `shots` comes
-                // from the task, the single source of truth the Planner reads.
+                // One 2D task per circuit, every one with the batch's `shots`: the
+                // run's in training, `final_shots` for the final batch. `shots`
+                // comes from the task, the single source of truth the Planner reads.
                 let tasks: Vec<CircuitTask> = bound
                     .iter()
-                    .map(|circuit| CircuitTask {
-                        circuit,
-                        shots: self.config.shots,
-                    })
+                    .map(|circuit| CircuitTask { circuit, shots })
                     .collect();
 
                 // Delegate execution to the Planner: it owns the waves, the per-wave
                 // concurrency cap, the between-wave `check_signals` and the shot merge.
-                let values =
-                    self.per_sample_values(objective, &labels, &tasks, n_candidates, n_train)?;
+                let values = self.per_sample_values(
+                    objective,
+                    &labels,
+                    &tasks,
+                    n_candidates,
+                    n_train,
+                    config,
+                )?;
 
                 // Structural C-5: exactly one value per submitted circuit. The Planner
                 // guarantees this, but a short/long batch would misalign the reshape
@@ -585,6 +640,7 @@ impl QmlOracle {
         tasks: &[CircuitTask<'_>],
         n_candidates: usize,
         n_train: usize,
+        config: &RunParams,
     ) -> Result<Vec<f64>, EvaluationError> {
         match objective {
             // Unchanged: the Planner executes and reduces.
@@ -592,17 +648,14 @@ impl QmlOracle {
                 self.backend.as_ref(),
                 tasks,
                 observable.as_ref(),
-                &self.config,
+                config,
                 &self.cancel,
             )?),
             QmlObjective::Supervised { objective, .. } => {
                 // Execute only; the pairing happens here, where the layout is known.
-                let counts = self.planner.execute(
-                    self.backend.as_ref(),
-                    tasks,
-                    &self.config,
-                    &self.cancel,
-                )?;
+                let counts =
+                    self.planner
+                        .execute(self.backend.as_ref(), tasks, config, &self.cancel)?;
                 // `labels` holds one label per selected circuit, so cycling pairs
                 // task `i` with `labels[i % n_train]`.
                 let window_labels: Vec<Label> = labels
@@ -627,18 +680,21 @@ impl QmlOracle {
         }
     }
 
-    /// Run `bound` through the planner and return one counts map per circuit.
-    fn run_sampled(&self, bound: &[BoundCircuit]) -> Result<Vec<Counts>, EvaluationError> {
+    /// Run `bound` through the planner, each circuit with `shots` shots and the
+    /// call with `config`, and return one counts map per circuit.
+    fn run_sampled(
+        &self,
+        bound: &[BoundCircuit],
+        shots: u32,
+        config: &RunParams,
+    ) -> Result<Vec<Counts>, EvaluationError> {
         let tasks: Vec<CircuitTask> = bound
             .iter()
-            .map(|circuit| CircuitTask {
-                circuit,
-                shots: self.config.shots,
-            })
+            .map(|circuit| CircuitTask { circuit, shots })
             .collect();
-        let counts =
-            self.planner
-                .execute(self.backend.as_ref(), &tasks, &self.config, &self.cancel)?;
+        let counts = self
+            .planner
+            .execute(self.backend.as_ref(), &tasks, config, &self.cancel)?;
         if counts.len() != tasks.len() {
             return Err(EvaluationError::WrongLength {
                 expected: tasks.len(),
@@ -704,7 +760,7 @@ impl QmlOracle {
                 )
             }
             None => {
-                let counts = self.run_sampled(&bound)?;
+                let counts = self.run_sampled(&bound, self.config.shots, &self.config)?;
                 (
                     problem.fitness_from_counts(&counts[..n])?,
                     problem.gradient_from_counts(&counts)?,
@@ -795,7 +851,13 @@ pub struct FullDataset(pub Arc<QmlOracle>);
 
 impl EvaluationOracle for FullDataset {
     fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
-        self.0.evaluate_batch_full(candidates)
+        self.0
+            .evaluate_batch_full(candidates, self.0.config.shots, &self.0.config)
+    }
+
+    /// As the oracle's own: every sample, `shots` shots, the final batch's seed.
+    fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+        self.0.evaluate_batch_with_shots(candidates, shots)
     }
 }
 
@@ -928,6 +990,8 @@ class Bound:
         max_concurrency: usize,
         /// Circuit count of each `run_circuits` call, in order.
         call_sizes: Mutex<Vec<usize>>,
+        /// Shots and seed of each `run_circuits` call, in order.
+        call_params: Mutex<Vec<(u32, Option<u64>)>>,
     }
 
     impl MockBackend {
@@ -937,6 +1001,7 @@ class Bound:
                 fail_on_call: None,
                 max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
+                call_params: Mutex::new(Vec::new()),
             }
         }
 
@@ -946,6 +1011,7 @@ class Bound:
                 fail_on_call: None,
                 max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
+                call_params: Mutex::new(Vec::new()),
             }
         }
 
@@ -955,6 +1021,7 @@ class Bound:
                 fail_on_call: Some(call),
                 max_concurrency: usize::MAX,
                 call_sizes: Mutex::new(Vec::new()),
+                call_params: Mutex::new(Vec::new()),
             }
         }
 
@@ -972,6 +1039,24 @@ class Bound:
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
         }
+
+        fn call_shots(&self) -> Vec<u32> {
+            self.call_params
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .map(|&(shots, _)| shots)
+                .collect()
+        }
+
+        fn call_seeds(&self) -> Vec<Option<u64>> {
+            self.call_params
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .map(|&(_, seed)| seed)
+                .collect()
+        }
     }
 
     impl QuantumBackend for MockBackend {
@@ -980,6 +1065,10 @@ class Bound:
             qcs: &[BoundCircuit],
             config: &RunParams,
         ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+            self.call_params
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((config.shots, config.seed));
             let mut sizes = self.call_sizes.lock().unwrap_or_else(|p| p.into_inner());
             // Global index of this call's first circuit within the whole run — the
             // value `encode_position` stamps, so a mis-ordered result is detectable.
@@ -1141,7 +1230,7 @@ class Bound:
         let oracle = oracle(&stub, N_TRAIN, Arc::clone(&backend), 8);
 
         let means = oracle
-            .try_evaluate_windowed(&candidates(POPULATION), WINDOW)
+            .try_evaluate_windowed(&candidates(POPULATION), WINDOW, 8, &oracle.config)
             .expect("a healthy windowed evaluation must succeed");
         assert_eq!(means.len(), POPULATION, "one fitness per candidate");
 
@@ -1185,20 +1274,22 @@ class Bound:
         let cands = candidates(POPULATION);
 
         let stub = Stub::new();
-        let windowed = oracle(&stub, N_TRAIN, Arc::new(MockBackend::positional()), SHOTS)
-            .try_evaluate_windowed(&cands, 2)
+        let oracle_windowed = oracle(&stub, N_TRAIN, Arc::new(MockBackend::positional()), SHOTS);
+        let windowed = oracle_windowed
+            .try_evaluate_windowed(&cands, 2, SHOTS, &oracle_windowed.config)
             .expect("windowed evaluation succeeds");
 
         // A window wider than the population reproduces the former single flat batch.
         let stub_full = Stub::new();
-        let eager = oracle(
+        let oracle_eager = oracle(
             &stub_full,
             N_TRAIN,
             Arc::new(MockBackend::positional()),
             SHOTS,
-        )
-        .try_evaluate_windowed(&cands, POPULATION * 4)
-        .expect("single-batch evaluation succeeds");
+        );
+        let eager = oracle_eager
+            .try_evaluate_windowed(&cands, POPULATION * 4, SHOTS, &oracle_eager.config)
+            .expect("single-batch evaluation succeeds");
 
         assert_eq!(
             windowed, eager,
@@ -1223,7 +1314,7 @@ class Bound:
         let oracle = oracle(&stub, N_TRAIN, Arc::clone(&backend), 8);
 
         let err = oracle
-            .try_evaluate_windowed(&candidates(POPULATION), WINDOW)
+            .try_evaluate_windowed(&candidates(POPULATION), WINDOW, 8, &oracle.config)
             .expect_err("the backend failure must propagate");
         assert!(
             matches!(err, EvaluationError::Backend(_)),
@@ -1259,8 +1350,9 @@ class Bound:
         for window in [1, 2, 3, POPULATION * 4] {
             let stub = Stub::new();
             let objective = Arc::new(RecordingObjective::new());
-            let means = supervised_oracle(&stub, &LABELS, Arc::clone(&objective), SHOTS)
-                .try_evaluate_windowed(&cands, window)
+            let oracle = supervised_oracle(&stub, &LABELS, Arc::clone(&objective), SHOTS);
+            let means = oracle
+                .try_evaluate_windowed(&cands, window, SHOTS, &oracle.config)
                 .expect("a healthy supervised evaluation succeeds");
 
             let seen = objective.seen();
@@ -1305,8 +1397,9 @@ class Bound:
             nan_at: Some(11),
             ..RecordingObjective::new()
         });
-        let err = supervised_oracle(&stub, &LABELS, objective, 64)
-            .try_evaluate_windowed(&candidates(5), 2)
+        let oracle = supervised_oracle(&stub, &LABELS, objective, 64);
+        let err = oracle
+            .try_evaluate_windowed(&candidates(5), 2, 64, &oracle.config)
             .expect_err("a NaN score must not reach the optimizer");
         match err {
             EvaluationError::NonFiniteScore { sample, value } => {
@@ -1328,7 +1421,7 @@ class Bound:
                 labels: vec![Label::Class(0), Label::Class(1)],
             },
         );
-        match oracle.try_evaluate_windowed(&candidates(4), WINDOW) {
+        match oracle.try_evaluate_windowed(&candidates(4), WINDOW, 8, &oracle.config) {
             Err(EvaluationError::LabelCount { labels, samples }) => {
                 assert_eq!((labels, samples), (2, 3));
             }
@@ -1422,7 +1515,7 @@ class Bound:
         let oracle = oracle(&stub, 1, Arc::clone(&backend), 8);
 
         oracle
-            .try_evaluate(&candidates(population))
+            .try_evaluate(&candidates(population), 8, &oracle.config)
             .expect("a healthy evaluation succeeds");
 
         let sizes = backend.call_sizes();
@@ -1431,6 +1524,64 @@ class Bound:
             "every wave must fill the backend's {concurrency} slots, got {sizes:?}"
         );
         assert_eq!(sizes.iter().sum::<usize>(), population);
+    }
+
+    /// `evaluate_batch_with_shots` runs every circuit, each candidate on every
+    /// training sample and in every window, with the shots it is given and the
+    /// final batch's seed, and `evaluate_batch` with the run's, with either
+    /// objective.
+    #[test]
+    fn a_batch_with_shots_puts_them_in_every_task() {
+        const LABELS: [i64; 3] = [3, 1, 4];
+        const SHOTS: u32 = 64;
+        let cands = candidates(5);
+        let stub = Stub::new();
+        let unsupervised = |backend| oracle(&stub, LABELS.len(), backend, SHOTS);
+        let supervised = |backend| {
+            with_objective(
+                oracle(&stub, LABELS.len(), backend, SHOTS),
+                QmlObjective::Supervised {
+                    objective: Arc::new(RecordingObjective::new()),
+                    labels: LABELS.iter().map(|&l| Label::Class(l)).collect(),
+                },
+            )
+        };
+        let builders: [&dyn Fn(Arc<MockBackend>) -> QmlOracle; 2] = [&unsupervised, &supervised];
+        for build in builders {
+            // A wave of at most four circuits, so each window runs in several.
+            let backend = Arc::new(MockBackend::with_concurrency(4));
+            let oracle = build(Arc::clone(&backend));
+            let values = oracle.evaluate_batch(&cands);
+            let runs = backend.call_shots().len();
+            assert!(runs > 1, "{runs} waves");
+            let with_shots = oracle.evaluate_batch_with_shots(&cands, 4096);
+            assert!(!oracle.errors.failed());
+            assert_eq!(values.len(), 5);
+            assert_eq!(with_shots.len(), 5);
+            let shots = backend.call_shots();
+            assert_eq!(shots.len(), 2 * runs, "{shots:?}");
+            assert!(shots[..runs].iter().all(|&s| s == SHOTS), "{shots:?}");
+            assert!(shots[runs..].iter().all(|&s| s == 4096), "{shots:?}");
+            assert_eq!(backend.call_sizes().iter().sum::<usize>(), 2 * 5 * 3);
+            // The final batch's seed, derived from the run's, in every wave.
+            let seeds = backend.call_seeds();
+            let derived = final_batch_params(&oracle.config).seed;
+            assert_ne!(derived, oracle.config.seed);
+            assert!(
+                seeds[..runs].iter().all(|&s| s == oracle.config.seed),
+                "{seeds:?}"
+            );
+            assert!(seeds[runs..].iter().all(|&s| s == derived), "{seeds:?}");
+            // Windowed too: two candidates a window, every circuit at 4096.
+            let windowed = Arc::new(MockBackend::recording());
+            let oracle = build(Arc::clone(&windowed));
+            oracle
+                .try_evaluate_windowed(&cands, 2, 4096, &final_batch_params(&oracle.config))
+                .expect("a healthy evaluation succeeds");
+            assert_eq!(windowed.call_sizes(), vec![6, 6, 3]);
+            assert_eq!(windowed.call_shots(), vec![4096; 3]);
+            assert_eq!(windowed.call_seeds(), vec![derived; 3]);
+        }
     }
 
     // ── Native source (polypus-qml), exact mode, gradient, minibatch ──────────
@@ -1540,7 +1691,10 @@ class Bound:
             oracle.gradient_batch(&candidates[0], problem.num_params()),
             vec![0.0; problem.num_params()]
         );
-        assert_eq!(oracle.evaluate_batch_full(&candidates), vec![0.0; 3]);
+        assert_eq!(
+            oracle.evaluate_batch_full(&candidates, 64, &oracle.config),
+            vec![0.0; 3]
+        );
         assert_eq!(
             oracle.value_and_gradient(&candidates[0], problem.num_params()),
             Some((0.0, vec![0.0; problem.num_params()]))
@@ -1565,8 +1719,9 @@ class Bound:
     fn native_sampled_fitness_is_the_problems_fitness_of_the_same_counts() {
         let problem = native_problem(4);
         let candidates = native_candidates(&problem, 3);
-        let fitness = native_oracle(&problem, false, None, 21)
-            .try_evaluate_windowed(&candidates, WINDOW)
+        let oracle = native_oracle(&problem, false, None, 21);
+        let fitness = oracle
+            .try_evaluate_windowed(&candidates, WINDOW, 2000, &oracle.config)
             .unwrap();
         // One window, one planner call: the same counts a backend with the same
         // seed gives for the same candidate-major batch.
@@ -1589,7 +1744,9 @@ class Bound:
         let problem = native_problem(4);
         let candidates = native_candidates(&problem, 3);
         let oracle = native_oracle(&problem, true, None, 0);
-        let fitness = oracle.try_evaluate_windowed(&candidates, 2).unwrap();
+        let fitness = oracle
+            .try_evaluate_windowed(&candidates, 2, 2000, &oracle.config)
+            .unwrap();
         for (theta, f) in candidates.iter().zip(&fitness) {
             let probabilities = exact_probabilities(problem.bind_batch(theta).unwrap());
             assert_eq!(
@@ -1668,12 +1825,49 @@ class Bound:
         let oracle = native_oracle(&problem, true, Some(MinibatchConfig::new(2, 9)), 0);
         assert_eq!(oracle.value_and_gradient(theta, problem.num_params()), None);
         let fitness = oracle
-            .try_evaluate_windowed(std::slice::from_ref(theta), 1)
+            .try_evaluate_windowed(std::slice::from_ref(theta), 1, 2000, &oracle.config)
             .unwrap();
         let first = problem.subset(&minibatch_indices(6, 9, 0, 2)).unwrap();
         let probabilities = exact_probabilities(first.bind_batch(theta).unwrap());
         assert_eq!(
             fitness[0],
+            first.fitness_from_probabilities(&probabilities).unwrap()
+        );
+    }
+
+    /// A native oracle's final batch (`evaluate_batch_with_shots`) scores every
+    /// training sample with the shots it is given, even under a minibatch, and
+    /// draws no minibatch, so a seeded run is the same up to it: the counts
+    /// are those a backend with the oracle's seed gives that batch at 4096 shots.
+    #[test]
+    fn a_native_final_batch_scores_every_sample_with_its_shots() {
+        let problem = native_problem(6);
+        let candidates = native_candidates(&problem, 2);
+        let oracle = native_oracle(&problem, false, Some(MinibatchConfig::new(2, 9)), 21);
+        let values = oracle.evaluate_batch_with_shots(&candidates, 4096);
+        assert!(!oracle.errors.failed());
+        let circuits: Vec<_> = candidates
+            .iter()
+            .flat_map(|theta| problem.bind_batch(theta).unwrap())
+            .collect();
+        let counts = NativeStatevectorBackend::new(21)
+            .run_circuits(&bound(circuits), &config(4096))
+            .unwrap();
+        let expected: Vec<f64> = counts
+            .chunks(problem.num_circuits())
+            .map(|c| problem.fitness_from_counts(c).unwrap())
+            .collect();
+        assert_eq!(values, expected);
+        // No minibatch was drawn: the next evaluation takes minibatch 0.
+        let exact = native_oracle(&problem, true, Some(MinibatchConfig::new(2, 9)), 0);
+        exact.evaluate_batch_with_shots(&candidates, 4096);
+        let next = exact
+            .try_evaluate_windowed(&candidates[..1], 1, 2000, &exact.config)
+            .unwrap();
+        let first = problem.subset(&minibatch_indices(6, 9, 0, 2)).unwrap();
+        let probabilities = exact_probabilities(first.bind_batch(&candidates[0]).unwrap());
+        assert_eq!(
+            next[0],
             first.fitness_from_probabilities(&probabilities).unwrap()
         );
     }
@@ -1701,7 +1895,9 @@ class Bound:
         // Calls 0 and 1 score their own minibatch, the same for every candidate;
         // call 2 is a gradient, base and shifts on one minibatch.
         for call in 0..2 {
-            let fitness = oracle.try_evaluate_windowed(&candidates, 2).unwrap();
+            let fitness = oracle
+                .try_evaluate_windowed(&candidates, 2, 2000, &oracle.config)
+                .unwrap();
             let sub = problem.subset(&minibatch_indices(6, 9, call, 2)).unwrap();
             for (theta, f) in candidates.iter().zip(&fitness) {
                 let probabilities = exact_probabilities(sub.bind_batch(theta).unwrap());
@@ -1731,7 +1927,7 @@ class Bound:
         );
         // The next call still draws minibatch 0.
         let next = oracle
-            .try_evaluate_windowed(std::slice::from_ref(&theta), 2)
+            .try_evaluate_windowed(std::slice::from_ref(&theta), 2, 2000, &oracle.config)
             .unwrap();
         let sub = problem.subset(&minibatch_indices(6, 9, 0, 2)).unwrap();
         let probabilities = exact_probabilities(sub.bind_batch(&theta).unwrap());
@@ -1749,7 +1945,7 @@ class Bound:
         let mut oracle = supervised_oracle(&stub, &labels, Arc::clone(&objective), 64);
         oracle.minibatch = Some(MinibatchConfig::new(2, 5));
         oracle
-            .try_evaluate_windowed(&candidates(3), WINDOW)
+            .try_evaluate_windowed(&candidates(3), WINDOW, 64, &oracle.config)
             .unwrap();
         // 3 candidates × 2 drawn samples, not × 5.
         assert_eq!(stub.assign_calls(), 6);

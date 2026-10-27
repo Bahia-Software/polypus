@@ -35,7 +35,7 @@ Polypus is a quantum computing library with a **Rust core** and **Python binding
 | Feature | |
 |---|---|
 | **Multi-QPU execution** | Shots and populations are split across `n_qpus`; results come back per QPU and merged. |
-| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES and Adam (or momentum) behind one `train()` call. Quantum machine learning either with your own Qiskit circuits (`qml.train`, `qml.predict`) or with native models (`qml.Model`) that get exact gradients, exact simulation, minibatches and save/load. |
+| **Variational training** | Differential Evolution, Particle Swarm, Quantum Natural Gradient, CMA-ES, Adam (or momentum), SPSA and Rotosolve behind one `train()` call, or an ask/tell optimizer from Optuna, Nevergrad, pycma or your own code through `polypus.External`. Quantum machine learning either with your own Qiskit circuits (`qml.train`, `qml.predict`) or with native models (`qml.Model`) that get exact gradients, exact simulation, minibatches and save/load. |
 | **Native cost observables** | QUBO and Ising costs are evaluated in Rust, without a Python call per bitstring. |
 | **Rust circuit engine** | `polypus.Circuit` imports and exports OpenQASM 2 and 3 and exports QIR. Parameter binding runs without the GIL, about 3x faster than Qiskit's `assign_parameters`. |
 | **Reproducible runs** | Every result reports the seed it used; pass it back to replay the run. |
@@ -148,7 +148,7 @@ result = polypus.train(
 result.best_params, result.best_fitness
 ```
 
-To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`, `polypus.CMAES` or `polypus.Adam`; to run on CUNQA, set `infrastructure="cunqa"` and remove `backend="polypus"`, since CUNQA's QPUs run Aer. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go step by step from a first circuit to variational training, covering gates, Qiskit and OpenQASM interoperability, local and cluster execution, and classic algorithms along the way; [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
+To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`, `polypus.CMAES`, `polypus.Adam`, `polypus.SPSA` or `polypus.Rotosolve` (for circuits whose every parameter is one single-Pauli rotation), or run an optimizer from another library with `polypus.External`; to run on CUNQA, set `infrastructure="cunqa"` and remove `backend="polypus"`, since CUNQA's QPUs run Aer. The rest of the code stays the same. The [tutorials](https://github.com/Bahia-Software/polypus-tutorials) go step by step from a first circuit to variational training, covering gates, Qiskit and OpenQASM interoperability, local and cluster execution, and classic algorithms along the way; [`examples/`](https://github.com/Bahia-Software/polypus/tree/main/examples) has complete scripts.
 
 ## Backends
 
@@ -166,7 +166,7 @@ To try another optimizer, replace `polypus.DE` with `polypus.PSO`, `polypus.QNG`
 | Topic | Covers |
 |---|---|
 | [Running circuits](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/running.md) | `RunResult`, multi-QPU runs, seeds, choosing a local backend, errors, troubleshooting |
-| [Variational training](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/training.md) | `train` parameters, `TrainResult`, cost functions, DE, PSO, QNG, CMA-ES and Adam |
+| [Variational training](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/training.md) | `train` parameters, `TrainResult`, cost functions, DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve and external optimizers |
 | [Quantum machine learning](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/qml.md) | `qml.train` with Qiskit circuits, labels, `SampleCost` and `qml.predict`; native models with `qml.Model`: layers, readout, losses, `fit`, prediction, saving |
 | [Circuits and interchange](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/circuits.md) | `polypus.Circuit`, the Rust builder, OpenQASM 2 and 3, QIR |
 | [Memory budget](https://github.com/Bahia-Software/polypus/blob/main/docs/guide/memory.md) | `POLYPUS_MEM_BUDGET`, cgroup detection, `InsufficientMemoryError` |
@@ -190,7 +190,7 @@ Polypus is a Cargo workspace. Only the three crates marked PyO3 link against Pyt
 | [`polypus`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus) | Python extension, exception hierarchy, re-exports |
 | [`polypus-circuit`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-circuit) | Circuit representation, OpenQASM 2 and 3, QIR |
 | [`polypus-sim`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-sim) | Statevector simulator |
-| [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE, PSO, QNG, CMA-ES and Adam (or momentum) |
+| [`polypus-optimizers`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-optimizers) | DE, PSO, QNG, CMA-ES, Adam (or momentum), SPSA and Rotosolve, and a bridge to ask/tell optimizers |
 | [`polypus-observable`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-observable) | QUBO and Ising cost observables |
 | [`polypus-qml`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-qml) | Quantum machine learning models: datasets, layers, readout and losses |
 | [`polypus-physics`](https://github.com/Bahia-Software/polypus/tree/main/crates/polypus-physics) | Monte Carlo transport and Pauli-sum Hamiltonians |

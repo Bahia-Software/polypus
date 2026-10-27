@@ -6,7 +6,8 @@ Both backends run the *same* native ``polypus.Circuit`` through the *same*
 entry points — only ``backend=`` changes — so the comparison is apples to
 apples. We check two things:
 
-  1. Correctness: the measured distributions agree (total-variation distance).
+  1. Correctness: the measured distributions agree (total-variation distance
+     of the Hamming-weight distributions, within the sampling noise).
   2. Performance: wall-clock time for a single run and for a full training loop,
      where the native backend's GIL-free, QASM-free path is expected to help.
 
@@ -16,6 +17,7 @@ comparison.)
 """
 
 import itertools
+import math
 import time
 
 import polypus
@@ -27,45 +29,26 @@ N_QUBITS = 12
 EDGES = list(itertools.combinations(range(N_QUBITS), 2))
 SHOTS = 8192
 
-# A separate, smaller instance for the distribution-agreement check in section 1
-# below. Total-variation distance between two *independently sampled* empirical
-# distributions is only a meaningful estimator when SHOTS is large relative to
-# the outcome space (2**n): at N_QUBITS qubits (2**12 = 4096 possible outcomes,
-# ~2000 of them live for this circuit) even two samples of the exact *same*
-# distribution disagree by TVD ~0.23 at SHOTS=8192 — pure sampling noise, not a
-# backend discrepancy (confirmed by running Aer against itself and polypus
-# against itself: same ~0.23 either way). A 5-qubit instance keeps 32 possible
-# outcomes, where TVD is a reliable signal again. Its sampling noise still
-# shrinks only as 1/sqrt(shots): at 8192 shots it measured 0.027-0.039 between
-# backends, too close to the 0.05 threshold for an unseeded run, so this check
-# takes 8x the shots (~0.01, a cheap budget on 5 qubits).
-N_QUBITS_CORRECTNESS = 5
-SHOTS_CORRECTNESS = 8 * SHOTS
-EDGES_CORRECTNESS = list(itertools.combinations(range(N_QUBITS_CORRECTNESS), 2))
 
-
-def build_qaoa(betas, gammas, n_qubits=N_QUBITS, edges=None):
+def build_qaoa(betas, gammas):
     """One-or-more-layer QAOA MaxCut ansatz as a native polypus.Circuit.
 
     Built exactly like ``max_cut_qaoa.py`` (``maxcut_cost_layer`` +
     ``standard_mixer_layer`` from ``polypus_python.qaoa_utils``): each edge
     gets a ``cx; rz(-gamma); cx`` cost term and each qubit an ``rx(2*beta)``
-    mixer rotation. Defaults to the module-level ``N_QUBITS``/``EDGES``;
-    pass ``n_qubits``/``edges`` explicitly to build a differently-sized
-    instance (see ``N_QUBITS_CORRECTNESS`` above).
+    mixer rotation.
     """
-    edges = EDGES if edges is None else edges
-    qc = polypus.Circuit(n_qubits)
-    for q in range(n_qubits):
+    qc = polypus.Circuit(N_QUBITS)
+    for q in range(N_QUBITS):
         qc = qc.h(q)
     for beta, gamma in zip(betas, gammas):
         # Cost layer (maxcut_cost_layer): cx; rz(-gamma); cx for every edge.
-        for a, b in edges:
+        for a, b in EDGES:
             qc = qc.cx(a, b)
             qc = qc.rz(b, -gamma)
             qc = qc.cx(a, b)
         # Mixer layer (standard_mixer_layer): rx(2*beta) on every qubit.
-        for q in range(n_qubits):
+        for q in range(N_QUBITS):
             qc = qc.rx(q, 2 * beta)
     return qc.measure_all()
 
@@ -74,6 +57,28 @@ def total_variation(a, b, shots):
     """Total-variation distance between two count dicts (0 = identical)."""
     keys = set(a) | set(b)
     return 0.5 * sum(abs(a.get(k, 0) - b.get(k, 0)) for k in keys) / shots
+
+
+def hamming_weights(counts):
+    """Counts per number of ones. On the complete graph the cut depends only on
+    the Hamming weight, so this keeps what the cost sees in N_QUBITS + 1 bins,
+    which SHOTS resolves; the 2**N_QUBITS outcomes get about two shots each."""
+    weights: dict[int, int] = {}
+    for key, n in counts.items():
+        w = key.count("1")
+        weights[w] = weights.get(w, 0) + n
+    return weights
+
+
+def tvd_threshold(shots, bins, false_alarm=1e-6):
+    """TVD that two samples of `shots` shots from the same distribution over
+    `bins` outcomes exceed with probability below `false_alarm`.
+
+    Bretagnolle-Huber-Carol: P(TVD(sample, p) >= eps) <= 2**bins *
+    exp(-2 * shots * eps**2). Bound each sample by eps at false_alarm / 2 and
+    add the two by the triangle inequality."""
+    eps = math.sqrt((bins * math.log(2) + math.log(2 / false_alarm)) / (2 * shots))
+    return 2 * eps
 
 
 def maxcut_value(bitstring):
@@ -121,40 +126,24 @@ print("=" * 70)
 
 fixed_circuit = build_qaoa([0.8], [0.4])
 
-# Distribution agreement: checked on the small instance (see
-# N_QUBITS_CORRECTNESS above), where SHOTS_CORRECTNESS is large enough relative to the
-# outcome space for total-variation distance to be a meaningful estimator.
-correctness_circuit = build_qaoa(
-    [0.8], [0.4], n_qubits=N_QUBITS_CORRECTNESS, edges=EDGES_CORRECTNESS
-)
-counts_aer_small = polypus.run_quantum_circuit(
-    correctness_circuit, shots=SHOTS_CORRECTNESS, infrastructure="local", backend="aer"
-).counts[0]
-counts_native_small = polypus.run_quantum_circuit(
-    correctness_circuit,
-    shots=SHOTS_CORRECTNESS,
-    infrastructure="local",
-    backend="polypus",
-).counts[0]
-
-tvd = total_variation(counts_aer_small, counts_native_small, SHOTS_CORRECTNESS)
-print(
-    f"\nTotal-variation distance (Aer vs polypus, {N_QUBITS_CORRECTNESS}q "
-    f"instance): {tvd:.4f}"
-)
-print("  -> distributions agree" if tvd < 0.05 else "  -> MISMATCH")
-
-# Mean cut / approximation ratio: reported on the full N_QUBITS instance used
-# for the performance and training sections below. These are aggregate
-# statistics (one weighted sum over all sampled outcomes), far less sensitive
-# to per-bin shot noise than the raw joint distribution above, so they stay
-# meaningful even where N_QUBITS makes bin-by-bin TVD unreliable.
 counts_aer = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="aer"
 ).counts[0]
 counts_native = polypus.run_quantum_circuit(
     fixed_circuit, shots=SHOTS, infrastructure="local", backend="polypus"
 ).counts[0]
+
+tvd = total_variation(
+    hamming_weights(counts_aer), hamming_weights(counts_native), SHOTS
+)
+threshold = tvd_threshold(SHOTS, N_QUBITS + 1)
+print(
+    f"\nTotal-variation distance of the Hamming weights (Aer vs polypus): "
+    f"{tvd:.4f} (sampling-noise bound {threshold:.4f})"
+)
+if tvd > threshold:
+    raise SystemExit("  -> MISMATCH: the backends sample different distributions")
+print("  -> distributions agree")
 
 exp_aer = sum(maxcut_value(k) * v for k, v in counts_aer.items()) / SHOTS
 exp_native = sum(maxcut_value(k) * v for k, v in counts_native.items()) / SHOTS

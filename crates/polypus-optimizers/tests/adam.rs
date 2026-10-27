@@ -154,9 +154,29 @@ fn one_gradient_and_one_single_candidate_batch_per_iteration() {
     let (args, oracle, gradient) = bowl_args(3);
     let outcome = AlgorithmAdam.optimize(args).unwrap();
     assert_eq!(gradient.calls(), outcome.iterations_run);
+    // And one more batch, the final θ, after the last step.
     let batches = oracle.batches();
-    assert_eq!(batches.len(), outcome.iterations_run);
+    assert_eq!(batches.len(), outcome.iterations_run + 1);
     assert!(batches.iter().all(|batch| batch.len() == 1));
+}
+
+/// `max_iters` counts steps: one iteration measures θ₀ and its stencil, steps,
+/// and measures the θ it reached, so no gradient goes into an unmeasured step.
+#[test]
+fn a_single_iteration_steps_and_measures_where_it_lands() {
+    let oracle = Recorder::new(bowl);
+    let mut args = fd_args(&oracle, 0.2, 2);
+    args.max_iters = 1;
+    let outcome = AlgorithmAdam.optimize(args).unwrap();
+    let batches = oracle.batches();
+    let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
+    assert_eq!(sizes, [2 * TARGET.len() + 1, 1]);
+    let (start, end) = (&batches[0][0], &batches[1][0]);
+    assert_ne!(start, end);
+    assert_eq!(outcome.iterations_run, 1);
+    let best = bowl(start).max(bowl(end));
+    assert_eq!(outcome.best_fitness, best);
+    assert_eq!(outcome.fitness_history, [best]);
 }
 
 #[test]
@@ -207,6 +227,8 @@ fn stagnation_stops_like_de() {
     // than `tolerance` over the last `patience` iterations — here g = 7.
     assert!(outcome.converged);
     assert_eq!(outcome.iterations_run, 8);
+    // The stop comes after g's step, and the θ that step reached is measured.
+    assert_eq!(oracle.batches().len(), 9);
     assert_c5(&outcome, flat, &oracle);
 }
 
@@ -244,7 +266,7 @@ type Breaks = fn(&mut AlgorithmAdamArgs);
 
 #[test]
 fn invalid_configurations_are_rejected_before_any_oracle_call() {
-    let cases: [(&str, Breaks); 11] = [
+    let cases: [(&str, Breaks); 12] = [
         ("max_iters", |a| a.max_iters = 0),
         ("dimensions", |a| a.dimensions = 0),
         ("learning_rate", |a| a.learning_rate = 0.0),
@@ -256,6 +278,8 @@ fn invalid_configurations_are_rejected_before_any_oracle_call() {
         ("beta2", |a| a.beta2 = f64::NAN),
         ("epsilon", |a| a.epsilon = 0.0),
         ("epsilon", |a| a.epsilon = f64::INFINITY),
+        // The window would compare an iteration with itself.
+        ("patience", |a| a.patience = 0),
     ];
     for (parameter, edit) in cases {
         assert_eq!(invalid_parameter(rejected(edit)), parameter);
@@ -499,11 +523,13 @@ fn adam_trains_with_a_finite_difference_over_the_same_shared_oracle() {
     for (x, t) in outcome.best_params.iter().zip(TARGET) {
         assert!((x - t).abs() < 1e-3, "{:?}", outcome.best_params);
     }
-    // θ and its stencil reached the one shared oracle, one batch per iteration.
+    // θ and its stencil reached the one shared oracle, one batch per iteration,
+    // then the final θ alone.
     let batches = oracle.batches();
     let sizes: Vec<usize> = batches.iter().map(Vec::len).collect();
-    assert_eq!(sizes.len(), outcome.iterations_run);
-    assert!(sizes.iter().all(|&n| n == 7), "{sizes:?}");
+    let mut expected = vec![7; outcome.iterations_run];
+    expected.push(1);
+    assert_eq!(sizes, expected);
     // The stencil points are not candidates: C-5 holds over the measured θs,
     // which head the batches.
     assert!(batches.iter().any(|batch| batch[0] == outcome.best_params));
@@ -543,11 +569,14 @@ fn each_iteration_is_one_batch_of_theta_then_its_stencil() {
     let h = 0.2;
     let outcome = AlgorithmAdam.optimize(fd_args(&oracle, h, 4)).unwrap();
     let batches = oracle.batches();
-    assert_eq!(batches.len(), outcome.iterations_run);
-    for batch in &batches {
+    assert_eq!(batches.len(), outcome.iterations_run + 1);
+    let (last, iterations) = batches.split_last().unwrap();
+    for batch in iterations {
         assert_eq!(batch.len(), 2 * TARGET.len() + 1);
         assert_eq!(batch[1..], stencil(&batch[0], h)[..]);
     }
+    // The θ the last step reached, without a stencil.
+    assert_eq!(last.len(), 1);
     // Each batch measures the θ the previous step reached.
     assert!(batches.windows(2).all(|pair| pair[0][0] != pair[1][0]));
 }
@@ -555,7 +584,7 @@ fn each_iteration_is_one_batch_of_theta_then_its_stencil() {
 /// C-5 against the batches the oracle saw, with either rule: θ heads every
 /// batch, `best_params` is the first θ measured with the best value,
 /// `best_fitness` the oracle's value for it, and `fitness_history[t]` the best
-/// measured up to iteration `t`.
+/// measured up to iteration `t`, the final θ counted in the last entry.
 #[test]
 fn best_params_fitness_invariant_holds_across_seeds_with_a_finite_difference() {
     for rule in RULES {
@@ -574,13 +603,17 @@ fn best_params_fitness_invariant_holds_across_seeds_with_a_finite_difference() {
                 .into_iter()
                 .map(|batch| batch[0].clone())
                 .collect();
-            assert_eq!(measured.len(), outcome.iterations_run, "{label}");
-            assert_eq!(outcome.fitness_history.len(), outcome.iterations_run);
-            let mut running = f64::NEG_INFINITY;
-            for (theta, recorded) in measured.iter().zip(&outcome.fitness_history) {
-                running = running.max(bowl(theta));
-                assert_eq!(*recorded, running, "{label}");
-            }
+            assert_eq!(measured.len(), outcome.iterations_run + 1, "{label}");
+            let mut running: Vec<f64> = measured
+                .iter()
+                .scan(f64::NEG_INFINITY, |best, theta| {
+                    *best = best.max(bowl(theta));
+                    Some(*best)
+                })
+                .collect();
+            let last = running.pop().unwrap();
+            *running.last_mut().unwrap() = last;
+            assert_eq!(outcome.fitness_history, running, "{label}");
             assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
             assert_eq!(outcome.best_fitness, bowl(&outcome.best_params), "{label}");
             assert_eq!(
@@ -671,7 +704,7 @@ fn a_nan_fitness_never_becomes_the_best() {
     let gradient = FiniteDifferenceGradient::new(Arc::clone(&shared), 0.2).unwrap();
     let outcome = AlgorithmAdam.optimize(args(shared, gradient, 8)).unwrap();
     let log = oracle.0.lock().unwrap().clone();
-    assert_eq!(log.len(), outcome.iterations_run);
+    assert_eq!(log.len(), outcome.iterations_run + 1);
     assert!(log.iter().any(|(_, values)| values[0].is_nan()));
     // The best is a θ the oracle gave a number, and that number.
     assert!(outcome.best_fitness.is_finite());
@@ -825,8 +858,9 @@ fn adam_is_kingma_and_bas_update() {
         args.beta2 = beta2;
         let (learning_rate, epsilon) = (args.learning_rate, args.epsilon);
         AlgorithmAdam.optimize(args).unwrap();
+        // θ₀, then the θ each of the twelve steps reached.
         let measured: Vec<Vec<f64>> = oracle.batches().concat();
-        assert_eq!(measured.len(), 12);
+        assert_eq!(measured.len(), 13);
         let mut theta = measured[0].clone();
         let (mut m, mut v) = ([0.0; 3], [0.0; 3]);
         for (t, next) in (1..).zip(&measured[1..]) {
@@ -867,7 +901,7 @@ fn momentum_is_polyaks_heavy_ball() {
     let (learning_rate, momentum) = (args.learning_rate, args.beta1);
     AlgorithmAdam.optimize(args).unwrap();
     let measured: Vec<Vec<f64>> = oracle.batches().concat();
-    assert_eq!(measured.len(), 8);
+    assert_eq!(measured.len(), 9);
     let mut theta = measured[0].clone();
     let mut velocity = [0.0; 3];
     for next in &measured[1..] {
@@ -894,7 +928,7 @@ fn momentum_steps_scale_with_the_cost_and_adam_steps_do_not() {
         let oracle = Recorder::new(bowl);
         let mut args = args(oracle.clone(), ExactGradient::new(gradient), 5);
         args.rule = rule;
-        args.max_iters = 2;
+        args.max_iters = 1;
         AlgorithmAdam.optimize(args).unwrap();
         let measured = oracle.batches().concat();
         measured[1]
@@ -933,13 +967,14 @@ fn momentum_ignores_beta2_and_epsilon() {
 
 #[test]
 fn momentum_rejects_the_same_configurations_before_any_oracle_call() {
-    let cases: [(&str, Breaks); 5] = [
+    let cases: [(&str, Breaks); 6] = [
         ("max_iters", |a| a.max_iters = 0),
         ("learning_rate", |a| a.learning_rate = f64::NAN),
         ("beta1", |a| a.beta1 = 1.0),
         // Unused by momentum, but a configuration is valid or not whatever the rule.
         ("beta2", |a| a.beta2 = 1.0),
         ("epsilon", |a| a.epsilon = 0.0),
+        ("patience", |a| a.patience = 0),
     ];
     for (parameter, edit) in cases {
         let err = rejected(|a| {

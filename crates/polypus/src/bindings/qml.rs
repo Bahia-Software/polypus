@@ -1080,7 +1080,7 @@ impl Model {
         let backend = Infrastructure::create_backend(&config)
             .map_err(crate::exceptions::backend_error_to_pyerr)?;
         let errors = OracleErrorSlot::new();
-        let method = method_from_pyclass(method, &errors, &effective_id)?;
+        let method = method_from_pyclass(method, dimensions, &errors, &effective_id)?;
         let resources = Resources::new(backend, None, Arc::new(config.run_params()))
             .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
         let scheduler = Scheduler::ephemeral(resources);
@@ -1097,6 +1097,7 @@ impl Model {
             seed: effective_seed,
             errors: errors.clone(),
             initial_point: None,
+            final_shots: None,
         };
         // GIL released for the run, as in `train`; the interrupt token keeps
         // Ctrl+C prompt between waves.

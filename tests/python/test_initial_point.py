@@ -13,7 +13,9 @@ records every batch the optimizer sends and answers with fixed counts, and
 read the candidates back from the recorded circuits: the point is the first
 candidate DE (every strategy, wrapped into ``[0, 2π)``), PSO and Adam (before
 its first finite-difference stencil) evaluate, the centre of QNG's first
-stencil, and the mean of CMA-ES's first generation. Without it nothing
+stencil, the mean of CMA-ES's first generation, the centre of SPSA's
+calibration batch, which SPSA then measures first, and the first point
+Rotosolve measures. Without it nothing
 changes; ``test_determinism_baseline.py`` pins that for seeded runs.
 """
 
@@ -28,7 +30,19 @@ POINT = [0.25, 1.5]
 # QNG's and Adam's default finite_difference_step.
 QNG_STEP = 0.1
 ADAM_STEP = 0.2
-OPTIMIZERS = ["rand1bin", "shade", "lshade", "pso", "qng", "cmaes", "adam"]
+# SPSA's default perturbation.
+SPSA_STEP = 0.1
+OPTIMIZERS = [
+    "rand1bin",
+    "shade",
+    "lshade",
+    "pso",
+    "qng",
+    "cmaes",
+    "adam",
+    "spsa",
+    "rotosolve",
+]
 STRATEGIES = ["rand1bin", "shade", "lshade"]
 
 _RY = re.compile(r"^ry\(([^)]*)\) q\[(\d+)\];$", re.MULTILINE)
@@ -40,7 +54,8 @@ def _all_ones(bitstring):
 
 def _method(name):
     """A small configuration of the optimizer ``name`` (a DE strategy name,
-    ``"pso"``, ``"qng"``, ``"cmaes"`` or ``"adam"``). CMA-ES gets a tiny
+    ``"pso"``, ``"qng"``, ``"cmaes"``, ``"adam"``, ``"spsa"`` or ``"rotosolve"``).
+    CMA-ES gets a tiny
     ``sigma0`` so that every candidate of its first generation sits on its
     mean."""
     import polypus
@@ -53,6 +68,10 @@ def _method(name):
         return polypus.CMAES(generations=1, sigma0=1e-9)
     if name == "adam":
         return polypus.Adam(max_iters=1)
+    if name == "spsa":
+        return polypus.SPSA(max_iters=1)
+    if name == "rotosolve":
+        return polypus.Rotosolve(sweeps=1)
     return polypus.DE(generations=2, population_size=6, strategy=name)
 
 
@@ -246,6 +265,8 @@ class TestValidation:
             ("qng", "invalid max_iters"),
             ("cmaes", "invalid sigma0"),
             ("adam", "invalid finite_difference_step"),
+            ("spsa", "invalid max_iters"),
+            ("rotosolve", "invalid sweeps"),
         ],
     )
     @pytest.mark.parametrize("point", [None, [0.25]])
@@ -262,6 +283,8 @@ class TestValidation:
             "qng": lambda: polypus.QNG(lambda theta, a: 1.0, max_iters=0),
             "cmaes": lambda: polypus.CMAES(sigma0=0.0),
             "adam": lambda: polypus.Adam(finite_difference_step=0.0),
+            "spsa": lambda: polypus.SPSA(max_iters=0),
+            "rotosolve": lambda: polypus.Rotosolve(sweeps=0),
         }[name]()
         run, _ = ENTRY_POINTS[entry]
         with pytest.raises(ValueError, match=re.escape(message)):
@@ -314,6 +337,22 @@ class TestStartingPoint:
             assert len(first) == len(stencil)
             for got, want in zip(first, stencil):
                 assert got == pytest.approx(want, abs=1e-12)
+        elif name == "spsa":
+            # 25 pairs θ₀ ± c·Δ around θ₀ = POINT, Δ of ±1 components, then
+            # the first iteration measures θ₀ first, with one pair, and the
+            # final θ is one circuit. (The QML oracle may split a batch into
+            # windows, so the circuits are read in order.)
+            sent = [candidate(qc) for batch in batches for qc in batch]
+            calibration = sent[:50]
+            for plus, minus in zip(calibration[::2], calibration[1::2]):
+                assert [(a + b) / 2 for a, b in zip(plus, minus)] == pytest.approx(
+                    POINT, abs=1e-12
+                )
+                assert [abs(a - p) for a, p in zip(plus, POINT)] == pytest.approx(
+                    [SPSA_STEP] * DIMENSIONS, abs=1e-12
+                )
+            assert sent[50] == pytest.approx(POINT, abs=1e-12)
+            assert len(sent) == 50 + 3 + 1
         elif name == "cmaes":
             # 4 + floor(3 ln 2) = 6 candidates, all on the first mean.
             assert len(first) == 6
@@ -359,6 +398,22 @@ class TestStartingPoint:
         batches = _record_batches(monkeypatch)
         _train(_method("adam"), initial_point=[-5.0, 9.0])
         assert _vqc_candidate(batches[0][0]) == pytest.approx([-5.0, 9.0], abs=1e-12)
+
+    def test_spsa_takes_a_point_outside_zero_two_pi_unwrapped(self, monkeypatch):
+        batches = _record_batches(monkeypatch)
+        _train(_method("spsa"), initial_point=[-5.0, 9.0])
+        assert _vqc_candidate(batches[1][0]) == pytest.approx([-5.0, 9.0], abs=1e-12)
+
+    def test_rotosolve_takes_a_point_outside_zero_two_pi_unwrapped(self, monkeypatch):
+        # θ₀ itself heads the first batch, then its two neighbours along the
+        # first parameter.
+        batches = _record_batches(monkeypatch)
+        _train(_method("rotosolve"), initial_point=[-5.0, 9.0])
+        first = [_vqc_candidate(qc) for qc in batches[0]]
+        expected = [[-5.0, 9.0], [-5.0 + math.pi / 2, 9.0], [-5.0 - math.pi / 2, 9.0]]
+        assert len(first) == len(expected)
+        for got, want in zip(first, expected):
+            assert got == pytest.approx(want, abs=1e-12)
 
     def test_none_is_the_default(self, monkeypatch):
         omitted = _record_batches(monkeypatch)

@@ -5,9 +5,11 @@ Ctrl+C responsiveness and GIL release during long-running calls
 Acceptance criterion: a ``KeyboardInterrupt`` takes effect *promptly* while
 ``polypus.train`` (native backend), ``polypus.qml.train`` (Qiskit/Aer backend)
 or ``polypus.qml.Model.fit`` (native QML) is running, rather than being ignored
-until the whole optimization finishes. A minibatched native QML run also
-re-scores its result on the whole training set at the end; that step is checked
-for GIL release directly, with a background thread.
+until the whole optimization finishes. ``polypus.train`` with
+``polypus.External`` (issue #399) gets the same check, with the interrupt
+landing in a batch or in the external optimizer's ``ask()``. A minibatched
+native QML run also re-scores its result on the whole training set at the end;
+that step is checked for GIL release directly, with a background thread.
 
 ``run_quantum_circuit`` (issue #73) is covered here too: it releases the GIL
 around the whole run and calls ``py.check_signals()`` at the per-circuit /
@@ -319,6 +321,75 @@ def test_qml_training_responds_to_sigint_promptly():
             "qml.train (QmlOracle) — the Planner's between-wave interrupt "
             "guard (SignalInterrupt) is likely not attached to the run token, "
             "or the GIL is not released around the optimizer"
+        ),
+    )
+
+
+# `polypus.External` (issue #399): the run is detached, and the external
+# optimizer's `ask()` and `tell()` attach only for their own calls. A Ctrl+C
+# that lands during a batch is honoured between waves, or before the library's
+# next call; one that lands while `ask()` runs is raised inside it. Both reach
+# the caller as `KeyboardInterrupt`. `__PAUSE__` is how long each `ask()`
+# sleeps: 0 keeps the run in the native simulation of `_NATIVE_CHILD`'s
+# circuit, 0.2 puts most of each round inside `ask()`. The search never ends
+# and the budget is far beyond the window, so only the interrupt stops it.
+_EXTERNAL_CHILD = r"""
+import random, sys, time
+import polypus
+
+qc = polypus.Circuit(16)
+for q in range(16):
+    qc = qc.h(q)
+for i in range(4):
+    qc = qc.ry(i, polypus.Param(i))
+for q in range(15):
+    qc = qc.cx(q, q + 1)
+qc = qc.measure_all()
+
+def expect(bitstring):
+    return float(bitstring.count("1"))
+
+class Search:
+    def __init__(self):
+        self.random = random.Random(0)
+    def ask(self):
+        time.sleep(__PAUSE__)
+        return [[self.random.uniform(0.0, 6.28) for _ in range(4)] for _ in range(8)]
+    def tell(self, candidates, values):
+        pass
+
+def train(max_evaluations, ident):
+    return polypus.train(
+        qc, polypus.External(Search(), max_evaluations),
+        shots=1024, n_qpus=1, dimensions=4, expectation_function=expect,
+        infrastructure="local", nodes=1, cores_per_qpu=1, id=ident,
+        backend="polypus",
+    )
+
+# Warm up the lazy import path with one batch.
+train(8, "warmup")
+
+print("READY", flush=True)
+start = time.time()
+try:
+    train(10**12, "external_interrupt_test")
+    print("COMPLETED", flush=True)
+except KeyboardInterrupt:
+    print(f"KEYBOARDINTERRUPT {time.time() - start:.3f}", flush=True)
+except BaseException as exc:  # e.g. a PanicException from a swallowed error
+    print(f"OTHER {type(exc).__name__}", flush=True)
+    sys.exit(1)
+"""
+
+
+@pytest.mark.parametrize("pause", ["0", "0.2"], ids=["in-batch", "in-ask"])
+def test_external_training_responds_to_sigint_promptly(pause):
+    _assert_responds_to_sigint_promptly(
+        _EXTERNAL_CHILD.replace("__PAUSE__", pause),
+        failure_hint=(
+            "train with polypus.External — the GIL is likely held between the "
+            "external optimizer's calls, or its KeyboardInterrupt is not "
+            "recorded in the run's error slot"
         ),
     )
 

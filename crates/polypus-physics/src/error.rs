@@ -36,7 +36,7 @@ pub enum PhysicsError {
         /// Human-readable description of the problem.
         message: String,
     },
-    /// No embedded ENDF-6 data is available for a given element symbol.
+    /// The symbol is not a chemical element with Z between 1 and 100.
     UnknownElement {
         symbol: String,
     },
@@ -60,7 +60,7 @@ pub enum PhysicsError {
     UntabulatedMedium {
         message: String,
     },
-    /// Could not find a locally pre-downloaded ENDF-6 evaluation. This crate
+    /// Could not read an ENDF-6 evaluation from the data directory. This crate
     /// never downloads data over the network — see the error message for how
     /// to make it available.
     EndfDataNotFound {

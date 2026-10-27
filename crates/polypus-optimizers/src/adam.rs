@@ -105,31 +105,36 @@ impl FromStr for AdamRule {
 /// size comes from running averages of the gradient and of its square.
 ///
 /// Each iteration measures the current `θ` and the gradient there, then steps
-/// by [`rule`](AlgorithmAdamArgs::rule).
+/// by [`rule`](AlgorithmAdamArgs::rule), so
+/// [`max_iters`](AlgorithmAdamArgs::max_iters) counts steps.
 /// When the gradient oracle scores `θ` in its own batch
 /// ([`GradientOracle::value_and_gradient`]), that is one call: with a
 /// [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient), one batch of
 /// `2·dimensions + 1` candidates, `θ` first. Otherwise `oracle` scores `θ`
-/// and then the gradient oracle is asked for the gradient. `best_params` is
-/// the measured `θ` with the best fitness (a `NaN` never wins), and
-/// `fitness_history` holds the best measured up to each iteration; the step
-/// after the last measurement is not measured.
+/// and then the gradient oracle is asked for the gradient. After the last
+/// step, the `max_iters`-th or the one before the stagnation stop, `oracle`
+/// scores the `θ` it reached in one batch of one candidate, so every
+/// gradient feeds a measured step. `best_params` is the measured `θ` with the
+/// best fitness (a `NaN` never wins), and `fitness_history` holds the best
+/// measured up to each iteration, the final `θ` counted in the last entry.
 ///
 /// # Preconditions
 ///
 /// Checked before any RNG draw or oracle call
 /// ([`OptimizerError::InvalidConfig`] or [`OptimizerError::InvalidBounds`]):
-/// `max_iters >= 1` (each iteration measures `θ`, so zero iterations would
-/// measure nothing and could not report a real `best_fitness`), `dimensions >= 1`,
-/// `learning_rate` finite and `> 0`, `beta1` and `beta2` in `[0, 1)` (at `1`
-/// the bias correction divides by zero), `epsilon` finite and `> 0` (with
-/// either rule, although momentum uses neither `beta2` nor `epsilon`),
-/// `bounds` finite with `lb < ub` (the initial `θ` is drawn uniformly from it),
-/// and `initial_point`, when given, `dimensions` finite values.
+/// `max_iters >= 1` (a run of no steps would only measure its starting
+/// point), `dimensions >= 1`, `learning_rate` finite and `> 0`, `beta1` and
+/// `beta2` in `[0, 1)` (at `1` the bias correction divides by zero), `epsilon`
+/// finite and `> 0` (with either rule, although momentum uses neither `beta2`
+/// nor `epsilon`), `patience >= 1` (the stagnation rule compares the best
+/// fitness with `patience` iterations earlier, and `0` would compare an
+/// iteration with itself), `bounds` finite with `lb < ub` (the initial `θ` is
+/// drawn uniformly from it), and `initial_point`, when given, `dimensions`
+/// finite values.
 pub struct AlgorithmAdamArgs {
     /// Maps parameter vectors to fitness values (higher is better). Scores `θ`
     /// once per iteration to track the best solution, unless the gradient
-    /// oracle scores it.
+    /// oracle scores it, and the final `θ` after the last step.
     pub oracle: Box<dyn EvaluationOracle>,
     /// `∇fitness(θ)`, uphill (see [`GradientOracle`]); the update adds it. One
     /// that also returns `θ`'s fitness
@@ -138,6 +143,7 @@ pub struct AlgorithmAdamArgs {
     /// measured (C-5): a [`FiniteDifferenceGradient`](crate::FiniteDifferenceGradient)
     /// over an [`Arc`](std::sync::Arc) shared with it.
     pub gradient_oracle: Box<dyn GradientOracle>,
+    /// Steps at most, each after measuring `θ` and the gradient there.
     pub max_iters: u32,
     /// Step size applied to the bias-corrected, moment-normalised update; with
     /// [`AdamRule::Momentum`], the factor of the gradient in the velocity.
@@ -158,8 +164,9 @@ pub struct AlgorithmAdamArgs {
     /// ends, in the oracle's fitness units: the stagnation rule of contract C-5,
     /// the same as DE's and CMA-ES's.
     pub tolerance: f64,
-    /// Iterations over which the best-fitness improvement is measured; no run
-    /// ends on stagnation before it has run `patience + 1` iterations.
+    /// Iterations over which the best-fitness improvement is measured, at
+    /// least 1; no run ends on stagnation before it has run `patience + 1`
+    /// iterations.
     pub patience: u32,
     /// How the gradient becomes a step: Adam (the default) or Polyak's
     /// momentum.
@@ -209,11 +216,20 @@ impl AlgorithmAdam {
         beta1: f64,
         beta2: f64,
         epsilon: f64,
+        patience: u32,
         bounds: (f64, f64),
         dimensions: u32,
         initial_point: Option<&[f64]>,
     ) -> Result<(), OptimizerError> {
-        validate(max_iters, dimensions, learning_rate, beta1, beta2, epsilon)?;
+        validate(
+            max_iters,
+            dimensions,
+            learning_rate,
+            beta1,
+            beta2,
+            epsilon,
+            patience,
+        )?;
         let (lb, ub) = bounds;
         // The same check as QNG's: `lb >= ub` is empty, and a non-finite bound
         // (`NaN` fails every comparison, an infinity would make the sampler panic)
@@ -251,6 +267,7 @@ impl AlgorithmAdam {
             beta1,
             beta2,
             epsilon,
+            patience,
             bounds,
             dimensions,
             initial_point.as_deref(),
@@ -332,13 +349,26 @@ impl AlgorithmAdam {
             }
 
             // ── 4. Stop when the best fitness stagnates (C-5) ─────────────────
+            // Judged on the θs measured so far; the θ this step reached is
+            // measured below, like the last iteration's.
             if fitness_stagnated(&fitness_history, tolerance, patience, iteration) {
                 converged = true;
                 break;
             }
         }
 
-        // `max_iters >= 1` and every iteration measures θ before it can end, so
+        // ── 5. Measure the θ the last step reached ───────────────────────────
+        // One candidate, so no gradient goes into an unmeasured step; its value
+        // joins the last iteration's entry, which stays the reported best (C-5).
+        let fitness = oracle.evaluate_batch(std::slice::from_ref(&theta));
+        check_oracle_len(1, fitness.len())?;
+        log::debug!("Final θ: fitness {:.4}", fitness[0]);
+        best.offer(&theta, fitness[0]);
+        if let Some(last) = fitness_history.last_mut() {
+            *last = best.value();
+        }
+
+        // `max_iters >= 1` and every iteration measures θ before it steps, so
         // `best` holds a measured θ.
         let (best_params, best_fitness) = best.into_parts();
         Ok(OptimizationOutcome {
@@ -359,6 +389,7 @@ fn validate(
     beta1: f64,
     beta2: f64,
     epsilon: f64,
+    patience: u32,
 ) -> Result<(), OptimizerError> {
     let invalid = |parameter: &'static str, reason: String| {
         Err(OptimizerError::InvalidConfig { parameter, reason })
@@ -366,7 +397,8 @@ fn validate(
     if max_iters == 0 {
         return invalid(
             "max_iters",
-            "must be at least 1 (0 iterations never evaluates the objective)".to_string(),
+            "must be at least 1 (a run of no steps would only measure its starting point)"
+                .to_string(),
         );
     }
     if dimensions == 0 {
@@ -388,6 +420,14 @@ fn validate(
     }
     if !epsilon.is_finite() || epsilon <= 0.0 {
         return invalid("epsilon", format!("must be finite and > 0, got {epsilon}"));
+    }
+    if patience == 0 {
+        return invalid(
+            "patience",
+            "must be at least 1 (iterations back to compare the best fitness with; 0 \
+             would compare an iteration with itself)"
+                .to_string(),
+        );
     }
     Ok(())
 }

@@ -6,9 +6,10 @@
 //! either the oracle's recorded failure or the optimizer's own config error).
 //! That triplication now lives here once:
 //! [`dispatch_optimizer`] takes a pyo3-free [`Method`] (the binding parses the
-//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam` object into it and builds the QNG
-//! variance oracle), runs the matching optimizer, and returns an
-//! [`OracleError`] the binding converts back into a `PyErr`.
+//! `polypus.DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve`/`External` object
+//! into it and builds the QNG variance oracle and the external optimizer's
+//! [`AskTell`]), runs the matching optimizer, and returns an [`OracleError`] the
+//! binding converts back into a `PyErr`.
 //!
 //! This crate is deliberately Python-free — the GIL is released by the caller
 //! (`py.detach(|| dispatch_optimizer(...))`) and re-acquired only inside
@@ -28,6 +29,9 @@ use polypus_optimizers::{
     AlgorithmPSOArgs, AlgorithmQNG, AlgorithmQNGArgs, DeStrategy, EvaluationOracle,
     OptimizationOutcome, Optimizer, OptimizerError, VarianceOracle,
 };
+use polypus_optimizers::{AlgorithmExternal, AlgorithmExternalArgs, AskTell};
+use polypus_optimizers::{AlgorithmRotosolve, AlgorithmRotosolveArgs};
+use polypus_optimizers::{AlgorithmSPSA, AlgorithmSPSAArgs};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
@@ -96,15 +100,55 @@ pub struct AdamConfig {
     pub rule: AdamRule,
 }
 
+/// SPSA configuration, mirroring the `polypus.SPSA` object (see [`DeConfig`]).
+/// The run starts with one calibration batch of 50 circuits, then makes one
+/// batch of `2·resamplings` circuits per iteration, plus the parameters
+/// themselves every `eval_interval` iterations.
+pub struct SpsaConfig {
+    pub max_iters: u32,
+    pub resamplings: u32,
+    pub perturbation: f64,
+    pub target_step: f64,
+    pub alpha: f64,
+    pub gamma: f64,
+    pub eval_interval: u32,
+}
+
+/// Rotosolve configuration, mirroring the `polypus.Rotosolve` object (see
+/// [`DeConfig`]). Each step is one batch of two circuits, plus the parameters
+/// themselves on the first step and every `reevaluate_every` steps; a sweep is
+/// one step per parameter. The caller checks that the circuit qualifies
+/// (every trainable parameter one single-Pauli rotation angle).
+pub struct RotosolveConfig {
+    pub sweeps: u32,
+    pub reevaluate_every: u32,
+    pub tolerance: f64,
+    pub patience: u32,
+}
+
+/// External configuration, mirroring the `polypus.External` object (see
+/// [`DeConfig`]). The external optimizer itself travels alongside it in
+/// [`Method::External`]. Each of its `ask()` batches is one oracle batch; the
+/// run stops at an empty `ask()` or before the batch that would take the
+/// evaluations past `max_evaluations`. The library owns its seed and its
+/// start, so dispatch passes it neither (contract C-7).
+pub struct ExternalConfig {
+    pub max_evaluations: u64,
+}
+
 /// The chosen optimizer and its configuration. `Qng` additionally carries its
-/// variance oracle (built from the Python callback at the binding boundary), so
-/// dispatch stays Python-free.
+/// variance oracle (built from the Python callback at the binding boundary), and
+/// `External` the ask/tell optimizer it bridges (a Python object adapted by the
+/// binding), so dispatch stays Python-free.
 pub enum Method {
     De(DeConfig),
     Pso(PsoConfig),
     Qng(QngConfig, Box<dyn VarianceOracle>),
     Cmaes(CmaesConfig),
     Adam(AdamConfig),
+    Spsa(SpsaConfig),
+    Rotosolve(RotosolveConfig),
+    External(ExternalConfig, Box<dyn AskTell>),
 }
 
 /// What a training run evaluates through: built by an
@@ -181,6 +225,25 @@ impl Method {
                 cfg.restarts,
                 initial_point,
             ),
+            Method::Spsa(cfg) => AlgorithmSPSA::check_preconditions(
+                cfg.max_iters,
+                cfg.resamplings,
+                cfg.perturbation,
+                cfg.target_step,
+                cfg.alpha,
+                cfg.gamma,
+                cfg.eval_interval,
+                dimensions,
+                initial_point,
+            ),
+            Method::Rotosolve(cfg) => AlgorithmRotosolve::check_preconditions(
+                cfg.sweeps,
+                cfg.reevaluate_every,
+                cfg.tolerance,
+                cfg.patience,
+                dimensions,
+                initial_point,
+            ),
             // The step first: dispatch builds the finite difference before it
             // runs Adam whenever the run's oracles carry no exact gradient,
             // which is every `train` and `qml.train` run. With an exact
@@ -193,10 +256,17 @@ impl Method {
                     cfg.beta1,
                     cfg.beta2,
                     cfg.epsilon,
+                    cfg.patience,
                     cfg.bounds,
                     dimensions,
                     initial_point,
                 )
+            }
+            // The library chooses its own start, so after the configuration
+            // any point is refused.
+            Method::External(cfg, _) => {
+                AlgorithmExternal::check_preconditions(cfg.max_evaluations, dimensions)?;
+                refuse_external_initial_point(initial_point)
             }
         }
     }
@@ -261,6 +331,13 @@ impl OracleErrorSlot {
     /// oracle thread that holds the interpreter may be calling [`failed`](Self::failed);
     /// formatting under the mutex would make each wait for the other.
     pub fn record(&self, err: BoxedError, run_id: &str) {
+        self.record_as(err, run_id, "oracle evaluation failed");
+    }
+
+    /// [`record`](Self::record), with `what` as the log line's account of the
+    /// failure, for one that is not an oracle's: an external optimizer's
+    /// `ask()` or `tell()` that raised, say.
+    pub fn record_as(&self, err: BoxedError, run_id: &str, what: &str) {
         if self.failed() {
             return;
         }
@@ -276,7 +353,7 @@ impl OracleErrorSlot {
         // Log only when this call actually stored the error, so the message never
         // claims to have "recorded" a failure it silently dropped.
         if let (true, Some(message)) = (stored, message) {
-            log::error!("run {run_id}: oracle evaluation failed: {message}");
+            log::error!("run {run_id}: {what}: {message}");
         }
     }
 
@@ -314,7 +391,11 @@ fn describe(err: &BoxedError) -> String {
 ///
 /// `initial_point` is handed to whichever optimizer `method` names (each
 /// optimizer's `initial_point` field says how it starts from it); `None` starts
-/// every optimizer as before.
+/// every optimizer as before. [`Method::External`] takes none, since its
+/// library chooses its own start: a point is an
+/// [`InvalidConfig`](OptimizerError::InvalidConfig) for `initial_point`, after
+/// External's configuration is checked and before any `ask()`. It ignores `seed` too (contract C-7: the library owns its
+/// seed).
 pub fn dispatch_optimizer(
     method: Method,
     oracles: impl Into<Oracles>,
@@ -390,6 +471,42 @@ pub fn dispatch_optimizer(
             seed: Some(seed),
             initial_point,
         }),
+        Method::Spsa(cfg) => AlgorithmSPSA.optimize(AlgorithmSPSAArgs {
+            oracle,
+            max_iters: cfg.max_iters,
+            resamplings: cfg.resamplings,
+            perturbation: cfg.perturbation,
+            target_step: cfg.target_step,
+            alpha: cfg.alpha,
+            gamma: cfg.gamma,
+            eval_interval: cfg.eval_interval,
+            dimensions,
+            seed: Some(seed),
+            initial_point,
+        }),
+        Method::Rotosolve(cfg) => AlgorithmRotosolve.optimize(AlgorithmRotosolveArgs {
+            oracle,
+            sweeps: cfg.sweeps,
+            reevaluate_every: cfg.reevaluate_every,
+            tolerance: cfg.tolerance,
+            patience: cfg.patience,
+            dimensions,
+            seed: Some(seed),
+            initial_point,
+        }),
+        // As every optimizer: the configuration, then the point.
+        Method::External(cfg, optimizer) => {
+            AlgorithmExternal::check_preconditions(cfg.max_evaluations, dimensions)
+                .and_then(|()| refuse_external_initial_point(initial_point.as_deref()))
+                .and_then(|()| {
+                    AlgorithmExternal.optimize(AlgorithmExternalArgs {
+                        oracle,
+                        optimizer,
+                        max_evaluations: cfg.max_evaluations,
+                        dimensions,
+                    })
+                })
+        }
     };
     // With a minibatch a gradient-free optimizer steered by subset estimates,
     // so its `best_fitness` is one; re-score the returned parameters on every
@@ -399,6 +516,21 @@ pub fn dispatch_optimizer(
         (result, _) => result,
     };
     finish(result, errors)
+}
+
+/// [`Method::External`] takes no `initial_point`: any point is an
+/// [`InvalidConfig`](OptimizerError::InvalidConfig) for it, whatever its
+/// length or values.
+fn refuse_external_initial_point(initial_point: Option<&[f64]>) -> Result<(), OptimizerError> {
+    match initial_point {
+        Some(_) => Err(OptimizerError::InvalidConfig {
+            parameter: "initial_point",
+            reason: "the external optimizer chooses its own start; give the starting point \
+                     to the library (or to the adapter's initial_point) instead"
+                .to_string(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Adam: the gradient is the exact one when the oracles carry it, otherwise a
@@ -500,7 +632,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_log::logged_for;
+    use crate::test_log::{capture_logs, logged_for};
     use std::fmt;
 
     // The slot is type-erased, so these exercise it with a trivial pure error —
@@ -577,6 +709,7 @@ mod tests {
     #[test]
     fn record_logs_only_the_error_it_stores() {
         let run_id = "oracle-error-slot-logs-only-the-stored-error";
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         slot.record(boxed("first"), run_id);
@@ -589,6 +722,28 @@ mod tests {
             slot.take().expect("an error was recorded").to_string(),
             "first"
         );
+    }
+
+    /// `record_as` logs its own account of the failure, and keeps the first
+    /// error like `record`.
+    #[test]
+    fn record_as_logs_its_own_wording() {
+        let run_id = "oracle-error-slot-record-as";
+        capture_logs();
+        let slot = OracleErrorSlot::new();
+        slot.record_as(
+            boxed("no trials"),
+            run_id,
+            "the external optimizer's ask() failed",
+        );
+        slot.record(boxed("later"), run_id);
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the external optimizer's ask() failed: no trials"
+            )]
+        );
+        assert_eq!(slot.take().expect("recorded").to_string(), "no trials");
     }
 
     /// An error whose `Display` cannot finish until another thread has called
@@ -627,6 +782,7 @@ mod tests {
 
         let run_id = "oracle-error-slot-formats-outside-the-lock";
         // The format only happens when an `ERROR` line will be written.
+        capture_logs();
         assert!(logged_for(run_id).is_empty());
         let slot = OracleErrorSlot::new();
         let (formatting_tx, formatting_rx) = mpsc::channel();
@@ -797,8 +953,11 @@ mod tests {
     /// Dispatch hands `initial_point` to every `Method`: it is the first
     /// candidate of the first batch (DE, PSO, and Adam, whose batch is θ₀ and
     /// then its finite-difference stencil), the centre of the first gradient
-    /// stencil (QNG, whose first candidate is θ₀ + h·e₀) and the first mean
-    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀).
+    /// stencil (QNG, whose first candidate is θ₀ + h·e₀), the first mean
+    /// (CMA-ES, whose candidates all sit on it with a tiny σ₀), the centre
+    /// of the calibration (SPSA, whose first candidate is θ₀ + c·Δ₁) and the
+    /// first point measured (Rotosolve, whose first batch is θ₀ and its two
+    /// neighbours along the first parameter).
     #[test]
     fn initial_point_reaches_every_optimizer() {
         let point = vec![0.5, 2.0, 1.25];
@@ -855,6 +1014,8 @@ mod tests {
                     rule: AdamRule::Adam,
                 }),
             ),
+            ("SPSA", spsa_method(2, 1)),
+            ("Rotosolve", rotosolve_method(2, 5)),
         ];
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             methods.push((strategy.as_str(), de_method(strategy)));
@@ -871,6 +1032,16 @@ mod tests {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
                 .expect("the oracle was called");
+            if name == "SPSA" {
+                // The first calibration point, θ₀ + c·Δ₁ with Δ₁ of ±1s.
+                for (x, p) in first.iter().zip(&point) {
+                    assert!(
+                        ((x - p).abs() - SPSA_PERTURBATION).abs() < 1e-12,
+                        "{first:?}"
+                    );
+                }
+                continue;
+            }
             let expected = match name {
                 "QNG" => vec![point[0] + step, point[1], point[2]],
                 _ => point.clone(),
@@ -1017,6 +1188,14 @@ mod tests {
                 short.clone(),
             ),
             (
+                "Adam, patience 0",
+                Box::new(move || match adam(0.1, 0.05) {
+                    Method::Adam(cfg) => Method::Adam(AdamConfig { patience: 0, ..cfg }),
+                    other => other,
+                }),
+                short.clone(),
+            ),
+            (
                 "Adam, short point",
                 Box::new(move || adam(0.1, 0.05)),
                 short.clone(),
@@ -1028,6 +1207,91 @@ mod tests {
             ),
         ];
         cases.extend(adam_cases);
+        let spsa = |max_iters, alpha| {
+            Method::Spsa(SpsaConfig {
+                max_iters,
+                resamplings: 1,
+                perturbation: 0.1,
+                target_step: 0.63,
+                alpha,
+                gamma: 0.101,
+                eval_interval: 1,
+            })
+        };
+        let spsa_cases: Vec<Case> = vec![
+            (
+                "SPSA, max_iters 0",
+                Box::new(move || spsa(0, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, alpha NaN",
+                Box::new(move || spsa(2, f64::NAN)),
+                short.clone(),
+            ),
+            (
+                "SPSA, short point",
+                Box::new(move || spsa(2, 0.602)),
+                short.clone(),
+            ),
+            (
+                "SPSA, valid",
+                Box::new(move || spsa(2, 0.602)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(spsa_cases);
+        let rotosolve = |sweeps, tolerance| {
+            Method::Rotosolve(RotosolveConfig {
+                sweeps,
+                reevaluate_every: 1,
+                tolerance,
+                patience: 1,
+            })
+        };
+        let rotosolve_cases: Vec<Case> = vec![
+            (
+                "Rotosolve, sweeps 0",
+                Box::new(move || rotosolve(0, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, tolerance -1",
+                Box::new(move || rotosolve(1, -1.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, short point",
+                Box::new(move || rotosolve(1, 0.0)),
+                short.clone(),
+            ),
+            (
+                "Rotosolve, valid",
+                Box::new(move || rotosolve(1, 0.0)),
+                outside.clone(),
+            ),
+        ];
+        cases.extend(rotosolve_cases);
+        let external = |max_evaluations| {
+            Method::External(
+                ExternalConfig { max_evaluations },
+                Box::new(Scripted::new(external_batches())),
+            )
+        };
+        let external_cases: Vec<Case> = vec![
+            (
+                "External, max_evaluations 0",
+                Box::new(move || external(0)),
+                short.clone(),
+            ),
+            (
+                "External, a point",
+                Box::new(move || external(6)),
+                outside.clone(),
+            ),
+            ("External, valid", Box::new(move || external(6)), None),
+        ];
+        cases.extend(external_cases);
         for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
             cases.push((
                 "DE, population 2",
@@ -1146,10 +1410,12 @@ mod tests {
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert_near_the_optimum(&outcome);
         // Each iteration: one batch on the same oracle, θ and its
-        // finite-difference stencil (2·dims + 1 candidates).
+        // finite-difference stencil (2·dims + 1 candidates); then the final θ
+        // alone.
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), outcome.iterations_run);
-        assert!(sizes.iter().all(|&n| n == 7), "{sizes:?}");
+        let mut expected = vec![7; outcome.iterations_run];
+        expected.push(1);
+        assert_eq!(sizes, expected);
     }
 
     #[test]
@@ -1173,9 +1439,9 @@ mod tests {
         assert_near_the_optimum(&outcome);
         assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
         // No stencil: the evaluation oracle only scores θ, one candidate a call,
-        // once per iteration.
+        // once per iteration and once more for the final θ.
         let sizes = sizes(&log);
-        assert_eq!(sizes.len(), outcome.iterations_run);
+        assert_eq!(sizes.len(), outcome.iterations_run + 1);
         assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
     }
 
@@ -1198,14 +1464,15 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         // The minibatch oracle only feeds the gradient, a bare stencil with no
-        // θ in front; θ is scored on the full set, once per iteration.
+        // θ in front; θ is scored on the full set, once per iteration, and so is
+        // the final θ, and nothing is re-scored after it.
         let minibatch_sizes = sizes(&minibatch_log);
         assert_eq!(minibatch_sizes.len(), outcome.iterations_run);
         assert!(
             minibatch_sizes.iter().all(|&n| n == 4),
             "{minibatch_sizes:?}"
         );
-        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run]);
+        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run + 1]);
         assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
     }
 
@@ -1229,7 +1496,7 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
         assert!(sizes(&minibatch_log).is_empty());
-        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run]);
+        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run + 1]);
         assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
     }
 
@@ -1332,5 +1599,337 @@ mod tests {
             _ => panic!("expected an InvalidConfig for the step"),
         }
         assert!(sizes(&log).is_empty());
+    }
+
+    // ── SPSA ──────────────────────────────────────────────────────────────────
+
+    const SPSA_PERTURBATION: f64 = 0.1;
+
+    fn spsa_method(max_iters: u32, resamplings: u32) -> Method {
+        Method::Spsa(SpsaConfig {
+            max_iters,
+            resamplings,
+            perturbation: SPSA_PERTURBATION,
+            target_step: 0.63,
+            alpha: 0.602,
+            gamma: 0.101,
+            eval_interval: 4,
+        })
+    }
+
+    /// Dispatch hands every `SpsaConfig` field and the seed to SPSA: the
+    /// outcome is the one `AlgorithmSPSA::optimize` returns for the same
+    /// arguments, after a calibration batch of 50, one batch per iteration and
+    /// the final θ.
+    #[test]
+    fn spsa_dispatch_runs_the_configured_optimizer() {
+        let (oracle, log) = recorder();
+        let dispatched = dispatch_optimizer(
+            spsa_method(9, 3),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid SPSA run must succeed"));
+        // θ heads the batches of iterations 1, 5 and 9; the final θ is alone.
+        assert_eq!(sizes(&log), [50, 7, 6, 6, 6, 7, 6, 6, 6, 7, 1]);
+        let (oracle, _) = recorder();
+        let direct = AlgorithmSPSA
+            .optimize(AlgorithmSPSAArgs {
+                oracle,
+                max_iters: 9,
+                resamplings: 3,
+                perturbation: SPSA_PERTURBATION,
+                target_step: 0.63,
+                alpha: 0.602,
+                gamma: 0.101,
+                eval_interval: 4,
+                dimensions: 3,
+                seed: Some(4),
+                initial_point: None,
+            })
+            .expect("a valid SPSA configuration runs");
+        assert_eq!(dispatched, direct);
+    }
+
+    #[test]
+    fn spsa_rejects_an_invalid_configuration_before_any_batch() {
+        let (oracle, log) = recorder();
+        let method = match spsa_method(10, 1) {
+            Method::Spsa(cfg) => Method::Spsa(SpsaConfig {
+                eval_interval: 0,
+                ..cfg
+            }),
+            other => other,
+        };
+        match dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "eval_interval")
+            }
+            _ => panic!("expected an InvalidConfig for eval_interval"),
+        }
+        assert!(sizes(&log).is_empty());
+    }
+
+    // ── Rotosolve ─────────────────────────────────────────────────────────────
+
+    fn rotosolve_method(sweeps: u32, reevaluate_every: u32) -> Method {
+        Method::Rotosolve(RotosolveConfig {
+            sweeps,
+            reevaluate_every,
+            tolerance: 0.0,
+            patience: 2,
+        })
+    }
+
+    /// Dispatch hands every `RotosolveConfig` field and the seed to Rotosolve:
+    /// the outcome is the one `AlgorithmRotosolve::optimize` returns for the
+    /// same arguments, after one batch per step and the final point.
+    #[test]
+    fn rotosolve_dispatch_runs_the_configured_optimizer() {
+        let (oracle, log) = recorder();
+        let dispatched = dispatch_optimizer(
+            rotosolve_method(3, 4),
+            oracle,
+            3,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Rotosolve run must succeed"));
+        // θ heads the batches of steps 0, 4 and 8; the final point is alone.
+        assert_eq!(sizes(&log), [3, 2, 2, 2, 3, 2, 2, 2, 3, 1]);
+        let (oracle, _) = recorder();
+        let direct = AlgorithmRotosolve
+            .optimize(AlgorithmRotosolveArgs {
+                oracle,
+                sweeps: 3,
+                reevaluate_every: 4,
+                tolerance: 0.0,
+                patience: 2,
+                dimensions: 3,
+                seed: Some(4),
+                initial_point: None,
+            })
+            .expect("a valid Rotosolve configuration runs");
+        assert_eq!(dispatched, direct);
+    }
+
+    #[test]
+    fn rotosolve_rejects_an_invalid_configuration_before_any_batch() {
+        let (oracle, log) = recorder();
+        let method = Method::Rotosolve(RotosolveConfig {
+            sweeps: 10,
+            reevaluate_every: 0,
+            tolerance: 0.01,
+            patience: 2,
+        });
+        match dispatch_optimizer(method, oracle, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "reevaluate_every")
+            }
+            _ => panic!("expected an InvalidConfig for reevaluate_every"),
+        }
+        assert!(sizes(&log).is_empty());
+    }
+
+    // ── External ──────────────────────────────────────────────────────────────
+
+    /// An ask/tell optimizer that proposes `batches` in order (then nothing),
+    /// counting its asks and keeping what it was told. With `fail`, its first
+    /// `ask` records the cause in that slot, as the Python bridge does, and
+    /// fails.
+    struct Scripted {
+        batches: std::collections::VecDeque<Vec<Vec<f64>>>,
+        asks: Arc<Mutex<usize>>,
+        told: Arc<Mutex<Vec<Vec<f64>>>>,
+        fail: Option<OracleErrorSlot>,
+    }
+
+    impl Scripted {
+        fn new(batches: Vec<Vec<Vec<f64>>>) -> Self {
+            Scripted {
+                batches: batches.into(),
+                asks: Arc::default(),
+                told: Arc::default(),
+                fail: None,
+            }
+        }
+    }
+
+    impl AskTell for Scripted {
+        fn ask(&mut self) -> Result<Option<Vec<Vec<f64>>>, polypus_optimizers::AskTellError> {
+            *self.asks.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+            if let Some(slot) = &self.fail {
+                slot.record(boxed("the library's own exception"), RUN_ID);
+                return Err("ask() raised".into());
+            }
+            Ok(self.batches.pop_front())
+        }
+
+        fn tell(
+            &mut self,
+            _candidates: &[Vec<f64>],
+            values: &[f64],
+        ) -> Result<(), polypus_optimizers::AskTellError> {
+            self.told
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(values.to_vec());
+            Ok(())
+        }
+    }
+
+    /// `Method` holds a `Box<dyn AskTell>` for `External`, and stays `Send +
+    /// Sync` as it was before: a compile-time check.
+    #[test]
+    fn method_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<Method>();
+    }
+
+    /// Three batches of two, three and one points in two dimensions.
+    fn external_batches() -> Vec<Vec<Vec<f64>>> {
+        vec![
+            vec![vec![0.0, 0.0], vec![1.0, 0.5]],
+            vec![vec![2.0, 2.0], vec![1.0, 1.0], vec![0.5, 1.5]],
+            vec![vec![1.5, 1.0]],
+        ]
+    }
+
+    /// Dispatch runs the bridge: one oracle batch per `ask()`, the values told
+    /// back, the run ended by the empty fourth `ask()` (the budget of seven
+    /// leaves room for it), and the outcome the bridge returns for the same
+    /// arguments. The seed is the library's (C-7), so dispatch
+    /// ignores it.
+    #[test]
+    fn external_dispatch_runs_the_configured_bridge() {
+        let mut outcomes = Vec::new();
+        for seed in [1, 77] {
+            let (oracle, log) = recorder();
+            let optimizer = Scripted::new(external_batches());
+            let told = Arc::clone(&optimizer.told);
+            let method =
+                Method::External(ExternalConfig { max_evaluations: 7 }, Box::new(optimizer));
+            let outcome =
+                dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), seed, None)
+                    .unwrap_or_else(|_| panic!("a valid External run must succeed"));
+            assert_eq!(sizes(&log), [2, 3, 1]);
+            assert_eq!(told.lock().unwrap_or_else(|p| p.into_inner()).len(), 3);
+            assert!(outcome.converged, "the script ended with an empty ask");
+            outcomes.push(outcome);
+        }
+        assert_eq!(outcomes[0], outcomes[1], "the seed must not matter");
+        let (oracle, _) = recorder();
+        let direct = AlgorithmExternal
+            .optimize(AlgorithmExternalArgs {
+                oracle,
+                optimizer: Box::new(Scripted::new(external_batches())),
+                max_evaluations: 7,
+                dimensions: 2,
+            })
+            .expect("a valid External configuration runs");
+        assert_eq!(outcomes[0], direct);
+        assert_eq!(direct.best_params, vec![1.0, 1.0]);
+    }
+
+    /// The budget reaches the bridge: with five evaluations the third batch
+    /// (which would make six) is neither evaluated nor told.
+    #[test]
+    fn external_dispatch_passes_the_budget() {
+        let (oracle, log) = recorder();
+        let optimizer = Scripted::new(external_batches());
+        let told = Arc::clone(&optimizer.told);
+        let method = Method::External(ExternalConfig { max_evaluations: 5 }, Box::new(optimizer));
+        let outcome = dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 3, None)
+            .unwrap_or_else(|_| panic!("a valid External run must succeed"));
+        assert_eq!(sizes(&log), [2, 3]);
+        assert_eq!(told.lock().unwrap_or_else(|p| p.into_inner()).len(), 2);
+        assert!(!outcome.converged, "the budget stopped the run");
+        assert_eq!(outcome.iterations_run, 2);
+    }
+
+    /// An `initial_point` is a configuration error before the library is asked
+    /// anything or the oracle called: the library chooses its own start. It
+    /// comes after External's own configuration errors.
+    #[test]
+    fn external_rejects_an_initial_point_before_any_ask() {
+        let (oracle, log) = recorder();
+        let optimizer = Scripted::new(external_batches());
+        let asks = Arc::clone(&optimizer.asks);
+        let method = Method::External(ExternalConfig { max_evaluations: 6 }, Box::new(optimizer));
+        match dispatch_optimizer(
+            method,
+            oracle,
+            2,
+            &OracleErrorSlot::new(),
+            1,
+            Some(vec![0.5, 0.5]),
+        ) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, reason })) => {
+                assert_eq!(parameter, "initial_point");
+                assert!(reason.contains("own start"), "{reason}");
+            }
+            _ => panic!("expected an InvalidConfig for initial_point"),
+        }
+        assert_eq!(*asks.lock().unwrap_or_else(|p| p.into_inner()), 0);
+        assert!(sizes(&log).is_empty());
+
+        let (oracle, _) = recorder();
+        let method = Method::External(
+            ExternalConfig { max_evaluations: 0 },
+            Box::new(Scripted::new(external_batches())),
+        );
+        match dispatch_optimizer(
+            method,
+            oracle,
+            2,
+            &OracleErrorSlot::new(),
+            1,
+            Some(vec![0.5, 0.5]),
+        ) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "max_evaluations")
+            }
+            _ => panic!("expected an InvalidConfig for max_evaluations"),
+        }
+    }
+
+    /// A failure the bridge recorded in the run's slot (the Python exception
+    /// `ask()` raised) is what dispatch returns, not the bridge's own error.
+    #[test]
+    fn external_returns_the_failure_recorded_in_the_slot() {
+        let (oracle, log) = recorder();
+        let errors = OracleErrorSlot::new();
+        let mut optimizer = Scripted::new(external_batches());
+        optimizer.fail = Some(errors.clone());
+        let method = Method::External(ExternalConfig { max_evaluations: 6 }, Box::new(optimizer));
+        match dispatch_optimizer(method, oracle, 2, &errors, 1, None) {
+            Err(OracleError::Evaluation(cause)) => {
+                assert_eq!(cause.to_string(), "the library's own exception")
+            }
+            _ => panic!("expected the recorded failure"),
+        }
+        assert!(sizes(&log).is_empty());
+        assert!(!errors.failed(), "dispatch takes the recorded failure");
+    }
+
+    /// Without a recorded failure, the bridge's own error is a configuration
+    /// error (it reaches Python as `ValueError`).
+    #[test]
+    fn external_bridge_errors_are_config_errors() {
+        let (oracle, _) = recorder();
+        let method = Method::External(
+            ExternalConfig { max_evaluations: 0 },
+            Box::new(Scripted::new(external_batches())),
+        );
+        match dispatch_optimizer(method, oracle, 2, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(OptimizerError::InvalidConfig { parameter, .. })) => {
+                assert_eq!(parameter, "max_evaluations")
+            }
+            _ => panic!("expected an InvalidConfig for max_evaluations"),
+        }
     }
 }

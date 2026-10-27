@@ -23,6 +23,5 @@ polypus-circuit = { workspace = true }
 # their results (pure Rust, no PyO3).
 polypus-qml = { workspace = true }
 pyo3 = { workspace = true }
-log = { workspace = true }
 # Count-weighted aggregation in the Python-callback observable fallback.
 rayon = { workspace = true }

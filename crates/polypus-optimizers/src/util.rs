@@ -5,8 +5,11 @@
 //! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
 //! crate's public API, so the module is `pub(crate)`-scoped. Every optimizer,
 //! [`AlgorithmQNG`](crate::AlgorithmQNG) included, checks its optional starting
-//! point with [`check_initial_point`], DE and CMA-ES share [`wrap_angle`], and
-//! [`AlgorithmAdam`](crate::AlgorithmAdam) keeps its best point with
+//! point with [`check_initial_point`], DE, CMA-ES and
+//! [`AlgorithmRotosolve`](crate::AlgorithmRotosolve) share [`wrap_angle`], and
+//! [`AlgorithmAdam`](crate::AlgorithmAdam),
+//! [`AlgorithmSPSA`](crate::AlgorithmSPSA), Rotosolve and
+//! [`AlgorithmExternal`](crate::AlgorithmExternal) keep their best point with
 //! [`BestMeasured`].
 //! Each helper is a small, single-purpose free function that used to be inlined
 //! (and duplicated) inside the optimizer loops. The behaviour is preserved

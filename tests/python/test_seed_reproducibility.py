@@ -9,8 +9,9 @@ These exercise issue #34 / #56's acceptance criteria from Python:
   are returned. A seed is rejected for ``infrastructure="qmio"`` (real hardware).
 * ``train`` / ``qml.train`` seed: same seed ⇒ identical outcome; no seed ⇒
   different outcome; the outcome now exposes fitness / iterations / convergence
-  / seed, and the ``DE``/``PSO``/``QNG``/``CMAES``/``Adam`` ``seed`` field feeds the
-  precedence.
+  / seed, and the ``DE``/``PSO``/``QNG``/``CMAES``/``Adam``/``SPSA``/``Rotosolve``
+  ``seed`` field feeds the precedence. ``External`` has no ``seed`` field: its
+  library owns its seed, and the run's seed fixes the shot sampling only.
 
 CUNQA's simulated QPUs (``infrastructure="cunqa"``) get the same seed forwarding
 as Aer, offset per QPU. It is pinned against a fake CUNQA SDK in
@@ -164,6 +165,24 @@ class TestOptimizerSeedField:
         assert adam.seed == 5
         adam.seed = 8
         assert adam.seed == 8
+
+    def test_spsa_seed_field(self):
+        import polypus
+
+        assert polypus.SPSA().seed is None
+        spsa = polypus.SPSA(seed=5)
+        assert spsa.seed == 5
+        spsa.seed = 8
+        assert spsa.seed == 8
+
+    def test_rotosolve_seed_field(self):
+        import polypus
+
+        assert polypus.Rotosolve().seed is None
+        rotosolve = polypus.Rotosolve(seed=5)
+        assert rotosolve.seed == 5
+        rotosolve.seed = 8
+        assert rotosolve.seed == 8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +344,113 @@ class TestTrainSeed:
         r3 = self._train(seed=777, method=self._adam(seed=1), ident="adam_field")
         assert r3.seed == 777
 
+    # SPSA: the seed draws the initial θ and every perturbation. Its gains use
+    # the platform's libm (`powf`), so, like CMA-ES, no cross-platform golden
+    # values.
+    @staticmethod
+    def _spsa(**kwargs):
+        import polypus
+
+        return polypus.SPSA(max_iters=6, eval_interval=2, **kwargs)
+
+    def test_same_seed_reproduces_spsa(self):
+        r1 = self._train(seed=2024, method=self._spsa(), ident="train_seed_spsa")
+        r2 = self._train(seed=2024, method=self._spsa(), ident="train_seed_spsa")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_no_seed_differs_across_spsa_calls(self):
+        r1 = self._train(seed=None, method=self._spsa(), ident="train_spsa_none")
+        r2 = self._train(seed=None, method=self._spsa(), ident="train_spsa_none")
+        assert r1.seed != r2.seed
+        assert r1.best_params != r2.best_params
+
+    def test_spsa_field_seed_is_used_and_the_kwarg_wins(self):
+        r1 = self._train(seed=None, method=self._spsa(seed=99), ident="spsa_field")
+        r2 = self._train(seed=None, method=self._spsa(seed=99), ident="spsa_field")
+        assert r1.seed == 99 and r2.seed == 99
+        assert r1.best_params == r2.best_params
+        r3 = self._train(seed=777, method=self._spsa(seed=1), ident="spsa_field")
+        assert r3.seed == 777
+
+    # Rotosolve: the seed draws the initial θ; the steps follow the seeded
+    # shots. They call `atan2` and `hypot`, the platform's libm, so, like
+    # CMA-ES, no cross-platform golden values.
+    @staticmethod
+    def _rotosolve(**kwargs):
+        import polypus
+
+        return polypus.Rotosolve(sweeps=4, reevaluate_every=2, tolerance=0, **kwargs)
+
+    def test_same_seed_reproduces_rotosolve(self):
+        r1 = self._train(seed=2024, method=self._rotosolve(), ident="seed_rotosolve")
+        r2 = self._train(seed=2024, method=self._rotosolve(), ident="seed_rotosolve")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run == 4
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_no_seed_differs_across_rotosolve_calls(self):
+        r1 = self._train(seed=None, method=self._rotosolve(), ident="rotosolve_none")
+        r2 = self._train(seed=None, method=self._rotosolve(), ident="rotosolve_none")
+        assert r1.seed != r2.seed
+        assert r1.best_params != r2.best_params
+
+    def test_rotosolve_field_seed_is_used_and_the_kwarg_wins(self):
+        method = self._rotosolve
+        r1 = self._train(seed=None, method=method(seed=99), ident="rotosolve_field")
+        r2 = self._train(seed=None, method=method(seed=99), ident="rotosolve_field")
+        assert r1.seed == 99 and r2.seed == 99
+        assert r1.best_params == r2.best_params
+        r3 = self._train(seed=777, method=method(seed=1), ident="rotosolve_field")
+        assert r3.seed == 777
+
+    # External: the library owns its seed (here the random search's own), and
+    # the run's seed fixes the shot sampling only.
+    @staticmethod
+    def _external(optimizer=None):
+        import polypus
+        from ask_tell_helpers import RandomSearch
+
+        if optimizer is None:
+            optimizer = RandomSearch(1, sizes=(4,), seed=3)
+        return polypus.External(optimizer, 24)
+
+    def test_same_seed_reproduces_external(self):
+        r1 = self._train(seed=2024, method=self._external(), ident="seed_external")
+        r2 = self._train(seed=2024, method=self._external(), ident="seed_external")
+        assert r1.seed == 2024 and r2.seed == 2024
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.iterations_run == r2.iterations_run == 6
+        assert r1.converged == r2.converged
+        assert r1.fitness_history == r2.fitness_history
+
+    def test_the_seed_fixes_only_the_shots_of_external(self):
+        from ask_tell_helpers import RandomSearch
+
+        first, second = RandomSearch(1, seed=3), RandomSearch(1, seed=3)
+        self._train(seed=1, method=self._external(first), ident="external_shots")
+        self._train(seed=2, method=self._external(second), ident="external_shots")
+        # The same candidates, measured with other shots.
+        assert first.asked == second.asked
+        assert [v for _, v in first.told] != [v for _, v in second.told]
+
+    def test_no_seed_draws_one_for_the_shots_of_external(self):
+        from ask_tell_helpers import RandomSearch
+
+        first, second = RandomSearch(1, seed=3), RandomSearch(1, seed=3)
+        r1 = self._train(seed=None, method=self._external(first), ident="ext_none")
+        r2 = self._train(seed=None, method=self._external(second), ident="ext_none")
+        assert r1.seed != r2.seed
+        assert [v for _, v in first.told] != [v for _, v in second.told]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # qml.train — optimizer RNG and Aer sampling are both seeded; mock the backend
@@ -425,6 +551,44 @@ class TestQmlTrainSeed:
 
         def method():
             return polypus.Adam(max_iters=3, tolerance=1e-12)
+
+        r1 = self._qml_train(123, method())
+        r2 = self._qml_train(123, method())
+        assert r1.seed == 123 and r2.seed == 123
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.fitness_history == r2.fitness_history
+        r3 = self._qml_train(None, method())
+        assert r3.seed != 123
+        assert r3.best_params != r1.best_params
+
+    def test_same_seed_reproduces_spsa(self, monkeypatch):
+        import polypus
+
+        self._patch_deterministic_backend(monkeypatch)
+
+        def method():
+            return polypus.SPSA(max_iters=3)
+
+        r1 = self._qml_train(123, method())
+        r2 = self._qml_train(123, method())
+        assert r1.seed == 123 and r2.seed == 123
+        assert r1.best_params == r2.best_params
+        assert r1.best_fitness == r2.best_fitness
+        assert r1.fitness_history == r2.fitness_history
+        r3 = self._qml_train(None, method())
+        assert r3.seed != 123
+        assert r3.best_params != r1.best_params
+
+    def test_same_seed_reproduces_rotosolve(self, monkeypatch):
+        # The ZZ feature map's angles are no concern: only the ansatz is
+        # trained, and real_amplitudes is one ry per parameter.
+        import polypus
+
+        self._patch_deterministic_backend(monkeypatch)
+
+        def method():
+            return polypus.Rotosolve(sweeps=2)
 
         r1 = self._qml_train(123, method())
         r2 = self._qml_train(123, method())
