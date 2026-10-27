@@ -563,6 +563,15 @@ mod tests {
             seed: None,
             opt_level: OptLevel::default(),
         };
+        // An empty batch, and replicas apportioned no shots, have nothing to
+        // run, so they need no interpreter.
+        assert!(backend.run_circuits(&[], &params).unwrap().is_empty());
+        assert_eq!(
+            backend
+                .run_shots_distributed(&circuit, &[0, 0], &params)
+                .unwrap(),
+            [HashMap::new(), HashMap::new()]
+        );
         assert!(unavailable(
             backend.run_circuits(&[circuit], &params).map(|_counts| ())
         ));

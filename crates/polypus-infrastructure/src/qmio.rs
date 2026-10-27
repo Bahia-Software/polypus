@@ -1945,6 +1945,164 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// An endpoint nothing listens on: `zeromq` keeps retrying the TCP connect
+    /// on its own, so each attempt ends at the receive timeout, the next one is
+    /// backed off, and once the retries are spent the call fails with the last
+    /// attempt's typed `Connect` error instead of hanging.
+    #[test]
+    fn an_unreachable_endpoint_fails_with_connect_after_the_retries() {
+        // A port that was just free: connecting to it is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let backend = QmioBackend::new(
+            endpoint.clone(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(100, 1, 10_000);
+        let params = RunParams {
+            id: "qmio-unreachable".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        let qmio_err = match &err {
+            BackendError::External(boxed) => boxed
+                .downcast_ref::<QmioError>()
+                .expect("the boxed error must be the original QmioError"),
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        };
+        match qmio_err {
+            QmioError::Connect {
+                endpoint: reported,
+                source,
+            } => {
+                assert_eq!(reported, &endpoint);
+                assert_eq!(source, "connect timed out after 100 ms");
+            }
+            other => panic!("expected QmioError::Connect, got: {other:?}"),
+        }
+        assert_eq!(
+            qmio_err.to_string(),
+            format!(
+                "could not connect to QMIO endpoint {endpoint}: connect timed out after 100 ms"
+            )
+        );
+    }
+
+    /// One circuit per call over the single REQ endpoint, and `close` is
+    /// idempotent (nothing was ever connected here).
+    #[test]
+    fn capabilities_and_an_idempotent_close() {
+        let backend = QmioBackend::new(
+            "tcp://qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap();
+        let capabilities = backend.capabilities();
+        assert_eq!(capabilities.max_concurrency, 1);
+        assert!(capabilities.supports_shot_distribution);
+        backend.close();
+        backend.close();
+    }
+
+    /// The message of every error names what failed, with its context.
+    #[test]
+    fn every_error_message_names_what_failed() {
+        let endpoint = || "tcp://qmio.example:5556".to_string();
+        let cases = [
+            (
+                QmioError::Circuit("bad".to_string()),
+                "could not build a circuit for QMIO: bad",
+            ),
+            (
+                QmioError::QirBitcode("no llvm-as".to_string()),
+                "QIR bitcode export failed: no llvm-as",
+            ),
+            (
+                QmioError::Config("bad option".to_string()),
+                "invalid QMIO config: bad option",
+            ),
+            (
+                QmioError::Pickle("truncated".to_string()),
+                "pickle error: truncated",
+            ),
+            (
+                QmioError::Json("not JSON".to_string()),
+                "reply JSON error: not JSON",
+            ),
+            (
+                QmioError::Schema("no counts".to_string()),
+                "unexpected QMIO reply schema: no counts",
+            ),
+            (
+                QmioError::Connect {
+                    endpoint: endpoint(),
+                    source: "refused".to_string(),
+                },
+                "could not connect to QMIO endpoint tcp://qmio.example:5556: refused",
+            ),
+            (
+                QmioError::Send("closed".to_string()),
+                "failed to send request to QMIO: closed",
+            ),
+            (
+                QmioError::Recv("closed".to_string()),
+                "failed to receive reply from QMIO: closed",
+            ),
+            (
+                QmioError::Timeout {
+                    endpoint: endpoint(),
+                    attempts: 3,
+                    millis: 250,
+                },
+                "no reply from QMIO endpoint tcp://qmio.example:5556 within 250 ms after 3 attempt(s)",
+            ),
+            (
+                QmioError::ResultUnknown {
+                    endpoint: endpoint(),
+                    detail: "no reply within 250 ms".to_string(),
+                },
+                "the request to QMIO endpoint tcp://qmio.example:5556 was delivered but no reply \
+                 was received (no reply within 250 ms); the QPU may have executed it, so it was \
+                 not resent (to avoid a double execution)",
+            ),
+            (
+                QmioError::ResponseTooLarge {
+                    bytes: 2048,
+                    limit: 1024,
+                },
+                "QMIO reply of 2048 bytes exceeds the 1024-byte safety limit",
+            ),
+            (
+                QmioError::Runtime("no threads".to_string()),
+                "could not build the Tokio runtime for the QMIO backend: no threads",
+            ),
+            (
+                QmioError::Internal("socket absent".to_string()),
+                "internal QMIO backend error: socket absent",
+            ),
+        ];
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
     /// Two callers hitting the **same** [`QmioBackend`] concurrently must be
     /// serialised over the single REQ socket and both complete correctly — the
     /// property the async-mutex hardening protects. It exercises the guard being

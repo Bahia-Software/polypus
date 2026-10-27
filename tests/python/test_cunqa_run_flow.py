@@ -193,6 +193,30 @@ def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch)
     assert sorted(run["options"]["seed"] for run in fake.runs) == [11, 12, 13]
 
 
+def test_fewer_shots_than_qpus_runs_only_the_replicas_with_shots(monkeypatch):
+    # C-3, as on the local backend: a replica apportioned no shots runs
+    # nothing and is an empty dict, so `counts` stays `n_qpus` long.
+    fake = FakeCunqa()
+    result = _run(fake, monkeypatch, seed=11, shots=2, n_qpus=3)
+    assert [sum(c.values()) for c in result.counts] == [1, 1, 0]
+    assert result.counts[2] == {}
+    assert sorted(run["qpu"].index for run in fake.runs) == [0, 1]
+
+
+def test_run_qcs_returning_the_wrong_shape_is_backend_error(monkeypatch):
+    # C-1: a seam call that succeeds with something other than
+    # list[dict[str, int]] is a Rust-side conversion failure, as on the local
+    # path (test_seam_extraction.py); the QPUs are still released.
+    import polypus_python
+
+    fake = FakeCunqa()
+    monkeypatch.setattr(polypus_python, "run_qcs", lambda *a, **k: ["not", "dicts"])
+    with pytest.raises(polypus.BackendError, match="list\\[dict\\[str, int\\]\\]"):
+        _run(fake, monkeypatch, seed=1)
+    assert fake.names()[-1] == "qdrop"
+    assert fake.dropped == list(fake.families)
+
+
 def test_several_registers_give_one_key_without_spaces(monkeypatch):
     # CUNQA 3.0.0 keys this "00 010" (#304).
     qasm = (
