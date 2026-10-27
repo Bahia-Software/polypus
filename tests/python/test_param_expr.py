@@ -69,7 +69,7 @@ def test_functions_and_constants():
 
 def test_equality_is_structural():
     a, b = Param(0), Param(1)
-    assert 2 * a == 2 * a
+    assert 2 * a == 2 * Param(0)
     assert a + b != b + a
     assert 2 * a != 2 * b
     assert (2 * a == 2) is False
