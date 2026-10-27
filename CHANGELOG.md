@@ -23,7 +23,9 @@ Changes on `main` since 0.7.2.
   a `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
   split) and returns a `TrainResult`: supervised with a named loss, or
   unsupervised maximising the readout; Adam gets the exact parameter-shift
-  gradient; `exact=True` uses exact probabilities on the local native
+  gradient; `polypus.Rotosolve` is accepted with `loss="expectation"` on a
+  model whose trainable parameters each sit in one rotation, and is otherwise
+  a `ValueError` before anything runs, as in `train` (#398); `exact=True` uses exact probabilities on the local native
   simulator; `batch_size` trains on minibatches. `Model.bind(params)` gives an
   immutable `TrainedModel` whose `predict` returns the readout's decisions
   (`int` for sign, threshold and argmax, `float` for raw) and whose `run`

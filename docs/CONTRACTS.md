@@ -1224,6 +1224,7 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     cost per bitstring averaged over the shots, and for `qml.train` a mean
     over the samples). Then `f(θ_j + t) = a + A·cos t + B·sin t` along each
     parameter. The optimizer cannot see the circuit; `train` and `qml.train`
+    (and `qml.Model.fit` for a native model, C-11)
     check it before anything runs (no backend, no CUNQA allocation) and
     raise `ValueError` with the first problem: for a `polypus.Circuit`,
     `ParameterizedCircuit::check_single_frequency` (`polypus-circuit`; the
@@ -2167,6 +2168,14 @@ below run before a backend exists:
   not matter) and needs `infrastructure="local"` with `backend="polypus"`.
 - **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
   reported `best_fitness` is on every sample (C-5).
+- **`polypus.Rotosolve`** needs what its closed-form step assumes (C-5):
+  `loss="expectation"`, the one loss linear in the measured distribution
+  (another is a `ValueError` naming it), and every trainable parameter the
+  angle of exactly one rotation, checked with
+  `ParameterizedCircuit::check_single_frequency` on the model's template (a
+  `ValueError` with the first problem; a `conv` or `pool` layer over more than
+  one pair fails it, since it shares each parameter across the pairs). Every
+  other optimizer takes any model.
 - **`backend=None`** is `"polypus"` (the native simulator) on
   `infrastructure="local"` and `"aer"` elsewhere (CUNQA's QPUs run Aer; a
   registry backend such as QMIO does not read it); an explicit `backend` wins.
@@ -2225,7 +2234,8 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   equivalences, and predictions against the results they read),
   `test_qml_native_training.py` (`fit`: supervised, unsupervised, exact,
   sampled, minibatches, seeds, every layer trained, the convergence curve, every
-  rejection), `test_qml_native_inference.py` (`bind`, `predict`, `run`,
+  rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
+  `test_qml_native_inference.py` (`bind`, `predict`, `run`,
   `ExactResult`, decision types, save/load and tampered files) and the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
   runs with the GIL released).

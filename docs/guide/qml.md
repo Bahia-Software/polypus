@@ -168,7 +168,7 @@ The `Ansatz` may also re-encode the data between its trainable layers (data re-u
 
 ### Training
 
-`model.fit(x, y=None, *, method, loss=None, ...)` takes rows of features (a list or a NumPy array) or a `qml.Dataset`, and any optimizer: `polypus.Adam` gets the exact gradient, and `DE`, `PSO`, `QNG` and `CMAES` work as in `train()`.
+`model.fit(x, y=None, *, method, loss=None, ...)` takes rows of features (a list or a NumPy array) or a `qml.Dataset`, and any optimizer: `polypus.Adam` gets the exact gradient, and `DE`, `PSO`, `QNG`, `CMAES`, `SPSA` and `polypus.External` work as in `train()`. `polypus.Rotosolve` needs a fitness that is a sinusoid of each parameter, so it takes only `loss="expectation"` and models whose trainable parameters each sit in one rotation: a `conv` or `pool` layer over more than one pair shares its parameters, and `fit` raises `ValueError` for it before anything runs.
 
 | `loss` | Labels | Scores `⟨O₀⟩` (or all `⟨O_k⟩`) as |
 |---|---|---|

@@ -31,9 +31,9 @@ use polypus_qml::{
 
 use super::{
     build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
-    interruptible_token, is_native_backend, log_training_start, method_from_pyclass, method_seed,
-    resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation, validate_id,
-    validate_shots_and_qpus, OptionsArg, RunResult,
+    interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
+    method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation,
+    validate_id, validate_shots_and_qpus, OptionsArg, RunResult,
 };
 use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
 use crate::infrastructure::execution_config::random_seed;
@@ -150,6 +150,41 @@ fn parse_loss(loss: &str) -> PyResult<Loss> {
              \"hinge\", \"categorical_cross_entropy\" or \"expectation\""
         ))),
     }
+}
+
+/// Check, before anything runs, that `polypus.Rotosolve` can train this native
+/// model, as `train` and `qml.train` check a circuit (#398). Its closed-form
+/// step assumes a fitness that is a sinusoid of each parameter, which takes two
+/// things: `loss="expectation"`, the one loss that is linear in each sample's
+/// measured distribution, and every trainable parameter the angle of exactly
+/// one single-Pauli rotation (`ParameterizedCircuit::check_single_frequency`,
+/// which a convolution or pooling layer fails: it shares each parameter across
+/// qubit pairs). One sample's template stands for all, since the trainable
+/// gates never depend on the data; a dataset is never empty.
+fn check_rotosolve_model(
+    compiled: &CompiledModel,
+    dataset: &polypus_qml::Dataset,
+    loss: Loss,
+) -> PyResult<()> {
+    if loss != Loss::Expectation {
+        return Err(PyValueError::new_err(format!(
+            "polypus.Rotosolve trains a native model only with loss=\"expectation\": with \
+             loss=\"{}\" the fitness is not linear in the measured distribution, so it is not \
+             a sinusoid of each parameter; train this model with another optimizer",
+            loss_name(loss)
+        )));
+    }
+    let template = compiled
+        .template_for(dataset.sample(0))
+        .map_err(qml_to_py_err)?;
+    template.check_single_frequency().map_err(|problem| {
+        PyValueError::new_err(format!(
+            "polypus.Rotosolve cannot train this model: {problem}. Rotosolve needs every \
+             trainable parameter to be the angle of exactly one rotation, and a convolution or \
+             pooling layer shares each of its parameters across qubit pairs; train this model \
+             with another optimizer"
+        ))
+    })
 }
 
 /// The Python spelling of a [`Loss`], the inverse of [`parse_loss`].
@@ -1025,6 +1060,12 @@ impl Model {
             .clone()
             .compile(dataset.num_features())
             .map_err(validation_to_py_err)?;
+        // Rotosolve's step is exact only on single-frequency models with a
+        // linear fitness: checked before any backend, and so any CUNQA
+        // allocation, exists, as `train` checks a circuit.
+        if is_rotosolve(method) {
+            check_rotosolve_model(&compiled, &dataset, loss)?;
+        }
         let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_py_err)?;
         let num_samples = problem.num_circuits();
         // A batch as large as the training set is the run without minibatches.

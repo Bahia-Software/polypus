@@ -567,3 +567,130 @@ class TestBasisEncoder:
         )
         assert len(result.best_params) == 8
         assert math.isfinite(result.best_fitness)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rotosolve: only where its closed-form step is exact (#398)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _Stop(Exception):
+    """Raised by the recorder to end the run at the CUNQA seam."""
+
+
+@pytest.fixture
+def seam_calls(monkeypatch):
+    """Record every ``connect_to_infrastructure`` call (the one that raises
+    CUNQA QPUs) and stop the run there."""
+    import polypus_python
+
+    calls = []
+
+    def record(infrastructure, **kwargs):
+        calls.append(infrastructure)
+        raise _Stop
+
+    monkeypatch.setattr(polypus_python, "connect_to_infrastructure", record)
+    return calls
+
+
+_CUNQA = {"infrastructure": "cunqa", "nodes": 1, "cores_per_qpu": 1}
+_TWO_ROWS = [[0.1, 0.2], [2.9, 2.8]]
+
+
+def _two_qubit(ansatz):
+    """An ``ry`` encoder, ``ansatz`` and the raw ``⟨Z₀⟩``."""
+    from polypus.qml import Encoder, Model, Readout, Z
+
+    return Model(Encoder(2).angle_encoder("ry"), ansatz, Readout([Z(0)]))
+
+
+def _four_qubit(ansatz):
+    """The same on four qubits, where a convolution or pooling layer has more
+    than one pair and so shares each parameter."""
+    from polypus.qml import Encoder, Model, Readout, Z
+
+    return Model(Encoder(4).angle_encoder("ry"), ansatz, Readout([Z(0)]))
+
+
+class TestRotosolveIsCheckedBeforeAnythingRuns:
+    """``Model.fit`` accepts ``polypus.Rotosolve`` only where its step is
+    exact, as ``train`` does for a circuit: ``loss="expectation"`` (linear in
+    the measured distribution) and every trainable parameter in exactly one
+    rotation. Anything else is a ``ValueError`` before any backend exists:
+    with ``infrastructure="cunqa"``, before ``connect_to_infrastructure``."""
+
+    @pytest.mark.parametrize(
+        ("loss", "labels"),
+        [("hinge", [1, -1]), ("squared_error", [0.5, -0.2])],
+    )
+    def test_a_supervised_loss(self, seam_calls, loss, labels):
+        import polypus
+        from polypus.qml import Ansatz
+
+        with pytest.raises(ValueError) as raised:
+            _two_qubit(Ansatz(2).hardware_efficient(1)).fit(
+                _TWO_ROWS, labels, method=polypus.Rotosolve(), loss=loss, **_CUNQA
+            )
+        assert str(raised.value).startswith(
+            "polypus.Rotosolve trains a native model only with "
+            f'loss="expectation": with loss="{loss}" the fitness is not linear'
+        )
+        assert seam_calls == []
+
+    @pytest.mark.parametrize("layer", ["conv", "pool"])
+    def test_a_layer_that_shares_its_parameters(self, seam_calls, layer):
+        import polypus
+        from polypus.qml import Ansatz
+
+        ansatz = getattr(Ansatz(4), layer)("basic")
+        rows = [[0.1, 0.2, 0.3, 0.4], [2.9, 2.8, 2.7, 2.6]]
+        with pytest.raises(ValueError) as raised:
+            _four_qubit(ansatz).fit(rows, method=polypus.Rotosolve(), **_CUNQA)
+        message = str(raised.value)
+        assert message.startswith(
+            "polypus.Rotosolve cannot train this model: parameter 0 ('theta_0') is in "
+        )
+        assert "shares each of its parameters across qubit pairs" in message
+        assert seam_calls == []
+
+    def test_models_that_qualify_get_to_the_seam(self, seam_calls):
+        # The control for the tests above: data re-uploaded between trainable
+        # layers (the encoders' angles are constants), and a convolution on
+        # two qubits, one pair, whose parameters each sit in one gate.
+        import polypus
+        from polypus.qml import Ansatz
+
+        plain = Ansatz(2).hardware_efficient(1)
+        reuploading = (
+            Ansatz(2).real_amplitudes(1).angle_encoder("ry").real_amplitudes(1)
+        )
+        one_pair = Ansatz(2).conv("basic")
+        for ansatz in (plain, reuploading, one_pair):
+            with pytest.raises(_Stop):
+                _two_qubit(ansatz).fit(_TWO_ROWS, method=polypus.Rotosolve(), **_CUNQA)
+        assert seam_calls == ["cunqa"] * 3
+
+    def test_other_optimizers_are_not_checked(self, seam_calls):
+        import polypus
+        from polypus.qml import Ansatz
+
+        with pytest.raises(_Stop):
+            _two_qubit(Ansatz(2).conv("basic")).fit(
+                _TWO_ROWS, [1, -1], method=polypus.DE(), loss="hinge", **_CUNQA
+            )
+        assert seam_calls == ["cunqa"]
+
+
+@pytest.mark.integration
+def test_rotosolve_reaches_the_readouts_maximum():
+    # ⟨Z₀⟩ of ry encodings of 0 is a sinusoid of each parameter with
+    # maximum 1; Rotosolve's closed-form step reaches it exactly.
+    import polypus
+    from polypus.qml import Ansatz
+
+    result = _two_qubit(Ansatz(2).hardware_efficient(1)).fit(
+        [[0.0, 0.0]], method=polypus.Rotosolve(sweeps=3, seed=4), exact=True, seed=4
+    )
+    assert result.best_fitness > 1 - 1e-9
+    assert result.fitness_history[-1] == result.best_fitness
