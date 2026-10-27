@@ -218,8 +218,16 @@ The Rust orchestration layer now returns a typed `Result` on every path:
   conversion, a statevector that does not fit in the memory budget) raises a
   class from the `polypus` exception hierarchy: `PolypusError` (base) →
   `BackendError` → {`CunqaError`, `QmioError`, `NativeCircuitError`,
-  `InsufficientMemoryError`}, and `PolypusError` → `EvaluationError`. Catching
-  `polypus.PolypusError` catches them all.
+  `InsufficientMemoryError`}, `PolypusError` → `EvaluationError`, and
+  `PolypusError` → `ConfigurationError`. Catching `polypus.PolypusError` catches
+  them all.
+- **`ConfigurationError`** (issue #418) subclasses both `PolypusError` and
+  `ValueError`. Every `ValueError` the entry points raise for an argument or a
+  configuration (an unknown `infrastructure`, a bad `walltime`, an optimizer
+  setting, `OracleError::Config`, …) is one, so the `ValueError` guarantees in
+  this file still hold. `train` and `qml.train` raise them, and convert the
+  observable and the optimizer, before any backend exists, so on CUNQA an
+  invalid configuration never reaches `qraise`.
 - **`InsufficientMemoryError`** (issue #215): a circuit that does not fit in the
   memory budget — `POLYPUS_MEM_BUDGET` when it is valid (e.g. `32G`), else the
   detected RAM/cgroup limit minus a safety reserve — is refused *before* it runs,
@@ -754,7 +762,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     configuration and point, in that order, without running anything;
     `Method::check_preconditions` in `polypus-orchestration` calls the one the
     method names, and `train` and `qml.train` call it before anything runs (no
-    backend, no CUNQA allocation), raising `ValueError` with the optimizer's
+    backend, no CUNQA allocation), raising `polypus.ConfigurationError` (a
+    `ValueError`) with the optimizer's
     message, so a configuration error comes first there too.
   - Postconditions: the optimizer draws everything exactly as without a
     point, then the point replaces part of it, so the RNG stream is

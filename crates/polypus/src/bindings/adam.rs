@@ -73,7 +73,7 @@ pub struct Adam {
 /// names.
 fn parse_rule(name: &str) -> PyResult<AdamRule> {
     name.parse()
-        .map_err(|e: OptimizerError| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        .map_err(|e: OptimizerError| crate::exceptions::configuration_error(e.to_string()))
 }
 
 #[pymethods]

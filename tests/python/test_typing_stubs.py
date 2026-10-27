@@ -72,3 +72,54 @@ class TestStubsCoverPublicApi:
         assert not missing, (
             f"{module_name}.__all__ names with no stub in {stub.name}: {missing}"
         )
+
+
+def _mypy(source, tmp_path):
+    """mypy's report on `source`, checked against the installed stubs."""
+    api = pytest.importorskip("mypy.api")
+    path = tmp_path / "snippet.py"
+    path.write_text(source, encoding="utf-8")
+    config = Path(__file__).resolve().parent / "stubtest_mypy.ini"
+    stdout, stderr, status = api.run(
+        [
+            "--config-file",
+            str(config),
+            "--cache-dir",
+            str(tmp_path / "mypy-cache"),
+            "--no-error-summary",
+            str(path),
+        ]
+    )
+    return status, stdout + stderr
+
+
+def _python_block(markdown, marker):
+    """The first ```python block of `markdown` that contains `marker`."""
+    for block in markdown.split("```python\n")[1:]:
+        code = block.split("```", 1)[0]
+        if marker in code:
+            return code
+    raise AssertionError(f"no python block contains {marker!r}")
+
+
+class TestOptionsType:
+    """`options` values are a `str` or a list/tuple of `str` (ADR 0005)."""
+
+    def test_the_documented_subprocess_example_type_checks(self, tmp_path):
+        docs = Path(__file__).resolve().parents[2] / "docs" / "backends.md"
+        example = _python_block(docs.read_text(encoding="utf-8"), "options={")
+        source = "from typing import Any\nqc: Any = None\n" + example
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_a_value_the_runtime_rejects_does_not_type_check(self, tmp_path):
+        # Proves the check above reads the stubs: an `int` value is a TypeError
+        # at run time, so mypy must reject it too.
+        source = (
+            "import polypus\n"
+            "polypus.run_quantum_circuit(\n"
+            '    "", shots=1, infrastructure="subprocess", options={"cwd": 1}\n'
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1 and "snippet.py:3: error" in report, report

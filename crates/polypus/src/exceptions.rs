@@ -18,8 +18,14 @@
 //!     │   ├── QmioError               # QMIO real-QPU network path
 //!     │   ├── NativeCircuitError      # pure-Rust circuit / simulator path
 //!     │   └── InsufficientMemoryError # a statevector exceeds the memory budget
-//!     └── EvaluationError             # optimizer oracle / expectation evaluation
+//!     ├── EvaluationError             # optimizer oracle / expectation evaluation
+//!     └── ConfigurationError          # also a ValueError: rejected before anything runs
 //! ```
+//!
+//! `ConfigurationError` is the one class with two bases, `PolypusError` and
+//! `ValueError`, so an `except ValueError` written for the argument checks keeps
+//! catching them (issue #418). `create_exception!` takes a single base, so it is
+//! built with `type()` instead (`configuration_error_type`).
 //!
 //! Contract C-1 (see `docs/CONTRACTS.md`) keeps its documented failure modes:
 //! an *unknown infrastructure* still surfaces as `ValueError` and a *bad kwarg*
@@ -44,7 +50,9 @@
 use crate::infrastructure::BackendError as InfraBackendError;
 use crate::infrastructure::{DisplaySafePyErr, InterpreterUnavailable};
 use pyo3::exceptions::{PyException, PyKeyboardInterrupt, PyTypeError, PyValueError};
-use pyo3::{create_exception, intern, PyErr};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::{create_exception, intern, Bound, Py, PyErr, PyResult, Python};
 
 create_exception!(
     polypus,
@@ -92,6 +100,47 @@ create_exception!(
     "An oracle/expectation-evaluation failure during training."
 );
 
+/// `polypus.ConfigurationError`, created once per interpreter as
+/// `type("ConfigurationError", (PolypusError, ValueError), ...)`.
+pub(crate) fn configuration_error_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    use pyo3::types::{PyAnyMethods, PyDictMethods};
+    static TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    TYPE.get_or_try_init(py, || {
+        let bases = PyTuple::new(
+            py,
+            [py.get_type::<PolypusError>(), py.get_type::<PyValueError>()],
+        )?;
+        let namespace = PyDict::new(py);
+        namespace.set_item("__module__", "polypus")?;
+        namespace.set_item(
+            "__doc__",
+            "An invalid argument or configuration, rejected before anything runs: no \
+             backend exists yet and no QPU has been requested. Also a ValueError.",
+        )?;
+        py.get_type::<PyType>()
+            .call1(("ConfigurationError", bases, namespace))?
+            .cast_into::<PyType>()
+            .map(Bound::unbind)
+            .map_err(PyErr::from)
+    })
+    .map(|class| class.bind(py))
+}
+
+/// A `polypus.ConfigurationError` with `message`: what every argument and
+/// configuration check of the entry points raises. Needs the interpreter to
+/// look the class up; when it cannot attach (it is finalizing), a plain
+/// `ValueError` with the same message is returned instead (ENGINEERING §9).
+pub(crate) fn configuration_error(message: impl Into<String>) -> PyErr {
+    let message = message.into();
+    crate::infrastructure::attach_or(
+        || PyValueError::new_err(message.clone()),
+        |py| match configuration_error_type(py) {
+            Ok(class) => PyErr::from_type(class.clone(), message.clone()),
+            Err(err) => err,
+        },
+    )
+}
+
 /// Map a backend-layer [`BackendError`](crate::infrastructure::BackendError) to
 /// the typed `polypus.*` Python exception it should surface as.
 ///
@@ -105,14 +154,14 @@ create_exception!(
 /// exception verbatim (keeping its `ValueError`/`TypeError` type, via
 /// `external_to_pyerr`) unless Qiskit raised it, which makes it a
 /// `polypus.BackendError` (`qiskit_error_to_pyerr`); an unknown infrastructure
-/// is a `ValueError`.
+/// is a `polypus.ConfigurationError`, so still a `ValueError`.
 pub(crate) fn backend_error_to_pyerr(err: InfraBackendError) -> PyErr {
     match err {
-        InfraBackendError::UnknownInfrastructure { name } => PyValueError::new_err(format!(
+        InfraBackendError::UnknownInfrastructure { name } => configuration_error(format!(
             "unknown infrastructure '{name}'; expected \"local\", \"cunqa\" or \"qmio\""
         )),
         InfraBackendError::InvalidCircuitCount { expected, got } => {
-            PyValueError::new_err(format!("expected exactly {expected} circuit(s), got {got}"))
+            configuration_error(format!("expected exactly {expected} circuit(s), got {got}"))
         }
         InfraBackendError::UnsupportedCircuit(m) => NativeCircuitError::new_err(m),
         // A backend/contract violation on our own results: the typed backend base
@@ -398,7 +447,7 @@ pub(crate) fn infrastructure_error_to_pyerr(
         // being discarded into a generic `polypus.EvaluationError`.
         InfraErr::Observable(e) => observable_error_to_pyerr(e),
         InfraErr::Cancelled => PyKeyboardInterrupt::new_err("the run was cancelled"),
-        InfraErr::IncompatiblePlanner(m) => PyValueError::new_err(m),
+        InfraErr::IncompatiblePlanner(m) => configuration_error(m),
     }
 }
 
@@ -417,11 +466,12 @@ pub fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()
         py.get_type::<InsufficientMemoryError>(),
     )?;
     m.add("EvaluationError", py.get_type::<EvaluationError>())?;
+    m.add("ConfigurationError", configuration_error_type(py)?)?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pyo3::prelude::*;
     use pyo3::PyTypeInfo;
@@ -452,6 +502,41 @@ mod tests {
                 "message lost in translation: {py_err}"
             );
         });
+    }
+
+    /// Assert `py_err` is a `polypus.ConfigurationError`, so it is catchable as
+    /// both `polypus.PolypusError` and `ValueError`, carrying `expected_message`.
+    pub(crate) fn assert_configuration_error(py_err: &PyErr, expected_message: &str) {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let class = configuration_error_type(py).expect("the class is created");
+            assert!(py_err.matches(py, class).expect("matches"), "{py_err}");
+            assert!(py_err.is_instance_of::<PolypusError>(py), "{py_err}");
+            assert!(py_err.is_instance_of::<PyValueError>(py), "{py_err}");
+            assert!(py_err.to_string().contains(expected_message), "{py_err}");
+        });
+    }
+
+    #[test]
+    fn configuration_error_is_a_polypus_error_and_a_value_error() {
+        assert_configuration_error(&configuration_error("bad shots"), "bad shots");
+    }
+
+    #[test]
+    fn unknown_infrastructure_maps_to_configuration_error() {
+        let err = backend_error_to_pyerr(InfraBackendError::UnknownInfrastructure {
+            name: "nowhere".to_string(),
+        });
+        assert_configuration_error(&err, "unknown infrastructure 'nowhere'");
+    }
+
+    #[test]
+    fn invalid_circuit_count_maps_to_configuration_error() {
+        let err = backend_error_to_pyerr(InfraBackendError::InvalidCircuitCount {
+            expected: 1,
+            got: 2,
+        });
+        assert_configuration_error(&err, "expected exactly 1 circuit(s), got 2");
     }
 
     #[test]
@@ -1137,18 +1222,16 @@ mod infrastructure_mapping_tests {
     //! `InfrastructureError` variant's target class and message.
     //!
     //! Note the hierarchy split: `Backend` and non-`External` `Observable` land
-    //! inside the `polypus.PolypusError` hierarchy, but `Cancelled`
-    //! (`KeyboardInterrupt`), `IncompatiblePlanner` (`ValueError`), a verbatim
+    //! inside the `polypus.PolypusError` hierarchy, and so does
+    //! `IncompatiblePlanner` (`ConfigurationError`), but `Cancelled`
+    //! (`KeyboardInterrupt`), a verbatim
     //! `Python` exception, and `Observable(External)` are *native* Python
     //! exceptions by design — so the `PolypusError`-catchable assertion is made
     //! only where it is actually true.
     use super::*;
     use crate::infrastructure::InfrastructureError as InfraErr;
     use polypus_observable::ObservableError as ObsErr;
-    use pyo3::exceptions::{
-        PyKeyboardInterrupt, PyRuntimeError, PyValueError, PyZeroDivisionError,
-    };
-    use pyo3::prelude::*;
+    use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyZeroDivisionError};
     use pyo3::PyTypeInfo;
 
     /// Assert `err` crosses the FFI as `E`, stays catchable as `PolypusError`,
@@ -1285,23 +1368,11 @@ mod infrastructure_mapping_tests {
     }
 
     #[test]
-    fn incompatible_planner_maps_to_value_error() {
-        // A configuration mismatch checked up front surfaces as a native
-        // `ValueError`, message preserved.
-        pyo3::Python::initialize();
+    fn incompatible_planner_maps_to_configuration_error() {
+        // A configuration mismatch checked up front, message preserved.
         let py_err = infrastructure_error_to_pyerr(InfraErr::IncompatiblePlanner(
             "shot distribution unsupported".to_string(),
         ));
-        Python::attach(|py| {
-            assert!(
-                py_err.is_instance_of::<PyValueError>(py),
-                "an incompatible planner must surface as ValueError: {py_err}"
-            );
-            assert!(
-                !py_err.is_instance_of::<PolypusError>(py),
-                "ValueError is a native Python exception, not a polypus.* class"
-            );
-            assert!(py_err.to_string().contains("shot distribution unsupported"));
-        });
+        super::tests::assert_configuration_error(&py_err, "shot distribution unsupported");
     }
 }

@@ -36,7 +36,7 @@ pub struct DE {
 /// names.
 fn parse_strategy(name: &str) -> PyResult<DeStrategy> {
     name.parse()
-        .map_err(|e: OptimizerError| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        .map_err(|e: OptimizerError| crate::exceptions::configuration_error(e.to_string()))
 }
 
 #[pymethods]
