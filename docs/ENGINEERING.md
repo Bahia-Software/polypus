@@ -16,7 +16,7 @@ two and open an issue — do not silently pick a side.
 ## 1. Architecture at a glance
 
 Polypus is an open-source distributed quantum computing library: a Rust core
-with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` crate is excluded):
+with PyO3 Python bindings. The Cargo workspace has fourteen crates (the `fuzz/` crate is excluded):
 
 | Crate | Role | PyO3? |
 |---|---|---|
@@ -25,6 +25,7 @@ with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` 
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
 | `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
+| `polypus-qml` | Quantum machine learning: datasets, layered variational models (encoders, ansatz, convolution, pooling), Pauli readout and losses; produces `polypus-circuit` circuits and turns counts into fitness, never executes them | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
 | `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
 | `polypus-subprocess-backend` | A pyo3-free `QuantumBackend` bridging to a provider's Python SDK running in its **own subprocess** over a versioned length-prefixed JSON protocol; registered as the built-in `"subprocess"` backend. The interpreter runs in the child, never embedded here | No |
@@ -44,7 +45,7 @@ boundary stays out-of-process and explicit; see
 ## 2. Workspace boundaries
 
 - `polypus-circuit`, `polypus-sim`, `polypus-physics`, `polypus-optimizers`,
-  `polypus-observable`, `polypus-backend`, `polypus-backend-conformance`,
+  `polypus-observable`, `polypus-qml`, `polypus-backend`, `polypus-backend-conformance`,
   `polypus-subprocess-backend` and `polypus-logger` are **pure Rust: they must not depend on `pyo3` or Python**. Do
   not introduce `Py<...>`, `PyAny`, `Python`, the GIL, or Python types into them.
   `polypus-backend` is the strictest of these: it is the public backend contract, so

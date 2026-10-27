@@ -15,7 +15,7 @@ use crate::{
     InfrastructureError, MemBudget, QuantumBackend, RunParams,
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
-use polypus_circuit::{ConcreteCircuit, ParameterizedCircuit};
+use polypus_circuit::{ConcreteCircuit, GateInstruction, ParameterizedCircuit};
 use polypus_sim::{sample_projected, SimError, Simulator, StatevectorSimulator, MAX_CLBITS};
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -329,6 +329,117 @@ impl NativeStatevectorBackend {
         } else {
             self.simulator.parallel_threshold
         }
+    }
+
+    /// Run a batch of bound circuits and return the **exact** basis-state
+    /// probabilities of each (`|amplitude|²`), one map per circuit in submission
+    /// order, keyed like [`run_circuits`](QuantumBackend::run_circuits)'s counts
+    /// (contract C-3).
+    ///
+    /// The exact counterpart of `run_circuits`, deliberately an **inherent**
+    /// method and not part of [`QuantumBackend`]: "exact" has no meaning for a
+    /// noisy simulator or real hardware, only for this noiseless statevector
+    /// backend. It is what the native QML exact mode runs.
+    ///
+    /// - **No sampling.** `config.shots` is ignored and no seed is drawn: the
+    ///   result is a pure function of the circuits, bit for bit, and the
+    ///   backend's sampling stream is left untouched. States of probability
+    ///   exactly zero are omitted, as an unobserved bitstring is from counts;
+    ///   the values sum to 1 up to rounding.
+    /// - **Full-register read-out only.** A circuit with no measurement is read
+    ///   on every qubit, and one that ends in `measure_all` on every classical
+    ///   bit, at the width `run_circuits` keys its counts. A circuit that
+    ///   measures individual qubits is [`BackendError::UnsupportedCircuit`]:
+    ///   its distribution would have to be marginalised over the unmeasured
+    ///   qubits.
+    /// - **Bounded memory.** The same statevector budget as `run_circuits`: a
+    ///   widest circuit that cannot fit even alone is refused
+    ///   ([`BackendError::InsufficientMemory`]) before anything runs, and the
+    ///   batch runs in windows of at most as many circuits as fit at once. Each
+    ///   result map holds up to `2^n` entries, so the output, unlike counts,
+    ///   grows with the width of the circuits rather than with the shots.
+    pub fn run_circuits_exact(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        let widest = representative_qubits(qcs);
+        self.check_memory(widest)?;
+        let cap = max_statevector_concurrency(widest, rayon::current_num_threads());
+        self.run_exact_with_cap(qcs, config, cap)
+    }
+
+    /// [`run_circuits_exact`](Self::run_circuits_exact) holding at most `cap`
+    /// statevectors at once: the windowing of
+    /// [`run_batch_with_cap`](Self::run_batch_with_cap) without the seeds. A
+    /// pure resource bound, so the result is the same for every `cap`.
+    fn run_exact_with_cap(
+        &self,
+        qcs: &[BoundCircuit],
+        config: &RunParams,
+        cap: usize,
+    ) -> Result<Vec<HashMap<String, f64>>, BackendError> {
+        let opts = TranspileOptions {
+            level: config.opt_level,
+        };
+        let threads = rayon::current_num_threads();
+        let cap = cap.max(1);
+        // Same fast path as the sampled batch: when every thread's statevector
+        // fits, rayon already bounds the circuits in flight.
+        let window = if cap >= threads {
+            qcs.len().max(1)
+        } else {
+            cap
+        };
+        let mut out = Vec::with_capacity(qcs.len());
+        for chunk in qcs.chunks(window) {
+            let pt = self.gate_parallel_threshold(chunk.len(), threads);
+            let block: Vec<HashMap<String, f64>> = chunk
+                .par_iter()
+                .map(|qc| self.simulate_one_exact(qc, &opts, pt))
+                .collect::<Result<_, _>>()?;
+            out.extend(block);
+        }
+        Ok(out)
+    }
+
+    /// Exact probabilities of one bound circuit, keyed as its counts would be.
+    fn simulate_one_exact(
+        &self,
+        circuit: &BoundCircuit,
+        opts: &TranspileOptions,
+        parallel_threshold: usize,
+    ) -> Result<HashMap<String, f64>, BackendError> {
+        let source = self.concrete_circuit(circuit, opts)?;
+        let concrete = source.circuit.as_ref();
+        if concrete
+            .gates()
+            .iter()
+            .any(|gate| matches!(gate, GateInstruction::Measure { .. }))
+        {
+            return Err(BackendError::UnsupportedCircuit(
+                "exact probabilities need a full-register read-out (measure_all, or no \
+                 measurement); this circuit measures individual qubits"
+                    .to_string(),
+            ));
+        }
+        let simulator = StatevectorSimulator {
+            max_qubits: self.simulator.max_qubits,
+            parallel_threshold,
+            fusion: self.simulator.fusion,
+        };
+        let sv = simulator.run(concrete).map_err(|e| {
+            log::error!("native statevector simulation failed: {e}");
+            BackendError::NativeCircuit(format!("native statevector simulation failed: {e}"))
+        })?;
+        let width = counts_width(concrete, source.declared_clbits);
+        Ok(sv
+            .probabilities()
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, p)| p != 0.0)
+            .map(|(state, p)| (bitstring(state, width), p))
+            .collect())
     }
 }
 
@@ -1771,5 +1882,153 @@ mod tests {
              native {native_saved_ms:.2} ms, qasm {qasm_saved_ms:.2} ms",
             SUBMISSIONS_PER_RUN as u64
         );
+    }
+
+    // ── Exact probabilities (run_circuits_exact) ──────────────────────────────
+
+    fn exact(qcs: &[BoundCircuit]) -> Vec<HashMap<String, f64>> {
+        NativeStatevectorBackend::new(0)
+            .run_circuits_exact(qcs, &config_with(OptLevel::default()).run_params())
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_bell_probabilities() {
+        let probs = exact(&[BoundCircuit::Native(bell())]);
+        assert_eq!(probs.len(), 1);
+        assert_eq!(probs[0].len(), 2, "{:?}", probs[0]);
+        assert!((probs[0]["00"] - 0.5).abs() < 1e-12);
+        assert!((probs[0]["11"] - 0.5).abs() < 1e-12);
+    }
+
+    /// A circuit whose eight outcomes all have different, non-trivial weights.
+    fn skewed3() -> ConcreteCircuit {
+        ParameterizedCircuit::new(3)
+            .ry(0, 0.3)
+            .ry(1, 1.1)
+            .cx(0, 2)
+            .ry(2, 2.2)
+            .rz(1, 0.7)
+            .h(1)
+            .measure_all()
+            .assign_parameters(&[])
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_probabilities_sum_to_one_and_match_sampled_frequencies() {
+        let circuit = BoundCircuit::Native(skewed3());
+        let probs = exact(std::slice::from_ref(&circuit)).remove(0);
+        assert!((probs.values().sum::<f64>() - 1.0).abs() < 1e-12);
+        let shots = 400_000;
+        let backend = NativeStatevectorBackend::new(11);
+        let counts = backend
+            .simulate_one(
+                &circuit,
+                shots,
+                5,
+                &TranspileOptions::default(),
+                backend.simulator.parallel_threshold,
+            )
+            .unwrap();
+        // Same keys as the counts (C-3), and frequencies within a few standard
+        // deviations (σ ≤ 1/(2·√shots) ≈ 8e-4).
+        for (key, &count) in &counts {
+            let p = probs[key];
+            assert!((count as f64 / shots as f64 - p).abs() < 5e-3, "{key}: {p}");
+        }
+        assert!(probs.keys().all(|key| key.len() == 3));
+    }
+
+    #[test]
+    fn exact_results_are_deterministic_and_leave_the_seed_stream_alone() {
+        let batch = vec![
+            BoundCircuit::Native(skewed3()),
+            BoundCircuit::Native(bell()),
+        ];
+        let params = config_with(OptLevel::default()).run_params();
+        let backend = NativeStatevectorBackend::new(3);
+        let first = backend.run_circuits_exact(&batch, &params).unwrap();
+        let again = NativeStatevectorBackend::new(99)
+            .run_circuits_exact(&batch, &params)
+            .unwrap();
+        assert_eq!(first, again);
+        // Sampling after an exact run gives what it gives on a fresh backend.
+        let sampled = backend.run_circuits(&batch, &params).unwrap();
+        let fresh = NativeStatevectorBackend::new(3)
+            .run_circuits(&batch, &params)
+            .unwrap();
+        assert_eq!(sampled, fresh);
+    }
+
+    #[test]
+    fn exact_windows_do_not_change_the_result() {
+        let batch: Vec<BoundCircuit> = (0..5)
+            .map(|i| {
+                BoundCircuit::Native(
+                    ParameterizedCircuit::new(3)
+                        .ry(0, 0.2 * i as f64)
+                        .cx(0, 1)
+                        .ry(2, 0.5)
+                        .measure_all()
+                        .assign_parameters(&[])
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let backend = NativeStatevectorBackend::new(0);
+        let params = config_with(OptLevel::default()).run_params();
+        let unbounded = backend
+            .run_exact_with_cap(&batch, &params, usize::MAX)
+            .unwrap();
+        for cap in [1, 2, 3] {
+            assert_eq!(
+                backend.run_exact_with_cap(&batch, &params, cap).unwrap(),
+                unbounded,
+                "cap {cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_measurement_free_circuit_is_read_on_every_qubit() {
+        let circuit = ParameterizedCircuit::new(3)
+            .x(2)
+            .assign_parameters(&[])
+            .unwrap();
+        let probs = exact(&[BoundCircuit::Native(circuit)]);
+        assert_eq!(probs[0], HashMap::from([("100".to_string(), 1.0)]));
+    }
+
+    #[test]
+    fn exact_qasm2_matches_native() {
+        let qasm = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\n\
+                    h q[0];\ncx q[0],q[1];\nmeasure q -> c;\n";
+        assert_eq!(
+            exact(&[BoundCircuit::Qasm2(qasm.to_string())]),
+            exact(&[BoundCircuit::Native(bell())])
+        );
+    }
+
+    #[test]
+    fn exact_rejects_a_partial_read_out() {
+        let circuit = ParameterizedCircuit::new(2)
+            .h(0)
+            .cx(0, 1)
+            .measure(0, 0)
+            .assign_parameters(&[])
+            .unwrap();
+        let err = NativeStatevectorBackend::new(0)
+            .run_circuits_exact(
+                &[BoundCircuit::Native(circuit)],
+                &config_with(OptLevel::default()).run_params(),
+            )
+            .unwrap_err();
+        match err {
+            BackendError::UnsupportedCircuit(message) => {
+                assert!(message.contains("measure_all"), "{message}")
+            }
+            other => panic!("expected UnsupportedCircuit, got {other:?}"),
+        }
     }
 }

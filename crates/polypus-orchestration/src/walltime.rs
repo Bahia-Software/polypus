@@ -219,14 +219,18 @@ impl Method {
 
     /// [`run_shape`](Self::run_shape) for a run over `oracles`. An exact
     /// gradient is one more call per Adam iteration: Adam scores θ on the
-    /// evaluation oracle, then asks the gradient oracle. The final θ is then
-    /// one call counted as two. An exact gradient
+    /// evaluation oracle, then asks the gradient oracle. So is a minibatch:
+    /// Adam scores θ on every sample (`full_evaluation`), then differentiates
+    /// the minibatch. The final θ is then one call counted as two. An exact
+    /// gradient
     /// that scores θ itself ([`GradientOracle::value_and_gradient`]) makes an
     /// iteration one call, which cannot be told in advance, so the projection
     /// then overestimates (see [`Watched`]).
     pub(crate) fn run_shape_over(&self, oracles: &Oracles, dimensions: u32) -> RunShape {
         let mut shape = self.run_shape(dimensions);
-        if matches!(self, Method::Adam(_)) && oracles.gradient.is_some() {
+        if matches!(self, Method::Adam(_))
+            && (oracles.gradient.is_some() || oracles.full_evaluation.is_some())
+        {
             shape.batches_per_generation += 1;
         }
         shape
@@ -506,6 +510,19 @@ struct Watched<T: ?Sized, C: Clock> {
     inner: Box<T>,
 }
 
+impl<C: Clock> EvaluationOracle for Watched<dyn EvaluationOracle, C> {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        self.watch
+            .observe(candidates.len(), || self.inner.evaluate_batch(candidates))
+    }
+
+    /// Forwarded, neither timed nor counted, as the watch's own: the final
+    /// batch comes after the optimizer and is not in the [`RunShape`].
+    fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
+        self.inner.evaluate_batch_with_shots(candidates, shots)
+    }
+}
+
 impl<C: Clock> GradientOracle for Watched<dyn GradientOracle, C> {
     fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
         self.watch
@@ -546,6 +563,12 @@ pub(crate) fn watched<C: Clock + 'static>(
                 watch: Arc::clone(&watch),
                 inner,
             }) as Box<dyn GradientOracle>
+        }),
+        full_evaluation: oracles.full_evaluation.map(|inner| {
+            Box::new(Watched {
+                watch: Arc::clone(&watch),
+                inner,
+            }) as Box<dyn EvaluationOracle>
         }),
         evaluation: Box::new(watch),
     }
@@ -950,18 +973,21 @@ mod tests {
 
     /// `run_shape_over` counts the batches Adam sends when it does not stop
     /// early: one per iteration with the finite difference, and with an exact
-    /// gradient the scored θ plus the gradient's call, then the final θ, one
-    /// batch, which the exact gradient's shape counts as two.
+    /// gradient or a minibatch the scored θ plus the gradient's call, then the
+    /// final θ, one batch, which those shapes count as two.
     #[test]
     fn adam_run_shape_counts_the_batches_the_optimizer_sends() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
-        for exact in [false, true] {
+        for (exact, minibatch) in [(false, false), (true, false), (false, true), (true, true)] {
             for max_iters in [1, 7, 30] {
                 let batches = Arc::new(Mutex::new(0));
                 let oracles = Oracles {
                     evaluation: Box::new(CountingOracle(Arc::clone(&batches))),
                     gradient: exact.then(|| {
                         Box::new(CountingGradient(Arc::clone(&batches))) as Box<dyn GradientOracle>
+                    }),
+                    full_evaluation: minibatch.then(|| {
+                        Box::new(CountingOracle(Arc::clone(&batches))) as Box<dyn EvaluationOracle>
                     }),
                 };
                 let method = Method::Adam(crate::AdamConfig {
@@ -980,12 +1006,15 @@ mod tests {
                 let shape = method.run_shape_over(&oracles, 2);
                 let outcome =
                     dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
-                let label = format!("exact gradient {exact}, {max_iters} iterations");
+                let label = format!(
+                    "exact gradient {exact}, minibatch {minibatch}, {max_iters} iterations"
+                );
                 assert!(outcome.is_some_and(|o| !o.converged), "{label}");
                 assert_eq!(shape.generations, u64::from(max_iters) + 1, "{label}");
                 assert_eq!(
                     *batches.lock().unwrap(),
-                    shape.generations * u64::from(shape.batches_per_generation) - u64::from(exact),
+                    shape.generations * u64::from(shape.batches_per_generation)
+                        - u64::from(exact || minibatch),
                     "{label}"
                 );
             }
@@ -1046,6 +1075,7 @@ mod tests {
                 let oracles = Oracles {
                     evaluation: Box::new(CountingOracle(Arc::clone(&batches))),
                     gradient: Some(gradient),
+                    full_evaluation: None,
                 };
                 let method = adam(7);
                 let shape = method.run_shape_over(&oracles, 2);
@@ -1702,6 +1732,7 @@ mod tests {
                 clock: Arc::clone(&clock),
                 per_call: Duration::from_secs(110),
             })),
+            full_evaluation: None,
         };
         let method = Method::Adam(crate::AdamConfig {
             max_iters: 100,
@@ -1798,6 +1829,7 @@ mod tests {
                 clock: Arc::clone(&clock),
                 per_call: Duration::from_secs(60),
             })),
+            full_evaluation: None,
         };
         let method = adam(100);
         let oracles = watched(

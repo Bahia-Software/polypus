@@ -221,11 +221,15 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             });
         };
         // The optimizer scores through a recorder of its best candidates; the
-        // final batch goes to the (watched) oracle itself, after the run.
+        // final batch goes to the (watched) oracle itself, after the run. Under
+        // a minibatch the oracle's `evaluate_batch_with_shots` scores every
+        // sample (the native QML oracle does), and the full-dataset view goes
+        // to the optimizer as it came.
         let count = self.method.final_candidates();
         let Oracles {
             evaluation,
             gradient,
+            full_evaluation,
         } = oracles;
         let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
         let elite = Arc::new(EliteRecorder::new(Arc::clone(&evaluation), count));
@@ -235,6 +239,7 @@ impl<F: OracleFactory> Flow for TrainFlow<F> {
             Oracles {
                 evaluation: Box::new(Arc::clone(&elite)),
                 gradient,
+                full_evaluation,
             },
             self.dimensions,
             &self.errors,

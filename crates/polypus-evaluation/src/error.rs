@@ -16,6 +16,7 @@ use polypus_infrastructure::{
     BackendError, DisplaySafePyErr, InfrastructureError, InterpreterUnavailable,
 };
 use polypus_observable::ObservableError;
+use polypus_qml::QmlError;
 
 /// A failure encountered while evaluating a candidate parameter vector.
 ///
@@ -88,6 +89,11 @@ pub enum EvaluationError {
         /// The offending value returned by `variance_function`.
         value: f64,
     },
+    /// The native QML problem (`polypus-qml`) failed: binding a candidate,
+    /// scoring its results (a label outside the loss's domain, a counts map of
+    /// the wrong width), or computing a gradient the model has none of
+    /// (`QmlError::NoExactGradient`, also raised for a Qiskit source).
+    Qml(QmlError),
 }
 
 impl fmt::Display for EvaluationError {
@@ -122,6 +128,7 @@ impl fmt::Display for EvaluationError {
                 f,
                 "variance_function returned an invalid value {value} for parameter index {param_index}; a QFIM diagonal element must be a finite, non-negative number"
             ),
+            EvaluationError::Qml(err) => write!(f, "QML model error: {err}"),
         }
     }
 }
@@ -141,6 +148,12 @@ impl From<BackendError> for EvaluationError {
 impl From<InterpreterUnavailable> for EvaluationError {
     fn from(err: InterpreterUnavailable) -> Self {
         EvaluationError::Backend(err.into())
+    }
+}
+
+impl From<QmlError> for EvaluationError {
+    fn from(err: QmlError) -> Self {
+        EvaluationError::Qml(err)
     }
 }
 

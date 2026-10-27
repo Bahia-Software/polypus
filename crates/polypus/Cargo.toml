@@ -44,6 +44,12 @@ polypus-circuit = { workspace = true }
 polypus-sim = { workspace = true, features = ["parallel"] }
 polypus-optimizers = { workspace = true }
 polypus-observable = { workspace = true }
+# `polypus.qml`'s native API (Model and its pieces, Dataset, TrainedModel) wraps
+# its types; `serde` gives TrainedModel its save format.
+polypus-qml = { workspace = true, features = ["serde"] }
+# TrainedModel.save / qml.load. `float_roundtrip` reads every saved `f64` back
+# bit for bit, so a loaded model predicts exactly as the saved one.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 polypus-infrastructure = { workspace = true }
 polypus-orchestration = { workspace = true }
 polypus-evaluation = { workspace = true }
