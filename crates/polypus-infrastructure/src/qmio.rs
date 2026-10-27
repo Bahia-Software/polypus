@@ -1507,6 +1507,55 @@ mod tests {
     }
 
     #[test]
+    fn config_json_maps_every_results_format_and_rejects_the_rest() {
+        for (format, processing, formatting) in [
+            ("binary_count", 1, 3),
+            ("raw", 1, 2),
+            ("binary", 2, 2),
+            ("squash_binary_result_arrays", 2, 6),
+        ] {
+            let config = build_config_json(100, None, format, 0).unwrap();
+            let results = &config["$data"]["results_format"]["$data"];
+            assert_eq!(results["format"]["$value"], processing, "{format}");
+            assert_eq!(results["transforms"]["$value"], formatting, "{format}");
+        }
+        match build_config_json(100, None, "csv", 0) {
+            Err(QmioError::Config(message)) => assert_eq!(
+                message,
+                "unsupported results format 'csv'; only 'binary_count' is implemented"
+            ),
+            other => panic!("expected QmioError::Config, got {other:?}"),
+        }
+    }
+
+    /// The config is built before any socket is opened, so an unknown results
+    /// format fails the run without contacting the endpoint.
+    #[test]
+    fn a_run_with_an_unknown_results_format_fails_before_connecting() {
+        let backend = QmioBackend::new(
+            "tcp://qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "csv".to_string(),
+        )
+        .unwrap();
+        let params = RunParams {
+            id: "qmio-csv".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        match backend.run_circuits(&[BoundCircuit::Native(bell())], &params) {
+            Err(BackendError::External(boxed)) => assert!(
+                matches!(boxed.downcast_ref::<QmioError>(), Some(QmioError::Config(m)) if m.contains("'csv'")),
+                "{boxed:?}"
+            ),
+            other => panic!("expected BackendError::External(QmioError::Config), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn pickle_request_text_roundtrips_to_str_tuple() {
         let payload =
             pickle_request(&ProgramPayload::Text("OPENQASM 3.0;".into()), "{\"a\":1}").unwrap();
@@ -1663,10 +1712,14 @@ mod tests {
         // native.rs and native_circuit_path.rs are unaffected).
         pyo3::Python::initialize();
         let circuit = pyo3::Python::attach(|py| crate::QiskitCircuit::into_bound(py.None()));
-        let err = backend(QmioProgramFormat::OpenQasm)
-            .serialize_program(&circuit)
-            .unwrap_err();
-        assert!(matches!(err, QmioError::UnsupportedCircuit));
+        for format in [
+            QmioProgramFormat::OpenQasm,
+            QmioProgramFormat::QirText,
+            QmioProgramFormat::QirBitcode,
+        ] {
+            let err = backend(format).serialize_program(&circuit).unwrap_err();
+            assert!(matches!(err, QmioError::UnsupportedCircuit), "{format:?}");
+        }
     }
 
     #[test]
@@ -2325,6 +2378,17 @@ mod tests {
         matches!(result, Err(QmioError::Schema(_)))
     }
 
+    /// `results` and `data` are tried as register maps first; a list or an empty
+    /// object is none, so the counts come from the fallback scan.
+    #[test]
+    fn counts_from_json_falls_back_when_results_and_data_are_no_register_maps() {
+        let reply = json!({"data": {}, "payload": {"01": 4}, "results": []});
+        assert_eq!(
+            counts_from_json(&reply).unwrap(),
+            HashMap::from([("01".to_string(), 4)])
+        );
+    }
+
     #[test]
     fn counts_from_json_skips_integer_metric_blocks_before_the_counts() {
         // `data` is tried before the register scan and `execution_metrics` sorts
@@ -2519,6 +2583,77 @@ mod tests {
             value = PickleValue::List(vec![value]);
         }
         assert!(is_schema_err(pickle_to_json(&value)));
+    }
+
+    /// Set members and dict keys are hashable values; each kind has a JSON image
+    /// too, so an odd set or key elsewhere in a reply never rejects it.
+    #[test]
+    fn pickle_to_json_converts_every_hashable_kind() {
+        use serde_pickle::HashableValue as H;
+        let hashable = |value: PickleValue| value.into_hashable().unwrap();
+        let cases = [
+            (H::None, json!(null)),
+            (H::Bool(true), json!(true)),
+            (H::I64(-3), json!(-3)),
+            (
+                hashable(big_int_value("18446744073709551615")),
+                json!(18446744073709551615u64),
+            ),
+            (
+                hashable(big_int_value("123456789012345678901234567890")),
+                json!("123456789012345678901234567890"),
+            ),
+            (H::F64(1.5), json!(1.5)),
+            (H::String("s".into()), json!("s")),
+            (H::Bytes(vec![9]), json!(null)),
+            (
+                hashable(PickleValue::Tuple(vec![
+                    PickleValue::I64(1),
+                    PickleValue::String("a".into()),
+                ])),
+                json!([1, "a"]),
+            ),
+            (
+                hashable(PickleValue::FrozenSet([H::I64(7)].into())),
+                json!([7]),
+            ),
+        ];
+        for (member, expected) in cases {
+            let set = PickleValue::Set([member.clone()].into());
+            assert_eq!(
+                pickle_to_json(&set).unwrap(),
+                json!([expected]),
+                "{member:?}"
+            );
+        }
+
+        // A key that is neither a string nor an integer keeps its Debug form.
+        let tuple_key = H::Tuple(vec![H::I64(1)]);
+        let dict = PickleValue::Dict(
+            [
+                (H::I64(3), PickleValue::I64(1)),
+                (tuple_key.clone(), PickleValue::I64(2)),
+            ]
+            .into(),
+        );
+        let mut expected = serde_json::Map::new();
+        expected.insert("3".to_string(), json!(1));
+        expected.insert(format!("{tuple_key:?}"), json!(2));
+        assert_eq!(
+            pickle_to_json(&dict).unwrap(),
+            serde_json::Value::Object(expected)
+        );
+    }
+
+    #[test]
+    fn pickle_to_json_bounds_the_nesting_of_hashable_values_too() {
+        use serde_pickle::HashableValue as H;
+        let mut member = H::I64(0);
+        for _ in 0..(MAX_PICKLE_DEPTH + 10) {
+            member = H::Tuple(vec![member]);
+        }
+        let set = PickleValue::Set([member].into());
+        assert!(is_schema_err(pickle_to_json(&set)));
     }
 
     #[test]
