@@ -23,7 +23,7 @@ with PyO3 Python bindings. The Cargo workspace has thirteen crates (the `fuzz/` 
 | `polypus-circuit` | Circuit IR + OpenQASM 2.0 and OpenQASM 3 import/export + QIR export | No |
 | `polypus-sim` | Statevector simulator (GIL-free; optional rayon via the `parallel` feature) | No |
 | `polypus-physics` | Particle physics: classical Monte Carlo transport + Hamiltonians as Pauli sums | No |
-| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES) behind evaluation oracles | No |
+| `polypus-optimizers` | Variational optimizers (DE, PSO, QNG, CMA-ES, Adam, SPSA, Rotosolve) behind evaluation and gradient oracles, and `AlgorithmExternal`, the bridge that runs an `AskTell` optimizer (Optuna, Nevergrad, pycma through the Python bindings) | No |
 | `polypus-observable` | Cost observables (Qubo / Ising) reducing measurement counts to a cost; pure math | No |
 | `polypus-backend` | The **pyo3-free backend contract** a third party implements: the `QuantumBackend` trait, `BoundCircuit`, `RunParams`, `BackendError`/`InfrastructureError`, the `Planner`, the transpiler seam, the memory budget and the runtime **backend registry** (`register_backend`, `BackendBuildContext`). Zero PyO3 in its dependency tree | No |
 | `polypus-backend-conformance` | Reusable conformance battery a third party runs against its `QuantumBackend` (error classification, shot conservation, batching/waves, concurrency, result validation); depends only on `polypus-backend` and `polypus-circuit` | No |
@@ -95,8 +95,8 @@ boundary stays out-of-process and explicit; see
   thread holds the GIL that every worker is blocked trying to acquire. This is
   why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
   `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
-  below it (the Aer and CUNQA backends, Python cost callbacks) attach on their
-  own, on whichever thread evaluates them. Each of those attaches is a *fresh*
+  below it (the Aer and CUNQA backends, Python cost callbacks, a
+  `polypus.External` optimizer's `ask()` and `tell()`) attach on their own, on whichever thread evaluates them. Each of those attaches is a *fresh*
   one (`detach` resets the thread's attachment), so each goes through
   `attach_or` and turns an unreachable interpreter into the typed
   `InterpreterUnavailable` error, never a panic or a hang (§9). The one attach
@@ -130,7 +130,10 @@ boundary stays out-of-process and explicit; see
     documented as **not** interruptible and is never used on a Python-facing
     path.
   The resulting `PyErr` — a `KeyboardInterrupt`, or an error raised by the user
-  `expectation_function` / variance callback — is recorded in the shared
+  `expectation_function` / variance callback / `polypus.External` optimizer's
+  `ask()` or `tell()` (which also call `py.check_signals()` before the user's
+  code, so a Ctrl+C during a batch stops the run before the library's next
+  call) — is recorded in the shared
   `OracleErrorSlot` and re-raised to Python by the entry point as the
   **original** exception. The interrupt travels type-erased through the pyo3-free
   layers, boxed in `BackendError::External` as a `DisplaySafePyErr` (§9), and

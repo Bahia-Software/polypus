@@ -32,7 +32,11 @@ from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
 from . import circuits as circuits
+from . import external as external
 from . import qml as qml
+
+# What `External` runs (bindings/external.rs), typed in `polypus.external`.
+from .external import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -47,6 +51,10 @@ __all__ = [
     "PSO",
     "QNG",
     "CMAES",
+    "Adam",
+    "SPSA",
+    "Rotosolve",
+    "External",
     "Circuit",
     "Param",
     "ParamExpr",
@@ -77,6 +85,7 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
+    "external",
 ]
 
 __version__: str
@@ -87,10 +96,13 @@ _FloatVector = Union[Sequence[float], npt.NDArray[np.floating[Any]]]
 # One measurement-counts map (contract C-3): bitstring -> shots, keys sorted.
 _Counts = dict[str, int]
 # The optimizer configurations `train` / `qml.train` accept as `method`.
-_Method = Union[DE, PSO, QNG, CMAES]
+_Method = Union[DE, PSO, QNG, CMAES, Adam, SPSA, Rotosolve, External]
 # `DE.strategy`: how trial vectors are built (bindings/de.rs). Any other name
 # raises `ValueError`.
 _DeStrategy = Literal["rand1bin", "shade", "lshade"]
+# `Adam.rule`: how the gradient becomes a step (bindings/adam.rs). Any other
+# name raises `ValueError`.
+_AdamRule = Literal["adam", "momentum"]
 # `train`'s `expectation_function`: a `bitstring -> float` callable, the same
 # memoised, or a native GIL-free observable.
 _CostFunction = Union[Callable[[str], float], CachedCost, Qubo, Ising]
@@ -206,6 +218,79 @@ class CMAES:
         restarts: int = 0,
         seed: Optional[int] = None,
     ) -> CMAES: ...
+
+@final
+class Adam:
+    max_iters: int
+    learning_rate: float
+    beta1: float
+    beta2: float
+    epsilon: float
+    bounds: tuple[float, float]
+    tolerance: float
+    patience: int
+    finite_difference_step: float
+    rule: _AdamRule
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 100,
+        learning_rate: float = 0.1,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-8,
+        # Default `(-pi, pi)` (bindings/adam.rs).
+        bounds: tuple[float, float] = ...,
+        tolerance: float = 0.01,
+        patience: int = 20,
+        finite_difference_step: float = 0.2,
+        rule: _AdamRule = "adam",
+        seed: Optional[int] = None,
+    ) -> Adam: ...
+
+@final
+class SPSA:
+    max_iters: int
+    resamplings: int
+    perturbation: float
+    target_step: float
+    alpha: float
+    gamma: float
+    eval_interval: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        max_iters: int = 300,
+        resamplings: int = 1,
+        perturbation: float = 0.1,
+        target_step: float = 0.63,
+        alpha: float = 0.602,
+        gamma: float = 0.101,
+        eval_interval: int = 20,
+        seed: Optional[int] = None,
+    ) -> SPSA: ...
+
+@final
+class Rotosolve:
+    sweeps: int
+    reevaluate_every: int
+    tolerance: float
+    patience: int
+    seed: Optional[int]
+    def __new__(
+        cls,
+        sweeps: int = 10,
+        reevaluate_every: int = 5,
+        tolerance: float = 0.01,
+        patience: int = 2,
+        seed: Optional[int] = None,
+    ) -> Rotosolve: ...
+
+@final
+class External:
+    optimizer: _AskTell
+    max_evaluations: int
+    def __new__(cls, optimizer: _AskTell, max_evaluations: int) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
@@ -382,6 +467,10 @@ class TrainResult:
     @property
     def fitness_history(self) -> list[float]: ...
     @property
+    def final_params(self) -> Optional[list[float]]: ...
+    @property
+    def final_fitness(self) -> Optional[float]: ...
+    @property
     def seed(self) -> int: ...
     @property
     def id(self) -> str: ...
@@ -454,6 +543,7 @@ def train(
     options: Optional[dict[str, str]] = None,
     walltime: Optional[str] = None,
     initial_point: Optional[_FloatVector] = None,
+    final_shots: Optional[int] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],

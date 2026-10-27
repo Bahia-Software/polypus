@@ -185,8 +185,9 @@ built-in backend keeps the default `None`.
 
 When a training run (`polypus.train`, `polypus.qml.train`) uses such a backend, it
 times the first generation (the initial population for DE and PSO, the first
-iteration for QNG), multiplies it by the generation budget and logs one `warn` if
-the projection exceeds the walltime:
+iteration for QNG, Adam and SPSA, the first step for Rotosolve, the first batch for an
+external optimizer), multiplies it by the generation budget and logs one `warn` if the
+projection exceeds the walltime:
 
 ```text
 run my-run: the first of up to 101 generations took 0:02:00, so the optimisation
@@ -196,6 +197,53 @@ runs out. Raise `walltime` or lower the generations.
 
 The projection is an upper bound, since early stopping only shortens a run. Nothing
 is enforced, and backends that return `None` are not timed at all.
+
+With `final_shots`, the run ends with one more batch once the optimizer has stopped:
+its best candidates (at most five) re-evaluated with `final_shots` shots. That batch
+is not part of the optimizer's generations, so the projection leaves it out and the
+watch passes it through untimed. Leave time for it in the walltime: if the QPUs are
+released before it runs, it fails like any batch and the run raises, after logging
+the optimizer's `best_params` and `best_fitness` as a warning.
+
+SPSA's calibration, one batch of 50 circuits before its first iteration, is not timed:
+it is far larger than an iteration's `2 × resamplings` circuits, so timing it as the
+first iteration would inflate the projection. The projection adds its circuits at the
+first iteration's pace instead, and the warning says so ("with the 50 circuits sent
+before it at that pace"). The first iteration also measures the parameters, so it
+holds `2 × resamplings + 1` circuits where most iterations hold `2 × resamplings`.
+
+Rotosolve's budget is `sweeps × dimensions` steps, each one batch: the two neighbours
+of the parameters along one of them, and the parameters themselves on the first step
+and every `reevaluate_every` steps. After the last step the parameters it reached are
+measured alone, which the projection counts as one more step. The first step is timed,
+with its 3 circuits where most steps hold 2. Its warning counts steps and asks to lower
+the sweeps ("the first of up to 301 steps took ... Raise `walltime` or lower the
+sweeps.").
+
+For both, the timed batch holds `n + 1` circuits where most hold `n`: `n = 2K` for
+SPSA with `K = resamplings`, `n = 2` for Rotosolve. On `Q` QPUs it takes
+`⌈(n + 1)/Q⌉` rounds where most batches take `⌈n/Q⌉`, so the projection stays an
+upper bound but can reach `⌈(n + 1)/Q⌉ / ⌈n/Q⌉` times the real time: `(n + 1)/n` on
+one QPU (1.5 times for Rotosolve and `resamplings=1`, about 1.06 times with
+`resamplings=8`), twice on `n` QPUs (2 for Rotosolve and `resamplings=1`, 16 with
+`resamplings=8`), and not at all on `n + 1` QPUs or more.
+
+An external optimizer (`polypus.External`) has a budget in candidates,
+`max_evaluations`, and batches whose size is the library's, known only once the run
+has started. The first batch is timed, and with `n` candidates in it the projection
+counts `⌊max_evaluations / n⌋` batches (at least one): exactly the batches the run
+sends when every batch has the first's size, as pycma's generations do, and Optuna's
+and Nevergrad's through the `polypus.external` adapters, whose batches hold
+`batch_size` and `num_workers` candidates. When later batches are larger, the run
+sends fewer, and if a batch `k` times larger takes at most `k` times as long, the
+projection stays an upper bound to within one first batch, the remainder the floor
+drops. When they are smaller, the run sends more, each leaving QPUs idle, and the
+projection can be too low. A library that stops early only shortens the run. Only
+the batch's evaluation is timed: the library's own time in `ask()` and `tell()`,
+between the batches, is not in the projection, and for a model-based method, which
+computes its next candidates from all the values it has seen, it can take much of
+the run. Its warning counts batches and asks to lower `max_evaluations` ("the first
+of up to 50 batches took ... Raise `walltime` or lower the max_evaluations.").
 
 ### Cancellation
 

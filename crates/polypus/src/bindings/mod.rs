@@ -1,29 +1,37 @@
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyList, PyModule};
+use pyo3::types::{IntoPyDict, PyBool, PyDict, PyList, PyModule};
 use pyo3::wrap_pyfunction;
 use pyo3::Bound;
 use pyo3::PyResult;
 
+pub mod adam;
 pub mod calibration;
 pub mod circuit;
 pub mod cmaes;
 mod compatibility;
 pub mod de;
 pub mod expr;
+pub mod external;
 pub mod logging;
 pub mod observable;
 pub mod pso;
 pub mod qng;
+pub mod rotosolve;
+pub mod spsa;
 
+use adam::Adam;
 use calibration::calibrate_parallel_threshold;
 use circuit::{qft, statevector, Circuit, Param};
 use cmaes::CMAES;
 use compatibility::backend_compatibility;
 use de::DE;
+use external::External;
 use logging::init_logger;
 use observable::{CachedCost, Ising, Qubo, SampleCost};
 use pso::PSO;
 use qng::QNG;
+use rotosolve::Rotosolve;
+use spsa::Spsa;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
@@ -37,8 +45,9 @@ use crate::infrastructure::{
     ShotDistributingPlanner, DEFAULT_WALLTIME,
 };
 use crate::orchestration::{
-    CmaesConfig, DeConfig, Method, OracleError, PsoConfig, QngConfig, Resources, RunCircuitFlow,
-    Scheduler, TrainFlow,
+    AdamConfig, CmaesConfig, DeConfig, ExternalConfig, FinalEvaluation, Method, OracleError,
+    PsoConfig, QngConfig, Resources, RotosolveConfig, RunCircuitFlow, Scheduler, SpsaConfig,
+    TrainFlow, TrainOutcome,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -189,10 +198,13 @@ pub struct TrainResult {
     #[pyo3(get)]
     pub best_fitness: f64,
     /// Generations/iterations actually executed (below the budget when an
-    /// early-stopping criterion fired).
+    /// early-stopping criterion fired); for `External`, the batches evaluated
+    /// and told.
     #[pyo3(get)]
     pub iterations_run: usize,
-    /// Whether the optimizer's convergence criterion was satisfied.
+    /// Whether the optimizer's convergence criterion was satisfied; for
+    /// `External`, whether the external optimizer ended the run with an empty
+    /// `ask()` (`False` when `max_evaluations` stopped it).
     #[pyo3(get)]
     pub converged: bool,
     /// Best fitness recorded at the end of each generation/iteration, in order
@@ -201,9 +213,21 @@ pub struct TrainResult {
     /// computed from (contract C-5).
     #[pyo3(get)]
     pub fitness_history: Vec<f64>,
+    /// With `final_shots`, the candidate the final batch chose: the best
+    /// candidates (`best_params` and, for DE, PSO, CMA-ES and `External`, up
+    /// to four more), re-evaluated once with `final_shots` shots after the optimizer
+    /// stopped; the highest value wins, `best_params` on a tie. `None`
+    /// without `final_shots` (contract C-5).
+    #[pyo3(get)]
+    pub final_params: Option<Vec<f64>>,
+    /// The value of [`final_params`](Self::final_params) in the final batch;
+    /// `None` without `final_shots`.
+    #[pyo3(get)]
+    pub final_fitness: Option<f64>,
     /// Effective RNG seed that drove the optimizer (and, on the native backend,
     /// shot sampling): the explicit `seed` kwarg, else the optimizer object's
-    /// `seed`, else a fresh OS-entropy value (contract C-7).
+    /// `seed`, else a fresh OS-entropy value (contract C-7). With `External`,
+    /// whose library owns its seed, it drives the shot sampling only.
     #[pyo3(get)]
     pub seed: u64,
     /// Run identifier used for logging, temp files and SLURM job names. This is
@@ -218,8 +242,12 @@ pub struct TrainResult {
 #[pymethods]
 impl TrainResult {
     fn __repr__(&self) -> String {
+        // Unchanged without `final_shots`.
+        let final_fitness = self
+            .final_fitness
+            .map_or(String::new(), |value| format!(", final_fitness={value}"));
         format!(
-            "TrainResult(id={:?}, best_fitness={}, iterations_run={}, converged={}, seed={}, best_params={:?})",
+            "TrainResult(id={:?}, best_fitness={}{final_fitness}, iterations_run={}, converged={}, seed={}, best_params={:?})",
             self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
         )
     }
@@ -235,9 +263,14 @@ impl TrainResult {
 fn outcome_to_train_result(
     py: Python<'_>,
     outcome: OptimizationOutcome,
+    final_evaluation: Option<FinalEvaluation>,
     seed: u64,
     id: String,
 ) -> PyResult<Py<PyAny>> {
+    let (final_params, final_fitness) = match final_evaluation {
+        Some(evaluation) => (Some(evaluation.params), Some(evaluation.fitness)),
+        None => (None, None),
+    };
     Py::new(
         py,
         TrainResult {
@@ -246,6 +279,8 @@ fn outcome_to_train_result(
             iterations_run: outcome.iterations_run,
             converged: outcome.converged,
             fitness_history: outcome.fitness_history,
+            final_params,
+            final_fitness,
             seed,
             id,
         },
@@ -256,8 +291,8 @@ fn outcome_to_train_result(
 /// Resolve the optimizer seed for `train` / `qml_train` (contract C-7).
 ///
 /// Precedence: the explicit `seed` kwarg wins when provided; otherwise the
-/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES` instance; otherwise a fresh
-/// OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
+/// `seed` field pinned on the `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` instance;
+/// otherwise a fresh OS-entropy value, drawn with `draw` (`random_seed` in production). The chosen
 /// value both drives the optimizer and is reported back in the [`TrainResult`],
 /// so the run can be replayed.
 fn resolve_optimizer_seed(
@@ -337,8 +372,11 @@ fn log_training_start(
 }
 
 /// Read the `seed` field pinned on the optimizer object passed as `method`,
-/// whichever of `DE`/`PSO`/`QNG`/`CMAES` it is (`None` if it is none of them — the type
-/// error is surfaced later by the dispatch that actually runs the optimizer).
+/// whichever of `DE`/`PSO`/`QNG`/`CMAES`/`Adam`/`SPSA`/`Rotosolve` it is (`None` if it is none
+/// of them — the type error is surfaced later by the dispatch that actually runs the
+/// optimizer). `External` has no seed field: its library owns its seed (contract
+/// C-7), so it is `None` too, and the run's seed then only fixes the shot
+/// sampling.
 fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(de) = method.extract::<PyRef<DE>>() {
         return de.seed;
@@ -352,7 +390,81 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
     if let Ok(cmaes) = method.extract::<PyRef<CMAES>>() {
         return cmaes.seed;
     }
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        return adam.seed;
+    }
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
+        return spsa.seed;
+    }
+    if let Ok(rotosolve) = method.extract::<PyRef<Rotosolve>>() {
+        return rotosolve.seed;
+    }
     None
+}
+
+/// `ValueError` when `method` is a `polypus.External` and an `initial_point`
+/// is given: the external library chooses its own start. Checked after
+/// External's configuration and instead of the point's length and finiteness,
+/// so the message says why any point is refused.
+fn check_external_initial_point(
+    method: &Bound<'_, PyAny>,
+    initial_point: Option<&[f64]>,
+) -> PyResult<()> {
+    if initial_point.is_none() || method.extract::<PyRef<External>>().is_err() {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "polypus.External takes no initial_point: the external optimizer chooses its own \
+         start. Give the starting point to the library, or to the initial_point of the \
+         polypus.external adapter (from_optuna, from_nevergrad); for pycma it is the x0 of \
+         cma.CMAEvolutionStrategy",
+    ))
+}
+
+/// Whether `method` is a `polypus.Rotosolve`, which only some circuits and
+/// objectives qualify for.
+fn is_rotosolve(method: &Bound<'_, PyAny>) -> bool {
+    method.extract::<PyRef<Rotosolve>>().is_ok()
+}
+
+/// The `ValueError` for a circuit Rotosolve cannot train, with the first
+/// reason the check found.
+fn rotosolve_circuit_error(reason: &str) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "polypus.Rotosolve cannot train this circuit: {reason}. Rotosolve needs every \
+         trainable parameter to be exactly one angle of an rx, ry, rz, rxx, rzz, p, u1, u, \
+         u2 or u3 gate (also ryy, rzx, or the θ of an r, in a Qiskit circuit), as ±θ + c, \
+         so that the fitness is a sinusoid of each parameter; train this circuit with \
+         another optimizer"
+    ))
+}
+
+/// Check, before anything runs, that `polypus.Rotosolve` can train `circuit`
+/// (issue #398): every trainable parameter the angle of exactly one
+/// single-Pauli rotation, as `±θ + c`. A `polypus.Circuit` is checked in
+/// Rust ([`ParameterizedCircuit::check_single_frequency`]); a Qiskit circuit
+/// by `polypus_python.rotosolve`, with `trainable` its trainable parameters
+/// (`None`: all of them; `qml.train` passes the ansatz's).
+///
+/// [`ParameterizedCircuit::check_single_frequency`]: crate::circuit::ParameterizedCircuit::check_single_frequency
+fn check_rotosolve_circuit(
+    circuit: &Bound<'_, PyAny>,
+    source: Option<&CircuitSource>,
+    trainable: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    if let Some(CircuitSource::Native(native)) = source {
+        return native
+            .check_single_frequency()
+            .map_err(|problem| rotosolve_circuit_error(&problem.to_string()));
+    }
+    let py = circuit.py();
+    let problem = PyModule::import(py, "polypus_python.rotosolve")?
+        .getattr("single_frequency_problem")?
+        .call1((circuit, trainable))?;
+    if problem.is_none() {
+        return Ok(());
+    }
+    Err(rotosolve_circuit_error(&problem.extract::<String>()?))
 }
 
 /// Check the optimizer's preconditions, `initial_point` included, before
@@ -362,17 +474,92 @@ fn method_seed(method: &Bound<'_, PyAny>) -> Option<u64> {
 /// within `bounds` for PSO), through [`Method::check_preconditions`]. A failure
 /// raises `ValueError` with the optimizer's own message before any QPU is
 /// requested; a `method` that is no optimizer raises the `TypeError` of
-/// [`method_from_pyclass`].
+/// [`method_from_pyclass`]. `External` refuses any point after its
+/// configuration, with [`check_external_initial_point`]'s message.
 fn validate_method(
     method: &Bound<'_, PyAny>,
     dimensions: u32,
     initial_point: Option<&[f64]>,
 ) -> PyResult<()> {
     // A throwaway `Method`: the checks read only its configuration, never the
-    // QNG variance oracle, so its error slot and run id are placeholders.
-    method_from_pyclass(method, &OracleErrorSlot::new(), "")?
-        .check_preconditions(dimensions, initial_point)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    // QNG variance oracle or the External optimizer, so its error slot and run
+    // id are placeholders.
+    let parsed = method_from_pyclass(method, dimensions, &OracleErrorSlot::new(), "")?;
+    // `External`'s point is refused below, with the message that names the
+    // adapters, rather than with dispatch's.
+    let point = match parsed {
+        Method::External(..) => None,
+        _ => initial_point,
+    };
+    parsed
+        .check_preconditions(dimensions, point)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    check_external_initial_point(method, initial_point)
+}
+
+/// Check the `final_shots` of `train`/`qml.train` before anything runs
+/// (contract C-5), as `shots` is checked: `None`, or an integer from 1 to
+/// 4294967295, the shots a circuit takes. A Python `int` or anything with
+/// `__index__` (a NumPy integer) is an integer; a `bool`, a `float` (even
+/// `4096.0`), a `str` or anything else raises `ValueError`, before any backend
+/// or CUNQA allocation exists. Only the `TypeError` of `operator.index` means
+/// "not an integer"; any other exception, raised inside a custom `__index__`
+/// or a `KeyboardInterrupt`, propagates unchanged.
+fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u32>> {
+    let Some(value) = final_shots.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    let index = positive_index(value, "final_shots")?;
+    match index.extract::<u32>() {
+        Ok(shots) => Ok(Some(shots)),
+        Err(_) => Err(too_large(value, "final_shots", u32::MAX)),
+    }
+}
+
+/// `value` as a Python `int` `>= 1`, for the setting `name`: a Python `int` or
+/// anything with `__index__` (a NumPy integer) is an integer, while a `bool`, a
+/// `float` (even `4.0`), a `str`, `None` or anything else raises `ValueError`.
+/// Only the `TypeError` of `operator.index` means "not an integer"; any other
+/// exception, raised inside a custom `__index__` or a `KeyboardInterrupt`,
+/// propagates unchanged. The caller converts the result to its own type and
+/// reports a value too large for it with [`too_large`].
+fn positive_index<'py>(value: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let not_positive = || {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be an integer >= 1, got {}",
+            shown_repr(value)
+        ))
+    };
+    if value.is_instance_of::<PyBool>() {
+        return Err(not_positive());
+    }
+    let py = value.py();
+    let index = match PyModule::import(py, "operator")?.call_method1("index", (value,)) {
+        Ok(index) => index,
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+            return Err(not_positive());
+        }
+        Err(err) => return Err(err),
+    };
+    if index.lt(1)? {
+        return Err(not_positive());
+    }
+    Ok(index)
+}
+
+/// The `ValueError` for a setting `name` whose integer `value` is above `max`.
+fn too_large(value: &Bound<'_, PyAny>, name: &str, max: impl std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "{name} must be at most {max}, got {}",
+        shown_repr(value)
+    ))
+}
+
+/// `value`'s `repr` for an error message, or a fixed text when it fails.
+fn shown_repr(value: &Bound<'_, PyAny>) -> String {
+    value
+        .repr()
+        .map_or_else(|_| "an unprintable value".to_string(), |r| r.to_string())
 }
 
 /// Turn an optimizer result into the value the Python entry point returns.
@@ -384,9 +571,10 @@ fn validate_method(
 /// `Ok` with a meaningless outcome. Surfacing the recorded error here is what
 /// makes the FFI boundary report the real cause instead of that garbage.
 ///
-/// Both entry points funnel every DE/PSO/QNG/CMAES branch through here, so this is
-/// also where the run's completion is logged — once, on the success path only
-/// (an oracle failure was already logged at `error!` where it was recorded).
+/// Both entry points funnel every DE/PSO/QNG/CMAES/Adam/SPSA/Rotosolve/External branch
+/// through here, so this is also where the run's completion is logged — once,
+/// on the success path only (an oracle failure was already logged at `error!`
+/// where it was recorded).
 /// `start` is the [`Instant`] captured on entry to the entry point, so the
 /// reported duration covers the whole call.
 ///
@@ -397,13 +585,13 @@ fn validate_method(
 /// recorded failure with its original class preserved.
 fn finish_optimization(
     py: Python<'_>,
-    result: Result<OptimizationOutcome, OracleError>,
+    result: Result<TrainOutcome, OracleError>,
     seed: u64,
     id: String,
     start: Instant,
 ) -> PyResult<Py<PyAny>> {
-    let outcome = match result {
-        Ok(outcome) => outcome,
+    let (outcome, final_evaluation) = match result {
+        Ok(outcome) => (outcome.optimization, outcome.final_evaluation),
         Err(OracleError::Evaluation(boxed)) => {
             // The oracle boxed an `EvaluationError` into the type-erased slot
             // (the scheduler crate is pyo3-free); recover it to re-raise with its
@@ -424,23 +612,32 @@ fn finish_optimization(
             ));
         }
     };
+    let final_fitness = final_evaluation
+        .as_ref()
+        .map_or(String::new(), |evaluation| {
+            format!(", final_fitness={}", evaluation.fitness)
+        });
     log::info!(
-        "training run {id} completed: iterations_run={}, converged={}, duration={:?}",
+        "training run {id} completed: iterations_run={}, converged={}{final_fitness}, duration={:?}",
         outcome.iterations_run,
         outcome.converged,
         start.elapsed()
     );
-    outcome_to_train_result(py, outcome, seed, id)
+    outcome_to_train_result(py, outcome, final_evaluation, seed, id)
 }
 
-/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` object into a pyo3-free [`Method`].
+/// Parse a `polypus.DE` / `PSO` / `QNG` / `CMAES` / `Adam` / `SPSA` / `Rotosolve` /
+/// `External` object into a pyo3-free [`Method`].
 ///
-/// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here — the
-/// only Python touch — so [`dispatch_optimizer`] itself stays Python-free. A
-/// non-method object is a `TypeError`, exactly as the previous inline dispatch
-/// (shared now by both `train` and `qml_train`).
+/// The QNG `variance_function` is adapted into a [`PyVarianceOracle`] here, and
+/// the `External` optimizer into a [`PyAskTell`](external::PyAskTell), which
+/// reads each row up to one value past `dimensions` — the only Python touches —
+/// so [`dispatch_optimizer`] itself stays Python-free. A non-method object is a
+/// `TypeError`, exactly as the previous inline dispatch (shared now by both
+/// `train` and `qml_train`).
 fn method_from_pyclass(
     method: &Bound<'_, PyAny>,
+    dimensions: u32,
     errors: &OracleErrorSlot,
     run_id: &str,
 ) -> PyResult<Method> {
@@ -491,8 +688,50 @@ fn method_from_pyclass(
             restarts: cmaes.restarts,
         }));
     }
+    if let Ok(adam) = method.extract::<PyRef<Adam>>() {
+        return Ok(Method::Adam(AdamConfig {
+            max_iters: adam.max_iters,
+            learning_rate: adam.learning_rate,
+            beta1: adam.beta1,
+            beta2: adam.beta2,
+            epsilon: adam.epsilon,
+            bounds: adam.bounds,
+            tolerance: adam.tolerance,
+            patience: adam.patience,
+            finite_difference_step: adam.finite_difference_step,
+            rule: adam.rule,
+        }));
+    }
+    if let Ok(spsa) = method.extract::<PyRef<Spsa>>() {
+        return Ok(Method::Spsa(SpsaConfig {
+            max_iters: spsa.max_iters,
+            resamplings: spsa.resamplings,
+            perturbation: spsa.perturbation,
+            target_step: spsa.target_step,
+            alpha: spsa.alpha,
+            gamma: spsa.gamma,
+            eval_interval: spsa.eval_interval,
+        }));
+    }
+    if let Ok(rotosolve) = method.extract::<PyRef<Rotosolve>>() {
+        return Ok(Method::Rotosolve(RotosolveConfig {
+            sweeps: rotosolve.sweeps,
+            reevaluate_every: rotosolve.reevaluate_every,
+            tolerance: rotosolve.tolerance,
+            patience: rotosolve.patience,
+        }));
+    }
+    if let Ok(external) = method.extract::<PyRef<External>>() {
+        let (max_evaluations, optimizer) =
+            external.for_run(method.py(), dimensions, errors, run_id);
+        return Ok(Method::External(
+            ExternalConfig { max_evaluations },
+            Box::new(optimizer),
+        ));
+    }
     Err(pyo3::exceptions::PyTypeError::new_err(
-        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, or polypus.CMAES",
+        "method must be an instance of polypus.DE, polypus.PSO, polypus.QNG, polypus.CMAES, \
+         polypus.Adam, polypus.SPSA, polypus.Rotosolve, or polypus.External",
     ))
 }
 
@@ -1406,14 +1645,23 @@ pub fn run_quantum_circuit<'py>(
 
 /// Unified entry point: train a variational quantum circuit with a chosen optimizer.
 ///
-/// `method` must be an instance of `DE`, `PSO`, `QNG`, or `CMAES`.
+/// `method` must be an instance of `DE`, `PSO`, `QNG`, `CMAES`, `Adam`, `SPSA`,
+/// `Rotosolve`, or `External`. Rotosolve trains only a circuit whose every
+/// parameter is the angle of exactly one single-Pauli rotation, as `±θ + c`:
+/// the circuit is checked before anything runs, and a circuit that does not
+/// qualify raises `ValueError` naming the first gate or parameter that does
+/// not. `External` runs an external ask/tell optimizer (Optuna, Nevergrad,
+/// pycma or your own object), one batch per `ask()`; an exception its `ask()`
+/// or `tell()` raises propagates as itself.
 ///
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
-/// OS-entropy value. On the native backend the same seed also drives shot
+/// OS-entropy value. `External` has no `seed` field and its library owns its
+/// seed, so there the seed only fixes the shot sampling. On the native backend the same seed also drives shot
 /// sampling, so a native-backend run reproduces exactly. Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
-/// `converged`, the effective `seed` and the effective `id`.
+/// `converged`, `fitness_history`, `final_params`, `final_fitness`, the
+/// effective `seed` and the effective `id`.
 ///
 /// The `id` kwarg is a human-readable *prefix*, not the literal effective id:
 /// a UUID v4 is appended for uniqueness (mirroring [`run_quantum_circuit`]),
@@ -1429,9 +1677,27 @@ pub fn run_quantum_circuit<'py>(
 /// `dimensions` finite numbers, otherwise `ValueError` before anything runs.
 /// DE (every `strategy`) evaluates it, wrapped into `[0, 2π)`, as the first
 /// member of its initial population; PSO as its first particle, which must lie
-/// within the PSO `bounds`; QNG starts from it as θ₀; CMA-ES centres its first
-/// run on it (restarts start elsewhere), with its `sigma0` unchanged. Without
-/// it every optimizer starts as before (contract C-5).
+/// within the PSO `bounds`; QNG and Adam start from it as θ₀; CMA-ES centres
+/// its first run on it (restarts start elsewhere), with its `sigma0`
+/// unchanged; SPSA starts from it as θ₀ and centres its calibration batch on
+/// it; Rotosolve starts from it as θ₀, the first point it measures. Without it
+/// every optimizer starts as before (contract C-5). `External` refuses it with
+/// `ValueError`, whatever the point: the external library chooses its start
+/// (give it to the library, or to the `initial_point` of a `polypus.external`
+/// adapter).
+///
+/// `final_shots` (default `None`) re-evaluates the best candidates once the
+/// optimizer has stopped, in one more batch with that many shots per circuit:
+/// `best_params` and, for DE, PSO, CMA-ES and `External`, the four best other
+/// distinct candidates they scored. `TrainResult.final_params` is the one with the
+/// highest re-evaluated value (`best_params` on a tie) and `final_fitness`
+/// that value; both are `None` without it, and `best_params`, `best_fitness`
+/// and `fitness_history` are the same with and without it, seeded runs
+/// included (contract C-5). It must be an integer `>= 1` (not a `bool` or a
+/// `float`), otherwise `ValueError` before anything runs. The batch is sent
+/// whatever stopped the optimizer, but not after an error or an interrupt; it
+/// is not part of the CUNQA walltime projection, and if it fails, `train`
+/// raises as for any batch.
 ///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
@@ -1471,7 +1737,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1491,6 +1757,7 @@ pub fn train<'py>(
     options: Option<OptionsArg>,
     walltime: Option<String>,
     initial_point: Option<Vec<f64>>,
+    final_shots: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1514,6 +1781,7 @@ pub fn train<'py>(
         }
     }
     validate_method(&method, dimensions, initial_point.as_deref())?;
+    let final_shots = validate_final_shots(final_shots.as_ref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
     if is_native_backend(backend) {
@@ -1533,6 +1801,11 @@ pub fn train<'py>(
                  serialization); got a Qiskit circuit. Build it with polypus.Circuit",
             ));
         }
+    }
+    // Rotosolve's step is exact only on single-frequency circuits: checked
+    // before any backend, and so any CUNQA allocation, exists.
+    if is_rotosolve(&method) {
+        check_rotosolve_circuit(&qc, Some(&circuit_source), None)?;
     }
     let backend_config = build_backend_config(
         &infrastructure,
@@ -1586,7 +1859,7 @@ pub fn train<'py>(
     // A callable stays a Python-callback observable (optimized fallback); a
     // polypus.Qubo/Ising opts into the native, GIL-free evaluation path.
     let observable = extract_cost_observable(&expectation_function)?;
-    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
     // Pair the backend with its default planner (the atomic-wave SequentialPlanner)
     // and validate the pairing up front.
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
@@ -1601,6 +1874,7 @@ pub fn train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
+        final_shots,
         errors: errors.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
@@ -1728,7 +2002,19 @@ fn bind_feature_rows<'py>(
 ///
 /// `initial_point` (keyword-only, default `None`) starts the search from a
 /// given point of the ansatz weights, as in [`train`]: `dimensions` finite
-/// numbers, otherwise `ValueError` before anything runs.
+/// numbers, otherwise `ValueError` before anything runs. `polypus.External`
+/// refuses it, as in [`train`].
+///
+/// With `method=polypus.Rotosolve(...)`, every ansatz parameter must be the
+/// angle of exactly one single-Pauli rotation, as `±θ + c`; the feature map's
+/// parameters are bound to each row, so they may appear anywhere. A
+/// `polypus.SampleCost`, which is not an average of a cost per bitstring, is
+/// rejected too. Both raise `ValueError` before anything runs.
+///
+/// `final_shots` (keyword-only, default `None`) re-evaluates the best
+/// candidates with that many shots once the optimizer has stopped, as in
+/// [`train`]: every training circuit of each candidate runs with them, and
+/// `TrainResult.final_params` and `final_fitness` hold the result.
 ///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
@@ -1773,7 +2059,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -1795,6 +2081,7 @@ pub fn qml_train<'py>(
     walltime: Option<String>,
     y_train: Option<Bound<'py, PyAny>>,
     initial_point: Option<Vec<f64>>,
+    final_shots: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1827,12 +2114,35 @@ pub fn qml_train<'py>(
         )));
     }
     validate_method(&method, dimensions, initial_point.as_deref())?;
+    let final_shots = validate_final_shots(final_shots.as_ref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
     let py = feature_map.py();
 
+    // Rotosolve needs a fitness that averages a cost per bitstring, which a
+    // `SampleCost` (a function of each sample's whole distribution) is not.
+    let rotosolve = is_rotosolve(&method);
+    if rotosolve
+        && expectation_function
+            .extract::<PyRef<'_, SampleCost>>()
+            .is_ok()
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "polypus.Rotosolve cannot train with a polypus.SampleCost: Rotosolve needs a \
+             fitness that averages a cost per bitstring over the shots, so that it is a \
+             sinusoid of each parameter, and a SampleCost scores each sample's whole \
+             distribution. Use a callable (bitstring, label) -> float or a \
+             polypus.CachedCost, or another optimizer",
+        ));
+    }
+
     let composed = compose_qml_template(&feature_map, &ansatz)?;
+    // Only the ansatz is trained: the feature map's parameters are bound to
+    // each row below, so they are constants wherever they appear.
+    if rotosolve {
+        check_rotosolve_circuit(&composed, None, Some(&ansatz.getattr("parameters")?))?;
+    }
     // Pre-bind each sample, leaving the ansatz parameters for the optimizer.
     let qcs = bind_feature_rows(&composed, &feature_map, &x_train, "x_train")?;
 
@@ -1911,7 +2221,7 @@ pub fn qml_train<'py>(
         Some((objective, labels)) => QmlObjective::Supervised { objective, labels },
         None => QmlObjective::Unsupervised(extract_cost_observable(&expectation_function)?),
     };
-    let method_enum = method_from_pyclass(&method, &errors, &effective_id)?;
+    let method_enum = method_from_pyclass(&method, dimensions, &errors, &effective_id)?;
     let resources = Resources::new(backend, None, Arc::new(config.run_params()))
         .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
     let scheduler = Scheduler::ephemeral(resources);
@@ -1924,6 +2234,7 @@ pub fn qml_train<'py>(
         dimensions,
         seed: effective_seed,
         initial_point,
+        final_shots,
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
@@ -2124,6 +2435,10 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PSO>()?;
     m.add_class::<QNG>()?;
     m.add_class::<CMAES>()?;
+    m.add_class::<Adam>()?;
+    m.add_class::<Spsa>()?;
+    m.add_class::<Rotosolve>()?;
+    m.add_class::<External>()?;
     m.add_class::<Circuit>()?;
     m.add_class::<Param>()?;
     expr::register(m)?;
@@ -2753,10 +3068,61 @@ mod tests {
                 "a rejected name leaves the strategy unchanged"
             );
             bound.setattr("strategy", "lshade").unwrap();
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::De(cfg)) => assert_eq!(cfg.strategy, DeStrategy::LShade),
                 _ => panic!("a polypus.DE parses into Method::De"),
             }
+        });
+    }
+
+    /// `polypus.Adam(rule=...)` rejects an unknown name with `ValueError`
+    /// when it is passed or set, before any run, naming the valid ones.
+    #[test]
+    fn adam_rule_is_validated_when_passed_or_set() {
+        Python::initialize();
+        Python::attach(|py| {
+            let new = |rule| {
+                Adam::new(
+                    100,
+                    0.05,
+                    0.9,
+                    0.999,
+                    1e-8,
+                    (-1.0, 1.0),
+                    0.01,
+                    20,
+                    0.1,
+                    rule,
+                    None,
+                )
+            };
+            let err = new("Momentum").err().expect("an unknown rule is rejected");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+
+            let adam = Py::new(py, new("adam").unwrap()).unwrap();
+            let bound = adam.bind(py);
+            let err = bound
+                .setattr("rule", "nesterov")
+                .expect_err("an unknown rule is rejected when set");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.to_string().contains("\"adam\" or \"momentum\""),
+                "{err}"
+            );
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "adam",
+                "a rejected name leaves the rule unchanged"
+            );
+            bound.setattr("rule", "momentum").unwrap();
+            assert_eq!(
+                bound.getattr("rule").unwrap().extract::<String>().unwrap(),
+                "momentum"
+            );
         });
     }
 
@@ -3829,7 +4195,7 @@ mod tests {
                 .expect("the pyclass instantiates");
             let bound = cmaes.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Cmaes(cfg)) => {
                     assert_eq!(cfg.generations, 40);
                     assert_eq!(cfg.population_size, Some(12));
@@ -3841,18 +4207,220 @@ mod tests {
                 _ => panic!("a polypus.CMAES parses into Method::Cmaes"),
             }
             bound.setattr("population_size", py.None()).unwrap();
-            match method_from_pyclass(bound.as_any(), &OracleErrorSlot::new(), "run") {
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
                 Ok(Method::Cmaes(cfg)) => assert_eq!(cfg.population_size, None),
                 _ => panic!("a polypus.CMAES parses into Method::Cmaes"),
             }
 
             let not_a_method = 3_i32.into_pyobject(py).unwrap();
             assert_eq!(method_seed(not_a_method.as_any()), None);
-            let err = method_from_pyclass(not_a_method.as_any(), &OracleErrorSlot::new(), "run")
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
                 .err()
                 .expect("an int is not a method");
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
             assert!(err.to_string().contains("polypus.CMAES"), "{err}");
+        });
+    }
+
+    /// `polypus.Adam` parses into `Method::Adam` with every field, its pinned
+    /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
+    #[test]
+    fn adam_reaches_the_method_and_its_seed_is_read() {
+        use polypus_optimizers::AdamRule;
+        Python::initialize();
+        Python::attach(|py| {
+            let adam = Py::new(
+                py,
+                Adam::new(
+                    40,
+                    0.2,
+                    0.8,
+                    0.99,
+                    1e-6,
+                    (-1.0, 2.0),
+                    0.5,
+                    7,
+                    0.05,
+                    "momentum",
+                    Some(99),
+                )
+                .expect("a valid rule"),
+            )
+            .expect("the pyclass instantiates");
+            let bound = adam.bind(py);
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
+                Ok(Method::Adam(cfg)) => {
+                    assert_eq!(cfg.max_iters, 40);
+                    assert_eq!(cfg.learning_rate, 0.2);
+                    assert_eq!(cfg.beta1, 0.8);
+                    assert_eq!(cfg.beta2, 0.99);
+                    assert_eq!(cfg.epsilon, 1e-6);
+                    assert_eq!(cfg.bounds, (-1.0, 2.0));
+                    assert_eq!(cfg.tolerance, 0.5);
+                    assert_eq!(cfg.patience, 7);
+                    assert_eq!(cfg.finite_difference_step, 0.05);
+                    assert_eq!(cfg.rule, AdamRule::Momentum);
+                }
+                _ => panic!("a polypus.Adam parses into Method::Adam"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.Adam"), "{err}");
+        });
+    }
+
+    /// `polypus.SPSA` parses into `Method::Spsa` with every field, its pinned
+    /// seed is the C-7 fallback, and a non-method object's `TypeError` names it.
+    #[test]
+    fn spsa_reaches_the_method_and_its_seed_is_read() {
+        Python::initialize();
+        Python::attach(|py| {
+            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
+                .expect("the pyclass instantiates");
+            let bound = spsa.bind(py);
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
+                Ok(Method::Spsa(cfg)) => {
+                    assert_eq!(cfg.max_iters, 40);
+                    assert_eq!(cfg.resamplings, 8);
+                    assert_eq!(cfg.perturbation, 0.2);
+                    assert_eq!(cfg.target_step, 1.2);
+                    assert_eq!(cfg.alpha, 1.0);
+                    assert_eq!(cfg.gamma, 0.25);
+                    assert_eq!(cfg.eval_interval, 5);
+                }
+                _ => panic!("a polypus.SPSA parses into Method::Spsa"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.SPSA"), "{err}");
+        });
+    }
+
+    /// `polypus.Rotosolve` parses into `Method::Rotosolve` with every field,
+    /// its pinned seed is the C-7 fallback, and a non-method object's
+    /// `TypeError` names it.
+    #[test]
+    fn rotosolve_reaches_the_method_and_its_seed_is_read() {
+        Python::initialize();
+        Python::attach(|py| {
+            let rotosolve = Py::new(py, Rotosolve::new(7, 3, 0.25, 4, Some(99)))
+                .expect("the pyclass instantiates");
+            let bound = rotosolve.bind(py);
+            assert!(is_rotosolve(bound.as_any()));
+            assert_eq!(method_seed(bound.as_any()), Some(99));
+            match method_from_pyclass(bound.as_any(), 1, &OracleErrorSlot::new(), "run") {
+                Ok(Method::Rotosolve(cfg)) => {
+                    assert_eq!(cfg.sweeps, 7);
+                    assert_eq!(cfg.reevaluate_every, 3);
+                    assert_eq!(cfg.tolerance, 0.25);
+                    assert_eq!(cfg.patience, 4);
+                }
+                _ => panic!("a polypus.Rotosolve parses into Method::Rotosolve"),
+            }
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            assert!(!is_rotosolve(not_a_method.as_any()));
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            assert!(err.to_string().contains("polypus.Rotosolve"), "{err}");
+        });
+    }
+
+    /// `polypus.External` parses into `Method::External` with its budget, has
+    /// no seed of its own (C-7), refuses any `initial_point` before the point
+    /// is checked, and is named by a non-method object's `TypeError`.
+    #[test]
+    fn external_reaches_the_method_without_a_seed() {
+        Python::initialize();
+        Python::attach(|py| {
+            let optimizer = PyModule::from_code(
+                py,
+                c"class Done:\n    def ask(self):\n        return None\n    def tell(self, c, v):\n        pass\n",
+                c"external_done.py",
+                c"external_done",
+            )
+            .and_then(|module| module.getattr("Done")?.call0())
+            .expect("the optimizer instantiates");
+            let external = Bound::new(
+                py,
+                External::new(optimizer, 12_i32.into_pyobject(py).unwrap().into_any())
+                    .expect("a valid External"),
+            )
+            .expect("the pyclass instantiates");
+            assert_eq!(method_seed(external.as_any()), None);
+            match method_from_pyclass(external.as_any(), 1, &OracleErrorSlot::new(), "run") {
+                Ok(Method::External(cfg, _)) => assert_eq!(cfg.max_evaluations, 12),
+                _ => panic!("a polypus.External parses into Method::External"),
+            }
+
+            assert!(check_external_initial_point(external.as_any(), None).is_ok());
+            // Even a point of the wrong length gets External's reason.
+            let err = check_external_initial_point(external.as_any(), Some(&[0.5]))
+                .expect_err("External refuses a point");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(
+                err.value(py)
+                    .to_string()
+                    .starts_with("polypus.External takes no initial_point"),
+                "{err}"
+            );
+            let rotosolve = Py::new(py, Rotosolve::new(7, 3, 0.25, 4, None)).unwrap();
+            assert!(
+                check_external_initial_point(rotosolve.bind(py).as_any(), Some(&[0.5])).is_ok()
+            );
+
+            let not_a_method = 3_i32.into_pyobject(py).unwrap();
+            let err = method_from_pyclass(not_a_method.as_any(), 1, &OracleErrorSlot::new(), "run")
+                .err()
+                .expect("an int is not a method");
+            assert!(err.to_string().contains("or polypus.External"), "{err}");
+        });
+    }
+
+    /// A native circuit is checked in Rust: one that qualifies passes, and the
+    /// first problem of one that does not is the `ValueError`'s reason.
+    #[test]
+    fn a_native_circuit_is_checked_for_rotosolve_in_rust() {
+        use crate::circuit::{Param, ParameterizedCircuit};
+        Python::initialize();
+        Python::attach(|py| {
+            let unused = 0_i32.into_pyobject(py).unwrap();
+            let good = CircuitSource::Native(
+                ParameterizedCircuit::new(2)
+                    .ry(0, Param(0))
+                    .cx(0, 1)
+                    .rz(1, Param(1)),
+            );
+            assert!(check_rotosolve_circuit(unused.as_any(), Some(&good), None).is_ok());
+            let bad = CircuitSource::Native(ParameterizedCircuit::new(2).ry(0, Param(0)).crx(
+                0,
+                1,
+                Param(1),
+            ));
+            let err = check_rotosolve_circuit(unused.as_any(), Some(&bad), None)
+                .expect_err("a controlled rotation does not qualify");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.starts_with(
+                    "polypus.Rotosolve cannot train this circuit: parameter 1 ('theta_1') is \
+                     an angle of 'crx' (instruction 1), which is not a rotation generated by a \
+                     single Pauli operator. Rotosolve needs"
+                ),
+                "{message}"
+            );
         });
     }
 }

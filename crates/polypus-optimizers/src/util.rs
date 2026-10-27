@@ -5,7 +5,12 @@
 //! stagnation rule) [`AlgorithmCmaEs`](crate::AlgorithmCmaEs), not part of the
 //! crate's public API, so the module is `pub(crate)`-scoped. Every optimizer,
 //! [`AlgorithmQNG`](crate::AlgorithmQNG) included, checks its optional starting
-//! point with [`check_initial_point`], and DE and CMA-ES share [`wrap_angle`].
+//! point with [`check_initial_point`], DE, CMA-ES and
+//! [`AlgorithmRotosolve`](crate::AlgorithmRotosolve) share [`wrap_angle`], and
+//! [`AlgorithmAdam`](crate::AlgorithmAdam),
+//! [`AlgorithmSPSA`](crate::AlgorithmSPSA), Rotosolve and
+//! [`AlgorithmExternal`](crate::AlgorithmExternal) keep their best point with
+//! [`BestMeasured`].
 //! Each helper is a small, single-purpose free function that used to be inlined
 //! (and duplicated) inside the optimizer loops. The behaviour is preserved
 //! exactly — same operation order, same comparators, same diagnostics — so the
@@ -203,6 +208,54 @@ pub(crate) fn check_initial_point(
         }
     }
     Ok(())
+}
+
+/// The best candidate an oracle has measured, and the value it returned for
+/// it, so that `best_fitness` is the oracle's value for `best_params`
+/// (contract C-5).
+///
+/// The first measurement is always kept, so a run that only ever measures
+/// `NaN` still reports a candidate it measured and the value it got. After it,
+/// a candidate replaces the best only with a strictly greater value, so a tie
+/// keeps the earlier one. A `NaN` never wins: it is greater than nothing, and
+/// any number replaces a `NaN` kept from the first measurement. Empty, it
+/// reports no parameters and `-∞`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BestMeasured {
+    best: Option<(Vec<f64>, f64)>,
+}
+
+impl BestMeasured {
+    /// Nothing measured yet.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Offer `params`, which the oracle scored `value`; returns whether it is
+    /// now the best.
+    pub(crate) fn offer(&mut self, params: &[f64], value: f64) -> bool {
+        let wins = match &self.best {
+            None => true,
+            Some((_, best)) => value > *best || (best.is_nan() && !value.is_nan()),
+        };
+        if wins {
+            self.best = Some((params.to_vec(), value));
+        }
+        wins
+    }
+
+    /// The best value so far; `-∞` before any measurement.
+    pub(crate) fn value(&self) -> f64 {
+        self.best
+            .as_ref()
+            .map_or(f64::NEG_INFINITY, |(_, value)| *value)
+    }
+
+    /// The best parameters and their value; no parameters and `-∞` before any
+    /// measurement.
+    pub(crate) fn into_parts(self) -> (Vec<f64>, f64) {
+        self.best.unwrap_or((Vec::new(), f64::NEG_INFINITY))
+    }
 }
 
 /// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a
@@ -456,6 +509,52 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn best_measured_is_empty_until_the_first_offer() {
+        let best = BestMeasured::new();
+        assert_eq!(best.value(), f64::NEG_INFINITY);
+        assert_eq!(best.into_parts(), (Vec::new(), f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn best_measured_keeps_the_first_offer_then_only_strict_improvements() {
+        let mut best = BestMeasured::new();
+        assert!(best.offer(&[1.0], 0.5));
+        assert!(best.offer(&[2.0], 0.75));
+        // A tie keeps the earlier candidate; a worse one changes nothing.
+        assert!(!best.offer(&[3.0], 0.75));
+        assert!(!best.offer(&[4.0], -1.0));
+        assert_eq!(best.value(), 0.75);
+        assert_eq!(best.into_parts(), (vec![2.0], 0.75));
+    }
+
+    #[test]
+    fn best_measured_never_lets_a_nan_win() {
+        let mut best = BestMeasured::new();
+        assert!(best.offer(&[1.0], f64::NEG_INFINITY));
+        assert!(!best.offer(&[2.0], f64::NAN));
+        assert_eq!(best.value(), f64::NEG_INFINITY);
+        assert!(best.offer(&[3.0], 0.0));
+        assert!(!best.offer(&[4.0], f64::NAN));
+        assert_eq!(best.into_parts(), (vec![3.0], 0.0));
+    }
+
+    #[test]
+    fn best_measured_keeps_a_first_nan_until_any_number_replaces_it() {
+        let mut best = BestMeasured::new();
+        // Only NaN measured: the first candidate and its NaN are what was
+        // measured, so they are what is reported.
+        assert!(best.offer(&[1.0], f64::NAN));
+        assert!(!best.offer(&[2.0], f64::NAN));
+        assert!(best.value().is_nan());
+        let (params, value) = best.clone().into_parts();
+        assert_eq!(params, vec![1.0]);
+        assert!(value.is_nan());
+        // Any number, even -inf, beats it.
+        assert!(best.offer(&[3.0], f64::NEG_INFINITY));
+        assert_eq!(best.into_parts(), (vec![3.0], f64::NEG_INFINITY));
     }
 
     #[test]

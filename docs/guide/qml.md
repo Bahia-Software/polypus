@@ -1,6 +1,6 @@
 # Quantum machine learning
 
-`polypus.qml.train()` trains a data-encoding circuit: a Qiskit `feature_map` encodes each row of `x_train` (one sample per row, `len(feature_map.parameters)` values each), an `ansatz` holds the trainable weights, and the optimizer maximises the mean per-sample score over the training set. It takes the same optimizers and parameters as `train()`.
+`polypus.qml.train()` trains a data-encoding circuit: a Qiskit `feature_map` encodes each row of `x_train` (one sample per row, `len(feature_map.parameters)` values each), an `ansatz` holds the trainable weights, and the optimizer maximises the mean per-sample score over the training set. It takes the same optimizers and parameters as `train()`, `polypus.External` included: there each candidate the library asks for runs one circuit per training sample, and `max_evaluations` counts candidates, not circuits.
 
 Pass `y_train` (one label per row) to train a supervised model: each sample is then scored against **its own label**. Here a binary classifier reads out the parity of the measured bits:
 
@@ -56,6 +56,8 @@ def log_likelihood(counts, label):
 
 expectation_function = polypus.SampleCost(log_likelihood)
 ```
+
+`polypus.Rotosolve` needs a fitness that averages a cost per bitstring, so it does not train with a `SampleCost`: `qml.train` raises `ValueError` before anything runs. It trains the ansatz only, so the feature map's gates are free; see [Rotosolve](training.md#rotosolve).
 
 Integer labels (Python or NumPy ints and bools) reach your function as `int`; if any label is not an integer, all of them arrive as `float` (regression targets). `y_train` is validated before anything runs: a length other than the number of rows, a `NaN`/`inf`, a string or a one-hot row is rejected with the offending index. Without `y_train`, one `expectation_function(bitstring)` is shared by every sample, as before.
 

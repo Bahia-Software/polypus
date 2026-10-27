@@ -11,9 +11,23 @@
 //! - [`AlgorithmQNG`] — Quantum Natural Gradient (QNG)
 //! - [`AlgorithmCmaEs`] — Covariance Matrix Adaptation Evolution Strategy
 //!   (CMA-ES), with optional IPOP restarts
+//! - [`AlgorithmAdam`] — Adam (adaptive moment estimation), or Polyak's
+//!   heavy-ball momentum ([`AdamRule`]), gradient ascent driven by a
+//!   [`GradientOracle`]
+//! - [`AlgorithmSPSA`] — Simultaneous Perturbation Stochastic Approximation
+//!   (SPSA): gradient ascent along an estimate from two evaluations per random
+//!   perturbation, whatever the number of parameters
+//! - [`AlgorithmRotosolve`] — Rotosolve: one parameter at a time, the closed-form
+//!   maximum of the sinusoid each single-Pauli rotation angle traces, with
+//!   Nakanishi, Fujii and Todo's reuse of the predicted value (two evaluations
+//!   per step)
+//! - [`AlgorithmExternal`] — a bridge to an optimizer that lives outside this
+//!   crate and speaks ask/tell ([`AskTell`]): each batch it asks for is scored
+//!   in one oracle call and its values are told back (the Python bindings run
+//!   Optuna, Nevergrad, pycma or the user's own optimizer through it)
 //!
 //! The optimizers are completely decoupled from circuits, backends, and the
-//! Python interpreter. They only depend on two input contracts:
+//! Python interpreter. They only depend on these input contracts:
 //!
 //! - [`EvaluationOracle`] maps a batch of parameter vectors to fitness values
 //!   (higher is better — the optimizers *maximise*). This is the single seam
@@ -22,6 +36,11 @@
 //! - [`VarianceOracle`] (QNG only) returns the diagonal elements of the
 //!   Fubini–Study metric (QFIM). It abstracts the one algorithm-specific
 //!   callback QNG needs, so no runtime detail leaks into this crate.
+//! - [`GradientOracle`] (Adam only) returns the fitness gradient. A caller with
+//!   an exact gradient (a parameter shift) implements it; any other caller
+//!   wraps its [`EvaluationOracle`] in a [`FiniteDifferenceGradient`].
+//! - [`AskTell`] ([`AlgorithmExternal`] only) is the optimizer itself, driven
+//!   from outside: it proposes batches and is told their fitness.
 //!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
@@ -31,7 +50,8 @@
 //! Every optimizer accepts an optional `seed`. With `None` (the default used
 //! by the Polypus Python bindings) it draws from [`rand::rng`], exactly
 //! as before. With `Some(seed)` the run is fully reproducible, which is what
-//! the unit tests rely on.
+//! the unit tests rely on. [`AlgorithmExternal`] is the exception: the
+//! external optimizer owns its randomness.
 //!
 //! ## Example — optimize a trivial analytic function without Python
 //!
@@ -74,25 +94,35 @@
 
 #![deny(clippy::all)]
 
+pub mod adam;
 pub mod cmaes;
 pub mod differential_evolution;
 pub mod error;
+pub mod external;
+pub mod finite_difference;
 pub mod objective;
 pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
+pub mod rotosolve;
+pub mod spsa;
 
 mod linalg;
 mod rng;
 mod shade;
 mod util;
 
+pub use adam::{AdamRule, AlgorithmAdam, AlgorithmAdamArgs};
 pub use cmaes::{AlgorithmCmaEs, AlgorithmCmaEsArgs, CmaEsBatchSchedule};
 pub use differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 pub use error::OptimizerError;
-pub use objective::{EvaluationOracle, VarianceOracle};
+pub use external::{AlgorithmExternal, AlgorithmExternalArgs, AskTell, AskTellError};
+pub use finite_difference::FiniteDifferenceGradient;
+pub use objective::{EvaluationOracle, GradientOracle, VarianceOracle};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};
+pub use rotosolve::{AlgorithmRotosolve, AlgorithmRotosolveArgs};
+pub use spsa::{AlgorithmSPSA, AlgorithmSPSAArgs};
