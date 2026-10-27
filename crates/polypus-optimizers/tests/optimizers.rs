@@ -103,6 +103,8 @@ fn de_converges_to_known_optimum() {
             patience: 20,
             seed: Some(42),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("valid DE args optimize successfully");
 
@@ -191,6 +193,8 @@ fn de_is_deterministic_for_a_fixed_seed() {
                 patience: 20,
                 seed: Some(123),
                 initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
             })
             .expect("valid DE args optimize successfully")
     };
@@ -245,6 +249,8 @@ fn de_early_stops_on_fitness_stagnation() {
                 patience,
                 seed: Some(7),
                 initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
             })
             .expect("valid DE args optimize successfully")
     };
@@ -294,6 +300,8 @@ fn de_large_patience_never_stops_early() {
             patience: 1_000,
             seed: Some(7),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("valid DE args optimize successfully");
     assert!(!outcome.converged, "large patience must prevent early stop");
@@ -357,6 +365,8 @@ fn de_handles_zero_dimensions() {
             patience: 20,
             seed: Some(1),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("valid DE args optimize successfully");
     assert!(outcome.best_params.is_empty());
@@ -375,6 +385,8 @@ fn de_handles_minimum_population() {
             patience: 20,
             seed: Some(1),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("valid DE args optimize successfully");
     assert_eq!(outcome.best_params.len(), 2);
@@ -395,6 +407,8 @@ fn de_rejects_population_below_four() {
             patience: 20,
             seed: Some(1),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         });
         assert!(
             matches!(
@@ -418,6 +432,8 @@ fn de_nan_fitness_does_not_panic() {
             patience: 20,
             seed: Some(1),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         })
         .expect("valid DE args optimize successfully");
     assert_eq!(outcome.best_params.len(), 2);
@@ -437,6 +453,8 @@ fn de_short_oracle_returns_error_not_panic() {
         patience: 20,
         seed: Some(1),
         initial_point: None,
+        mutation_factor: None,
+        crossover_rate: None,
     });
     assert!(
         matches!(
@@ -675,6 +693,8 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 patience: 20,
                 seed: Some(seed),
                 initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
             })
             .expect("valid DE args optimize successfully");
         assert_reported_fitness_matches_params(
@@ -694,6 +714,8 @@ fn de_best_params_fitness_invariant_holds_across_seeds() {
                 patience: 20,
                 seed: Some(seed),
                 initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
             })
             .expect("valid DE args optimize successfully");
         assert_reported_fitness_matches_params(

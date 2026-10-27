@@ -951,10 +951,19 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `patience` (generations; DE binding default **20**) is the look-back window.
     No early stop can fire before generation `patience`, so a larger value makes
     the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
-  - The search dynamics of the default `strategy="rand1bin"` are unchanged
-    (DE/rand/1, `F = 0.8`, `CR = 0.7`, angles initialised in `[0, 2π)`); only
-    the stopping rule differs. The `"shade"` and `"lshade"` strategies below
-    stop by the same rule. PSO still uses the per-dimension std-collapse test;
+  - The search dynamics of the default `strategy="rand1bin"` are DE/rand/1/bin
+    with angles initialised in `[0, 2π)` and a fixed mutation factor `F` and
+    crossover rate `CR`: `polypus.DE(mutation_factor=None,
+    crossover_rate=None)`, `None` meaning 0.8 and 0.7 (Rust:
+    `AlgorithmDifferentialEvolutionArgs::{mutation_factor, crossover_rate}`,
+    `AlgorithmDifferentialEvolution::DEFAULT_*`). `F` must be finite and in
+    `(0, 2]`, `CR` finite and in `[0, 1]`; a value out of range, or any value
+    with `"shade"` or `"lshade"`, which adapt both, raises `ValueError` when
+    the `DE` object is created or the attribute set (Rust:
+    `OptimizerError::InvalidConfig` from `check_preconditions` before any RNG
+    draw). One coordinate of each trial, `j_rand`, always comes from the
+    mutant, so no trial is a plain copy of its parent (#410). The `"shade"`
+    and `"lshade"` strategies below stop by the same rule. PSO still uses the per-dimension std-collapse test;
     QNG has no early stop.
 - **DE strategies.** `polypus.DE(strategy=...)` (Rust: `DeStrategy` and
   `AlgorithmDifferentialEvolution::optimize_with_strategy`) picks how trial
@@ -984,8 +993,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     it by stepping the schedule the optimizer follows, and the walltime
     projection (`run_shape`) uses that count.
   - The adaptive strategies share with `"rand1bin"` the initial population
-    (the same draws from the same seed), the wrapping of mutated angles into
-    `[0, 2π)` (`rem_euclid`: the parameters are periodic), one oracle batch per
+    (the same draws from the same seed), difference vectors taken as the
+    shortest arc in `(−π, π]`, so an optimum on the 0/2π seam is found as well
+    as one at π (#410), mutated angles wrapped into `[0, 2π)` (the parameters
+    are periodic), one oracle batch per
     generation after the initial one, its length checked, the evaluation
     budget, the stagnation stop above (`patience` counts generations for
     L-SHADE too) and every postcondition of this contract. `"rand1bin"` and
@@ -1452,7 +1463,11 @@ silently-poisoned result.
 
 The DE strategies have their own suite,
 `crates/polypus-optimizers/tests/de_strategies.rs`: the pinned `"rand1bin"`
-outcome (`rand1bin_default_matches_its_pinned_outcome`), the multi-seed
+outcome (`rand1bin_default_matches_its_pinned_outcome`, re-pinned in #410),
+`j_rand` (`rand1bin_never_evaluates_a_trial_equal_to_its_parent`), the seam
+(`an_optimum_on_the_seam_converges_as_well_as_one_at_pi`), `F` and `CR`
+(`rand1bin_uses_the_given_mutation_factor_and_crossover_rate`,
+`invalid_rates_are_rejected_before_any_evaluation`), the multi-seed
 invariant (`adaptive_strategies_best_params_fitness_invariant_holds_across_seeds`),
 the stagnation stop, length errors (one on a shrunken L-SHADE batch), the
 L-SHADE schedule and budget

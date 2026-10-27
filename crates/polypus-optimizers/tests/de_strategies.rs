@@ -165,6 +165,8 @@ fn args(
         patience: 1_000,
         seed: Some(seed),
         initial_point: None,
+        mutation_factor: None,
+        crossover_rate: None,
     }
 }
 
@@ -260,9 +262,10 @@ fn bits(values: &[f64]) -> Vec<u64> {
 
 /// Pins DE/rand/1/bin's seeded outcome bit for bit, through both entry points.
 /// The values were captured from `AlgorithmDifferentialEvolution::optimize`
-/// before the strategies were added, so this fails if the default strategy's
-/// draws, arithmetic or stopping rule change at all. Every operation involved
-/// (the uniform draws, `F = 0.8`, `rem_euclid`, the [`Quadratic`] oracle) is
+/// when `j_rand` and the wrapped difference vectors were added (#410), so this
+/// fails if the default strategy's draws, arithmetic or stopping rule change
+/// at all. Every operation involved (the uniform draws, `F = 0.8`, the
+/// wrapped differences, `rem_euclid`, the [`Quadratic`] oracle) is
 /// IEEE-754 basic arithmetic, so the values hold on every platform; a `rand`
 /// release that changed the `StdRng` stream would also fail here, as it does
 /// in `rng.rs`'s pinned-stream test.
@@ -291,23 +294,16 @@ fn rand1bin_default_matches_its_pinned_outcome() {
             patience: 20,
             seed: 42,
             best_params: &[
-                4607612620868739072,
-                4602059860356609501,
-                4604351434418528315,
+                4612925309883399170,
+                4609771367755810729,
+                4613053425573511674,
             ],
-            best_fitness: 13824131431062134976,
+            best_fitness: 13841044831122837039,
             iterations_run: 6,
             converged: false,
-            fitness_history: &[
-                13838482420622740690,
-                13838482420622740690,
-                13836545766831140230,
-                13836545766831140230,
-                13824131431062134976,
-                13824131431062134976,
-            ],
+            fitness_history: &[13841044831122837039; 6],
         },
-        // Stopped by fitness stagnation after 13 of 200 generations.
+        // Stopped by fitness stagnation after 10 of 200 generations.
         Pinned {
             population_size: 10,
             generations: 200,
@@ -315,24 +311,21 @@ fn rand1bin_default_matches_its_pinned_outcome() {
             tolerance: 1e-3,
             patience: 5,
             seed: 7,
-            best_params: &[4607239762160668585, 4606961771196870020],
-            best_fitness: 13783541473274576150,
-            iterations_run: 13,
+            best_params: &[4607676651211568170, 4607322590807962001],
+            best_fitness: 13802026541919242189,
+            iterations_run: 10,
             converged: true,
             fitness_history: &[
                 13824008821365558148,
-                13817008167141364435,
-                13817008167141364435,
-                13817008167141364435,
-                13817008167141364435,
-                13807722849325017925,
-                13807722849325017925,
-                13783541473274576150,
-                13783541473274576150,
-                13783541473274576150,
-                13783541473274576150,
-                13783541473274576150,
-                13783541473274576150,
+                13824008821365558148,
+                13819440700729502274,
+                13819324885250564949,
+                13802026541919242189,
+                13802026541919242189,
+                13802026541919242189,
+                13802026541919242189,
+                13802026541919242189,
+                13802026541919242189,
             ],
         },
     ];
@@ -346,6 +339,8 @@ fn rand1bin_default_matches_its_pinned_outcome() {
             patience: case.patience,
             seed: Some(case.seed),
             initial_point: None,
+            mutation_factor: None,
+            crossover_rate: None,
         };
         let through_trait = AlgorithmDifferentialEvolution
             .optimize(make())
@@ -812,4 +807,195 @@ fn lshade_checks_the_length_of_a_shrunken_batch() {
             got: shrunk - 1
         })
     );
+}
+
+/// Records every vector it evaluates; fitness is `Σ cos(xᵢ − target)`.
+struct RecordingCosine {
+    target: f64,
+    seen: Arc<Mutex<Vec<Vec<f64>>>>,
+}
+
+impl EvaluationOracle for RecordingCosine {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        self.seen.lock().unwrap().extend_from_slice(candidates);
+        candidates
+            .iter()
+            .map(|c| c.iter().map(|x| (x - self.target).cos()).sum())
+            .collect()
+    }
+}
+
+fn run_cosine(
+    strategy: DeStrategy,
+    target: f64,
+    dimensions: u32,
+    population_size: u32,
+    generations: u32,
+    seed: u64,
+) -> (OptimizationOutcome, Vec<Vec<f64>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let outcome = AlgorithmDifferentialEvolution
+        .optimize_with_strategy(
+            strategy,
+            AlgorithmDifferentialEvolutionArgs {
+                oracle: Box::new(RecordingCosine {
+                    target,
+                    seen: Arc::clone(&seen),
+                }),
+                population_size,
+                generations,
+                dimensions,
+                tolerance: 0.0,
+                patience: generations + 1,
+                seed: Some(seed),
+                initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
+            },
+        )
+        .expect("a valid DE configuration runs");
+    let seen = Arc::try_unwrap(seen).unwrap().into_inner().unwrap();
+    (outcome, seen)
+}
+
+/// DE/rand/1/bin forces one mutant coordinate per trial (`j_rand`), so no trial
+/// is its parent unchanged, which would spend an evaluation on a known vector.
+/// Without it a trial equals its parent with probability `(1 − CR)^d`: 30 % of
+/// the trials at `d = 1`.
+#[test]
+fn rand1bin_never_evaluates_a_trial_equal_to_its_parent() {
+    let population_size = 20;
+    for dimensions in 1..=4 {
+        let (_, seen) = run_cosine(DeStrategy::Rand1Bin, PI, dimensions, population_size, 50, 3);
+        let fitness = |v: &[f64]| v.iter().map(|x| (x - PI).cos()).sum::<f64>();
+        // Replay the greedy selection from the evaluated batches.
+        let (initial, generations) = seen.split_at(population_size as usize);
+        let mut population = initial.to_vec();
+        let mut copies = 0;
+        for batch in generations.chunks(population_size as usize) {
+            for (parent, trial) in population.iter_mut().zip(batch) {
+                if trial == parent {
+                    copies += 1;
+                }
+                if fitness(trial) > fitness(parent) {
+                    *parent = trial.clone();
+                }
+            }
+        }
+        assert_eq!(
+            copies, 0,
+            "d = {dimensions}: {copies} trials equal to their parent"
+        );
+    }
+}
+
+/// Angles live on a circle: members at 0.05 and 6.23 rad are 0.1 rad apart. The
+/// difference vectors are wrapped into (−π, π], so an optimum on the 0/2π seam
+/// is found as well as one at π. Before, it converged an order of magnitude
+/// worse for DE/rand/1/bin and about a thousand times worse for SHADE.
+#[test]
+fn an_optimum_on_the_seam_converges_as_well_as_one_at_pi() {
+    let mean_gap = |strategy, target| {
+        let seeds = 0..40u64;
+        let n = seeds.end as f64;
+        seeds
+            .map(|seed| 4.0 - run_cosine(strategy, target, 4, 20, 40, seed).0.best_fitness)
+            .sum::<f64>()
+            / n
+    };
+    for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade] {
+        let (seam, middle) = (mean_gap(strategy, 0.0), mean_gap(strategy, PI));
+        assert!(
+            seam < 2.0 * middle,
+            "{strategy}: mean gap {seam:e} with the optimum at 0, {middle:e} at π"
+        );
+    }
+}
+
+fn rates_args(
+    mutation_factor: Option<f64>,
+    crossover_rate: Option<f64>,
+) -> AlgorithmDifferentialEvolutionArgs {
+    AlgorithmDifferentialEvolutionArgs {
+        mutation_factor,
+        crossover_rate,
+        ..args(Box::new(Quadratic { target: 1.0 }), 10, 20, 3, 5)
+    }
+}
+
+/// `None` is DE/rand/1/bin's documented `F` and `CR`, and a set value is used.
+#[test]
+fn rand1bin_uses_the_given_mutation_factor_and_crossover_rate() {
+    let run = |f, cr| {
+        AlgorithmDifferentialEvolution
+            .optimize(rates_args(f, cr))
+            .expect("valid rates run")
+    };
+    let default = run(None, None);
+    let explicit = run(
+        Some(AlgorithmDifferentialEvolution::DEFAULT_MUTATION_FACTOR),
+        Some(AlgorithmDifferentialEvolution::DEFAULT_CROSSOVER_RATE),
+    );
+    assert_eq!(default, explicit);
+    assert_ne!(run(Some(0.5), None).best_params, default.best_params);
+    assert_ne!(run(None, Some(0.9)).best_params, default.best_params);
+}
+
+/// Rates outside `(0, 2]` / `[0, 1]`, and any rate for SHADE or L-SHADE, which
+/// adapt their own, are rejected before any oracle call.
+#[test]
+fn invalid_rates_are_rejected_before_any_evaluation() {
+    let cases = [
+        (DeStrategy::Rand1Bin, Some(0.0), None, "mutation_factor"),
+        (DeStrategy::Rand1Bin, Some(2.5), None, "mutation_factor"),
+        (
+            DeStrategy::Rand1Bin,
+            Some(f64::NAN),
+            None,
+            "mutation_factor",
+        ),
+        (DeStrategy::Rand1Bin, None, Some(-0.1), "crossover_rate"),
+        (DeStrategy::Rand1Bin, None, Some(1.5), "crossover_rate"),
+        (
+            DeStrategy::Rand1Bin,
+            None,
+            Some(f64::INFINITY),
+            "crossover_rate",
+        ),
+        (DeStrategy::Shade, Some(0.5), None, "mutation_factor"),
+        (DeStrategy::LShade, None, Some(0.5), "crossover_rate"),
+    ];
+    for (strategy, f, cr, name) in cases {
+        let calls = Arc::new(Mutex::new(0usize));
+        let result = AlgorithmDifferentialEvolution.optimize_with_strategy(
+            strategy,
+            AlgorithmDifferentialEvolutionArgs {
+                mutation_factor: f,
+                crossover_rate: cr,
+                ..args(Box::new(Counting(Arc::clone(&calls))), 10, 5, 3, 5)
+            },
+        );
+        match result {
+            Err(OptimizerError::InvalidConfig { parameter, .. }) => {
+                assert_eq!(parameter, name, "{strategy} {f:?} {cr:?}")
+            }
+            other => panic!("{strategy} {f:?} {cr:?}: expected InvalidConfig, got {other:?}"),
+        }
+        assert_eq!(*calls.lock().unwrap(), 0, "the oracle must not be called");
+    }
+    for (f, cr) in [(Some(2.0), Some(0.0)), (Some(1e-9), Some(1.0))] {
+        AlgorithmDifferentialEvolution
+            .optimize(rates_args(f, cr))
+            .expect("the range ends are valid");
+    }
+}
+
+/// Counts its calls; constant fitness.
+struct Counting(Arc<Mutex<usize>>);
+
+impl EvaluationOracle for Counting {
+    fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+        *self.0.lock().unwrap() += 1;
+        vec![0.0; candidates.len()]
+    }
 }

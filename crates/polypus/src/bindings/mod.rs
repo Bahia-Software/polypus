@@ -649,6 +649,8 @@ fn method_from_pyclass(
             tolerance: de.tolerance,
             patience: de.patience,
             strategy: de.strategy,
+            mutation_factor: de.mutation_factor,
+            crossover_rate: de.crossover_rate,
         }));
     }
     if let Ok(pso) = method.extract::<PyRef<PSO>>() {
@@ -3046,6 +3048,8 @@ mod tests {
                     patience: 20,
                     seed: Some(seed),
                     initial_point: None,
+                    mutation_factor: None,
+                    crossover_rate: None,
                 })
                 .expect("valid DE args optimize successfully")
         };
@@ -3066,13 +3070,17 @@ mod tests {
         use polypus_optimizers::DeStrategy;
         Python::initialize();
         Python::attach(|py| {
-            let err = DE::new(100, 50, 0.01, 20, None, "LSHADE")
+            let err = DE::new(100, 50, 0.01, 20, None, "LSHADE", None, None)
                 .err()
                 .expect("an unknown strategy is rejected");
             assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
             assert!(err.to_string().contains("\"lshade\""), "{err}");
 
-            let de = Py::new(py, DE::new(100, 50, 0.01, 20, None, "shade").unwrap()).unwrap();
+            let de = Py::new(
+                py,
+                DE::new(100, 50, 0.01, 20, None, "shade", None, None).unwrap(),
+            )
+            .unwrap();
             let bound = de.bind(py);
             assert!(bound.setattr("strategy", "jade").is_err());
             assert_eq!(
