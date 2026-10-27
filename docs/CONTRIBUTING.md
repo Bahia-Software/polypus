@@ -215,7 +215,10 @@ request and push to `main` (configuration in `sonar-project.properties`):
 Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes and over the
 pytest suite, which runs against a wheel built with the same instrumentation,
 the clippy report, and Python coverage of `python/` from that pytest run. The
-subprocess worker template
+instrumented wheel simulates several times slower, so that run sets
+`POLYPUS_TEST_TIME_SCALE=10`, which stretches the deadlines and timeouts of the
+Ctrl+C tests in `tests/python/test_interrupt.py` by that factor; `ci.yml` runs
+them with the bounds as written. The subprocess worker template
 (`crates/polypus-subprocess-backend/python/worker_template.py`) is left out of
 the coverage figures: it runs as a separate process spawned by the Rust
 integration tests, which no tool instruments. So are the diagnostic binaries

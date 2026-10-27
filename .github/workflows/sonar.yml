@@ -106,10 +106,13 @@ jobs:
       # the profiles go) reach the build, the tests and the report. The build
       # goes to cargo-llvm-cov's target directory, where `report` looks.
       # sys.monitoring also traces the Python callbacks the extension runs from
-      # threads it starts itself, which settrace-based tracing misses.
+      # threads it starts itself, which settrace-based tracing misses. The
+      # instrumented extension simulates up to ten times slower, so the
+      # deadlines of the Ctrl+C tests (test_interrupt.py) stretch to match.
       - name: Build, install and test the instrumented wheel
         env:
           COVERAGE_CORE: sysmon
+          POLYPUS_TEST_TIME_SCALE: "10"
         run: |
           source <(cargo llvm-cov show-env --sh)
           export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR"
