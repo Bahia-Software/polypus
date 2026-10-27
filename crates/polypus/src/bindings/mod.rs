@@ -15,6 +15,7 @@ pub mod external;
 pub mod logging;
 pub mod observable;
 pub mod pso;
+pub mod qml;
 pub mod qng;
 pub mod rotosolve;
 pub mod spsa;
@@ -35,7 +36,7 @@ use spsa::Spsa;
 
 use crate::evaluation::{
     CircuitSource, CostObservable, Label, OracleErrorSlot, PyCallbackObservable, PyLabelledCost,
-    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, SupervisedObjective,
+    PySampleCost, PyVarianceOracle, QmlObjective, QmlOracleFactory, QmlSource, SupervisedObjective,
     VqcOracleFactory,
 };
 use crate::infrastructure::execution_config::{random_id_bytes, random_seed};
@@ -2087,6 +2088,8 @@ pub fn qml_train<'py>(
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
     validate_id(&id)?;
+    // Native models have their own entry point (plan D4-R).
+    qml::reject_native_pieces("train", &feature_map, &ansatz)?;
     // Same seed precedence as `train` (contract C-7): kwarg > optimizer field >
     // OS entropy. qml.train always runs on a Qiskit/Aer path (native rejected
     // below); this seed governs the optimizer's RNG and, since it's threaded
@@ -2227,8 +2230,11 @@ pub fn qml_train<'py>(
     let scheduler = Scheduler::ephemeral(resources);
     let flow = TrainFlow {
         factory: QmlOracleFactory {
-            training_circuits: qcs,
-            objective,
+            source: QmlSource::Qiskit {
+                training_circuits: qcs,
+                objective,
+            },
+            minibatch: None,
         },
         method: method_enum,
         dimensions,
@@ -2297,6 +2303,7 @@ pub fn qml_predict<'py>(
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
     validate_cunqa_allocation(&infrastructure, nodes, cores_per_qpu, walltime.as_deref())?;
+    qml::reject_native_pieces("predict", &feature_map, &ansatz)?;
     // The model is a Qiskit circuit: neither the native backend nor QMIO runs it.
     if is_native_backend(backend) {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -2461,6 +2468,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let qml = PyModule::new(py, "polypus.qml")?;
     qml.add_function(wrap_pyfunction!(qml_train, &qml)?)?;
     qml.add_function(wrap_pyfunction!(qml_predict, &qml)?)?;
+    qml::register(&qml)?;
     // Attach under the short key: `add_submodule` would use the dotted `__name__`
     // verbatim as the attribute name, breaking `polypus.qml.train` access.
     m.add("qml", &qml)?;

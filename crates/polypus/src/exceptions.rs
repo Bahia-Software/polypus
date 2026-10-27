@@ -373,6 +373,8 @@ pub(crate) fn evaluation_error_to_pyerr(err: crate::evaluation::EvaluationError)
         invalid_variance @ EvalErr::InvalidVariance { .. } => {
             EvaluationError::new_err(invalid_variance.to_string())
         }
+        // A native QML model failure (`polypus-qml`) is an evaluation failure.
+        qml @ EvalErr::Qml(_) => EvaluationError::new_err(qml.to_string()),
     }
 }
 
@@ -972,6 +974,16 @@ mod evaluation_mapping_tests {
                 value: -1.0,
             },
             "finite, non-negative",
+        );
+    }
+
+    #[test]
+    fn qml_maps_to_evaluation_error() {
+        assert_maps_to_evaluation_error(
+            EvalErr::Qml(crate::evaluation::QmlError::NoExactGradient {
+                reason: "a Qiskit source".to_string(),
+            }),
+            "no exact parameter-shift gradient",
         );
     }
 

@@ -14,6 +14,28 @@ Entries were curated from the Conventional Commits history. Releases before
 Changes on `main` since 0.7.2.
 
 ### Added
+- Native QML models in `polypus.qml`: `Model(encoder, ansatz, readout)`
+  built from an `Encoder` and an `Ansatz` (layer builders that check each call
+  without the data, with data re-uploading inside the ansatz) and a
+  `Readout(observables, decision="raw", threshold=None)`, with the readout
+  helpers `Z`/`X`/`Y`, `PauliTerm` (`Z(0) @ Z(1)`) and `Observable` (weighted
+  sums). `Model.fit(x, y=None, *, method, loss=None, ...)` trains it on rows or
+  a `Dataset(x, y=None)` (an unlabeled dataset stays marked as such across a
+  split) and returns a `TrainResult`: supervised with a named loss, or
+  unsupervised maximising the readout; Adam gets the exact parameter-shift
+  gradient; `polypus.Rotosolve` is accepted with `loss="expectation"` on a
+  model whose trainable parameters each sit in one rotation, and is otherwise
+  a `ValueError` before anything runs, as in `train` (#398); `exact=True` uses exact probabilities on the local native
+  simulator; `batch_size` trains on minibatches. `Model.bind(params)` gives an
+  immutable `TrainedModel` whose `predict` returns the readout's decisions
+  (`int` for sign, threshold and argmax, `float` for raw) and whose `run`
+  returns the counts per row, or an `ExactResult` of probabilities with
+  `exact=True`. `TrainedModel.save(path)` writes it as versioned JSON (read back
+  bit for bit) and `polypus.qml.load(path)` reads it, revalidating the model
+  and its parameters; loading never runs code. Execution arguments have
+  defaults, and `backend=None` is the native simulator on `local`. Options are
+  strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
+  circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
 - `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
   `qml.train`: runs an optimizer from outside Polypus, a library such as
   Optuna, Nevergrad or pycma or an object of your own, through Polypus's
@@ -175,6 +197,33 @@ Changes on `main` since 0.7.2.
   program that is not a terminal-measurement circuit. The keyword-only
   `resources=True` also checks the native qubit ceiling and memory budget, with
   the message of the error the run raises.
+- The QML oracle (`QmlOracle`, Rust) trains a native `polypus-qml` problem as
+  well as Qiskit circuits (`QmlSource`), sampled or exact, with optional
+  per-call minibatches (`MinibatchConfig`, `evaluate_full`) and, for the native
+  source, the exact parameter-shift gradient, which `QmlOracleFactory` hands
+  to Adam through the run's `Oracles`. Without a minibatch the gradient also
+  returns the parameters' fitness from its own batch
+  (`GradientOracle::value_and_gradient`), so an Adam iteration on a native
+  model is one call. Both sources share the candidate windows. With a minibatch the `Oracles` also carry a full-dataset view
+  (`Oracles::full_evaluation`): Adam scores its parameters on it and takes
+  only the gradient from the minibatch, and the other optimizers'
+  `best_fitness` is re-scored on it at the end.
+- `NativeStatevectorBackend::run_circuits_exact` (Rust): the exact basis-state
+  probabilities of each circuit, keyed like its counts, with no sampling and
+  the same memory budget and windows as `run_circuits`. Only for a
+  full-register read-out.
+- `polypus-qml`, a pure-Rust crate for quantum machine learning: validated
+  datasets with deterministic splits and feature scaling; layered variational
+  models (angle, amplitude, IQP and basis encoders, a hardware-efficient
+  ansatz, QCNN convolution and pooling); Pauli readout with sign, threshold,
+  argmax or raw decisions; squared-error, binary and categorical
+  cross-entropy and hinge losses, and an unsupervised `Expectation` loss that
+  maximises the readout itself (no labels). It builds `polypus-circuit`
+  circuits and turns measurement counts into a fitness, and into an exact
+  parameter-shift gradient that stays exact when convolution and pooling reuse
+  a parameter across gates, but never runs them. A `TrainedModel` (model plus
+  trained parameters) saves as versioned JSON under the `serde` feature.
+  Python reaches it through `polypus.qml.Model`.
 - `polypus.CMAES(generations=100, population_size=None, sigma0=math.pi / 2,
   tolerance=0.01, patience=20, restarts=0, seed=None)`, accepted by `train`
   and `qml.train`: Hansen's (μ/μ_w, λ)-CMA-ES for periodic parameters, with

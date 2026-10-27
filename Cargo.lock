@@ -794,9 +794,11 @@ dependencies = [
  "polypus-observable",
  "polypus-optimizers",
  "polypus-orchestration",
+ "polypus-qml",
  "polypus-sim",
  "pyo3",
  "rayon",
+ "serde_json",
  "uuid",
 ]
 
@@ -830,6 +832,7 @@ dependencies = [
  "polypus-observable",
  "polypus-optimizers",
  "polypus-orchestration",
+ "polypus-qml",
  "pyo3",
  "rayon",
 ]
@@ -897,6 +900,18 @@ dependencies = [
  "plotters",
  "rand 0.10.3",
  "serde",
+]
+
+[[package]]
+name = "polypus-qml"
+version = "0.7.2"
+dependencies = [
+ "log",
+ "polypus-circuit",
+ "polypus-optimizers",
+ "polypus-sim",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

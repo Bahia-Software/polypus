@@ -158,17 +158,23 @@ pub enum Method {
 /// - `gradient` is an exact fitness gradient, when the factory can compute one
 ///   (a parameter shift). Only Adam reads it; without it, Adam differentiates
 ///   `evaluation` by finite differences.
+/// - `full_evaluation` is set when `evaluation` scores a minibatch: the same
+///   model on every training sample. Adam tracks its best solution with it (the
+///   minibatch only drives its gradient), and the other optimizers' reported
+///   `best_fitness` is re-scored with it once they finish (contract C-5).
 pub struct Oracles {
     pub evaluation: Box<dyn EvaluationOracle>,
     pub gradient: Option<Box<dyn GradientOracle>>,
+    pub full_evaluation: Option<Box<dyn EvaluationOracle>>,
 }
 
 impl From<Box<dyn EvaluationOracle>> for Oracles {
-    /// An evaluation oracle alone: no exact gradient.
+    /// An evaluation oracle alone: no exact gradient, no minibatch.
     fn from(evaluation: Box<dyn EvaluationOracle>) -> Self {
         Oracles {
             evaluation,
             gradient: None,
+            full_evaluation: None,
         }
     }
 }
@@ -401,9 +407,20 @@ pub fn dispatch_optimizer(
     let Oracles {
         evaluation: oracle,
         gradient,
+        mut full_evaluation,
     } = oracles.into();
     let result = match method {
-        Method::Adam(cfg) => dispatch_adam(cfg, oracle, gradient, dimensions, seed, initial_point),
+        // Adam tracks its best on the full set itself, so it takes the view and
+        // its outcome is not re-scored below.
+        Method::Adam(cfg) => dispatch_adam(
+            cfg,
+            oracle,
+            gradient,
+            full_evaluation.take(),
+            dimensions,
+            seed,
+            initial_point,
+        ),
         Method::De(cfg) => AlgorithmDifferentialEvolution.optimize_with_strategy(
             cfg.strategy,
             AlgorithmDifferentialEvolutionArgs {
@@ -491,6 +508,13 @@ pub fn dispatch_optimizer(
                 })
         }
     };
+    // With a minibatch a gradient-free optimizer steered by subset estimates,
+    // so its `best_fitness` is one; re-score the returned parameters on every
+    // sample (C-5). `fitness_history` keeps the estimates the search used.
+    let result = match (result, full_evaluation) {
+        (Ok(outcome), Some(full)) => rescore(outcome, full.as_ref()),
+        (result, _) => result,
+    };
     finish(result, errors)
 }
 
@@ -511,28 +535,38 @@ fn refuse_external_initial_point(initial_point: Option<&[f64]>) -> Result<(), Op
 
 /// Adam: the gradient is the exact one when the oracles carry it, otherwise a
 /// finite difference of `evaluation`, which scores θ with its stencil in one
-/// batch per iteration.
+/// batch per iteration. When `evaluation` is a minibatch, the best solution is
+/// tracked on every sample (`full_evaluation`), so its history and
+/// `best_fitness` are full-dataset values.
 fn dispatch_adam(
     cfg: AdamConfig,
     evaluation: Box<dyn EvaluationOracle>,
     gradient: Option<Box<dyn GradientOracle>>,
+    full_evaluation: Option<Box<dyn EvaluationOracle>>,
     dimensions: u32,
     seed: u64,
     initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OptimizerError> {
     let (gradient_oracle, tracking): (Box<dyn GradientOracle>, Box<dyn EvaluationOracle>) =
-        match gradient {
-            Some(gradient) => (gradient, evaluation),
-            None => {
-                // The finite difference and the tracking share one oracle: θ's
-                // value comes from the difference's batch, and Adam reports it
-                // as the run's fitness (C-5).
+        match (gradient, full_evaluation) {
+            (Some(gradient), Some(full)) => (gradient, full),
+            (Some(gradient), None) => (gradient, evaluation),
+            (None, full) => {
                 let evaluation: Arc<dyn EvaluationOracle> = Arc::from(evaluation);
                 let difference = FiniteDifferenceGradient::new(
                     Arc::clone(&evaluation),
                     cfg.finite_difference_step,
                 )?;
-                (Box::new(difference), Box::new(evaluation))
+                match full {
+                    // The stencil scores θ on the minibatch, and Adam must
+                    // report its own oracle's value (C-5), so it scores θ on
+                    // the full set and takes only the gradient from here.
+                    Some(full) => (Box::new(GradientOnly(difference)), full),
+                    // The finite difference and the tracking share one oracle:
+                    // θ's value comes from the difference's batch, and Adam
+                    // reports it as the run's fitness (C-5).
+                    None => (Box::new(difference), Box::new(evaluation)),
+                }
             }
         };
     AlgorithmAdam.optimize(AlgorithmAdamArgs {
@@ -551,6 +585,36 @@ fn dispatch_adam(
         seed: Some(seed),
         initial_point,
     })
+}
+
+/// A gradient oracle without its [`GradientOracle::value_and_gradient`], so
+/// Adam scores θ with its own oracle before asking for the gradient.
+struct GradientOnly<G>(G);
+
+impl<G: GradientOracle> GradientOracle for GradientOnly<G> {
+    fn gradient(&self, theta: &[f64], param_index: usize) -> f64 {
+        self.0.gradient(theta, param_index)
+    }
+
+    fn gradient_batch(&self, theta: &[f64], dims: usize) -> Vec<f64> {
+        self.0.gradient_batch(theta, dims)
+    }
+}
+
+/// `outcome` with `best_fitness` re-scored by `full` on `best_params`.
+fn rescore(
+    mut outcome: OptimizationOutcome,
+    full: &dyn EvaluationOracle,
+) -> Result<OptimizationOutcome, OptimizerError> {
+    let scores = full.evaluate_batch(std::slice::from_ref(&outcome.best_params));
+    if scores.len() != 1 {
+        return Err(OptimizerError::OracleLengthMismatch {
+            expected: 1,
+            got: scores.len(),
+        });
+    }
+    outcome.best_fitness = scores[0];
+    Ok(outcome)
 }
 
 /// An oracle failure recorded during the run is the root cause; surface it
@@ -1361,6 +1425,7 @@ mod tests {
         let oracles = Oracles {
             evaluation: oracle,
             gradient: Some(Box::new(QuadraticGradient(Arc::clone(&calls)))),
+            full_evaluation: None,
         };
         let outcome = dispatch_optimizer(
             adam_method(300),
@@ -1378,6 +1443,96 @@ mod tests {
         let sizes = sizes(&log);
         assert_eq!(sizes.len(), outcome.iterations_run + 1);
         assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
+    }
+
+    #[test]
+    fn a_minibatched_adam_tracks_its_best_on_the_full_dataset() {
+        let (minibatch, minibatch_log) = recorder();
+        let (full, full_log) = recorder();
+        let oracles = Oracles {
+            evaluation: minibatch,
+            gradient: None,
+            full_evaluation: Some(full),
+        };
+        let outcome = dispatch_optimizer(
+            adam_method(50),
+            oracles,
+            2,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
+        // The minibatch oracle only feeds the gradient, a bare stencil with no
+        // θ in front; θ is scored on the full set, once per iteration, and so is
+        // the final θ, and nothing is re-scored after it.
+        let minibatch_sizes = sizes(&minibatch_log);
+        assert_eq!(minibatch_sizes.len(), outcome.iterations_run);
+        assert!(
+            minibatch_sizes.iter().all(|&n| n == 4),
+            "{minibatch_sizes:?}"
+        );
+        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run + 1]);
+        assert_eq!(outcome.fitness_history.last(), Some(&outcome.best_fitness));
+    }
+
+    #[test]
+    fn a_minibatched_adam_with_an_exact_gradient_tracks_on_the_full_dataset() {
+        let (minibatch, minibatch_log) = recorder();
+        let (full, full_log) = recorder();
+        let calls = Arc::new(Mutex::new(0));
+        let oracles = Oracles {
+            evaluation: minibatch,
+            gradient: Some(Box::new(QuadraticGradient(Arc::clone(&calls)))),
+            full_evaluation: Some(full),
+        };
+        let outcome = dispatch_optimizer(
+            adam_method(50),
+            oracles,
+            2,
+            &OracleErrorSlot::new(),
+            4,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid Adam run must succeed"));
+        assert!(sizes(&minibatch_log).is_empty());
+        assert_eq!(sizes(&full_log), vec![1; outcome.iterations_run + 1]);
+        assert_eq!(*calls.lock().unwrap(), outcome.iterations_run);
+    }
+
+    /// Scores every candidate `offset` above `RecordingQuadratic`, so a test can
+    /// tell which oracle produced a fitness.
+    struct Shifted(f64);
+    impl EvaluationOracle for Shifted {
+        fn evaluate_batch(&self, candidates: &[Vec<f64>]) -> Vec<f64> {
+            candidates
+                .iter()
+                .map(|c| self.0 - c.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_minibatched_population_run_reports_its_best_on_the_full_dataset() {
+        let (minibatch, _) = recorder();
+        let oracles = Oracles {
+            evaluation: minibatch,
+            gradient: None,
+            full_evaluation: Some(Box::new(Shifted(100.0))),
+        };
+        let outcome = dispatch_optimizer(
+            de_method(DeStrategy::default()),
+            oracles,
+            3,
+            &OracleErrorSlot::new(),
+            9,
+            None,
+        )
+        .unwrap_or_else(|_| panic!("a valid DE run must succeed"));
+        let full = Shifted(100.0).evaluate_batch(std::slice::from_ref(&outcome.best_params))[0];
+        assert_eq!(outcome.best_fitness, full);
+        // The history keeps the estimates the search steered by.
+        assert!(outcome.fitness_history.iter().all(|&f| f <= 0.0));
     }
 
     /// The configured rule reaches the optimizer: dispatch runs what
