@@ -293,6 +293,7 @@ class TestOptunaAdapter:
             ({"bounds": (1.0, 1.0)}, "bounds must be finite with low < high"),
             ({"bounds": (0.0, math.inf)}, "bounds must be finite with low < high"),
             ({"bounds": 3}, "bounds must be two numbers (low, high), got 3"),
+            ({"initial_point": ["a", 0.5]}, "must be 2 numbers, got ['a', 0.5]"),
             ({"initial_point": [0.5]}, "must have one value per dimension (2), got 1"),
             ({"initial_point": [0.5, math.nan]}, "every value must be finite"),
             ({"initial_point": [0.5, 7.0]}, "must lie within bounds"),

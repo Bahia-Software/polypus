@@ -4456,4 +4456,267 @@ mod tests {
         });
         crate::exceptions::tests::assert_configuration_error(&err, "must be at least 4, got 3");
     }
+
+    /// Register `name` as a backend whose factory counts its calls in `builds`
+    /// and fails, so a test can tell whether an entry point created it.
+    fn register_sentinel_backend(name: &str, builds: &'static std::sync::atomic::AtomicUsize) {
+        crate::infrastructure::register_backend(
+            name,
+            move |_ctx: &crate::infrastructure::BackendBuildContext| {
+                builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::infrastructure::BackendError::Conversion(
+                    "the sentinel backend was created".to_string(),
+                ))
+            },
+        );
+    }
+
+    /// A `polypus.DE` built through its Python signature, so these tests do not
+    /// depend on the order of `DE::new`'s arguments.
+    fn de<'py>(py: Python<'py>, population_size: u32) -> Bound<'py, PyAny> {
+        let kwargs = [("generations", 1), ("population_size", population_size)]
+            .into_py_dict(py)
+            .expect("the kwargs build");
+        py.get_type::<DE>()
+            .call((), Some(&kwargs))
+            .expect("the pyclass instantiates")
+    }
+
+    /// `train` with every argument but these fixed: one dimension, a Qiskit-like
+    /// placeholder circuit (nothing reads it before the backend exists).
+    fn train_on<'py>(
+        py: Python<'py>,
+        infrastructure: &str,
+        method: Bound<'py, PyAny>,
+        expectation_function: Bound<'py, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        train(
+            py.None().into_bound(py),
+            method,
+            16,
+            1,
+            1,
+            expectation_function,
+            infrastructure.to_string(),
+            1,
+            1,
+            "edge".to_string(),
+            "automatic",
+            None,
+            "aer",
+            Some(3),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Stand-ins for a Qiskit feature map and ansatz: what `qml.train` reads of
+    /// them before the backend exists (`parameters`, `compose`, `num_clbits`,
+    /// `assign_parameters`).
+    fn fake_qml_circuits(py: Python<'_>) -> (Bound<'_, PyAny>, Bound<'_, PyAny>) {
+        let module = PyModule::from_code(
+            py,
+            c"class Circuit:
+    num_clbits = 1
+    def __init__(self, *parameters):
+        self.parameters = list(parameters)
+    def compose(self, other):
+        return Circuit(*self.parameters, *other.parameters)
+    def assign_parameters(self, values, inplace=False):
+        return self
+",
+            c"fake_qml_circuits.py",
+            c"fake_qml_circuits",
+        )
+        .expect("the module compiles");
+        let circuit = module.getattr("Circuit").expect("the class exists");
+        (
+            circuit.call1(("x",)).expect("a feature map"),
+            circuit.call1(("w",)).expect("an ansatz"),
+        )
+    }
+
+    /// `qml.train` with every argument but these fixed: one feature, one weight,
+    /// two training rows.
+    fn qml_train_on<'py>(
+        py: Python<'py>,
+        infrastructure: &str,
+        method: Bound<'py, PyAny>,
+        expectation_function: Bound<'py, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let (feature_map, ansatz) = fake_qml_circuits(py);
+        let rows = py.eval(c"[[0.1], [0.2]]", None, None).expect("the rows");
+        qml_train(
+            feature_map,
+            ansatz,
+            rows,
+            method,
+            16,
+            1,
+            1,
+            expectation_function,
+            infrastructure.to_string(),
+            1,
+            1,
+            "edge".to_string(),
+            "automatic",
+            None,
+            "aer",
+            Some(3),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// `train` and `qml.train` convert `expectation_function` and check the
+    /// optimizer before they create the backend, which on CUNQA requests a
+    /// SLURM allocation (issue #418).
+    #[test]
+    fn training_checks_the_configuration_before_creating_the_backend() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TRAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+        static QML_BUILDS: AtomicUsize = AtomicUsize::new(0);
+        register_sentinel_backend("sentinel-train-418", &TRAIN_BUILDS);
+        register_sentinel_backend("sentinel-qml-train-418", &QML_BUILDS);
+        Python::initialize();
+        Python::attach(|py| {
+            let not_an_observable = 42_i32.into_pyobject(py).unwrap().into_any();
+            let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+            type Run = for<'py> fn(
+                Python<'py>,
+                &str,
+                Bound<'py, PyAny>,
+                Bound<'py, PyAny>,
+            ) -> PyResult<Py<PyAny>>;
+            let entry_points: [(&str, &str, &AtomicUsize, Run); 2] = [
+                ("train", "sentinel-train-418", &TRAIN_BUILDS, train_on),
+                (
+                    "qml.train",
+                    "sentinel-qml-train-418",
+                    &QML_BUILDS,
+                    qml_train_on,
+                ),
+            ];
+            for (name, infrastructure, builds, run) in entry_points {
+                let err = run(py, infrastructure, de(py, 4), not_an_observable.clone())
+                    .expect_err("an invalid observable is rejected");
+                assert!(
+                    err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                    "{name}: {err}"
+                );
+                assert!(
+                    err.to_string().contains("expectation_function"),
+                    "{name}: {err}"
+                );
+
+                let err = run(py, infrastructure, de(py, 3), cost.clone())
+                    .expect_err("a population too small is rejected");
+                crate::exceptions::tests::assert_configuration_error(&err, "population_size");
+                assert_eq!(
+                    builds.load(Ordering::SeqCst),
+                    0,
+                    "{name} created the backend"
+                );
+
+                // Control: a valid configuration does create it.
+                let err = run(py, infrastructure, de(py, 4), cost.clone())
+                    .expect_err("the sentinel backend fails");
+                assert!(
+                    err.to_string().contains("sentinel backend was created"),
+                    "{name}: {err}"
+                );
+                assert_eq!(builds.load(Ordering::SeqCst), 1, "{name}");
+            }
+        });
+    }
+
+    /// `qml.train` and `qml.predict` refuse `infrastructure="qmio"` before they
+    /// read the model, which QMIO could not serialize.
+    #[test]
+    fn qml_rejects_qmio_before_reading_the_model() {
+        Python::initialize();
+        Python::attach(|py| {
+            let none = || py.None().into_bound(py);
+            let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+            let train_err = qml_train(
+                none(),
+                none(),
+                none(),
+                de(py, 4),
+                16,
+                1,
+                1,
+                cost,
+                "qmio".to_string(),
+                1,
+                1,
+                "edge".to_string(),
+                "automatic",
+                None,
+                "aer",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect_err("qmio is rejected");
+            let predict_err = qml_predict(
+                none(),
+                none(),
+                none(),
+                vec![0.0],
+                16,
+                "qmio".to_string(),
+                1,
+                1,
+                1,
+                "automatic",
+                None,
+                "aer",
+                None,
+                None,
+            )
+            .expect_err("qmio is rejected");
+            for err in [train_err, predict_err] {
+                crate::exceptions::tests::assert_configuration_error(
+                    &err,
+                    "cannot serialize the Qiskit circuits of a QML model",
+                );
+            }
+        });
+    }
+
+    /// The argument checks shared by the entry points raise
+    /// `polypus.ConfigurationError`.
+    #[test]
+    fn argument_checks_raise_configuration_error() {
+        // Before the cases: without an interpreter the class cannot be looked up.
+        Python::initialize();
+        let cases: [(PyResult<()>, &str); 6] = [
+            (validate_id(""), "id must not be empty"),
+            (validate_id("a b"), "' '"),
+            (validate_id(&"a".repeat(65)), "64"),
+            (validate_cunqa_allocation("cunqa", 0, 1, None), "nodes"),
+            (
+                validate_cunqa_allocation("cunqa", 1, 0, None),
+                "cores_per_qpu",
+            ),
+            (
+                validate_cunqa_allocation("cunqa", 1, 1, Some("1-00:00:00")),
+                "walltime",
+            ),
+        ];
+        for (result, message) in cases {
+            let err = result.expect_err("the argument is rejected");
+            crate::exceptions::tests::assert_configuration_error(&err, message);
+        }
+    }
 }
