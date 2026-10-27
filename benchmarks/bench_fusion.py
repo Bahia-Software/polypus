@@ -139,7 +139,7 @@ def run_point(family: str, n: int, depth: int, reps: int) -> dict:
     }
 
 
-def _worker() -> int:
+def _worker() -> None:
     """Subprocess entry: run one point and print its result as JSON."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--family", required=True)
@@ -148,7 +148,6 @@ def _worker() -> int:
     ap.add_argument("--reps", type=int, required=True)
     args = ap.parse_args(sys.argv[2:])
     print(json.dumps(run_point(args.family, args.n, args.depth, args.reps)))
-    return 0
 
 
 def main() -> int:
@@ -193,6 +192,7 @@ def main() -> int:
     )
 
     rows = []
+    failed = 0
     for family in args.families:
         depth = args.depth if args.depth is not None else _DEFAULT_DEPTH.get(family, 1)
         for n in args.qubits:
@@ -213,6 +213,7 @@ def main() -> int:
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
+                failed += 1
                 print(
                     f"! {family} n={n} FAILED:\n{proc.stderr.strip()}", file=sys.stderr
                 )
@@ -242,10 +243,16 @@ def main() -> int:
                 )
         print(f"# wrote {csv_path} and {json_path}")
 
+    # A failed point is skipped so the rest of the sweep still runs and is
+    # saved, but the exit code must say the results have holes.
+    if failed:
+        print(f"! {failed} point(s) FAILED", file=sys.stderr)
+        return 1
     return 0
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
-        raise SystemExit(_worker())
-    raise SystemExit(main())
+        _worker()
+    else:
+        raise SystemExit(main())
