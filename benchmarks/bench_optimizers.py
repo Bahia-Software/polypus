@@ -44,7 +44,9 @@ the number of parameters):
                 on the HEA
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
                 iteration, with spsa's perturbation and target step on each
-                problem, so the two differ only in the perturbations
+                problem, so their settings differ only in the perturbations;
+                the averaged estimate is smaller on average, so its steps
+                are usually shorter
   rotosolve     polypus.Rotosolve(), the HEA only: as many sweeps as the
                 budget allows, the current point re-measured every fifth
                 step (the default)
@@ -58,9 +60,11 @@ nothing there and prints the row as "—" (not applicable).
 Momentum's learning rate depends on the scale of the cost, so its rate and
 step are tuned per problem: they are the values the review that proposed Adam
 (#395) chose on reserved instances 100-109, never on the test instances
-0-29. Adam uses one configuration, its defaults, for both problems. SPSA's
+0-29. Adam uses one configuration for both problems, its defaults, which the
+same review chose on reserved instances, not on the test ones. SPSA's
 perturbation and target step are likewise the values the review that
-proposed SPSA (#396) chose on instances 100-109.
+proposed SPSA (#396) chose on instances 100-109. DE and CMA-ES use their
+defaults, untuned.
 
 Early stopping is off (``tolerance=0``) for all but ``cmaes-ipop``, so they
 spend the whole budget; ``cmaes-ipop`` keeps the default ``tolerance=0.01`` and
@@ -208,7 +212,8 @@ RESTART_SEED_STEP = 1_000_000
 # SPSA's perturbations per iteration, and its (perturbation, target step) per
 # problem, as tuned on the reserved instances 100-109 in the review that
 # proposed SPSA (#396) with one perturbation; spsa-k8 takes the same, so the
-# two rows differ only in the perturbations.
+# two rows' settings differ only in the perturbations (spsa-k8's steps are
+# shorter, its averaged estimate being smaller).
 SPSA_RESAMPLINGS = {"spsa": 1, "spsa-k8": 8}
 SPSA = {"qaoa": (0.2, 1.2), "hea": (0.1, 0.63)}
 # The circuits of SPSA's calibration batch, before its first iteration.

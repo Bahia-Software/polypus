@@ -24,7 +24,27 @@ use std::fmt;
 /// `f64` bounds, which are not `Eq`, exactly as this crate's
 /// [`OptimizationOutcome`](crate::OptimizationOutcome) omits `Eq` for the same
 /// reason.
+///
+/// The enum is `#[non_exhaustive]`: new optimizers add variants without a
+/// breaking release, so a `match` outside this crate needs a wildcard arm.
+///
+/// ```compile_fail,E0004
+/// use polypus_optimizers::OptimizerError;
+///
+/// fn kind(err: &OptimizerError) -> &'static str {
+///     match err {
+///         OptimizerError::PopulationTooSmall { .. } => "population",
+///         OptimizerError::InvalidBounds { .. } => "bounds",
+///         OptimizerError::OracleLengthMismatch { .. } => "length",
+///         OptimizerError::NonFiniteGradient { .. } => "gradient",
+///         OptimizerError::InvalidConfig { .. } => "config",
+///         OptimizerError::InvalidCandidate { .. } => "candidate",
+///         OptimizerError::ExternalOptimizer { .. } => "external",
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum OptimizerError {
     /// Differential Evolution needs at least four population members: each
     /// trial mutation samples three *distinct* other members of the

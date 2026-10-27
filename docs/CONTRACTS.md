@@ -1149,7 +1149,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     a strictly better one, so a `NaN` never wins over a number.
     `fitness_history[k − 1]` is the best measured up to iteration `k`, the
     final `θ` counted in the last entry; the first iteration measures θ₀, so
-    every entry is defined, and the last is `best_fitness`.
+    no entry is the `-∞` placeholder (a `NaN` measurement can appear), and
+    the last is `best_fitness`.
   - No early stop: the run makes `max_iters` iterations and reports
     `converged = false`, as QNG does.
   - The gains use `powf`, so a seeded run reproduces on the same platform and

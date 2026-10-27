@@ -114,8 +114,10 @@ Changes on `main` since 0.7.2.
   `c/k^gamma` and practical exponents (1998). It estimates the gradient from
   two circuits per random perturbation whatever the number of parameters,
   so it suits many parameters and few QPUs. A calibration batch of 50
-  circuits around the starting point sets the gain so the first step moves
-  each parameter by about `target_step`, as Qiskit's `SPSA.calibrate` does.
+  circuits around the starting point sets the gain so that, with
+  `resamplings=1`, the first step moves each parameter by about
+  `target_step`, as Qiskit's `SPSA.calibrate` does; with more perturbations
+  the first step is usually shorter.
   Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
   fills more QPUs and averages that many estimates; the parameters are
   measured in the same batch on the first iteration and every
@@ -223,9 +225,8 @@ Changes on `main` since 0.7.2.
 
 ### Changed
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
-  `External`, and `polypus_optimizers::OptimizerError` two,
-  `InvalidCandidate` and `ExternalOptimizer`, so an exhaustive `match` on
-  either outside its crate must handle them (#399).
+  `External`, so an exhaustive `match` on it outside its crate must handle
+  it (#399).
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
   it (#398).
@@ -310,6 +311,10 @@ Changes on `main` since 0.7.2.
   `Oracles`; a factory with only an evaluation oracle returns it `.into()`.
   `dispatch_optimizer` takes `impl Into<Oracles>`, so a boxed oracle still
   works, and `Method` has an `Adam` variant.
+- **BREAKING (Rust):** `polypus_optimizers::OptimizerError` has new variants,
+  `NonFiniteGradient` (#394), `InvalidCandidate` and `ExternalOptimizer`
+  (#399), and is `#[non_exhaustive]`; a `match` on it outside its crate needs
+  a wildcard arm, and later variants are not breaking.
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a `Spsa` variant,
   so an exhaustive `match` on it needs an arm for it (#396).
 - **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has a
