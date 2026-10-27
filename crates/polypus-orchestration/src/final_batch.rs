@@ -486,6 +486,8 @@ mod tests {
                 tolerance: 0.0,
                 patience: 1,
                 strategy,
+                mutation_factor: None,
+                crossover_rate: None,
             })
         };
         let methods = [

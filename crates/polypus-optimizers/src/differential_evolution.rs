@@ -7,7 +7,7 @@ use crate::rng::with_seeded_rng;
 use crate::shade;
 use crate::util::{
     argmax, check_initial_point, check_oracle_len, fitness_stagnated, rows_to_candidates,
-    wrap_angle,
+    wrap_angle, wrap_difference,
 };
 use ndarray::{Array1, Array2};
 use rand::{seq::IndexedRandom, Rng, RngExt};
@@ -26,15 +26,17 @@ pub struct AlgorithmDifferentialEvolution;
 /// How Differential Evolution builds its trial vectors.
 ///
 /// Every strategy takes the same [`AlgorithmDifferentialEvolutionArgs`] and
-/// shares the rest of the run: angles initialised in `[0, 2π)`, trial vectors
-/// wrapped back into it with `rem_euclid(2π)`, one oracle batch per
+/// shares the rest of the run: angles initialised in `[0, 2π)`, difference
+/// vectors taken as the shortest signed arc in `(−π, π]`, trial vectors
+/// wrapped back into `[0, 2π)`, one oracle batch per
 /// generation, the evaluation budget `population_size × (generations + 1)`
 /// (the initial population plus `generations` full generations), the
 /// fitness-stagnation early stop, and the postconditions of contract C-5. The
 /// strategies differ in mutation and parameter control:
 ///
-/// - [`Rand1Bin`](Self::Rand1Bin), the default: DE/rand/1/bin with fixed
-///   `F = 0.8` and `CR = 0.7`.
+/// - [`Rand1Bin`](Self::Rand1Bin), the default: DE/rand/1/bin with a fixed
+///   mutation factor `F` and crossover rate `CR` (0.8 and 0.7 unless set)
+///   and one coordinate always taken from the mutant.
 /// - [`Shade`](Self::Shade): SHADE (Tanabe & Fukunaga, CEC 2013):
 ///   current-to-pbest/1 mutation with an archive of replaced parents, and `F`
 ///   and `CR` drawn per individual from a memory of the values that produced
@@ -62,7 +64,7 @@ pub struct AlgorithmDifferentialEvolution;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DeStrategy {
-    /// DE/rand/1/bin with `F = 0.8` and `CR = 0.7`.
+    /// DE/rand/1/bin with a fixed `F` and `CR` (0.8 and 0.7 by default).
     #[default]
     Rand1Bin,
     /// SHADE: success-history adaptive DE with a fixed population.
@@ -149,8 +151,9 @@ impl FromStr for DeStrategy {
 /// # Preconditions
 ///
 /// `population_size >= 4` — each trial mutation samples 3 *distinct* other
-/// members of the population. `initial_point`, when given, holds `dimensions`
-/// finite values.
+/// members of the population. `mutation_factor` is finite and in `(0, 2]`,
+/// `crossover_rate` finite and in `[0, 1]`, and both are `None` for SHADE and
+/// L-SHADE. `initial_point`, when given, holds `dimensions` finite values.
 pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
@@ -183,6 +186,16 @@ pub struct AlgorithmDifferentialEvolutionArgs {
     /// candidate of the initial batch while the other members, and the RNG
     /// stream, are the same as without it. `None` draws the whole population.
     pub initial_point: Option<Vec<f64>>,
+    /// DE/rand/1/bin's mutation factor `F`, which scales the difference
+    /// vector; `None` is
+    /// [`DEFAULT_MUTATION_FACTOR`](AlgorithmDifferentialEvolution::DEFAULT_MUTATION_FACTOR).
+    /// SHADE and L-SHADE adapt `F` themselves and reject a value.
+    pub mutation_factor: Option<f64>,
+    /// DE/rand/1/bin's crossover rate `CR`, the probability that a coordinate
+    /// comes from the mutant (one coordinate always does); `None` is
+    /// [`DEFAULT_CROSSOVER_RATE`](AlgorithmDifferentialEvolution::DEFAULT_CROSSOVER_RATE).
+    /// SHADE and L-SHADE adapt `CR` themselves and reject a value.
+    pub crossover_rate: Option<f64>,
 }
 
 impl AlgorithmDifferentialEvolution {
@@ -201,14 +214,26 @@ impl AlgorithmDifferentialEvolution {
     /// strategy shares it; 4 is also the size L-SHADE shrinks towards.
     pub(crate) const MIN_POPULATION: usize = 4;
 
+    /// DE/rand/1/bin's mutation factor `F` when none is given.
+    pub const DEFAULT_MUTATION_FACTOR: f64 = 0.8;
+
+    /// DE/rand/1/bin's crossover rate `CR` when none is given.
+    pub const DEFAULT_CROSSOVER_RATE: f64 = 0.7;
+
     /// Check the preconditions of [`AlgorithmDifferentialEvolutionArgs`] that
     /// every strategy checks before any RNG draw or oracle call, in the same
     /// order, without running anything: `population_size` at least 4, then
-    /// `initial_point` (`dimensions` finite values). `train` and `qml.train`
-    /// call it before any backend exists.
+    /// `mutation_factor` and `crossover_rate` (in range for
+    /// [`DeStrategy::Rand1Bin`], `None` for the adaptive strategies, as
+    /// [`OptimizerError::InvalidConfig`]), then `initial_point` (`dimensions`
+    /// finite values). `train` and `qml.train` call it before any backend
+    /// exists.
     pub fn check_preconditions(
+        strategy: DeStrategy,
         population_size: u32,
         dimensions: u32,
+        mutation_factor: Option<f64>,
+        crossover_rate: Option<f64>,
         initial_point: Option<&[f64]>,
     ) -> Result<(), OptimizerError> {
         // Sampling 3 distinct other members needs `popsize >= 4`: rejected
@@ -221,7 +246,51 @@ impl AlgorithmDifferentialEvolution {
                 min: Self::MIN_POPULATION,
             });
         }
+        Self::check_rates(strategy, mutation_factor, crossover_rate)?;
         check_initial_point(initial_point, dimensions as usize, None)
+    }
+
+    /// Check `mutation_factor` and `crossover_rate` for `strategy`: for
+    /// [`DeStrategy::Rand1Bin`] each, when set, is finite and in `(0, 2]`
+    /// (`F`) or `[0, 1]` (`CR`); SHADE and L-SHADE adapt both themselves, so
+    /// neither may be set. A violation is [`OptimizerError::InvalidConfig`].
+    /// Part of [`check_preconditions`](Self::check_preconditions); `polypus.DE`
+    /// also calls it when it is built or changed.
+    pub fn check_rates(
+        strategy: DeStrategy,
+        mutation_factor: Option<f64>,
+        crossover_rate: Option<f64>,
+    ) -> Result<(), OptimizerError> {
+        let check = |parameter, value: Option<f64>, domain, in_range: bool| match value {
+            Some(value) if strategy != DeStrategy::Rand1Bin => Err(OptimizerError::InvalidConfig {
+                parameter,
+                reason: format!(
+                    "the {strategy} strategy adapts it itself, so it must be None (got {value}); \
+                     set it to None before switching strategy"
+                ),
+            }),
+            Some(value) if !in_range => Err(OptimizerError::InvalidConfig {
+                parameter,
+                reason: format!("must be finite and {domain}, got {value}"),
+            }),
+            _ => Ok(()),
+        };
+        // NaN and the infinities fall outside both ranges.
+        let f = mutation_factor.unwrap_or(Self::DEFAULT_MUTATION_FACTOR);
+        check(
+            "mutation_factor",
+            mutation_factor,
+            "in (0, 2]",
+            f > 0.0 && f <= 2.0,
+        )?;
+        let cr = crossover_rate.unwrap_or(Self::DEFAULT_CROSSOVER_RATE);
+        check(
+            "crossover_rate",
+            crossover_rate,
+            "in [0, 1]",
+            (0.0..=1.0).contains(&cr),
+        )?;
+        Ok(())
     }
 
     /// Run Differential Evolution with the given `strategy`.
@@ -229,8 +298,8 @@ impl AlgorithmDifferentialEvolution {
     /// [`DeStrategy::Rand1Bin`] is exactly [`Optimizer::optimize`]: the same
     /// code, RNG draws and outcome for a given seed. [`DeStrategy::Shade`] and
     /// [`DeStrategy::LShade`] take the same arguments and return the same
-    /// errors (a `population_size` below 4, an oracle that returns the wrong
-    /// number of values); see [`DeStrategy`] for what they change, including
+    /// errors (those of [`check_preconditions`](Self::check_preconditions),
+    /// an oracle that returns the wrong number of values); see [`DeStrategy`] for what they change, including
     /// L-SHADE's use of `generations` as an evaluation budget.
     ///
     /// ```
@@ -262,6 +331,8 @@ impl AlgorithmDifferentialEvolution {
     ///             patience: 20,
     ///             seed: Some(7),
     ///             initial_point: None,
+    ///             mutation_factor: None,
+    ///             crossover_rate: None,
     ///         },
     ///     )
     ///     .expect("valid arguments optimize successfully");
@@ -297,6 +368,8 @@ impl AlgorithmDifferentialEvolution {
             patience,
             seed: _,
             initial_point,
+            mutation_factor,
+            crossover_rate,
         } = args;
 
         let popsize = population_size as usize;
@@ -306,7 +379,16 @@ impl AlgorithmDifferentialEvolution {
 
         // Preconditions (documented on the struct), before any RNG draw or
         // oracle call.
-        Self::check_preconditions(population_size, dimensions, initial_point.as_deref())?;
+        Self::check_preconditions(
+            DeStrategy::Rand1Bin,
+            population_size,
+            dimensions,
+            mutation_factor,
+            crossover_rate,
+            initial_point.as_deref(),
+        )?;
+        let f = mutation_factor.unwrap_or(Self::DEFAULT_MUTATION_FACTOR);
+        let cr = crossover_rate.unwrap_or(Self::DEFAULT_CROSSOVER_RATE);
 
         // Initialise population with angles in [0, 2pi)
         let mut pop = Array2::<f64>::zeros((popsize, dims));
@@ -347,9 +429,19 @@ impl AlgorithmDifferentialEvolution {
                 let c1 = pop.row(sel[0]).to_owned();
                 let c2 = pop.row(sel[1]).to_owned();
                 let c3 = pop.row(sel[2]).to_owned();
-                let mut mutant = &c1 + 0.8 * (&c2 - &c3);
-                mutant.mapv_inplace(|x| x.rem_euclid(2.0 * PI));
-                let cross: Array1<bool> = Array1::from_shape_fn(dims, |_| rng.random_bool(0.7));
+                // Angles live on a circle: the difference is the shortest arc.
+                let difference = (&c2 - &c3).mapv(wrap_difference);
+                let mut mutant = &c1 + f * &difference;
+                mutant.mapv_inplace(wrap_angle);
+                // One coordinate always comes from the mutant (`j_rand`), so a
+                // trial is never a plain copy of its parent.
+                let j_rand = if dims > 0 {
+                    rng.random_range(0..dims)
+                } else {
+                    0
+                };
+                let cross: Array1<bool> =
+                    Array1::from_shape_fn(dims, |j| rng.random_bool(cr) || j == j_rand);
                 let trial = cross
                     .iter()
                     .zip(mutant.iter())
@@ -391,7 +483,7 @@ impl AlgorithmDifferentialEvolution {
             // test, which on QAOA-like landscapes fired within a handful of
             // generations — long before the fitness had actually plateaued —
             // and contradicted the C-5 contract's fitness-stagnation prose. The
-            // search dynamics (DE/rand/1, F=0.8, CR=0.7, [0, 2π) init) are
+            // search dynamics (DE/rand/1/bin, [0, 2π) init) are
             // unchanged; only the stopping rule differs.
             fitness_history.push(fitness[best_idx]);
             if fitness_stagnated(&fitness_history, tolerance, patience, generation) {

@@ -494,7 +494,7 @@ def scenario_6_x_and_y_readouts():
             # These expectations are a harder surface for DE than scenario 1's
             # ⟨Z₀⟩, so a larger budget; still milliseconds.
             method=polypus.DE(
-                generations=120, population_size=30, tolerance=1e-9, patience=120
+                generations=120, population_size=40, tolerance=1e-9, patience=120
             ),
             loss="hinge",
             exact=True,

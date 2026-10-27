@@ -45,6 +45,12 @@ pub struct DeConfig {
     /// How trial vectors are built (`polypus.DE(strategy=...)`);
     /// [`DeStrategy::Rand1Bin`] is the classic DE.
     pub strategy: DeStrategy,
+    /// DE/rand/1/bin's `F`; `None` is the default (see
+    /// [`AlgorithmDifferentialEvolutionArgs::mutation_factor`]).
+    pub mutation_factor: Option<f64>,
+    /// DE/rand/1/bin's `CR`; `None` is the default (see
+    /// [`AlgorithmDifferentialEvolutionArgs::crossover_rate`]).
+    pub crossover_rate: Option<f64>,
 }
 
 /// PSO configuration, mirroring the `polypus.PSO` object (see [`DeConfig`]).
@@ -201,8 +207,11 @@ impl Method {
     ) -> Result<(), OptimizerError> {
         match self {
             Method::De(cfg) => AlgorithmDifferentialEvolution::check_preconditions(
+                cfg.strategy,
                 cfg.population_size,
                 dimensions,
+                cfg.mutation_factor,
+                cfg.crossover_rate,
                 initial_point,
             ),
             Method::Pso(cfg) => {
@@ -432,6 +441,8 @@ pub fn dispatch_optimizer(
                 patience: cfg.patience,
                 seed: Some(seed),
                 initial_point,
+                mutation_factor: cfg.mutation_factor,
+                crossover_rate: cfg.crossover_rate,
             },
         ),
         Method::Pso(cfg) => AlgorithmPSO.optimize(AlgorithmPSOArgs {
@@ -873,6 +884,8 @@ mod tests {
             tolerance: 0.0,
             patience: 100,
             strategy,
+            mutation_factor: None,
+            crossover_rate: None,
         })
     }
 
@@ -910,6 +923,8 @@ mod tests {
                 patience: 100,
                 seed: Some(9),
                 initial_point: None,
+                mutation_factor: None,
+                crossover_rate: None,
             })
             .expect("a valid DE configuration runs");
         assert_eq!(dispatched, direct);
@@ -1103,6 +1118,8 @@ mod tests {
                 tolerance: 0.0,
                 patience: 10,
                 strategy,
+                mutation_factor: None,
+                crossover_rate: None,
             })
         };
         let short = Some(vec![0.5]);
