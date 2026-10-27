@@ -82,10 +82,10 @@ class TestInference:
         assert (run.seed, run.backend, run.infrastructure) == (5, "polypus", "local")
 
     def test_the_seed_replays_the_counts(self, trained):
-        assert (
-            trained.run(X, shots=64, seed=9).counts
-            == trained.run(X, shots=64, seed=9).counts
-        )
+        first = trained.run(X, shots=64, seed=9)
+        second = trained.run(X, shots=64, seed=9)
+        assert first is not second
+        assert first.counts == second.counts
 
     def test_exact_run_returns_probabilities(self, trained):
         from polypus.qml import ExactResult
@@ -300,9 +300,10 @@ class TestClassifierInference:
     def test_exact_predictions_are_deterministic(self, clusters):
         model, result = clusters
         trained = model.bind(result.best_params)
-        assert trained.predict(_NEW_SAMPLES, exact=True) == trained.predict(
-            _NEW_SAMPLES, exact=True
-        )
+        first = trained.predict(_NEW_SAMPLES, exact=True)
+        second = trained.predict(_NEW_SAMPLES, exact=True)
+        assert first is not second
+        assert first == second
 
     def test_two_bindings_of_one_model_are_independent(self, clusters):
         # The model holds no trained state: binding it again, to anything,
