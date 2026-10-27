@@ -1,8 +1,8 @@
 name: SonarQube Cloud
 
 # Code-quality dashboard (sonar-project.properties): Rust and Python coverage,
-# the clippy report, then the SonarQube Cloud scan. Informational only: no
-# check of this workflow is required, and the quality gate does not fail it.
+# the clippy report, then the SonarQube Cloud scan. On pull requests the scan
+# job fails when the quality gate fails; pushes to main only report.
 on:
   push:
     branches: [main]
@@ -20,8 +20,8 @@ env:
 
 jobs:
   # Same test passes as the `test (Rust)` job in ci.yml, instrumented with
-  # cargo-llvm-cov and merged into one LCOV report. Rust code reached only
-  # through the Python extension is not counted.
+  # cargo-llvm-cov and merged into one LCOV report. The Rust code that only
+  # the Python suite reaches is measured by the `python` job.
   rust:
     name: Rust coverage + clippy report
     runs-on: ubuntu-latest
@@ -71,7 +71,9 @@ jobs:
 
   # The pytest suite against the installed wheel, as in the 3.13 leg of
   # `python-tests` (ci.yml). Coverage maps site-packages back to python/
-  # ([tool.coverage] in pyproject.toml).
+  # ([tool.coverage] in pyproject.toml). The wheel is built with
+  # cargo-llvm-cov's instrumentation, so the same run also measures the Rust
+  # it reaches (lcov-python.info).
   python:
     name: Python coverage
     runs-on: ubuntu-latest
@@ -81,34 +83,48 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - name: Install Rust (rust-toolchain.toml)
-        run: rustup toolchain install --no-self-update
+      - name: Install Rust (rust-toolchain.toml) + llvm-tools
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
       - name: Install LLVM
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends llvm
+      # A key of its own: the instrumented build cannot reuse the plain one.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: llvm-cov
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-llvm-cov@0.9.1
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip maturin pytest coverage==7.16.2
           pip install -r requirements-dev.txt
-      - name: Build & install polypus-quantum (extension + bundled polypus_python)
-        run: |
-          maturin build --release --out dist
-          pip install dist/polypus_quantum-*.whl
+      # One step, so that show-env's variables (instrumentation flags, where
+      # the profiles go) reach the build, the tests and the report. The build
+      # goes to cargo-llvm-cov's target directory, where `report` looks.
       # sys.monitoring also traces the Python callbacks the extension runs from
       # threads it starts itself, which settrace-based tracing misses.
-      - name: Run Python tests with coverage
+      - name: Build, install and test the instrumented wheel
         env:
           COVERAGE_CORE: sysmon
         run: |
+          source <(cargo llvm-cov show-env --sh)
+          export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR"
+          maturin build --release --out dist
+          pip install dist/polypus_quantum-*.whl
           python -m coverage run -m pytest tests/python -rs
           python -m coverage combine
           python -m coverage xml -o coverage.xml
+          cargo llvm-cov report --release --lcov --output-path lcov-python.info
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonar-python
-          path: coverage.xml
+          path: |
+            coverage.xml
+            lcov-python.info
           retention-days: 3
 
   scan:
@@ -118,7 +134,9 @@ jobs:
     timeout-minutes: 20
     # Pull requests from forks get no secrets, and the token is missing until
     # the project is imported in SonarQube Cloud: the reports are still built
-    # (and kept as artifacts), only the upload is skipped.
+    # (and kept as artifacts), only the upload is skipped. On pull requests the
+    # scan waits for the quality gate and fails with it, so this job is the
+    # check to require; one without the token passes without a gate.
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
@@ -135,3 +153,5 @@ jobs:
           merge-multiple: true
       - uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         if: env.SONAR_TOKEN != ''
+        with:
+          args: -Dsonar.qualitygate.wait=${{ github.event_name == 'pull_request' }}

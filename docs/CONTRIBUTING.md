@@ -212,16 +212,19 @@ pushing.
 
 `.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
 request and push to `main` (configuration in `sonar-project.properties`):
-Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes, the clippy
-report, and Python coverage of `python/` from the pytest suite. Rust reached
-only through the Python extension is not counted. The subprocess worker
-template (`crates/polypus-subprocess-backend/python/worker_template.py`) is
-left out of the coverage figures: it runs as a separate process spawned by the
-Rust integration tests, which no tool instruments; Sonar still analyses it for
-issues. The dashboard is informational: no check is required and the quality
-gate does not fail the run. Without the `SONAR_TOKEN` secret (pull requests
-from forks) the reports are still built but not uploaded. Python coverage
-locally, with the wheel installed:
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes and over the
+pytest suite, which runs against a wheel built with the same instrumentation,
+the clippy report, and Python coverage of `python/` from that pytest run. The
+subprocess worker template
+(`crates/polypus-subprocess-backend/python/worker_template.py`) is left out of
+the coverage figures: it runs as a separate process spawned by the Rust
+integration tests, which no tool instruments. So are the diagnostic binaries
+under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
+for issues. On pull requests the `SonarQube Cloud scan` job waits for the
+quality gate and fails with it; pushes to `main` only report. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded, and the job passes without a gate. Python coverage locally,
+with the wheel installed:
 
 ```bash
 python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report
