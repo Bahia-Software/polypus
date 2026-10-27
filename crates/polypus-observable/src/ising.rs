@@ -171,6 +171,26 @@ mod tests {
     }
 
     #[test]
+    fn mean_does_not_depend_on_hashmap_iteration_order() {
+        // "001" -> 0.8, "010" -> 0.6, "100" -> -0.4 up to rounding, so the sum
+        // depends on the order its terms are added in. Four shots make the division
+        // by the shot count exact, so that difference reaches the mean.
+        let ising =
+            IsingObservable::new(3, vec![(0, 0.1), (1, 0.2), (2, 0.7)], vec![], 0.0, 1.0).unwrap();
+        let value = |key: &str| ising.expectation_batch(&[counts(&[(key, 1)])]).unwrap()[0];
+        let (a, b, c) = (value("001"), value("010"), value("100"));
+        let ascending = ((a + b) + c * 2.0) / 4.0;
+        assert_ne!(ascending, ((b + c * 2.0) + a) / 4.0);
+        // Each map gets its own `RandomState`, hence its own iteration order.
+        let batch: Vec<_> = (0..128)
+            .map(|_| counts(&[("001", 1), ("010", 1), ("100", 2)]))
+            .collect();
+        for ev in ising.expectation_batch(&batch).unwrap() {
+            assert_eq!(ev, ascending, "summed in ascending bitstring order");
+        }
+    }
+
+    #[test]
     fn rejects_bad_construction() {
         assert!(IsingObservable::new(0, vec![], vec![], 0.0, 1.0).is_err());
         assert!(IsingObservable::new(2, vec![(2, 1.0)], vec![], 0.0, 1.0).is_err());

@@ -113,6 +113,8 @@ fn de_args(
         patience: 1_000,
         seed: Some(seed),
         initial_point,
+        mutation_factor: None,
+        crossover_rate: None,
     }
 }
 

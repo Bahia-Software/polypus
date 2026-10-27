@@ -12,8 +12,8 @@
 //! - angles start uniform in `[0, 2π)`, drawn exactly as DE/rand/1/bin draws
 //!   them, so a given seed starts every strategy from the same population,
 //!   whose first member an `initial_point` replaces as in DE/rand/1/bin;
-//! - a mutant coordinate is wrapped back into `[0, 2π)` with `rem_euclid`, as
-//!   DE/rand/1/bin does, instead of the papers' bound repair: the parameters
+//! - a difference between two members is the shortest arc in `(−π, π]`, and a
+//!   mutant coordinate is wrapped back into `[0, 2π)`, as DE/rand/1/bin does, instead of the papers' bound repair: the parameters
 //!   are angles, so the objective is periodic;
 //! - each generation is a single oracle batch, its length checked right away;
 //! - the evaluation budget is DE/rand/1/bin's, `population_size ×
@@ -30,11 +30,11 @@
 //! than `generations` full ones.
 
 use crate::differential_evolution::{
-    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs,
+    AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 use crate::error::OptimizerError;
 use crate::outcome::OptimizationOutcome;
-use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle};
+use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle, wrap_difference};
 use rand::{Rng, RngExt};
 use std::f64::consts::{PI, TAU};
 
@@ -59,6 +59,14 @@ pub(crate) enum Variant {
 }
 
 impl Variant {
+    /// The [`DeStrategy`] this variant runs.
+    pub(crate) fn strategy(self) -> DeStrategy {
+        match self {
+            Variant::Shade => DeStrategy::Shade,
+            Variant::LShade => DeStrategy::LShade,
+        }
+    }
+
     /// Number of memory slots `H`.
     fn memory_size(self, initial_population: usize) -> usize {
         match self {
@@ -356,6 +364,8 @@ pub(crate) fn run_with_rng<R: Rng>(
         patience,
         seed: _,
         initial_point,
+        mutation_factor,
+        crossover_rate,
     } = args;
 
     let initial = population_size as usize;
@@ -366,8 +376,11 @@ pub(crate) fn run_with_rng<R: Rng>(
     // oracle call. The population bound also covers what current-to-pbest/1
     // needs: a donor other than the parent and a second one other than both.
     AlgorithmDifferentialEvolution::check_preconditions(
+        variant.strategy(),
         population_size,
         dimensions,
+        mutation_factor,
+        crossover_rate,
         initial_point.as_deref(),
     )?;
 
@@ -425,8 +438,13 @@ pub(crate) fn run_with_rng<R: Rng>(
             let trial = (0..dims)
                 .map(|j| {
                     if rng.random::<f64>() < cr || j == j_rand {
-                        (parent[j] + f * (pbest[j] - parent[j]) + f * (x1[j] - x2[j]))
-                            .rem_euclid(TAU)
+                        // Angles live on a circle: each difference is the
+                        // shortest arc.
+                        wrap_angle(
+                            parent[j]
+                                + f * wrap_difference(pbest[j] - parent[j])
+                                + f * wrap_difference(x1[j] - x2[j]),
+                        )
                     } else {
                         parent[j]
                     }
