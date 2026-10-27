@@ -2055,6 +2055,85 @@ mod tests {
         );
     }
 
+    /// An endpoint without a transport (`tcp://`) is refused by `zeromq` before
+    /// any network IO, so no attempt waits for the receive timeout and the call
+    /// fails with a typed `Connect` error that names the problem.
+    #[test]
+    fn a_malformed_endpoint_fails_with_connect_naming_the_problem() {
+        let backend = QmioBackend::new(
+            "qmio.example:5556".to_string(),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(60_000, 1, 120_000);
+        let params = RunParams {
+            id: "qmio-malformed".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        match &err {
+            BackendError::External(boxed) => match boxed.downcast_ref::<QmioError>() {
+                Some(QmioError::Connect { endpoint, source }) => {
+                    assert_eq!(endpoint, "qmio.example:5556");
+                    assert!(source.contains("Could not parse transport"), "{source}");
+                }
+                other => panic!("expected QmioError::Connect, got: {other:?}"),
+            },
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        }
+    }
+
+    /// The whole-call budget caps the retries: with a thousand allowed against an
+    /// endpoint nothing listens on, the call stops at the first attempt that would
+    /// start past the deadline and fails with the last attempt's error.
+    #[test]
+    fn the_global_timeout_stops_the_retries() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let backend = QmioBackend::new(
+            format!("tcp://127.0.0.1:{port}"),
+            QmioProgramFormat::OpenQasm,
+            0,
+            None,
+            "binary_count".to_string(),
+        )
+        .unwrap()
+        .with_test_timeouts(50, 1_000, 300);
+        let params = RunParams {
+            id: "qmio-deadline".to_string(),
+            shots: 8,
+            seed: None,
+            opt_level: crate::OptLevel::default(),
+        };
+        let started = Instant::now();
+        let err = backend
+            .run_circuits(&[BoundCircuit::Native(bell())], &params)
+            .unwrap_err();
+        // A thousand attempts with the linear backoff would take hours.
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:?}");
+        match &err {
+            BackendError::External(boxed) => match boxed.downcast_ref::<QmioError>() {
+                Some(QmioError::Connect { source, .. }) => {
+                    assert_eq!(source, "connect timed out after 50 ms");
+                }
+                other => panic!("expected QmioError::Connect, got: {other:?}"),
+            },
+            other => panic!("expected BackendError::External(QmioError), got: {other:?}"),
+        }
+    }
+
     /// One circuit per call over the single REQ endpoint, and `close` is
     /// idempotent (nothing was ever connected here).
     #[test]
