@@ -168,7 +168,7 @@ the PR description.
 ## Repository hygiene
 
 `.github/workflows/hygiene.yml` runs `.github/scripts/hygiene.py` (standard
-library only, Python ≥ 3.9) on every pull request and push to `main`. It
+library only, Python ≥ 3.10) on every pull request and push to `main`. It
 rejects:
 
 - internal notes and local tool configuration that `.gitignore` already
