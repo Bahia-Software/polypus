@@ -7,8 +7,9 @@ use pyo3::prelude::*;
 /// The run starts with one calibration batch of 50 circuits around the
 /// starting point that sets the gain so that, with `resamplings=1`, the first
 /// step moves each parameter by about `target_step`; with more perturbations
-/// their average is smaller, so the first step is shorter. Each iteration then sends one batch of
-/// `2·resamplings` circuits, plus the current parameters on the first
+/// the average of their estimates is smaller on average, so the first step is
+/// usually shorter. Each iteration then sends one batch of `2·resamplings`
+/// circuits, plus the current parameters on the first
 /// iteration and every `eval_interval` iterations after it; after the last
 /// step, one more circuit measures the parameters it reached.
 /// `best_params` is the best of the parameters measured. The run always makes

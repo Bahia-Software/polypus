@@ -45,7 +45,8 @@ the number of parameters):
   spsa-k8       polypus.SPSA(resamplings=8), eight perturbations per
                 iteration, with spsa's perturbation and target step on each
                 problem, so their settings differ only in the perturbations;
-                the averaged estimate is smaller, so its steps are shorter
+                the averaged estimate is smaller on average, so its steps
+                are usually shorter
   rotosolve     polypus.Rotosolve(), the HEA only: as many sweeps as the
                 budget allows, the current point re-measured every fifth
                 step (the default)

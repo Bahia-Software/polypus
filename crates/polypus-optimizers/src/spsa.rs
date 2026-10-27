@@ -58,7 +58,7 @@ use std::f64::consts::TAU;
 ///    `a = target_step / mean|ĝ|`. The first gain `a₁` is `a`, so with
 ///    `resamplings = 1` the first step moves each parameter by about
 ///    [`target_step`](AlgorithmSPSAArgs::target_step). With `K > 1` the
-///    first step is shorter: the mean of `K` estimates is smaller on average
+///    first step is usually shorter: the mean of `K` estimates is smaller on average
 ///    than one estimate, whose magnitude set `a`. A pair whose magnitude
 ///    is not finite (a non-finite value, or an overflow) is left out of the
 ///    mean. When no magnitude is left, their mean is zero (a flat landscape
@@ -169,8 +169,8 @@ pub struct AlgorithmSPSAArgs {
     pub perturbation: f64,
     /// The magnitude, in radians, of each parameter's first step with
     /// `resamplings = 1`, which sets `a` through the calibration. With more
-    /// perturbations the averaged estimate is smaller, so the first step is
-    /// shorter.
+    /// perturbations the averaged estimate is smaller on average, so the first
+    /// step is usually shorter.
     pub target_step: f64,
     /// Decay exponent `α` of the step gain `a_k = a / k^α`.
     pub alpha: f64,

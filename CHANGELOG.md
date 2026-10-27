@@ -117,7 +117,7 @@ Changes on `main` since 0.7.2.
   circuits around the starting point sets the gain so that, with
   `resamplings=1`, the first step moves each parameter by about
   `target_step`, as Qiskit's `SPSA.calibrate` does; with more perturbations
-  the first step is shorter.
+  the first step is usually shorter.
   Each iteration is one batch of `2·resamplings` circuits, so `resamplings`
   fills more QPUs and averages that many estimates; the parameters are
   measured in the same batch on the first iteration and every
