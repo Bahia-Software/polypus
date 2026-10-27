@@ -414,6 +414,11 @@ Changes on `main` since 0.7.2.
   internal caller uses the panicking exports any more (#350).
 
 ### Fixed
+- With `infrastructure="subprocess"`, a worker that answers with a frame that
+  is no protocol message (an unknown `op`, a field of the wrong type, a payload
+  that is not JSON) fails the call at once with a protocol error, and the
+  worker is killed. The bridge waited for the live worker to exit, so the call
+  hung forever, past `recv_timeout_ms` (#492).
 - `train` and `qml.train` convert `expectation_function` before creating the
   backend, so an invalid one no longer requests a CUNQA allocation (`qraise`)
   before failing; the optimizer configuration was already checked first.
