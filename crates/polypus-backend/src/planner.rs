@@ -374,10 +374,11 @@ impl Planner for ShotDistributingPlanner {
         // Cap the in-flight replicas at the backend's concurrency (QMIO: 1,
         // CUNQA: `n_qpus`; unbounded backends run the whole array in one chunk),
         // running the interrupt check after every chunk so a slow/real-hardware run
-        // stays interruptible between waves. Chunking is numerically transparent:
-        // `run_shots_distributed` seeds each replica from a per-backend contiguous
-        // block, independent of how the batch is chunked (C-7), and the replicas
-        // are collected in apportionment order across chunks.
+        // stays interruptible between waves. The replicas are collected in
+        // apportionment order across chunks. On the native backend chunking is
+        // numerically transparent (each replica's seed comes from a per-backend
+        // contiguous block); on a backend that seeds per call, each chunk is a
+        // call with its own seed (C-7, "The seed across the calls of one run").
         let wave = backend.capabilities().max_concurrency.max(1);
         let mut replicas: Vec<Counts> = Vec::with_capacity(shot_batches.len());
         for chunk in shot_batches.chunks(wave) {

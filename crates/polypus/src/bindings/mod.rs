@@ -1864,8 +1864,9 @@ pub fn train<'py>(
         infrastructure: infrastructure.clone(),
         backend_config,
         opt_level: OptLevel::default(),
-        // Consumed only by the native backend; ignored by Aer/CUNQA/QMIO. Set
-        // unconditionally so a native-backend training run reproduces exactly.
+        // The run's base seed: the native backend seeds each circuit from it,
+        // Aer, CUNQA and the subprocess bridge each call (C-7); QMIO ignores
+        // it. Set unconditionally so a seeded training run reproduces exactly.
         seed: Some(effective_seed),
     });
     // Shared error slot: the oracle records the first evaluation failure here
@@ -2234,8 +2235,9 @@ pub fn qml_train<'py>(
         infrastructure: infrastructure.clone(),
         backend_config,
         opt_level: OptLevel::default(),
-        // Consumed only by the native backend; ignored by Aer/CUNQA/QMIO. Set
-        // unconditionally so a native-backend training run reproduces exactly.
+        // The run's base seed: the native backend seeds each circuit from it,
+        // Aer, CUNQA and the subprocess bridge each call (C-7); QMIO ignores
+        // it. Set unconditionally so a seeded training run reproduces exactly.
         seed: Some(effective_seed),
     });
     // Shared error slot (see `train`): the oracle records the first evaluation

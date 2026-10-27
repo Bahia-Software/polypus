@@ -377,22 +377,24 @@ class TestFinalBatch:
     @pytest.mark.parametrize("entry", ENTRY_POINTS)
     def test_the_final_batch_has_a_seed_of_its_own(self, monkeypatch, entry):
         # Aer seeds each circuit from the seed and its position in the call,
-        # so with the run's seed the final batch would measure best_params,
-        # at index 0 as Adam scored it, with the training's random numbers.
+        # so with a training call's seed the final batch would measure
+        # best_params, at index 0 as Adam scored it, with that call's random
+        # numbers. Every call of a run gets its own seed (C-7).
         run, candidate, width = ENTRY_POINTS[entry]
-        seeds = []
+        sequences = []
         for _ in range(2):
             calls = []
             _record(monkeypatch, candidate, width, calls)
             run(_method("adam"), final_shots=FINAL_SHOTS)
             *scored, final = calls
-            assert scored and all(call == (SHOTS, 11) for call in scored)
-            shots, seed = final
-            assert shots == FINAL_SHOTS
-            assert seed not in (None, 11)
-            seeds.append(seed)
+            assert scored and all(shots == SHOTS for shots, _ in scored)
+            assert final[0] == FINAL_SHOTS
+            seeds = [seed for _, seed in calls]
+            assert seeds[0] == 11
+            assert len(set(seeds)) == len(seeds)
+            sequences.append(seeds)
         # Derived from the run's seed, the same in every run.
-        assert seeds[0] == seeds[1]
+        assert sequences[0] == sequences[1]
 
     def test_an_error_in_the_run_skips_the_final_batch(self, monkeypatch):
         sent = _record(monkeypatch, _vqc_candidate, DIMENSIONS)
