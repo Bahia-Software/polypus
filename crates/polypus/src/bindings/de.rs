@@ -54,7 +54,7 @@ fn check_rates(
     crossover_rate: Option<f64>,
 ) -> PyResult<()> {
     AlgorithmDifferentialEvolution::check_rates(strategy, mutation_factor, crossover_rate)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        .map_err(|e| crate::exceptions::configuration_error(e.to_string()))
 }
 
 #[pymethods]

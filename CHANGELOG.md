@@ -39,8 +39,8 @@ Changes on `main` since 0.7.2.
 - `polypus.DE(mutation_factor=None, crossover_rate=None)`: DE/rand/1/bin's
   `F`, in `(0, 2]`, and `CR`, in `[0, 1]`; `None` keeps 0.8 and 0.7. A value
   out of range, or any value with `strategy="shade"` or `"lshade"`, which
-  adapt both, raises `ValueError` when the object is built or the attribute
-  set. Rust: `AlgorithmDifferentialEvolution::check_rates` and the
+  adapt both, raises `polypus.ConfigurationError` when the object is built or
+  the attribute set. Rust: `AlgorithmDifferentialEvolution::check_rates` and the
   `DEFAULT_MUTATION_FACTOR` and `DEFAULT_CROSSOVER_RATE` constants (#410).
 - `polypus.External(optimizer, max_evaluations)`, accepted by `train` and
   `qml.train`: runs an optimizer from outside Polypus, a library such as
