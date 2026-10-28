@@ -63,14 +63,22 @@ Changes on `main` since 0.7.2.
   library owns its seed and its start: `External` has no `seed` (the run's
   seed fixes the shot sampling) and `initial_point` raises `ValueError`
   before anything runs (#399).
-- `polypus.external`, pure-Python adapters for `polypus.External`:
+- `polypus.ask_tell`, pure-Python adapters for `polypus.External`:
   `from_optuna(study, dimensions, batch_size, bounds=(0, 2π),
   initial_point=None)`, for example with Optuna's TPE sampler,
   `from_nevergrad(optimizer, batch_size=None, initial_point=None)` and
   `from_pycma(es)`, which call each library's public ask/tell methods only
   and negate the values for a library that minimises; and `AskTell`, the
   protocol as a `typing.Protocol`. None of the three libraries is a
-  dependency of Polypus, and the module imports none of them (#399).
+  dependency of Polypus, and the module imports none of them (#399); the pip
+  extras `optuna`, `nevergrad` and `cma` (`pip install
+  "polypus-quantum[optuna]"`) install one, from the version CI tests the
+  adapters with up to the next major. An adapter's `tell` raises
+  `ValueError` for other candidates than the batch it handed out, or the
+  same in another order, before the library is told anything. The Optuna
+  adapter, an `OptunaAskTell`, has `close()`, which marks the trials of a
+  batch handed out and never told `TrialState.FAIL`, so that a budget that
+  cuts a batch leaves no trial `RUNNING` (#467).
 - External optimizers in training runs (Rust, `polypus-orchestration`):
   `Method::External` with `ExternalConfig`. The CUNQA walltime warning
   projects `max_evaluations / n` batches after a first batch of `n`
@@ -282,7 +290,7 @@ Changes on `main` since 0.7.2.
   `train`, `qml.train` and `qml.predict` raises it (an unknown `infrastructure`,
   a bad `walltime`, an optimizer setting, `options` on `local`/`cunqa`, …), as
   do `polypus.DE(strategy=...)`, `polypus.Adam(rule=...)` and the argument
-  checks of the `polypus.external` adapters, so `except polypus.PolypusError`
+  checks of the `polypus.ask_tell` adapters, so `except polypus.PolypusError`
   catches them and `except ValueError` still does (#418).
 
 ### Changed
@@ -414,7 +422,7 @@ Changes on `main` since 0.7.2.
   at once (#467).
 - **BREAKING:** a `final_shots` (`train`, `qml.train`), a `max_evaluations`
   (`polypus.External`) or an adapter's `dimensions` or `batch_size`
-  (`polypus.external`) that is not an integer, such as `4096.0`, `True` or a
+  (`polypus.ask_tell`) that is not an integer, such as `4096.0`, `True` or a
   `str`, raises `TypeError` instead of `ValueError`, as `shots` and every
   other integer argument do. An integer below 1 still raises
   `polypus.ConfigurationError` (#467).

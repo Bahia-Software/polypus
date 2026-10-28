@@ -343,7 +343,7 @@ polypus.External(optimizer, max_evaluations)
 - `ask()` returns the next batch: an iterable of rows, such as a list of lists or a 2-D NumPy array, each row one finite number per circuit parameter. `None` or an empty batch means the optimizer is done.
 - `tell(candidates, values)` receives the rows of that batch, as a `list[list[float]]`, and their fitness, as a `list[float]` in the same order. Its return value is ignored.
 
-The values are fitness to **maximise**, as for every Polypus optimizer. Optuna minimises unless the study is created with `direction="maximize"`, and Nevergrad and pycma always minimise, so their values must be negated: the adapters in `polypus.external`, below, do it for you. `polypus.external.AskTell` is the protocol as a `typing.Protocol`, for type checkers.
+The values are fitness to **maximise**, as for every Polypus optimizer. Optuna minimises unless the study is created with `direction="maximize"`, and Nevergrad and pycma always minimise, so their values must be negated: the adapters in `polypus.ask_tell`, below, do it for you. `polypus.ask_tell.AskTell` is the protocol as a `typing.Protocol`, for type checkers.
 
 **The budget.** `max_evaluations`, an integer `>= 1`, is the most candidates a run evaluates. It is required, since some libraries never say they are done. The run stops:
 
@@ -356,7 +356,7 @@ A first `ask()` that proposes nothing, and a first batch larger than `max_evalua
 
 | Parameter | Description |
 |---|---|
-| `optimizer` | The ask/tell object: an adapter from `polypus.external`, or your own |
+| `optimizer` | The ask/tell object: an adapter from `polypus.ask_tell`, or your own |
 | `max_evaluations` | Candidates evaluated at most over a run, an integer `>= 1` |
 
 **The result.** `best_params` and `best_fitness` are the best candidate Polypus measured and the value it measured, whatever the library would recommend as its own best. `fitness_history` has one entry per batch, the best value measured up to it, and `iterations_run` counts the batches evaluated and told.
@@ -367,14 +367,14 @@ A first `ask()` that proposes nothing, and a first batch larger than `max_evalua
 
 With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and leaves out the time the library itself takes in `ask()` and `tell()` (see [Allocation walltime](../backends.md#allocation-walltime)), which for a model-based library can be much of the run.
 
-None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there). `polypus.external` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
+None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there), or install Polypus with it as an extra, `pip install "polypus-quantum[optuna]"` (`[nevergrad]`, `[cma]`), which asks for a version from the one these adapters are tested with (Optuna 5.0.0, Nevergrad 1.0.12, pycma 4.5.0) up to the next major. `polypus.ask_tell` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. Its `tell` checks that the candidates are the rows of that batch, in its order, with one value each, and raises `ValueError` otherwise, before the library is told anything: Polypus always tells the rows it was given, so only a `tell` of your own can get them wrong, and its values would reach other candidates. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
 
 ```python
 import math
 
 import numpy as np
 import polypus
-from polypus.external import from_nevergrad, from_optuna, from_pycma
+from polypus.ask_tell import from_nevergrad, from_optuna, from_pycma
 
 common = dict(
     shots=1024,
@@ -388,7 +388,7 @@ common = dict(
 )
 ```
 
-**Optuna (TPE).** `from_optuna(study, dimensions, batch_size, bounds=(0, 2π), initial_point=None)` asks the study for `batch_size` trials per batch (`study.ask()`) and suggests one float per parameter in each, named `x0`, `x1`, … (`trial.suggest_float` within `bounds`), then tells each trial its value (`study.tell`), negated when the study minimises. A study with several objectives raises `ValueError`. Optuna's `TPESampler` is a form of Bayesian optimization: it builds a model of the values the trials returned and draws the next trials from it, after `n_startup_trials` random ones (10 by default in Optuna 5.0.0, the version checked here). With `constant_liar=True`, the default in Optuna 5.0 and passed explicitly below for older versions, it penalizes the trials still waiting for their values, so it avoids proposing the trials of one batch close to each other. Optuna never says it is done, so `max_evaluations` ends the run: make it a multiple of `batch_size`, since the trials of an untold remainder stay in the study as `RUNNING` trials, which TPE with `constant_liar=True` keeps penalising, until a later run with the same adapter tells them. `initial_point` is enqueued as the study's first trial (`study.enqueue_trial`).
+**Optuna (TPE).** `from_optuna(study, dimensions, batch_size, bounds=(0, 2π), initial_point=None)` asks the study for `batch_size` trials per batch (`study.ask()`) and suggests one float per parameter in each, named `x0`, `x1`, … (`trial.suggest_float` within `bounds`), then tells each trial its value (`study.tell`), negated when the study minimises. A study with several objectives raises `ValueError`. Optuna's `TPESampler` is a form of Bayesian optimization: it builds a model of the values the trials returned and draws the next trials from it, after `n_startup_trials` random ones (10 by default in Optuna 5.0.0, the version checked here). With `constant_liar=True`, the default in Optuna 5.0 and passed explicitly below for older versions, it penalizes the trials still waiting for their values, so it avoids proposing the trials of one batch close to each other. Optuna never says it is done, so `max_evaluations` ends the run: make it a multiple of `batch_size`, since the trials of an untold remainder stay in the study as `RUNNING` trials, which TPE with `constant_liar=True` keeps penalising, until a later run with the same adapter tells them. To end a study instead, call the adapter's `close()`: it tells the study that those trials failed (`TrialState.FAIL`), which the samplers ignore, and does nothing when every batch was told. The adapter can go on after it, with new trials. `from_optuna` returns an `OptunaAskTell`, the protocol with `close()`. `initial_point` is enqueued as the study's first trial (`study.enqueue_trial`).
 
 ```python
 import optuna
@@ -397,15 +397,12 @@ study = optuna.create_study(
     direction="maximize",
     sampler=optuna.samplers.TPESampler(seed=7, constant_liar=True),
 )
+adapter = from_optuna(study, dimensions=6, batch_size=4)
 result = polypus.train(
-    qc,
-    polypus.External(
-        from_optuna(study, dimensions=6, batch_size=4), max_evaluations=200
-    ),
-    id="tpe",
-    **common,
+    qc, polypus.External(adapter, max_evaluations=200), id="tpe", **common
 )
 len(study.trials)  # 200, each with the value Polypus measured
+adapter.close()  # no trial left RUNNING when 4 does not divide the budget
 ```
 
 **Nevergrad.** `from_nevergrad(optimizer, batch_size=None, initial_point=None)` asks the optimizer for `batch_size` candidates per batch, by default its `num_workers`, and tells each `-value`. When the optimizer has a `budget`, the run ends once that many candidates have been asked, the last batch cut to fit; without one, `max_evaluations` ends it. `initial_point` is suggested to the optimizer (`optimizer.suggest`), so it is the first candidate. Any optimizer of `ng.optimizers` works the same way; this example uses `TBPSA`, which Nevergrad's documentation (version 1.0.12, the one checked here) describes as suited to noisy objectives, and seeds the parametrization's `random_state`:

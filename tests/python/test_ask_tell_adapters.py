@@ -1,12 +1,13 @@
 """
-The adapters of ``polypus.external``: Optuna, Nevergrad and pycma through
+The adapters of ``polypus.ask_tell``: Optuna, Nevergrad and pycma through
 ``polypus.External`` (issue #399).
 
 The first part runs on stand-ins for each library's public ask/tell API, so it
 needs none of the three: what each adapter asks, how it maps candidates to
 rows, the sign of the values it tells, the library's stop signal, the batch
-it re-offers and the checks of its arguments. Importing ``polypus.external``
-must not import any of the libraries.
+it re-offers, the checks of its arguments and of what it is told, and
+Optuna's ``close()``. Importing ``polypus.ask_tell`` must not import any of
+the libraries, and the pip extras ask for the versions CI tests.
 
 The second part trains through each real library and is skipped when it is
 not installed, except under ``POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1``, where it
@@ -21,17 +22,32 @@ import os
 import re
 import subprocess
 import sys
+import types
+from importlib.metadata import PackageNotFoundError, requires
+from pathlib import Path
 
 import numpy as np
 import polypus
 import pytest
-from polypus.external import from_nevergrad, from_optuna, from_pycma
+from polypus.ask_tell import from_nevergrad, from_optuna, from_pycma
 
 DIMENSIONS = 2
 SHOTS = 64
 # CI installs the three libraries on its latest Python and sets this to 1, so
 # a missing one fails the tests that train through it instead of skipping.
 REQUIRE_LIBRARIES = "POLYPUS_REQUIRE_EXTERNAL_LIBRARIES"
+CI_WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+# A batch of two rows told back otherwise than ask() handed it out.
+OTHER_CANDIDATES = pytest.mark.parametrize(
+    "other",
+    [
+        lambda batch: [batch[1], batch[0]],
+        lambda batch: [batch[0], [x + 1.0 for x in batch[1]]],
+        lambda batch: [batch[0]],
+        lambda batch: [batch[0], ["a", "b"]],
+    ],
+    ids=["reordered", "another-row", "one-row-missing", "not-numbers"],
+)
 
 
 def _library(name):
@@ -93,8 +109,8 @@ class Recording:
 
 def test_importing_the_adapters_imports_none_of_the_libraries():
     code = (
-        "import sys, polypus, polypus.external\n"
-        "assert polypus.external.from_optuna\n"
+        "import sys, polypus, polypus.ask_tell\n"
+        "assert polypus.ask_tell.from_optuna\n"
         "print(sorted({'optuna', 'nevergrad', 'cma'} & set(sys.modules)))\n"
     )
     out = subprocess.run(
@@ -105,16 +121,40 @@ def test_importing_the_adapters_imports_none_of_the_libraries():
 
 def test_the_module_is_reachable_from_polypus():
     import polypus
-    import polypus.external
+    import polypus.ask_tell
 
-    assert polypus.external is sys.modules["polypus.external"]
-    assert "external" in polypus.__all__
-    assert polypus.external.__all__ == [
+    assert polypus.ask_tell is sys.modules["polypus.ask_tell"]
+    assert "ask_tell" in polypus.__all__
+    assert polypus.ask_tell.__all__ == [
         "AskTell",
+        "OptunaAskTell",
         "from_optuna",
         "from_nevergrad",
         "from_pycma",
     ]
+
+
+def test_the_extras_ask_for_the_versions_ci_tests():
+    # pyproject.toml's floors are the pins of CI's adapter tests: raising a pin
+    # without its floor would let pip install a version no test ran on.
+    try:
+        requirements = requires("polypus-quantum") or []
+    except PackageNotFoundError:
+        pytest.skip("the polypus-quantum distribution is not installed")
+    if not CI_WORKFLOW.is_file():
+        pytest.skip(f"no {CI_WORKFLOW}: tests run outside the repository")
+    pins = dict(
+        re.findall(r"\b(optuna|nevergrad|cma)==([\w.]+)", CI_WORKFLOW.read_text())
+    )
+    floors = {}
+    for requirement in requirements:
+        extra = re.search(r"""extra\s*==\s*["']([\w-]+)["']""", requirement)
+        if extra:
+            name = re.match(r"[\w.-]+", requirement).group(0)
+            floor = re.search(r">=\s*([\w.]+)", requirement)
+            floors[extra.group(1)] = (name, floor and floor.group(1))
+    assert sorted(pins) == ["cma", "nevergrad", "optuna"], pins
+    assert floors == {name: (name, pin) for name, pin in pins.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +188,7 @@ class FakeStudy:
         self.trials = []
         self.queue = []
         self.told = []
+        self.failed = []
 
     def ask(self):
         fixed = self.queue.pop(0) if self.queue else {}
@@ -155,10 +196,13 @@ class FakeStudy:
         self.trials.append(trial)
         return trial
 
-    def tell(self, trial, value):
+    def tell(self, trial, values=None, state=None):
         if trial.number in getattr(self, "refuse", ()):
             raise LookupError(f"trial {trial.number}")
-        self.told.append((trial.number, value))
+        if state is None:
+            self.told.append((trial.number, values))
+        else:
+            self.failed.append((trial.number, state))
 
     def enqueue_trial(self, params):
         self.queue.append(dict(params))
@@ -277,6 +321,69 @@ class TestOptunaAdapter:
         with pytest.raises(RuntimeError, match="no batch pending"):
             adapter.tell(batch, [1.0, 2.0])
 
+    @OTHER_CANDIDATES
+    def test_a_tell_with_other_candidates_raises(self, other):
+        study = FakeStudy()
+        adapter = from_optuna(study, 2, 2)
+        batch = adapter.ask()
+        with pytest.raises(ValueError, match="other candidates than the batch"):
+            adapter.tell(other(batch), [1.0, 2.0])
+        assert study.told == []
+        adapter.tell(batch, [1.0, 2.0])
+        assert study.told == [(0, -1.0), (1, -2.0)]
+
+    @pytest.fixture
+    def trial_state(self, monkeypatch):
+        """A stand-in for ``optuna.trial.TrialState``, which ``close()``
+        imports."""
+        trial = types.ModuleType("optuna.trial")
+        trial.TrialState = types.SimpleNamespace(FAIL="FAIL")
+        optuna = types.ModuleType("optuna")
+        optuna.trial = trial
+        monkeypatch.setitem(sys.modules, "optuna", optuna)
+        monkeypatch.setitem(sys.modules, "optuna.trial", trial)
+
+    @pytest.mark.usefixtures("trial_state")
+    def test_close_fails_the_trials_of_a_batch_not_told(self):
+        study = FakeStudy()
+        adapter = from_optuna(study, 2, 3)
+        adapter.close()
+        assert study.failed == [], "no batch handed out, nothing to fail"
+        batch = adapter.ask()
+        adapter.close()
+        assert study.failed == [(0, "FAIL"), (1, "FAIL"), (2, "FAIL")]
+        assert study.told == []
+        with pytest.raises(RuntimeError, match="no batch pending"):
+            adapter.tell(batch, [1.0, 2.0, 3.0])
+        # The adapter goes on with new trials.
+        assert adapter.ask() != batch
+        assert len(study.trials) == 6
+        adapter.close()
+        adapter.close()
+        assert [number for number, _ in study.failed] == [0, 1, 2, 3, 4, 5]
+
+    @pytest.mark.usefixtures("trial_state")
+    def test_close_after_a_tell_fails_nothing(self):
+        study = FakeStudy()
+        adapter = from_optuna(study, 2, 2)
+        adapter.tell(adapter.ask(), [1.0, 2.0])
+        adapter.close()
+        assert study.failed == []
+
+    @pytest.mark.usefixtures("trial_state")
+    def test_a_close_that_fails_partway_keeps_the_rest_pending(self):
+        study = FakeStudy()
+        study.refuse = {1}
+        adapter = from_optuna(study, 2, 3)
+        batch = adapter.ask()
+        with pytest.raises(LookupError, match="trial 1"):
+            adapter.close()
+        assert study.failed == [(0, "FAIL")]
+        assert adapter.ask() == batch[1:]
+        study.refuse = set()
+        adapter.close()
+        assert study.failed == [(0, "FAIL"), (1, "FAIL"), (2, "FAIL")]
+
     def test_the_initial_point_is_the_first_trial(self):
         study = FakeStudy()
         adapter = from_optuna(study, 2, 2, initial_point=[0.5, np.float64(1.5)])
@@ -382,6 +489,17 @@ class TestNevergradAdapter:
         with pytest.raises(ValueError, match="3 values for a batch of 2"):
             adapter.tell(batch, [1.0, 2.0, 3.0])
 
+    @OTHER_CANDIDATES
+    def test_a_tell_with_other_candidates_raises(self, other):
+        optimizer = FakeNevergrad()
+        adapter = from_nevergrad(optimizer, batch_size=2)
+        batch = adapter.ask()
+        with pytest.raises(ValueError, match="other candidates than the batch"):
+            adapter.tell(other(batch), [1.0, 2.0])
+        assert optimizer.told == []
+        adapter.tell(batch, [1.0, 2.0])
+        assert [loss for _, loss in optimizer.told] == [-1.0, -2.0]
+
     def test_the_initial_point_is_suggested(self):
         optimizer = FakeNevergrad()
         adapter = from_nevergrad(optimizer, batch_size=2, initial_point=(0.5, 1.5))
@@ -471,6 +589,18 @@ class TestPycmaAdapter:
         with pytest.raises(ValueError, match="1 values for a batch of 2"):
             adapter.tell(batch, [1.0])
 
+    @OTHER_CANDIDATES
+    def test_a_tell_with_other_candidates_raises(self, other):
+        es = FakeES(popsize=2)
+        adapter = from_pycma(es)
+        batch = adapter.ask()
+        with pytest.raises(ValueError, match="other candidates than the batch"):
+            adapter.tell(other(batch), [1.0, 2.0])
+        assert es.told == []
+        # The same rows as a NumPy array are the same candidates.
+        adapter.tell(np.array(batch), [1.0, 2.0])
+        assert es.told[0][1] == [-1.0, -2.0]
+
     def test_a_run_through_the_bridge(self):
         es = FakeES(generations=3, popsize=4)
         recording = Recording(from_pycma(es))
@@ -526,6 +656,29 @@ class TestOptuna:
         first, second = run(), run()
         assert first.best_params == second.best_params
         assert first.fitness_history == second.fitness_history
+
+    def test_close_leaves_no_trial_running(self):
+        optuna = _library("optuna")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        state = optuna.trial.TrialState
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(seed=2, constant_liar=True)
+        )
+        adapter = from_optuna(study, DIMENSIONS, 4)
+        # The budget leaves the third batch untold: its trials stay RUNNING.
+        _train(adapter, 10)
+        assert [t.state for t in study.trials] == [state.COMPLETE] * 8 + [
+            state.RUNNING
+        ] * 4
+        adapter.close()
+        assert [t.state for t in study.trials] == [state.COMPLETE] * 8 + [
+            state.FAIL
+        ] * 4
+        # The adapter goes on with new trials, which the study completes.
+        _train(adapter, 4)
+        assert [t.state for t in study.trials[12:]] == [state.COMPLETE] * 4
+        adapter.close()
+        assert len(study.trials) == 16
 
 
 @pytest.mark.integration
