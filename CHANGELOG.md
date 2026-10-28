@@ -25,8 +25,9 @@ Changes on `main` since 0.7.2.
   unsupervised maximising the readout; Adam gets the exact parameter-shift
   gradient; `polypus.Rotosolve` is accepted with `loss="expectation"` on a
   model whose trainable parameters each sit in one rotation, and is otherwise
-  a `ValueError` before anything runs, as in `train` (#398); `exact=True` uses exact probabilities on the local native
-  simulator; `batch_size` trains on minibatches. `Model.bind(params)` gives an
+  a `polypus.ConfigurationError` before anything runs, as in `train` (#398);
+  `exact=True` uses exact probabilities on the local native simulator;
+  `batch_size` trains on minibatches. `Model.bind(params)` gives an
   immutable `TrainedModel` whose `predict` returns the readout's decisions
   (`int` for sign, threshold and argmax, `float` for raw) and whose `run`
   returns the counts per row, or an `ExactResult` of probabilities with
@@ -287,11 +288,15 @@ Changes on `main` since 0.7.2.
   calls the one the method names.
 - `polypus.ConfigurationError`, a `polypus.PolypusError` that is also a
   `ValueError`. Every argument and configuration check of `run_quantum_circuit`,
-  `train`, `qml.train` and `qml.predict` raises it (an unknown `infrastructure`,
-  a bad `walltime`, an optimizer setting, `options` on `local`/`cunqa`, …), as
-  do `polypus.DE(strategy=...)`, `polypus.Adam(rule=...)` and the argument
-  checks of the `polypus.ask_tell` adapters, so `except polypus.PolypusError`
-  catches them and `except ValueError` still does (#418).
+  `train`, `qml.train`, `qml.predict` and a native model's `Model.fit`,
+  `TrainedModel.predict` and `TrainedModel.run` raises it (an unknown
+  `infrastructure`, a bad `walltime`, an optimizer setting, `options` on
+  `local`/`cunqa`, a loss without labels, …), as do `polypus.DE(strategy=...)`,
+  `polypus.Adam(rule=...)` and the argument checks of the `polypus.ask_tell`
+  adapters, so `except polypus.PolypusError` catches them and
+  `except ValueError` still does (#418, #507). Building a native model
+  (`qml.Encoder`, `qml.Ansatz`, `qml.Readout`, `qml.Dataset`, `qml.load`)
+  raises a plain `ValueError`, as building a `polypus.Circuit` does.
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a

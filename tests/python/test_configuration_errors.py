@@ -130,3 +130,115 @@ class TestQmlTrainRejectsQmio:
             polypus.ConfigurationError, match="cannot serialize the Qiskit circuits"
         ):
             _qml_train(infrastructure="qmio")
+
+
+# ── The native QML API (`Model.fit`, `TrainedModel.predict`/`run`) ──────────
+
+_UNSET = object()
+
+
+def _fit(x=_UNSET, y=_UNSET, **kwargs):
+    from qml_native_helpers import X, Y, make_model
+
+    kwargs.setdefault("method", polypus.DE(generations=1, population_size=4))
+    kwargs.setdefault("loss", "hinge")
+    kwargs.setdefault("infrastructure", "cunqa")
+    return make_model().fit(
+        X if x is _UNSET else x,
+        Y if y is _UNSET else y,
+        shots=16,
+        nodes=1,
+        cores_per_qpu=1,
+        id="config_check",
+        seed=3,
+        **kwargs,
+    )
+
+
+def _trained():
+    from qml_native_helpers import make_model
+
+    model = make_model()
+    return model.bind([0.1] * model.num_params)
+
+
+def _infer(entry_point, x=_UNSET, **kwargs):
+    from qml_native_helpers import X
+
+    kwargs.setdefault("infrastructure", "cunqa")
+    return getattr(_trained(), entry_point)(
+        X if x is _UNSET else x, shots=16, nodes=1, cores_per_qpu=1, **kwargs
+    )
+
+
+class TestNativeQmlChecksRaiseIt:
+    """The native API's own checks raise `ConfigurationError` too, before any
+    backend exists. The builders (`Encoder`, `Ansatz`, `Readout`, `Dataset`,
+    `qml.load`) keep a plain `ValueError`, as `polypus.Circuit`'s do."""
+
+    @pytest.mark.parametrize(
+        ("call", "match"),
+        [
+            pytest.param(lambda: _fit(loss="l2"), "unknown loss", id="unknown-loss"),
+            pytest.param(
+                lambda: _fit(y=None), "needs labels", id="loss-without-labels"
+            ),
+            pytest.param(
+                lambda: _fit(loss=None), "needs a loss", id="labels-without-loss"
+            ),
+            pytest.param(
+                lambda: _fit(loss="expectation"),
+                "does not use labels",
+                id="expectation-with-labels",
+            ),
+            pytest.param(
+                lambda: _fit(x=polypus.qml.Dataset([[0.1], [2.9]], [1, -1]), y=[1, -1]),
+                "carries its own labels",
+                id="dataset-and-y",
+            ),
+            pytest.param(lambda: _fit(batch_size=6), "batch_size", id="batch-size"),
+            pytest.param(lambda: _fit(exact=True), "exact=True", id="fit-exact"),
+            pytest.param(
+                lambda: _fit(x=[[0.1, 0.2], [2.9, 2.8]], y=[1, -1]),
+                None,
+                id="fit-too-many-features",
+            ),
+            pytest.param(
+                lambda: _fit(x=[[0.1], [2.9, 2.8]], y=[1, -1]),
+                None,
+                id="fit-ragged-rows",
+            ),
+            pytest.param(
+                lambda: _fit(method=polypus.Rotosolve()),
+                "polypus.Rotosolve",
+                id="rotosolve",
+            ),
+            pytest.param(
+                lambda: _infer("predict", exact=True), "exact=True", id="predict-exact"
+            ),
+            pytest.param(
+                lambda: _infer("predict", x=[[0.1, 0.2]]),
+                None,
+                id="predict-too-many-features",
+            ),
+            pytest.param(
+                lambda: _infer("run", infrastructure="qmio", seed=1),
+                "seed is not supported",
+                id="run-seed-on-qmio",
+            ),
+        ],
+    )
+    def test_before_any_cunqa_call(self, monkeypatch, call, match):
+        fake = FakeCunqa().install(monkeypatch)
+        with pytest.raises(polypus.ConfigurationError, match=match):
+            call()
+        assert fake.calls == []
+
+    def test_a_valid_native_configuration_reaches_cunqa(self, monkeypatch):
+        # The checks above would pass if CUNQA were never reached at all.
+        fake = FakeCunqa().install(monkeypatch)
+        _fit()
+        assert fake.names()[0] == "qraise"
+        fake = FakeCunqa().install(monkeypatch)
+        _infer("predict")
+        assert fake.names()[0] == "qraise"
