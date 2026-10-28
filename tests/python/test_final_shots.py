@@ -277,7 +277,9 @@ class TestValidation:
         import polypus
 
         run = ENTRY_POINTS[entry][0]
-        with pytest.raises(TypeError, match="shots"):
+        # Only the class: PyO3's wording for `shots` depends on the Python
+        # version (on 3.10 it does not name the argument).
+        with pytest.raises(TypeError):
             run(polypus.DE(), infrastructure="cunqa", shots=4096.0)
         with pytest.raises(TypeError, match="final_shots must be an integer"):
             run(polypus.DE(), infrastructure="cunqa", final_shots=4096.0)
