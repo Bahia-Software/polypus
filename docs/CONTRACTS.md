@@ -867,9 +867,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     still reproduces it. The native backend seeds circuits from its own
     counter, which the batch continues, and does not read the seed.
   - Preconditions: an integer from 1 to 4294967295. `train` and `qml.train`
-    raise `ValueError` for anything else (0, a negative, a `float`, a `bool`,
-    a `str`) before anything runs (no backend, no CUNQA allocation), next to
-    the `initial_point` check; a NumPy integer is accepted. In Rust,
+    raise `ValueError` for an integer out of that range (0, a negative, 2³²)
+    and `TypeError` for anything that is not an integer (a `float`, a `bool`,
+    a `str`), as for `shots`, before anything runs (no backend, no CUNQA
+    allocation), next to the `initial_point` check; a NumPy integer is
+    accepted. In Rust,
     `Some(0)` is `OptimizerError::InvalidConfig` for `final_shots` before the
     oracle is built.
   - Which candidates: during the run the optimizer scores through a
@@ -925,9 +927,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `QmlOracle` (the shots and the derived seed in every wave), the trait's
     tests in
     `crates/polypus-optimizers/src/objective.rs`, and
-    `tests/python/test_final_shots.py` (the `ValueError`s before the CUNQA
-    seam, the final batch of every optimizer through both entry points at
-    the seam: its shots, its seed, its candidates, the winner and the
+    `tests/python/test_final_shots.py` (the `ValueError`s and `TypeError`s
+    before the CUNQA seam, the final batch of every optimizer through both
+    entry points at the seam: its shots, its seed, its candidates, the winner and the
     unchanged batches before it; an error, an interrupt and a failing final
     batch; a real Aer run whose final batch is measured afresh; and seeded
     native runs unchanged with a final value measured with `final_shots`).
@@ -950,7 +952,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     generations, long before the fitness had plateaued.)
   - `patience` (generations; DE binding default **20**) is the look-back window.
     No early stop can fire before generation `patience`, so a larger value makes
-    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`.
+    the optimizer more patient. Exposed as `polypus.DE(..., patience=20)`. It
+    must be at least 1: 0 would compare a generation's best fitness with
+    itself and stop the run at once, so it is an `OptimizerError::InvalidConfig`
+    before any RNG draw, for every strategy and for CMA-ES too (in Python, the
+    `ValueError` of `train`/`qml.train` before any QPU is requested).
   - The search dynamics of the default `strategy="rand1bin"` are DE/rand/1/bin
     with angles initialised in `[0, 2π)` and a fixed mutation factor `F` and
     crossover rate `CR`: `polypus.DE(mutation_factor=None,
@@ -1014,7 +1020,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     draw or oracle call: `dimensions >= 1` (unlike DE and PSO, which accept
     zero), `generations >= 1` (there is no initial batch), `sigma0` finite and
     in `(0, 2π]`, `population_size >= 2` when given (`None` is Hansen's
-    `4 + ⌊3 ln d⌋`), and `population_size · 2^restarts` within `u32`.
+    `4 + ⌊3 ln d⌋`), `population_size · 2^restarts` within `u32`, and
+    `patience >= 1`, as DE's.
   - One `evaluate_batch` call of λ candidates per generation, its length
     checked, and no separate initial batch. The mean and samples stay
     unwrapped in ℝ^d; each candidate is wrapped into `[0, 2π)` when handed to
@@ -1088,7 +1095,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `evaluate_batch` of one candidate, its length checked, so every gradient
     feeds a measured step.
   - `best_params` is the measured `θ` with the best fitness and `best_fitness`
-    the value the oracle returned for it; `fitness_history[t]` is the best
+    the value the oracle returned for it; the stencil's `θ ± h·e_i` only give
+    the gradient and never compete. `fitness_history[t]` is the best
     measured up to iteration `t`, the final `θ` counted in the last entry.
     The first measurement is kept and later ones only when strictly better,
     so a `NaN` never wins over a number (a run
@@ -1166,7 +1174,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   with a calibrated first step).
   - Preconditions, each an `OptimizerError::InvalidConfig` before any RNG draw
     or oracle call, in this order: `max_iters >= 1`, `dimensions >= 1`,
-    `resamplings >= 1`, `perturbation` and `target_step` finite and `> 0`,
+    `resamplings` from 1 to `AlgorithmSPSA::MAX_RESAMPLINGS` (2³¹ − 1, so an
+    iteration's batch of `2·resamplings + 1` fits in `u32`, as CMA-ES's
+    population must), `perturbation` and `target_step` finite and `> 0`,
     `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5` (Spall's
     conditions on the gains), `stability_constant` finite and `>= 0`,
     `eval_interval >= 1`, then `initial_point` as under *Starting point*
@@ -1288,9 +1298,12 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   - `best_params` is the best of the **measured** points (`x` when measured,
     and every neighbour), kept as Adam's: the first measurement, then only a
     strictly better one, so a `NaN` never wins over a number; predicted
-    values never compete. `fitness_history[k]` is the best measured up to
-    step `k`; step 0 measures θ₀, so no entry is `-∞`, and the last is
-    `best_fitness`. After the last step, whether the run used its sweeps or
+    values never compete. The neighbours are offered unwrapped, so
+    `best_params` can lie up to π/2 outside `[0, 2π)`, and further when an
+    `initial_point` outside it leaves a coordinate unmoved.
+    `fitness_history[k]` is the best measured up to step `k`; step 0 measures
+    θ₀, so no entry is `-∞`, and the last is `best_fitness`. After the last
+    step, whether the run used its sweeps or
     stopped early, one more `evaluate_batch` of one candidate, its length
     checked, measures the point it reached; it competes for `best_params`
     like any measured point and its value joins the last entry of
@@ -1345,8 +1358,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `dimensions >= 1`; `initial_point` is refused (under *Starting point*
     above). `polypus.External` checks, when it is built and when either
     attribute is set, that `max_evaluations` is an integer from 1 to
-    2⁶⁴ − 1 (not a `bool` or a `float`; `ValueError`) and that `optimizer`
-    has callable `ask` and `tell` (`TypeError`).
+    2⁶⁴ − 1 (`ValueError` out of that range, `TypeError` for a value that is
+    not an integer, a `bool` or a `float` included) and that `optimizer` has
+    callable `ask` and `tell` (`TypeError`).
   - Batch `k = 0, 1, …` is one `ask()`. `None` or an empty batch ends the
     run with `converged = true`. A batch of `n` rows with
     `spent + n > max_evaluations` ends it with `converged = false` and is
@@ -2131,8 +2145,9 @@ batching and distribution are the oracle's concern.
 layers that load each sample), an `Ansatz` (the trainable layers, which may also
 re-upload the data) and a `Readout`. It copies the three, so building on them
 afterwards does not change it, and it holds no trained parameters. Everything
-that does not depend on the data is checked where it is written, as a
-`ValueError`:
+that does not depend on the data is checked where it is written, as a plain
+`ValueError`, as `polypus.Circuit`'s builders raise (the checks of `fit`,
+`predict` and `run` below are `polypus.ConfigurationError`):
 
 - each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
   amplitude encoder, pooling below two active qubits) and leaves the object as
@@ -2184,16 +2199,17 @@ stubs spell each set as a `Literal`.
 **Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
 argument after `y` is keyword-only and `method` is required. It returns a
 `TrainResult` (C-7) whose `best_params` has `num_params` values. All the checks
-below run before a backend exists:
+below run before a backend exists and raise `polypus.ConfigurationError`, which
+is also a `ValueError` (#418), as `train`'s do:
 
 - **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
-  `Dataset`, `y` is a `ValueError` (it carries its own labels, or none).
+  `Dataset`, `y` is an error (it carries its own labels, or none).
   Labels from `y` follow C-8's checks; the rows must be non-empty, of equal
   width and finite.
 - **Labels and loss.** With labels, `loss` is required and is a supervised
-  loss; `"expectation"` (which ignores labels) is a `ValueError`. Without
+  loss; `"expectation"` (which ignores labels) is an error. Without
   labels (`y=None`, or a `Dataset` built without them), `loss=None` means
-  `"expectation"` and a supervised loss is a `ValueError`: labels are never
+  `"expectation"` and a supervised loss is an error: labels are never
   ignored, and a supervised loss never trains against made-up labels. `"argmax"`
   pairs with `"categorical_cross_entropy"` only, and every other decision with a
   scalar loss. Label domains are the loss's (±1 for `"hinge"`, 0/1 for
@@ -2205,10 +2221,10 @@ below run before a backend exists:
   reported `best_fitness` is on every sample (C-5).
 - **`polypus.Rotosolve`** needs what its closed-form step assumes (C-5):
   `loss="expectation"`, the one loss linear in the measured distribution
-  (another is a `ValueError` naming it), and every trainable parameter the
+  (another is an error naming it), and every trainable parameter the
   angle of exactly one rotation, checked with
-  `ParameterizedCircuit::check_single_frequency` on the model's template (a
-  `ValueError` with the first problem; a `conv` or `pool` layer over more than
+  `ParameterizedCircuit::check_single_frequency` on the model's template (an
+  error with the first problem; a `conv` or `pool` layer over more than
   one pair fails it, since it shares each parameter across the pairs). Every
   other optimizer takes any model.
 - **`backend=None`** is `"polypus"` (the native simulator) on
@@ -2225,7 +2241,9 @@ for `"argmax"` (the class index), a `float` for `"raw"` (the expectation).
 `counts` holds one C-3 dict per row (`merged_counts` is `None`), or with
 `exact=True` an `ExactResult` whose `probabilities` holds one dict per row,
 keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
-`exact` and `backend=None` follow `fit`'s rules.
+`exact` and `backend=None` follow `fit`'s rules, and so do their checks (the
+rows against the model, `exact`, a `seed` on `qmio`): before a backend exists,
+as `polypus.ConfigurationError`.
 
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
@@ -2271,7 +2289,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   sampled, minibatches, seeds, every layer trained, the convergence curve, every
   rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
   `test_qml_native_inference.py` (`bind`, `predict`, `run`,
-  `ExactResult`, decision types, save/load and tampered files) and the native
+  `ExactResult`, decision types, save/load and tampered files), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
-  runs with the GIL released).
+  runs with the GIL released) and `TestNativeQmlChecksRaiseIt` in
+  `test_configuration_errors.py` (every check of `fit`, `predict` and `run` is a
+  `polypus.ConfigurationError` raised before any CUNQA call).
 

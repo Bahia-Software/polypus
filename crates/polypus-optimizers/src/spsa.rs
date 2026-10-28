@@ -151,7 +151,8 @@ pub struct AlgorithmSPSA;
 /// Checked before any RNG draw or oracle call, each violation an
 /// [`OptimizerError::InvalidConfig`] naming the parameter: `max_iters >= 1`
 /// (the first iteration measures θ₀, so zero iterations would measure
-/// nothing), `dimensions >= 1`, `resamplings >= 1`, `perturbation` and
+/// nothing), `dimensions >= 1`, `resamplings` from 1 to
+/// [`MAX_RESAMPLINGS`](AlgorithmSPSA::MAX_RESAMPLINGS), `perturbation` and
 /// `target_step` finite and `> 0`, `alpha` in `(0.5, 1]`, `gamma > 0` with
 /// `alpha − gamma > 0.5`, `stability_constant` finite and `>= 0`,
 /// `eval_interval >= 1`, and `initial_point`, when
@@ -210,6 +211,10 @@ impl AlgorithmSPSA {
     /// Perturbations in the calibration batch, which holds twice as many
     /// candidates.
     pub const CALIBRATION_PERTURBATIONS: u32 = 25;
+    /// The largest `resamplings`: an iteration's batch, `2·resamplings + 1`
+    /// candidates, then still fits in a `u32`, as CMA-ES's largest
+    /// population does.
+    pub const MAX_RESAMPLINGS: u32 = (u32::MAX - 1) / 2;
     /// The default `alpha`: Spall's (1998) practical value.
     pub const DEFAULT_ALPHA: f64 = 0.602;
     /// The default `gamma`: Spall's (1998) practical value.
@@ -477,6 +482,16 @@ fn validate(
         return invalid(
             "resamplings",
             "must be at least 1 (each iteration needs a perturbation)".to_string(),
+        );
+    }
+    if resamplings > AlgorithmSPSA::MAX_RESAMPLINGS {
+        return invalid(
+            "resamplings",
+            format!(
+                "must be at most {} (a batch of 2·resamplings + 1 candidates must fit in \
+                 a u32), got {resamplings}",
+                AlgorithmSPSA::MAX_RESAMPLINGS
+            ),
         );
     }
     for (parameter, value) in [("perturbation", perturbation), ("target_step", target_step)] {

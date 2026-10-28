@@ -288,8 +288,6 @@ class TestOptunaAdapter:
         ("kwargs", "message"),
         [
             ({"dimensions": 0}, "dimensions must be an integer >= 1, got 0"),
-            ({"batch_size": 2.0}, "batch_size must be an integer >= 1, got 2.0"),
-            ({"batch_size": True}, "batch_size must be an integer >= 1, got True"),
             ({"bounds": (1.0, 1.0)}, "bounds must be finite with low < high"),
             ({"bounds": (0.0, math.inf)}, "bounds must be finite with low < high"),
             ({"bounds": 3}, "bounds must be two numbers (low, high), got 3"),
@@ -303,6 +301,17 @@ class TestOptunaAdapter:
         arguments = {"dimensions": 2, "batch_size": 2, **kwargs}
         study = FakeStudy()
         with pytest.raises(polypus.ConfigurationError, match=re.escape(message)):
+            from_optuna(study, **arguments)
+        assert study.queue == []
+
+    @pytest.mark.parametrize("name", ["dimensions", "batch_size"])
+    @pytest.mark.parametrize("value", [2.0, True, "2", None])
+    def test_a_count_that_is_not_an_integer_is_a_type_error(self, name, value):
+        # As polypus.External's max_evaluations, and an integer argument's.
+        arguments = {"dimensions": 2, "batch_size": 2, name: value}
+        study = FakeStudy()
+        message = f"{name} must be an integer >= 1, got {value!r}"
+        with pytest.raises(TypeError, match=re.escape(message)):
             from_optuna(study, **arguments)
         assert study.queue == []
 
@@ -393,7 +402,12 @@ class TestNevergradAdapter:
         optimizer = FakeNevergrad()
         with pytest.raises(polypus.ConfigurationError, match=message):
             from_nevergrad(optimizer, **kwargs)
-        assert optimizer.suggested == []
+
+    @pytest.mark.parametrize("value", [2.0, True])
+    def test_a_batch_size_that_is_not_an_integer_is_a_type_error(self, value):
+        message = f"batch_size must be an integer >= 1, got {value!r}"
+        with pytest.raises(TypeError, match=re.escape(message)):
+            from_nevergrad(FakeNevergrad(), batch_size=value)
 
     def test_a_candidate_that_is_not_flat_raises(self):
         optimizer = FakeNevergrad()

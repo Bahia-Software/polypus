@@ -267,3 +267,17 @@ class TestDeStrategyBatches:
                 ident="de_strategy_bad_pop",
             )
         assert batches == []
+
+    @pytest.mark.parametrize("strategy", STRATEGIES)
+    def test_zero_patience_raises_before_any_batch(self, monkeypatch, strategy):
+        # 0 would compare a generation's best fitness with itself.
+        import polypus
+
+        batches = _record_batches(monkeypatch)
+        with pytest.raises(polypus.ConfigurationError, match="patience"):
+            _train(
+                polypus.DE(generations=2, patience=0, strategy=strategy),
+                seed=1,
+                ident="de_strategy_zero_patience",
+            )
+        assert batches == []

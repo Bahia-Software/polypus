@@ -693,10 +693,15 @@ type Breaks = fn(&mut AlgorithmSPSAArgs);
 
 #[test]
 fn invalid_configurations_are_rejected_before_any_oracle_call() {
-    let cases: [(&str, Breaks); 25] = [
+    let cases: [(&str, Breaks); 27] = [
         ("max_iters", |a| a.max_iters = 0),
         ("dimensions", |a| a.dimensions = 0),
         ("resamplings", |a| a.resamplings = 0),
+        // A batch of 2·resamplings + 1 candidates must fit in a u32.
+        ("resamplings", |a| {
+            a.resamplings = AlgorithmSPSA::MAX_RESAMPLINGS + 1
+        }),
+        ("resamplings", |a| a.resamplings = u32::MAX),
         ("perturbation", |a| a.perturbation = 0.0),
         ("perturbation", |a| a.perturbation = -0.1),
         ("perturbation", |a| a.perturbation = f64::NAN),

@@ -147,6 +147,12 @@ pub struct ExternalConfig {
 /// variance oracle (built from the Python callback at the binding boundary), and
 /// `External` the ask/tell optimizer it bridges (a Python object adapted by the
 /// binding), so dispatch stays Python-free.
+///
+/// `#[non_exhaustive]`: every new optimizer adds a variant, which is then not
+/// a breaking change; a match outside this crate needs a `_` arm (inside it
+/// the matches stay exhaustive, so a new variant fails to build until each
+/// one handles it).
+#[non_exhaustive]
 pub enum Method {
     De(DeConfig),
     Pso(PsoConfig),
@@ -213,6 +219,7 @@ impl Method {
                 dimensions,
                 cfg.mutation_factor,
                 cfg.crossover_rate,
+                cfg.patience,
                 initial_point,
             ),
             Method::Pso(cfg) => {
@@ -233,6 +240,7 @@ impl Method {
                 cfg.generations,
                 cfg.sigma0,
                 cfg.restarts,
+                cfg.patience,
                 initial_point,
             ),
             Method::Spsa(cfg) => AlgorithmSPSA::check_preconditions(
@@ -255,10 +263,9 @@ impl Method {
                 dimensions,
                 initial_point,
             ),
-            // The step first: dispatch builds the finite difference before it
-            // runs Adam whenever the run's oracles carry no exact gradient,
-            // which is every `train` and `qml.train` run. With an exact
-            // gradient dispatch never reads the step.
+            // The step first, as dispatch checks it: before it builds the
+            // finite difference that every `train` and `qml.train` run uses,
+            // and with an exact gradient too, so the two always agree.
             Method::Adam(cfg) => {
                 finite_difference::check_step(cfg.finite_difference_step)?;
                 AlgorithmAdam::check_preconditions(
@@ -290,9 +297,13 @@ impl Method {
 /// oracle error is the *cause*, and the optimizer's own error is often just its
 /// downstream symptom.
 pub enum OracleError {
-    /// The optimizer rejected its configuration before any evaluation
-    /// (population too small, empty/non-finite bounds, `max_iters == 0`, ...).
-    /// Surfaces as `ValueError`.
+    /// The optimizer returned an error: it rejected its configuration before
+    /// any evaluation (population too small, empty/non-finite bounds,
+    /// `max_iters == 0`, ...), which surfaces as `polypus.ConfigurationError`,
+    /// or an oracle returned the wrong number of values or a non-finite
+    /// gradient ([`OptimizerError::OracleLengthMismatch`],
+    /// [`OptimizerError::NonFiniteGradient`]), which surfaces as
+    /// `polypus.EvaluationError`.
     Config(OptimizerError),
     /// An oracle evaluation failed and was recorded in the shared slot during the
     /// run (backend, binding, observable, a Python callback, or a C-5 violation).
@@ -405,8 +416,8 @@ fn describe(err: &BoxedError) -> String {
 /// every optimizer as before. [`Method::External`] takes none, since its
 /// library chooses its own start: a point is an
 /// [`InvalidConfig`](OptimizerError::InvalidConfig) for `initial_point`, after
-/// External's configuration is checked and before any `ask()`. It ignores `seed` too (contract C-7: the library owns its
-/// seed).
+/// External's configuration is checked and before any `ask()`. It ignores
+/// `seed` too (contract C-7: the library owns its seed).
 pub fn dispatch_optimizer(
     method: Method,
     oracles: impl Into<Oracles>,
@@ -561,6 +572,9 @@ fn dispatch_adam(
     seed: u64,
     initial_point: Option<Vec<f64>>,
 ) -> Result<OptimizationOutcome, OptimizerError> {
+    // Checked even when an exact gradient leaves it unused, so a bad step is
+    // refused whatever oracles the run has, as `check_preconditions` refuses it.
+    finite_difference::check_step(cfg.finite_difference_step)?;
     let (gradient_oracle, tracking): (Box<dyn GradientOracle>, Box<dyn EvaluationOracle>) =
         match (gradient, full_evaluation) {
             (Some(gradient), Some(full)) => (gradient, full),
@@ -1181,6 +1195,14 @@ mod tests {
                 Some(vec![0.5, f64::NAN]),
             ),
             ("CMA-ES, no point", Box::new(move || cmaes(0.3)), None),
+            (
+                "CMA-ES, patience 0",
+                Box::new(move || match cmaes(0.3) {
+                    Method::Cmaes(cfg) => Method::Cmaes(CmaesConfig { patience: 0, ..cfg }),
+                    other => other,
+                }),
+                short.clone(),
+            ),
         ];
         let adam = |finite_difference_step, learning_rate| {
             Method::Adam(AdamConfig {
@@ -1317,6 +1339,14 @@ mod tests {
             cases.push((
                 "DE, population 2",
                 Box::new(move || de(strategy, 2)),
+                short.clone(),
+            ));
+            cases.push((
+                "DE, patience 0",
+                Box::new(move || match de(strategy, 6) {
+                    Method::De(cfg) => Method::De(DeConfig { patience: 0, ..cfg }),
+                    other => other,
+                }),
                 short.clone(),
             ));
             cases.push((
@@ -1464,6 +1494,37 @@ mod tests {
         let sizes = sizes(&log);
         assert_eq!(sizes.len(), outcome.iterations_run + 1);
         assert!(sizes.iter().all(|&n| n == 1), "{sizes:?}");
+    }
+
+    /// With an exact gradient the step is never used, but a bad one is still
+    /// refused, as `check_preconditions` refuses it, before any call.
+    #[test]
+    fn adam_with_an_exact_gradient_still_rejects_a_bad_step() {
+        let (oracle, log) = recorder();
+        let calls = Arc::new(Mutex::new(0));
+        let oracles = Oracles {
+            evaluation: oracle,
+            gradient: Some(Box::new(QuadraticGradient(Arc::clone(&calls)))),
+            full_evaluation: None,
+        };
+        let method = match adam_method(10) {
+            Method::Adam(cfg) => Method::Adam(AdamConfig {
+                finite_difference_step: f64::NAN,
+                ..cfg
+            }),
+            other => other,
+        };
+        let checked = method
+            .check_preconditions(3, None)
+            .expect_err("check_preconditions refuses the step");
+        match dispatch_optimizer(method, oracles, 3, &OracleErrorSlot::new(), 1, None) {
+            Err(OracleError::Config(dispatched)) => {
+                assert_eq!(dispatched.to_string(), checked.to_string())
+            }
+            _ => panic!("expected the step's InvalidConfig"),
+        }
+        assert!(sizes(&log).is_empty());
+        assert_eq!(*calls.lock().unwrap(), 0);
     }
 
     #[test]
