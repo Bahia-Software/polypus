@@ -1176,7 +1176,7 @@ class OnePlusLambda:
 def scenario_19_external_optimizer():
     """``polypus.External`` runs any ask/tell optimizer, here the twenty lines
     of ``OnePlusLambda`` above (Optuna, Nevergrad and pycma plug in the same way
-    through ``polypus.external``). Each ``ask()`` is one batch, spread over the
+    through ``polypus.ask_tell``). Each ``ask()`` is one batch, spread over the
     QPUs like a DE generation, and ``max_evaluations`` caps the candidates."""
     x, y = two_clusters_2f()
     model = sign_model_2q(reps=1)

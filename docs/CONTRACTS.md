@@ -817,7 +817,7 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     configuration errors and before any `ask`, and `train` and `qml.train`
     raise `ValueError` before anything runs, in place of the length and
     finiteness checks, pointing to the `initial_point` of the
-    `polypus.external` adapters (and pycma's `x0`).
+    `polypus.ask_tell` adapters (and pycma's `x0`).
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
     batch of PSO and every DE strategy against the same seed without a point,
     QNG's stencil around the point, Adam's first batch of the point and its
@@ -1347,7 +1347,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   to an optimizer outside Polypus through the `AskTell` trait, `ask()` for a
   batch and `tell(candidates, values)` for its values, maximising; the
   bindings implement it over any Python object with those two methods, and
-  `polypus.external` adapts Optuna, Nevergrad and pycma, #399).
+  `polypus.ask_tell` adapts Optuna, Nevergrad and pycma, #399; an
+  adapter's `tell` raises `ValueError` for other candidates than the batch
+  it handed out, and Optuna's adapter has `close()`, which marks the trials
+  of an untold batch failed).
   - Preconditions, each an `OptimizerError::InvalidConfig` before any `ask`
     or oracle call, in this order: `max_evaluations >= 1`,
     `dimensions >= 1`; `initial_point` is refused (under *Starting point*
@@ -1427,12 +1430,15 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     budget, the rows, an endless row, the exceptions, the calling thread,
     reuse, the spread over the QPUs, a reference cycle collected, and the
     outcome against what `tell` received over 5 seeds), and
-    `tests/python/test_external_adapters.py` (the adapters against fakes of
-    each library's public API, and through the bridge with Optuna's TPE,
-    Nevergrad and pycma, their values negated for the minimising ones: these
-    skip when a library is not installed, but CI installs the three, pinned,
-    on its latest Python and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`, so
-    there they run); the External cases of
+    `tests/python/test_ask_tell_adapters.py` (the adapters against fakes of
+    each library's public API, their `tell` refusing other candidates than
+    the batch handed out, Optuna's `close()` failing an untold batch's
+    trials, the pip extras' floors against CI's pins, and through the bridge
+    with Optuna's TPE, Nevergrad and pycma, their values negated for the
+    minimising ones, and Optuna's `close()` on a real study: these skip when
+    a library is not installed, but CI installs the three, pinned, on its
+    latest Python and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`, so there
+    they run); the External cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
     which the library is not told.
 - **Minibatches (`batch_size`).** With a minibatch, `evaluate_batch` scores a

@@ -233,7 +233,7 @@ An external optimizer (`polypus.External`) has a budget in candidates,
 has started. The first batch is timed, and with `n` candidates in it the projection
 counts `⌊max_evaluations / n⌋` batches (at least one): exactly the batches the run
 sends when every batch has the first's size, as pycma's generations do, and Optuna's
-and Nevergrad's through the `polypus.external` adapters, whose batches hold
+and Nevergrad's through the `polypus.ask_tell` adapters, whose batches hold
 `batch_size` and `num_workers` candidates. When later batches are larger, the run
 sends fewer, and if a batch `k` times larger takes at most `k` times as long, the
 projection stays an upper bound to within one first batch, the remainder the floor

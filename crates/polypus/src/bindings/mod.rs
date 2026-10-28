@@ -428,7 +428,7 @@ fn check_external_initial_point(
     Err(crate::exceptions::configuration_error(
         "polypus.External takes no initial_point: the external optimizer chooses its own \
          start. Give the starting point to the library, or to the initial_point of the \
-         polypus.external adapter (from_optuna, from_nevergrad); for pycma it is the x0 of \
+         polypus.ask_tell adapter (from_optuna, from_nevergrad); for pycma it is the x0 of \
          cma.CMAEvolutionStrategy",
     ))
 }
@@ -1709,7 +1709,7 @@ pub fn run_quantum_circuit<'py>(
 /// it; Rotosolve starts from it as θ₀, the first point it measures. Without it
 /// every optimizer starts as before (contract C-5). `External` refuses it with
 /// `ValueError`, whatever the point: the external library chooses its start
-/// (give it to the library, or to the `initial_point` of a `polypus.external`
+/// (give it to the library, or to the `initial_point` of a `polypus.ask_tell`
 /// adapter).
 ///
 /// `final_shots` (default `None`) re-evaluates the best candidates once the

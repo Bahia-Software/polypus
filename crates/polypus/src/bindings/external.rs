@@ -35,7 +35,7 @@ use polypus_optimizers::{AskTell, AskTellError};
 /// - `tell(candidates, values)` receives the rows of that batch, as a
 ///   `list[list[float]]`, and their fitness, as a `list[float]` in the same
 ///   order. Fitness is to be MAXIMISED, as everywhere in Polypus: a library
-///   that minimises must be told `-value`. The adapters in `polypus.external`
+///   that minimises must be told `-value`. The adapters in `polypus.ask_tell`
 ///   wrap Optuna, Nevergrad and pycma this way.
 ///
 /// Each `ask()` is one batch of the oracle, spread over the QPUs as any
