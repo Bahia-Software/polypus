@@ -6,8 +6,8 @@ use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::shade;
 use crate::util::{
-    argmax, check_initial_point, check_oracle_len, fitness_stagnated, rows_to_candidates,
-    wrap_angle, wrap_difference,
+    argmax, check_initial_point, check_oracle_len, check_patience, fitness_stagnated,
+    rows_to_candidates, wrap_angle, wrap_difference,
 };
 use ndarray::{Array1, Array2};
 use rand::{seq::IndexedRandom, Rng, RngExt};
@@ -153,7 +153,8 @@ impl FromStr for DeStrategy {
 /// `population_size >= 4` — each trial mutation samples 3 *distinct* other
 /// members of the population. `mutation_factor` is finite and in `(0, 2]`,
 /// `crossover_rate` finite and in `[0, 1]`, and both are `None` for SHADE and
-/// L-SHADE. `initial_point`, when given, holds `dimensions` finite values.
+/// L-SHADE. `patience >= 1`. `initial_point`, when given, holds `dimensions`
+/// finite values.
 pub struct AlgorithmDifferentialEvolutionArgs {
     /// Oracle that maps parameter vectors to fitness values.
     pub oracle: Box<dyn EvaluationOracle>,
@@ -225,15 +226,16 @@ impl AlgorithmDifferentialEvolution {
     /// order, without running anything: `population_size` at least 4, then
     /// `mutation_factor` and `crossover_rate` (in range for
     /// [`DeStrategy::Rand1Bin`], `None` for the adaptive strategies, as
-    /// [`OptimizerError::InvalidConfig`]), then `initial_point` (`dimensions`
-    /// finite values). `train` and `qml.train` call it before any backend
-    /// exists.
+    /// [`OptimizerError::InvalidConfig`]), then `patience` (at least 1), then
+    /// `initial_point` (`dimensions` finite values). `train` and `qml.train`
+    /// call it before any backend exists.
     pub fn check_preconditions(
         strategy: DeStrategy,
         population_size: u32,
         dimensions: u32,
         mutation_factor: Option<f64>,
         crossover_rate: Option<f64>,
+        patience: u32,
         initial_point: Option<&[f64]>,
     ) -> Result<(), OptimizerError> {
         // Sampling 3 distinct other members needs `popsize >= 4`: rejected
@@ -247,6 +249,7 @@ impl AlgorithmDifferentialEvolution {
             });
         }
         Self::check_rates(strategy, mutation_factor, crossover_rate)?;
+        check_patience(patience, "generations")?;
         check_initial_point(initial_point, dimensions as usize, None)
     }
 
@@ -375,8 +378,6 @@ impl AlgorithmDifferentialEvolution {
         let popsize = population_size as usize;
         let max_gen = generations as usize;
         let dims = dimensions as usize;
-        let patience = patience as usize;
-
         // Preconditions (documented on the struct), before any RNG draw or
         // oracle call.
         Self::check_preconditions(
@@ -385,8 +386,10 @@ impl AlgorithmDifferentialEvolution {
             dimensions,
             mutation_factor,
             crossover_rate,
+            patience,
             initial_point.as_deref(),
         )?;
+        let patience = patience as usize;
         let f = mutation_factor.unwrap_or(Self::DEFAULT_MUTATION_FACTOR);
         let cr = crossover_rate.unwrap_or(Self::DEFAULT_CROSSOVER_RATE);
 

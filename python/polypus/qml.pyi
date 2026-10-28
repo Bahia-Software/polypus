@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    SupportsIndex,
     Union,
     final,
     overload,
@@ -341,7 +342,7 @@ def train(
     *,
     y_train: Optional[Iterable[float]] = None,
     initial_point: Optional[_FloatVector] = None,
-    final_shots: Optional[int] = None,
+    final_shots: Optional[SupportsIndex] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,

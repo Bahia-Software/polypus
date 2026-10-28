@@ -21,6 +21,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    SupportsIndex,
     TypedDict,
     Union,
     final,
@@ -301,7 +302,9 @@ class Rotosolve:
 class External:
     optimizer: _AskTell
     max_evaluations: int
-    def __new__(cls, optimizer: _AskTell, max_evaluations: int) -> External: ...
+    def __new__(
+        cls, optimizer: _AskTell, max_evaluations: SupportsIndex
+    ) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
@@ -554,7 +557,7 @@ def train(
     options: Optional[_Options] = None,
     walltime: Optional[str] = None,
     initial_point: Optional[_FloatVector] = None,
-    final_shots: Optional[int] = None,
+    final_shots: Optional[SupportsIndex] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],

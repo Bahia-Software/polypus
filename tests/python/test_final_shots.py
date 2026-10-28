@@ -87,13 +87,13 @@ def _circuit():
     return qc
 
 
-def _train(method, *, infrastructure="local", **kwargs):
+def _train(method, *, infrastructure="local", shots=SHOTS, **kwargs):
     import polypus
 
     return polypus.train(
         _circuit(),
         method,
-        shots=SHOTS,
+        shots=shots,
         n_qpus=1,
         dimensions=DIMENSIONS,
         expectation_function=_all_ones,
@@ -122,7 +122,7 @@ def _qml_model():
     return feature_map, ansatz
 
 
-def _qml_train(method, *, infrastructure="local", **kwargs):
+def _qml_train(method, *, infrastructure="local", shots=SHOTS, **kwargs):
     import polypus
 
     feature_map, ansatz = _qml_model()
@@ -132,7 +132,7 @@ def _qml_train(method, *, infrastructure="local", **kwargs):
         # One sample, so each candidate is one circuit.
         [[0.3]],
         method,
-        shots=SHOTS,
+        shots=shots,
         n_qpus=1,
         dimensions=DIMENSIONS,
         expectation_function=_all_ones,
@@ -245,29 +245,44 @@ class TestValidation:
     """Rejected at the edge, before any QPU is requested."""
 
     @pytest.mark.parametrize(
-        ("value", "shown"),
+        ("value", "shown", "error"),
         [
-            (0, "0"),
-            (-1, "-1"),
-            (1.5, "1.5"),
-            (4096.0, "4096.0"),
-            (True, "True"),
-            (False, "False"),
-            ("4096", "'4096'"),
-            ([4096], "[4096]"),
+            (0, "0", ValueError),
+            (-1, "-1", ValueError),
+            # Not an integer: a TypeError, as for shots.
+            (1.5, "1.5", TypeError),
+            (4096.0, "4096.0", TypeError),
+            (True, "True", TypeError),
+            (False, "False", TypeError),
+            ("4096", "'4096'", TypeError),
+            ([4096], "[4096]", TypeError),
         ],
     )
     def test_a_value_that_is_not_a_positive_integer_raises_before_anything_runs(
-        self, seam_calls, entry, value, shown
+        self, seam_calls, entry, value, shown, error
     ):
         import polypus
 
         run = ENTRY_POINTS[entry][0]
         with pytest.raises(
-            ValueError,
+            error,
             match=re.escape(f"final_shots must be an integer >= 1, got {shown}"),
         ):
             run(polypus.DE(), infrastructure="cunqa", final_shots=value)
+        assert seam_calls == []
+
+    def test_shots_and_final_shots_raise_the_same_error_for_a_float(
+        self, seam_calls, entry
+    ):
+        import polypus
+
+        run = ENTRY_POINTS[entry][0]
+        # Only the class: PyO3's wording for `shots` depends on the Python
+        # version (on 3.10 it does not name the argument).
+        with pytest.raises(TypeError):
+            run(polypus.DE(), infrastructure="cunqa", shots=4096.0)
+        with pytest.raises(TypeError, match="final_shots must be an integer"):
+            run(polypus.DE(), infrastructure="cunqa", final_shots=4096.0)
         assert seam_calls == []
 
     def test_a_value_above_a_circuits_shots_raises_before_anything_runs(
@@ -332,6 +347,7 @@ class TestFinalBatch:
         assert plain.final_params is None
         assert plain.final_fitness is None
         assert "final_fitness" not in repr(plain)
+        assert "final_params" not in repr(plain)
         # Every circuit the optimizer sent, and so its result, is unchanged.
         scored = [c for c in sent if c[1] == SHOTS]
         final = [c for c in sent if c[1] == FINAL_SHOTS]
@@ -353,6 +369,10 @@ class TestFinalBatch:
         assert result.final_fitness == values[winner]
         assert result.final_params == final[winner][0]
         assert f"final_fitness={result.final_fitness}" in repr(result)
+        # The final point last, after the best one.
+        text = repr(result)
+        assert text.index("best_params=[") < text.index(", final_params=[")
+        assert text.endswith("])")
 
     @pytest.mark.parametrize("entry", ENTRY_POINTS)
     def test_the_final_batch_has_a_seed_of_its_own(self, monkeypatch, entry):
@@ -422,6 +442,29 @@ class TestFinalBatch:
         with pytest.raises(KeyboardInterrupt):
             run(_method("rand1bin"), final_shots=FINAL_SHOTS)
         assert shots == [SHOTS] * 3
+
+    @pytest.mark.parametrize("entry", ENTRY_POINTS)
+    def test_an_interrupt_during_the_final_batch_raises(self, monkeypatch, entry):
+        # Ctrl+C while the final batch runs: the run raises KeyboardInterrupt,
+        # as a failing final batch raises its error, and returns no result.
+        import polypus_python
+
+        run = ENTRY_POINTS[entry][0]
+        shots = []
+
+        def interrupted_at_the_end(infrastructure, **kwargs):
+            shots.append(kwargs["shots"])
+            if kwargs["shots"] == FINAL_SHOTS:
+                raise KeyboardInterrupt
+            return [{"0": kwargs["shots"]} for _ in kwargs["qcs"]]
+
+        monkeypatch.setattr(polypus_python, "run_qcs", interrupted_at_the_end)
+        with pytest.raises(KeyboardInterrupt):
+            run(_method("rand1bin"), final_shots=FINAL_SHOTS)
+        # The whole run, then the final batch, cut at its first call.
+        assert len(shots) > 1
+        assert shots[:-1] == [SHOTS] * (len(shots) - 1)
+        assert shots[-1] == FINAL_SHOTS
 
     def test_a_failing_final_batch_raises(self, monkeypatch):
         import polypus_python

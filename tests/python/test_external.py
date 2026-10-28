@@ -197,28 +197,33 @@ class TestTheObject:
             polypus.External()
 
     @pytest.mark.parametrize(
-        ("value", "shown"),
+        ("value", "shown", "error"),
         [
-            (0, "0"),
-            (-1, "-1"),
-            (2.5, "2.5"),
-            (10.0, "10.0"),
-            (True, "True"),
-            ("10", "'10'"),
-            (None, "None"),
-            ([10], "[10]"),
+            (0, "0", ValueError),
+            (-1, "-1", ValueError),
+            # Not an integer: a TypeError, as for an integer argument.
+            (2.5, "2.5", TypeError),
+            (10.0, "10.0", TypeError),
+            (True, "True", TypeError),
+            ("10", "'10'", TypeError),
+            (None, "None", TypeError),
+            ([10], "[10]", TypeError),
         ],
     )
-    def test_max_evaluations_must_be_a_positive_integer(self, value, shown):
+    def test_max_evaluations_must_be_a_positive_integer(self, value, shown, error):
         import polypus
 
         message = f"max_evaluations must be an integer >= 1, got {shown}"
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(error, match=re.escape(message)) as raised:
             polypus.External(RandomSearch(DIMENSIONS), value)
         method = polypus.External(RandomSearch(DIMENSIONS), 3)
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(error, match=re.escape(message)):
             method.max_evaluations = value
         assert method.max_evaluations == 3
+        # Only the out-of-range integers are configuration errors.
+        assert isinstance(raised.value, polypus.ConfigurationError) == (
+            error is ValueError
+        )
 
     def test_max_evaluations_fits_in_64_bits(self):
         import polypus

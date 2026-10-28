@@ -1594,15 +1594,16 @@ mod tests {
 
     /// With IPOP restarts the batches grow, and `growth` bounds the work they
     /// add: every run is checked against the schedule's per-generation bound
-    /// and the total against `first_generations` first batches. Patience 0
-    /// restarts after every generation, the worst case the bound assumes, so
-    /// there it is met exactly.
+    /// and the total against `first_generations` first batches. Patience 1
+    /// on a flat landscape restarts after every second generation, the
+    /// soonest stagnation can; the bound assumes a restart after every
+    /// generation, which only a degenerate distribution can force.
     #[test]
     fn cmaes_growth_bounds_the_batches_with_restarts() {
         use polypus_optimizers::CmaEsBatchSchedule;
         for (population_size, generations, restarts, patience) in [
-            (None, 4, 3, 0),
-            (Some(5), 3, 2, 0),
+            (None, 8, 3, 1),
+            (Some(5), 6, 2, 1),
             (Some(4), 40, 3, 2),
             (None, 30, 5, 3),
             (Some(6), 10, 4, 4),
@@ -1622,10 +1623,9 @@ mod tests {
             }
             let total: u64 = sizes.iter().sum();
             assert!(total <= growth.first_generations * first, "{label}");
-            if patience == 0 && generations == restarts + 1 {
-                let worst: Vec<u64> = (0..generations).map(|g| first << g).collect();
-                assert_eq!(sizes, worst, "{label}");
-                assert_eq!(total, growth.first_generations * first, "{label}");
+            if patience == 1 && generations == 2 * (restarts + 1) {
+                let soonest: Vec<u64> = (0..generations).map(|g| first << (g / 2)).collect();
+                assert_eq!(sizes, soonest, "{label}");
             }
         }
     }

@@ -24,10 +24,10 @@ asking the library again: the bridge leaves a batch untold when it would take
 the run past ``max_evaluations``, and a later run with the same object starts
 with it. A ``tell`` that the library fails partway keeps the candidates it did
 not tell, to be offered again; a ``tell`` with no batch handed out raises
-``RuntimeError``. The library keeps its state between runs, its seed included: seed it
-where you build it (contract C-7). Its start is its own too, so
-``polypus.External`` refuses ``initial_point``; :func:`from_optuna` and
-:func:`from_nevergrad` take one here, and pycma's is the ``x0`` of
+``RuntimeError``. The library keeps its state between runs, its seed
+included: seed it where you build it (contract C-7). Its start is its own
+too, so ``polypus.External`` refuses ``initial_point``; :func:`from_optuna`
+and :func:`from_nevergrad` take one here, and pycma's is the ``x0`` of
 ``CMAEvolutionStrategy``.
 """
 
@@ -61,16 +61,15 @@ def _configuration_error(message: str) -> ValueError:
 
 
 def _positive_int(value: Any, name: str) -> int:
-    """``value`` as an ``int >= 1``; a ``bool`` or a non-integer is a
-    ``polypus.ConfigurationError``."""
+    """``value`` as an ``int >= 1``: one below 1 is a
+    ``polypus.ConfigurationError``, and a value that is not an integer (a
+    ``bool`` or a ``float`` too) a ``TypeError``, as in ``polypus.External``."""
     if isinstance(value, bool):
-        raise _configuration_error(f"{name} must be an integer >= 1, got {value!r}")
+        raise TypeError(f"{name} must be an integer >= 1, got {value!r}")
     try:
         number = operator.index(value)
     except TypeError:
-        raise _configuration_error(
-            f"{name} must be an integer >= 1, got {value!r}"
-        ) from None
+        raise TypeError(f"{name} must be an integer >= 1, got {value!r}") from None
     if number < 1:
         raise _configuration_error(f"{name} must be an integer >= 1, got {value!r}")
     return number
@@ -296,9 +295,10 @@ def from_optuna(
     a multiple of ``batch_size``, or the last ``max_evaluations % batch_size``
     evaluations are not spent. The trials of that untold remainder stay in
     the study as ``RUNNING`` trials, which TPE with ``constant_liar=True``
-    keeps penalising, until a later run with the same adapter tells them. The sampler is the study's: ``TPESampler`` for
-    Bayesian optimisation, with ``constant_liar=True`` when ``batch_size > 1``
-    so the trials of one batch differ, and ``seed`` to fix its candidates.
+    keeps penalising, until a later run with the same adapter tells them.
+    The sampler is the study's: ``TPESampler`` for Bayesian optimisation,
+    with ``constant_liar=True`` when ``batch_size > 1`` so the trials of one
+    batch differ, and ``seed`` to fix its candidates.
 
     ``initial_point`` is enqueued as the first trial (``study.enqueue_trial``):
     ``dimensions`` finite numbers within ``bounds``, otherwise ``ValueError``.

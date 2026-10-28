@@ -27,8 +27,9 @@ import pytest
 DIMENSIONS = 2
 # Inside DE's [0, 2π) and PSO's default bounds (-π, π), away from either seam.
 POINT = [0.25, 1.5]
-# QNG's and Adam's default finite_difference_step.
+# QNG's default finite_difference_step.
 QNG_STEP = 0.1
+# Adam's default finite_difference_step.
 ADAM_STEP = 0.2
 # SPSA's default perturbation.
 SPSA_STEP = 0.1

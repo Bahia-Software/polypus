@@ -412,6 +412,24 @@ Changes on `main` since 0.7.2.
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
   does not include the file. Fuzzing and Miri use a dated nightly, and the
   docs, release and tutorial-sync jobs have a timeout (#415).
+- **BREAKING:** `polypus.DE`, with every `strategy`, and `polypus.CMAES`
+  refuse `patience=0` with `polypus.ConfigurationError` when `train` starts,
+  as `polypus.Adam` and `polypus.Rotosolve` already did: it compared a
+  generation's best fitness with itself, so any `tolerance > 0` ended the run
+  at once (#467).
+- **BREAKING:** a `final_shots` (`train`, `qml.train`), a `max_evaluations`
+  (`polypus.External`) or an adapter's `dimensions` or `batch_size`
+  (`polypus.external`) that is not an integer, such as `4096.0`, `True` or a
+  `str`, raises `TypeError` instead of `ValueError`, as `shots` and every
+  other integer argument do. An integer below 1 still raises
+  `polypus.ConfigurationError` (#467).
+- `repr(TrainResult)` shows `final_params` after `best_params` when the run
+  had `final_shots` (#467).
+- **BREAKING (Rust):** `polypus_orchestration::Method` is
+  `#[non_exhaustive]`: a `match` on it outside its crate needs a wildcard
+  arm, and a new optimizer is no longer a breaking change.
+  `AlgorithmDifferentialEvolution::check_preconditions` and
+  `AlgorithmCmaEs::check_preconditions` take `patience` (#467).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits
@@ -531,6 +549,19 @@ Changes on `main` since 0.7.2.
   that wrote the fixtures; the QIR checks with `llvm-as`; and the conformance
   battery against Aer. There a missing tool fails those tests instead of
   skipping them, and pytest lists every skip with its reason (#407).
+- An oracle failure that the optimizer detects, a batch answered with the
+  wrong number of values or a gradient with a `NaN` or an infinity, raises
+  `polypus.EvaluationError` instead of `polypus.ConfigurationError` (#467).
+- `polypus.SPSA` refuses a `resamplings` above 2147483647 with
+  `polypus.ConfigurationError`, so that an iteration's batch fits in 32 bits;
+  `resamplings=4294967295` aborted the process when it allocated the batch
+  (#467).
+- The stubs type `final_shots` and `External`'s `max_evaluations` as
+  `SupportsIndex`, which the runtime accepts, so mypy accepts a NumPy
+  integer (#467).
+- Rust: `dispatch_optimizer` checks Adam's `finite_difference_step` with an
+  exact gradient too, as `Method::check_preconditions` does, so the two
+  agree whatever oracles the run has (#467).
 
 ## [0.7.2] - 2026-09-30
 
