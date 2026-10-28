@@ -485,7 +485,10 @@ on every header, before any buffer is allocated:
   limit. A counts payload is far below the default; raise it only for a worker that
   really returns more.
 
-Either way the call fails at once with a `polypus.BackendError` (a protocol error,
+A frame that passes both checks but whose payload is no message of the protocol (not
+JSON, an unknown `op`, a field of the wrong type) is refused too.
+
+In each case the call fails at once with a `polypus.BackendError` (a protocol error,
 not the `Unresponsive` timeout), the worker is killed, and a later call fails fast.
 The fix on the worker side is to keep stdout for frames: send logs and prints to
 stderr, and make sure the SDK does not print to stdout on import.

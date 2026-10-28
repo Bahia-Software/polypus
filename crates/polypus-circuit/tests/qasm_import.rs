@@ -408,6 +408,87 @@ fn rejects_truncated_input() {
     ));
 }
 
+/// A token where the grammar expects another is named in the error,
+/// whichever token it is.
+#[test]
+fn a_misplaced_token_is_named() {
+    let cases = [
+        ("x", "'x'"),
+        ("1", "'1'"),
+        ("1.5", "'1.5'"),
+        ("\"s\"", "string literal"),
+        ("(", "'('"),
+        (")", "')'"),
+        ("[", "'['"),
+        ("]", "']'"),
+        ("->", "'->'"),
+        ("+", "'+'"),
+        ("-", "'-'"),
+        ("*", "'*'"),
+        ("/", "'/'"),
+        ("^", "'^'"),
+        ("{", "'{'"),
+        ("}", "'}'"),
+        ("=", "'='"),
+    ];
+    for (token, named) in cases {
+        let src = format!("OPENQASM 2.0;\nqreg q[1];\nh q[0] {token};\n");
+        assert_parse_err(&src, &format!("expected ',' or ';', found {named}"), 3);
+    }
+    // The two that position accepts, where they do not fit.
+    let src = "OPENQASM 2.0;\nqreg q[1];\nh ,;\n";
+    assert_parse_err(src, "expected a quantum register, found ','", 3);
+    assert_parse_err("OPENQASM 2.0;\nqreg q[1;\n", "expected ']', found ';'", 2);
+}
+
+/// Each statement reports the token that breaks it, on its line.
+#[test]
+fn malformed_statements_are_rejected_on_their_line() {
+    let cases = [
+        ("1;", "expected a statement, found '1'"),
+        ("include qelib1;", "expected file name, found 'qelib1'"),
+        ("include \"qelib1.inc;", "unterminated string literal"),
+        ("h q[i];", "expected bit index, found 'i'"),
+        ("h q[0]; @", "unexpected character '@'"),
+        ("barrier q[0] q[1];", "expected ',' or ';', found 'q'"),
+        ("rx(0.5 0.2) q[0];", "expected ',' or ')', found '0.2'"),
+        ("rx(,) q[0];", "expected an expression, found ','"),
+        ("gate g(s t) a { }", "expected ',' or ')', found 't'"),
+        ("gate g a;", "expected ',' or '{', found ';'"),
+        ("gate g a { h a b; }", "expected ',' or ';', found 'b'"),
+        ("gate g a { h a; @ }", "unexpected character '@'"),
+        ("opaque;", "opaque gate '' has no definition"),
+    ];
+    for (statement, needle) in cases {
+        let src = format!("OPENQASM 2.0;\nqreg q[2];\n{statement}\n");
+        assert_parse_err(&src, needle, 3);
+    }
+}
+
+#[test]
+fn the_version_may_be_an_integer_but_must_be_a_number() {
+    let qc = ParameterizedCircuit::from_qasm2("OPENQASM 2;\nqreg q[1];\nh q[0];\n").unwrap();
+    assert_eq!(qc.gates(), [GateInstruction::H(0)]);
+    assert_parse_err("OPENQASM two;\n", "only OpenQASM version 2.0", 1);
+}
+
+/// An empty parameter list is no parameter list, in a call and in a
+/// declaration; a unary `+` is accepted and changes nothing.
+#[test]
+fn empty_parameter_lists_and_unary_plus() {
+    let src =
+        "OPENQASM 2.0;\ngate g() a { h a; }\nqreg q[1];\nh() q[0];\ng q[0];\nrx(+0.5) q[0];\n";
+    let qc = ParameterizedCircuit::from_qasm2(src).unwrap();
+    match qc.gates() {
+        [GateInstruction::H(0), GateInstruction::Custom(call), GateInstruction::Rx { qubit: 0, theta }] =>
+        {
+            assert_eq!((call.name(), call.params()), ("g", &[][..]));
+            assert_eq!(*theta, GateParam::Fixed(0.5));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 // ───────────────────── `id` is an instruction, not a no-op ────────────────
 
 /// Regression: `id` used to be dropped at parse time, which silently changed

@@ -531,6 +531,8 @@ mod tests {
             seed: Some(1),
             opt_level: OptLevel::default(),
         };
+        // An empty batch has nothing to run, so it needs no interpreter.
+        assert!(backend.run_circuits(&[], &params).unwrap().is_empty());
         match backend.run_circuits(std::slice::from_ref(&circuit), &params) {
             Err(BackendError::External(boxed)) => assert!(boxed.is::<InterpreterUnavailable>()),
             other => panic!("expected External(InterpreterUnavailable), got {other:?}"),
