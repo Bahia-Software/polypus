@@ -2139,8 +2139,9 @@ batching and distribution are the oracle's concern.
 layers that load each sample), an `Ansatz` (the trainable layers, which may also
 re-upload the data) and a `Readout`. It copies the three, so building on them
 afterwards does not change it, and it holds no trained parameters. Everything
-that does not depend on the data is checked where it is written, as a
-`ValueError`:
+that does not depend on the data is checked where it is written, as a plain
+`ValueError`, as `polypus.Circuit`'s builders raise (the checks of `fit`,
+`predict` and `run` below are `polypus.ConfigurationError`):
 
 - each `Encoder`/`Ansatz` builder call re-checks its layers (a misplaced
   amplitude encoder, pooling below two active qubits) and leaves the object as
@@ -2192,16 +2193,17 @@ stubs spell each set as a `Literal`.
 **Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
 argument after `y` is keyword-only and `method` is required. It returns a
 `TrainResult` (C-7) whose `best_params` has `num_params` values. All the checks
-below run before a backend exists:
+below run before a backend exists and raise `polypus.ConfigurationError`, which
+is also a `ValueError` (#418), as `train`'s do:
 
 - **Data.** `x` is rows of features or a `polypus.qml.Dataset`; with a
-  `Dataset`, `y` is a `ValueError` (it carries its own labels, or none).
+  `Dataset`, `y` is an error (it carries its own labels, or none).
   Labels from `y` follow C-8's checks; the rows must be non-empty, of equal
   width and finite.
 - **Labels and loss.** With labels, `loss` is required and is a supervised
-  loss; `"expectation"` (which ignores labels) is a `ValueError`. Without
+  loss; `"expectation"` (which ignores labels) is an error. Without
   labels (`y=None`, or a `Dataset` built without them), `loss=None` means
-  `"expectation"` and a supervised loss is a `ValueError`: labels are never
+  `"expectation"` and a supervised loss is an error: labels are never
   ignored, and a supervised loss never trains against made-up labels. `"argmax"`
   pairs with `"categorical_cross_entropy"` only, and every other decision with a
   scalar loss. Label domains are the loss's (±1 for `"hinge"`, 0/1 for
@@ -2213,10 +2215,10 @@ below run before a backend exists:
   reported `best_fitness` is on every sample (C-5).
 - **`polypus.Rotosolve`** needs what its closed-form step assumes (C-5):
   `loss="expectation"`, the one loss linear in the measured distribution
-  (another is a `ValueError` naming it), and every trainable parameter the
+  (another is an error naming it), and every trainable parameter the
   angle of exactly one rotation, checked with
-  `ParameterizedCircuit::check_single_frequency` on the model's template (a
-  `ValueError` with the first problem; a `conv` or `pool` layer over more than
+  `ParameterizedCircuit::check_single_frequency` on the model's template (an
+  error with the first problem; a `conv` or `pool` layer over more than
   one pair fails it, since it shares each parameter across the pairs). Every
   other optimizer takes any model.
 - **`backend=None`** is `"polypus"` (the native simulator) on
@@ -2233,7 +2235,9 @@ for `"argmax"` (the class index), a `float` for `"raw"` (the expectation).
 `counts` holds one C-3 dict per row (`merged_counts` is `None`), or with
 `exact=True` an `ExactResult` whose `probabilities` holds one dict per row,
 keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
-`exact` and `backend=None` follow `fit`'s rules.
+`exact` and `backend=None` follow `fit`'s rules, and so do their checks (the
+rows against the model, `exact`, a `seed` on `qmio`): before a backend exists,
+as `polypus.ConfigurationError`.
 
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
@@ -2279,7 +2283,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   sampled, minibatches, seeds, every layer trained, the convergence curve, every
   rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
   `test_qml_native_inference.py` (`bind`, `predict`, `run`,
-  `ExactResult`, decision types, save/load and tampered files) and the native
+  `ExactResult`, decision types, save/load and tampered files), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
-  runs with the GIL released).
+  runs with the GIL released) and `TestNativeQmlChecksRaiseIt` in
+  `test_configuration_errors.py` (every check of `fit`, `predict` and `run` is a
+  `polypus.ConfigurationError` raised before any CUNQA call).
 
