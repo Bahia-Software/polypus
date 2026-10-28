@@ -268,6 +268,7 @@ class SPSA:
     target_step: float
     alpha: float
     gamma: float
+    stability_constant: float
     eval_interval: int
     seed: Optional[int]
     def __new__(
@@ -280,6 +281,7 @@ class SPSA:
         gamma: float = 0.101,
         eval_interval: int = 20,
         seed: Optional[int] = None,
+        stability_constant: float = 0.0,
     ) -> SPSA: ...
 
 @final

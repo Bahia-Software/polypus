@@ -730,6 +730,7 @@ fn method_from_pyclass(
             target_step: spsa.target_step,
             alpha: spsa.alpha,
             gamma: spsa.gamma,
+            stability_constant: spsa.stability_constant,
             eval_interval: spsa.eval_interval,
         }));
     }
@@ -4324,7 +4325,7 @@ mod tests {
     fn spsa_reaches_the_method_and_its_seed_is_read() {
         Python::initialize();
         Python::attach(|py| {
-            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
+            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99), 4.0))
                 .expect("the pyclass instantiates");
             let bound = spsa.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
@@ -4336,6 +4337,7 @@ mod tests {
                     assert_eq!(cfg.target_step, 1.2);
                     assert_eq!(cfg.alpha, 1.0);
                     assert_eq!(cfg.gamma, 0.25);
+                    assert_eq!(cfg.stability_constant, 4.0);
                     assert_eq!(cfg.eval_interval, 5);
                 }
                 _ => panic!("a polypus.SPSA parses into Method::Spsa"),

@@ -297,6 +297,13 @@ Changes on `main` since 0.7.2.
   `except ValueError` still does (#418, #507). Building a native model
   (`qml.Encoder`, `qml.Ansatz`, `qml.Readout`, `qml.Dataset`, `qml.load`)
   raises a plain `ValueError`, as building a `polypus.Circuit` does.
+- `polypus.SPSA(stability_constant=0.0)`: Spall's stability constant `A`
+  of the step gain `a/(k + A)^alpha`, finite and `>= 0`. The calibration
+  keeps the first step at `target_step` whatever `A`, so a larger `A` makes
+  the early steps shrink more slowly; `0` keeps the previous gains, and
+  seeded runs are unchanged. It comes after `seed` in the positional order.
+  Rust: `AlgorithmSPSAArgs::stability_constant` and
+  `polypus_orchestration::SpsaConfig::stability_constant` (#467).
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
@@ -438,6 +445,14 @@ Changes on `main` since 0.7.2.
   arm, and a new optimizer is no longer a breaking change.
   `AlgorithmDifferentialEvolution::check_preconditions` and
   `AlgorithmCmaEs::check_preconditions` take `patience` (#467).
+- With `polypus.External` on CUNQA, the walltime warning times the first
+  batch until the second starts, so the library's own time in `tell()` and
+  the next `ask()` is in the projection; it left that time out, which for a
+  model-based library can be much of the run. The warning comes when the
+  second batch starts, and a run of one batch gets none (#467).
+- **BREAKING (Rust):** `AlgorithmSPSAArgs` and
+  `polypus_orchestration::SpsaConfig` have a `stability_constant` field, and
+  `AlgorithmSPSA::check_preconditions` takes it (#467).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits

@@ -22,11 +22,13 @@
 //!
 //! The calibration follows Spall's guideline (1998): choose `a` from the
 //! magnitude of the gradient estimate at θ₀, averaged over several
-//! replications, so that the early steps have the size wanted. Here that size
-//! is `target_step` and the replications are 25 perturbations sent in one
-//! batch. It behaves as Qiskit's `SPSA.calibrate` does, without taking its
-//! code. The fallback `a = target_step`, when no magnitude is usable, is
-//! Polypus's own choice.
+//! replications, so that the early steps have the size wanted, `a/(1 + A)^α`
+//! times that magnitude. Here that size is `target_step` and the replications
+//! are 25 perturbations sent in one batch. With `A = 0` it behaves as Qiskit's
+//! `SPSA.calibrate` does, without taking its code; with `A > 0` Qiskit leaves
+//! `a` as it is, so its first step shrinks, where Polypus keeps it at
+//! `target_step` as Spall's guideline asks. The fallback, a first gain of
+//! `target_step` when no magnitude is usable, is Polypus's own choice.
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
@@ -55,17 +57,19 @@ use std::f64::consts::TAU;
 ///    [`perturbation`](AlgorithmSPSAArgs::perturbation). Each pair gives the
 ///    magnitude `|f₊ − f₋| / (2c)`, which every component of that pair's
 ///    estimate `ĝᵢ` shares, `Δᵢ` being ±1; their mean is `mean|ĝ|`, and
-///    `a = target_step / mean|ĝ|`. The first gain `a₁` is `a`, so with
+///    `a = target_step · (1 + A)^α / mean|ĝ|`, `A` the
+///    [`stability_constant`](AlgorithmSPSAArgs::stability_constant). The
+///    first gain `a₁ = a / (1 + A)^α` is `target_step / mean|ĝ|`, so with
 ///    `resamplings = 1` the first step moves each parameter by about
-///    [`target_step`](AlgorithmSPSAArgs::target_step). With `K > 1` the
+///    [`target_step`](AlgorithmSPSAArgs::target_step), whatever `A`. With `K > 1` the
 ///    first step is usually shorter: the mean of `K` estimates is smaller on average
 ///    than one estimate, whose magnitude set `a`. A pair whose magnitude
 ///    is not finite (a non-finite value, or an overflow) is left out of the
 ///    mean. When no magnitude is left, their mean is zero (a flat landscape
-///    around θ₀) or not finite, or `a` is not finite, `a = target_step`, as if
-///    `mean|ĝ|` were 1, and a warning is logged; the run goes on.
+///    around θ₀) or not finite, or `a` is not finite, `a₁ = target_step`, as
+///    if `mean|ĝ|` were 1, and a warning is logged; the run goes on.
 /// 3. **Iterations** `k = 1, …, max_iters`, with Spall's gains
-///    `a_k = a / k^α` and `c_k = c / k^γ` (`A = 0`): `K =`
+///    `a_k = a / (k + A)^α` and `c_k = c / k^γ`: `K =`
 ///    [`resamplings`](AlgorithmSPSAArgs::resamplings) fresh ±1 perturbations,
 ///    one `evaluate_batch` of `2K` candidates
 ///    `[θ_k + c_k·Δ₁, θ_k − c_k·Δ₁, …]`, and the step
@@ -123,6 +127,7 @@ use std::f64::consts::TAU;
 ///         target_step: 0.63,
 ///         alpha: AlgorithmSPSA::DEFAULT_ALPHA,
 ///         gamma: AlgorithmSPSA::DEFAULT_GAMMA,
+///         stability_constant: 0.0,
 ///         eval_interval: 20,
 ///         dimensions: 4,
 ///         seed: Some(7),
@@ -149,7 +154,8 @@ pub struct AlgorithmSPSA;
 /// nothing), `dimensions >= 1`, `resamplings` from 1 to
 /// [`MAX_RESAMPLINGS`](AlgorithmSPSA::MAX_RESAMPLINGS), `perturbation` and
 /// `target_step` finite and `> 0`, `alpha` in `(0.5, 1]`, `gamma > 0` with
-/// `alpha − gamma > 0.5`, `eval_interval >= 1`, and `initial_point`, when
+/// `alpha − gamma > 0.5`, `stability_constant` finite and `>= 0`,
+/// `eval_interval >= 1`, and `initial_point`, when
 /// given, `dimensions` finite values. The ranges of `alpha` and `gamma` are
 /// Spall's (1992) conditions on the gains: `c_k → 0` (`γ > 0`),
 /// `Σ a_k = ∞` (`α ≤ 1`) and `Σ (a_k/c_k)² < ∞` (`α − γ > 1/2`).
@@ -173,10 +179,17 @@ pub struct AlgorithmSPSAArgs {
     /// perturbations the averaged estimate is smaller on average, so the first
     /// step is usually shorter.
     pub target_step: f64,
-    /// Decay exponent `α` of the step gain `a_k = a / k^α`.
+    /// Decay exponent `α` of the step gain `a_k = a / (k + A)^α`.
     pub alpha: f64,
     /// Decay exponent `γ` of the perturbation `c_k = c / k^γ`.
     pub gamma: f64,
+    /// Spall's stability constant `A` of the step gain `a_k = a / (k + A)^α`,
+    /// finite and `>= 0`. The calibration keeps the first step at
+    /// `target_step` whatever `A`, so a larger `A` only makes the gain decay
+    /// more slowly at first: `a_k / a₁ = ((1 + A) / (k + A))^α`. `0` is the
+    /// plain `a / k^α`. Spall (1998) suggests about a tenth of the iterations,
+    /// or less.
+    pub stability_constant: f64,
     /// θ_k is measured, first in its iteration's batch, on the first
     /// iteration and every `eval_interval` iterations after it; the final θ
     /// is measured whatever the interval.
@@ -235,6 +248,7 @@ impl AlgorithmSPSA {
         target_step: f64,
         alpha: f64,
         gamma: f64,
+        stability_constant: f64,
         eval_interval: u32,
         dimensions: u32,
         initial_point: Option<&[f64]>,
@@ -247,6 +261,7 @@ impl AlgorithmSPSA {
             target_step,
             alpha,
             gamma,
+            stability_constant,
             eval_interval,
         )?;
         check_initial_point(initial_point, dimensions as usize, None)
@@ -270,6 +285,7 @@ impl AlgorithmSPSA {
             target_step,
             alpha,
             gamma,
+            stability_constant,
             eval_interval,
             dimensions,
             seed: _,
@@ -283,6 +299,7 @@ impl AlgorithmSPSA {
             target_step,
             alpha,
             gamma,
+            stability_constant,
             eval_interval,
             dimensions,
             initial_point.as_deref(),
@@ -300,7 +317,10 @@ impl AlgorithmSPSA {
         let batch = perturbed(&theta, perturbation, &deltas);
         let values = oracle.evaluate_batch(&batch);
         check_oracle_len(batch.len(), values.len())?;
-        let a = calibrated_gain(&values, perturbation, target_step);
+        // `a₁ = a / (1 + A)^α` is the calibrated gain; with `A = 0` the
+        // factor is exactly 1.
+        let a = calibrated_gain(&values, perturbation, target_step)
+            * (1.0 + stability_constant).powf(alpha);
         log::debug!("Calibration: a = {a:.6e}");
 
         let resamplings = resamplings as usize;
@@ -310,7 +330,7 @@ impl AlgorithmSPSA {
         let mut fitness_history: Vec<f64> = Vec::with_capacity(max_iters as usize);
 
         for k in 1..=max_iters {
-            let a_k = a / f64::from(k).powf(alpha);
+            let a_k = a / (f64::from(k) + stability_constant).powf(alpha);
             let c_k = perturbation / f64::from(k).powf(gamma);
             let deltas: Vec<Vec<f64>> = (0..resamplings).map(|_| rademacher(rng, dims)).collect();
             let measured = Self::measures(k, eval_interval);
@@ -401,7 +421,7 @@ fn perturbed(theta: &[f64], c: f64, deltas: &[Vec<f64>]) -> Vec<Vec<f64>> {
         .collect()
 }
 
-/// The step gain `a` from the calibration batch's `values`, pairs of
+/// The first step gain `a₁` from the calibration batch's `values`, pairs of
 /// `f(θ₀ + c·Δᵢ)` and `f(θ₀ − c·Δᵢ)`: `target_step / mean|ĝ|`, the mean over
 /// the pairs whose magnitude `|f₊ − f₋| / (2c)` is finite. Without a usable
 /// mean (a flat landscape, or no finite value), `target_step`.
@@ -424,7 +444,7 @@ fn calibrated_gain(values: &[f64], c: f64, target_step: f64) -> f64 {
     log::warn!(
         "SPSA calibration: the {} gradient estimates at the starting point have no usable \
          magnitude ({} of them finite), as on a flat landscape or after a failed evaluation, \
-         whose error ends the run; using a = target_step = {target_step}",
+         whose error ends the run; using a first gain of target_step = {target_step}",
         values.len() / 2,
         magnitudes.len(),
     );
@@ -440,6 +460,7 @@ fn validate(
     target_step: f64,
     alpha: f64,
     gamma: f64,
+    stability_constant: f64,
     eval_interval: u32,
 ) -> Result<(), OptimizerError> {
     let invalid = |parameter: &'static str, reason: String| {
@@ -495,6 +516,12 @@ fn validate(
                  that the perturbation c/k^gamma shrinks and that (a_k/c_k)^2 has a finite \
                  sum, got {gamma}"
             ),
+        );
+    }
+    if !stability_constant.is_finite() || stability_constant < 0.0 {
+        return invalid(
+            "stability_constant",
+            format!("must be finite and >= 0, got {stability_constant}"),
         );
     }
     if eval_interval == 0 {
