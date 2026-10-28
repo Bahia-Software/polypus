@@ -238,6 +238,7 @@ polypus.SPSA(
     gamma=0.101,
     eval_interval=20,
     seed=None,
+    stability_constant=0.0,
 )
 ```
 
@@ -246,7 +247,7 @@ Simultaneous perturbation stochastic approximation (Spall, 1992) is a gradient m
 A run has three parts:
 
 1. **Calibration.** One batch of 50 circuits around the starting point θ₀, 25 random perturbations in both directions, measures how large the gradient estimates are there, and SPSA sets its gain so that, with `resamplings=1`, the first step moves each parameter by about `target_step` radians, following Spall's guideline (1998), as Qiskit's `SPSA.calibrate` does. With more perturbations per iteration the average of their estimates is smaller on average than one estimate, so the first step is usually shorter. Each pair gives `|f₊ − f₋| / (2·perturbation)`, the size of every component of its estimate, and the gain is `target_step` over their mean. If every pair has the same fitness (a flat landscape around θ₀), the gain is `target_step` and a warning is logged.
-2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / k^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults.
+2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / (k + A)^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults and `A` the `stability_constant`, 0 by default. The calibration keeps the first step at `target_step` whatever `A`, so a larger `A` only makes the steps shrink more slowly at first: with `A = 30`, the tenth gain is still 86 % of the first, where with `A = 0` it is 25 %. Spall suggests an `A` of about a tenth of `max_iters` or less, for a run whose early steps would otherwise shrink before it has moved far. Qiskit's `SPSA.calibrate` does not scale `a` with `A`, so there a larger `A` makes the first step shorter.
 3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration and every `eval_interval` iterations after it, as Jones, Mineh and Montanaro do (arXiv:2411.13742), and after the last step one more circuit measures the parameters it reached, so the last iteration's circuits are not wasted on a step that is never measured. `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration, the final parameters counted in the last entry.
 
 | Parameter | Description |
@@ -256,6 +257,7 @@ A run has three parts:
 | `perturbation` | `c`, the size of the first perturbations in radians, finite and `> 0` |
 | `target_step` | Size of the first step on each parameter with `resamplings=1`, in radians, finite and `> 0`; with more perturbations the first step is usually shorter. The default `0.63` is about `2π/10` |
 | `alpha`, `gamma` | Decay exponents of the steps and of the perturbations: `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5`, Spall's conditions for the iterates to converge |
+| `stability_constant` | Spall's `A`, finite and `>= 0`: a larger value slows the decay of the early steps without changing the first. It comes after `seed` in the positional order |
 | `eval_interval` | Iterations between measurements of θ, at least 1 |
 
 θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `2 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, the final one included, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
@@ -268,7 +270,7 @@ A run has three parts:
 
 **SPSA needs budget.** The calibration takes 50 circuits before the first step, and the steps that follow are small and noisy, so with a small budget SPSA can end below a global search: with 500 evaluations in [Choosing an optimizer](#choosing-an-optimizer), one perturbation per iteration was within noise of the classic DE and eight were below it. Like Adam, it is a local method: [Starting point](#starting-point) shows how to start it from a global search's result.
 
-**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / k^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
+**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / (k + A)^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
 
 **References.**
 
@@ -365,7 +367,7 @@ A first `ask()` that proposes nothing, and a first batch larger than `max_evalua
 
 **Threads and reuse.** As in every training run, the GIL is released while the run goes on. `ask()` and `tell()` run on the thread that called `train`, which holds the GIL only during each call, so other Python threads run while a batch is evaluated. `External` keeps your object, not a copy: a second run with it continues from the library's state (an Optuna study keeps its trials, a pycma strategy its generation), and `max_evaluations` counts each run's evaluations on their own. A pycma strategy that has stopped proposes nothing, so a second run with it raises `ValueError`. Do not share one optimizer between two runs at the same time.
 
-With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and leaves out the time the library itself takes in `ask()` and `tell()` (see [Allocation walltime](../backends.md#allocation-walltime)), which for a model-based library can be much of the run.
+With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and times that batch until the second starts, so the time the library itself takes in `tell()` and `ask()` between them counts too (see [Allocation walltime](../backends.md#allocation-walltime)). A model-based library takes longer as it sees more values, so its projection can still fall short.
 
 None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there). `polypus.external` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
 

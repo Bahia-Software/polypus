@@ -112,6 +112,7 @@ fn spsa_args(oracle: &Recorder, seed: u64) -> AlgorithmSPSAArgs {
         target_step: 0.63,
         alpha: AlgorithmSPSA::DEFAULT_ALPHA,
         gamma: AlgorithmSPSA::DEFAULT_GAMMA,
+        stability_constant: 0.0,
         eval_interval: 20,
         dimensions: TARGET.len() as u32,
         seed: Some(seed),
@@ -240,6 +241,47 @@ fn the_calibration_sets_the_first_step() {
     }
 }
 
+/// The calibration scales `a` by `(1 + A)^α`, so the first gain, and so the
+/// first step, is the same whatever the stability constant `A`; the second
+/// step, from the same θ along the same perturbation, is longer by
+/// `(2(1 + A) / (2 + A))^α`: the gain decays more slowly at first.
+#[test]
+fn the_stability_constant_keeps_the_first_step_and_slows_the_decay() {
+    let steps = |stability: f64| -> (Vec<f64>, Vec<f64>) {
+        let oracle = Recorder::new(plane);
+        let mut args = spsa_args(&oracle, 9);
+        args.max_iters = 2;
+        args.eval_interval = 1;
+        args.stability_constant = stability;
+        AlgorithmSPSA.optimize(args).unwrap();
+        let batches = oracle.batches();
+        let theta: Vec<&Vec<f64>> = batches[1..].iter().map(|b| &b[0]).collect();
+        let step = |k: usize| -> Vec<f64> {
+            theta[k + 1]
+                .iter()
+                .zip(theta[k])
+                .map(|(b, a)| b - a)
+                .collect()
+        };
+        (step(0), step(1))
+    };
+    let (first, second) = steps(0.0);
+    for stability in [0.5, 9.0, 30.0] {
+        let (first_a, second_a) = steps(stability);
+        let ratio =
+            (2.0 * (1.0 + stability) / (2.0 + stability)).powf(AlgorithmSPSA::DEFAULT_ALPHA);
+        for j in 0..3 {
+            assert!((first_a[j] - first[j]).abs() < 1e-12, "A {stability}");
+            // On a plane every estimate along Δ is the same, whatever θ.
+            assert!(second[j].abs() > 1e-3);
+            assert!(
+                (second_a[j] / second[j] - ratio).abs() < 1e-12,
+                "A {stability}: {second_a:?} vs {second:?}"
+            );
+        }
+    }
+}
+
 /// A flat landscape around θ₀ gives `mean|ĝ| = 0`, and an oracle of only
 /// `NaN` no magnitude at all: either way `a = target_step`, as if `mean|ĝ|`
 /// were 1, and the run goes on without a panic.
@@ -353,14 +395,20 @@ fn each_iteration_is_one_batch_of_2k_with_theta_first_when_measured() {
 }
 
 /// The θs follow Spall's recurrence: `θ_{k+1} = θ_k + a_k·ĝ_k` with
-/// `a_k = a/k^α`, `c_k = c/k^γ` and `ĝ_k` the mean of the K estimates
+/// `a_k = a/(k + A)^α`, `a = a₁·(1 + A)^α` from the calibrated first gain
+/// `a₁`, `c_k = c/k^γ` and `ĝ_k` the mean of the K estimates
 /// `(f₊ − f₋)/(2c_k)·Δ`, rebuilt here from what the oracle saw over a dozen
 /// iterations of a landscape whose gradient changes with θ, with non-default
-/// exponents. Pinned bits would only freeze a mistake (and `powf` is not the
-/// same on every platform).
+/// exponents and stability constants. Pinned bits would only freeze a mistake
+/// (and `powf` is not the same on every platform).
 #[test]
 fn every_step_follows_spalls_gains_and_the_mean_of_the_estimates() {
-    for (alpha, gamma, resamplings) in [(0.602, 0.101, 1), (1.0, 1.0 / 6.0, 4)] {
+    for (alpha, gamma, resamplings, stability) in [
+        (0.602, 0.101, 1, 0.0),
+        (1.0, 1.0 / 6.0, 4, 0.0),
+        (0.602, 0.101, 2, 7.5),
+        (1.0, 1.0 / 6.0, 1, 1.0),
+    ] {
         let oracle = Recorder::new(bowl);
         let mut args = spsa_args(&oracle, 13);
         args.max_iters = 12;
@@ -368,18 +416,19 @@ fn every_step_follows_spalls_gains_and_the_mean_of_the_estimates() {
         args.resamplings = resamplings;
         args.alpha = alpha;
         args.gamma = gamma;
+        args.stability_constant = stability;
         args.perturbation = 0.2;
         args.target_step = 0.4;
         AlgorithmSPSA.optimize(args).unwrap();
         let (batches, values) = (oracle.batches(), oracle.values());
-        let a = calibrated_gain(&values[0], 0.2, 0.4);
+        let a = calibrated_gain(&values[0], 0.2, 0.4) * (1.0 + stability).powf(alpha);
         // Batch 13 is the θ the twelfth step reached, alone.
         assert_eq!(batches.len(), 14);
         assert_eq!(batches[13].len(), 1);
         for k in 1..=12 {
             let (batch, scored) = (&batches[k], &values[k]);
             let kf = k as f64;
-            let (a_k, c_k) = (a / kf.powf(alpha), 0.2 / kf.powf(gamma));
+            let (a_k, c_k) = (a / (kf + stability).powf(alpha), 0.2 / kf.powf(gamma));
             let theta = &batch[0];
             let deltas = assert_pairs(&batch[1..], theta, c_k, 1e-12);
             let mut gradient = [0.0; 3];
@@ -393,7 +442,7 @@ fn every_step_follows_spalls_gains_and_the_mean_of_the_estimates() {
                 let expected = theta[j] + a_k * gradient[j];
                 assert!(
                     (batches[k + 1][0][j] - expected).abs() < 1e-12,
-                    "α {alpha}, γ {gamma}, K {resamplings}, k {k}"
+                    "α {alpha}, γ {gamma}, K {resamplings}, A {stability}, k {k}"
                 );
             }
         }
@@ -644,7 +693,7 @@ type Breaks = fn(&mut AlgorithmSPSAArgs);
 
 #[test]
 fn invalid_configurations_are_rejected_before_any_oracle_call() {
-    let cases: [(&str, Breaks); 22] = [
+    let cases: [(&str, Breaks); 25] = [
         ("max_iters", |a| a.max_iters = 0),
         ("dimensions", |a| a.dimensions = 0),
         ("resamplings", |a| a.resamplings = 0),
@@ -665,6 +714,11 @@ fn invalid_configurations_are_rejected_before_any_oracle_call() {
         ("gamma", |a| a.gamma = -0.1),
         ("gamma", |a| a.gamma = 0.102),
         ("gamma", |a| a.gamma = f64::NAN),
+        ("stability_constant", |a| a.stability_constant = -0.5),
+        ("stability_constant", |a| a.stability_constant = f64::NAN),
+        ("stability_constant", |a| {
+            a.stability_constant = f64::INFINITY
+        }),
         ("eval_interval", |a| a.eval_interval = 0),
         ("initial_point", |a| a.initial_point = Some(vec![0.0, 1.0])),
         ("initial_point", |a| {

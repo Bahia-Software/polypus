@@ -1168,24 +1168,27 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     or oracle call, in this order: `max_iters >= 1`, `dimensions >= 1`,
     `resamplings >= 1`, `perturbation` and `target_step` finite and `> 0`,
     `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5` (Spall's
-    conditions on the gains), `eval_interval >= 1`, then `initial_point` as
-    under *Starting point* above.
+    conditions on the gains), `stability_constant` finite and `>= 0`,
+    `eval_interval >= 1`, then `initial_point` as under *Starting point*
+    above.
   - θ₀ is `initial_point` when given, otherwise drawn uniformly from
     `[0, 2π)`; the iterates are not wrapped. The first call is the
     calibration: one `evaluate_batch` of 50 candidates, 25 pairs
     `[θ₀ + c·Δᵢ, θ₀ − c·Δᵢ]` with ±1 perturbations `Δᵢ` and `c` the
     `perturbation`. Each pair gives `|f₊ − f₋|/(2c)`, the magnitude of every
-    component of its gradient estimate; the gain is
-    `a = target_step / mean`, the mean over the pairs whose magnitude is
-    finite (a non-finite value, or an overflow, leaves its pair out). With no
-    such pair, a zero mean (a flat landscape), a non-finite mean or a
-    non-finite `a`, `a = target_step` and a warning is logged; the run goes
+    component of its gradient estimate; the first gain is
+    `a₁ = target_step / mean`, the mean over the pairs whose magnitude is
+    finite (a non-finite value, or an overflow, leaves its pair out), and
+    `a = a₁·(1 + A)^α` with `A` the `stability_constant`, so the first step
+    does not depend on `A` (exactly `a = a₁` with the default `A = 0`). With
+    no such pair, a zero mean (a flat landscape), a non-finite mean or a
+    non-finite `a₁`, `a₁ = target_step` and a warning is logged; the run goes
     on.
   - Iteration `k = 1, …, max_iters` makes **one** `evaluate_batch`, its length
     checked: `K = resamplings` fresh pairs `[θ_k + c_k·Δ, θ_k − c_k·Δ]`,
     `2K` candidates, headed by `θ_k` itself (`2K + 1`) on the first
     iteration and every `eval_interval` iterations after it. It steps
-    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/k^α`, `c_k = c/k^γ` and `ĝ_k`
+    `θ_{k+1} = θ_k + a_k·ĝ_k` with `a_k = a/(k + A)^α`, `c_k = c/k^γ` and `ĝ_k`
     the mean of the pairs' estimates `(f₊ − f₋)/(2c_k)·Δ` whose slope
     `(f₊ − f₋)/(2c_k)` is finite; with none, θ stays. After the last step,
     one `evaluate_batch` of one candidate, its length checked, measures the
@@ -1211,8 +1214,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     reach `⌈(2K + 1)/Q⌉ / ⌈2K/Q⌉` of the real time: `(2K + 1)/2K` on one QPU
     (1.5× with `K = 1`), 2× on `2K` QPUs, 1× on `2K + 1` or more.
   - Enforced by `crates/polypus-optimizers/tests/spsa.rs` (the calibration
-    batch and the first step it sets, the flat and non-finite fallbacks and a
-    non-finite pair left out; one batch of `2K` per iteration with `θ` first
+    batch and the first step it sets, the stability constant keeping it and
+    slowing the decay, the flat and non-finite fallbacks and a non-finite
+    pair left out; one batch of `2K` per iteration with `θ` first
     when measured, then the final `θ` alone; every step against Spall's
     recurrence, the last included; the C-5
     postconditions against the batches the oracle saw over 25 seeds, with one
@@ -1227,7 +1231,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `the_spsa_calibration_is_not_timed_as_the_first_iteration` in
     `src/walltime.rs`. Through Python, `tests/python/test_spsa.py` pins the
     calibration and the batches at the seam, the final `θ` included, the
-    pairs centred on `θ`, the
+    pairs centred on `θ`, the first two steps with and without a stability
+    constant, the
     configuration rejected before any batch on both entry points, the
     defaults and a native climb; the SPSA cases of
     `tests/python/test_oracle_contract.py` cover a bad value in a batch,
@@ -1385,9 +1390,10 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `n` candidates (at least one): exact when every batch has the first's
     size, an upper bound to within one first batch when they grow (if a
     batch `k` times larger takes at most `k` times as long), and possibly
-    too low when they shrink. Only the oracle call is timed, not the
-    library's own time in `ask()` and `tell()`. Its warning asks to lower
-    `max_evaluations` (`docs/backends.md`).
+    too low when they shrink. The first batch is timed until the second
+    starts, so the library's `tell()` and next `ask()` between them are in
+    the projection; a run of one batch is not projected. Its warning asks to
+    lower `max_evaluations` (`docs/backends.md`).
   - Enforced by `crates/polypus-optimizers/tests/external.rs` (one oracle
     batch per `ask` and its values told; `None` and an empty batch; a batch
     over the budget neither scored nor told; the budget spent exactly and

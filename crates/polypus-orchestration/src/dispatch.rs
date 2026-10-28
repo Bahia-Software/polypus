@@ -117,6 +117,7 @@ pub struct SpsaConfig {
     pub target_step: f64,
     pub alpha: f64,
     pub gamma: f64,
+    pub stability_constant: f64,
     pub eval_interval: u32,
 }
 
@@ -241,6 +242,7 @@ impl Method {
                 cfg.target_step,
                 cfg.alpha,
                 cfg.gamma,
+                cfg.stability_constant,
                 cfg.eval_interval,
                 dimensions,
                 initial_point,
@@ -490,6 +492,7 @@ pub fn dispatch_optimizer(
             target_step: cfg.target_step,
             alpha: cfg.alpha,
             gamma: cfg.gamma,
+            stability_constant: cfg.stability_constant,
             eval_interval: cfg.eval_interval,
             dimensions,
             seed: Some(seed),
@@ -1232,6 +1235,7 @@ mod tests {
                 target_step: 0.63,
                 alpha,
                 gamma: 0.101,
+                stability_constant: 0.0,
                 eval_interval: 1,
             })
         };
@@ -1630,6 +1634,7 @@ mod tests {
             target_step: 0.63,
             alpha: 0.602,
             gamma: 0.101,
+            stability_constant: 0.0,
             eval_interval: 4,
         })
     }
@@ -1662,6 +1667,7 @@ mod tests {
                 target_step: 0.63,
                 alpha: 0.602,
                 gamma: 0.101,
+                stability_constant: 0.0,
                 eval_interval: 4,
                 dimensions: 3,
                 seed: Some(4),

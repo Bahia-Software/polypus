@@ -829,6 +829,7 @@ mod tests {
                     target_step: 0.63,
                     alpha: 0.602,
                     gamma: 0.101,
+                    stability_constant: 0.0,
                     eval_interval: 2,
                 }),
             ),

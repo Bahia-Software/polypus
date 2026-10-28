@@ -238,12 +238,16 @@ and Nevergrad's through the `polypus.external` adapters, whose batches hold
 sends fewer, and if a batch `k` times larger takes at most `k` times as long, the
 projection stays an upper bound to within one first batch, the remainder the floor
 drops. When they are smaller, the run sends more, each leaving QPUs idle, and the
-projection can be too low. A library that stops early only shortens the run. Only
-the batch's evaluation is timed: the library's own time in `ask()` and `tell()`,
-between the batches, is not in the projection, and for a model-based method, which
-computes its next candidates from all the values it has seen, it can take much of
-the run. Its warning counts batches and asks to lower `max_evaluations` ("the first
-of up to 50 batches took ... Raise `walltime` or lower the max_evaluations.").
+projection can be too low. A library that stops early only shortens the run. The
+first batch is timed until the second starts, so the library's own time between
+them, its `tell()` of the first batch and its `ask()` for the second, is in the
+projection, at that pace for every batch: a model-based method, which computes its
+next candidates from all the values it has seen, can spend much of the run there,
+and more as it sees more values, so its projection can still fall short. The
+warning therefore comes when the second batch starts, and a run of one batch, over
+once that batch is, gets none. It counts batches and asks to lower
+`max_evaluations` ("the first of up to 50 batches, with the optimizer's tell() and
+next ask(), took ... Raise `walltime` or lower the max_evaluations.").
 
 ### Cancellation
 

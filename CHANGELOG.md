@@ -284,6 +284,13 @@ Changes on `main` since 0.7.2.
   do `polypus.DE(strategy=...)`, `polypus.Adam(rule=...)` and the argument
   checks of the `polypus.external` adapters, so `except polypus.PolypusError`
   catches them and `except ValueError` still does (#418).
+- `polypus.SPSA(stability_constant=0.0)`: Spall's stability constant `A`
+  of the step gain `a/(k + A)^alpha`, finite and `>= 0`. The calibration
+  keeps the first step at `target_step` whatever `A`, so a larger `A` makes
+  the early steps shrink more slowly; `0` keeps the previous gains, and
+  seeded runs are unchanged. It comes after `seed` in the positional order.
+  Rust: `AlgorithmSPSAArgs::stability_constant` and
+  `polypus_orchestration::SpsaConfig::stability_constant` (#467).
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
@@ -407,6 +414,14 @@ Changes on `main` since 0.7.2.
   longer turn CI red under `-D warnings`. The MSRV stays 1.85, and the sdist
   does not include the file. Fuzzing and Miri use a dated nightly, and the
   docs, release and tutorial-sync jobs have a timeout (#415).
+- With `polypus.External` on CUNQA, the walltime warning times the first
+  batch until the second starts, so the library's own time in `tell()` and
+  the next `ask()` is in the projection; it left that time out, which for a
+  model-based library can be much of the run. The warning comes when the
+  second batch starts, and a run of one batch gets none (#467).
+- **BREAKING (Rust):** `AlgorithmSPSAArgs` and
+  `polypus_orchestration::SpsaConfig` have a `stability_constant` field, and
+  `AlgorithmSPSA::check_preconditions` takes it (#467).
 
 ### Deprecated
 - Rust: `ConcreteCircuit::to_qasm2` and `to_qir`, which panic on circuits

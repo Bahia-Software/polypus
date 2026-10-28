@@ -110,11 +110,14 @@ class TestSPSAOptions:
         assert spsa.gamma == pytest.approx(0.101)
         assert spsa.eval_interval == 20
         assert spsa.seed is None
+        assert spsa.stability_constant == 0.0
 
     def test_keywords_and_positions(self):
         import polypus
 
-        values = (30, 8, 0.2, 1.2, 1.0, 0.25, 5, 7)
+        # stability_constant comes after seed, so a positional seed keeps its
+        # place.
+        values = (30, 8, 0.2, 1.2, 1.0, 0.25, 5, 7, 3.0)
         by_name = polypus.SPSA(
             max_iters=30,
             resamplings=8,
@@ -124,6 +127,7 @@ class TestSPSAOptions:
             gamma=0.25,
             eval_interval=5,
             seed=7,
+            stability_constant=3.0,
         )
         by_position = polypus.SPSA(*values)
         for spsa in (by_name, by_position):
@@ -136,6 +140,7 @@ class TestSPSAOptions:
                 spsa.gamma,
                 spsa.eval_interval,
                 spsa.seed,
+                spsa.stability_constant,
             ) == values
 
     def test_every_field_is_settable(self):
@@ -150,6 +155,7 @@ class TestSPSAOptions:
         spsa.gamma = 0.2
         spsa.eval_interval = 3
         spsa.seed = 9
+        spsa.stability_constant = 30.0
         assert (
             spsa.max_iters,
             spsa.resamplings,
@@ -159,7 +165,8 @@ class TestSPSAOptions:
             spsa.gamma,
             spsa.eval_interval,
             spsa.seed,
-        ) == (12, 4, 0.3, 0.5, 0.9, 0.2, 3, 9)
+            spsa.stability_constant,
+        ) == (12, 4, 0.3, 0.5, 0.9, 0.2, 3, 9, 30.0)
 
     @pytest.mark.parametrize(
         "kwargs", [{"max_iters": -1}, {"resamplings": -1}, {"eval_interval": -1}]
@@ -260,6 +267,9 @@ class TestSPSABatches:
             ({"alpha": 1.1}, "alpha"),
             ({"gamma": 0.0}, "gamma"),
             ({"gamma": 0.2}, "gamma"),
+            ({"stability_constant": -1.0}, "stability_constant"),
+            ({"stability_constant": float("nan")}, "stability_constant"),
+            ({"stability_constant": float("inf")}, "stability_constant"),
             ({"eval_interval": 0}, "eval_interval"),
         ],
     )
@@ -272,6 +282,46 @@ class TestSPSABatches:
         with pytest.raises(ValueError, match=message):
             _train(polypus.SPSA(**kwargs), ident="spsa_invalid")
         assert batches == []
+
+    def test_the_stability_constant_keeps_the_first_step_and_slows_the_decay(
+        self, monkeypatch
+    ):
+        # The gain is a/(k + A)^α, with a calibrated so that the first gain
+        # does not depend on A: the first step is the same, and the second,
+        # from the same θ along the same perturbation, longer by
+        # (2(1 + A)/(2 + A))^α.
+        import polypus
+        import polypus_python
+
+        thetas = []
+
+        def sine(infrastructure, **kwargs):
+            # P(1) = (1 + sin θ)/2, so the fitness changes with θ.
+            shots, results = kwargs["shots"], []
+            batch = [_candidate(qc)[0] for qc in kwargs["qcs"]]
+            thetas.append(batch[0])
+            for angle in batch:
+                ones = round(shots * (1 + math.sin(angle)) / 2)
+                results.append({"1": ones, "0": shots - ones})
+            return results
+
+        monkeypatch.setattr(polypus_python, "run_qcs", sine)
+        steps = {}
+        for stability in (0.0, 9.0):
+            thetas.clear()
+            _train(
+                polypus.SPSA(
+                    max_iters=2, eval_interval=1, stability_constant=stability
+                ),
+                shots=2**20,
+            )
+            # The calibration's first candidate, then θ₁, θ₂ and the final θ.
+            _, theta1, theta2, theta3 = thetas
+            steps[stability] = (theta2 - theta1, theta3 - theta2)
+        (first, second), (first_a, second_a) = steps[0.0], steps[9.0]
+        assert first_a == pytest.approx(first, abs=1e-9)
+        assert abs(second) > 1e-3
+        assert second_a / second == pytest.approx((20 / 11) ** 0.602, rel=1e-3)
 
     @pytest.mark.parametrize("resamplings", [1, 2])
     def test_qml_train_runs_spsa(self, monkeypatch, resamplings):
