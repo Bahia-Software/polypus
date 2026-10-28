@@ -6,7 +6,7 @@ Each ``ask()`` is one oracle batch; its values go back through ``tell()``. The
 run stops at an empty ``ask()`` or before the batch that would take it past
 ``max_evaluations``. These tests drive the bridge with the deterministic
 ``RandomSearch`` of ``ask_tell_helpers.py``; the adapters for Optuna,
-Nevergrad and pycma are in ``test_external_adapters.py``.
+Nevergrad and pycma are in ``test_ask_tell_adapters.py``.
 
 The configuration tests need no backend. ``initial_point`` is refused before
 anything runs: with ``infrastructure="cunqa"``, before
@@ -308,7 +308,7 @@ class TestBeforeAnythingRuns:
         assert message.startswith(
             "polypus.External takes no initial_point: the external optimizer chooses "
             "its own start. Give the starting point to the library, or to the "
-            "initial_point of the polypus.external adapter"
+            "initial_point of the polypus.ask_tell adapter"
         ), message
         assert seam_calls == []
         assert optimizer.asked == []

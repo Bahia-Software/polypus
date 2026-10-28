@@ -141,8 +141,10 @@ leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
 pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
 Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
 Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
-so the tests of `polypus.external` that train through them run there
-(contract C-5); elsewhere they skip unless you install them.
+so the tests of `polypus.ask_tell` that train through them run there
+(contract C-5); elsewhere they skip unless you install them. Those pins are
+the floors of the pip extras of the same names in `pyproject.toml`, which a
+test checks: bump a pin and its floor together.
 
 CI also builds the wheel on Linux, macOS and Windows and executes every
 notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).

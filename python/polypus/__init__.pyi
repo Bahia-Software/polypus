@@ -32,12 +32,12 @@ import numpy.typing as npt
 from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
+from . import ask_tell as ask_tell
 from . import circuits as circuits
-from . import external as external
 from . import qml as qml
 
-# What `External` runs (bindings/external.rs), typed in `polypus.external`.
-from .external import AskTell as _AskTell
+# What `External` runs (bindings/external.rs), typed in `polypus.ask_tell`.
+from .ask_tell import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -87,7 +87,7 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
-    "external",
+    "ask_tell",
 ]
 
 __version__: str

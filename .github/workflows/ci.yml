@@ -440,8 +440,8 @@ jobs:
         run: |
           maturin build --release --out dist
           pip install dist/polypus_quantum-*.whl
-      # The libraries the adapters of polypus.external wrap, so the tests that
-      # train through them (tests/python/test_external_adapters.py) run here
+      # The libraries the adapters of polypus.ask_tell wrap, so the tests that
+      # train through them (tests/python/test_ask_tell_adapters.py) run here
       # instead of skipping; POLYPUS_REQUIRE_EXTERNAL_LIBRARIES below makes a
       # missing one fail. Pinned, like ruff and mypy, so that a new release
       # cannot turn CI red without a deliberate bump. Latest leg only.

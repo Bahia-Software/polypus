@@ -54,6 +54,17 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+# The libraries the adapters of `polypus.ask_tell` wrap, none of them a
+# dependency: `pip install "polypus-quantum[optuna]"` installs Polypus with
+# one. Each floor is the version CI tests the adapters with (the pins of the
+# "Install Optuna, Nevergrad and pycma" step of .github/workflows/ci.yml,
+# which tests/python/test_ask_tell_adapters.py checks), and each upper bound
+# the next major; raise a floor together with its pin.
+[project.optional-dependencies]
+optuna = ["optuna>=5.0.0,<6"]
+nevergrad = ["nevergrad>=1.0.12,<2"]
+cma = ["cma>=4.5.0,<5"]
+
 [project.urls]
 Homepage = "https://github.com/Bahia-Software/polypus"
 Repository = "https://github.com/Bahia-Software/polypus"
