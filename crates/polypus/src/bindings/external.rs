@@ -71,9 +71,10 @@ use polypus_optimizers::{AskTell, AskTellError};
 /// counts each run's evaluations on their own. Two runs at the same time must
 /// not share one optimizer.
 ///
-/// `max_evaluations` must be an integer `>= 1` (not a `bool` or a `float`),
-/// otherwise `ValueError`; an `optimizer` without callable `ask` and `tell`
-/// raises `TypeError`. Both are checked here and whenever they are set.
+/// `max_evaluations` must be an integer `>= 1`: a smaller one raises
+/// `ValueError`, and a value that is not an integer (a `bool` or a `float`
+/// too) `TypeError`; an `optimizer` without callable `ask` and `tell` raises
+/// `TypeError`. Both are checked here and whenever they are set.
 ///
 /// `External` takes part in Python's garbage collection, so an optimizer that
 /// refers back to its `External` (a cycle) is freed with it.
@@ -187,8 +188,9 @@ fn check_optimizer(optimizer: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-/// `max_evaluations` as a `u64`: an integer from 1 to 2⁶⁴ − 1 (see
-/// [`positive_index`](super::positive_index)), otherwise `ValueError`.
+/// `max_evaluations` as a `u64`: an integer from 1 to 2⁶⁴ − 1, otherwise
+/// `ValueError`, or `TypeError` for a value that is not an integer (see
+/// [`positive_index`](super::positive_index)).
 fn parse_max_evaluations(value: &Bound<'_, PyAny>) -> PyResult<u64> {
     let index = super::positive_index(value, "max_evaluations")?;
     index
@@ -761,21 +763,36 @@ class Counted:
         });
     }
 
-    /// `max_evaluations` is an integer `>= 1` up to `u64::MAX`; the optimizer
-    /// needs callable `ask` and `tell`.
+    /// `max_evaluations` is an integer `>= 1` up to `u64::MAX` (`TypeError`
+    /// when it is not an integer, `ValueError` when it is out of range); the
+    /// optimizer needs callable `ask` and `tell`.
     #[test]
     fn the_configuration_is_checked_when_built_and_when_set() {
         Python::initialize();
         Python::attach(|py| {
             let module = module(py, SCRIPTED, "external_config");
             let optimizer = module.getattr("Scripted").unwrap().call1(((),)).unwrap();
-            for bad in ["0", "-3", "True", "4.0", "'7'", "None", "2**64"] {
+            // An integer out of range is a `ValueError`, anything else a
+            // `TypeError`, as an integer argument's.
+            for (bad, is_an_integer) in [
+                ("0", true),
+                ("-3", true),
+                ("2**64", true),
+                ("True", false),
+                ("4.0", false),
+                ("'7'", false),
+                ("None", false),
+            ] {
                 let code = CString::new(bad).unwrap();
                 let value = py.eval(&code, None, None).unwrap();
                 let err = External::new(optimizer.clone(), value)
                     .err()
                     .unwrap_or_else(|| panic!("{bad} must be rejected"));
-                assert!(err.is_instance_of::<PyValueError>(py), "{bad}: {err}");
+                if is_an_integer {
+                    assert!(err.is_instance_of::<PyValueError>(py), "{bad}: {err}");
+                } else {
+                    assert!(err.is_instance_of::<PyTypeError>(py), "{bad}: {err}");
+                }
                 assert!(
                     err.value(py)
                         .to_string()

@@ -133,6 +133,23 @@ pub(crate) fn stagnated(history: &[f64], tolerance: f64, patience: usize) -> boo
     recent_improvement(history, patience).is_some_and(|improvement| improvement < tolerance)
 }
 
+/// `patience` must be at least 1: the stagnation rule compares the best
+/// fitness with `patience` `unit` earlier, and `0` would compare one with
+/// itself, so a run with a positive `tolerance` would stop after its first.
+/// DE and CMA-ES check it here; Adam and Rotosolve, with their own wording.
+pub(crate) fn check_patience(patience: u32, unit: &str) -> Result<(), OptimizerError> {
+    if patience == 0 {
+        return Err(OptimizerError::InvalidConfig {
+            parameter: "patience",
+            reason: format!(
+                "must be at least 1 ({unit} back to compare the best fitness with; 0 \
+                 would compare one with itself)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `history[g] - history[g - patience]` for the last generation `g`, or `None`
 /// while there is no full `patience`-wide window behind it: with one entry per
 /// generation, `history.len() > patience` is exactly `g >= patience`
@@ -154,7 +171,7 @@ pub(crate) fn recent_improvement(history: &[f64], patience: usize) -> Option<f64
 /// Checking the length immediately after each batch call — for *any* oracle,
 /// Python-backed or not — turns that into the typed
 /// [`OptimizerError::OracleLengthMismatch`] the FFI seam maps to a
-/// `PyValueError`.
+/// `polypus.EvaluationError`.
 pub(crate) fn check_oracle_len(expected: usize, got: usize) -> Result<(), OptimizerError> {
     if expected == got {
         Ok(())
