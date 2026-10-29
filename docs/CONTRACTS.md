@@ -1141,26 +1141,36 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     iteration is one call (C-11 (f)); neither it, for Qiskit circuits, nor
     `VqcOracleFactory` provides a gradient otherwise, so those runs take the
     finite difference, built over the run's evaluation oracle so that `θ`'s
-    value is that oracle's. The CUNQA walltime projection (`Method::run_shape_over`) counts
-    one batch per iteration with the finite difference, and two (`θ`, then the
-    gradient) with an exact gradient, and the final `θ` as one more
-    iteration, a bound on its single candidate. The watch forwards every call,
-    `value_and_gradient` included, counted as a batch only when it returns a
-    value, so Adam sends the same batches with and without it; an exact
-    gradient that scores `θ` itself makes an iteration one batch, which the
-    projection cannot tell in advance, so it then overestimates. Enforced by
-    the `adam_*` tests in `crates/polypus-orchestration/src/dispatch.rs` (the
-    rule reaches the optimizer, one batch of `2·dims + 1` per iteration and
-    the final `θ`) and in `src/walltime.rs` (the projection counts the batches
-    sent, exactly with the finite difference and one more with an exact
-    gradient, the same batches with and without the watch, the watch of an
-    iteration with an exact gradient, and a forwarded `value_and_gradient`
-    timed as a batch). Through Python, `tests/python/test_adam.py` pins the
-    batches at the seam (one batch of `θ` and its stencil per iteration, then
-    the final `θ`, with each rule), the configuration and an unknown `rule`
-    rejected before any batch, the defaults, and both entry points; the Adam
-    cases of `tests/python/test_oracle_contract.py` cover a bad value in a
-    batch, the updated `θ`'s own and the final `θ`'s included.
+    value is that oracle's. A `GradientOracle` declares in advance, through
+    `scores_theta` (default `false`), whether its `value_and_gradient` scores
+    `θ` in the gradient's own batch: `true` exactly when it returns a value,
+    as `FiniteDifferenceGradient` always does and `QmlOracle` does without a
+    minibatch. The CUNQA walltime projection (`Method::run_shape_over`)
+    counts one batch per iteration when the gradient scores `θ` (the finite
+    difference the run builds with no gradient and no minibatch, or a given
+    gradient whose `scores_theta` is `true`), and two (`θ`, then the
+    gradient) with a given gradient that does not, or with a minibatch and no
+    given gradient; the final `θ` counts as one more iteration, exact with
+    one batch per iteration and a bound on its single candidate with two. The
+    watch forwards every call, `value_and_gradient` and `scores_theta`
+    included, `value_and_gradient` counted as a batch only when it returns a
+    value, so Adam sends the same batches with and without it. Enforced by
+    `scores_theta_tells_whether_value_and_gradient_scores_theta` in
+    `crates/polypus-optimizers/tests/adam.rs` (the default, the finite
+    difference and an `Arc` of each agree with `value_and_gradient`), by the
+    `adam_*` tests in `crates/polypus-orchestration/src/dispatch.rs` (the rule
+    reaches the optimizer, one batch of `2·dims + 1` per iteration and the
+    final `θ`) and in `src/walltime.rs` (the projection counts the batches
+    sent for every combination of gradient and minibatch, one or two per
+    iteration, the same batches with and without the watch, the watch of an
+    iteration with an exact gradient, a forwarded `value_and_gradient` timed
+    as a batch, whose one-call iteration the projection times exactly, and a
+    forwarded `scores_theta`). Through Python, `tests/python/test_adam.py`
+    pins the batches at the seam (one batch of `θ` and its stencil per
+    iteration, then the final `θ`, with each rule), the configuration and an
+    unknown `rule` rejected before any batch, the defaults, and both entry
+    points; the Adam cases of `tests/python/test_oracle_contract.py` cover a
+    bad value in a batch, the updated `θ`'s own and the final `θ`'s included.
 - **SPSA** (`AlgorithmSPSA`, exposed as `polypus.SPSA`: Spall's
   simultaneous perturbation stochastic approximation, ascending the fitness,
   with a calibrated first step).
@@ -2112,12 +2122,16 @@ batching and distribution are the oracle's concern.
   run once; in exact mode that value is, bit for bit, what `evaluate_batch`
   returns for `θ`. With a minibatch it returns `None` (those base circuits are
   the minibatch's, and Adam tracks its best on every sample), and Adam scores
-  `θ` apart. The walltime projection, which counts two calls per Adam
-  iteration with an exact gradient, then overestimates, as C-5 allows. With a
-  minibatch, one subset of the samples is
-  drawn per call, from the run's seed and a call counter, and shared by every
-  candidate of an `evaluate_batch` and by the base and every shift of a
-  gradient; `evaluate_full` scores every sample (the minibatch rules of C-5).
+  `θ` apart. Its `scores_theta` declares which, `true` exactly without a
+  minibatch, so the walltime projection counts an Adam iteration as one call
+  without a minibatch and two with one (C-5); enforced by
+  `the_native_gradient_declares_whether_it_scores_theta` in
+  `crates/polypus-evaluation/src/qml_oracle.rs` and, through the factory's
+  `Oracles`, `the_factory_hands_out_each_role_the_source_has`. With a minibatch,
+  one subset of the samples is drawn per call, from the run's seed and a call
+  counter, and shared by every candidate of an `evaluate_batch` and by the base
+  and every shift of a gradient; `evaluate_full` scores every sample (the
+  minibatch rules of C-5).
 
 ### The Python API (`polypus.qml`)
 

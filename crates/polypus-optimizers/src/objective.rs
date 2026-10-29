@@ -128,13 +128,25 @@ pub trait GradientOracle: Send + Sync {
     /// must mean that nothing was scored, since a caller that counts batches
     /// does not count that call.
     ///
-    /// A training run's CUNQA walltime projection (`polypus-orchestration`)
-    /// cannot tell in advance whether an exact gradient overrides this, so it
-    /// counts two calls per Adam iteration. With an override an iteration is
-    /// one call, and the projection times two iterations as one: it
-    /// overestimates, never underestimates.
+    /// An implementation that overrides this must also override
+    /// [`scores_theta`](GradientOracle::scores_theta), which tells in advance
+    /// which of the two it returns.
     fn value_and_gradient(&self, _theta: &[f64], _dims: usize) -> Option<(f64, Vec<f64>)> {
         None
+    }
+
+    /// Whether [`value_and_gradient`](GradientOracle::value_and_gradient)
+    /// scores `theta` in the gradient's own batch: `true` exactly when it
+    /// returns `Some`, `false` exactly when it returns `None` (the default).
+    ///
+    /// It is asked before a run, when nothing has been scored yet: a training
+    /// run's CUNQA walltime projection (`polypus-orchestration`) counts one
+    /// call per Adam iteration when it is `true` and two (`theta`, then the
+    /// gradient) when it is `false`. An oracle that answers `false` but scores
+    /// `theta` makes the projection overestimate; one that answers `true` but
+    /// returns `None` makes it underestimate, so the two must agree.
+    fn scores_theta(&self) -> bool {
+        false
     }
 }
 
@@ -151,6 +163,10 @@ impl<T: GradientOracle + ?Sized> GradientOracle for std::sync::Arc<T> {
 
     fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
         (**self).value_and_gradient(theta, dims)
+    }
+
+    fn scores_theta(&self) -> bool {
+        (**self).scores_theta()
     }
 }
 
