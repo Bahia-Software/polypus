@@ -2279,8 +2279,11 @@ the native simulator with the same seed and shots it gives `run([x])`'s counts,
 and its statevector gives `run([x], exact=True)`'s probabilities. `x` is
 checked as a row of `fit`: a feature count the encoders cannot carry, a
 non-finite value or, for the amplitude encoder, a zero sample is a
-`ValueError`; several rows or a `Dataset` is a `TypeError`. The model is
-unchanged, and each call returns a new `Circuit`.
+`ValueError`; several rows or a `Dataset` is a `TypeError`. These are plain
+`ValueError`s, as `bind` raises, not `polypus.ConfigurationError`: `circuit`
+builds a circuit and runs nothing, so the same row that `run` rejects with a
+`ConfigurationError` is a `ValueError` here. The model is unchanged, and each
+call returns a new `Circuit`.
 
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:

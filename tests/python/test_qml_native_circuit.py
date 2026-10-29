@@ -277,6 +277,19 @@ class TestRejections:
         with pytest.raises(ValueError, match="non-finite feature at sample 0, index 1"):
             _circuit_calls()[call]([0.1, value])
 
+    @pytest.mark.parametrize("call", range(3))
+    @pytest.mark.parametrize("bad", [[0.1, 0.2, 0.3], [0.1, math.nan]])
+    def test_the_checks_are_plain_value_errors(self, call, bad):
+        # `circuit` runs nothing: a `ValueError` as `bind` raises, where `run`
+        # raises its `ConfigurationError` subclass for the same row.
+        import polypus
+
+        with pytest.raises(ValueError) as raised:
+            _circuit_calls()[call](bad)
+        assert not isinstance(raised.value, polypus.ConfigurationError)
+        with pytest.raises(polypus.ConfigurationError):
+            _model().bind(_PARAMS).run([bad], exact=True)
+
     def test_the_amplitude_encoder_s_limits(self):
         model = _amplitude_model()
         with pytest.raises(ValueError, match="5 feature"):
