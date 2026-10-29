@@ -67,6 +67,23 @@ class TestShorOrderFinding:
         )
         np.testing.assert_allclose(marginal[[0, 64, 128, 192]], 0.25, atol=1e-9)
 
+    # The limits the docs state: 24-bit moduli build, and to_qasm3 exports
+    # 16-bit ones but not 17-bit ones.
+    def test_the_largest_modulus_builds(self):
+        from polypus.circuits.templates import shor_order_finding
+
+        assert (
+            repr(shor_order_finding(2, 2**24 - 3))
+            == "Circuit(num_qubits=98, num_params=0, gates=3716641)"
+        )
+
+    def test_to_qasm3_exports_up_to_16_bit_moduli(self):
+        from polypus.circuits.templates import shor_order_finding
+
+        assert shor_order_finding(2, 2**16 - 1).to_qasm3().startswith("OPENQASM 3")
+        with pytest.raises(ValueError, match="MAX_SOURCE_BYTES"):
+            shor_order_finding(2, 2**16 + 1).to_qasm3()
+
     @pytest.mark.parametrize(
         "args", [(2, 2), (2, 2**24 + 1), (0, 15), (6, 15), (7, 15, 0), (7, 15, 9)]
     )
