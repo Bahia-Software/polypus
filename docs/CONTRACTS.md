@@ -1763,7 +1763,12 @@ rejection, and the returned manifest/outcome fields), `tests/python/test_qml_pre
 (`Model.fit` and `TrainedModel.run`: seed replay, exact runs independent of
 shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields), the minibatch draws in
 `crates/polypus-evaluation/src/qml_oracle.rs`
-(`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`), plus the Rust tests in
+(`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`),
+`tests/python/test_determinism_baseline.py` (seeded results pinned bit for bit:
+counts and a mocked-backend `qml.train` on any platform, native `train`
+trajectories on the fixture's build only, opt-in with
+`POLYPUS_DETERMINISM_STRICT=1`, and the same trajectories replayed in a fresh
+process on every CI leg, #407), plus the Rust tests in
 `crates/polypus/src/bindings/mod.rs` (native seed round-trip through
 `run_quantum_circuit`, the `qmio` rejection path, the seed-resolution
 precedence / optimizer determinism, the default-seed entropy-failure path
