@@ -124,6 +124,27 @@ Changes on `main` since 0.7.2.
   with `SingleFrequencyError` and `AngleForm`, which say whether a circuit
   qualifies; `tests/python/test_rotosolve.py` checks that it and the Python
   check of a Qiskit circuit take the same angles and gates (#398).
+- `callback` in `train`, `qml.train` and `qml.Model.fit` (keyword-only):
+  called once per iteration of the optimizer with a read-only
+  `polypus.TrainProgress` (`iteration`, `best_fitness`, `best_params`,
+  `evaluations`), so a run can report its progress, write checkpoints or
+  stop on a criterion of its own. Returning `True` stops the run, which
+  returns the `TrainResult` it has reached (`converged=False`; the
+  `final_shots` batch is still sent); `None` or `False` go on, and any other
+  value raises `TypeError`. An exception in the callback propagates as
+  itself, with no result. Ctrl+C keeps working as before, and a seeded run
+  with a callback that never stops returns the same result as without one.
+  A `callback` that is not callable raises `TypeError` before anything runs
+  (#500).
+- Watching a run in Rust: `IterationObserver`, `IterationReport` and
+  `Optimizer::optimize_observed` (with `optimize` now its default, an
+  observer that never stops), and
+  `AlgorithmDifferentialEvolution::optimize_with_strategy_observed`
+  (`polypus-optimizers`); `TrainObserver`, `TrainProgress`,
+  `TrainFlow::observer` and `dispatch_optimizer_observed`, which counts the
+  evaluations (`polypus-orchestration`). Adam, SPSA and Rotosolve now
+  measure the point their last step reached inside their last iteration, with
+  the same oracle calls and outcome (#500).
 - `final_shots` in `train` and `qml.train` (keyword-only in `qml.train`):
   once the optimizer has stopped, its best candidates are re-evaluated in
   one more batch with that many shots per circuit, `best_params` and, for
@@ -350,6 +371,12 @@ Changes on `main` since 0.7.2.
 - **BREAKING (Rust):** `polypus_orchestration::Method` has a new variant,
   `Rotosolve`, so an exhaustive `match` on it outside the crate must handle
   it (#398).
+- **BREAKING (Rust):** an `Optimizer` implemented outside `polypus-optimizers`
+  now implements `optimize_observed`, which shows an `IterationObserver` each
+  iteration, instead of `optimize`, now its default with an observer that
+  never stops (#500).
+- **BREAKING (Rust):** `polypus_orchestration::TrainFlow` has an `observer`
+  field (`None` keeps the previous behaviour) (#500).
 - **BREAKING:** with `infrastructure="qmio"` or a registered backend
   (`"subprocess"` or a third-party one), a `noise_model` or a `sim_method`
   other than `"automatic"` raises `ValueError` instead of being ignored, and so
