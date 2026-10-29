@@ -2,11 +2,15 @@
 //!
 //! Each template returns a [`ParameterizedCircuit`] so it stays composable: the
 //! caller can keep chaining gates, append `measure_all`, or export it directly.
-//! Templates add no measurements of their own. The arithmetic blocks of Shor's
-//! algorithm are in [`arithmetic`].
+//! Templates add no measurements of their own. The order-finding circuit of
+//! Shor's algorithm is [`shor_order_finding`]; its arithmetic blocks are in
+//! [`arithmetic`].
 
 pub mod arithmetic;
 mod emit;
+mod shor;
+
+pub use shor::{shor_order_finding, MAX_SHOR_MODULUS_BITS};
 
 use crate::{CircuitError, ParameterizedCircuit};
 use emit::{circuit_from_ops, emit_qft};

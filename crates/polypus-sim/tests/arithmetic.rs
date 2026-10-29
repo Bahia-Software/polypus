@@ -6,7 +6,7 @@ use polypus_circuit::templates::arithmetic::{
     controlled_modular_multiplication, controlled_modular_multiplier, modular_phase_adder,
     phase_adder,
 };
-use polypus_circuit::templates::qft_with_options;
+use polypus_circuit::templates::{qft_with_options, shor_order_finding};
 use polypus_circuit::{GateInstruction as G, ParameterizedCircuit};
 use polypus_sim::{Simulator, StatevectorSimulator};
 
@@ -183,6 +183,33 @@ fn controlled_modular_multiplication_multiplies_in_place() {
                     "a = {a}, N = {modulus}, x = {x}, c = {c}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn shor_order_finding_peaks_at_multiples_of_two_to_the_t_over_r() {
+    // a = 7 has order 4 modulo 15 and a = 4 has order 2: with t = 4 counting
+    // qubits the counting register reads k · 16 / r, each with probability 1/r.
+    for (a, peaks) in [(7, &[0, 4, 8, 12][..]), (4, &[0, 8][..])] {
+        let qc = shor_order_finding(a, 15, Some(4)).unwrap();
+        let state = StatevectorSimulator::new()
+            .run(&qc.assign_parameters(&[]).unwrap())
+            .unwrap();
+        let mut counting = [0.0; 16];
+        for (index, amplitude) in state.amplitudes().iter().enumerate() {
+            counting[index & 0b1111] += amplitude.norm_sqr();
+        }
+        for (value, probability) in counting.iter().enumerate() {
+            let expected = if peaks.contains(&value) {
+                1.0 / peaks.len() as f64
+            } else {
+                0.0
+            };
+            assert!(
+                (probability - expected).abs() < 1e-9,
+                "a = {a}: P({value}) = {probability}, expected {expected}"
+            );
         }
     }
 }

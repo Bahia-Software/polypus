@@ -345,9 +345,15 @@ impl MultiplierLayout {
 
     /// Gates of [`controlled_modular_multiplier`] on this layout.
     fn multiplier_len(&self) -> usize {
-        let (n, m) = (self.x.len(), self.b.len());
-        m * (m + 1) + n * (2 * m * m + 13 * m + 10)
+        multiplier_gate_count(self.x.len())
     }
+}
+
+/// Gates of [`controlled_modular_multiplier`] for an `n`-bit modulus: two QFTs
+/// on its `m = n + 1` qubits and `n` modular adders.
+pub(crate) fn multiplier_gate_count(n: usize) -> usize {
+    let m = n + 1;
+    m * (m + 1) + n * (2 * m * m + 13 * m + 10)
 }
 
 /// Emit [`controlled_modular_multiplier`] on `x` and `b`, controlled by
