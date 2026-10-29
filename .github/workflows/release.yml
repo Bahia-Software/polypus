@@ -5,7 +5,7 @@
 # Trusted Publishing, or the CARGO_REGISTRY_TOKEN secret while one is set).
 #
 #   • Push a tag `vX.Y.Z`   → build everything and publish to PyPI and crates.io.
-#   • Either way the `gate` job runs first (tag ↔ Cargo.toml version, green
+#   • Either way the `gate` job runs first (version rules, green
 #     ci.yml for the commit) — see its comment for what is enforced when.
 #   • Manual "Run workflow" → build everything; the `target` input picks the index
 #                             (testpypi = default dry run, or pypi).
@@ -42,10 +42,15 @@ jobs:
   # job, so a release that would be refused aborts before spending build minutes
   # (publish-* and the post-publish checks inherit it through their `needs`).
   #
-  #   1. Tag ↔ version. On a tag push the tag must be exactly `vX.Y.Z` (so a
-  #      malformed tag like `v.0.5.0` is rejected) and equal `v` + the
-  #      `[workspace.package].version` in the root Cargo.toml — the single source
-  #      of truth (docs/CONTRIBUTING.md). A manual run has no tag: skipped.
+  #   1. Version rules (.github/scripts/release_check.py). Always: the
+  #      `[workspace.package].version` in the root Cargo.toml — the single
+  #      source of truth (docs/CONTRIBUTING.md) — is `X.Y.Z` or `X.Y.Z-dev`, and
+  #      every internal pin in `[workspace.dependencies]` equals it. On a tag
+  #      push or a manual run with target=pypi, also: no `-dev` version, a
+  #      `## [X.Y.Z] - date` section in CHANGELOG.md, and the same version and
+  #      date in CITATION.cff. On a tag push, the tag is exactly `v` + the
+  #      version (so a malformed tag like `v.0.5.0` is rejected). A TestPyPI
+  #      dry run accepts a `-dev` version (published as `X.Y.Z.dev0`).
   #   2. Green CI for this exact commit. ci.yml never runs on a tag push, so we
   #      ask the Actions API for a successful ci.yml run whose head_sha is the
   #      commit this workflow builds (`github.sha`, the one every build job checks
@@ -73,32 +78,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
-        name: Read workspace version
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Could not read an X.Y.Z version from Cargo.toml (got '$version')"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Tag matches Cargo.toml version
+        name: Version, pins, CHANGELOG.md and CITATION.cff
         env:
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.target == 'pypi' }}
         run: |
-          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
-            echo "::notice::Not a tag push ($GITHUB_EVENT_NAME on $GITHUB_REF): tag/version check does not apply"
-            exit 0
-          fi
-          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
-            exit 1
-          fi
-          if [[ "$TAG" != "v$VERSION" ]]; then
-            echo "::error::Tag '$TAG' does not match Cargo.toml [workspace.package].version '$VERSION' (expected 'v$VERSION')"
-            exit 1
-          fi
-          echo "Tag $TAG matches Cargo.toml version $VERSION"
+          args=()
+          [[ -z "$TAG" ]] || args+=(--tag "$TAG")
+          [[ "$PUBLISH" != true ]] || args+=(--publish)
+          python3 .github/scripts/release_check.py "${args[@]}"
       - name: ci.yml is green for this commit
         env:
           GH_TOKEN: ${{ github.token }}

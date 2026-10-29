@@ -1,9 +1,10 @@
 name: Hygiene
 
 # Blocks internal files, ignored artefacts, infrastructure data, notebooks with
-# outputs, oversized blobs and Cargo.toml/CITATION.cff version drift. Logic and
-# policy live in .github/scripts/hygiene.py and .github/hygiene-allow.txt;
-# changes to either, or to this file, need human review.
+# outputs, oversized blobs, Cargo.toml/CITATION.cff version drift and stale
+# internal version pins. Logic and policy live in .github/scripts/hygiene.py,
+# .github/scripts/release_check.py and .github/hygiene-allow.txt; changes to
+# any of them, or to this file, need human review.
 #
 # Pull requests run the public rules only. The maintainers' private patterns
 # (secret HYGIENE_LEAK_PATTERNS) run after the merge, on the push to main: they
@@ -50,10 +51,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - name: Test the check (Python 3.11)
+      - name: Test the checks (Python 3.11)
         run: |
           python -m pip install pytest==8.3.5
-          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py
+          python -m pytest -p no:cacheprovider -q .github/scripts/test_hygiene.py \
+            .github/scripts/test_release_check.py .github/scripts/test_publish_crates.py
+
+      # The release gate's rules that hold on every branch: an `X.Y.Z` or
+      # `X.Y.Z-dev` workspace version and internal pins equal to it.
+      - name: Version and internal pins
+        run: python .github/scripts/release_check.py
 
       - name: Check (pull request, public rules)
         if: github.event_name == 'pull_request'
