@@ -65,8 +65,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use polypus_backend::{
-    register_backend, BackendBuildContext, BackendError, BoundCircuit, Counts, OptionValue,
-    QuantumBackend, RunParams,
+    register_backend, BackendBuildContext, BackendError, BoundCircuit, CallSeeds, Counts,
+    OptionValue, QuantumBackend, RunParams,
 };
 
 use protocol::{Circuit, Request, Response, PROTOCOL_VERSION};
@@ -637,6 +637,9 @@ pub struct SubprocessBackend {
     /// no-op rather than a second SIGINT).
     cancel_sent: AtomicBool,
     recv_timeout: Duration,
+    /// The seed sent with each call: the run's on the first, then one derived
+    /// from it and the call's index (contract C-7).
+    seeds: CallSeeds,
 }
 
 impl SubprocessBackend {
@@ -687,6 +690,7 @@ impl SubprocessBackend {
             worker: Mutex::new(worker),
             pid,
             cancel_sent: AtomicBool::new(false),
+            seeds: CallSeeds::new(),
             recv_timeout: config.recv_timeout,
         })
     }
@@ -835,11 +839,13 @@ impl QuantumBackend for SubprocessBackend {
         // A fresh call clears any prior cancel latch, so a new cancel is delivered.
         self.cancel_sent.store(false, Ordering::SeqCst);
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        // Under the lock, so the seeds follow the order of the requests.
+        let seed = self.seeds.next(params.seed);
         worker.send(&Request::Run {
             id: params.id.clone(),
             circuits,
             shots: params.shots,
-            seed: params.seed,
+            seed,
         })?;
         match worker.recv_timeout(self.recv_timeout) {
             Ok(Response::Result { counts, .. }) => Ok(counts),

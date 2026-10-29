@@ -109,6 +109,20 @@ not here — this keeps the per-call surface minimal and pyo3-free. `seed` is
 `Some` whenever a seed-consuming backend runs (contract C-7); honour it if you
 sample shots yourself, and fall back to your own default on `None`.
 
+`seed` is the run's base seed, the same on every call of the run. Give each
+call its own sampling stream derived from it, as every built-in simulating backend does,
+so that two generations of a training run do not share shot noise and the same
+seed replays the run (C-7, "The seed across the calls of one run"). The
+simplest way is a `polypus_backend::CallSeeds` field: `self.seeds.next(params.seed)`
+returns the base seed the first time and a seed derived from it and the count
+afterwards. Call it once per `run_circuits` (and `run_shots_distributed`, if you
+override it) when you send the whole batch with one seed, or once per
+submission when you send circuits one at a time, as the Rust template
+(`examples/rust-backend-template`) does. Do not reuse `params.seed` unchanged on every
+call: batch slot `i` would then get the same random numbers in every
+generation. The subprocess bridge does this for its worker, which receives
+each call's seed in the `run` request.
+
 ### Reporting failure: `BackendError`
 
 Never panic across the boundary — return a `BackendError`:
@@ -464,7 +478,9 @@ bridge sends `{"op":"hello","protocol":1}` and the worker must answer `{"op":"re
 
 Circuits arrive as **OpenQASM 2.0** text (a provider-native `Foreign` object cannot
 cross a process boundary and is rejected before it reaches the worker). Return one
-counts map per circuit, in order.
+counts map per circuit, in order. `seed`, when present, is this run request's own
+seed, already different on every request of a training run (C-7): pass it to your
+SDK as is.
 
 ### Polluted stdout and the frame-size cap
 

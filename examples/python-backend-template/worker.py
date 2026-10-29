@@ -23,6 +23,8 @@ Requests (bridge -> worker):
     {"op": "hello", "protocol": 1}
     {"op": "run", "id": "...", "circuits": [{"qasm": "...", "n_qubits": N}, ...],
                   "shots": S, "seed": <int|absent>}
+    (`seed` is this request's own seed, different on every request of a run;
+    pass it to the SDK as is.)
     {"op": "shutdown"}
 
 Responses (worker -> bridge):

@@ -1,6 +1,6 @@
 use crate::{CircuitSource, CostObservable, EvaluationError, EvaluationOracle, OracleErrorSlot};
 use polypus_infrastructure::{
-    final_batch_params, BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
+    BoundCircuit, CancelToken, CircuitTask, Planner, QuantumBackend, RunParams,
 };
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
 use std::sync::Arc;
@@ -41,11 +41,11 @@ impl EvaluationOracle for VqcOracle {
     }
 
     /// Every circuit of the batch runs with `shots` shots instead of the run's
-    /// (`final_shots` of a training run), and with the final batch's seed
-    /// ([`final_batch_params`]), so its shot noise is independent of the
+    /// (`final_shots` of a training run). The backend gives each call its own
+    /// sampling stream (contract C-7), so its shot noise is independent of the
     /// training's.
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
-        self.evaluate(candidates, shots, &final_batch_params(&self.config))
+        self.evaluate(candidates, shots, &self.config)
     }
 }
 
@@ -412,9 +412,10 @@ mod tests {
         assert_eq!(backend.submitted_qasm(), expected);
     }
 
-    /// `evaluate_batch` measures every circuit with the run's shots and seed,
-    /// and `evaluate_batch_with_shots` with the shots it is given and the final
-    /// batch's seed, in every wave, for the same candidates in the same order.
+    /// `evaluate_batch` measures every circuit with the run's shots, and
+    /// `evaluate_batch_with_shots` with the shots it is given, in every wave,
+    /// for the same candidates in the same order; both send the run's seed,
+    /// which the backend derives each call's from (C-7).
     #[test]
     fn a_batch_with_shots_puts_them_in_every_task() {
         pyo3::Python::initialize();
@@ -430,12 +431,8 @@ mod tests {
         // Two waves of 3 + 2 at the run's 16 shots, then two at 4096.
         assert_eq!(backend.shots_per_call(), vec![16, 16, 4096, 4096]);
         assert_eq!(backend.chunk_sizes(), vec![3, 2, 3, 2]);
-        let derived = final_batch_params(&oracle.config).seed;
-        assert_ne!(derived, Some(7));
-        assert_eq!(
-            backend.seeds_per_call(),
-            vec![Some(7), Some(7), derived, derived]
-        );
+        // The run's seed on every call: the backend derives each call's.
+        assert_eq!(backend.seeds_per_call(), vec![Some(7); 4]);
         // The same circuits, in candidate order.
         let submitted = backend.submitted_qasm();
         assert_eq!(submitted[..5], submitted[5..]);

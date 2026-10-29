@@ -22,29 +22,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// SplitMix64 increment (the golden-ratio gamma).
-pub(crate) const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
-/// SplitMix64 output finaliser: a bijective 64-bit mixer.
-pub(crate) fn splitmix64_mix(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 /// Seed for the circuit at global position `index` of a backend seeded with
-/// `base_seed`: output `index` of a SplitMix64 stream whose state starts at the
-/// mixed base seed.
-///
-/// A plain `base_seed + index` made neighbouring base seeds share streams shifted
-/// by one circuit (circuit `k` of seed `s` was circuit `k-1` of seed `s+1`,
-/// issue #348). Mixing the base seed first puts distinct base seeds on unrelated
-/// stream positions, so repetitions run with seeds `0, 1, 2, ...` are
-/// independent. The map is still a pure function of `(base_seed, index)`, which
-/// keeps contract C-7 (same seed and batch reproduce bit-for-bit).
+/// `base_seed` ([`polypus_backend::stream_seed`], contract C-7).
 fn circuit_seed(base_seed: u64, index: u64) -> u64 {
-    let state = splitmix64_mix(base_seed);
-    splitmix64_mix(state.wrapping_add(index.wrapping_add(1).wrapping_mul(SPLITMIX64_GAMMA)))
+    polypus_backend::stream_seed(base_seed, index)
 }
 
 /// Local, noiseless statevector backend backed by `polypus-sim`.
@@ -1236,6 +1217,23 @@ mod tests {
         );
     }
 
+    /// Contract C-7 (#411): every call of a run gets its own stream. Two calls of
+    /// one backend with the same batch sample differently, and a fresh backend
+    /// with the same seed replays the sequence.
+    #[test]
+    fn consecutive_calls_get_their_own_streams() {
+        let cfg = config_with(OptLevel::default());
+        let batch = vec![BoundCircuit::Native(uniform3())];
+        let run = |backend: &NativeStatevectorBackend| {
+            backend.run_circuits(&batch, &cfg.run_params()).unwrap()
+        };
+        let a = NativeStatevectorBackend::new(2024);
+        let (first, second) = (run(&a), run(&a));
+        assert_ne!(first, second);
+        let b = NativeStatevectorBackend::new(2024);
+        assert_eq!((run(&b), run(&b)), (first, second));
+    }
+
     /// Issue #348: neighbouring base seeds must not share sampling streams
     /// shifted by one circuit. With the former `base_seed + index` scheme,
     /// circuit `k` of seed `s` replayed circuit `k-1` of seed `s+1`.
@@ -1269,7 +1267,6 @@ mod tests {
     /// count for a fixed seed (C-7), so it must be deliberate.
     #[test]
     fn circuit_seed_is_pinned() {
-        assert_eq!(splitmix64_mix(0), 0);
         // SplitMix64 seeded with state 0: first output (reference value).
         assert_eq!(circuit_seed(0, 0), 0xE220_A839_7B1D_CDAF);
         let seeds: std::collections::HashSet<u64> = (0..1000).map(|k| circuit_seed(7, k)).collect();
