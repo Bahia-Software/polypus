@@ -126,4 +126,10 @@ impl<O: EvaluationOracle> GradientOracle for FiniteDifferenceGradient<O> {
     fn value_and_gradient(&self, theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
         Some(self.stencil(theta, true, 0..dims))
     }
+
+    /// `true`: [`value_and_gradient`](GradientOracle::value_and_gradient)
+    /// always scores `θ` with its stencil.
+    fn scores_theta(&self) -> bool {
+        true
+    }
 }

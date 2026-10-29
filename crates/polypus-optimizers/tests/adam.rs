@@ -419,6 +419,31 @@ fn finite_difference_scores_theta_first_in_the_batch_of_its_stencil() {
     );
 }
 
+/// `scores_theta` tells in advance what `value_and_gradient` returns, so the
+/// walltime projection can count an Adam iteration as one call or two.
+#[test]
+fn scores_theta_tells_whether_value_and_gradient_scores_theta() {
+    let theta = vec![0.3, 0.9, -0.4];
+    let fd = FiniteDifferenceGradient::new(Recorder::new(bowl), 0.25).unwrap();
+    let exact = ExactGradient::new(bowl_gradient);
+    let shared_fd: Arc<dyn GradientOracle> = Arc::new(fd.clone());
+    let shared_exact: Arc<dyn GradientOracle> = Arc::new(exact.clone());
+    let cases: [(&str, &dyn GradientOracle, bool); 4] = [
+        ("finite difference", &fd, true),
+        ("exact gradient (default)", &exact, false),
+        ("shared finite difference", &shared_fd, true),
+        ("shared exact gradient", &shared_exact, false),
+    ];
+    for (name, gradient, scores) in cases {
+        assert_eq!(gradient.scores_theta(), scores, "{name}");
+        assert_eq!(
+            gradient.value_and_gradient(&theta, 3).is_some(),
+            gradient.scores_theta(),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn finite_difference_rejects_a_bad_step() {
     for step in [0.0, -1e-3, f64::NAN, f64::INFINITY] {
