@@ -2459,6 +2459,16 @@ fn backend_cleanup_failures() -> u64 {
     crate::infrastructure::cleanup_failure_count()
 }
 
+/// The PEP 440 form of a workspace version, the one maturin gives the
+/// distribution: `X.Y.Z` stays, the development version `X.Y.Z-dev` of `main`
+/// becomes `X.Y.Z.dev0` (C-6).
+fn python_version(cargo_version: &str) -> String {
+    match cargo_version.strip_suffix("-dev") {
+        Some(release) => format!("{release}.dev0"),
+        None => cargo_version.to_owned(),
+    }
+}
+
 /// Polypus — distributed quantum computing (Rust core, Python bindings).
 ///
 /// Same project, three names: install `polypus-quantum` from PyPI
@@ -2469,7 +2479,7 @@ fn backend_cleanup_failures() -> u64 {
 #[pymodule]
 pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Baked in at compile time, so it names the binary actually loaded (C-6).
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__version__", python_version(env!("CARGO_PKG_VERSION")))?;
     crate::exceptions::register(m)?;
     m.add_class::<DE>()?;
     m.add_class::<PSO>()?;
@@ -4801,5 +4811,15 @@ mod tests {
             let err = result.expect_err("the argument is rejected");
             crate::exceptions::tests::assert_configuration_error(&err, message);
         }
+    }
+
+    #[test]
+    fn python_version_keeps_a_release_version() {
+        assert_eq!(python_version("0.8.0"), "0.8.0");
+    }
+
+    #[test]
+    fn python_version_maps_a_dev_version_as_maturin_does() {
+        assert_eq!(python_version("0.8.1-dev"), "0.8.1.dev0");
     }
 }

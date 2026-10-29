@@ -25,7 +25,7 @@ Rules of the road:
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
 | C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`) | ✅ present | DE `best_fitness` mismatch (C4) |
-| C-6 | Version coherence | `release.yml` gate (tag ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
+| C-6 | Version coherence | `release.yml` gate (tag, internal pins, CHANGELOG.md, CITATION.cff ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff, pins) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
@@ -1513,16 +1513,21 @@ each strategy sends, `test_seed_reproducibility.py` the seeded runs, and
 ## C-6 · Version coherence
 
 The workspace `Cargo.toml` version (`[workspace.package].version`) is the
-**single source of truth**. Everything else must equal it exactly:
+**single source of truth**. It is `X.Y.Z` in a release and `X.Y.Z-dev` on
+`main` between releases (docs/RELEASING.md). Everything else follows it:
 
-- a release tag `vX.Y.Z`;
-- the root `version` of `CITATION.cff`;
+- a release tag `vX.Y.Z` (never for a `-dev` version);
+- the version pin of every internal crate in `[workspace.dependencies]`,
+  exactly;
+- the root `version` of `CITATION.cff`: equal in a release; on a `-dev`
+  version it keeps the last release, so it must be an earlier `X.Y.Z`;
 - the version of the installed `polypus-quantum` distribution, which maturin
-  derives from it at build time;
+  derives from it at build time (`X.Y.Z-dev` becomes the PEP 440 `X.Y.Z.dev0`);
 - `polypus.__version__`, a `str` the compiled extension sets from
-  `CARGO_PKG_VERSION` when it is built, so it names the binary actually loaded
-  rather than whatever distribution metadata happens to be installed. It is
-  listed in `polypus.__all__`.
+  `CARGO_PKG_VERSION` when it is built, in the same PEP 440 form as the
+  distribution, so it names the binary actually loaded rather than whatever
+  distribution metadata happens to be installed, and a build of `main` never
+  reports a released version. It is listed in `polypus.__all__`.
 
 The release workflow refuses to publish when the tag and `Cargo.toml` diverge.
 
@@ -1532,9 +1537,13 @@ is the first release action.*
 
 **Enforcing checks:**
 
-- Tag ↔ `Cargo.toml`: the `gate` job of `.github/workflows/release.yml`, on
-  every tag push (it reads `[workspace.package].version` and refuses a tag
-  other than `v<version>`).
+- Tag, pins, `CHANGELOG.md` and `CITATION.cff` ↔ `Cargo.toml` at release: the
+  `gate` job of `.github/workflows/release.yml`
+  (`.github/scripts/release_check.py`, tests in
+  `.github/scripts/test_release_check.py`), on every tag push and manual run
+  with `target=pypi`.
+- Version form and internal pins on every pull request and push to `main`:
+  the same script in branch mode, from `.github/workflows/hygiene.yml`.
 - `Cargo.toml` ↔ `CITATION.cff`: `.github/workflows/hygiene.yml` on every pull
   request and push to `main` (`.github/scripts/hygiene.py`, rule
   `version-mismatch`; tests in `.github/scripts/test_hygiene.py`).
@@ -1543,10 +1552,6 @@ is the first release action.*
   installed wheel. Its distribution comparison skips only when no
   `polypus-quantum` distribution is installed, and its `Cargo.toml` comparison
   only when the tests run outside the repository.
-
-The release gate requires a green `ci.yml` run for the tagged commit but not a
-green `hygiene.yml` run, so a mismatch with `CITATION.cff` blocks merges, not
-releases.
 
 ---
 
