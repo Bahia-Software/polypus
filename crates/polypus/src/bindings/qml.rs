@@ -30,13 +30,14 @@ use polypus_qml::{
     ValidationError,
 };
 
+use super::callback::validate_callback;
 use super::circuit::Circuit;
 use super::{
     build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
     interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
-    method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation,
-    validate_final_shots, validate_id, validate_method, validate_shots_and_qpus, OptionsArg,
-    RunResult,
+    method_seed, resolve_optimizer_seed, seed_or_entropy, training_observer, unique_id,
+    validate_cunqa_allocation, validate_final_shots, validate_id, validate_method,
+    validate_shots_and_qpus, OptionsArg, RunResult,
 };
 use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
 use crate::exceptions::configuration_error;
@@ -1044,6 +1045,12 @@ impl Model {
     ///   shots once the optimizer has stopped, as in `train`, on every training
     ///   sample even with `batch_size`, into `TrainResult.final_params` and
     ///   `final_fitness`. `fit` refuses it with `exact=True`, which uses no shots.
+    /// - **`callback`** is called once per iteration of the optimizer with a
+    ///   `polypus.TrainProgress`, as in `polypus.train`: returning `True` stops
+    ///   the run, which returns the `TrainResult` it has reached
+    ///   (`converged=False`), and the `final_shots` batch is still sent. With
+    ///   `batch_size`, its `best_fitness` is a minibatch estimate, except for
+    ///   Adam.
     /// - **Execution** takes the arguments of `polypus.train`. `backend=None`
     ///   is the native simulator on `infrastructure="local"` and Aer otherwise
     ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
@@ -1051,13 +1058,15 @@ impl Model {
     ///   which a UUID is appended (C-9).
     ///
     /// Every check runs before a backend exists and raises
-    /// `polypus.ConfigurationError` (a `ValueError`). The fitness is the
+    /// `polypus.ConfigurationError` (a `ValueError`), except a value of the
+    /// wrong type (a `final_shots` that is not an integer, a `callback` that is
+    /// neither callable nor `None`), a `TypeError`. The fitness is the
     /// negated mean loss over the samples, which the optimizers maximise.
     #[pyo3(signature = (
         x, y=None, *, method, loss=None, shots=1024, infrastructure="local", n_qpus=1,
         nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
         noise_model=None, backend=None, seed=None, id="qml", exact=false, batch_size=None,
-        initial_point=None, final_shots=None,
+        initial_point=None, final_shots=None, callback=None,
     ))]
     fn fit<'py>(
         &self,
@@ -1081,6 +1090,7 @@ impl Model {
         batch_size: Option<usize>,
         initial_point: Option<Vec<f64>>,
         final_shots: Option<Bound<'py, PyAny>>,
+        callback: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let start = Instant::now();
         let py = x.py();
@@ -1095,10 +1105,11 @@ impl Model {
                 self.num_params
             ))
         })?;
-        // The optimizer and its point, then `final_shots`, in `train`'s order
-        // (C-5).
+        // The optimizer and its point, then `final_shots` and `callback`, in
+        // `train`'s order (C-5).
         validate_method(method, dimensions, initial_point.as_deref())?;
         let final_shots = validate_final_shots(final_shots.as_ref())?;
+        let callback = validate_callback(callback.as_ref())?;
         let backend = resolve_backend(backend, infrastructure);
         if exact && !(infrastructure == "local" && is_native_backend(backend)) {
             return Err(configuration_error(
@@ -1188,6 +1199,7 @@ impl Model {
             errors: errors.clone(),
             initial_point,
             final_shots,
+            observer: training_observer(callback, &errors, &effective_id),
         };
         // GIL released for the run, as in `train`; the interrupt token keeps
         // Ctrl+C prompt between waves.

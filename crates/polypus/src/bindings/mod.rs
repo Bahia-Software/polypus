@@ -6,6 +6,7 @@ use pyo3::PyResult;
 
 pub mod adam;
 pub mod calibration;
+pub mod callback;
 pub mod circuit;
 pub mod cmaes;
 mod compatibility;
@@ -22,6 +23,7 @@ pub mod spsa;
 
 use adam::Adam;
 use calibration::calibrate_parallel_threshold;
+use callback::{validate_callback, PyTrainObserver, TrainProgress};
 use circuit::{qft, statevector, Circuit, Param};
 use cmaes::CMAES;
 use compatibility::backend_compatibility;
@@ -48,7 +50,7 @@ use crate::infrastructure::{
 use crate::orchestration::{
     AdamConfig, CmaesConfig, DeConfig, ExternalConfig, FinalEvaluation, Method, OracleError,
     PsoConfig, QngConfig, Resources, RotosolveConfig, RunCircuitFlow, Scheduler, SpsaConfig,
-    TrainFlow, TrainOutcome,
+    TrainFlow, TrainObserver, TrainOutcome,
 };
 use polypus_optimizers::{OptimizationOutcome, VarianceOracle};
 use std::collections::HashMap;
@@ -523,6 +525,18 @@ fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Opti
         Ok(shots) => Ok(Some(shots)),
         Err(_) => Err(too_large(value, "final_shots", u32::MAX)),
     }
+}
+
+/// The run's observer for a validated `callback` of `train`, `qml.train` or
+/// `Model.fit`: `None` without one, so the run is exactly as before.
+pub(crate) fn training_observer(
+    callback: Option<Py<PyAny>>,
+    errors: &OracleErrorSlot,
+    run_id: &str,
+) -> Option<Box<dyn TrainObserver>> {
+    callback.map(|callback| -> Box<dyn TrainObserver> {
+        Box::new(PyTrainObserver::new(callback, errors, run_id))
+    })
 }
 
 /// `value` as a Python `int` `>= 1`, for the setting `name`: a Python `int` or
@@ -1727,10 +1741,29 @@ pub fn run_quantum_circuit<'py>(
 /// is not part of the CUNQA walltime projection, and if it fails, `train`
 /// raises as for any batch.
 ///
+/// `callback` (keyword-only, default `None`) is called once per iteration of
+/// the optimizer, `iterations_run` times in all, with a read-only
+/// `polypus.TrainProgress`: `iteration` (1, 2, …), `best_fitness` and
+/// `best_params` (the entry the iteration leaves in `fitness_history`, and a
+/// copy of its parameters) and `evaluations` (the candidates scored so far).
+/// An iteration is a generation of DE, PSO or CMA-ES, an iteration of QNG,
+/// Adam or SPSA, a step of Rotosolve and an ask/tell batch of `External`. It
+/// is not called once the optimizer has returned, nor for the `final_shots`
+/// batch. Returning `True` (or a NumPy `bool_` that is true) stops the run
+/// after that iteration: `train` returns the `TrainResult` it has reached,
+/// with `iterations_run` that iteration, `converged=False` and every other
+/// field as after any stop, and the `final_shots` batch is still sent.
+/// Returning `None` or `False` lets the run go on; any other value raises
+/// `TypeError` and the run returns no result. An exception the callback
+/// raises propagates as itself, with no result and no `final_shots` batch
+/// (contract C-5). Without a callback, or with one that never stops the run,
+/// a seeded run returns exactly the same result. A `callback` that is neither
+/// callable nor `None` raises `TypeError` before anything runs.
+///
 /// Interruption: pressing Ctrl+C (or otherwise sending `SIGINT`) stops the
 /// optimization promptly and raises `KeyboardInterrupt` in Python, instead of
-/// waiting for the run to finish. An exception raised by
-/// `expectation_function` propagates the same way, as itself.
+/// waiting for the run to finish, with or without a `callback`. An exception
+/// raised by `expectation_function` propagates the same way, as itself.
 ///
 /// `nodes` and `cores_per_qpu` size the SLURM allocation and are consumed only
 /// by `infrastructure="cunqa"`; `local`/`qmio` accept but ignore them. For
@@ -1765,7 +1798,7 @@ pub fn run_quantum_circuit<'py>(
 ///         infrastructure="local", nodes=1, cores_per_qpu=2, id="run1"
 ///     )
 /// ```
-#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None))]
+#[pyfunction(signature = (qc, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, fusion=None, options=None, walltime=None, initial_point=None, final_shots=None, *, callback=None))]
 pub fn train<'py>(
     qc: Bound<'py, PyAny>,
     method: Bound<'py, PyAny>,
@@ -1786,6 +1819,7 @@ pub fn train<'py>(
     walltime: Option<String>,
     initial_point: Option<Vec<f64>>,
     final_shots: Option<Bound<'py, PyAny>>,
+    callback: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -1810,6 +1844,7 @@ pub fn train<'py>(
     }
     validate_method(&method, dimensions, initial_point.as_deref())?;
     let final_shots = validate_final_shots(final_shots.as_ref())?;
+    let callback = validate_callback(callback.as_ref())?;
     // The native statevector backend runs pure-Rust circuits only; a Qiskit
     // template can't be simulated without the interpreter.
     if is_native_backend(backend) {
@@ -1906,6 +1941,7 @@ pub fn train<'py>(
         seed: effective_seed,
         initial_point,
         final_shots,
+        observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
     };
     // Release the GIL for the whole optimization: parameter binding and native
@@ -2048,6 +2084,11 @@ fn bind_feature_rows<'py>(
 /// [`train`]: every training circuit of each candidate runs with them, and
 /// `TrainResult.final_params` and `final_fitness` hold the result.
 ///
+/// `callback` (keyword-only, default `None`) is called once per iteration of
+/// the optimizer with a `polypus.TrainProgress`, and stops the run when it
+/// returns `True`, as in [`train`]; its `evaluations` count candidates, each
+/// scored with one circuit per training row.
+///
 /// Interruption: same behaviour as [`train`] — Ctrl+C stops the optimization
 /// promptly and raises `KeyboardInterrupt` rather than waiting for the run to
 /// finish, and an exception raised by `expectation_function` propagates as
@@ -2091,7 +2132,7 @@ fn bind_feature_rows<'py>(
 ///         y_train=y_train,
 ///     )
 /// ```
-#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None))]
+#[pyfunction(name = "train", signature = (feature_map, ansatz, x_train, method, shots, n_qpus, dimensions, expectation_function, infrastructure, nodes, cores_per_qpu, id, sim_method="automatic", noise_model=None, backend="aer", seed=None, options=None, walltime=None, *, y_train=None, initial_point=None, final_shots=None, callback=None))]
 pub fn qml_train<'py>(
     feature_map: Bound<'py, PyAny>,
     ansatz: Bound<'py, PyAny>,
@@ -2114,6 +2155,7 @@ pub fn qml_train<'py>(
     y_train: Option<Bound<'py, PyAny>>,
     initial_point: Option<Vec<f64>>,
     final_shots: Option<Bound<'py, PyAny>>,
+    callback: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let start = Instant::now();
     validate_shots_and_qpus(shots, n_qpus)?;
@@ -2152,6 +2194,7 @@ pub fn qml_train<'py>(
     }
     validate_method(&method, dimensions, initial_point.as_deref())?;
     let final_shots = validate_final_shots(final_shots.as_ref())?;
+    let callback = validate_callback(callback.as_ref())?;
     // Type-checked before any circuit is composed; the count is checked once
     // `x_train` has been read (contract C-8).
     let labels = y_train.as_ref().map(extract_labels).transpose()?;
@@ -2277,6 +2320,7 @@ pub fn qml_train<'py>(
         seed: effective_seed,
         initial_point,
         final_shots,
+        observer: training_observer(callback, &errors, &effective_id),
         errors: errors.clone(),
     };
     // Release the GIL for the optimization (see `train` and docs/ENGINEERING.md
@@ -2484,6 +2528,7 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     expr::register(m)?;
     m.add_class::<RunResult>()?;
     m.add_class::<TrainResult>()?;
+    m.add_class::<TrainProgress>()?;
     m.add_class::<Qubo>()?;
     m.add_class::<Ising>()?;
     m.add_class::<CachedCost>()?;
@@ -4573,6 +4618,18 @@ mod tests {
         method: Bound<'py, PyAny>,
         expectation_function: Bound<'py, PyAny>,
     ) -> PyResult<Py<PyAny>> {
+        train_with(py, infrastructure, method, expectation_function, None, None)
+    }
+
+    /// [`train_on`] with `final_shots` and `callback`.
+    fn train_with<'py>(
+        py: Python<'py>,
+        infrastructure: &str,
+        method: Bound<'py, PyAny>,
+        expectation_function: Bound<'py, PyAny>,
+        final_shots: Option<Bound<'py, PyAny>>,
+        callback: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         train(
             py.None().into_bound(py),
             method,
@@ -4592,7 +4649,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            final_shots,
+            callback,
         )
     }
 
@@ -4630,6 +4688,18 @@ mod tests {
         method: Bound<'py, PyAny>,
         expectation_function: Bound<'py, PyAny>,
     ) -> PyResult<Py<PyAny>> {
+        qml_train_with(py, infrastructure, method, expectation_function, None, None)
+    }
+
+    /// [`qml_train_on`] with `final_shots` and `callback`.
+    fn qml_train_with<'py>(
+        py: Python<'py>,
+        infrastructure: &str,
+        method: Bound<'py, PyAny>,
+        expectation_function: Bound<'py, PyAny>,
+        final_shots: Option<Bound<'py, PyAny>>,
+        callback: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (feature_map, ansatz) = fake_qml_circuits(py);
         let rows = py.eval(c"[[0.1], [0.2]]", None, None).expect("the rows");
         qml_train(
@@ -4653,8 +4723,98 @@ mod tests {
             None,
             None,
             None,
-            None,
+            final_shots,
+            callback,
         )
+    }
+
+    /// `train` and `qml.train` reject a `callback` that is neither callable
+    /// nor `None` with `TypeError`, right after `final_shots` and before they
+    /// create the backend; a callable one reaches the backend.
+    #[test]
+    fn a_callback_is_checked_after_final_shots_and_before_the_backend() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TRAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+        static QML_BUILDS: AtomicUsize = AtomicUsize::new(0);
+        register_sentinel_backend("sentinel-train-500", &TRAIN_BUILDS);
+        register_sentinel_backend("sentinel-qml-train-500", &QML_BUILDS);
+        Python::initialize();
+        Python::attach(|py| {
+            let cost = py.eval(c"lambda bits: 0.0", None, None).unwrap();
+            let not_callable = py.eval(c"'checkpoint.json'", None, None).unwrap();
+            let callable = py.eval(c"lambda progress: None", None, None).unwrap();
+            let zero = 0_i32.into_pyobject(py).unwrap().into_any();
+            type Run = for<'py> fn(
+                Python<'py>,
+                &str,
+                Bound<'py, PyAny>,
+                Bound<'py, PyAny>,
+                Option<Bound<'py, PyAny>>,
+                Option<Bound<'py, PyAny>>,
+            ) -> PyResult<Py<PyAny>>;
+            let entry_points: [(&str, &str, &AtomicUsize, Run); 2] = [
+                ("train", "sentinel-train-500", &TRAIN_BUILDS, train_with),
+                (
+                    "qml.train",
+                    "sentinel-qml-train-500",
+                    &QML_BUILDS,
+                    qml_train_with,
+                ),
+            ];
+            for (name, infrastructure, builds, run) in entry_points {
+                let err = run(
+                    py,
+                    infrastructure,
+                    de(py, 4),
+                    cost.clone(),
+                    None,
+                    Some(not_callable.clone()),
+                )
+                .expect_err("a callback that is not callable is rejected");
+                assert!(
+                    err.is_instance_of::<pyo3::exceptions::PyTypeError>(py),
+                    "{name}: {err}"
+                );
+                assert!(
+                    err.to_string()
+                        .contains("callback must be a callable or None, got 'checkpoint.json'"),
+                    "{name}: {err}"
+                );
+
+                // `final_shots` is checked first.
+                let err = run(
+                    py,
+                    infrastructure,
+                    de(py, 4),
+                    cost.clone(),
+                    Some(zero.clone()),
+                    Some(not_callable.clone()),
+                )
+                .expect_err("final_shots=0 is rejected");
+                crate::exceptions::tests::assert_configuration_error(&err, "final_shots");
+                assert_eq!(
+                    builds.load(Ordering::SeqCst),
+                    0,
+                    "{name} created the backend"
+                );
+
+                // Control: a callable callback reaches the backend.
+                let err = run(
+                    py,
+                    infrastructure,
+                    de(py, 4),
+                    cost.clone(),
+                    None,
+                    Some(callable.clone()),
+                )
+                .expect_err("the sentinel backend fails");
+                assert!(
+                    err.to_string().contains("sentinel backend was created"),
+                    "{name}: {err}"
+                );
+                assert_eq!(builds.load(Ordering::SeqCst), 1, "{name}");
+            }
+        });
     }
 
     /// `train` and `qml.train` convert `expectation_function` and check the
@@ -4743,6 +4903,7 @@ mod tests {
                 "automatic",
                 None,
                 "aer",
+                None,
                 None,
                 None,
                 None,

@@ -12,6 +12,8 @@
 //!   [`EvaluationOracle`](polypus_optimizers::EvaluationOracle) into an
 //!   optimization outcome. An oracle failure is recorded — **type-erased** — in an
 //!   [`OracleErrorSlot`] and surfaced ahead of the optimizer's own config error.
+//!   [`dispatch_optimizer_observed`] also shows a [`TrainObserver`] every
+//!   iteration, which can stop the run.
 //! - **[`Resources`] + [`Scheduler`] + [`Flow`]** bind a backend to its planner
 //!   (validating the pairing in [`Resources::new`]) and run a flow over them.
 //!   **Every flow lives here** — [`RunCircuitFlow`] and training ([`TrainFlow`])
@@ -29,14 +31,17 @@
 pub mod dispatch;
 mod final_batch;
 pub mod flow;
+pub mod progress;
 pub mod scheduler;
 #[cfg(test)]
 mod test_log;
 mod walltime;
 
 pub use dispatch::{
-    dispatch_optimizer, AdamConfig, BoxedError, CmaesConfig, DeConfig, ExternalConfig, Method,
-    OracleError, OracleErrorSlot, Oracles, PsoConfig, QngConfig, RotosolveConfig, SpsaConfig,
+    dispatch_optimizer, dispatch_optimizer_observed, AdamConfig, BoxedError, CmaesConfig, DeConfig,
+    ExternalConfig, Method, OracleError, OracleErrorSlot, Oracles, PsoConfig, QngConfig,
+    RotosolveConfig, SpsaConfig,
 };
 pub use flow::{FinalEvaluation, Flow, OracleFactory, RunCircuitFlow, TrainFlow, TrainOutcome};
+pub use progress::{TrainObserver, TrainProgress};
 pub use scheduler::{Resources, Scheduler};
