@@ -202,6 +202,37 @@ Two more options are keyword-only:
 - `trained.predict(x)` returns one decision per row: an `int` for `"sign"`, `"threshold"` and `"argmax"`, a `float` for `"raw"`.
 - `trained.run(x)` returns the counts behind them: a `RunResult` with one dict per row (`merged_counts` is `None`). With `exact=True` it returns an `ExactResult`, whose `probabilities` holds one dict per row.
 
+### Inspecting the circuit
+
+`model.circuit(x)` returns the circuit the model runs for one sample `x`, a `polypus.Circuit` to draw or export like any other (see [Drawing](circuits.md#drawing) and [Export](circuits.md#export)). The features are fixed, the trainable angles are the parameters `theta_0`, `theta_1`, … in the order of `best_params`, and the readout's basis change comes right before the measurement:
+
+```python
+from polypus import qml
+
+model = qml.Model(
+    qml.Encoder(2).angle_encoder("ry"),
+    qml.Ansatz(2).real_amplitudes(1),
+    qml.Readout([qml.Y(0)], decision="sign"),
+)
+qc = model.circuit([0.3, 1.2])
+print(qc)
+print(qc.param_names)  # ['theta_0', 'theta_1', 'theta_2', 'theta_3']
+```
+
+```text
+     ┌─────────┐ ┌─────────────┐       ┌─────────────┐ ┌─────┐ ┌───┐ ┌─┐
+q0: ─┤ Ry(0.3) ├─┤ Ry(theta_0) ├───■───┤ Ry(theta_2) ├─┤ S†  ├─┤ H ├─┤M├─────
+     └─────────┘ └─────────────┘   │   └─────────────┘ └─────┘ └───┘ └╥┘
+     ┌─────────┐ ┌─────────────┐ ┌─┴─┐ ┌─────────────┐                ║  ┌─┐
+q1: ─┤ Ry(1.2) ├─┤ Ry(theta_1) ├─┤ X ├─┤ Ry(theta_3) ├────────────────╫──┤M├─
+     └─────────┘ └─────────────┘ └───┘ └─────────────┘                ║  └╥┘
+                                                                      ║   ║
+c2: ══════════════════════════════════════════════════════════════════╩═══╩══
+                                                                      0   1
+```
+
+`S†` then `H` rotates `Y` onto `Z`, which is what the measurement reads (`X` needs only the `H`). `model.circuit(x, params)` fixes the trainable angles too, and `trained.circuit(x)` does so with the trained model's own parameters: it is exactly the circuit `trained.run([x])` executes, so `polypus.run_quantum_circuit(trained.circuit(x), shots, "local", backend="polypus", seed=s)` gives the counts of `trained.run([x], shots=shots, seed=s)`. `x` is checked as a row of `fit` is: a feature count the encoders cannot carry or a non-finite value raises `ValueError`.
+
 ### Data
 
 `qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:
