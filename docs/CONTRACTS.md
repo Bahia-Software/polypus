@@ -2221,6 +2221,23 @@ for `"argmax"` (the class index), a `float` for `"raw"` (the expectation).
 keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
 `exact` and `backend=None` follow `fit`'s rules.
 
+**Inspecting the circuit.** `model.circuit(x, params=None)` and
+`TrainedModel.circuit(x)` return the `polypus.Circuit` the model runs for the
+one sample `x` (a flat sequence of floats or a 1-D NumPy array): the features
+fixed, the trainable layers, the readout's basis change and the terminal
+`measure_all`. It is the model's only circuit, since the readout resolves to a
+single basis group. Without `params` the trainable angles stay free:
+`num_params` equals the model's and `param_names` are `theta_0`, `theta_1`, …,
+in the order of `best_params`. With `params` (checked as `bind` checks them) it
+is `model.bind(params).circuit(x)`, every angle fixed and `num_params == 0`.
+The bound circuit is the one `run` and `predict` execute for that row: run on
+the native simulator with the same seed and shots it gives `run([x])`'s counts,
+and its statevector gives `run([x], exact=True)`'s probabilities. `x` is
+checked as a row of `fit`: a feature count the encoders cannot carry, a
+non-finite value or, for the amplitude encoder, a zero sample is a
+`ValueError`; several rows or a `Dataset` is a `TypeError`. The model is
+unchanged, and each call returns a new `Circuit`.
+
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
 
@@ -2255,7 +2272,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
     tests in `crates/polypus-infrastructure/src/native.rs`, and the `adam_*` and
     `a_minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
-    (f).
+    (f);
+  - `a_bound_circuit_converts_gate_for_gate` and
+    `an_invalid_concrete_circuit_is_an_error_not_a_panic` in
+    `crates/polypus/src/bindings/qml.rs`: the bound circuit `circuit` returns
+    is, gate for gate, the one the model binds.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2265,7 +2286,10 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   sampled, minibatches, seeds, every layer trained, the convergence curve, every
   rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
   `test_qml_native_inference.py` (`bind`, `predict`, `run`,
-  `ExactResult`, decision types, save/load and tampered files) and the native
+  `ExactResult`, decision types, save/load and tampered files),
+  `test_qml_native_circuit.py` (`Model.circuit` and `TrainedModel.circuit`:
+  the shape and parameter names, the basis change, the drawings, counts and
+  exact probabilities identical to `run`'s, every rejection) and the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
   runs with the GIL released).
 

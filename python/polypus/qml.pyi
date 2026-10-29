@@ -23,6 +23,7 @@ from qiskit_aer.noise import NoiseModel
 
 from . import (
     CachedCost,
+    Circuit,
     Ising,
     Qubo,
     RunResult,
@@ -181,6 +182,11 @@ class Model:
         batch_size: Optional[int] = None,
     ) -> TrainResult: ...
     def bind(self, params: Sequence[float]) -> TrainedModel: ...
+    # The circuit for one sample, measured in the readout's basis; without
+    # `params` its trainable angles stay free (`theta_0`, `theta_1`, ...).
+    def circuit(
+        self, x: _FloatVector, params: Optional[_FloatVector] = None
+    ) -> Circuit: ...
 
 @final
 class TrainedModel:
@@ -264,6 +270,8 @@ class TrainedModel:
     ) -> Union[RunResult, ExactResult]: ...
     # Versioned JSON, replacing any file at `path`; read back with `load`.
     def save(self, path: Union[str, PathLike[str]]) -> None: ...
+    # The circuit `run` executes for one sample, every angle fixed.
+    def circuit(self, x: _FloatVector) -> Circuit: ...
 
 def load(path: Union[str, PathLike[str]]) -> TrainedModel: ...
 

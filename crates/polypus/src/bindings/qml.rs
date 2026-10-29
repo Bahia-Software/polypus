@@ -22,6 +22,7 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 
+use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
     AngleEncoder, CompiledModel, ConvBlock, ConvLayer, Decision, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Loss, Observable, Pairing, Pauli,
@@ -29,6 +30,7 @@ use polypus_qml::{
     ValidationError,
 };
 
+use super::circuit::Circuit;
 use super::{
     build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
     interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
@@ -988,6 +990,24 @@ impl Model {
         Ok(TrainedModel { inner })
     }
 
+    /// The circuit the model runs for the one sample `x` (a flat sequence of
+    /// floats), as a `polypus.Circuit` to draw or export: the features fixed,
+    /// then the readout's basis change and the terminal `measure_all`.
+    ///
+    /// Without `params` the trainable angles stay free (`num_params` of them,
+    /// named `theta_0`, `theta_1`, … in the order of `best_params`); with
+    /// `params` it is `self.bind(params).circuit(x)`, every angle fixed, and
+    /// `params` is checked as `bind` checks it. `x` is checked as one row of
+    /// `fit` is: a feature count the encoders cannot carry, or a value that is
+    /// not finite, is a `ValueError`.
+    #[pyo3(signature = (x, params=None))]
+    fn circuit(&self, x: &Bound<'_, PyAny>, params: Option<Vec<f64>>) -> PyResult<Circuit> {
+        match params {
+            None => sample_circuit(&self.spec, x, None),
+            Some(params) => self.bind(params)?.circuit(x),
+        }
+    }
+
     /// Train the model on `x` (rows of features, or a `Dataset`) and, for
     /// supervised training, the labels `y`, and return a `TrainResult`.
     ///
@@ -1611,6 +1631,61 @@ impl TrainedModel {
             }
         }
     }
+
+    /// The circuit `run` executes for the one sample `x`, every angle fixed
+    /// (`num_params == 0`): the same as `self.model.circuit(x, self.params)`.
+    fn circuit(&self, x: &Bound<'_, PyAny>) -> PyResult<Circuit> {
+        sample_circuit(self.inner.spec(), x, Some(self.inner.params()))
+    }
+}
+
+/// The circuit `spec` runs for the one sample `x`, as `run_rows` builds it for
+/// a row: compiled for `x`'s feature count and with the template's free angles
+/// or, with `params` (already checked against the model), bound to them. `x`
+/// goes through the checks a row does, through the same `Dataset`.
+fn sample_circuit(
+    spec: &QuantumModel,
+    x: &Bound<'_, PyAny>,
+    params: Option<&[f64]>,
+) -> PyResult<Circuit> {
+    let x: Vec<f64> = x.extract().map_err(|e: PyErr| {
+        if e.is_instance_of::<PyTypeError>(x.py()) {
+            let err = PyTypeError::new_err("x must be one sample, a flat sequence of floats");
+            err.set_cause(x.py(), Some(e));
+            err
+        } else {
+            e
+        }
+    })?;
+    let rows = polypus_qml::Dataset::from_rows(std::slice::from_ref(&x), &[0.0])
+        .map_err(validation_to_py_err)?;
+    let compiled = spec
+        .clone()
+        .compile(rows.num_features())
+        .map_err(validation_to_py_err)?;
+    let inner = match params {
+        None => compiled.template_for(rows.sample(0)),
+        Some(params) => compiled
+            .bind(rows.sample(0), params)
+            .and_then(|bound| parameterized_from_concrete(bound).map_err(QmlError::from)),
+    }
+    .map_err(qml_to_py_err)?;
+    Ok(Circuit { inner })
+}
+
+/// `concrete` as a [`ParameterizedCircuit`], the type a `polypus.Circuit`
+/// wraps: the same qubits and gates, every angle fixed, so no parameters.
+/// Every gate goes through `try_push`, which re-checks it (C-4), so a gate that
+/// could not be pushed is an error rather than a circuit the builder would
+/// refuse.
+fn parameterized_from_concrete(
+    concrete: ConcreteCircuit,
+) -> Result<ParameterizedCircuit, CircuitError> {
+    let mut circuit = ParameterizedCircuit::new(concrete.num_qubits());
+    for gate in concrete.into_gates() {
+        circuit.try_push(gate)?;
+    }
+    Ok(circuit)
 }
 
 /// Write `bytes` to a temporary file beside `path`, then rename it over `path`,
@@ -1837,5 +1912,58 @@ mod tests {
         let pool = || Layer::Pool(PoolLayer::new(PoolBlock::Basic));
         assert!(check_layers(2, &[pool()]).is_ok());
         assert!(check_layers(2, &[pool(), pool()]).is_err());
+    }
+
+    #[test]
+    fn a_bound_circuit_converts_gate_for_gate() {
+        use polypus_circuit::GateInstruction;
+
+        // A `Y` readout, so the bound circuit carries the basis change too.
+        let readout = Readout::new(
+            vec![
+                Observable::new(vec![(1.0, PauliString::new(vec![(0, Pauli::Y)]).unwrap())])
+                    .unwrap(),
+            ],
+            Decision::Sign,
+        )
+        .unwrap();
+        let compiled = QuantumModel::new(2)
+            .layer(Layer::AngleEncoder(AngleEncoder::new(RotationAxis::Ry)))
+            .layer(Layer::HardwareEfficient(
+                HardwareEfficientAnsatz::real_amplitudes(1),
+            ))
+            .readout(readout)
+            .compile(2)
+            .unwrap();
+        let (x, theta) = ([0.3, 1.2], [0.1, -0.2, 0.3, -0.4]);
+        let bound = compiled.bind(&x, &theta).unwrap();
+
+        let circuit = parameterized_from_concrete(bound.clone()).unwrap();
+        assert_eq!(circuit.num_qubits(), 2);
+        assert_eq!(circuit.num_params(), 0);
+        assert_eq!(circuit.gates(), bound.gates());
+        assert_eq!(circuit.num_clbits(), 2);
+        assert_eq!(circuit.gates().last(), Some(&GateInstruction::MeasureAll));
+        assert!(circuit
+            .gates()
+            .windows(2)
+            .any(|w| w == [GateInstruction::Sdg(0), GateInstruction::H(0)]));
+        // Binding nothing gives back the very circuit the model runs.
+        assert_eq!(circuit.assign_parameters(&[]).unwrap(), bound);
+    }
+
+    #[test]
+    fn an_invalid_concrete_circuit_is_an_error_not_a_panic() {
+        use polypus_circuit::GateInstruction;
+
+        // A gate after the terminal measurement breaks C-4.
+        let invalid = ConcreteCircuit::new_unchecked(
+            1,
+            vec![GateInstruction::MeasureAll, GateInstruction::H(0)],
+        );
+        assert!(matches!(
+            parameterized_from_concrete(invalid),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+        ));
     }
 }
