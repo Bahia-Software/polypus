@@ -170,7 +170,9 @@ class TestFactor:
         )
 
     def test_same_seed_same_result(self):
-        assert factor(15, seed=7, **NATIVE) == factor(15, seed=7, **NATIVE)
+        first = factor(15, seed=7, **NATIVE)
+        second = factor(15, seed=7, **NATIVE)
+        assert first == second
 
     def test_aer_backend_factors_15(self):
         result = factor(15, infrastructure="local", backend="aer", a=7, seed=3)
