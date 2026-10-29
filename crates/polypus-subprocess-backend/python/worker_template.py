@@ -23,6 +23,8 @@ Requests (bridge -> worker):
     {"op": "hello", "protocol": 1}
     {"op": "run", "id": "...", "circuits": [{"qasm": "...", "n_qubits": N}, ...],
                   "shots": S, "seed": <int|absent>}
+    (`seed` is this request's own seed, different on every request of a run;
+    pass it to the SDK as is.)
     {"op": "shutdown"}
 
 Responses (worker -> bridge):
@@ -141,6 +143,11 @@ def _run(req, stdout):
         os._exit(137)  # 128 + 9, mimics a killed process
     hang = os.environ.get("WORKER_HANG_MS")
     delay = os.environ.get("WORKER_RUN_DELAY_MS")
+    seed_log = os.environ.get("WORKER_SEED_LOG")
+    if seed_log is not None:
+        # One line per run with the seed it received, for the seed-stream test.
+        with open(seed_log, "a") as fh:
+            fh.write(f"{req.get('seed')}\n")
     # ----------------------------------------------------------------------
     if hang is not None:
         # Simulate a wedged SDK: sleep long, ignoring abort, so the bridge's read

@@ -483,16 +483,22 @@ def scenario_6_x_and_y_readouts():
     """``sign(⟨X₀⟩)`` and ``sign(⟨Y₀⟩)`` instead of ``sign(⟨Z₀⟩)``: the model
     adds the basis change before the measurement itself (``H`` for X,
     ``S†`` then ``H`` for Y). Each model must separate both clusters, including
-    two samples it never saw."""
+    two samples it never saw.
+
+    ``trained.circuit(x)`` draws the circuit the model runs for a held-out
+    sample, and the scenario checks that the basis change sits right before the
+    measurement, and that the same model with a ``Z`` readout has none."""
     x, y = two_clusters_2f()
     held_x, held_y = [[0.52, 0.58], [2.58, 2.52]], [-1, 1]
+    encoder, ansatz = (
+        qml.Encoder(2).angle_encoder("ry"),
+        qml.Ansatz(2).hardware_efficient(2),
+    )
+    # The OpenQASM 2.0 lines each basis change adds before `measure q -> c;`.
+    basis_change = {"X": ["h q[0];"], "Y": ["sdg q[0];", "h q[0];"]}
     checks, parts = [], []
     for name, pauli in [("X", X), ("Y", Y)]:
-        model = qml.Model(
-            qml.Encoder(2).angle_encoder("ry"),
-            qml.Ansatz(2).hardware_efficient(2),
-            qml.Readout([pauli(0)], decision="sign"),
-        )
+        model = qml.Model(encoder, ansatz, qml.Readout([pauli(0)], decision="sign"))
         result = model.fit(
             x,
             y,
@@ -509,11 +515,32 @@ def scenario_6_x_and_y_readouts():
         trained = model.bind(result.best_params)
         acc, _ = accuracy(trained, x, y)
         held_acc, _ = accuracy(trained, held_x, held_y)
+        circuit = trained.circuit(held_x[0])
+        print(f"\n  ⟨{name}₀⟩ readout, the circuit for {held_x[0]}:")
+        # Folded at 76 columns so the 4-space indent keeps it within 80.
+        drawing = circuit.draw(fold=76).splitlines()
+        print("\n".join("    " + line if line.strip() else "" for line in drawing))
+        lines = circuit.to_qasm2().splitlines()
+        z_lines = (
+            qml.Model(encoder, ansatz, qml.Readout([Z(0)]))
+            .circuit(held_x[0], result.best_params)
+            .to_qasm2()
+            .splitlines()
+        )
+        change = basis_change[name]
         checks += [
             params_check(model, result),
             (f"{name}: hinge fitness > -0.1", result.best_fitness > -0.1),
             (f"{name}: train accuracy == 1.0", acc == 1.0),
             (f"{name}: held-out accuracy == 1.0", held_acc == 1.0),
+            (
+                f"{name}: basis change right before the measurement",
+                lines[-1 - len(change) :] == change + ["measure q -> c;"],
+            ),
+            (
+                f"{name}: the Z readout's circuit has no basis change",
+                z_lines == lines[: -1 - len(change)] + ["measure q -> c;"],
+            ),
         ] + history_checks(result)
         parts.append(f"⟨{name}₀⟩ fitness={result.best_fitness:+.4f} acc={acc:.0%}")
     return verdict(checks, "DE: " + ", ".join(parts) + " (held-out 100 %)")

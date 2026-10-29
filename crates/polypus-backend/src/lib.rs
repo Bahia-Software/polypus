@@ -35,6 +35,7 @@ pub mod mem_budget;
 pub mod params;
 pub mod planner;
 pub mod registry;
+pub mod seed;
 pub mod transpiler;
 
 pub use circuit::{BoundCircuit, ForeignCircuit};
@@ -52,6 +53,7 @@ pub use registry::{
     create_registered_backend, is_registered, register_backend, registered_names,
     BackendBuildContext, BackendFactory, OptionValue,
 };
+pub use seed::{stream_seed, CallSeeds};
 pub use transpiler::{IdentityTranspiler, OptLevel, TranspileOptions, Transpiler};
 
 /// Wave size a memory-budgeted backend (native/local) should report from

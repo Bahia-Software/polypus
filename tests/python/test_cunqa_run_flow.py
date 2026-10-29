@@ -180,9 +180,12 @@ def test_train_runs_each_wave_on_the_family(monkeypatch):
     for run in fake.runs:
         assert run["options"]["shots"] == 16
         assert run["qpu"].family == result.id
-    # Within a wave, QPU i gets seed + i.
-    for run in fake.runs:
-        assert run["options"]["seed"] == 3 + run["qpu"].index
+    # Within a wave, QPU i gets the wave's seed + i; the first wave's is the
+    # run's, the next ones their own (C-7, test_seed_streams.py).
+    first, second = fake.runs[:2], fake.runs[2:4]
+    assert [run["options"]["seed"] for run in first] == [3, 4]
+    assert second[1]["options"]["seed"] == second[0]["options"]["seed"] + 1
+    assert second[0]["options"]["seed"] != 3
 
 
 def test_uneven_shot_split_gives_every_replica_its_own_qpu_and_seed(monkeypatch):

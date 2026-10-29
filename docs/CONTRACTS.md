@@ -855,17 +855,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     training circuit of each candidate for QML, and the Planner reads them
     from the tasks. `Arc<T>` and the walltime watch forward it. No optimizer
     calls it.
-  - Seed: `VqcOracle` and `QmlOracle` send the batch with
-    `polypus_infrastructure::final_batch_params(config)`, the run's
-    `RunParams` with the seed replaced by SplitMix64's first output from it.
-    Aer seeds each circuit from the seed and its position in the call alone,
-    and CUNQA each QPU from `seed + k` (C-7), so with the run's seed a
-    candidate re-evaluated at the position it was scored at, as `best_params`
-    at index 0 is for QNG, Adam and SPSA, would get the training's random
-    numbers: the same counts with the same shots. With the derived seed the
-    batch's shot noise is independent of the training's, and a seeded run
-    still reproduces it. The native backend seeds circuits from its own
-    counter, which the batch continues, and does not read the seed.
+  - Seed: the batch is the run's last call to the backend, which gives it a
+    sampling stream of its own (C-7), so its shot noise is independent of
+    the training's even for a candidate re-evaluated at the position it was
+    scored at, as `best_params` at index 0 is for QNG, Adam and SPSA, and a
+    seeded run still reproduces it.
   - Preconditions: an integer from 1 to 4294967295. `train` and `qml.train`
     raise `ValueError` for an integer out of that range (0, a negative, 2³²)
     and `TypeError` for anything that is not an integer (a `float`, a `bool`,
@@ -920,11 +914,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     backend's does: the same batches and outcome, then one batch with the
     shots and the expected candidates) with the error, interrupt, optimizer
     error, failing final batch, its warning and `Some(0)` tests there,
-    `the_final_batch_derives_its_seed_from_the_runs` in
-    `crates/polypus-infrastructure/src/execution_config.rs`,
     `a_batch_with_shots_is_forwarded_untimed` in `src/walltime.rs`, the
     `a_batch_with_shots_puts_them_in_every_task` tests of `VqcOracle` and
-    `QmlOracle` (the shots and the derived seed in every wave), the trait's
+    `QmlOracle` (the shots and the run's seed in every wave), the trait's
     tests in
     `crates/polypus-optimizers/src/objective.rs`, and
     `tests/python/test_final_shots.py` (the `ValueError`s and `TypeError`s
@@ -1597,13 +1589,16 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
     path reproduces the per-replica counts of running the replicas one by
     one. Until #348 the seed was `s + k`, which made neighbouring base seeds
     share streams shifted by one circuit; counts for a fixed seed changed when
-    that was fixed. Aer receives the base seed unchanged, and CUNQA keeps its
-    per-QPU offset below.
+    that was fixed. Aer and CUNQA receive one seed per call instead (see
+    [The seed across the calls of one run](#the-seed-across-the-calls-of-one-run)):
+    a `run_quantum_circuit` that is one call gives Aer the base seed
+    unchanged, and CUNQA adds its per-QPU offset below.
   - With `infrastructure="cunqa"`: the same `seed` kwarg is forwarded across
     the same seam (`crates/polypus-infrastructure/src/cunqa.rs` mirrors
     `local.rs`, `polypus_python`'s `cunqa.py` mirrors `local.py`), with a
     per-QPU offset so distributed shots aren't identical copies: the circuit
-    sent to QPU `k` runs with `seed + k`, masked to 63 bits. With shots split
+    sent to QPU `k` runs with the call's seed (below) `+ k`, masked to 63
+    bits. With shots split
     across the QPUs, replica `i` runs on QPU `i`, so every replica gets its own
     QPU and seed even when the split is uneven (`shots` not a multiple of
     `n_qpus`) and is sent as one `run_qcs` call per batch size, each carrying
@@ -1650,15 +1645,11 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   `crates/polypus-optimizers/tests/spsa.rs` compares two runs instead of
   pinning one. A seeded `Rotosolve` run carries the same caveat: its seed
   only draws θ₀, but every step calls `atan2` and `hypot`;
-  `crates/polypus-optimizers/tests/rotosolve.rs` compares two runs. With `final_shots` (C-5) the final batch is sent after every
-  circuit of the optimizer: the native backend's circuit indices, and so its
-  per-circuit seeds, continue after the optimizer's, and Aer and CUNQA get
-  the run's seed on every call of the optimizer, so a seeded run gives the
-  same `best_params`, `best_fitness` and `fitness_history` with and without
-  it. The final batch reaches Aer and CUNQA with a seed derived from the
-  run's (`final_batch_params`, C-5), since theirs would otherwise measure a
-  candidate at the position it was scored at with the training's random
-  numbers; it reproduces too.
+  `crates/polypus-optimizers/tests/rotosolve.rs` compares two runs. With `final_shots` (C-5) the final batch is the run's last
+  call (below), sent after every call of the optimizer, so a seeded run
+  gives the same `best_params`, `best_fitness` and `fitness_history` with
+  and without it, and the final batch has shot noise of its own, which a
+  seeded run reproduces too.
 - **`qml.predict(..., seed=None)`** seeds shot sampling like
   `run_quantum_circuit`: an explicit seed reproduces the counts, `None` draws one
   from OS entropy, and the effective value is reported. `qmio` is rejected
@@ -1682,6 +1673,50 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   the run `id`'s UUID v4 suffix. Every call draws an id, so this holds
   with or without an explicit seed and for `infrastructure="qmio"`, which
   never draws a seed.
+
+### The seed across the calls of one run
+
+A run (one entry-point call) sends its circuits to one backend in one or more
+calls: a `train` sends the initial population and one batch per generation,
+each split into waves when it exceeds the backend's concurrency (CUNQA:
+`n_qpus`) or the memory budget, and `qml.train` also windows its candidates by
+the host's cores; the `final_shots` batch is the last call. **Every call gets
+its own sampling stream, on every backend** (#411), so no two calls of a run
+share shot noise, and the same seed replays the whole sequence:
+
+- The native backend seeds circuit `k` of the run with `circuit_seed(s, k)`
+  (above); its calls take consecutive blocks of `k`, so its seeds do not
+  depend on how the batches are split.
+- Aer, CUNQA and the subprocess bridge receive one seed per call: the base
+  seed `s` on call `0` and `stream_seed(s, n)` on call `n >= 1`, the native
+  map (`polypus_backend::{stream_seed, CallSeeds}`). Calls are numbered in the
+  order the backend receives them, which is the run's: the planners call a
+  backend sequentially. Every `run_circuits` call counts, and so does a
+  `run_shots_distributed` call on CUNQA, which overrides it; Aer and the
+  bridge use the trait's default, one `run_circuits` call per shot group, so
+  an uneven shot split is several calls there. CUNQA adds each QPU's offset to
+  its call's seed. A run of one call, such as a `run_quantum_circuit` with
+  `n_qpus=1` or an even split, therefore seeds Aer exactly as Aer's own
+  `seed_simulator=s` does. On that first call, as before #411, neighbouring
+  base seeds can share streams (on CUNQA, QPU `k+1` of seed `s` is QPU `k` of
+  seed `s+1`); later calls are mixed like the native backend's circuits.
+- Since a call's seed depends on its index, a seeded Aer or CUNQA run replays
+  on the same configuration: the same `n_qpus`, and for a split that depends
+  on them, the same memory budget and core count.
+- A third-party backend receives the base seed in `RunParams::seed` on every
+  call and gives each call its own stream, with `CallSeeds` or its own
+  derivation (`docs/backends.md`).
+
+Until #411, Aer, CUNQA and the bridge received the base seed on every call,
+so batch slot `i` was sampled with the same random numbers in every
+generation, unlike the native backend; seeded results on those backends
+changed after 0.7.2. **Enforcing tests:** `tests/python/test_seed_streams.py`
+(the seeds Aer and the fake CUNQA receive over a `train`, read off the
+`run_qcs` seam, and their replay), `consecutive_calls_get_their_own_streams`
+in `crates/polypus-infrastructure/src/native.rs`,
+`crates/polypus-subprocess-backend/tests/seed_streams.rs` (the seeds the
+reference worker receives) and the `CallSeeds` tests in
+`crates/polypus-backend/src/seed.rs`.
 
 ### The run manifest (return shapes)
 
@@ -2270,6 +2305,26 @@ keyed like the counts. Both take rows or a `Dataset` (its labels are not used);
 rows against the model, `exact`, a `seed` on `qmio`): before a backend exists,
 as `polypus.ConfigurationError`.
 
+**Inspecting the circuit.** `model.circuit(x, params=None)` and
+`TrainedModel.circuit(x)` return the `polypus.Circuit` the model runs for the
+one sample `x` (a flat sequence of floats or a 1-D NumPy array): the features
+fixed, the trainable layers, the readout's basis change and the terminal
+`measure_all`. It is the model's only circuit, since the readout resolves to a
+single basis group. Without `params` the trainable angles stay free:
+`num_params` equals the model's and `param_names` are `theta_0`, `theta_1`, …,
+in the order of `best_params`. With `params` (checked as `bind` checks them) it
+is `model.bind(params).circuit(x)`, every angle fixed and `num_params == 0`.
+The bound circuit is the one `run` and `predict` execute for that row: run on
+the native simulator with the same seed and shots it gives `run([x])`'s counts,
+and its statevector gives `run([x], exact=True)`'s probabilities. `x` is
+checked as a row of `fit`: a feature count the encoders cannot carry, a
+non-finite value or, for the amplitude encoder, a zero sample is a
+`ValueError`; several rows or a `Dataset` is a `TypeError`. These are plain
+`ValueError`s, as `bind` raises, not `polypus.ConfigurationError`: `circuit`
+builds a circuit and runs nothing, so the same row that `run` rejects with a
+`ConfigurationError` is a `ValueError` here. The model is unchanged, and each
+call returns a new `Circuit`.
+
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
 
@@ -2304,7 +2359,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     tests in `crates/polypus-evaluation/src/qml_oracle.rs`, the `exact_*`
     tests in `crates/polypus-infrastructure/src/native.rs`, and the `adam_*` and
     `a_minibatched_*` tests in `crates/polypus-orchestration/src/dispatch.rs`:
-    (f).
+    (f);
+  - `a_bound_circuit_converts_gate_for_gate` and
+    `an_invalid_concrete_circuit_is_an_error_not_a_panic` in
+    `crates/polypus/src/bindings/qml.rs`: the bound circuit `circuit` returns
+    is, gate for gate, the one the model binds.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2314,7 +2373,10 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   sampled, minibatches, seeds, every layer trained, the convergence curve, every
   rejection, Rotosolve's checks before the CUNQA seam and a Rotosolve climb),
   `test_qml_native_inference.py` (`bind`, `predict`, `run`,
-  `ExactResult`, decision types, save/load and tampered files), the native
+  `ExactResult`, decision types, save/load and tampered files),
+  `test_qml_native_circuit.py` (`Model.circuit` and `TrainedModel.circuit`:
+  the shape and parameter names, the basis change, the drawings, counts and
+  exact probabilities identical to `run`'s, every rejection), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
   runs with the GIL released) and `TestNativeQmlChecksRaiseIt` in
   `test_configuration_errors.py` (every check of `fit`, `predict` and `run` is a
