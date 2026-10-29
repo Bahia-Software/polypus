@@ -85,6 +85,16 @@ fn compose_validates_the_map() {
             reason: "qubit 1 is targeted twice".into()
         })
     );
+    assert_eq!(
+        qc.try_compose(&sub, &[1, 1]).unwrap_err().to_string(),
+        "invalid qubit map for compose: qubit 1 is targeted twice"
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid qubit map for compose: expected 2 target qubits, got 1")]
+fn compose_panics_where_try_compose_fails() {
+    let _ = Pc::new(3).compose(&Pc::new(2), &[0]);
 }
 
 #[test]
@@ -122,6 +132,32 @@ fn compose_copies_expressions_into_the_target() {
 }
 
 #[test]
+fn compose_copies_an_expression_next_to_other_angles() {
+    let mut sub = Pc::new(1);
+    let theta = sub.add_expr(ParamExpr::param(0) * 2.0).unwrap();
+    sub.try_push(G::U {
+        qubit: 0,
+        theta,
+        phi: GateParam::Fixed(0.5),
+        lam: GateParam::Param(0),
+    })
+    .unwrap();
+    let bound = Pc::new(2)
+        .compose(&sub, &[1])
+        .assign_parameters(&[0.25])
+        .unwrap();
+    assert_eq!(
+        bound.gates(),
+        [G::U {
+            qubit: 1,
+            theta: GateParam::Fixed(0.5),
+            phi: GateParam::Fixed(0.5),
+            lam: GateParam::Fixed(0.25)
+        }]
+    );
+}
+
+#[test]
 fn compose_rejects_conflicting_parameter_names() {
     let header = "OPENQASM 3.0;\ninclude \"stdgates.inc\";\n";
     let ours = Pc::from_qasm3(&format!(
@@ -133,12 +169,18 @@ fn compose_rejects_conflicting_parameter_names() {
     ))
     .unwrap();
     let mut qc = ours.clone();
+    let err = qc.try_compose(&theirs, &[0]).unwrap_err();
     assert_eq!(
-        qc.try_compose(&theirs, &[0]),
-        Err(CircuitError::ConflictingParamNames {
+        err,
+        CircuitError::ConflictingParamNames {
             index: 0,
             name: "beta".into()
-        })
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "cannot compose: the composed circuit names parameter 0 'beta', which the target \
+         circuit names differently or gives to another parameter"
     );
     assert_eq!(qc, ours);
 }
@@ -174,4 +216,42 @@ fn compose_rejects_a_circuit_that_refers_outside_its_register() {
             num_qubits: 1
         })
     );
+}
+
+/// One instruction of every kind the OpenQASM 2.0 importer builds, on the five
+/// distinct qubits `q`, ending with the measurement (contract C-4).
+fn every_instruction(q: [usize; 5]) -> String {
+    let [a, b, c, d, e] = q.map(|i| format!("q[{i}]"));
+    format!(
+        "h {a}; x {a}; y {a}; z {a}; s {a}; t {a}; sdg {a}; tdg {a}; id {a};\n\
+         sx {a}; sxdg {a}; rx(0.1) {a}; ry(0.2) {a}; rz(0.3) {a}; p(0.4) {a};\n\
+         u1(0.5) {a}; u2(0.1, 0.2) {a}; u3(0.1, 0.2, 0.3) {a};\n\
+         u(0.1, 0.2, 0.3) {a}; U(0.1, 0.2, 0.3) {a}; u0(0.1) {a};\n\
+         cx {a}, {b}; CX {b}, {a}; cz {a}, {b}; swap {a}, {b}; cy {a}, {b};\n\
+         ch {a}, {b}; csx {a}, {b}; rzz(0.1) {a}, {b}; rxx(0.2) {a}, {b};\n\
+         cp(0.3) {a}, {b}; cu1(0.4) {a}, {b}; crx(0.1) {a}, {b};\n\
+         cry(0.2) {a}, {b}; crz(0.3) {b}, {a}; cu3(0.1, 0.2, 0.3) {a}, {b};\n\
+         cu(0.1, 0.2, 0.3, 0.4) {a}, {b}; ccx {a}, {b}, {c};\n\
+         cswap {c}, {a}, {b}; rccx {a}, {b}, {c}; rc3x {a}, {b}, {c}, {d};\n\
+         c3x {d}, {c}, {b}, {a}; c3sqrtx {a}, {b}, {c}, {d};\n\
+         c4x {a}, {b}, {c}, {d}, {e}; pair {b}, {e}; barrier {a}, {c};\n\
+         measure {a} -> c[0];\n"
+    )
+}
+
+#[test]
+fn compose_maps_every_operand_of_every_instruction() {
+    let program = |num_qubits: usize, q: [usize; 5]| {
+        format!(
+            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n\
+             gate pair x, y {{ cx x, y; h y; }}\n\
+             qreg q[{num_qubits}];\ncreg c[1];\n{}",
+            every_instruction(q)
+        )
+    };
+    let map = [6, 2, 4, 0, 5];
+    let sub = Pc::from_qasm2(&program(5, [0, 1, 2, 3, 4])).unwrap();
+    assert!(sub.gates().iter().any(|g| matches!(g, G::Custom(_))));
+    let placed = Pc::from_qasm2(&program(7, map)).unwrap();
+    assert_eq!(Pc::new(7).compose(&sub, &map).gates(), placed.gates());
 }
