@@ -2,7 +2,10 @@
 //! (`templates::arithmetic`), checked gate by gate. Their action on basis
 //! states is checked by simulation in `polypus-sim/tests/arithmetic.rs`.
 
-use polypus_circuit::templates::arithmetic::{modular_phase_adder, phase_adder};
+use polypus_circuit::templates::arithmetic::{
+    controlled_modular_multiplication, controlled_modular_multiplier, modular_phase_adder,
+    phase_adder,
+};
 use polypus_circuit::templates::MAX_QFT_QUBITS;
 use polypus_circuit::{CircuitError, GateInstruction as G, GateParam::Fixed};
 use std::f64::consts::PI;
@@ -91,5 +94,48 @@ fn modular_phase_adder_validates_the_modulus() {
                 ..
             })
         ));
+    }
+}
+
+#[test]
+fn controlled_modular_multiplier_gate_count() {
+    let qc = controlled_modular_multiplier(7, 15).unwrap();
+    assert_eq!((qc.num_qubits(), qc.gates().len()), (11, 530));
+}
+
+#[test]
+fn controlled_modular_multiplication_gate_count() {
+    let qc = controlled_modular_multiplication(7, 15).unwrap();
+    assert_eq!((qc.num_qubits(), qc.gates().len()), (11, 1064));
+}
+
+#[test]
+fn controlled_modular_multiplication_rejects_a_non_invertible_multiplier() {
+    let err = controlled_modular_multiplication(6, 15).unwrap_err();
+    assert!(matches!(
+        err,
+        CircuitError::InvalidTemplateArgument {
+            argument: "multiplier",
+            ..
+        }
+    ));
+    assert!(err.to_string().contains("factor 3"), "{err}");
+}
+
+#[test]
+fn controlled_modular_multiplication_validates_the_modulus() {
+    for modulus in [0, 1] {
+        for block in [
+            controlled_modular_multiplier,
+            controlled_modular_multiplication,
+        ] {
+            assert!(matches!(
+                block(1, modulus),
+                Err(CircuitError::InvalidTemplateArgument {
+                    argument: "modulus",
+                    ..
+                })
+            ));
+        }
     }
 }

@@ -2,7 +2,10 @@
 //! every basis state they are specified for: each block must map a basis state
 //! to the basis state its arithmetic predicts, with the controls untouched.
 
-use polypus_circuit::templates::arithmetic::{modular_phase_adder, phase_adder};
+use polypus_circuit::templates::arithmetic::{
+    controlled_modular_multiplication, controlled_modular_multiplier, modular_phase_adder,
+    phase_adder,
+};
 use polypus_circuit::templates::qft_with_options;
 use polypus_circuit::{GateInstruction as G, ParameterizedCircuit};
 use polypus_sim::{Simulator, StatevectorSimulator};
@@ -107,6 +110,78 @@ fn modular_phase_adder_adds_modulo_n() {
                         "N = {modulus}, a = {a}, b = {b}, controls = {controls:02b}"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Bits of `n`.
+fn bit_length(n: usize) -> usize {
+    (usize::BITS - n.leading_zeros()) as usize
+}
+
+/// The multipliers of `modulus` that have an inverse modulo it.
+fn coprime_multipliers(modulus: usize) -> Vec<usize> {
+    let gcd = |mut a: usize, mut b: usize| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    (1..modulus).filter(|&a| gcd(a, modulus) == 1).collect()
+}
+
+/// The `(multiplier, modulus)` pairs both multiplication blocks are run on.
+/// N = 21 takes 13 qubits: one multiplier keeps the debug run CI makes short.
+fn multiplication_cases() -> Vec<(usize, usize)> {
+    let mut cases: Vec<_> = coprime_multipliers(15)
+        .into_iter()
+        .map(|a| (a, 15))
+        .collect();
+    cases.push((2, 21));
+    cases
+}
+
+#[test]
+fn controlled_modular_multiplier_accumulates_a_times_x() {
+    for (a, modulus) in multiplication_cases() {
+        // [c, x_0..x_{n-1}, b_0..b_n, anc]
+        let n = bit_length(modulus);
+        let qc = controlled_modular_multiplier(a as u64, modulus as u64).unwrap();
+        for c in 0..2 {
+            for x in 0..modulus {
+                let input = c | (x << 1);
+                let product = if c == 1 { a * x % modulus } else { 0 };
+                assert_eq!(
+                    output_state(&qc, input),
+                    input | (product << (n + 1)),
+                    "a = {a}, N = {modulus}, x = {x}, c = {c}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn controlled_modular_multiplication_multiplies_in_place() {
+    let mut cases = multiplication_cases();
+    for modulus in [3, 4, 10] {
+        cases.extend(
+            coprime_multipliers(modulus)
+                .into_iter()
+                .map(|a| (a, modulus)),
+        );
+    }
+    for (a, modulus) in cases {
+        let qc = controlled_modular_multiplication(a as u64, modulus as u64).unwrap();
+        for c in 0..2 {
+            for x in 0..modulus {
+                let product = if c == 1 { a * x % modulus } else { x };
+                assert_eq!(
+                    output_state(&qc, c | (x << 1)),
+                    c | (product << 1),
+                    "a = {a}, N = {modulus}, x = {x}, c = {c}"
+                );
             }
         }
     }

@@ -15,7 +15,7 @@
 //! algorithm builds on the same blocks without their checks or intermediate
 //! circuits.
 
-use super::emit::{circuit_from_ops, emit_qft, Op};
+use super::emit::{circuit_from_ops, emit_qft, invert, Op};
 use super::MAX_QFT_QUBITS;
 use crate::{CircuitError, ParameterizedCircuit};
 use std::f64::consts::PI;
@@ -209,6 +209,223 @@ pub(crate) fn emit_modular_phase_adder(
     out.extend([Op::X(top), Op::Cx(top, anc), Op::X(top)]);
     emit_qft(out, register, false, false);
     emit_phase_adder(out, controlled, register, addend, false);
+}
+
+/// Beauregard's controlled modular multiplier (figure 6): add `multiplier · x`
+/// modulo `modulus` to the register `b`, when the control is `1`.
+///
+/// With `n` the bit length of `modulus`, the qubits are `[c, x_0..x_{n-1},
+/// b_0..b_n, anc]`, `2n + 3` in all: the control, the `n`-qubit factor `x`, an
+/// `(n + 1)`-qubit accumulator `b` in plain (not Fourier) values, and the
+/// ancilla of the modular adder. `multiplier` is reduced modulo `modulus`. For
+/// `x` and `b` below `modulus`, the circuit maps `|x⟩|b⟩` to
+/// `|x⟩|(b + multiplier · x) mod modulus⟩` when the control is `1`, leaves
+/// both registers as they are otherwise, and returns the ancilla to `|0⟩`. It
+/// is the QFT of `b`, one [`modular_phase_adder`] of `(multiplier · 2^i) mod
+/// modulus` controlled by `c` and `x_i` for each bit of `x`, and the inverse
+/// QFT: `m(m + 1) + n(2m² + 13m + 10)` gates for `m = n + 1`.
+///
+/// ```
+/// use polypus_circuit::templates::arithmetic::controlled_modular_multiplier;
+///
+/// let qc = controlled_modular_multiplier(7, 15).unwrap();
+/// assert_eq!(qc.num_qubits(), 11);
+/// assert_eq!(qc.gates().len(), 530);
+/// ```
+///
+/// # Errors
+///
+/// [`CircuitError::InvalidTemplateArgument`] for a `modulus` below 2.
+pub fn controlled_modular_multiplier(
+    multiplier: u64,
+    modulus: u64,
+) -> Result<ParameterizedCircuit, CircuitError> {
+    let layout = MultiplierLayout::new("controlled_modular_multiplier", modulus)?;
+    let mut ops = Vec::with_capacity(layout.multiplier_len());
+    emit_controlled_multiplier(
+        &mut ops,
+        layout.control,
+        &layout.x,
+        &layout.b,
+        layout.anc,
+        multiplier % modulus,
+        modulus,
+    );
+    circuit_from_ops(layout.num_qubits(), &ops)
+}
+
+/// Beauregard's controlled modular multiplication in place (figure 7):
+/// multiply the register `x` by `multiplier` modulo `modulus`, when the
+/// control is `1`.
+///
+/// The qubits are those of [`controlled_modular_multiplier`], `[c,
+/// x_0..x_{n-1}, b_0..b_n, anc]`. For `x` below `modulus` and `b` and the
+/// ancilla at `0`, the circuit maps `|x⟩` to `|multiplier · x mod modulus⟩`
+/// when the control is `1` and leaves it otherwise; `b` and the ancilla end
+/// at `0`. It is the multiplier with `multiplier`, a controlled swap of each
+/// `x_i` with `b_i`, and the inverse of the multiplier with the inverse of
+/// `multiplier` modulo `modulus`: `2 · multiplier + n` gates, with `multiplier`
+/// the count of [`controlled_modular_multiplier`].
+///
+/// ```
+/// use polypus_circuit::templates::arithmetic::controlled_modular_multiplication;
+///
+/// let qc = controlled_modular_multiplication(7, 15).unwrap();
+/// assert_eq!(qc.num_qubits(), 11);
+/// assert_eq!(qc.gates().len(), 1064);
+/// ```
+///
+/// # Errors
+///
+/// [`CircuitError::InvalidTemplateArgument`] for a `modulus` below 2, or a
+/// `multiplier` that shares a factor with `modulus`: it has no inverse modulo
+/// `modulus`, and the multiplication could not be undone.
+pub fn controlled_modular_multiplication(
+    multiplier: u64,
+    modulus: u64,
+) -> Result<ParameterizedCircuit, CircuitError> {
+    const TEMPLATE: &str = "controlled_modular_multiplication";
+    let layout = MultiplierLayout::new(TEMPLATE, modulus)?;
+    let reduced = multiplier % modulus;
+    let Some(inverse) = mod_inverse(reduced, modulus) else {
+        let factor = gcd(multiplier, modulus);
+        return Err(CircuitError::invalid_template_argument(
+            TEMPLATE,
+            "multiplier",
+            format!(
+                "{multiplier} shares the factor {factor} with the modulus {modulus}, \
+                 so it has no inverse modulo {modulus}"
+            ),
+        ));
+    };
+    let mut ops = Vec::with_capacity(2 * layout.multiplier_len() + layout.x.len());
+    emit_controlled_multiplication(
+        &mut ops,
+        layout.control,
+        &layout.x,
+        &layout.b,
+        layout.anc,
+        reduced,
+        inverse,
+        modulus,
+    );
+    circuit_from_ops(layout.num_qubits(), &ops)
+}
+
+/// The qubits of the multiplication blocks: `[c, x_0..x_{n-1}, b_0..b_n, anc]`.
+struct MultiplierLayout {
+    control: usize,
+    x: Vec<usize>,
+    b: Vec<usize>,
+    anc: usize,
+}
+
+impl MultiplierLayout {
+    /// The layout for `modulus`, which `template` requires to be at least 2.
+    fn new(template: &'static str, modulus: u64) -> Result<Self, CircuitError> {
+        if modulus < 2 {
+            return Err(CircuitError::invalid_template_argument(
+                template,
+                "modulus",
+                format!("must be at least 2, got {modulus}"),
+            ));
+        }
+        let n = bit_length(modulus);
+        Ok(MultiplierLayout {
+            control: 0,
+            x: (1..=n).collect(),
+            b: (n + 1..2 * n + 2).collect(),
+            anc: 2 * n + 2,
+        })
+    }
+
+    fn num_qubits(&self) -> usize {
+        self.anc + 1
+    }
+
+    /// Gates of [`controlled_modular_multiplier`] on this layout.
+    fn multiplier_len(&self) -> usize {
+        let (n, m) = (self.x.len(), self.b.len());
+        m * (m + 1) + n * (2 * m * m + 13 * m + 10)
+    }
+}
+
+/// Emit [`controlled_modular_multiplier`] on `x` and `b`, controlled by
+/// `control` and with the ancilla `anc`.
+///
+/// Preconditions, not checked: `modulus ≥ 2`, `multiplier < modulus`, `x` has
+/// `bit_length(modulus)` qubits and `b` one more, and every qubit is distinct.
+pub(crate) fn emit_controlled_multiplier(
+    out: &mut Vec<Op>,
+    control: usize,
+    x: &[usize],
+    b: &[usize],
+    anc: usize,
+    multiplier: u64,
+    modulus: u64,
+) {
+    emit_qft(out, b, false, false);
+    // multiplier · 2^i mod N, doubled in u128 so that 2 · (N - 1) cannot wrap.
+    let mut addend = multiplier;
+    for &x_i in x {
+        emit_modular_phase_adder(out, (control, x_i), b, anc, addend, modulus);
+        addend = (u128::from(addend) * 2 % u128::from(modulus)) as u64;
+    }
+    emit_qft(out, b, true, false);
+}
+
+/// Emit [`controlled_modular_multiplication`] on `x` and `b`, controlled by
+/// `control` and with the ancilla `anc`; `inverse` is the inverse of
+/// `multiplier` modulo `modulus`.
+///
+/// The inverse multiplier is emitted onto the end of `out` and inverted in
+/// place, so the block needs no buffer of its own. Preconditions, not checked:
+/// those of [`emit_controlled_multiplier`], and `multiplier · inverse ≡ 1`
+/// modulo `modulus`.
+pub(crate) fn emit_controlled_multiplication(
+    out: &mut Vec<Op>,
+    control: usize,
+    x: &[usize],
+    b: &[usize],
+    anc: usize,
+    multiplier: u64,
+    inverse: u64,
+    modulus: u64,
+) {
+    emit_controlled_multiplier(out, control, x, b, anc, multiplier, modulus);
+    out.extend(
+        x.iter()
+            .zip(b)
+            .map(|(&x_i, &b_i)| Op::Cswap(control, x_i, b_i)),
+    );
+    let start = out.len();
+    emit_controlled_multiplier(out, control, x, b, anc, inverse, modulus);
+    invert(&mut out[start..]);
+}
+
+/// The greatest common divisor of `a` and `b` (`gcd(0, 0) = 0`).
+pub(crate) fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The inverse of `a` modulo `modulus`, or `None` when they share a factor
+/// (or `modulus` is 0). The extended Euclidean algorithm runs in `i128`, so its
+/// negative coefficients cannot overflow.
+pub(crate) fn mod_inverse(a: u64, modulus: u64) -> Option<u64> {
+    let (mut old_r, mut r) = (i128::from(a.checked_rem(modulus)?), i128::from(modulus));
+    let (mut old_s, mut s) = (1i128, 0i128);
+    while r != 0 {
+        let q = old_r / r;
+        (old_r, r) = (r, old_r - q * r);
+        (old_s, s) = (s, old_s - q * s);
+    }
+    if old_r != 1 {
+        return None;
+    }
+    u64::try_from(old_s.rem_euclid(i128::from(modulus))).ok()
 }
 
 /// The number of bits of `n`: `0` for `0`, else one more than the index of its
