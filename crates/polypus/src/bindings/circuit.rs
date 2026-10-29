@@ -890,6 +890,60 @@ impl Circuit {
         push(slf, GateInstruction::MeasureAll)
     }
 
+    // ── Composition ──────────────────────────────────────────────────────
+
+    /// Append the instructions of `other`, placing its qubit `i` on
+    /// `qubits[i]` (by default its qubit `i` on qubit `i`), and return `self`.
+    ///
+    /// Use it to put a template on a subregister or to run one circuit after
+    /// another. Free parameters are shared by index: `Param(0)` of `other` is
+    /// `Param(0)` here, so a parameter both circuits use is bound once, and the
+    /// result takes the names `other` gives to parameters this circuit does not
+    /// name. Classical bits are not renumbered: a measurement keeps its bit,
+    /// and `measure_all` placed on a subregister measures `qubits[i]` into bit
+    /// `i`. `qc.compose(qc)` appends a copy of `qc`.
+    ///
+    /// ```python
+    /// import polypus
+    /// from polypus.circuits.templates import qft
+    ///
+    /// qc = polypus.Circuit(3).x(0).compose(qft(2), qubits=[1, 2])
+    /// assert repr(qc) == "Circuit(num_qubits=3, num_params=0, gates=5)"
+    /// ```
+    ///
+    /// Raises `ValueError`, leaving the circuit unchanged, when `qubits` does
+    /// not give one distinct qubit of this circuit per qubit of `other`, when
+    /// an instruction acts on a qubit this circuit has measured, or when
+    /// `other` names a parameter differently; `TypeError` when `other` is not
+    /// a `Circuit`.
+    #[pyo3(signature = (other, qubits = None))]
+    fn compose<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, Circuit>,
+        qubits: Option<Vec<usize>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        // `qc.compose(qc)` would borrow the same object twice: copy it first.
+        // A circuit a call in progress holds (an argument's `__index__` that
+        // composes it) raises `RuntimeError` instead of panicking.
+        let copy;
+        let borrowed;
+        let other = if other.is(slf) {
+            copy = other.try_borrow()?.inner.clone();
+            &copy
+        } else {
+            borrowed = other.try_borrow()?;
+            &borrowed.inner
+        };
+        let qubits = qubits.unwrap_or_else(|| (0..other.num_qubits()).collect());
+        let mut this = slf.try_borrow_mut()?;
+        let target = &mut this.inner;
+        slf.py()
+            .detach(|| target.try_compose(other, &qubits))
+            .map_err(to_py_err)?;
+        drop(this);
+        Ok(slf.clone())
+    }
+
     // ── Export ───────────────────────────────────────────────────────────
 
     /// Serialize to OpenQASM 2.0.

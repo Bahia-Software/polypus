@@ -306,6 +306,14 @@ Changes on `main` since 0.7.2.
   seeded runs are unchanged. It comes after `seed` in the positional order.
   Rust: `AlgorithmSPSAArgs::stability_constant` and
   `polypus_orchestration::SpsaConfig::stability_constant` (#467).
+- `Circuit.compose(other, qubits=None)` / `ParameterizedCircuit::compose`
+  (and `try_compose`) place a circuit onto chosen qubits of another: qubit `i`
+  of `other` lands on `qubits[i]`, free parameters are shared by index, and
+  classical bits are not renumbered. Every instruction is checked as its gate
+  method checks it (contract C-4) before any is appended, so a failed call
+  leaves the circuit unchanged; the errors are the new
+  `CircuitError::InvalidQubitMap` and `CircuitError::ConflictingParamNames`
+  (`ValueError` in Python) and those of the gate methods.
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
