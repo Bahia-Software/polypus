@@ -136,23 +136,18 @@ fn same_instruction(
 }
 
 /// The checks [`ParameterizedCircuit::try_push`] makes before it appends
-/// `gate` to a circuit of `num_qubits` qubits whose measured qubits are
-/// `measured` and whose expressions are `exprs`. The first that fails is the
-/// error. [`ParameterizedCircuit::try_compose`] makes them for every
-/// instruction it appends, before appending any.
+/// `gate` to a circuit of `num_qubits` qubits whose measured qubits are those
+/// for which `is_measured` holds and whose expressions are `exprs`. The first
+/// that fails is the error. [`ParameterizedCircuit::try_compose`] makes them
+/// for every instruction it appends, before appending any.
 fn check_instruction(
     gate: &GateInstruction,
     num_qubits: usize,
-    measured: &MeasuredQubits,
+    is_measured: impl Fn(usize) -> bool,
     exprs: &ExprArena,
 ) -> Result<(), CircuitError> {
     // The first measured operand in operand order, for any arity.
-    if let Some(&qubit) = gate
-        .acts_on()
-        .qubits()
-        .iter()
-        .find(|&&q| measured.contains(q))
-    {
+    if let Some(&qubit) = gate.acts_on().qubits().iter().find(|&&q| is_measured(q)) {
         return Err(CircuitError::QubitAlreadyMeasured { qubit });
     }
     // Every qubit reference in range: unitary operands, a measurement target
@@ -432,7 +427,12 @@ impl ParameterizedCircuit {
         // a circuit quadratic in its gate count. Checked before any mutation
         // below; the cache itself is only advanced on the success path.
         self.measured.sync(&self.gates);
-        check_instruction(&gate, self.num_qubits, &self.measured, &self.exprs)?;
+        check_instruction(
+            &gate,
+            self.num_qubits,
+            |q| self.measured.contains(q),
+            &self.exprs,
+        )?;
         for param in gate.params() {
             self.track_param(param);
         }
@@ -476,8 +476,10 @@ impl ParameterizedCircuit {
     ///
     /// Every instruction is checked as [`try_push`](Self::try_push) checks it,
     /// in order and against the same record of measured qubits (contract C-4),
-    /// before any is appended: on error the circuit is unchanged. The circuit
-    /// is not copied to achieve that, so composing in a loop stays linear.
+    /// before any is appended: on error the circuit is unchanged. Nothing of
+    /// this circuit is copied to achieve that, and a call costs what `other`
+    /// holds rather than what this circuit holds, so composing in a loop stays
+    /// linear.
     ///
     /// ```
     /// use polypus_circuit::templates::qft;
@@ -553,14 +555,22 @@ impl ParameterizedCircuit {
             }
         }
 
-        // Each instruction passes the checks `try_push` makes, in order, against
-        // a copy of the record of measured qubits, before any is appended. Its
+        // Each instruction passes the checks `try_push` makes, in order, before
+        // any is appended. A qubit counts as measured when this circuit measured
+        // it or an instruction placed before it does: those are recorded apart,
+        // so the circuit's own record is neither changed nor copied. Its
         // expressions are still `other`'s, so they must resolve there.
         self.measured.sync(&self.gates);
-        let mut measured = self.measured.clone();
+        let mut placed_measured = MeasuredQubits::default();
+        placed_measured.sync(&[]);
         for gate in &placed {
-            check_instruction(gate, self.num_qubits, &measured, &other.exprs)?;
-            measured.record(gate);
+            check_instruction(
+                gate,
+                self.num_qubits,
+                |q| self.measured.contains(q) || placed_measured.contains(q),
+                &other.exprs,
+            )?;
+            placed_measured.record(gate);
         }
 
         // Nothing below fails: every expression resolves in `other` and every
@@ -608,7 +618,15 @@ impl ParameterizedCircuit {
         other: &'a ParameterizedCircuit,
     ) -> Result<&'a [String], CircuitError> {
         let ours = &self.param_names;
-        let taken: BTreeSet<&str> = ours.iter().map(String::as_str).collect();
+        let adopted = other.param_names.get(ours.len()..).unwrap_or_default();
+        // Only an adopted name can clash with one of ours at another index, so
+        // the set of ours is built only when there is one: a call goes over no
+        // more names than `other` gives.
+        let taken: BTreeSet<&str> = if adopted.is_empty() {
+            BTreeSet::new()
+        } else {
+            ours.iter().map(String::as_str).collect()
+        };
         for (index, name) in other.param_names.iter().enumerate() {
             let conflicts = match ours.get(index) {
                 Some(our_name) => our_name != name,
@@ -621,7 +639,7 @@ impl ParameterizedCircuit {
                 });
             }
         }
-        Ok(other.param_names.get(ours.len()..).unwrap_or_default())
+        Ok(adopted)
     }
 
     // ── Single-qubit gates ───────────────────────────────────────────────

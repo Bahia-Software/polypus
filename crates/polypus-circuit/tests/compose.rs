@@ -53,6 +53,28 @@ fn compose_rejects_a_gate_on_a_measured_target() {
 }
 
 #[test]
+fn compose_rejects_a_gate_on_a_qubit_other_measured_before_it() {
+    // Only a circuit assembled unchecked acts on a qubit it measured.
+    let measured_then_x = |first| Pc::from_parts_unchecked(1, 0, vec![first, G::X(0)]);
+    // A measurement, and a MeasureAll expanded onto a subregister.
+    for first in [G::Measure { qubit: 0, cbit: 0 }, G::MeasureAll] {
+        let mut qc = Pc::new(2);
+        assert_eq!(
+            qc.try_compose(&measured_then_x(first), &[1]),
+            Err(CircuitError::QubitAlreadyMeasured { qubit: 1 })
+        );
+        assert_eq!(qc, Pc::new(2));
+        // Nor is qubit 1 left marked as measured.
+        assert_eq!(qc.try_push(G::X(1)), Ok(()));
+    }
+    // A MeasureAll kept over the whole register.
+    assert_eq!(
+        Pc::new(1).try_compose(&measured_then_x(G::MeasureAll), &[0]),
+        Err(CircuitError::QubitAlreadyMeasured { qubit: 0 })
+    );
+}
+
+#[test]
 fn failed_compose_leaves_the_circuit_unchanged() {
     let mut qc = Pc::new(3).h(0).measure(2, 0);
     let before = qc.clone();
