@@ -480,8 +480,8 @@ fn check_rotosolve_circuit(
 }
 
 /// Check the optimizer's preconditions, `initial_point` included, before
-/// anything runs in `train`/`qml.train` (contract C-5): every check the
-/// optimizer makes before its first RNG draw, in its order, so its
+/// anything runs in `train`, `qml.train` and `Model.fit` (contract C-5): every
+/// check the optimizer makes before its first RNG draw, in its order, so its
 /// configuration errors come before the point's (`dimensions` finite values,
 /// within `bounds` for PSO), through [`Method::check_preconditions`]. A failure
 /// raises `ValueError` with the optimizer's own message before any QPU is
@@ -509,9 +509,9 @@ fn validate_method(
     check_external_initial_point(method, initial_point)
 }
 
-/// Check the `final_shots` of `train`/`qml.train` before anything runs
-/// (contract C-5), as `shots` is checked: `None`, or an integer from 1 to
-/// 4294967295, the shots a circuit takes, before any backend or CUNQA
+/// Check the `final_shots` of `train`, `qml.train` and `Model.fit` before
+/// anything runs (contract C-5), as `shots` is checked: `None`, or an integer
+/// from 1 to 4294967295, the shots a circuit takes, before any backend or CUNQA
 /// allocation exists. What is and is not an integer, and which error each
 /// raises, is [`positive_index`]'s.
 fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u32>> {

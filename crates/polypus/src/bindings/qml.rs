@@ -35,7 +35,8 @@ use super::{
     build_backend_config, counts_to_pylist, extract_labels, finish_optimization,
     interruptible_token, is_native_backend, is_rotosolve, log_training_start, method_from_pyclass,
     method_seed, resolve_optimizer_seed, seed_or_entropy, unique_id, validate_cunqa_allocation,
-    validate_id, validate_shots_and_qpus, OptionsArg, RunResult,
+    validate_final_shots, validate_id, validate_method, validate_shots_and_qpus, OptionsArg,
+    RunResult,
 };
 use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
 use crate::exceptions::configuration_error;
@@ -1036,6 +1037,13 @@ impl Model {
     /// - **`batch_size`** scores each evaluation on a fresh, seed-determined
     ///   subset of that many samples, `1 <= batch_size < num_samples`; the
     ///   reported `best_fitness` is always on the whole training set (C-5).
+    /// - **`initial_point`** starts the optimizer from a given point, such as
+    ///   the `params` of a `TrainedModel` read back with `qml.load` to keep
+    ///   training it: `num_params` finite numbers, with `train`'s rules (C-5).
+    /// - **`final_shots`** re-evaluates the best candidates with that many
+    ///   shots once the optimizer has stopped, as in `train`, on every training
+    ///   sample even with `batch_size`, into `TrainResult.final_params` and
+    ///   `final_fitness`. `fit` refuses it with `exact=True`, which uses no shots.
     /// - **Execution** takes the arguments of `polypus.train`. `backend=None`
     ///   is the native simulator on `infrastructure="local"` and Aer otherwise
     ///   (CUNQA's QPUs run Aer); an explicit `backend` wins. `seed` drives the
@@ -1049,6 +1057,7 @@ impl Model {
         x, y=None, *, method, loss=None, shots=1024, infrastructure="local", n_qpus=1,
         nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
         noise_model=None, backend=None, seed=None, id="qml", exact=false, batch_size=None,
+        initial_point=None, final_shots=None,
     ))]
     fn fit<'py>(
         &self,
@@ -1070,6 +1079,8 @@ impl Model {
         id: &str,
         exact: bool,
         batch_size: Option<usize>,
+        initial_point: Option<Vec<f64>>,
+        final_shots: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let start = Instant::now();
         let py = x.py();
@@ -1078,6 +1089,16 @@ impl Model {
         validate_id(id)?;
         let loss = loss.map(parse_loss).transpose()?;
         let effective_seed = resolve_optimizer_seed(seed, method_seed(method), random_seed)?;
+        let dimensions = u32::try_from(self.num_params).map_err(|_| {
+            configuration_error(format!(
+                "the model has {} trainable parameters, more than an optimizer can search",
+                self.num_params
+            ))
+        })?;
+        // The optimizer and its point, then `final_shots`, in `train`'s order
+        // (C-5).
+        validate_method(method, dimensions, initial_point.as_deref())?;
+        let final_shots = validate_final_shots(final_shots.as_ref())?;
         let backend = resolve_backend(backend, infrastructure);
         if exact && !(infrastructure == "local" && is_native_backend(backend)) {
             return Err(configuration_error(
@@ -1085,6 +1106,7 @@ impl Model {
                  native simulator computes exact probabilities",
             ));
         }
+        check_exact_final_shots(exact, final_shots)?;
 
         let (dataset, labeled) = native_dataset(x, y)?;
         let loss = resolve_loss(loss, labeled)?;
@@ -1112,12 +1134,6 @@ impl Model {
             Some(size) => Some(MinibatchConfig::new(size, effective_seed)),
             None => None,
         };
-        let dimensions = u32::try_from(self.num_params).map_err(|_| {
-            configuration_error(format!(
-                "the model has {} trainable parameters, more than an optimizer can search",
-                self.num_params
-            ))
-        })?;
         let exact = exact.then(|| Arc::new(NativeStatevectorBackend::new(effective_seed)));
 
         // Native circuits never ask for fusion here: `None` keeps the backend's
@@ -1170,8 +1186,8 @@ impl Model {
             dimensions,
             seed: effective_seed,
             errors: errors.clone(),
-            initial_point: None,
-            final_shots: None,
+            initial_point,
+            final_shots,
         };
         // GIL released for the run, as in `train`; the interrupt token keeps
         // Ctrl+C prompt between waves.
@@ -1191,6 +1207,21 @@ fn resolve_backend<'a>(backend: Option<&'a str>, infrastructure: &str) -> &'a st
     } else {
         "aer"
     })
+}
+
+/// `fit`'s `final_shots` with `exact=True`: exact mode computes probabilities
+/// and takes no shots, so a re-evaluation with more of them would only repeat
+/// the exact values. Refused before any backend exists (C-11), after
+/// `final_shots` itself has been checked.
+fn check_exact_final_shots(exact: bool, final_shots: Option<u32>) -> PyResult<()> {
+    if exact && final_shots.is_some() {
+        return Err(configuration_error(
+            "final_shots does not apply with exact=True: exact mode computes exact \
+             probabilities and uses no shots. Drop final_shots, or exact=True to train \
+             with shots",
+        ));
+    }
+    Ok(())
 }
 
 /// The training set and whether it has labels: a [`Dataset`](PyDataset) as it
@@ -1893,6 +1924,21 @@ mod tests {
         assert!(resolve_loss(Some(Loss::Hinge), false).is_err());
         assert!(resolve_loss(None, true).is_err());
         assert!(resolve_loss(Some(Loss::Expectation), true).is_err());
+    }
+
+    #[test]
+    fn final_shots_is_refused_only_with_exact() {
+        Python::initialize();
+        assert!(check_exact_final_shots(false, None).is_ok());
+        assert!(check_exact_final_shots(false, Some(4096)).is_ok());
+        assert!(check_exact_final_shots(true, None).is_ok());
+        let err = check_exact_final_shots(true, Some(4096))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("final_shots does not apply with exact=True"),
+            "{err}"
+        );
     }
 
     #[test]
