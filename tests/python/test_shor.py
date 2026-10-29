@@ -140,6 +140,13 @@ class TestFactor:
         with pytest.raises(ValueError):
             factor(15, **options, **NATIVE)
 
+    # Checked before the shortcuts: 22 is even, and seed 3 draws the base 5
+    # for 15.
+    @pytest.mark.parametrize("n, counting_qubits", [(22, 0), (15, 9)])
+    def test_counting_qubits_out_of_range_raises_value_error(self, n, counting_qubits):
+        with pytest.raises(ValueError, match="counting_qubits"):
+            factor(n, counting_qubits=counting_qubits, seed=3, **NATIVE)
+
     @pytest.mark.parametrize("seed", [-1, 2**64])
     def test_a_seed_out_of_range_raises_overflow_error(self, seed):
         with pytest.raises(OverflowError):
@@ -173,6 +180,21 @@ class TestFactor:
         first = factor(15, seed=7, **NATIVE)
         second = factor(15, seed=7, **NATIVE)
         assert first == second
+
+    # qmio, real hardware, refuses a seed.
+    @pytest.mark.parametrize("seed", [None, 7])
+    def test_a_run_has_a_seed_only_when_factor_has_one(self, monkeypatch, seed):
+        run_seeds = []
+        run_quantum_circuit = polypus.run_quantum_circuit
+
+        def spy(*args, **kwargs):
+            run_seeds.append(kwargs.get("seed"))
+            return run_quantum_circuit(*args, **kwargs)
+
+        monkeypatch.setattr(polypus, "run_quantum_circuit", spy)
+        factor(15, a=7, seed=seed, **NATIVE)
+        assert run_seeds
+        assert all((run_seed is None) == (seed is None) for run_seed in run_seeds)
 
     def test_aer_backend_factors_15(self):
         result = factor(15, infrastructure="local", backend="aer", a=7, seed=3)

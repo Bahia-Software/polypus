@@ -82,11 +82,14 @@ def factor(
     ``factors=None``.
 
     ``seed`` (0 to ``2**64 - 1``) draws the bases and the seed of every run,
-    so the same seed on a seeded backend gives the same result.
+    so the same seed on a seeded backend gives the same result. Without it no
+    run gets a seed, which ``qmio`` (real hardware) refuses.
 
-    The circuit has ``t + 2 * n.bit_length() + 2`` qubits for ``t`` counting
-    qubits, ``2 * n.bit_length()`` by default: with the local simulators,
-    which hold 30 qubits, the practical limit is ``n < 128``.
+    ``counting_qubits`` is between 1 and ``2 * n.bit_length()``, its default;
+    fewer save qubits and find the order less often. The circuit has
+    ``counting_qubits + 2 * n.bit_length() + 2`` qubits: with the local
+    simulators, which hold 30 qubits, and the default counting register, the
+    practical limit is ``n < 128``.
 
     ```python
     from polypus.shor import factor
@@ -113,6 +116,11 @@ def factor(
         raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
     if a is not None and not 2 <= a < n:
         raise ValueError(f"a must be between 2 and n - 1 = {n - 1}, got {a}")
+    if counting_qubits is not None and not 1 <= counting_qubits <= 2 * n.bit_length():
+        raise ValueError(
+            "counting_qubits must be between 1 and 2 * n.bit_length() = "
+            f"{2 * n.bit_length()}, got {counting_qubits}"
+        )
 
     if n % 2 == 0:
         return ShorResult(n, (2, n // 2), "even", None, None, 0, None)
@@ -139,8 +147,10 @@ def factor(
             qc = polypus.circuits.templates.shor_order_finding(base, n, counting_qubits)
             for qubit in range(t):
                 qc.measure(qubit, qubit)
+        # qmio, real hardware, refuses a seed: an unseeded call seeds no run.
+        run_seed = None if seed is None else rng.getrandbits(63)
         run = polypus.run_quantum_circuit(
-            qc, shots, infrastructure, seed=rng.getrandbits(63), **run_kwargs
+            qc, shots, infrastructure, seed=run_seed, **run_kwargs
         )
         counts = run.merged_counts or {}
         order = _order_from_counts(counts, t, base, n)
