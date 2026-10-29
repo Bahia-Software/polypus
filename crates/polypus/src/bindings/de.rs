@@ -16,7 +16,7 @@ pub struct DE {
     pub tolerance: f64,
     /// Number of generations over which the best-fitness improvement is measured
     /// for the stagnation early stop; no stop can fire before generation
-    /// `patience`. Defaults to 20.
+    /// `patience`. At least 1, checked when `train` starts. Defaults to 20.
     #[pyo3(get, set)]
     pub patience: u32,
     /// Optional RNG seed pinned on the optimizer object. Consumed by

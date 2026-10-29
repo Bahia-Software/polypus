@@ -990,6 +990,30 @@ fn invalid_rates_are_rejected_before_any_evaluation() {
     }
 }
 
+/// `patience: 0` would compare the best fitness of a generation with itself, so
+/// any positive tolerance would stop the run at once: every strategy refuses it
+/// before any oracle call.
+#[test]
+fn zero_patience_is_rejected_before_any_evaluation() {
+    for strategy in [DeStrategy::Rand1Bin, DeStrategy::Shade, DeStrategy::LShade] {
+        let calls = Arc::new(Mutex::new(0usize));
+        let result = AlgorithmDifferentialEvolution.optimize_with_strategy(
+            strategy,
+            AlgorithmDifferentialEvolutionArgs {
+                patience: 0,
+                ..args(Box::new(Counting(Arc::clone(&calls))), 10, 5, 3, 5)
+            },
+        );
+        match result {
+            Err(OptimizerError::InvalidConfig { parameter, .. }) => {
+                assert_eq!(parameter, "patience", "{strategy}")
+            }
+            other => panic!("{strategy}: expected InvalidConfig, got {other:?}"),
+        }
+        assert_eq!(*calls.lock().unwrap(), 0, "the oracle must not be called");
+    }
+}
+
 /// Counts its calls; constant fitness.
 struct Counting(Arc<Mutex<usize>>);
 

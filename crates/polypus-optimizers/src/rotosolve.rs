@@ -72,7 +72,9 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 /// then only a strictly better one, so a `NaN` never wins over a number: a
 /// `NaN` first measurement is kept only until a number arrives), and
 /// `best_fitness` the value the oracle returned for it. Predicted values
-/// never compete. `fitness_history` has one entry per step, the best measured
+/// never compete. The neighbours are offered as they are, not wrapped, so
+/// `best_params` can lie up to π/2 outside `[0, 2π)`, and further when an
+/// `initial_point` outside it leaves a coordinate unmoved. `fitness_history` has one entry per step, the best measured
 /// up to it; the first step measures θ₀, so no entry is the `-∞` of nothing
 /// measured, and the last is `best_fitness`.
 ///

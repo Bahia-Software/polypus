@@ -37,7 +37,7 @@ pub struct Spsa {
     /// Size in radians of the first step on each parameter with
     /// `resamplings=1`, finite and `> 0`, which the calibration batch turns
     /// into the gain `a`; with more perturbations the first step is shorter.
-    /// Defaults to `0.63`. Later steps shrink as `1/k^alpha`.
+    /// Defaults to `0.63`. Later steps shrink as `1/(k + stability_constant)^alpha`.
     #[pyo3(get, set)]
     pub target_step: f64,
     /// Decay exponent of the step gain, in `(0.5, 1]`. Defaults to Spall's
@@ -48,6 +48,13 @@ pub struct Spsa {
     /// Defaults to Spall's practical `0.101`.
     #[pyo3(get, set)]
     pub gamma: f64,
+    /// Spall's stability constant `A`, finite and `>= 0`: iteration k's gain is
+    /// `a/(k + A)^alpha`. The calibration keeps the first step at
+    /// `target_step` whatever `A`, so a larger `A` makes the steps shrink more
+    /// slowly at first. Defaults to `0`, `a/k^alpha`; Spall suggests about a
+    /// tenth of `max_iters`, or less.
+    #[pyo3(get, set)]
+    pub stability_constant: f64,
     /// Iterations between measurements of the parameters themselves, at
     /// least 1. Defaults to 20: the first iteration and every 20th after it
     /// add one circuit to their batch; the final parameters are measured
@@ -65,7 +72,9 @@ pub struct Spsa {
 #[pymethods]
 impl Spsa {
     #[new]
-    #[pyo3(signature = (max_iters = 300, resamplings = 1, perturbation = 0.1, target_step = 0.63, alpha = 0.602, gamma = 0.101, eval_interval = 20, seed = None))]
+    // `stability_constant` comes last, after `seed`, so a positional `seed`
+    // keeps its place.
+    #[pyo3(signature = (max_iters = 300, resamplings = 1, perturbation = 0.1, target_step = 0.63, alpha = 0.602, gamma = 0.101, eval_interval = 20, seed = None, stability_constant = 0.0))]
     pub fn new(
         max_iters: u32,
         resamplings: u32,
@@ -75,6 +84,7 @@ impl Spsa {
         gamma: f64,
         eval_interval: u32,
         seed: Option<u64>,
+        stability_constant: f64,
     ) -> Self {
         Spsa {
             max_iters,
@@ -83,6 +93,7 @@ impl Spsa {
             target_step,
             alpha,
             gamma,
+            stability_constant,
             eval_interval,
             seed,
         }

@@ -243,13 +243,24 @@ pub struct TrainResult {
 #[pymethods]
 impl TrainResult {
     fn __repr__(&self) -> String {
-        // Unchanged without `final_shots`.
+        // Unchanged without `final_shots`; with it, the final value after the
+        // best and the final point after the best one.
         let final_fitness = self
             .final_fitness
             .map_or(String::new(), |value| format!(", final_fitness={value}"));
+        let final_params = self
+            .final_params
+            .as_ref()
+            .map_or(String::new(), |params| format!(", final_params={params:?}"));
         format!(
-            "TrainResult(id={:?}, best_fitness={}{final_fitness}, iterations_run={}, converged={}, seed={}, best_params={:?})",
-            self.id, self.best_fitness, self.iterations_run, self.converged, self.seed, self.best_params
+            "TrainResult(id={:?}, best_fitness={}{final_fitness}, iterations_run={}, \
+             converged={}, seed={}, best_params={:?}{final_params})",
+            self.id,
+            self.best_fitness,
+            self.iterations_run,
+            self.converged,
+            self.seed,
+            self.best_params
         )
     }
 }
@@ -417,7 +428,7 @@ fn check_external_initial_point(
     Err(crate::exceptions::configuration_error(
         "polypus.External takes no initial_point: the external optimizer chooses its own \
          start. Give the starting point to the library, or to the initial_point of the \
-         polypus.external adapter (from_optuna, from_nevergrad); for pycma it is the x0 of \
+         polypus.ask_tell adapter (from_optuna, from_nevergrad); for pycma it is the x0 of \
          cma.CMAEvolutionStrategy",
     ))
 }
@@ -500,12 +511,9 @@ fn validate_method(
 
 /// Check the `final_shots` of `train`/`qml.train` before anything runs
 /// (contract C-5), as `shots` is checked: `None`, or an integer from 1 to
-/// 4294967295, the shots a circuit takes. A Python `int` or anything with
-/// `__index__` (a NumPy integer) is an integer; a `bool`, a `float` (even
-/// `4096.0`), a `str` or anything else raises `ValueError`, before any backend
-/// or CUNQA allocation exists. Only the `TypeError` of `operator.index` means
-/// "not an integer"; any other exception, raised inside a custom `__index__`
-/// or a `KeyboardInterrupt`, propagates unchanged.
+/// 4294967295, the shots a circuit takes, before any backend or CUNQA
+/// allocation exists. What is and is not an integer, and which error each
+/// raises, is [`positive_index`]'s.
 fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u32>> {
     let Some(value) = final_shots.filter(|value| !value.is_none()) else {
         return Ok(None);
@@ -518,32 +526,30 @@ fn validate_final_shots(final_shots: Option<&Bound<'_, PyAny>>) -> PyResult<Opti
 }
 
 /// `value` as a Python `int` `>= 1`, for the setting `name`: a Python `int` or
-/// anything with `__index__` (a NumPy integer) is an integer, while a `bool`, a
-/// `float` (even `4.0`), a `str`, `None` or anything else raises `ValueError`.
-/// Only the `TypeError` of `operator.index` means "not an integer"; any other
+/// anything with `__index__` (a NumPy integer) is an integer, and one below 1
+/// raises `ValueError` (a `polypus.ConfigurationError`). A `bool`, a `float`
+/// (even `4.0`), a `str`, `None` or anything else is not an integer and raises
+/// `TypeError`, as an integer argument such as `shots` does. Only the
+/// `TypeError` of `operator.index` means "not an integer"; any other
 /// exception, raised inside a custom `__index__` or a `KeyboardInterrupt`,
 /// propagates unchanged. The caller converts the result to its own type and
 /// reports a value too large for it with [`too_large`].
 fn positive_index<'py>(value: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-    let not_positive = || {
-        crate::exceptions::configuration_error(format!(
-            "{name} must be an integer >= 1, got {}",
-            shown_repr(value)
-        ))
-    };
+    let message = || format!("{name} must be an integer >= 1, got {}", shown_repr(value));
+    let not_an_integer = || pyo3::exceptions::PyTypeError::new_err(message());
     if value.is_instance_of::<PyBool>() {
-        return Err(not_positive());
+        return Err(not_an_integer());
     }
     let py = value.py();
     let index = match PyModule::import(py, "operator")?.call_method1("index", (value,)) {
         Ok(index) => index,
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
-            return Err(not_positive());
+            return Err(not_an_integer());
         }
         Err(err) => return Err(err),
     };
     if index.lt(1)? {
-        return Err(not_positive());
+        return Err(crate::exceptions::configuration_error(message()));
     }
     Ok(index)
 }
@@ -582,8 +588,10 @@ fn shown_repr(value: &Bound<'_, PyAny>) -> String {
 /// [`OracleError::Config`] is a rejected optimizer configuration
 /// (`population_size` too small for DE, empty PSO/QNG `bounds`, …), caught before
 /// any oracle call — unlike an oracle failure it has nowhere else to be logged,
-/// so it is logged here too; [`OracleError::Evaluation`] re-raises the oracle's
-/// recorded failure with its original class preserved.
+/// so it is logged here too — except an oracle that returned the wrong number
+/// of values or a non-finite gradient, a failure of the run's evaluation that
+/// is raised as `polypus.EvaluationError`; [`OracleError::Evaluation`]
+/// re-raises the oracle's recorded failure with its original class preserved.
 fn finish_optimization(
     py: Python<'_>,
     result: Result<TrainOutcome, OracleError>,
@@ -605,6 +613,15 @@ fn finish_optimization(
                     Err(other) => crate::exceptions::EvaluationError::new_err(other.to_string()),
                 },
             );
+        }
+        Err(OracleError::Config(
+            oracle_err @ (polypus_optimizers::OptimizerError::OracleLengthMismatch { .. }
+            | polypus_optimizers::OptimizerError::NonFiniteGradient { .. }),
+        )) => {
+            log::error!("run {id}: evaluation failed: {oracle_err}");
+            return Err(crate::exceptions::EvaluationError::new_err(
+                oracle_err.to_string(),
+            ));
         }
         Err(OracleError::Config(config_err)) => {
             log::error!("run {id}: optimizer rejected the configuration: {config_err}");
@@ -713,6 +730,7 @@ fn method_from_pyclass(
             target_step: spsa.target_step,
             alpha: spsa.alpha,
             gamma: spsa.gamma,
+            stability_constant: spsa.stability_constant,
             eval_interval: spsa.eval_interval,
         }));
     }
@@ -1665,8 +1683,9 @@ pub fn run_quantum_circuit<'py>(
 /// `seed` makes the optimizer reproducible (contract C-7): precedence is the
 /// explicit `seed` kwarg, then the optimizer object's `seed` field, then a fresh
 /// OS-entropy value. `External` has no `seed` field and its library owns its
-/// seed, so there the seed only fixes the shot sampling. On the native backend the same seed also drives shot
-/// sampling, so a native-backend run reproduces exactly. Returns a
+/// seed, so there the seed only fixes the shot sampling. On the native backend
+/// the same seed also drives shot sampling, so a native-backend run reproduces
+/// exactly. Returns a
 /// [`TrainResult`] exposing `best_params`, `best_fitness`, `iterations_run`,
 /// `converged`, `fitness_history`, `final_params`, `final_fitness`, the
 /// effective `seed` and the effective `id`.
@@ -1691,7 +1710,7 @@ pub fn run_quantum_circuit<'py>(
 /// it; Rotosolve starts from it as θ₀, the first point it measures. Without it
 /// every optimizer starts as before (contract C-5). `External` refuses it with
 /// `ValueError`, whatever the point: the external library chooses its start
-/// (give it to the library, or to the `initial_point` of a `polypus.external`
+/// (give it to the library, or to the `initial_point` of a `polypus.ask_tell`
 /// adapter).
 ///
 /// `final_shots` (default `None`) re-evaluates the best candidates once the
@@ -1701,8 +1720,9 @@ pub fn run_quantum_circuit<'py>(
 /// highest re-evaluated value (`best_params` on a tie) and `final_fitness`
 /// that value; both are `None` without it, and `best_params`, `best_fitness`
 /// and `fitness_history` are the same with and without it, seeded runs
-/// included (contract C-5). It must be an integer `>= 1` (not a `bool` or a
-/// `float`), otherwise `ValueError` before anything runs. The batch is sent
+/// included (contract C-5). It must be an integer `>= 1`, checked before
+/// anything runs: a smaller one raises `ValueError`, and a value that is not
+/// an integer (a `bool` or a `float` too) `TypeError`, as `shots` does. The batch is sent
 /// whatever stopped the optimizer, but not after an error or an interrupt; it
 /// is not part of the CUNQA walltime projection, and if it fails, `train`
 /// raises as for any batch.
@@ -4305,7 +4325,7 @@ mod tests {
     fn spsa_reaches_the_method_and_its_seed_is_read() {
         Python::initialize();
         Python::attach(|py| {
-            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99)))
+            let spsa = Py::new(py, Spsa::new(40, 8, 0.2, 1.2, 1.0, 0.25, 5, Some(99), 4.0))
                 .expect("the pyclass instantiates");
             let bound = spsa.bind(py);
             assert_eq!(method_seed(bound.as_any()), Some(99));
@@ -4317,6 +4337,7 @@ mod tests {
                     assert_eq!(cfg.target_step, 1.2);
                     assert_eq!(cfg.alpha, 1.0);
                     assert_eq!(cfg.gamma, 0.25);
+                    assert_eq!(cfg.stability_constant, 4.0);
                     assert_eq!(cfg.eval_interval, 5);
                 }
                 _ => panic!("a polypus.SPSA parses into Method::Spsa"),
@@ -4471,6 +4492,50 @@ mod tests {
             .expect_err("a rejected configuration is an error")
         });
         crate::exceptions::tests::assert_configuration_error(&err, "must be at least 4, got 3");
+    }
+
+    /// An oracle that returned the wrong number of values or a non-finite
+    /// gradient failed during the run: `polypus.EvaluationError`, not a
+    /// rejected configuration (issue #467).
+    #[test]
+    fn an_oracle_failure_reported_by_the_optimizer_is_an_evaluation_error() {
+        Python::initialize();
+        for (failure, message) in [
+            (
+                polypus_optimizers::OptimizerError::OracleLengthMismatch {
+                    expected: 3,
+                    got: 2,
+                },
+                "returned 2 fitness value(s) for 3 candidate(s)",
+            ),
+            (
+                polypus_optimizers::OptimizerError::NonFiniteGradient {
+                    index: 1,
+                    value: f64::NAN,
+                },
+                "gradient oracle returned NaN for parameter 1",
+            ),
+        ] {
+            Python::attach(|py| {
+                let err = finish_optimization(
+                    py,
+                    Err(OracleError::Config(failure)),
+                    0,
+                    "run".to_string(),
+                    Instant::now(),
+                )
+                .expect_err("an oracle failure is an error");
+                assert!(
+                    err.is_instance_of::<crate::exceptions::EvaluationError>(py),
+                    "{err}"
+                );
+                assert!(
+                    !err.is_instance_of::<pyo3::exceptions::PyValueError>(py),
+                    "{err}"
+                );
+                assert!(err.value(py).to_string().contains(message), "{err}");
+            });
+        }
     }
 
     /// Register `name` as a backend whose factory counts its calls in `builds`

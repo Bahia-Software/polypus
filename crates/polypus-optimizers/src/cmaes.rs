@@ -6,7 +6,8 @@ use crate::objective::EvaluationOracle;
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{
-    check_initial_point, check_oracle_len, recent_improvement, stagnated, wrap_angle,
+    check_initial_point, check_oracle_len, check_patience, recent_improvement, stagnated,
+    wrap_angle,
 };
 use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
@@ -149,6 +150,8 @@ pub struct AlgorithmCmaEs;
 /// - `population_size >= 2` when given: μ = ⌊λ/2⌋ must be at least 1.
 /// - `restarts` small enough that the largest population, `λ₀·2^restarts`,
 ///   fits in a `u32` like `population_size`.
+/// - `patience >= 1`: the stagnation rule compares a run's best fitness with
+///   `patience` generations earlier.
 /// - `initial_point`, when given, holds `dimensions` finite values.
 pub struct AlgorithmCmaEsArgs {
     /// Oracle that maps parameter vectors to fitness values (higher is better).
@@ -242,9 +245,11 @@ impl AlgorithmCmaEs {
         generations: u32,
         sigma0: f64,
         restarts: u32,
+        patience: u32,
         initial_point: Option<&[f64]>,
     ) -> Result<(), OptimizerError> {
         validate(dimensions, population_size, generations, sigma0, restarts)?;
+        check_patience(patience, "generations")?;
         check_initial_point(initial_point, dimensions as usize, None)
     }
 
@@ -266,6 +271,7 @@ impl AlgorithmCmaEs {
         } = args;
 
         let schedule = validate(dimensions, population_size, generations, sigma0, restarts)?;
+        check_patience(patience, "generations")?;
         let n = dimensions as usize;
         check_initial_point(initial_point.as_deref(), n, None)?;
         let budget = generations as usize;

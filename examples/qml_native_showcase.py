@@ -1,16 +1,18 @@
-"""Native ``polypus.qml`` showcase: sixteen scenarios, each one verified.
+"""Native ``polypus.qml`` showcase: twenty scenarios, each one verified.
 
 ``examples/basic_qml.py`` shows the *Qiskit* form of QML (a ``QuantumCircuit``
 feature map and ansatz scored by your own ``expectation_function``). This script
 is its counterpart for **native models**, ``polypus.qml.Model``: all four
 encoders (angle, amplitude, IQP and computational basis), data re-uploading
-between trainable layers, the QCNN layers, every optimizer (DE, PSO, CMA-ES, QNG
-and Adam with its exact parameter-shift gradient), readouts in the X, Y and Z
-bases, all four decisions (sign, threshold, argmax and raw), classification,
-regression and unsupervised training of a Hamiltonian's ground state, exact and
-sampled runs, minibatches, inference and saving, the ``Dataset`` utilities,
-weighted observables, the Aer backend beside the native one, and the convergence
-curve.
+between trainable layers, the QCNN layers, every optimizer (DE, PSO, CMA-ES,
+QNG, Adam with its exact parameter-shift gradient and its momentum rule, SPSA,
+Rotosolve, and an optimizer of your own through ``External``), readouts in the
+X, Y and Z bases, all four decisions (sign, threshold, argmax and raw), all five
+losses (hinge, binary and categorical cross-entropy, squared error and the
+unsupervised expectation), classification, regression and the ground state of
+a Hamiltonian, exact and sampled runs, minibatches, inference and saving, the
+``Dataset`` utilities, weighted observables, the Aer backend beside the native
+one with and without a noise model, and the convergence curve.
 
 Every scenario *checks learning*, not just that nothing raised: the toy datasets
 are two or three well-separated clusters in ``[0, π]`` (or, for the
@@ -38,18 +40,21 @@ It prints a ✅/❌ table and exits non-zero if any scenario failed.
 
 import math
 import os
+import random
 import sys
 import tempfile
 import time
 
 import polypus
 from polypus import qml
+from qiskit_aer.noise import NoiseModel, depolarizing_error
 
 PI = math.pi
 
 # Every run uses the native simulator, the default on infrastructure="local":
 # seeded end to end by Polypus (contract C-7) and the only backend with
-# `exact=True`. Scenario 16 also runs a trained model on Aer.
+# `exact=True`. Scenario 16 also runs a trained model on Aer, with and without
+# a noise model.
 Z, X, Y = qml.Z, qml.X, qml.Y
 
 
@@ -967,16 +972,18 @@ def scenario_15_regression_raw():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scenario 16: one trained model, three ways to run it
+# Scenario 16: one trained model, four ways to run it
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def scenario_16_backends():
     """Trained on the native simulator, then run exactly, sampled on the native
-    simulator and sampled on **Aer**: the same ``TrainedModel``, three
-    executions, one answer. ``backend=`` is the only change, as for any
-    Polypus circuit; CUNQA and QMIO take the same model through
-    ``infrastructure=``."""
+    simulator, sampled on **Aer**, and sampled on Aer with a **noise model**:
+    the same ``TrainedModel``, four executions, one answer. ``backend=`` is the
+    only change, as for any Polypus circuit; CUNQA and QMIO take the same model
+    through ``infrastructure=``. Depolarizing noise shrinks every expectation
+    towards 0, but a model whose samples sit far from the decision boundary
+    keeps its decisions."""
     x, y = two_clusters_2f()
     model = sign_model_2q()
     result = model.fit(
@@ -997,6 +1004,14 @@ def scenario_16_backends():
     aer_z0 = [z0(c) for c in trained.run(x, shots=4096, seed=1, backend="aer").counts]
     exact_z0 = [z0(p) for p in trained.run(x, exact=True).probabilities]
     gap = max(abs(a - e) for a, e in zip(aer_z0, exact_z0))
+    # 2% depolarizing error on every one-qubit rotation, 5% on every CX.
+    noise = NoiseModel()
+    noise.add_all_qubit_quantum_error(depolarizing_error(0.02, 1), ["ry", "rz"])
+    noise.add_all_qubit_quantum_error(depolarizing_error(0.05, 2), ["cx"])
+    noisy_args = {"shots": 4096, "seed": 1, "backend": "aer", "noise_model": noise}
+    noisy = trained.predict(x, **noisy_args)
+    noisy_z0 = [z0(c) for c in trained.run(x, **noisy_args).counts]
+    shrink = sum(map(abs, noisy_z0)) / sum(map(abs, exact_z0))
     checks = [
         params_check(model, result),
         ("exact predictions == labels", exact == y),
@@ -1004,11 +1019,229 @@ def scenario_16_backends():
         ("Aer sampled == exact", aer == exact),
         # 4096 shots: a standard error of at most 1/64 per expectation.
         ("Aer ⟨Z₀⟩ within 0.06 of exact", gap < 0.06),
+        ("noisy Aer == exact", noisy == exact),
+        ("noise shrinks |⟨Z₀⟩|", shrink < 0.95),
     ] + history_checks(result)
     return verdict(
         checks,
-        f"exact / native shots / Aer shots agree on {len(x)} samples; "
-        f"max |⟨Z₀⟩ Aer − exact|={gap:.4f}",
+        f"exact / native / Aer / noisy Aer agree on {len(x)} samples; "
+        f"max |⟨Z₀⟩ Aer − exact|={gap:.4f}, noise keeps {shrink:.0%} of |⟨Z₀⟩|",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 17: SPSA on sampled results
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_17_spsa_shots():
+    """``SPSA`` on **sampled** results, the optimizer made for real hardware.
+
+    Each SPSA step costs two evaluations whatever the number of parameters: it
+    perturbs every parameter at once in a random direction and reads the slope
+    from the difference. On a QPU that is far cheaper than a parameter-shift
+    gradient (two circuits per parameter), and SPSA tolerates the shot noise.
+    As in scenario 3, learning is judged on the learned parameters, scored
+    without noise afterwards.
+    """
+    x, y = two_clusters_2f()
+    model = sign_model_2q(reps=1)
+    result = model.fit(
+        x,
+        y,
+        method=polypus.SPSA(max_iters=200),
+        loss="hinge",
+        shots=1024,
+        seed=5,
+        id="showcase_17",
+    )
+    acc, _ = accuracy(model.bind(result.best_params), x, y)
+    checks = [
+        params_check(model, result),
+        ("shot fitness > -0.35", result.best_fitness > -0.35),
+        ("train accuracy == 1.0", acc == 1.0),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"SPSA/shots=1024: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
+        f"iters={result.iterations_run}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 18: Rotosolve, and where it does not apply
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_18_rotosolve():
+    """``Rotosolve`` solves for one parameter at a time in closed form.
+
+    With ``loss="expectation"`` the fitness is a sinusoid of each parameter
+    when every parameter is the angle of one rotation, so three measurements
+    give that parameter's exact optimum. On scenario 12's Hamiltonian it
+    reaches the ground state in a few sweeps, with its default settings. Where that assumption fails, a
+    supervised loss or a convolution that shares its parameters across qubit
+    pairs, ``fit`` refuses before anything runs with a
+    ``polypus.ConfigurationError``.
+    """
+    hamiltonian = qml.Observable([(-1.0, Z(0) @ Z(1)), (-0.5, Z(1))])
+    model = qml.Model(
+        qml.Encoder(2).angle_encoder("ry"),
+        qml.Ansatz(2).hardware_efficient(1),
+        qml.Readout([hamiltonian]),
+    )
+    result = model.fit(
+        [[0.0, 0.0]],
+        method=polypus.Rotosolve(),
+        exact=True,
+        seed=4,
+        id="showcase_18",
+    )
+
+    def refused(fit):
+        try:
+            fit()
+        except polypus.ConfigurationError as error:
+            return "Rotosolve" in str(error)
+        return False
+
+    x, y = two_clusters_2f()
+    qcnn = qml.Model(
+        qml.Encoder(4).angle_encoder("ry"),
+        qml.Ansatz(4).conv("basic"),
+        qml.Readout([Z(0)]),
+    )
+    checks = [
+        params_check(model, result),
+        ("energy within 0.001 of E₀ = -1.5", result.best_fitness > 1.499),
+        ("never above the true maximum", result.best_fitness <= 1.5 + 1e-9),
+        (
+            "a supervised loss is refused",
+            refused(
+                lambda: sign_model_2q().fit(
+                    x, y, method=polypus.Rotosolve(), loss="hinge", exact=True
+                )
+            ),
+        ),
+        (
+            "a shared-parameter convolution is refused",
+            refused(
+                lambda: qcnn.fit(
+                    [[0.1, 0.2, 0.3, 0.4]], method=polypus.Rotosolve(), exact=True
+                )
+            ),
+        ),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"Rotosolve/expectation: E={-result.best_fitness:+.4f} (E₀=-1.5) "
+        f"sweeps={result.iterations_run // model.num_params}; hinge and conv refused",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 19: an optimizer of your own, through External
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class OnePlusLambda:
+    """A (1+λ) evolution strategy in plain Python, in the ask/tell form
+    ``polypus.External`` runs: ``ask()`` proposes λ Gaussian mutations of the
+    best point so far, ``tell()`` keeps the best of them if it is no worse,
+    widening the step after a success and narrowing it after a failure. The
+    values are fitness to maximise, like every Polypus optimizer's."""
+
+    def __init__(self, dimensions, offspring, seed):
+        self.rng = random.Random(seed)
+        self.offspring = offspring
+        self.sigma = 0.5
+        self.parent = [self.rng.uniform(0.0, 2 * PI) for _ in range(dimensions)]
+        self.parent_value = -math.inf
+
+    def ask(self):
+        return [
+            [p + self.rng.gauss(0.0, self.sigma) for p in self.parent]
+            for _ in range(self.offspring)
+        ]
+
+    def tell(self, candidates, values):
+        best = max(range(len(values)), key=values.__getitem__)
+        if values[best] >= self.parent_value:
+            self.parent, self.parent_value = candidates[best], values[best]
+            self.sigma *= 1.2
+        else:
+            self.sigma *= 0.85
+
+
+def scenario_19_external_optimizer():
+    """``polypus.External`` runs any ask/tell optimizer, here the twenty lines
+    of ``OnePlusLambda`` above (Optuna, Nevergrad and pycma plug in the same way
+    through ``polypus.ask_tell``). Each ``ask()`` is one batch, spread over the
+    QPUs like a DE generation, and ``max_evaluations`` caps the candidates."""
+    x, y = two_clusters_2f()
+    model = sign_model_2q(reps=1)
+    offspring, batches = 8, 40
+    result = model.fit(
+        x,
+        y,
+        method=polypus.External(
+            OnePlusLambda(model.num_params, offspring, seed=3),
+            max_evaluations=offspring * batches,
+        ),
+        loss="hinge",
+        exact=True,
+        seed=1,
+        id="showcase_19",
+    )
+    acc, _ = accuracy(model.bind(result.best_params), x, y)
+    checks = [
+        params_check(model, result),
+        ("one iteration per batch", result.iterations_run == batches),
+        ("hinge fitness > -0.1", result.best_fitness > -0.1),
+        ("train accuracy == 1.0", acc == 1.0),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"External (1+8)-ES/hinge: fitness={result.best_fitness:+.4f} acc={acc:.0%} "
+        f"batches={result.iterations_run}",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario 20: binary cross-entropy, Adam with momentum
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def scenario_20_binary_cross_entropy():
+    """``loss="binary_cross_entropy"`` with labels in ``{0, 1}``: the model's
+    probability of class 1 is ``p = (1 + ⟨Z₀⟩)/2``, and the loss is the log
+    loss of that probability. Trained with ``Adam(rule="momentum")``, plain
+    gradient ascent with momentum, here on the exact gradient. A ``sign``
+    decision then answers ``+1`` for class 1 and ``−1`` for class 0."""
+    x, y = two_clusters_2f()
+    labels = [(1.0 + label) / 2.0 for label in y]
+    model = sign_model_2q(reps=1)
+    result = model.fit(
+        x,
+        labels,
+        method=polypus.Adam(max_iters=100, learning_rate=0.05, rule="momentum"),
+        loss="binary_cross_entropy",
+        exact=True,
+        seed=8,
+        id="showcase_20",
+    )
+    acc, _ = accuracy(model.bind(result.best_params), x, y)
+    checks = [
+        ("labels are {0, 1}", set(labels) == {0.0, 1.0}),
+        params_check(model, result),
+        # Fitness is −mean log loss; a coin flip scores −ln 2 ≈ −0.69.
+        ("log loss < 0.05", result.best_fitness > -0.05),
+        ("train accuracy == 1.0", acc == 1.0),
+    ] + history_checks(result)
+    return verdict(
+        checks,
+        f"Adam(momentum)/BCE: log loss={-result.best_fitness:.4f} acc={acc:.0%} "
+        f"iters={result.iterations_run}",
     )
 
 
@@ -1032,7 +1265,11 @@ SCENARIOS = [
     ("13. Data re-uploading", scenario_13_data_reuploading),
     ("14. CMA-ES + threshold decision", scenario_14_cmaes_threshold),
     ("15. Regression, raw decision", scenario_15_regression_raw),
-    ("16. Native, sampled and Aer runs", scenario_16_backends),
+    ("16. Native, sampled, Aer and noisy runs", scenario_16_backends),
+    ("17. SPSA (shots)", scenario_17_spsa_shots),
+    ("18. Rotosolve, and where it is refused", scenario_18_rotosolve),
+    ("19. Your own optimizer through External", scenario_19_external_optimizer),
+    ("20. Binary cross-entropy + Adam momentum", scenario_20_binary_cross_entropy),
 ]
 
 

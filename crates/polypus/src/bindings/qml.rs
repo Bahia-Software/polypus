@@ -36,6 +36,7 @@ use super::{
     validate_id, validate_shots_and_qpus, OptionsArg, RunResult,
 };
 use crate::evaluation::{Label, MinibatchConfig, OracleErrorSlot, QmlOracleFactory, QmlSource};
+use crate::exceptions::configuration_error;
 use crate::infrastructure::execution_config::random_seed;
 use crate::infrastructure::{
     BoundCircuit, Counts, ExecutionConfig, Infrastructure, InfrastructureError,
@@ -48,6 +49,15 @@ use crate::orchestration::{Resources, RunCircuitFlow, Scheduler, TrainFlow};
 /// `to_py_err` in [`circuit`](super::circuit) does for `CircuitError`.
 fn validation_to_py_err(e: ValidationError) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// A [`ValidationError`] found while `Model.fit`, `TrainedModel.predict` or
+/// `run` checks its arguments (the rows, the labels, the model against them),
+/// as a `polypus.ConfigurationError`, which every argument check of an entry
+/// point raises (#418). The builders keep [`validation_to_py_err`], a plain
+/// `ValueError`, as `polypus.Circuit`'s do.
+fn validation_to_config_err(e: ValidationError) -> PyErr {
+    configuration_error(e.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,7 +155,7 @@ fn parse_loss(loss: &str) -> PyResult<Loss> {
         "hinge" => Ok(Loss::Hinge),
         "categorical_cross_entropy" => Ok(Loss::CategoricalCrossEntropy),
         "expectation" => Ok(Loss::Expectation),
-        other => Err(PyValueError::new_err(format!(
+        other => Err(configuration_error(format!(
             "unknown loss '{other}'; expected \"squared_error\", \"binary_cross_entropy\", \
              \"hinge\", \"categorical_cross_entropy\" or \"expectation\""
         ))),
@@ -167,7 +177,7 @@ fn check_rotosolve_model(
     loss: Loss,
 ) -> PyResult<()> {
     if loss != Loss::Expectation {
-        return Err(PyValueError::new_err(format!(
+        return Err(configuration_error(format!(
             "polypus.Rotosolve trains a native model only with loss=\"expectation\": with \
              loss=\"{}\" the fitness is not linear in the measured distribution, so it is not \
              a sinusoid of each parameter; train this model with another optimizer",
@@ -176,9 +186,9 @@ fn check_rotosolve_model(
     }
     let template = compiled
         .template_for(dataset.sample(0))
-        .map_err(qml_to_py_err)?;
+        .map_err(qml_to_config_err)?;
     template.check_single_frequency().map_err(|problem| {
-        PyValueError::new_err(format!(
+        configuration_error(format!(
             "polypus.Rotosolve cannot train this model: {problem}. Rotosolve needs every \
              trainable parameter to be the angle of exactly one rotation, and a convolution or \
              pooling layer shares each of its parameters across qubit pairs; train this model \
@@ -996,8 +1006,10 @@ impl Model {
     ///   `"hinge"`, or `"categorical_cross_entropy"` for an `"argmax"` readout.
     ///   Without labels the run maximises the readout's first observable
     ///   (`loss=None` or `"expectation"`); a supervised loss is then an error.
-    /// - **`method`** is any optimizer (`DE`, `PSO`, `QNG`, `CMAES`, `Adam`);
-    ///   Adam gets the exact parameter-shift gradient.
+    /// - **`method`** is any optimizer (`DE`, `PSO`, `QNG`, `CMAES`, `Adam`,
+    ///   `SPSA`, `Rotosolve`, `External`); Adam gets the exact parameter-shift
+    ///   gradient. `Rotosolve` needs `loss="expectation"` and every trainable
+    ///   parameter in one rotation.
     /// - **`exact=True`** uses exact probabilities instead of shots (then `shots`
     ///   does not matter), on `infrastructure="local"` with the native simulator
     ///   only.
@@ -1010,8 +1022,9 @@ impl Model {
     ///   optimizer, the shots and the minibatches (C-7), and `id` is a prefix to
     ///   which a UUID is appended (C-9).
     ///
-    /// Every check runs before a backend exists. The fitness is the negated
-    /// mean loss over the samples, which the optimizers maximise.
+    /// Every check runs before a backend exists and raises
+    /// `polypus.ConfigurationError` (a `ValueError`). The fitness is the
+    /// negated mean loss over the samples, which the optimizers maximise.
     #[pyo3(signature = (
         x, y=None, *, method, loss=None, shots=1024, infrastructure="local", n_qpus=1,
         nodes=1, cores_per_qpu=2, walltime=None, options=None, sim_method="automatic",
@@ -1047,7 +1060,7 @@ impl Model {
         let effective_seed = resolve_optimizer_seed(seed, method_seed(method), random_seed)?;
         let backend = resolve_backend(backend, infrastructure);
         if exact && !(infrastructure == "local" && is_native_backend(backend)) {
-            return Err(PyValueError::new_err(
+            return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
             ));
@@ -1059,19 +1072,19 @@ impl Model {
             .spec
             .clone()
             .compile(dataset.num_features())
-            .map_err(validation_to_py_err)?;
+            .map_err(validation_to_config_err)?;
         // Rotosolve's step is exact only on single-frequency models with a
         // linear fitness: checked before any backend, and so any CUNQA
         // allocation, exists, as `train` checks a circuit.
         if is_rotosolve(method) {
             check_rotosolve_model(&compiled, &dataset, loss)?;
         }
-        let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_py_err)?;
+        let problem = QmlProblem::new(compiled, dataset, loss).map_err(validation_to_config_err)?;
         let num_samples = problem.num_circuits();
         // A batch as large as the training set is the run without minibatches.
         let minibatch = match batch_size {
             Some(size) if size == 0 || size >= num_samples => {
-                return Err(PyValueError::new_err(format!(
+                return Err(configuration_error(format!(
                     "batch_size must satisfy 1 <= batch_size < {num_samples} (the number of \
                      training samples), got {size}"
                 )));
@@ -1080,7 +1093,7 @@ impl Model {
             None => None,
         };
         let dimensions = u32::try_from(self.num_params).map_err(|_| {
-            PyValueError::new_err(format!(
+            configuration_error(format!(
                 "the model has {} trainable parameters, more than an optimizer can search",
                 self.num_params
             ))
@@ -1169,7 +1182,7 @@ fn native_dataset(
 ) -> PyResult<(polypus_qml::Dataset, bool)> {
     if let Ok(dataset) = x.cast::<PyDataset>() {
         if y.is_some() {
-            return Err(PyValueError::new_err(
+            return Err(configuration_error(
                 "x is a polypus.qml.Dataset, which carries its own labels; pass y only with \
                  plain rows",
             ));
@@ -1195,26 +1208,27 @@ fn native_dataset(
     // Unlabeled: zeros satisfy the pure crate; `labeled` keeps a supervised loss
     // from ever training against them (plan F3).
     let labels = labels.unwrap_or_else(|| vec![0.0; rows.len()]);
-    let dataset = polypus_qml::Dataset::from_rows(&rows, &labels).map_err(validation_to_py_err)?;
+    let dataset =
+        polypus_qml::Dataset::from_rows(&rows, &labels).map_err(validation_to_config_err)?;
     Ok((dataset, labeled))
 }
 
 /// The loss a run trains with (plans F2 and F3): with labels, a supervised loss,
 /// which must be named; without labels, `expectation`. Every other pairing is a
-/// `ValueError`, so labels are never ignored and a supervised loss never trains
+/// `polypus.ConfigurationError`, so labels are never ignored and a supervised loss never trains
 /// against made-up labels.
 fn resolve_loss(loss: Option<Loss>, labeled: bool) -> PyResult<Loss> {
     match (loss, labeled) {
         (None | Some(Loss::Expectation), false) => Ok(Loss::Expectation),
-        (Some(loss), false) => Err(PyValueError::new_err(format!(
+        (Some(loss), false) => Err(configuration_error(format!(
             "loss=\"{}\" needs labels: pass y (or a labeled Dataset), or use \
              loss=\"expectation\" to maximise the readout",
             loss_name(loss)
         ))),
-        (None, true) => Err(PyValueError::new_err(
+        (None, true) => Err(configuration_error(
             "the training set has labels, so fit needs a loss, e.g. loss=\"hinge\"",
         )),
-        (Some(Loss::Expectation), true) => Err(PyValueError::new_err(
+        (Some(Loss::Expectation), true) => Err(configuration_error(
             "loss=\"expectation\" does not use labels: drop y (or use a Dataset without \
              labels), or choose a supervised loss",
         )),
@@ -1291,10 +1305,16 @@ enum RowResults {
     Exact(Vec<HashMap<String, f64>>),
 }
 
-/// A `polypus-qml` [`QmlError`] (binding a row, reading a result) as a
-/// `ValueError`: at inference it is always about the input.
+/// A `polypus-qml` [`QmlError`] from reading a result as a `ValueError`: at
+/// inference it is always about the input.
 fn qml_to_py_err(e: QmlError) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// A [`QmlError`] from binding a row before anything runs, as a
+/// `polypus.ConfigurationError`, like [`validation_to_config_err`].
+fn qml_to_config_err(e: QmlError) -> PyErr {
+    configuration_error(e.to_string())
 }
 
 /// A [`Model`] bound to trained parameters, from [`Model::bind`]: what runs
@@ -1315,7 +1335,8 @@ pub struct TrainedModel {
 impl TrainedModel {
     /// Bind every row of `x` to the parameters and run the circuits: sampled
     /// through the scheduler, or, with `exact`, as exact probabilities on the
-    /// native simulator. Every check runs before a backend exists.
+    /// native simulator. Every check runs before a backend exists and raises
+    /// `polypus.ConfigurationError`.
     fn run_rows(&self, x: &Bound<'_, PyAny>, exec: Execution<'_, '_>) -> PyResult<RowsRun> {
         let py = x.py();
         let start = Instant::now();
@@ -1328,7 +1349,7 @@ impl TrainedModel {
         )?;
         let backend = resolve_backend(exec.backend, exec.infrastructure);
         if exec.exact && !(exec.infrastructure == "local" && is_native_backend(backend)) {
-            return Err(PyValueError::new_err(
+            return Err(configuration_error(
                 "exact=True needs infrastructure=\"local\" and backend=\"polypus\": only the \
                  native simulator computes exact probabilities",
             ));
@@ -1338,20 +1359,20 @@ impl TrainedModel {
         let compiled = self
             .inner
             .compile(rows.num_features())
-            .map_err(validation_to_py_err)?;
+            .map_err(validation_to_config_err)?;
         let circuits = (0..rows.num_samples())
             .map(|i| {
                 compiled
                     .bind(rows.sample(i), self.inner.params())
                     .map(BoundCircuit::Native)
-                    .map_err(qml_to_py_err)
+                    .map_err(qml_to_config_err)
             })
             .collect::<PyResult<Vec<_>>>()?;
         // As in `run_quantum_circuit` (C-7): `qmio` is hardware, so a seed there
         // would be silently ineffective.
         let seed = if exec.infrastructure == "qmio" {
             if exec.seed.is_some() {
-                return Err(PyValueError::new_err(
+                return Err(configuration_error(
                     "seed is not supported for the 'qmio' infrastructure (real quantum hardware)",
                 ));
             }
