@@ -95,7 +95,7 @@ use std::f64::consts::TAU;
 ///
 /// There is no early stop: the run makes `max_iters` iterations and, like
 /// [`AlgorithmQNG`](crate::AlgorithmQNG), reports `converged = false`. Only an
-/// [`IterationObserver`](crate::IterationObserver) can stop it sooner; the
+/// [`IterationObserver`] can stop it sooner; the
 /// final θ is measured within the last iteration, before the observer sees
 /// it, so a run stopped earlier ends without measuring the θ its last step
 /// reached.

@@ -121,7 +121,7 @@ impl FromStr for AdamRule {
 /// best fitness (a `NaN` never wins), and `fitness_history` holds the best
 /// measured up to each iteration, the final `θ` counted in the last entry.
 /// The final `θ` is measured within the last iteration, before an
-/// [`IterationObserver`](crate::IterationObserver) sees it; a run the
+/// [`IterationObserver`] sees it; a run the
 /// observer stops earlier ends without measuring the `θ` its last step
 /// reached, and reports `converged = false`.
 ///

@@ -76,7 +76,7 @@ pub trait AskTell: Send + Sync {
 /// the last is `best_fitness`; `iterations_run` counts the batches scored and
 /// told. `converged` is `true` when the optimizer ended the run with an empty
 /// `ask`, and `false` when the budget did, or an
-/// [`IterationObserver`](crate::IterationObserver), which sees each batch once
+/// [`IterationObserver`], which sees each batch once
 /// it is told and stops the run without another `ask`.
 ///
 /// # Errors

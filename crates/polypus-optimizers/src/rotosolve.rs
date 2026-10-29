@@ -86,7 +86,7 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 /// for `best_params` like any measured point; its value joins the last entry
 /// of `fitness_history`. The stop is decided before it, so that entry can be
 /// higher than the one the stop judged. It is measured within the last step,
-/// before an [`IterationObserver`](crate::IterationObserver) sees it; a run the
+/// before an [`IterationObserver`] sees it; a run the
 /// observer stops on an earlier step ends without measuring the point that
 /// step reached, and reports `converged = false`.
 ///
