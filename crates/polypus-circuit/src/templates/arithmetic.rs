@@ -15,7 +15,7 @@
 //! algorithm builds on the same blocks without their checks or intermediate
 //! circuits.
 
-use super::emit::{circuit_from_ops, Op};
+use super::emit::{circuit_from_ops, emit_qft, Op};
 use super::MAX_QFT_QUBITS;
 use crate::{CircuitError, ParameterizedCircuit};
 use std::f64::consts::PI;
@@ -132,6 +132,89 @@ pub(crate) fn emit_phase_adder(
             out.extend(angles().map(|(qubit, theta)| Op::Cp(c1, qubit, theta / 2.0)));
         }
     }
+}
+
+/// Beauregard's modular adder (figure 5 of "Circuit for Shor's algorithm
+/// using 2n+3 qubits", 2003): add `addend` modulo `modulus` to a register in
+/// the Fourier basis, when both controls are `1`.
+///
+/// With `n` the bit length of `modulus`, the qubits are `[c1, c2, b_0..b_n,
+/// anc]`: the two controls, an `(n + 1)`-qubit register (one bit above the
+/// modulus, for the overflow) and an ancilla, `n + 4` qubits in all. `addend`
+/// is reduced modulo `modulus`. For a register holding `b < modulus`, the
+/// circuit leaves `(b + addend) mod modulus` when both controls are `1` and
+/// `b` otherwise, and returns the ancilla to `|0⟩`; for `b ≥ modulus` both the
+/// register and the ancilla are undefined. It has `2m² + 13m + 10` gates for
+/// `m = n + 1`, no free parameters and no measurements.
+///
+/// ```
+/// use polypus_circuit::templates::arithmetic::modular_phase_adder;
+///
+/// let qc = modular_phase_adder(7, 15).unwrap();
+/// assert_eq!(qc.num_qubits(), 8);
+/// assert_eq!(qc.gates().len(), 125);
+/// ```
+///
+/// # Errors
+///
+/// [`CircuitError::InvalidTemplateArgument`] for a `modulus` below 2.
+pub fn modular_phase_adder(
+    addend: u64,
+    modulus: u64,
+) -> Result<ParameterizedCircuit, CircuitError> {
+    if modulus < 2 {
+        return Err(CircuitError::invalid_template_argument(
+            "modular_phase_adder",
+            "modulus",
+            format!("must be at least 2, got {modulus}"),
+        ));
+    }
+    let m = bit_length(modulus) + 1;
+    let register: Vec<usize> = (2..2 + m).collect();
+    let anc = 2 + m;
+    let mut ops = Vec::with_capacity(2 * m * m + 13 * m + 10);
+    emit_modular_phase_adder(&mut ops, (0, 1), &register, anc, addend % modulus, modulus);
+    circuit_from_ops(m + 3, &ops)
+}
+
+/// Emit [`modular_phase_adder`] on `register`, controlled by `controls` and
+/// with the ancilla `anc`.
+///
+/// Preconditions, not checked: `modulus ≥ 2`, `addend < modulus`, `register`
+/// has `bit_length(modulus) + 1` qubits, and the controls, the register and
+/// `anc` are distinct qubits.
+pub(crate) fn emit_modular_phase_adder(
+    out: &mut Vec<Op>,
+    controls: (usize, usize),
+    register: &[usize],
+    anc: usize,
+    addend: u64,
+    modulus: u64,
+) {
+    let (c1, c2) = controls;
+    let top = register[register.len() - 1];
+    let controlled = Controls::Two(c1, c2);
+    // b + a, minus N: the top bit flags b + a < N, which the ancilla records
+    // and undoes by adding N back.
+    emit_phase_adder(out, controlled, register, addend, false);
+    emit_phase_adder(out, Controls::Zero, register, modulus, true);
+    emit_qft(out, register, true, false);
+    out.push(Op::Cx(top, anc));
+    emit_qft(out, register, false, false);
+    emit_phase_adder(out, Controls::One(anc), register, modulus, false);
+    // Subtracting a again leaves the top bit clear exactly when the ancilla
+    // is set, which resets the ancilla; adding a back restores the sum.
+    emit_phase_adder(out, controlled, register, addend, true);
+    emit_qft(out, register, true, false);
+    out.extend([Op::X(top), Op::Cx(top, anc), Op::X(top)]);
+    emit_qft(out, register, false, false);
+    emit_phase_adder(out, controlled, register, addend, false);
+}
+
+/// The number of bits of `n`: `0` for `0`, else one more than the index of its
+/// highest set bit.
+pub(crate) fn bit_length(n: u64) -> usize {
+    (u64::BITS - n.leading_zeros()) as usize
 }
 
 /// The phase Draper's adder gives qubit `j` of the register to add `addend`:

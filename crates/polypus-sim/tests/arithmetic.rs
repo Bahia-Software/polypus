@@ -2,7 +2,7 @@
 //! every basis state they are specified for: each block must map a basis state
 //! to the basis state its arithmetic predicts, with the controls untouched.
 
-use polypus_circuit::templates::arithmetic::phase_adder;
+use polypus_circuit::templates::arithmetic::{modular_phase_adder, phase_adder};
 use polypus_circuit::templates::qft_with_options;
 use polypus_circuit::{GateInstruction as G, ParameterizedCircuit};
 use polypus_sim::{Simulator, StatevectorSimulator};
@@ -82,6 +82,29 @@ fn phase_adder_adds_modulo_two_to_the_m() {
                         output_state(&qc, input),
                         expected,
                         "a = {a}, b = {b}, controls = {controls:0num_controls$b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn modular_phase_adder_adds_modulo_n() {
+    for modulus in [15usize, 21] {
+        // [c1, c2, b_0..b_n, anc]: an (n + 1)-qubit register after the controls.
+        let n = (usize::BITS - modulus.leading_zeros()) as usize;
+        let register: Vec<usize> = (2..n + 3).collect();
+        for a in 0..modulus {
+            let block = modular_phase_adder(a as u64, modulus as u64).unwrap();
+            let qc = in_fourier_basis(&block, &register);
+            for controls in 0..4 {
+                for b in 0..modulus {
+                    let sum = if controls == 3 { (a + b) % modulus } else { b };
+                    assert_eq!(
+                        output_state(&qc, controls | (b << 2)),
+                        controls | (sum << 2),
+                        "N = {modulus}, a = {a}, b = {b}, controls = {controls:02b}"
                     );
                 }
             }

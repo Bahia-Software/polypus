@@ -2,7 +2,7 @@
 //! (`templates::arithmetic`), checked gate by gate. Their action on basis
 //! states is checked by simulation in `polypus-sim/tests/arithmetic.rs`.
 
-use polypus_circuit::templates::arithmetic::phase_adder;
+use polypus_circuit::templates::arithmetic::{modular_phase_adder, phase_adder};
 use polypus_circuit::templates::MAX_QFT_QUBITS;
 use polypus_circuit::{CircuitError, GateInstruction as G, GateParam::Fixed};
 use std::f64::consts::PI;
@@ -71,4 +71,25 @@ fn phase_adder_validates_its_arguments() {
             max_qubits: MAX_QFT_QUBITS
         }
     );
+}
+
+#[test]
+fn modular_phase_adder_gate_count() {
+    let qc = modular_phase_adder(7, 15).unwrap();
+    assert_eq!((qc.num_qubits(), qc.gates().len()), (8, 125));
+    let qc = modular_phase_adder(5, 21).unwrap();
+    assert_eq!((qc.num_qubits(), qc.gates().len()), (9, 160));
+}
+
+#[test]
+fn modular_phase_adder_validates_the_modulus() {
+    for modulus in [0, 1] {
+        assert!(matches!(
+            modular_phase_adder(1, modulus),
+            Err(CircuitError::InvalidTemplateArgument {
+                argument: "modulus",
+                ..
+            })
+        ));
+    }
 }
