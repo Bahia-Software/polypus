@@ -36,11 +36,13 @@ class ShorResult:
     ``factors`` is ``(p, q)`` with ``p <= q`` and ``p * q == n``, or ``None``
     when no attempt split ``n``. ``method`` says how they were found:
     ``"even"``, ``"perfect_power"`` or ``"gcd"`` without running a circuit,
-    ``"quantum"`` from the order the circuit measured, and ``None`` without
-    factors. ``a`` is the base of the last attempt (``None`` for the first two
-    shortcuts), ``order`` its order when the counts gave it, and ``counts`` the
-    counts of its run (``None`` when it ran no circuit). ``attempts`` is the
-    number of circuits run.
+    ``"quantum"`` from an order read off the counts of a run, and ``None``
+    without factors. ``a`` is the base of the last attempt (``None`` for the
+    first two shortcuts), ``order`` its order when the counts gave it, and
+    ``counts`` the counts of its run (``None`` when it ran no circuit).
+    ``attempts`` is the number of circuits run.
+
+    ``"quantum"`` does not prove that the circuit worked: see :func:`factor`.
     """
 
     n: int
@@ -69,10 +71,17 @@ def factor(
     perfect power and a base sharing a factor with ``n`` are split without a
     circuit. Otherwise each attempt builds
     ``shor_order_finding(a, n, counting_qubits)``, measures its counting
-    register, runs it ``shots`` times with
+    register, runs it ``shots`` times (1 to ``2**32 - 1``) with
     ``polypus.run_quantum_circuit(qc, shots, infrastructure, **run_kwargs)``
-    (``backend``, ``options``...) and reads the order of ``a`` from the most
-    frequent outcomes. Errors of the run propagate.
+    (``backend``, ``options``...) and reads the order of ``a`` from the
+    outcomes, most frequent first. Errors of the run propagate.
+
+    Reading the order tries every outcome, and several multiples of each order
+    an outcome suggests, so for the ``n`` a simulator can run it finds the
+    order even from counts that carry no signal: ``method="quantum"`` says
+    where the order was read, not that the circuit worked. The evidence that
+    it did is in ``counts``, which a working circuit concentrates near the
+    multiples of ``2**counting_qubits / order``.
 
     ``a`` (between 2 and ``n - 1``) is the base of every attempt when given,
     and ``factor`` stops as soon as it finds its order, even one that does not
@@ -86,10 +95,12 @@ def factor(
     run gets a seed, which ``qmio`` (real hardware) refuses.
 
     ``counting_qubits`` is between 1 and ``2 * n.bit_length()``, its default;
-    fewer save qubits and find the order less often. The circuit has
-    ``counting_qubits + 2 * n.bit_length() + 2`` qubits: with the local
-    simulators, which hold 30 qubits, and the default counting register, the
-    practical limit is ``n < 128``.
+    fewer make each run cheaper and its counts less precise. The circuit has
+    ``counting_qubits + 2 * n.bit_length() + 2`` qubits. The local simulators
+    hold 30 (``n < 128`` with the default register), but each qubit more
+    doubles the time and memory of a run: on four cores an attempt takes
+    seconds for ``n < 16``, about a minute for ``n < 32``, half an hour for
+    ``n < 64`` (26 qubits, 1 GiB) and, at 30 qubits, 16 GiB and many hours.
 
     ```python
     from polypus.shor import factor
@@ -112,6 +123,8 @@ def factor(
         raise ValueError(f"n must be composite, got the prime {n}")
     if shots < 1:
         raise ValueError(f"shots must be at least 1, got {shots}")
+    if shots >= 1 << 32:
+        raise OverflowError(f"shots must be below 2**32, got {shots}")
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
     if a is not None and not 2 <= a < n:
@@ -145,6 +158,8 @@ def factor(
             shortcut = _ordered(divisor, n // divisor)
             return ShorResult(n, shortcut, "gcd", base, None, attempt, None)
         if qc is None or a is None:
+            # One circuit alive at a time: free the last attempt's first.
+            qc = None
             qc = polypus.circuits.templates.shor_order_finding(base, n, counting_qubits)
             for qubit in range(t):
                 qc.measure(qubit, qubit)

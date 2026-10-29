@@ -7,7 +7,10 @@ The classical post-processing (``order_from_measurement``,
 for 15 and 21, and its argument validation.
 """
 
+import gc
 import inspect
+import weakref
+from types import SimpleNamespace
 
 import polypus
 import pytest
@@ -90,16 +93,34 @@ def test_helpers_reject_non_integers():
 
 NATIVE = dict(infrastructure="local", backend="polypus")
 
+# What a working circuit gives for 15 with a = 7 (order 4): the multiples of
+# 2**8 / 4 and nothing else. Noise, or the wrong qubits measured, gives others.
+PEAKS_15 = {"00000000", "01000000", "10000000", "11000000"}
+
+
+def _share_near_peaks(counts, t, r):
+    """The share of shots within 1 of a multiple of 2**t / r."""
+    peaks = [s * 2**t / r for s in range(r + 1)]
+    near = sum(
+        count
+        for bits, count in counts.items()
+        if min(abs(int(bits, 2) - peak) for peak in peaks) <= 1
+    )
+    return near / sum(counts.values())
+
 
 class TestFactor:
     def test_factors_15_with_the_quantum_circuit(self):
         result = factor(15, a=7, seed=1, **NATIVE)
         assert (result.factors, result.method, result.order) == ((3, 5), "quantum", 4)
         assert sum(result.counts.values()) == 1024
+        assert set(result.counts) == PEAKS_15
 
     def test_factors_21_with_six_counting_qubits(self):
         result = factor(21, a=2, counting_qubits=6, seed=1, **NATIVE)
         assert (result.factors, result.order) == ((3, 7), 6)
+        # About 0.91 for the circuit, against 0.22 for noise.
+        assert _share_near_peaks(result.counts, 6, 6) >= 0.8
 
     @pytest.mark.parametrize(
         "n, factors, method",
@@ -146,6 +167,11 @@ class TestFactor:
     def test_counting_qubits_out_of_range_raises_value_error(self, n, counting_qubits):
         with pytest.raises(ValueError, match="counting_qubits"):
             factor(n, counting_qubits=counting_qubits, seed=3, **NATIVE)
+
+    def test_shots_beyond_what_a_run_takes_raise_overflow_error(self):
+        # A run takes fewer than 2**32 shots; 22 is split without a circuit.
+        with pytest.raises(OverflowError, match="shots"):
+            factor(22, shots=2**32, **NATIVE)
 
     @pytest.mark.parametrize("seed", [-1, 2**64])
     def test_a_seed_out_of_range_raises_overflow_error(self, seed):
@@ -199,11 +225,39 @@ class TestFactor:
     def test_aer_backend_factors_15(self):
         result = factor(15, infrastructure="local", backend="aer", a=7, seed=3)
         assert (result.factors, result.method) == ((3, 5), "quantum")
+        assert set(result.counts) == PEAKS_15
 
     def test_a_circuit_beyond_the_simulator_raises_its_error(self):
         # 34 qubits; the native simulator holds at most 30
         with pytest.raises(polypus.NativeCircuitError, match="at most 30"):
             factor(143, a=2, **NATIVE)
+
+    def test_an_attempt_frees_the_last_circuit_before_building_the_next(
+        self, monkeypatch
+    ):
+        # Two 24-bit circuits alive at once would double the peak memory.
+        built = []
+        alive_at_build = []
+
+        class Circuit:
+            def measure(self, qubit, cbit):
+                pass
+
+        def build(a, n, counting_qubits):
+            gc.collect()
+            alive_at_build.append(sum(ref() is not None for ref in built))
+            qc = Circuit()
+            built.append(weakref.ref(qc))
+            return qc
+
+        def run(*args, **kwargs):
+            return SimpleNamespace(merged_counts={"0": 1})
+
+        monkeypatch.setattr(polypus.circuits.templates, "shor_order_finding", build)
+        monkeypatch.setattr(polypus, "run_quantum_circuit", run)
+        monkeypatch.setattr(shor, "order_from_measurement", lambda *args: None)
+        result = factor(4093 * 4099, max_attempts=3, seed=0, **NATIVE)
+        assert (result.attempts, alive_at_build) == (3, [0, 0, 0])
 
     def test_a_failed_search_is_reported_not_raised(self, monkeypatch):
         monkeypatch.setattr(shor, "order_from_measurement", lambda *args: None)
