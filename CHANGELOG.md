@@ -306,6 +306,19 @@ Changes on `main` since 0.7.2.
   seeded runs are unchanged. It comes after `seed` in the positional order.
   Rust: `AlgorithmSPSAArgs::stability_constant` and
   `polypus_orchestration::SpsaConfig::stability_constant` (#467).
+- `shor_order_finding` template: Beauregard's order-finding circuit for
+  Shor's algorithm, moduli up to 24 bits.
+  `polypus.circuits.templates.shor_order_finding(a, modulus,
+  counting_qubits=None)` / `polypus_circuit::templates::shor_order_finding`
+  returns the circuit (2n counting qubits by default, no measurements) whose
+  counting register estimates the order of `a` modulo `modulus`;
+  `MAX_SHOR_MODULUS_BITS` is the 24-bit limit, the largest circuit the
+  OpenQASM importers read back. The arithmetic blocks it is built from are
+  public in Rust under `templates::arithmetic`: `phase_adder`,
+  `modular_phase_adder`, `controlled_modular_multiplier` and
+  `controlled_modular_multiplication`. Their invalid arguments are the new
+  `CircuitError::InvalidTemplateArgument` (`ValueError` in Python). `qft` and
+  `shor_order_finding` build without holding the GIL.
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a

@@ -22,7 +22,7 @@ pub mod spsa;
 
 use adam::Adam;
 use calibration::calibrate_parallel_threshold;
-use circuit::{qft, statevector, Circuit, Param};
+use circuit::{qft, shor_order_finding, statevector, Circuit, Param};
 use cmaes::CMAES;
 use compatibility::backend_compatibility;
 use de::DE;
@@ -2510,9 +2510,11 @@ pub fn polypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sys.getattr("modules")?.set_item("polypus.qml", &qml)?;
 
     // circuits.templates subpackage — exposes polypus.circuits.templates.qft()
+    // and shor_order_finding()
     let circuits = PyModule::new(py, "polypus.circuits")?;
     let templates = PyModule::new(py, "polypus.circuits.templates")?;
     templates.add_function(wrap_pyfunction!(qft, &templates)?)?;
+    templates.add_function(wrap_pyfunction!(shor_order_finding, &templates)?)?;
     // Attach under short keys (see the qml note above) and mirror both levels
     // into sys.modules so `import polypus.circuits.templates` also resolves.
     circuits.add("templates", &templates)?;

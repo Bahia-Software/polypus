@@ -49,6 +49,38 @@ qaoa.to_qasm3()  # rzz(2.0*theta_0) q[0], q[1]; ...
 
 Expressions follow the same rules as those imported from OpenQASM 3 (contract C-2): a gate method rejects a `NaN` or infinite number, a constant division by zero, and an expression nested more than 64 levels deep with `ValueError`; binding evaluates the expression exactly as written, in binary64 and without reassociation, and raises `ValueError` for a division by zero or a non-finite angle. An expression without parameters (`polypus.pi / 2`) is evaluated when the gate is added. `repr` shows the expression in OpenQASM 3 syntax, with `Param(i)` for each parameter; two expressions compare equal when they are built the same way (`a + b != b + a`). The constants are expressions, not floats: use `math.pi` where a number is needed.
 
+## Templates
+
+`polypus.circuits.templates` builds ready-made circuits in Rust, without the GIL. They are ordinary `polypus.Circuit`s with no free parameters and no measurements: keep chaining gates onto them, measure them, or export them.
+
+`qft(num_qubits, inverse=False, swaps=True)` is the quantum Fourier transform in Qiskit's convention, with the qubit-reversal swaps unless `swaps=False`; `inverse=True` builds its exact adjoint. It takes up to 2827 qubits, the largest QFT the OpenQASM importers read back.
+
+`shor_order_finding(a, modulus, counting_qubits=None)` is the quantum part of Shor's algorithm: measuring its counting register estimates the order `r` of `a` modulo `modulus`, the smallest `r > 0` with `a**r % modulus == 1`. It is Beauregard's circuit with the counting register kept whole, so it runs on any backend. With `n = modulus.bit_length()` and `t = counting_qubits` (`2n` by default), qubits `0..t` are the counting register, then come `x` (`n` qubits, set to 1), `b` (`n + 1`) and an ancilla. Read as an integer, qubit 0 the least-significant bit, the counting register peaks at the values closest to `s * 2**t / r` for `s` in `range(r)`.
+
+```python
+import polypus
+from polypus.circuits.templates import shor_order_finding
+
+qc = shor_order_finding(7, 15)  # t = 8 counting qubits, 18 qubits in all
+for k in range(8):
+    qc.measure(k, k)
+result = polypus.run_quantum_circuit(
+    qc, shots=1024, infrastructure="local", backend="polypus"
+)
+result.merged_counts  # peaks at 0, 64, 128 and 192: 7 has order 4 modulo 15
+```
+
+`a` must be between 1 and `modulus - 1` and share no factor with `modulus` (a shared factor already divides it), and `counting_qubits` between 1 and `2n`; otherwise `ValueError`. Moduli go up to 24 bits: 98 qubits and 3.7 million gates, the largest circuit the OpenQASM importers read back. The native simulator holds up to 30 qubits, moduli of up to 7 bits with the default counting register. `to_qasm3` exports moduli of up to 16 bits; from 17 bits on, the program text would pass the importer's 32 MiB and it raises `ValueError`.
+
+In Rust the templates are in `polypus_circuit::templates`, and the arithmetic blocks `shor_order_finding` is built from are public in `templates::arithmetic`: Draper's `phase_adder` and Beauregard's `modular_phase_adder`, `controlled_modular_multiplier` and `controlled_modular_multiplication`.
+
+```rust
+use polypus_circuit::templates::{qft_with_options, shor_order_finding};
+
+let order_finding = shor_order_finding(7, 15, None)?; // 18 qubits, 8561 gates
+let inverse_qft = qft_with_options(4, true, true)?;
+```
+
 ## Drawing
 
 A circuit draws itself, natively and with no plotting library: `print(qc)` shows a text drawing, and a notebook displays an SVG one.

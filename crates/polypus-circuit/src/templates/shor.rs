@@ -37,9 +37,10 @@ const TEMPLATE: &str = "shor_order_finding";
 /// `1 + t + t · c + t(t + 1)/2 + ⌊t/2⌋` gates, where
 /// `c = 2(m(m + 1) + n(2m² + 13m + 10)) + n` and `m = n + 1`; at the largest
 /// modulus, [`MAX_SHOR_MODULUS_BITS`] bits, that is 3,716,641 gates on 98
-/// qubits. Above about 16 bits [`to_qasm3`](ParameterizedCircuit::to_qasm3)
-/// returns [`CircuitError::ExportLimit`]: the program text would pass the
-/// 32 MiB the importer reads.
+/// qubits. With the default counting register,
+/// [`to_qasm3`](ParameterizedCircuit::to_qasm3) exports moduli of up to 16
+/// bits; from 17 bits on it returns [`CircuitError::ExportLimit`], as the
+/// program text would pass the 32 MiB the importer reads.
 ///
 /// ```
 /// use polypus_circuit::templates::shor_order_finding;
