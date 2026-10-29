@@ -76,7 +76,7 @@ def log_likelihood(counts, label):
 expectation_function = polypus.SampleCost(log_likelihood)
 ```
 
-`polypus.Rotosolve` needs a fitness that averages a cost per bitstring, so it does not train with a `SampleCost`: `qml.train` raises `ValueError` before anything runs. It trains the ansatz only, so the feature map's gates are free; see [Rotosolve](training.md#rotosolve).
+`polypus.Rotosolve` needs a fitness that averages a cost per bitstring, so it does not train with a `SampleCost`: `qml.train` raises `polypus.ConfigurationError` (a `ValueError`) before anything runs. It trains the ansatz only, so the feature map's gates are free; see [Rotosolve](training.md#rotosolve).
 
 Integer labels (Python or NumPy ints and bools) reach your function as `int`; if any label is not an integer, all of them arrive as `float` (regression targets). `y_train` is validated before anything runs: a length other than the number of rows, a `NaN`/`inf`, a string or a one-hot row is rejected with the offending index. Without `y_train`, one `expectation_function(bitstring)` is shared by every sample, as before.
 
@@ -132,7 +132,7 @@ trained = model.bind(result.best_params)
 labels = trained.predict(np.array([[0.15], [2.95]]))  # [1, -1]
 ```
 
-[`examples/qml_iris_demo.py`](../../examples/qml_iris_demo.py) trains one on the Iris flowers end to end, and [`examples/qml_native_showcase.py`](../../examples/qml_native_showcase.py) runs every encoder, layer, optimizer, readout and option in sixteen checked scenarios: classification, regression, an unsupervised ground state and data re-uploading among them.
+[`examples/qml_iris_demo.py`](../../examples/qml_iris_demo.py) trains one on the Iris flowers end to end, and [`examples/qml_native_showcase.py`](../../examples/qml_native_showcase.py) runs every encoder, layer, optimizer, readout, decision and loss in twenty checked scenarios: classification, regression, an unsupervised ground state and data re-uploading among them, SPSA on sampled results, Rotosolve and the models it refuses, an ask/tell optimizer of your own through `polypus.External`, and a trained model run on Aer with a noise model.
 
 Everything after `y` is keyword-only. The execution arguments have defaults (`shots=1024`, `infrastructure="local"`, `n_qpus=1`, `nodes=1`, `cores_per_qpu=2`, `id="qml"`), and without `backend` the native simulator runs the model locally (on CUNQA, whose QPUs run Aer, it is `"aer"`).
 
@@ -168,7 +168,7 @@ The `Ansatz` may also re-encode the data between its trainable layers (data re-u
 
 ### Training
 
-`model.fit(x, y=None, *, method, loss=None, ...)` takes rows of features (a list or a NumPy array) or a `qml.Dataset`, and any optimizer: `polypus.Adam` gets the exact gradient, and `DE`, `PSO`, `QNG`, `CMAES`, `SPSA` and `polypus.External` work as in `train()`. `polypus.Rotosolve` needs a fitness that is a sinusoid of each parameter, so it takes only `loss="expectation"` and models whose trainable parameters each sit in one rotation: a `conv` or `pool` layer over more than one pair shares its parameters, and `fit` raises `ValueError` for it before anything runs.
+`model.fit(x, y=None, *, method, loss=None, ...)` takes rows of features (a list or a NumPy array) or a `qml.Dataset`, and any optimizer: `polypus.Adam` gets the exact gradient, and `DE`, `PSO`, `QNG`, `CMAES`, `SPSA` and `polypus.External` work as in `train()`. `polypus.Rotosolve` needs a fitness that is a sinusoid of each parameter, so it takes only `loss="expectation"` and models whose trainable parameters each sit in one rotation: a `conv` or `pool` layer over more than one pair shares its parameters, and `fit` raises `polypus.ConfigurationError` for it before anything runs.
 
 | `loss` | Labels | Scores `⟨O₀⟩` (or all `⟨O_k⟩`) as |
 |---|---|---|
@@ -178,7 +178,7 @@ The `Ansatz` may also re-encode the data between its trainable layers (data re-u
 | `"categorical_cross_entropy"` | class index `0 … k−1` | softmax cross-entropy over the `k` observables (the loss for `"argmax"`) |
 | `"expectation"` | none | `−⟨O₀⟩`: maximises the readout |
 
-With labels, `loss` is required. Without them (`y=None`), the run maximises the readout's first observable, and a supervised loss raises `ValueError`. To minimise a cost Hamiltonian, write it as an `Observable` with negated coefficients:
+With labels, `loss` is required. Without them (`y=None`), the run maximises the readout's first observable, and a supervised loss raises `polypus.ConfigurationError`. To minimise a cost Hamiltonian, write it as an `Observable` with negated coefficients:
 
 ```python
 cost = qml.Readout([qml.Observable([(-1.0, qml.Z(0) @ qml.Z(1)), (-0.5, qml.Z(1))])])

@@ -29,7 +29,7 @@ pub struct CMAES {
     #[pyo3(get, set)]
     pub tolerance: f64,
     /// Generations over which a run's best-fitness improvement is measured.
-    /// Defaults to 20.
+    /// At least 1, checked when `train` starts. Defaults to 20.
     #[pyo3(get, set)]
     pub patience: u32,
     /// IPOP restarts allowed after the first run ends; each doubles the

@@ -742,7 +742,7 @@ fn invalid_configuration_is_rejected_before_any_oracle_call() {
         initial_point: None,
     };
     type Tweak = fn(AlgorithmCmaEsArgs) -> AlgorithmCmaEsArgs;
-    let cases: [(&str, Tweak); 12] = [
+    let cases: [(&str, Tweak); 13] = [
         ("dimensions", |a| AlgorithmCmaEsArgs { dimensions: 0, ..a }),
         ("generations", |a| AlgorithmCmaEsArgs {
             generations: 0,
@@ -781,6 +781,8 @@ fn invalid_configuration_is_rejected_before_any_oracle_call() {
             restarts: 1,
             ..a
         }),
+        // 0 would compare the best fitness with itself and stop at once.
+        ("patience", |a| AlgorithmCmaEsArgs { patience: 0, ..a }),
     ];
     for (parameter, tweak) in cases {
         let calls = Arc::new(Mutex::new(0));
