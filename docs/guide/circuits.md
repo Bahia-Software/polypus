@@ -81,6 +81,21 @@ let order_finding = shor_order_finding(7, 15, None)?; // 18 qubits, 8561 gates
 let inverse_qft = qft_with_options(4, true, true)?;
 ```
 
+### Factoring with Shor
+
+`polypus.shor.factor(n, infrastructure=..., shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None, **run_kwargs)` runs Shor's algorithm end to end and returns a `ShorResult`: the two `factors` (smaller first), the `method` that found them, and the base `a`, its `order` and the `counts` of the last run.
+
+```python
+from polypus.shor import factor
+
+result = factor(15, a=7, infrastructure="local", backend="polypus", seed=1)
+result.factors, result.method, result.order  # ((3, 5), 'quantum', 4)
+```
+
+An even `n` (`"even"`), a perfect power (`"perfect_power"`, which Shor's algorithm cannot split) and a base that shares a factor with `n` (`"gcd"`) need no circuit. Otherwise each attempt runs `shor_order_finding(a, n, counting_qubits)` with its counting register measured, through `run_quantum_circuit` with `infrastructure` and the other keywords (`backend`, `options`...), and `"quantum"` factors come from the order read off the most frequent outcomes. Without `a`, each of the `max_attempts` attempts draws a new base; with it, `factor` stops at the first order it reads, even one that does not split `n`. A search that fails returns `factors=None`, while an error of the run propagates. `seed` draws the bases and the seed of every run. `n` must be a composite below `2**24`; with the local simulators the practical limit is `n < 128`, 30 qubits with the default counting register.
+
+The classical steps are public too: `order_from_measurement(y, t, a, n)` reads the order from one outcome `y` of a `t`-qubit counting register (continued fractions, a bounded number of modular powers), and `factors_from_order(a, n, r)` splits `n` with `gcd(a**(r/2) ± 1, n)`.
+
 ## Drawing
 
 A circuit draws itself, natively and with no plotting library: `print(qc)` shows a text drawing, and a notebook displays an SVG one.

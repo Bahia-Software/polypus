@@ -319,6 +319,13 @@ Changes on `main` since 0.7.2.
   `controlled_modular_multiplication`. Their invalid arguments are the new
   `CircuitError::InvalidTemplateArgument` (`ValueError` in Python). `qft` and
   `shor_order_finding` build without holding the GIL.
+- `polypus.shor.factor`: Shor's algorithm end to end, from the classical
+  shortcuts to the order-finding circuit. `factor(n, infrastructure=...,
+  shots=1024, a=None, counting_qubits=None, max_attempts=10, seed=None,
+  **run_kwargs)` splits a composite `n` below `2**24` on any backend and
+  returns a `ShorResult` (factors, method, base, order, attempts, counts).
+  `order_from_measurement` and `factors_from_order`, its classical
+  post-processing, are public in the same module.
 
 ### Changed
 - Argument and configuration errors are now `polypus.ConfigurationError`, a

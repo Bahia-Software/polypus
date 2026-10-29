@@ -35,6 +35,7 @@ from qiskit_aer.noise import NoiseModel
 from . import ask_tell as ask_tell
 from . import circuits as circuits
 from . import qml as qml
+from . import shor as shor
 
 # What `External` runs (bindings/external.rs), typed in `polypus.ask_tell`.
 from .ask_tell import AskTell as _AskTell
@@ -88,6 +89,7 @@ __all__ = [
     "qml",
     "circuits",
     "ask_tell",
+    "shor",
 ]
 
 __version__: str
