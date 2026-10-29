@@ -388,6 +388,18 @@ impl CustomGate {
         Ok(call)
     }
 
+    /// The same call — same definition, same angles — on other qubits, as
+    /// many as it had. Unlike [`with_arguments`](Self::with_arguments), the body
+    /// is not checked again: the angles, already accepted, do not change.
+    pub(crate) fn with_qubits(&self, qubits: Vec<usize>) -> CustomGate {
+        debug_assert_eq!(qubits.len(), self.qubits.len());
+        CustomGate {
+            definition: Arc::clone(&self.definition),
+            params: self.params.clone(),
+            qubits,
+        }
+    }
+
     /// The same call with its parameters replaced (binding).
     pub(crate) fn with_params(&self, params: Vec<GateParam>) -> Self {
         CustomGate {
