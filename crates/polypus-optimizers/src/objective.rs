@@ -31,9 +31,8 @@ pub trait EvaluationOracle: Send + Sync {
     ///
     /// Its shot noise should be independent of every `evaluate_batch` call's:
     /// the candidates it gets were scored there, and a re-evaluation with the
-    /// same random numbers would repeat their values. Polypus's oracles send
-    /// it with a seed derived from the run's
-    /// (`polypus_infrastructure::final_batch_params`).
+    /// same random numbers would repeat their values. Polypus's backends give
+    /// every call of a run its own sampling stream (contract C-7).
     ///
     /// The default calls `evaluate_batch`, which is right for an oracle
     /// without shots (an analytic function, an exact simulator), whose values

@@ -37,6 +37,10 @@ Changes on `main` since 0.7.2.
   defaults, and `backend=None` is the native simulator on `local`. Options are
   strings from closed sets. `qml.train` and `qml.predict`, which run Qiskit
   circuits, reject an `Encoder` or `Ansatz` with `TypeError`.
+- `polypus_backend::CallSeeds`, which hands out the seed of each call a
+  backend receives (the run's on the first, then one derived from it and the
+  call's index), and `polypus_backend::stream_seed`, the SplitMix64 map
+  behind it and behind the native backend's per-circuit seeds (#411).
 - `polypus.DE(mutation_factor=None, crossover_rate=None)`: DE/rand/1/bin's
   `F`, in `(0, 2]`, and `CR`, in `[0, 1]`; `None` keeps 0.8 and 0.7. A value
   out of range, or any value with `strategy="shade"` or `"lshade"`, which
@@ -131,10 +135,9 @@ Changes on `main` since 0.7.2.
   re-evaluated alone, and slightly optimistic still as the highest of five.
   `best_fitness` keeps its meaning: `best_params`, `best_fitness` and
   `fitness_history` are the optimizer's, and a seeded run sends the same
-  batches with and without `final_shots`. The final batch is sampled with a
-  seed derived from the run's, so on Aer and CUNQA, which seed each circuit
-  from its position in the call, it does not repeat the training's counts
-  for a candidate at the same position. `best_params` and `best_fitness` are
+  batches with and without `final_shots`. The final batch has shot noise of
+  its own (#411), so it does not repeat the training's counts for a
+  candidate. `best_params` and `best_fitness` are
   logged before it, and as a warning if it fails. A value that is not an
   integer `>= 1` raises `ValueError` before anything runs. The batch is not
   part of the CUNQA walltime projection (#397).
@@ -147,8 +150,7 @@ Changes on `main` since 0.7.2.
   `train` does (#498).
 - The final batch in Rust: `EvaluationOracle::evaluate_batch_with_shots`
   (`polypus-optimizers`), a provided method that `VqcOracle` and `QmlOracle`
-  implement by putting the shots in every task and sending the batch with
-  `polypus_infrastructure::final_batch_params`; `TrainFlow::final_shots`,
+  implement by putting the shots in every task; `TrainFlow::final_shots`,
   `TrainOutcome`, `FinalEvaluation` and `Method::final_candidates`
   (`polypus-orchestration`) (#397).
 - `polypus.SPSA(max_iters=300, resamplings=1, perturbation=0.1,
@@ -316,6 +318,16 @@ Changes on `main` since 0.7.2.
 - Argument and configuration errors are now `polypus.ConfigurationError`, a
   `polypus.PolypusError`, so an `except polypus.PolypusError` placed before an
   `except ValueError` now catches them (#418).
+- **BREAKING:** a seed means the same across the calls of one run on every
+  backend: each call gets its own sampling stream. Aer, CUNQA and the
+  subprocess bridge received the run's seed on every call, so batch slot `i`
+  got the same random numbers in every generation; they now receive it on
+  the first call and a seed derived from it and the call's index on the
+  next ones, as the native backend already did per circuit. A
+  `run_quantum_circuit` that is one call is unchanged; seeded `train`,
+  `qml.train` and multi-call runs on those backends change. Contract C-7
+  states it, and `docs/backends.md` says what a third-party backend must do
+  (#411).
 - **BREAKING:** `polypus.Qubo`, `polypus.Ising` and a Python cost function sum
   each candidate's count-weighted cost in ascending bitstring order instead of
   `HashMap` iteration order, which differs between processes, and the cost
@@ -592,6 +604,12 @@ Changes on `main` since 0.7.2.
 - Rust: `dispatch_optimizer` checks Adam's `finite_difference_step` with an
   exact gradient too, as `Method::check_preconditions` does, so the two
   agree whatever oracles the run has (#467).
+- A Python test that CI skips now fails the run unless the leg's
+  `POLYPUS_ALLOWED_SKIPS` lists it (`tests/python/skip_guard.py`), so a test
+  that backs a contract cannot stop running unnoticed. The floors leg installs
+  LLVM too, and every leg replays the seeded native trainings of the C-7
+  determinism baseline in a second process and compares them byte for byte
+  (#407).
 
 ## [0.7.2] - 2026-09-30
 

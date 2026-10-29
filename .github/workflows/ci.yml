@@ -145,6 +145,12 @@ jobs:
           python-version: "3.10"
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install --no-self-update
+      # llvm-as checks that the QIR bitcode export is valid LLVM.
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          llvm-as --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install uv
         run: python -m pip install uv==0.13.5
@@ -165,7 +171,17 @@ jobs:
           uv pip install --system --resolution lowest-direct -r pyproject.toml -r requirements-dev.txt
           uv pip install --system --no-deps dist/polypus_quantum-*.whl
           uv pip list --system
+      # A skip outside POLYPUS_ALLOWED_SKIPS fails the run (see the
+      # python-tests job). The floors include an older Qiskit than the C-10
+      # fixtures' and none of the external optimizer libraries.
       - name: Run Python tests
+        env:
+          POLYPUS_REQUIRE_LLVM_AS: "1"
+          POLYPUS_ALLOWED_SKIPS: >-
+            test_cunqa_real.py
+            test_determinism_baseline.py::TestSameBuildStrict
+            test_ask_tell_adapters.py
+            test_qasm3_interop.py
         run: pytest tests/python -rs --strict-markers
 
   clippy:
@@ -456,12 +472,21 @@ jobs:
       # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
       # variables turn the skips of tests that back a contract into failures:
       # a missing llvm-as, in the fixtures leg another Qiskit, and in the
-      # latest leg a missing Optuna, Nevergrad or pycma.
+      # latest leg a missing Optuna, Nevergrad or pycma. Any other skip fails
+      # the run unless POLYPUS_ALLOWED_SKIPS lists it (tests/python/
+      # skip_guard.py): the real-CUNQA tests (opt-in), the C-7 tier pinned to
+      # the fixture's build (its trainings are compared across two processes
+      # instead), and per leg the C-10 fixtures and the external libraries.
       - name: Run Python tests
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
           POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
           POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.13' && '1' || '' }}
+          POLYPUS_ALLOWED_SKIPS: >-
+            test_cunqa_real.py
+            test_determinism_baseline.py::TestSameBuildStrict
+            ${{ matrix.qiskit != 'fixtures' && 'test_qasm3_interop.py' || '' }}
+            ${{ matrix.python-version != '3.13' && 'test_ask_tell_adapters.py' || '' }}
         run: pytest tests/python -rs --strict-markers
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or
