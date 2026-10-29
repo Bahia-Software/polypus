@@ -10,13 +10,15 @@
 //! [`AlgorithmAdam`](crate::AlgorithmAdam),
 //! [`AlgorithmSPSA`](crate::AlgorithmSPSA), Rotosolve and
 //! [`AlgorithmExternal`](crate::AlgorithmExternal) keep their best point with
-//! [`BestMeasured`].
+//! [`BestMeasured`], the first three measuring their last point with
+//! [`measure_last_point`].
 //! Each helper is a small, single-purpose free function that used to be inlined
 //! (and duplicated) inside the optimizer loops. The behaviour is preserved
 //! exactly — same operation order, same comparators, same diagnostics — so the
 //! determinism the tests pin (`tests/optimizers.rs`) is unaffected.
 
 use crate::error::OptimizerError;
+use crate::objective::EvaluationOracle;
 use ndarray::{Array2, Axis};
 use std::f64::consts::{PI, TAU};
 
@@ -268,11 +270,41 @@ impl BestMeasured {
             .map_or(f64::NEG_INFINITY, |(_, value)| *value)
     }
 
+    /// The best parameters so far; none before any measurement.
+    pub(crate) fn params(&self) -> &[f64] {
+        self.best.as_ref().map_or(&[], |(params, _)| params)
+    }
+
     /// The best parameters and their value; no parameters and `-∞` before any
     /// measurement.
     pub(crate) fn into_parts(self) -> (Vec<f64>, f64) {
         self.best.unwrap_or((Vec::new(), f64::NEG_INFINITY))
     }
+}
+
+/// Measure `point`, the one the last step of an Adam, SPSA or Rotosolve run
+/// reached, in one batch of one candidate: it competes in `best` like any
+/// measured point, and the last entry of `fitness_history` becomes the best
+/// value, so the history ends at the reported best (contract C-5). Returns the
+/// value measured.
+///
+/// The three call it inside their last iteration, before showing it to the
+/// observer, so the observer sees the run's final best and no oracle is
+/// called after the report (see
+/// [`IterationObserver`](crate::IterationObserver)).
+pub(crate) fn measure_last_point(
+    oracle: &dyn EvaluationOracle,
+    point: &[f64],
+    best: &mut BestMeasured,
+    fitness_history: &mut [f64],
+) -> Result<f64, OptimizerError> {
+    let values = oracle.evaluate_batch(&[point.to_vec()]);
+    check_oracle_len(1, values.len())?;
+    best.offer(point, values[0]);
+    if let Some(last) = fitness_history.last_mut() {
+        *last = best.value();
+    }
+    Ok(values[0])
 }
 
 /// `x mod 2π` in `[0, 2π)`. `rem_euclid` alone can return 2π itself for a

@@ -42,6 +42,11 @@
 //! - [`AskTell`] ([`AlgorithmExternal`] only) is the optimizer itself, driven
 //!   from outside: it proposes batches and is told their fitness.
 //!
+//! A caller that wants to watch a run, or stop it on a criterion of its own,
+//! passes an [`IterationObserver`] to [`Optimizer::optimize_observed`]: it sees
+//! an [`IterationReport`] at the end of every iteration and can stop the run
+//! there, which then returns what it has reached.
+//!
 //! Because the crate is Python-free, it can be reused by any Rust project
 //! (a future `polypus-vqe`, `polypus-qml`, …) without pulling in PyO3.
 //!
@@ -103,6 +108,7 @@ pub mod error;
 pub mod external;
 pub mod finite_difference;
 pub mod objective;
+pub mod observer;
 pub mod outcome;
 pub mod pso;
 pub mod quantum_natural_gradient;
@@ -123,6 +129,7 @@ pub use error::OptimizerError;
 pub use external::{AlgorithmExternal, AlgorithmExternalArgs, AskTell, AskTellError};
 pub use finite_difference::FiniteDifferenceGradient;
 pub use objective::{EvaluationOracle, GradientOracle, VarianceOracle};
+pub use observer::{IterationObserver, IterationReport, Unobserved};
 pub use outcome::{OptimizationOutcome, Optimizer};
 pub use pso::{AlgorithmPSO, AlgorithmPSOArgs};
 pub use quantum_natural_gradient::{AlgorithmQNG, AlgorithmQNGArgs};

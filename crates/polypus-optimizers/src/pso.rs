@@ -2,6 +2,7 @@
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
 use crate::util::{
@@ -88,6 +89,7 @@ impl AlgorithmPSO {
     fn run_with_rng<R: Rng>(
         args: AlgorithmPSOArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmPSOArgs {
             oracle,
@@ -198,6 +200,15 @@ impl AlgorithmPSO {
 
             fitness_history.push(personal_best_fitness[global_best_idx]);
 
+            // A stop asked for here wins over the convergence stop below.
+            let report = IterationReport {
+                iteration: iterations_run,
+                best_fitness: personal_best_fitness[global_best_idx],
+                best_params: &global_best_pos,
+            };
+            if observer.observe(&report).is_break() {
+                break;
+            }
             if population_converged(&positions, tolerance, generation) {
                 converged = true;
                 break;
@@ -217,7 +228,11 @@ impl AlgorithmPSO {
 impl Optimizer for AlgorithmPSO {
     type Args = AlgorithmPSOArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
