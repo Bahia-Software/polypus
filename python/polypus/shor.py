@@ -138,7 +138,8 @@ def factor(
     order: Optional[int] = None
     counts: Optional[dict[str, int]] = None
     for attempt in range(max_attempts):
-        base = rng.randrange(2, n) if a is None else a
+        # Not a security use (python:S2245): a base need not be unpredictable.
+        base = rng.randrange(2, n) if a is None else a  # NOSONAR
         divisor = math.gcd(base, n)
         if divisor > 1:
             shortcut = _ordered(divisor, n // divisor)
@@ -148,7 +149,8 @@ def factor(
             for qubit in range(t):
                 qc.measure(qubit, qubit)
         # qmio, real hardware, refuses a seed: an unseeded call seeds no run.
-        run_seed = None if seed is None else rng.getrandbits(63)
+        # Not a security use either: a seed must reproduce its run (C-7).
+        run_seed = None if seed is None else rng.getrandbits(63)  # NOSONAR
         run = polypus.run_quantum_circuit(
             qc, shots, infrastructure, seed=run_seed, **run_kwargs
         )
