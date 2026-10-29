@@ -7,6 +7,8 @@ The classical post-processing (``order_from_measurement``,
 for 15 and 21, and its argument validation.
 """
 
+import inspect
+
 import polypus
 import pytest
 from polypus import shor
@@ -186,4 +188,6 @@ class TestFactor:
 
 
 def test_docstring_example_runs():
-    exec(factor.__doc__.split("```python\n", 1)[1].split("```", 1)[0], {})
+    # `inspect.getdoc` removes the indentation that Python < 3.13 keeps.
+    doc = inspect.getdoc(factor)
+    exec(doc.split("```python\n", 1)[1].split("```", 1)[0], {})
