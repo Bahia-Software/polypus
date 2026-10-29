@@ -349,6 +349,13 @@ impl GradientOracle for QmlOracle {
             }
         }
     }
+
+    /// `true` without a minibatch, when
+    /// [`value_and_gradient`](Self::value_and_gradient) returns `θ`'s fitness,
+    /// so the walltime projection counts an Adam iteration as one call.
+    fn scores_theta(&self) -> bool {
+        self.minibatch.is_none()
+    }
 }
 
 impl QmlOracle {
@@ -1835,6 +1842,26 @@ class Bound:
         );
     }
 
+    /// `scores_theta` tells in advance what `value_and_gradient` returns (the
+    /// walltime projection counts an Adam iteration by it): `true` on every
+    /// sample, `false` under a minibatch.
+    #[test]
+    fn the_native_gradient_declares_whether_it_scores_theta() {
+        let problem = native_problem(6);
+        let theta = &native_candidates(&problem, 1)[0];
+        let dims = problem.num_params();
+        for (minibatch, scores) in [(None, true), (Some(MinibatchConfig::new(2, 9)), false)] {
+            let label = format!("minibatch {minibatch:?}");
+            let oracle = native_oracle(&problem, true, minibatch, 0);
+            assert_eq!(oracle.scores_theta(), scores, "{label}");
+            assert_eq!(
+                oracle.value_and_gradient(theta, dims).is_some(),
+                oracle.scores_theta(),
+                "{label}"
+            );
+        }
+    }
+
     /// A native oracle's final batch (`evaluate_batch_with_shots`) scores every
     /// training sample with the shots it is given, even under a minibatch, and
     /// draws no minibatch, so a seeded run is the same up to it: the counts
@@ -1980,14 +2007,17 @@ class Bound:
         let errors = OracleErrorSlot::new();
         let cancel = CancelToken::default();
 
-        // Native, full batch: evaluation and exact gradient, no full view.
+        // Native, full batch: evaluation and exact gradient, which scores θ,
+        // no full view.
         let oracles = exact(None).build(&resources(1), &cancel, &errors);
-        assert!(oracles.gradient.is_some());
+        assert!(oracles.gradient.as_ref().is_some_and(|g| g.scores_theta()));
         assert!(oracles.full_evaluation.is_none());
 
-        // Native, minibatched: the full view scores every sample.
+        // Native, minibatched: the exact gradient does not score θ, and the
+        // full view scores every sample.
         let oracles =
             exact(Some(MinibatchConfig::new(2, 3))).build(&resources(1), &cancel, &errors);
+        assert!(oracles.gradient.as_ref().is_some_and(|g| !g.scores_theta()));
         let full = oracles
             .full_evaluation
             .expect("a minibatch comes with a full-dataset view");
