@@ -256,6 +256,7 @@ class TestCmaesBatches:
             ({"population_size": 1}, "population_size"),
             ({"generations": 0}, "generations"),
             ({"population_size": 8, "restarts": 40}, "restarts"),
+            ({"patience": 0}, "patience"),
         ],
     )
     def test_invalid_configuration_raises_before_any_batch(

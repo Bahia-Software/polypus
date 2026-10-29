@@ -52,6 +52,7 @@ The package imports as `polypus`. Wheels are published for Linux, macOS and Wind
 | To use | Install |
 |---|---|
 | Local simulators (Aer and native) | `pip install polypus-quantum` |
+| Optuna, Nevergrad or pycma through `polypus.External` | `pip install "polypus-quantum[optuna]"` (`[nevergrad]`, `[cma]`) |
 | CUNQA | Polypus, plus [CUNQA](https://github.com/CESGA-Quantum-Spain/cunqa) `>=2.4,<4` on the cluster. **CUNQA 2.3 is not supported** (it names the `qraise` argument `cores`, not `cores_per_qpu`) |
 | QMIO | Polypus built from source with `--features qmio` |
 | The Rust crates | `cargo add polypus` |

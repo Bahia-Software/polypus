@@ -111,9 +111,16 @@ pytestmark = pytest.mark.integration
 # Generous margins (the true interrupt latency is well under a second): these
 # bounds only need to be far below the "completed run" budget below to prove
 # "promptly", not pin down an exact latency — avoids flakiness from CI jitter.
-_READY_TIMEOUT_S = 60.0  # child import + one warm-up generation on a cold CI runner
+#
+# `POLYPUS_TEST_TIME_SCALE` multiplies the deadlines and timeouts (never the
+# delays before a SIGINT, which a slower run only makes safer) for a build that
+# runs several times slower: the Python coverage job in sonar.yml sets it, since
+# its extension is instrumented for coverage. The uninstrumented runs in ci.yml
+# keep the bounds as written.
+_TIME_SCALE = float(os.environ.get("POLYPUS_TEST_TIME_SCALE", "1"))
+_READY_TIMEOUT_S = 60.0 * _TIME_SCALE  # child import + one warm-up generation
 _DELAY_BEFORE_SIGINT_S = 0.5  # let the GIL-free optimization get going
-_INTERRUPT_DEADLINE_S = 5.0  # hard ceiling; real value <1s, full run far longer
+_INTERRUPT_DEADLINE_S = 5.0 * _TIME_SCALE  # real value <1s, full run far longer
 
 # The child trains on the native backend with a budget whose *completed* run
 # takes far longer than the interrupt window (~a minute), so any prompt exit
@@ -465,7 +472,7 @@ def test_native_qml_training_responds_to_sigint_promptly():
 _HEARTBEAT_INTERVAL_S = 0.05
 _MAX_LIVE_GAP_S = 1.0
 _MIN_RESCORE_S = 1.0
-_RESCORE_CHILD_TIMEOUT_S = 120.0
+_RESCORE_CHILD_TIMEOUT_S = 120.0 * _TIME_SCALE
 
 _MINIBATCH_RESCORE_CHILD = f"""
 import sys, time, threading

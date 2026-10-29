@@ -97,7 +97,8 @@ boundary stays out-of-process and explicit; see
   why the entry points (`train`, `qml.train`, `run_quantum_circuit`) run
   `Scheduler::run_cancellable` inside `py.detach`: the Python-backed pieces
   below it (the Aer and CUNQA backends, Python cost callbacks, a
-  `polypus.External` optimizer's `ask()` and `tell()`) attach on their own, on whichever thread evaluates them. Each of those attaches is a *fresh*
+  `polypus.External` optimizer's `ask()` and `tell()`) attach on their own,
+  on whichever thread evaluates them. Each of those attaches is a *fresh*
   one (`detach` resets the thread's attachment), so each goes through
   `attach_or` and turns an unreachable interpreter into the typed
   `InterpreterUnavailable` error, never a panic or a hang (§9). The one attach

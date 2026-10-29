@@ -82,33 +82,6 @@ impl ExecutionConfig {
     }
 }
 
-/// The [`RunParams`] of a training run's final batch (`final_shots`, contract
-/// C-5): `config` with its seed, if any, replaced by one derived from it.
-///
-/// Aer and CUNQA seed every call from the run's seed: Aer each circuit from
-/// the seed and the circuit's position in the call alone (`seed + 2113·i` in
-/// Aer 0.17), CUNQA QPU `k` from `seed + k` (contract C-7). A candidate the
-/// final batch re-evaluates at the position it was scored at in training, as
-/// `best_params` at index 0 is for Adam, SPSA and QNG, would be measured with
-/// the same random numbers: with the same shots, the same counts and so the
-/// same value; with more, the same first shots among them. The derived seed,
-/// SplitMix64's first output from `seed`, is a bijective mix of it, far from
-/// it but with negligible probability, so the final batch's per-circuit seeds
-/// miss every one the training used and its shot noise is independent of the
-/// training's. It is deterministic, so a seeded run still reproduces its final
-/// batch.
-///
-/// The native backend seeds each circuit from its own counter, which the final
-/// batch continues, so it does not read this seed.
-pub fn final_batch_params(config: &RunParams) -> RunParams {
-    RunParams {
-        seed: config.seed.map(|seed| {
-            crate::native::splitmix64_mix(seed.wrapping_add(crate::native::SPLITMIX64_GAMMA))
-        }),
-        ..config.clone()
-    }
-}
-
 /// Draw a fresh 64-bit seed from OS entropy.
 ///
 /// Used as the default when no explicit seed is supplied, so an omitted seed
@@ -292,42 +265,6 @@ pub enum QmioProgramFormat {
 mod tests {
     use super::*;
     use crate::BackendError;
-
-    /// The final batch keeps everything but the seed, which it derives from
-    /// the run's, the same way every time, far from it and from its
-    /// neighbours; no seed stays no seed.
-    #[test]
-    fn the_final_batch_derives_its_seed_from_the_runs() {
-        for seed in [0, 1, 11, 2024, u64::MAX >> 1, u64::MAX] {
-            let config = RunParams {
-                id: "final-seed".to_string(),
-                shots: 64,
-                seed: Some(seed),
-                opt_level: OptLevel::default(),
-            };
-            let params = final_batch_params(&config);
-            assert_eq!(params.id, config.id);
-            assert_eq!(params.shots, config.shots);
-            assert_eq!(params.opt_level, config.opt_level);
-            let derived = params.seed.expect("a seeded run keeps a seed");
-            assert_eq!(final_batch_params(&config).seed, Some(derived));
-            // Aer masks seeds to 63 bits and offsets each circuit's by a small
-            // multiple of its position; CUNQA each QPU's by its index.
-            let mask = u64::MAX >> 1;
-            let gap = (derived & mask).wrapping_sub(seed & mask) & mask;
-            assert!(
-                gap > 1 << 32 && gap < mask - (1 << 32),
-                "seed {seed}: derived {derived} is near it"
-            );
-        }
-        let unseeded = RunParams {
-            id: "final-seed".to_string(),
-            shots: 64,
-            seed: None,
-            opt_level: OptLevel::default(),
-        };
-        assert_eq!(final_batch_params(&unseeded).seed, None);
-    }
 
     /// The RNG failure a broken entropy source reports.
     #[derive(Debug)]

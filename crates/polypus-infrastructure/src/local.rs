@@ -2,8 +2,8 @@ use crate::attach::{attach_or, InterpreterUnavailable};
 use crate::error::BackendError;
 use crate::transpiler::{IdentityTranspiler, TranspileOptions, Transpiler};
 use crate::{
-    max_statevector_concurrency, BackendCapabilities, BoundCircuit, BudgetSource, CircuitTask,
-    InfrastructureError, MemBudget, QuantumBackend, RunParams,
+    max_statevector_concurrency, BackendCapabilities, BoundCircuit, BudgetSource, CallSeeds,
+    CircuitTask, InfrastructureError, MemBudget, QuantumBackend, RunParams,
 };
 use polypus_backend::mem_budget::{active_budget, check_fits};
 use pyo3::prelude::*;
@@ -20,6 +20,9 @@ pub struct LocalBackend {
     /// internally, so this defaults to the no-op [`IdentityTranspiler`] and the
     /// observable behavior is unchanged.
     transpiler: Box<dyn Transpiler>,
+    /// The seed of each call: the run's on the first, then one derived from it
+    /// and the call's index (contract C-7).
+    seeds: CallSeeds,
 }
 
 impl LocalBackend {
@@ -28,6 +31,7 @@ impl LocalBackend {
             sim_method,
             noise_model,
             transpiler: Box::new(IdentityTranspiler),
+            seeds: CallSeeds::new(),
         }
     }
 }
@@ -38,6 +42,7 @@ impl QuantumBackend for LocalBackend {
         qcs: &[BoundCircuit],
         config: &RunParams,
     ) -> Result<Vec<HashMap<String, u64>>, BackendError> {
+        let seed = self.seeds.next(config.seed);
         // The seal unpacks a non-empty batch; an empty one is a valid request with
         // no results, as on the native backend.
         if qcs.is_empty() {
@@ -130,10 +135,11 @@ impl QuantumBackend for LocalBackend {
                         .set_item("noise_model", nm.clone_ref(py))
                         .map_err(conv)?;
                 }
-                // Forwarded to Aer's `seed_simulator` on the Python side (contract
-                // C-7); `None` is simply omitted rather than sent as `seed=None`,
-                // so Aer's own unseeded default behavior is unchanged.
-                if let Some(seed) = config.seed {
+                // This call's seed (`CallSeeds`), forwarded to Aer's
+                // `seed_simulator` on the Python side (contract C-7); `None` is
+                // simply omitted rather than sent as `seed=None`, so Aer's own
+                // unseeded default behavior is unchanged.
+                if let Some(seed) = seed {
                     kwargs.set_item("seed", seed).map_err(conv)?;
                 }
 
@@ -531,6 +537,8 @@ mod tests {
             seed: Some(1),
             opt_level: OptLevel::default(),
         };
+        // An empty batch has nothing to run, so it needs no interpreter.
+        assert!(backend.run_circuits(&[], &params).unwrap().is_empty());
         match backend.run_circuits(std::slice::from_ref(&circuit), &params) {
             Err(BackendError::External(boxed)) => assert!(boxed.is::<InterpreterUnavailable>()),
             other => panic!("expected External(InterpreterUnavailable), got {other:?}"),

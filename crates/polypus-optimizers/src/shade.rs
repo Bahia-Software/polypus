@@ -370,8 +370,6 @@ pub(crate) fn run_with_rng<R: Rng>(
 
     let initial = population_size as usize;
     let dims = dimensions as usize;
-    let patience = patience as usize;
-
     // The same preconditions as DE/rand/1/bin, checked before any RNG draw or
     // oracle call. The population bound also covers what current-to-pbest/1
     // needs: a donor other than the parent and a second one other than both.
@@ -381,8 +379,10 @@ pub(crate) fn run_with_rng<R: Rng>(
         dimensions,
         mutation_factor,
         crossover_rate,
+        patience,
         initial_point.as_deref(),
     )?;
+    let patience = patience as usize;
 
     // The same draws, in the same order, as DE/rand/1/bin's initialisation, and
     // the same replacement of the first member by the caller's point.

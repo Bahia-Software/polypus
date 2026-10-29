@@ -224,6 +224,7 @@ fn spsa_args(
         target_step: 0.63,
         alpha: AlgorithmSPSA::DEFAULT_ALPHA,
         gamma: AlgorithmSPSA::DEFAULT_GAMMA,
+        stability_constant: 0.0,
         eval_interval: 2,
         dimensions: 3,
         seed: Some(seed),

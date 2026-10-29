@@ -41,7 +41,7 @@ pub use polypus_backend::{
     check_statevector_fits, create_registered_backend, is_registered, max_statevector_concurrency,
     merge_counts, register_backend, registered_names, validate_run_results, wave_concurrency,
     BackendBuildContext, BackendCapabilities, BackendError, BackendFactory, BoundCircuit,
-    BudgetSource, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
+    BudgetSource, CallSeeds, CancelToken, CircuitTask, Counts, ForeignCircuit, IdentityTranspiler,
     InfrastructureError, InsufficientMemory, Interrupt, MemBudget, OptLevel, OptionValue, Planner,
     PlannerRequirements, QuantumBackend, RunParams, SequentialPlanner, ShotDistributingPlanner,
     TranspileOptions, Transpiler,
@@ -54,7 +54,7 @@ pub use attach::{
 pub use circuit::{as_qiskit, seam_error, to_py_object, QiskitCircuit};
 pub use cunqa::{validate_walltime, CunqaBackend, InvalidWalltime, DEFAULT_WALLTIME};
 pub use error::EntropyError;
-pub use execution_config::{final_batch_params, BackendConfig, ExecutionConfig};
+pub use execution_config::{BackendConfig, ExecutionConfig};
 pub use local::LocalBackend;
 pub use native::NativeStatevectorBackend;
 #[cfg(feature = "qmio")]

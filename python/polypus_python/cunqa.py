@@ -154,6 +154,9 @@ class Cunqa(Infraestructure):
         qcs = [qc for qc, _ in prepared]
         shots = args["shots"]
 
+        # This call's seed: the Rust side gives every call of a run its own
+        # (contract C-7), so successive waves and generations do not share
+        # shot noise.
         seed = args.get("seed", None)
 
         # Where these circuits start among the family's QPUs: circuit `i` runs on

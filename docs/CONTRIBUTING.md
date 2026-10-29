@@ -141,8 +141,18 @@ leg that installs the Qiskit `tests/python/qasm3_fixtures.py` names, for the
 pinned OpenQASM 3 fixtures (contract C-10). The other legs use the latest
 Qiskit, where those fixture tests skip. The latest-Python leg installs pinned
 Optuna, Nevergrad and pycma and sets `POLYPUS_REQUIRE_EXTERNAL_LIBRARIES=1`,
-so the tests of `polypus.external` that train through them run there
-(contract C-5); elsewhere they skip unless you install them.
+so the tests of `polypus.ask_tell` that train through them run there
+(contract C-5); elsewhere they skip unless you install them. Those pins are
+the floors of the pip extras of the same names in `pyproject.toml`, which a
+test checks: bump a pin and its floor together.
+
+Every Python leg also sets `POLYPUS_ALLOWED_SKIPS` to the tests it may skip,
+separated by spaces: a file (`test_cunqa_real.py`) or a class or test in it
+(`test_determinism_baseline.py::TestSameBuildStrict`; a test covers its
+parametrized cases). Any other skip fails the run and is listed at its end
+(`tests/python/skip_guard.py`), as is an entry that matched no skip, which
+does not fail it. A test that needs something a leg lacks either gets it
+installed there or goes on that leg's list in `.github/workflows/ci.yml`.
 
 CI also builds the wheel on Linux, macOS and Windows and executes every
 notebook under `tutorials/` (`jupyter nbconvert --to notebook --execute`).
@@ -212,16 +222,22 @@ pushing.
 
 `.github/workflows/sonar.yml` sends the code to SonarQube Cloud on every pull
 request and push to `main` (configuration in `sonar-project.properties`):
-Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes, the clippy
-report, and Python coverage of `python/` from the pytest suite. Rust reached
-only through the Python extension is not counted. The subprocess worker
-template (`crates/polypus-subprocess-backend/python/worker_template.py`) is
-left out of the coverage figures: it runs as a separate process spawned by the
-Rust integration tests, which no tool instruments; Sonar still analyses it for
-issues. The dashboard is informational: no check is required and the quality
-gate does not fail the run. Without the `SONAR_TOKEN` secret (pull requests
-from forks) the reports are still built but not uploaded. Python coverage
-locally, with the wheel installed:
+Rust coverage from `cargo llvm-cov` over the `test (Rust)` passes and over the
+pytest suite, which runs against a wheel built with the same instrumentation,
+the clippy report, and Python coverage of `python/` from that pytest run. The
+instrumented wheel simulates several times slower, so that run sets
+`POLYPUS_TEST_TIME_SCALE=10`, which stretches the deadlines and timeouts of the
+Ctrl+C tests in `tests/python/test_interrupt.py` by that factor; `ci.yml` runs
+them with the bounds as written. The subprocess worker template
+(`crates/polypus-subprocess-backend/python/worker_template.py`) is left out of
+the coverage figures: it runs as a separate process spawned by the Rust
+integration tests, which no tool instruments. So are the diagnostic binaries
+under `crates/*/src/bin/`, which are run by hand. Sonar still analyses both
+for issues. On pull requests the `SonarQube Cloud scan` job waits for the
+quality gate and fails with it; pushes to `main` only report. Without the
+`SONAR_TOKEN` secret (pull requests from forks) the reports are still built
+but not uploaded, and the job passes without a gate. Python coverage locally,
+with the wheel installed:
 
 ```bash
 python -m coverage run -m pytest tests/python && python -m coverage combine && python -m coverage report

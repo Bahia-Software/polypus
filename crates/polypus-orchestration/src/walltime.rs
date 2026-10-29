@@ -7,7 +7,8 @@
 //! which times the first generation, projects it over the optimizer's generation
 //! budget (for CMA-ES with IPOP restarts, whose batches grow, over the bound
 //! [`Method::growth`] gives; for an external optimizer, over its evaluation
-//! budget in batches the size of its first; batches sent before the first
+//! budget in batches the size of its first, timed until the second starts so
+//! that the library's own time counts; batches sent before the first
 //! generation, such as a calibration, are not timed but added at its pace) and
 //! logs one `warn` when the projection exceeds the walltime. Backends
 //! without a walltime get the bare oracle, so they pay nothing. The final batch
@@ -53,6 +54,14 @@ pub(crate) struct RunShape {
     /// one circuit, and the watch projects the budget over batches the size of
     /// the first. `None` for every other optimizer.
     pub evaluations: Option<u64>,
+    /// Whether the first generation is timed until the next batch starts
+    /// rather than until its own last batch ends: an external optimizer's,
+    /// whose library computes between its batches (`tell()` of one, then
+    /// `ask()` for the next), so that time is the run's too. The projection,
+    /// and its warning, then come when the second batch starts, and a run of
+    /// one batch is not projected. `false` for every other optimizer, whose
+    /// time between batches is its own bookkeeping.
+    pub until_next_batch: bool,
     /// Batches sent once before the first generation, unlike any generation's:
     /// a calibration. The watch does not time them as the first generation;
     /// it adds them to the projection by their circuits, at the first
@@ -94,7 +103,8 @@ impl Method {
     /// population in one batch the size of a generation's, so it counts as one;
     /// a QNG iteration is a gradient batch plus a single-candidate batch; an
     /// Adam iteration is one batch, θ and its finite-difference stencil
-    /// (with an exact gradient see [`run_shape_over`](Self::run_shape_over)),
+    /// (with a given gradient or a minibatch see
+    /// [`run_shape_over`](Self::run_shape_over)),
     /// and its final θ, one candidate after the last step, counts as one more
     /// iteration; an SPSA iteration is one batch of its perturbations (and θ
     /// when it is measured), after one leading calibration batch of 50
@@ -129,8 +139,10 @@ impl Method {
     /// for batches of constant size, as pycma, Nevergrad with `num_workers`
     /// and the Optuna adapter with its `batch_size` send; an upper bound to
     /// within one first batch when they grow; and it can be too low when they
-    /// shrink. Only the oracle call is timed: the library's own time in `ask()`
-    /// and `tell()`, between the batches, is not in the projection.
+    /// shrink. The first batch is timed until the second starts
+    /// ([`RunShape::until_next_batch`]), so the library's `tell()` of the first
+    /// batch and its `ask()` for the second are in the projection, at that
+    /// pace for every batch; only the first `ask()`, before any batch, is not.
     pub(crate) fn run_shape(&self, dimensions: u32) -> RunShape {
         match self {
             Method::De(cfg) => RunShape {
@@ -141,6 +153,7 @@ impl Method {
                     + 1,
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "generations",
                 setting: "generations",
             },
@@ -149,6 +162,7 @@ impl Method {
                 generations: u64::from(cfg.generations) + 1,
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "generations",
                 setting: "generations",
             },
@@ -157,6 +171,7 @@ impl Method {
                 generations: u64::from(cfg.max_iters),
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -167,6 +182,7 @@ impl Method {
                 generations: u64::from(cfg.generations),
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "generations",
                 setting: "generations",
             },
@@ -179,6 +195,7 @@ impl Method {
                 generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -191,6 +208,7 @@ impl Method {
                 generations: u64::from(cfg.max_iters) + 1,
                 leading_batches: 1,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "iterations",
                 setting: "iterations",
             },
@@ -201,6 +219,7 @@ impl Method {
                 generations: u64::from(cfg.sweeps) * u64::from(dimensions) + 1,
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "steps",
                 setting: "sweeps",
             },
@@ -211,27 +230,33 @@ impl Method {
                 generations: cfg.max_evaluations,
                 leading_batches: 0,
                 evaluations: Some(cfg.max_evaluations),
+                until_next_batch: true,
                 unit: "batches",
                 setting: "max_evaluations",
             },
         }
     }
 
-    /// [`run_shape`](Self::run_shape) for a run over `oracles`. An exact
-    /// gradient is one more call per Adam iteration: Adam scores θ on the
-    /// evaluation oracle, then asks the gradient oracle. So is a minibatch:
-    /// Adam scores θ on every sample (`full_evaluation`), then differentiates
-    /// the minibatch. The final θ is then one call counted as two. An exact
-    /// gradient
-    /// that scores θ itself ([`GradientOracle::value_and_gradient`]) makes an
-    /// iteration one call, which cannot be told in advance, so the projection
-    /// then overestimates (see [`Watched`]).
+    /// [`run_shape`](Self::run_shape) for a run over `oracles`. An Adam
+    /// iteration is one call when its gradient scores θ in its own batch
+    /// ([`GradientOracle::scores_theta`]): the finite difference the run builds
+    /// when it has neither a gradient nor a minibatch, or a gradient that
+    /// declares it, such as a native QML model's without a minibatch. It is
+    /// one more call otherwise, with a gradient that does not score θ (Adam
+    /// scores θ on its tracking oracle, then asks the gradient oracle) or with
+    /// a minibatch and no gradient (Adam scores θ on every sample,
+    /// `full_evaluation`, then differentiates the minibatch); the final θ is
+    /// then one call counted as two.
     pub(crate) fn run_shape_over(&self, oracles: &Oracles, dimensions: u32) -> RunShape {
         let mut shape = self.run_shape(dimensions);
-        if matches!(self, Method::Adam(_))
-            && (oracles.gradient.is_some() || oracles.full_evaluation.is_some())
-        {
-            shape.batches_per_generation += 1;
+        if matches!(self, Method::Adam(_)) {
+            let scores_theta = match &oracles.gradient {
+                Some(gradient) => gradient.scores_theta(),
+                None => oracles.full_evaluation.is_none(),
+            };
+            if !scores_theta {
+                shape.batches_per_generation += 1;
+            }
         }
         shape
     }
@@ -289,7 +314,9 @@ pub(crate) struct Growth {
 ///
 /// The first generation is timed from the start of its first batch to the end of
 /// its last, so a QNG iteration includes the variance evaluations between its two
-/// batches. Early stopping can only shorten a run, so the projection is an upper
+/// batches; with [`until_next_batch`](RunShape::until_next_batch), an external
+/// optimizer's, to the start of the next batch, so the library's `tell()` and
+/// `ask()` between the two are in it. Early stopping can only shorten a run, so the projection is an upper
 /// bound. After the first generation the watch is one atomic load per batch.
 ///
 /// The shape's [`leading_batches`](RunShape::leading_batches) pass through
@@ -320,6 +347,10 @@ struct WatchState {
     /// Batches of the first generation seen so far, and their circuits.
     batches: u32,
     circuits: u64,
+    /// The first generation's batches are done and, with
+    /// [`until_next_batch`](RunShape::until_next_batch), its time runs on
+    /// until the next batch starts.
+    awaiting_next: bool,
     /// The projected duration, when the warning fired.
     warned: Option<Duration>,
 }
@@ -375,11 +406,22 @@ impl<C: Clock> WalltimeWatch<C> {
         if state.batches < self.shape.batches_per_generation {
             return;
         }
+        if self.shape.until_next_batch {
+            state.awaiting_next = true;
+            return;
+        }
         self.done.store(true, Ordering::Relaxed);
+        let end = self.clock.now();
+        self.project(&mut state, end);
+    }
+
+    /// Project the run from a first generation that ended at `end`, and warn
+    /// when the projection exceeds the walltime.
+    fn project(&self, state: &mut WatchState, end: Instant) {
         let Some(started) = state.started else {
             return;
         };
-        let first = self.clock.now().saturating_duration_since(started);
+        let first = end.saturating_duration_since(started);
         let generations = self.shape.generations_after(state.circuits);
         let work = self.growth.map_or(generations, |g| g.first_generations) as f64
             + state.leading_generations();
@@ -421,10 +463,16 @@ impl<C: Clock> WalltimeWatch<C> {
                 );
                 return;
             }
+            // The library's time between the batches is in the first one's.
+            let with_the_library = if self.shape.until_next_batch {
+                ", with the optimizer's tell() and next ask(),"
+            } else {
+                ""
+            };
             log::warn!(
-                "run {}: the first of up to {} {} took {}, so the optimisation may take up \
-                 to {}, beyond the {} walltime; the QPUs are released when it runs out. \
-                 Raise `walltime` or lower the {}.",
+                "run {}: the first of up to {} {}{with_the_library} took {}, so the \
+                 optimisation may take up to {}, beyond the {} walltime; the QPUs are \
+                 released when it runs out. Raise `walltime` or lower the {}.",
                 self.run_id,
                 generations,
                 self.shape.unit,
@@ -468,6 +516,14 @@ impl<C: Clock> WalltimeWatch<C> {
                 }
                 return out;
             }
+            if state.awaiting_next {
+                // The next batch starts: the first generation ends here.
+                self.done.store(true, Ordering::Relaxed);
+                let end = self.clock.now();
+                self.project(&mut state, end);
+                drop(state);
+                return call();
+            }
             state.started.get_or_insert_with(|| self.clock.now());
         }
         let out = call();
@@ -496,15 +552,15 @@ impl<C: Clock> EvaluationOracle for WalltimeWatch<C> {
 /// count as batches of the generation the watch times: an exact gradient, one
 /// batch of an Adam iteration.
 ///
-/// It forwards every call, so Adam sends the same batches with and without
-/// the watch. A [`GradientOracle::value_and_gradient`] that returns `None` (the
-/// default) scored nothing and is not counted: Adam then scores θ through the
-/// watched evaluation oracle and calls the gradient, the two batches
-/// [`Method::run_shape_over`] counts per iteration. One that scores θ itself
-/// makes an iteration a single batch, which the shape cannot tell in advance:
-/// the watch then times two iterations as the first, so the projection
-/// overestimates. A gradient call has no candidates, so it counts as a batch of
-/// no circuits.
+/// It forwards every call, [`GradientOracle::scores_theta`] included, so Adam
+/// sends the same batches with and without the watch and
+/// [`Method::run_shape_over`] counts them. A
+/// [`GradientOracle::value_and_gradient`] that returns `None` (the default)
+/// scored nothing and is not counted: Adam then scores θ through the watched
+/// evaluation oracle and calls the gradient, two batches per iteration. One
+/// that scores θ itself makes an iteration a single batch, which its
+/// `scores_theta` declares in advance. A gradient call has no candidates, so it
+/// counts as a batch of no circuits.
 struct Watched<T: ?Sized, C: Clock> {
     watch: Arc<WalltimeWatch<C>>,
     inner: Box<T>,
@@ -540,6 +596,10 @@ impl<C: Clock> GradientOracle for Watched<dyn GradientOracle, C> {
             || self.inner.value_and_gradient(theta, dims),
             Option::is_some,
         )
+    }
+
+    fn scores_theta(&self) -> bool {
+        self.inner.scores_theta()
     }
 }
 
@@ -650,6 +710,7 @@ mod tests {
         generations: 101,
         leading_batches: 0,
         evaluations: None,
+        until_next_batch: false,
         unit: "generations",
         setting: "generations",
     };
@@ -725,6 +786,7 @@ mod tests {
             generations: 50,
             leading_batches: 0,
             evaluations: None,
+            until_next_batch: false,
             unit: "iterations",
             setting: "iterations",
         };
@@ -790,6 +852,7 @@ mod tests {
         generations: 300,
         leading_batches: 1,
         evaluations: None,
+        until_next_batch: false,
         unit: "iterations",
         setting: "iterations",
     };
@@ -852,6 +915,7 @@ mod tests {
             generations: 100,
             leading_batches: 2,
             evaluations: None,
+            until_next_batch: false,
             unit: "iterations",
             setting: "iterations",
         };
@@ -975,58 +1039,8 @@ mod tests {
         }
     }
 
-    /// `run_shape_over` counts the batches Adam sends when it does not stop
-    /// early: one per iteration with the finite difference, and with an exact
-    /// gradient or a minibatch the scored θ plus the gradient's call, then the
-    /// final θ, one batch, which those shapes count as two.
-    #[test]
-    fn adam_run_shape_counts_the_batches_the_optimizer_sends() {
-        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
-        for (exact, minibatch) in [(false, false), (true, false), (false, true), (true, true)] {
-            for max_iters in [1, 7, 30] {
-                let batches = Arc::new(Mutex::new(0));
-                let oracles = Oracles {
-                    evaluation: Box::new(CountingOracle(Arc::clone(&batches))),
-                    gradient: exact.then(|| {
-                        Box::new(CountingGradient(Arc::clone(&batches))) as Box<dyn GradientOracle>
-                    }),
-                    full_evaluation: minibatch.then(|| {
-                        Box::new(CountingOracle(Arc::clone(&batches))) as Box<dyn EvaluationOracle>
-                    }),
-                };
-                let method = Method::Adam(crate::AdamConfig {
-                    max_iters,
-                    learning_rate: 0.1,
-                    beta1: 0.9,
-                    beta2: 0.999,
-                    epsilon: 1e-8,
-                    bounds: (0.0, 1.0),
-                    // Zero improvement is never below a zero tolerance.
-                    tolerance: 0.0,
-                    patience: 1,
-                    finite_difference_step: 0.2,
-                    rule: polypus_optimizers::AdamRule::Adam,
-                });
-                let shape = method.run_shape_over(&oracles, 2);
-                let outcome =
-                    dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
-                let label = format!(
-                    "exact gradient {exact}, minibatch {minibatch}, {max_iters} iterations"
-                );
-                assert!(outcome.is_some_and(|o| !o.converged), "{label}");
-                assert_eq!(shape.generations, u64::from(max_iters) + 1, "{label}");
-                assert_eq!(
-                    *batches.lock().unwrap(),
-                    shape.generations * u64::from(shape.batches_per_generation)
-                        - u64::from(exact || minibatch),
-                    "{label}"
-                );
-            }
-        }
-    }
-
-    /// A zero gradient that scores θ itself, as zero, and counts its calls into
-    /// the same counter as [`CountingOracle`].
+    /// A zero gradient that scores θ itself, as zero, declares it, and counts
+    /// its calls into the same counter as [`CountingOracle`].
     struct CountingScoringGradient(Arc<Mutex<u64>>);
 
     impl GradientOracle for CountingScoringGradient {
@@ -1041,6 +1055,93 @@ mod tests {
         fn value_and_gradient(&self, _theta: &[f64], dims: usize) -> Option<(f64, Vec<f64>)> {
             *self.0.lock().unwrap() += 1;
             Some((0.0, vec![0.0; dims]))
+        }
+        fn scores_theta(&self) -> bool {
+            true
+        }
+    }
+
+    /// The gradient an Adam run is given in the counting tests.
+    #[derive(Debug, Clone, Copy)]
+    enum AdamGradient {
+        /// None: the run builds a finite difference of its evaluation oracle.
+        Absent,
+        /// [`CountingGradient`], which does not score θ.
+        NotScoring,
+        /// [`CountingScoringGradient`], which does.
+        Scoring,
+        /// A real [`FiniteDifferenceGradient`](polypus_optimizers::FiniteDifferenceGradient)
+        /// over a [`CountingOracle`].
+        FiniteDifference,
+    }
+
+    impl AdamGradient {
+        fn build(self, batches: &Arc<Mutex<u64>>) -> Option<Box<dyn GradientOracle>> {
+            match self {
+                AdamGradient::Absent => None,
+                AdamGradient::NotScoring => Some(Box::new(CountingGradient(Arc::clone(batches)))),
+                AdamGradient::Scoring => {
+                    Some(Box::new(CountingScoringGradient(Arc::clone(batches))))
+                }
+                AdamGradient::FiniteDifference => Some(Box::new(
+                    polypus_optimizers::FiniteDifferenceGradient::new(
+                        CountingOracle(Arc::clone(batches)),
+                        0.2,
+                    )
+                    .unwrap(),
+                )),
+            }
+        }
+    }
+
+    /// `run_shape_over` counts the batches Adam sends when it does not stop
+    /// early. An iteration is one batch when the gradient scores θ in its own:
+    /// the finite difference the run builds without a gradient or a minibatch,
+    /// a gradient that declares it (with or without a minibatch, which then
+    /// only tracks), and a finite difference given as the gradient. It is two
+    /// (θ, then the gradient) with a minibatch and no gradient, or with a
+    /// gradient that does not score θ. The final θ is one batch, exact with one
+    /// per iteration and counted as two with two.
+    #[test]
+    fn adam_run_shape_counts_the_batches_the_optimizer_sends() {
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        use AdamGradient::*;
+        for (gradient, minibatch, per_iteration) in [
+            (Absent, false, 1),
+            (Absent, true, 2),
+            (NotScoring, false, 2),
+            (NotScoring, true, 2),
+            (Scoring, false, 1),
+            (Scoring, true, 1),
+            (FiniteDifference, false, 1),
+            // No factory builds it; pins that a given gradient counts by `scores_theta` alone.
+            (FiniteDifference, true, 1),
+        ] {
+            for max_iters in [1, 7, 30] {
+                let batches = Arc::new(Mutex::new(0));
+                let oracles = Oracles {
+                    evaluation: Box::new(CountingOracle(Arc::clone(&batches))),
+                    gradient: gradient.build(&batches),
+                    full_evaluation: minibatch.then(|| {
+                        Box::new(CountingOracle(Arc::clone(&batches))) as Box<dyn EvaluationOracle>
+                    }),
+                };
+                let method = adam(max_iters);
+                let shape = method.run_shape_over(&oracles, 2);
+                let outcome =
+                    dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
+                let label =
+                    format!("gradient {gradient:?}, minibatch {minibatch}, {max_iters} iterations");
+                assert!(outcome.is_some_and(|o| !o.converged), "{label}");
+                let sent = *batches.lock().unwrap();
+                assert_eq!(sent, u64::from(max_iters) * per_iteration + 1, "{label}");
+                assert_eq!(
+                    u64::from(shape.batches_per_generation),
+                    per_iteration,
+                    "{label}"
+                );
+                assert_eq!(shape.generations, u64::from(max_iters) + 1, "{label}");
+            }
         }
     }
 
@@ -1064,7 +1165,7 @@ mod tests {
     /// The watch forwards every call, so Adam over an exact gradient sends the
     /// same batches with and without it: one per iteration when the gradient
     /// scores θ itself, two (θ, then the gradient) when it does not, and the
-    /// final θ. `run_shape_over` counts two per iteration either way.
+    /// final θ. `run_shape_over` counts the same per iteration.
     #[test]
     fn adam_sends_the_same_batches_with_and_without_the_watch() {
         use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
@@ -1099,9 +1200,13 @@ mod tests {
                     dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).ok();
                 let label = format!("scores θ {scores_theta}, watched {behind_the_watch}");
                 assert!(outcome.is_some_and(|o| !o.converged), "{label}");
-                assert_eq!(shape.batches_per_generation, 2, "{label}");
                 let per_iteration = if scores_theta { 1 } else { 2 };
-                assert_eq!(*batches.lock().unwrap(), 7 * per_iteration + 1, "{label}");
+                assert_eq!(shape.batches_per_generation, per_iteration, "{label}");
+                assert_eq!(
+                    *batches.lock().unwrap(),
+                    7 * u64::from(per_iteration) + 1,
+                    "{label}"
+                );
             }
         }
     }
@@ -1114,6 +1219,7 @@ mod tests {
             target_step: 0.63,
             alpha: 0.602,
             gamma: 0.101,
+            stability_constant: 0.0,
             eval_interval,
         })
     }
@@ -1290,6 +1396,30 @@ mod tests {
         )
     }
 
+    /// [`Constant`]'s batches from a library that takes `per_ask` and
+    /// `per_tell` of the fake clock, as a model-based one computes.
+    struct Thinking {
+        rows: usize,
+        clock: Arc<FakeClock>,
+        per_ask: Duration,
+        per_tell: Duration,
+    }
+
+    impl polypus_optimizers::AskTell for Thinking {
+        fn ask(&mut self) -> Result<Option<Vec<Vec<f64>>>, polypus_optimizers::AskTellError> {
+            self.clock.advance(self.per_ask);
+            Ok(Some(vec![vec![0.5, 0.25]; self.rows]))
+        }
+        fn tell(
+            &mut self,
+            _candidates: &[Vec<f64>],
+            _values: &[f64],
+        ) -> Result<(), polypus_optimizers::AskTellError> {
+            self.clock.advance(self.per_tell);
+            Ok(())
+        }
+    }
+
     /// With batches of constant size, the generations the shape counts after
     /// the first batch are exactly the batches the bridge sends: it stops
     /// before the batch that would take it past `max_evaluations`.
@@ -1356,9 +1486,10 @@ mod tests {
         assert_eq!(
             logged_for(run_id),
             vec![format!(
-                "run {run_id}: the first of up to 50 batches took 0:01:00, so the optimisation \
-                 may take up to 0:50:00, beyond the 0:40:00 walltime; the QPUs are released \
-                 when it runs out. Raise `walltime` or lower the max_evaluations."
+                "run {run_id}: the first of up to 50 batches, with the optimizer's tell() and \
+                 next ask(), took 0:01:00, so the optimisation may take up to 0:50:00, beyond \
+                 the 0:40:00 walltime; the QPUs are released when it runs out. Raise \
+                 `walltime` or lower the max_evaluations."
             )]
         );
 
@@ -1380,6 +1511,86 @@ mod tests {
         );
         assert!(dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None).is_ok());
         assert!(logged_for(quiet).is_empty());
+    }
+
+    /// The library's own time counts: the first batch is timed until the
+    /// second starts, so its `tell()` and the next `ask()` are in it. At 10 s
+    /// a circuit, batches of 6 take 1 min, and with 20 s in `tell()` and 10 s
+    /// in `ask()` a batch takes 1:30; 50 of them, 1:15:00, which the
+    /// projection gives where the batches alone would give 0:50:00.
+    #[test]
+    fn an_external_run_counts_the_librarys_own_time() {
+        capture_logs();
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let run_id = "walltime-watch-external-thinking";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(10),
+        });
+        let method = Method::External(
+            crate::ExternalConfig {
+                max_evaluations: 303,
+            },
+            Box::new(Thinking {
+                rows: 6,
+                clock: Arc::clone(&clock),
+                per_ask: Duration::from_secs(10),
+                per_tell: Duration::from_secs(20),
+            }),
+        );
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(3600),
+            &method,
+            2,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let start = clock.now();
+        let outcome = dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None);
+        assert!(outcome.is_ok_and(|o| o.iterations_run == 50));
+        // 50 batches and tells, and 51 asks: the last proposes a batch that
+        // does not fit.
+        assert_eq!(
+            clock.now().saturating_duration_since(start),
+            Duration::from_secs(50 * 90 + 10)
+        );
+        assert_eq!(
+            logged_for(run_id),
+            vec![format!(
+                "run {run_id}: the first of up to 50 batches, with the optimizer's tell() and \
+                 next ask(), took 0:01:30, so the optimisation may take up to 1:15:00, beyond \
+                 the 1:00:00 walltime; the QPUs are released when it runs out. Raise \
+                 `walltime` or lower the max_evaluations."
+            )]
+        );
+    }
+
+    /// A run of one batch is not projected: the first batch's time runs until
+    /// a second one starts, and none does.
+    #[test]
+    fn an_external_run_of_one_batch_is_not_projected() {
+        capture_logs();
+        use crate::dispatch::{dispatch_optimizer, OracleErrorSlot};
+        let run_id = "walltime-watch-external-one-batch";
+        let clock = FakeClock::new();
+        let oracle: Box<dyn EvaluationOracle> = Box::new(PerCircuitOracle {
+            clock: Arc::clone(&clock),
+            per_circuit: Duration::from_secs(3600),
+        });
+        let method = external(6, 6);
+        let oracles = watched(
+            oracle.into(),
+            Duration::from_secs(60),
+            &method,
+            2,
+            run_id,
+            Arc::clone(&clock),
+        );
+        let outcome = dispatch_optimizer(method, oracles, 2, &OracleErrorSlot::new(), 3, None);
+        assert!(outcome.is_ok_and(|o| o.iterations_run == 1));
+        assert!(logged_for(run_id).is_empty());
     }
 
     /// Takes `per_batch` on the fake clock and records the shots of every
@@ -1594,15 +1805,16 @@ mod tests {
 
     /// With IPOP restarts the batches grow, and `growth` bounds the work they
     /// add: every run is checked against the schedule's per-generation bound
-    /// and the total against `first_generations` first batches. Patience 0
-    /// restarts after every generation, the worst case the bound assumes, so
-    /// there it is met exactly.
+    /// and the total against `first_generations` first batches. Patience 1
+    /// on a flat landscape restarts after every second generation, the
+    /// soonest stagnation can; the bound assumes a restart after every
+    /// generation, which only a degenerate distribution can force.
     #[test]
     fn cmaes_growth_bounds_the_batches_with_restarts() {
         use polypus_optimizers::CmaEsBatchSchedule;
         for (population_size, generations, restarts, patience) in [
-            (None, 4, 3, 0),
-            (Some(5), 3, 2, 0),
+            (None, 8, 3, 1),
+            (Some(5), 6, 2, 1),
             (Some(4), 40, 3, 2),
             (None, 30, 5, 3),
             (Some(6), 10, 4, 4),
@@ -1622,10 +1834,9 @@ mod tests {
             }
             let total: u64 = sizes.iter().sum();
             assert!(total <= growth.first_generations * first, "{label}");
-            if patience == 0 && generations == restarts + 1 {
-                let worst: Vec<u64> = (0..generations).map(|g| first << g).collect();
-                assert_eq!(sizes, worst, "{label}");
-                assert_eq!(total, growth.first_generations * first, "{label}");
+            if patience == 1 && generations == 2 * (restarts + 1) {
+                let soonest: Vec<u64> = (0..generations).map(|g| first << (g / 2)).collect();
+                assert_eq!(sizes, soonest, "{label}");
             }
         }
     }
@@ -1759,6 +1970,7 @@ mod tests {
                 generations: 101,
                 leading_batches: 0,
                 evaluations: None,
+                until_next_batch: false,
                 unit: "iterations",
                 setting: "iterations",
             }
@@ -1794,7 +2006,7 @@ mod tests {
     }
 
     /// An exact gradient that scores θ itself, as the sum of its parameters,
-    /// in `per_call` on the fake clock.
+    /// in `per_call` on the fake clock, and declares it.
     struct SlowScoringGradient {
         clock: Arc<FakeClock>,
         per_call: Duration,
@@ -1813,53 +2025,102 @@ mod tests {
             self.clock.advance(self.per_call);
             Some((theta.iter().sum(), vec![0.0; dims]))
         }
+        fn scores_theta(&self) -> bool {
+            true
+        }
     }
 
     /// Behind the watch, an exact gradient that scores θ itself still does,
-    /// timed as a batch. The shape counts two calls per iteration, so the watch
-    /// times two of its one-call iterations as the first: the projection
-    /// overestimates, here warning about a run of 1:41:00 within 3 h.
+    /// timed as a batch. It declares it, so the shape counts one call per
+    /// iteration and the watch times that call as the first: 100 iterations
+    /// and the final θ, 101 of 1 min, is 1:41:00, which warns within 1:40:00
+    /// and not within 1:41:00. Were the iteration counted as two calls, two of
+    /// them would be timed as the first, and 3:22:00 would warn within both.
     #[test]
     fn a_watched_gradient_that_scores_theta_is_forwarded_and_timed() {
         capture_logs();
-        let run_id = "walltime-watch-adam-scoring";
+        for (walltime, run_id, warns) in [
+            (6000, "walltime-watch-adam-scoring", true),
+            (6060, "walltime-watch-adam-scoring-fits", false),
+        ] {
+            let clock = FakeClock::new();
+            let oracles = Oracles {
+                evaluation: Box::new(SlowOracle {
+                    clock: Arc::clone(&clock),
+                    per_batch: Duration::from_secs(10),
+                }),
+                gradient: Some(Box::new(SlowScoringGradient {
+                    clock: Arc::clone(&clock),
+                    per_call: Duration::from_secs(60),
+                })),
+                full_evaluation: None,
+            };
+            let method = adam(100);
+            assert_eq!(method.run_shape_over(&oracles, 2).batches_per_generation, 1);
+            let oracles = watched(
+                oracles,
+                Duration::from_secs(walltime),
+                &method,
+                2,
+                run_id,
+                Arc::clone(&clock),
+            );
+            let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
+            // Nothing is logged before the first iteration.
+            assert!(logged_for(run_id).is_empty());
+            assert_eq!(
+                gradient.value_and_gradient(&[0.5, 0.25], 2),
+                Some((0.75, vec![0.0, 0.0]))
+            );
+            // A second iteration is past the first: it changes nothing.
+            gradient.value_and_gradient(&[0.5, 0.25], 2);
+            let logged = logged_for(run_id);
+            if warns {
+                assert_eq!(logged.len(), 1, "{logged:?}");
+                assert!(
+                    logged[0].contains("101 iterations took 0:01:00"),
+                    "{}",
+                    logged[0]
+                );
+                assert!(logged[0].contains("1:41:00"), "{}", logged[0]);
+            } else {
+                assert!(logged.is_empty(), "{logged:?}");
+            }
+        }
+    }
+
+    /// The watch forwards `scores_theta`: a watched gradient that scores θ
+    /// still declares it, and one that does not still declines.
+    #[test]
+    fn a_watched_gradient_forwards_whether_it_scores_theta() {
         let clock = FakeClock::new();
-        let oracles = Oracles {
-            evaluation: Box::new(SlowOracle {
-                clock: Arc::clone(&clock),
-                per_batch: Duration::from_secs(10),
-            }),
-            gradient: Some(Box::new(SlowScoringGradient {
-                clock: Arc::clone(&clock),
-                per_call: Duration::from_secs(60),
-            })),
-            full_evaluation: None,
-        };
-        let method = adam(100);
-        let oracles = watched(
-            oracles,
-            Duration::from_secs(3 * 3600),
-            &method,
-            2,
-            run_id,
-            Arc::clone(&clock),
-        );
-        let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
-        assert_eq!(
-            gradient.value_and_gradient(&[0.5, 0.25], 2),
-            Some((0.75, vec![0.0, 0.0]))
-        );
-        assert!(logged_for(run_id).is_empty());
-        gradient.value_and_gradient(&[0.5, 0.25], 2);
-        // Two iterations of 1 min, projected as 100 and the final θ, 101 of
-        // 2 min: 3:22:00.
-        let logged = logged_for(run_id);
-        assert_eq!(logged.len(), 1, "{logged:?}");
-        assert!(
-            logged[0].contains("101 iterations took 0:02:00"),
-            "{}",
-            logged[0]
-        );
-        assert!(logged[0].contains("3:22:00"), "{}", logged[0]);
+        for scores_theta in [false, true] {
+            let gradient: Box<dyn GradientOracle> = if scores_theta {
+                Box::new(SlowScoringGradient {
+                    clock: Arc::clone(&clock),
+                    per_call: Duration::ZERO,
+                })
+            } else {
+                Box::new(SlowGradient {
+                    clock: Arc::clone(&clock),
+                    per_call: Duration::ZERO,
+                })
+            };
+            let oracles = Oracles {
+                evaluation: Box::new(CountingOracle(Arc::new(Mutex::new(0)))),
+                gradient: Some(gradient),
+                full_evaluation: None,
+            };
+            let oracles = watched(
+                oracles,
+                Duration::from_secs(3600),
+                &adam(5),
+                2,
+                "walltime-watch-scores-theta",
+                Arc::clone(&clock),
+            );
+            let gradient = oracles.gradient.as_ref().expect("the gradient is kept");
+            assert_eq!(gradient.scores_theta(), scores_theta);
+        }
     }
 }

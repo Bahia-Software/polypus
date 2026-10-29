@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    SupportsIndex,
     Union,
     final,
     overload,
@@ -23,6 +24,7 @@ from qiskit_aer.noise import NoiseModel
 
 from . import (
     CachedCost,
+    Circuit,
     Ising,
     Qubo,
     RunResult,
@@ -53,7 +55,9 @@ __all__ = [
 
 # ── Native pieces ───────────────────────────────────────────────────────────
 # Each option is a string from a closed set (bindings/qml.rs); any other value
-# raises `ValueError` naming the valid ones.
+# raises `ValueError` naming the valid ones (`polypus.ConfigurationError`, a
+# `ValueError`, for `fit`'s `loss`, like every check of `fit`, `predict` and
+# `run`).
 _Axis = Literal["rx", "ry", "rz"]
 _Entanglement = Literal["linear", "circular", "full"]
 _Entangler = Literal["cx", "cz"]
@@ -181,6 +185,11 @@ class Model:
         batch_size: Optional[int] = None,
     ) -> TrainResult: ...
     def bind(self, params: Sequence[float]) -> TrainedModel: ...
+    # The circuit for one sample, measured in the readout's basis; without
+    # `params` its trainable angles stay free (`theta_0`, `theta_1`, ...).
+    def circuit(
+        self, x: _FloatVector, params: Optional[_FloatVector] = None
+    ) -> Circuit: ...
 
 @final
 class TrainedModel:
@@ -264,6 +273,8 @@ class TrainedModel:
     ) -> Union[RunResult, ExactResult]: ...
     # Versioned JSON, replacing any file at `path`; read back with `load`.
     def save(self, path: Union[str, PathLike[str]]) -> None: ...
+    # The circuit `run` executes for one sample, every angle fixed.
+    def circuit(self, x: _FloatVector) -> Circuit: ...
 
 def load(path: Union[str, PathLike[str]]) -> TrainedModel: ...
 
@@ -339,7 +350,7 @@ def train(
     *,
     y_train: Optional[Iterable[float]] = None,
     initial_point: Optional[_FloatVector] = None,
-    final_shots: Optional[int] = None,
+    final_shots: Optional[SupportsIndex] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,

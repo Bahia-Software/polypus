@@ -18,13 +18,13 @@ import pytest
 # Each stubbed module of the package, with its stub relative to the package dir.
 # The submodules are created by the extension at import time (they are not
 # files), so their stubs are the only on-disk description of them, except
-# `polypus.external`, a pure-Python module typed inline.
+# `polypus.ask_tell`, a pure-Python module typed inline.
 STUBS = {
     "polypus": "__init__.pyi",
     "polypus.qml": "qml.pyi",
     "polypus.circuits": "circuits/__init__.pyi",
     "polypus.circuits.templates": "circuits/templates.pyi",
-    "polypus.external": "external.py",
+    "polypus.ask_tell": "ask_tell.py",
 }
 
 
@@ -123,3 +123,20 @@ class TestOptionsType:
         )
         status, report = _mypy(source, tmp_path)
         assert status == 1 and "snippet.py:3: error" in report, report
+
+
+class TestAskTellTypes:
+    def test_only_the_optuna_adapter_types_close(self, tmp_path):
+        # `from_optuna` returns an `OptunaAskTell`, the other adapters an
+        # `AskTell`, which has no `close()`.
+        source = (
+            "from typing import Any\n"
+            "from polypus.ask_tell import from_optuna, from_pycma\n"
+            "library: Any = None\n"
+            "from_optuna(library, 2, 2).close()\n"
+            "from_pycma(library).close()\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:4:" not in report, report
+        assert 'snippet.py:5: error: "AskTell" has no attribute "close"' in report

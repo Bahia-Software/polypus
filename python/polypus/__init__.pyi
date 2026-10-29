@@ -21,6 +21,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    SupportsIndex,
     TypedDict,
     Union,
     final,
@@ -31,12 +32,12 @@ import numpy.typing as npt
 from qiskit import QuantumCircuit
 from qiskit_aer.noise import NoiseModel
 
+from . import ask_tell as ask_tell
 from . import circuits as circuits
-from . import external as external
 from . import qml as qml
 
-# What `External` runs (bindings/external.rs), typed in `polypus.external`.
-from .external import AskTell as _AskTell
+# What `External` runs (bindings/external.rs), typed in `polypus.ask_tell`.
+from .ask_tell import AskTell as _AskTell
 
 __all__ = [
     "__version__",
@@ -86,7 +87,7 @@ __all__ = [
     "backend_compatibility",
     "qml",
     "circuits",
-    "external",
+    "ask_tell",
 ]
 
 __version__: str
@@ -267,6 +268,7 @@ class SPSA:
     target_step: float
     alpha: float
     gamma: float
+    stability_constant: float
     eval_interval: int
     seed: Optional[int]
     def __new__(
@@ -279,6 +281,7 @@ class SPSA:
         gamma: float = 0.101,
         eval_interval: int = 20,
         seed: Optional[int] = None,
+        stability_constant: float = 0.0,
     ) -> SPSA: ...
 
 @final
@@ -301,7 +304,9 @@ class Rotosolve:
 class External:
     optimizer: _AskTell
     max_evaluations: int
-    def __new__(cls, optimizer: _AskTell, max_evaluations: int) -> External: ...
+    def __new__(
+        cls, optimizer: _AskTell, max_evaluations: SupportsIndex
+    ) -> External: ...
 
 # ── Native circuits ─────────────────────────────────────────────────────────
 
@@ -554,7 +559,7 @@ def train(
     options: Optional[_Options] = None,
     walltime: Optional[str] = None,
     initial_point: Optional[_FloatVector] = None,
-    final_shots: Optional[int] = None,
+    final_shots: Optional[SupportsIndex] = None,
 ) -> TrainResult: ...
 def run_quantum_circuit(
     qc: Union[QuantumCircuit, Circuit, str],

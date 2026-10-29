@@ -57,7 +57,7 @@ Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An except
 | `seed` | The effective seed; pass it back as `seed=...` to reproduce the run |
 | `id` | The effective run id |
 
-The seed can also be pinned on the optimizer (`polypus.DE(..., seed=42)`). The `seed` argument of `train` takes precedence. On the native backend the same seed also drives shot sampling, so the whole run reproduces exactly.
+The seed can also be pinned on the optimizer (`polypus.DE(..., seed=42)`). The `seed` argument of `train` takes precedence. The same seed also drives shot sampling, a fresh stream for every batch the run sends, so the whole run reproduces exactly: on the native backend anywhere, on Aer and CUNQA with the same `n_qpus` and resources.
 
 ## Cost functions
 
@@ -97,7 +97,7 @@ polypus.DE(
 )
 ```
 
-The run stops early when the best fitness improves by less than `tolerance` over the last `patience` generations.
+The run stops early when the best fitness improves by less than `tolerance` over the last `patience` generations. `patience` is at least 1: `train` raises `ValueError` for 0 before anything runs.
 
 `strategy` picks how each generation builds its trial vectors:
 
@@ -169,7 +169,7 @@ The covariance matrix adaptation evolution strategy (Hansen's tutorial, arXiv:16
 | `generations` | Total generations, over the first run and every restart. Each generation is one batch; there is no separate initial batch. At least 1 |
 | `population_size` | Candidates per generation in the first run, at least 2. `None` uses Hansen's default `4 + floor(3 ln d)` for `d = dimensions` (9 for 6 parameters) |
 | `sigma0` | Initial step size in radians, in `(0, 2π]`. The default `π/2` suits angles spread over the whole circle; larger values make runs stall more often. During the run the spread of each angle stays within `max(sigma0, π/2)` |
-| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` generations, as with DE |
+| `tolerance`, `patience` | The run ends when its best fitness improves by less than `tolerance` over its last `patience` generations, as with DE. `patience` is at least 1 |
 | `restarts` | IPOP restarts allowed. When a run ends, the next one starts from a new random mean with twice the population |
 
 A run also ends when its distribution degenerates: its spread collapses below `1e-12·sigma0` or grows beyond `1e4·sigma0`, its covariance becomes ill-conditioned (condition number above `1e14`), or a value is no longer finite. Either way the next restart starts if one is left; otherwise the optimisation stops with `converged=True`. If the generations run out first, `converged` is `False`. `iterations_run` counts the generations of all runs. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
@@ -220,7 +220,7 @@ Any other `rule` raises `ValueError`.
 
 **The finite-difference step matters.** Shot noise enters the gradient through the difference of two fitness values divided by `2 × finite_difference_step`, so a small step amplifies it. Jones, Mineh and Montanaro (arXiv:2411.13742) found that a step of 0.4 works and 0.01 ruins the gradient. Prefer the default `0.2` to a small step, which needs many more shots for the same accuracy.
 
-`best_params` is the measured point with the best fitness and `fitness_history` the best fitness measured up to each iteration. After the last step, whether `max_iters` ran out or the run stagnated, one more circuit measures the parameters it reached, which count in the last entry, so no gradient is spent on a step that is never measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+`best_params` is the `θ` with the best measured fitness, among the points the run stepped to: the `θ ± finite_difference_step` around them only give the gradient, and never count, even when one of them measured higher. `fitness_history` is the best fitness measured up to each iteration. After the last step, whether `max_iters` ran out or the run stagnated, one more circuit measures the parameters it reached, which count in the last entry, so no gradient is spent on a step that is never measured. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
 **A local method.** Adam and momentum climb to an optimum near where they start, so on a landscape with many local optima one run can end in a poor one. Start them from a global search's result, such as an L-SHADE run's `best_params`, with `initial_point` (see [Starting point](#starting-point)), or run them a few times with different seeds and keep the best. In [Choosing an optimizer](#choosing-an-optimizer), starting from L-SHADE was the more reliable of the two.
 
@@ -238,6 +238,7 @@ polypus.SPSA(
     gamma=0.101,
     eval_interval=20,
     seed=None,
+    stability_constant=0.0,
 )
 ```
 
@@ -246,16 +247,17 @@ Simultaneous perturbation stochastic approximation (Spall, 1992) is a gradient m
 A run has three parts:
 
 1. **Calibration.** One batch of 50 circuits around the starting point θ₀, 25 random perturbations in both directions, measures how large the gradient estimates are there, and SPSA sets its gain so that, with `resamplings=1`, the first step moves each parameter by about `target_step` radians, following Spall's guideline (1998), as Qiskit's `SPSA.calibrate` does. With more perturbations per iteration the average of their estimates is smaller on average than one estimate, so the first step is usually shorter. Each pair gives `|f₊ − f₋| / (2·perturbation)`, the size of every component of its estimate, and the gain is `target_step` over their mean. If every pair has the same fitness (a flat landscape around θ₀), the gain is `target_step` and a warning is logged.
-2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / k^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults.
+2. **Iterations.** Iteration `k` sends one batch of `2 × resamplings` circuits, `θ ± c_k·Δ` for `resamplings` random perturbations `Δ` of ±1, averages their estimates and steps uphill by `a_k` times the average. Spall's gains (1998) shrink the steps and the perturbations as the run goes on: `a_k = a / (k + A)^alpha` and `c_k = perturbation / k^gamma`, with his practical exponents as defaults and `A` the `stability_constant`, 0 by default. The calibration keeps the first step at `target_step` whatever `A`, so a larger `A` only makes the steps shrink more slowly at first: with `A = 30`, the tenth gain is still 86 % of the first, where with `A = 0` it is 25 %. Spall suggests an `A` of about a tenth of `max_iters` or less, for a run whose early steps would otherwise shrink before it has moved far. Qiskit's `SPSA.calibrate` does not scale `a` with `A`, so there a larger `A` makes the first step shorter.
 3. **Measuring θ.** SPSA never evaluates its own parameters to take a step, so θ is added to the iteration's batch on the first iteration and every `eval_interval` iterations after it, as Jones, Mineh and Montanaro do (arXiv:2411.13742), and after the last step one more circuit measures the parameters it reached, so the last iteration's circuits are not wasted on a step that is never measured. `best_params` is the measured θ with the best fitness and `fitness_history` the best measured up to each iteration, the final parameters counted in the last entry.
 
 | Parameter | Description |
 |---|---|
 | `max_iters` | Iterations, each one batch of `2 × resamplings` circuits, plus one when θ is measured; the final parameters cost one circuit more. At least 1 |
-| `resamplings` | Perturbations averaged per iteration, at least 1. Each adds two circuits to the iteration's batch |
+| `resamplings` | Perturbations averaged per iteration, from 1 to 2147483647, so that the batch fits in 32 bits. Each adds two circuits to the iteration's batch |
 | `perturbation` | `c`, the size of the first perturbations in radians, finite and `> 0` |
 | `target_step` | Size of the first step on each parameter with `resamplings=1`, in radians, finite and `> 0`; with more perturbations the first step is usually shorter. The default `0.63` is about `2π/10` |
 | `alpha`, `gamma` | Decay exponents of the steps and of the perturbations: `alpha` in `(0.5, 1]`, `gamma > 0` with `alpha − gamma > 0.5`, Spall's conditions for the iterates to converge |
+| `stability_constant` | Spall's `A`, finite and `>= 0`: a larger value slows the decay of the early steps without changing the first. It comes after `seed` in the positional order |
 | `eval_interval` | Iterations between measurements of θ, at least 1 |
 
 θ₀ is drawn uniformly from `[0, 2π)`, since SPSA takes no `bounds`, or is `initial_point`; the parameters are not wrapped afterwards. The run always makes `max_iters` iterations and reports `converged=False`, as QNG does: there is no early stop. It sends `2 + max_iters` batches and `50 + 2 × resamplings × max_iters` circuits plus one per measurement of θ, the final one included, 666 with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
@@ -268,7 +270,7 @@ A run has three parts:
 
 **SPSA needs budget.** The calibration takes 50 circuits before the first step, and the steps that follow are small and noisy, so with a small budget SPSA can end below a global search: with 500 evaluations in [Choosing an optimizer](#choosing-an-optimizer), one perturbation per iteration was within noise of the classic DE and eight were below it. Like Adam, it is a local method: [Starting point](#starting-point) shows how to start it from a global search's result.
 
-**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / k^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
+**Reproducibility.** As with CMA-ES, a seed reproduces an SPSA run exactly on the same machine and build, but may not across operating systems or CPU architectures: the gains `a / (k + A)^alpha` and `perturbation / k^gamma` are powers from the platform's math library, whose last bit can differ.
 
 **References.**
 
@@ -319,7 +321,7 @@ In `qml.train` only the ansatz is trained: the feature map's parameters are boun
 | `reevaluate_every` | Steps between measurements of the current parameters, at least 1 |
 | `tolerance`, `patience` | The run ends after `patience` consecutive sweeps (at least 1) that raise the best measured fitness by less than `tolerance` (finite, `>= 0`); `tolerance=0` never stops early |
 
-θ₀ is drawn uniformly from `[0, 2π)`, or is `initial_point`, and measured on the first step; a parameter is wrapped into `[0, 2π)` when a step moves it. `best_params` is the best of the points measured, the current parameters and their neighbours at ±π/2, never a predicted value, and `fitness_history` has one entry per step, the best measured up to it; `iterations_run` counts steps. After the last step, whether the run used its sweeps or stopped early, the parameters it reached are measured too, in one more batch of one circuit, whose value joins the last entry of `fitness_history`. A run sends at most `sweeps × dimensions` batches of 2 or 3 circuits and that last one: 661 circuits for 30 parameters with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
+θ₀ is drawn uniformly from `[0, 2π)`, or is `initial_point`, and measured on the first step; a parameter is wrapped into `[0, 2π)` when a step moves it. `best_params` is the best of the points measured, the current parameters and their neighbours at ±π/2, never a predicted value. The neighbours are measured as they are, not wrapped, so `best_params` can lie up to π/2 outside `[0, 2π)`, or anywhere an `initial_point` outside it puts the parameters not yet moved. `fitness_history` has one entry per step, the best measured up to it; `iterations_run` counts steps. After the last step, whether the run used its sweeps or stopped early, the parameters it reached are measured too, in one more batch of one circuit, whose value joins the last entry of `fitness_history`. A run sends at most `sweeps × dimensions` batches of 2 or 3 circuits and that last one: 661 circuits for 30 parameters with the defaults. Invalid settings raise `ValueError` when `train` starts, before any circuit runs.
 
 **When to prefer Rotosolve: a circuit that qualifies, and few QPUs.** There is no learning rate, step size or perturbation to tune: each step goes to the maximum along its parameter. Each batch is 2 or 3 circuits whatever the number of parameters, so, as with SPSA, a run suits few QPUs and leaves many idle, and it takes one sequential round per step. Under shot noise each step lands on the maximum of a sinusoid through three noisy values, off by an angle that shrinks with more shots. It is a local method too, climbing one parameter at a time to an optimum near where it starts: [Starting point](#starting-point) shows how to start it from a global search's result. In [Choosing an optimizer](#choosing-an-optimizer), on a 30-parameter hardware-efficient ansatz, it ended level with Adam and SPSA on average, and 0.021 ± 0.011 below L-SHADE then Adam, about two standard errors, because 5 of its 30 runs stopped in a poorer optimum.
 
@@ -343,7 +345,7 @@ polypus.External(optimizer, max_evaluations)
 - `ask()` returns the next batch: an iterable of rows, such as a list of lists or a 2-D NumPy array, each row one finite number per circuit parameter. `None` or an empty batch means the optimizer is done.
 - `tell(candidates, values)` receives the rows of that batch, as a `list[list[float]]`, and their fitness, as a `list[float]` in the same order. Its return value is ignored.
 
-The values are fitness to **maximise**, as for every Polypus optimizer. Optuna minimises unless the study is created with `direction="maximize"`, and Nevergrad and pycma always minimise, so their values must be negated: the adapters in `polypus.external`, below, do it for you. `polypus.external.AskTell` is the protocol as a `typing.Protocol`, for type checkers.
+The values are fitness to **maximise**, as for every Polypus optimizer. Optuna minimises unless the study is created with `direction="maximize"`, and Nevergrad and pycma always minimise, so their values must be negated: the adapters in `polypus.ask_tell`, below, do it for you. `polypus.ask_tell.AskTell` is the protocol as a `typing.Protocol`, for type checkers.
 
 **The budget.** `max_evaluations`, an integer `>= 1`, is the most candidates a run evaluates. It is required, since some libraries never say they are done. The run stops:
 
@@ -352,11 +354,11 @@ The values are fitness to **maximise**, as for every Polypus optimizer. Optuna m
 
 A first `ask()` that proposes nothing, and a first batch larger than `max_evaluations`, raise `ValueError`: nothing was evaluated, so there is no result. With an optimizer that asks for a fixed number of candidates per batch, make `max_evaluations` a multiple of it, or the remainder is not spent.
 
-**What is checked.** Every row must be one finite real number per parameter. A row of another length, a `NaN`, an infinity or a value that is not a real number (a `bool`, including a NumPy bool array's, a complex number, or an integer too large for a float) raises `ValueError` naming the batch and the row (both counted from 0), before that batch is evaluated, and the run stops. Polypus reads a batch only up to one row past the budget left, so an endless iterator ends the run like any batch that does not fit, and a row only up to one value past the number of parameters, so an endless row raises the `ValueError` of a row too long. An exception raised in `ask()` or `tell()`, `KeyboardInterrupt` included, stops the run and reaches the caller of `train` as itself, as one raised by `expectation_function` does; Ctrl+C during a batch stops the run before the optimizer's next call. `External` raises `TypeError` for an `optimizer` without callable `ask` and `tell`, and `ValueError` for a `max_evaluations` that is not an integer `>= 1` (`0`, `100.0` or `True`), when it is built or the attribute is set.
+**What is checked.** Every row must be one finite real number per parameter. A row of another length, a `NaN`, an infinity or a value that is not a real number (a `bool`, including a NumPy bool array's, a complex number, or an integer too large for a float) raises `ValueError` naming the batch and the row (both counted from 0), before that batch is evaluated, and the run stops. Polypus reads a batch only up to one row past the budget left, so an endless iterator ends the run like any batch that does not fit, and a row only up to one value past the number of parameters, so an endless row raises the `ValueError` of a row too long. An exception raised in `ask()` or `tell()`, `KeyboardInterrupt` included, stops the run and reaches the caller of `train` as itself, as one raised by `expectation_function` does; Ctrl+C during a batch stops the run before the optimizer's next call. `External` raises `TypeError` for an `optimizer` without callable `ask` and `tell`, `ValueError` for a `max_evaluations` below 1, and `TypeError` for one that is not an integer (`100.0` or `True`), when it is built or the attribute is set.
 
 | Parameter | Description |
 |---|---|
-| `optimizer` | The ask/tell object: an adapter from `polypus.external`, or your own |
+| `optimizer` | The ask/tell object: an adapter from `polypus.ask_tell`, or your own |
 | `max_evaluations` | Candidates evaluated at most over a run, an integer `>= 1` |
 
 **The result.** `best_params` and `best_fitness` are the best candidate Polypus measured and the value it measured, whatever the library would recommend as its own best. `fitness_history` has one entry per batch, the best value measured up to it, and `iterations_run` counts the batches evaluated and told.
@@ -365,16 +367,16 @@ A first `ask()` that proposes nothing, and a first batch larger than `max_evalua
 
 **Threads and reuse.** As in every training run, the GIL is released while the run goes on. `ask()` and `tell()` run on the thread that called `train`, which holds the GIL only during each call, so other Python threads run while a batch is evaluated. `External` keeps your object, not a copy: a second run with it continues from the library's state (an Optuna study keeps its trials, a pycma strategy its generation), and `max_evaluations` counts each run's evaluations on their own. A pycma strategy that has stopped proposes nothing, so a second run with it raises `ValueError`. Do not share one optimizer between two runs at the same time.
 
-With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and leaves out the time the library itself takes in `ask()` and `tell()` (see [Allocation walltime](../backends.md#allocation-walltime)), which for a model-based library can be much of the run.
+With `final_shots`, the five best distinct candidates are re-evaluated, as for DE, PSO and CMA-ES, since Polypus cannot tell whether the library searches globally or locally. With `infrastructure="cunqa"`, the walltime warning projects the run from its first batch, assuming every batch has its size, and times that batch until the second starts, so the time the library itself takes in `tell()` and `ask()` between them counts too (see [Allocation walltime](../backends.md#allocation-walltime)). A model-based library takes longer as it sees more values, so its projection can still fall short.
 
-None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there). `polypus.external` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
+None of the three libraries is a dependency of Polypus: install the one you use from PyPI, `optuna`, `nevergrad` or `cma` (pycma's name there), or install Polypus with it as an extra, `pip install "polypus-quantum[optuna]"` (`[nevergrad]`, `[cma]`), which asks for a version from the one these adapters are tested with (Optuna 5.0.0, Nevergrad 1.0.12, pycma 4.5.0) up to the next major. `polypus.ask_tell` does not import them; its adapters only call the public ask/tell methods of the object you built. Each adapter keeps a batch it handed out until it is told, and offers it again on the next `ask()`, so a batch the budget left untold is the first of the next run. Its `tell` checks that the candidates are the rows of that batch, in its order, with one value each, and raises `ValueError` otherwise, before the library is told anything: Polypus always tells the rows it was given, so only a `tell` of your own can get them wrong, and its values would reach other candidates. The examples below train a circuit `qc` with 6 parameters on 4 QPUs and share these arguments:
 
 ```python
 import math
 
 import numpy as np
 import polypus
-from polypus.external import from_nevergrad, from_optuna, from_pycma
+from polypus.ask_tell import from_nevergrad, from_optuna, from_pycma
 
 common = dict(
     shots=1024,
@@ -388,7 +390,7 @@ common = dict(
 )
 ```
 
-**Optuna (TPE).** `from_optuna(study, dimensions, batch_size, bounds=(0, 2π), initial_point=None)` asks the study for `batch_size` trials per batch (`study.ask()`) and suggests one float per parameter in each, named `x0`, `x1`, … (`trial.suggest_float` within `bounds`), then tells each trial its value (`study.tell`), negated when the study minimises. A study with several objectives raises `ValueError`. Optuna's `TPESampler` is a form of Bayesian optimization: it builds a model of the values the trials returned and draws the next trials from it, after `n_startup_trials` random ones (10 by default in Optuna 5.0.0, the version checked here). With `constant_liar=True`, the default in Optuna 5.0 and passed explicitly below for older versions, it penalizes the trials still waiting for their values, so it avoids proposing the trials of one batch close to each other. Optuna never says it is done, so `max_evaluations` ends the run: make it a multiple of `batch_size`, since the trials of an untold remainder stay in the study as `RUNNING` trials, which TPE with `constant_liar=True` keeps penalising, until a later run with the same adapter tells them. `initial_point` is enqueued as the study's first trial (`study.enqueue_trial`).
+**Optuna (TPE).** `from_optuna(study, dimensions, batch_size, bounds=(0, 2π), initial_point=None)` asks the study for `batch_size` trials per batch (`study.ask()`) and suggests one float per parameter in each, named `x0`, `x1`, … (`trial.suggest_float` within `bounds`), then tells each trial its value (`study.tell`), negated when the study minimises. A study with several objectives raises `ValueError`. Optuna's `TPESampler` is a form of Bayesian optimization: it builds a model of the values the trials returned and draws the next trials from it, after `n_startup_trials` random ones (10 by default in Optuna 5.0.0, the version checked here). With `constant_liar=True`, the default in Optuna 5.0 and passed explicitly below for older versions, it penalizes the trials still waiting for their values, so it avoids proposing the trials of one batch close to each other. Optuna never says it is done, so `max_evaluations` ends the run: make it a multiple of `batch_size`, since the trials of an untold remainder stay in the study as `RUNNING` trials, which TPE with `constant_liar=True` keeps penalising, until a later run with the same adapter tells them. To end a study instead, call the adapter's `close()`: it tells the study that those trials failed (`TrialState.FAIL`), which the samplers ignore, and does nothing when every batch was told. The adapter can go on after it, with new trials. `from_optuna` returns an `OptunaAskTell`, the protocol with `close()`. `initial_point` is enqueued as the study's first trial (`study.enqueue_trial`).
 
 ```python
 import optuna
@@ -397,15 +399,12 @@ study = optuna.create_study(
     direction="maximize",
     sampler=optuna.samplers.TPESampler(seed=7, constant_liar=True),
 )
+adapter = from_optuna(study, dimensions=6, batch_size=4)
 result = polypus.train(
-    qc,
-    polypus.External(
-        from_optuna(study, dimensions=6, batch_size=4), max_evaluations=200
-    ),
-    id="tpe",
-    **common,
+    qc, polypus.External(adapter, max_evaluations=200), id="tpe", **common
 )
 len(study.trials)  # 200, each with the value Polypus measured
+adapter.close()  # no trial left RUNNING when 4 does not divide the budget
 ```
 
 **Nevergrad.** `from_nevergrad(optimizer, batch_size=None, initial_point=None)` asks the optimizer for `batch_size` candidates per batch, by default its `num_workers`, and tells each `-value`. When the optimizer has a `budget`, the run ends once that many candidates have been asked, the last batch cut to fit; without one, `max_evaluations` ends it. `initial_point` is suggested to the optimizer (`optimizer.suggest`), so it is the first candidate. Any optimizer of `ng.optimizers` works the same way; this example uses `TBPSA`, which Nevergrad's documentation (version 1.0.12, the one checked here) describes as suited to noisy objectives, and seeds the parametrization's `random_state`:
@@ -502,7 +501,7 @@ CMA-ES keeps its `sigma0`. With the default `π/2`, two standard deviations alre
 
 CMA-ES and QNG never evaluate the point itself. CMA-ES samples around it; QNG estimates the gradient around it, and the first value it keeps is that of the point after one step. Their `best_fitness` can therefore come out below the one the point had in the earlier run.
 
-PSO's default `bounds` are `(-π, π)`, while DE and CMA-ES return points in `[0, 2π)`, so starting PSO from their `best_params` raises `ValueError` as soon as a value passes π. Pass bounds that contain the point, such as `polypus.PSO(bounds=(0, 2 * math.pi))`, or subtract 2π from every value above π first: the angles are the same, as DE and CMA-ES assume when they wrap.
+PSO's default `bounds` are `(-π, π)`, while DE and CMA-ES return points in `[0, 2π)`, so starting PSO from their `best_params` raises `ValueError` as soon as a value passes π. Adam and SPSA never wrap their parameters, and Rotosolve measures its neighbours unwrapped, so their `best_params` can lie outside both ranges. Pass bounds that contain the point, such as `polypus.PSO(bounds=(0, 2 * math.pi))`, or move every value into `[-π, π)` first by adding or subtracting a multiple of 2π: the angles are the same, as DE and CMA-ES assume when they wrap.
 
 **Explore, then refine.** A global search followed by a local refinement from its best point was the most reliable pattern in [Choosing an optimizer](#choosing-an-optimizer): L-SHADE with half of the evaluation budget, then Adam from its `best_params` with the other half. A complete example, QAOA with p = 1 for MaxCut on a 4-node ring:
 
@@ -609,7 +608,7 @@ result.final_fitness  # its value with 4096 shots
 
 `final_params` is the candidate with the highest re-evaluated value, `best_params` on a tie. Re-evaluating the best few candidates of a population, as Novák et al. recommend, lets the run pick one whose value with many shots beats `best_params`, which may have come first only by its noise. `final_fitness` is then the highest of a few fresh estimates, so it is still slightly optimistic, though far less than `best_fitness`, the highest of the whole run; when `best_params` is re-evaluated alone, it has no bias. `best_params`, `best_fitness` and `fitness_history` remain what the optimizer found: a seeded run sends the same batches with and without `final_shots`, and then the final batch. Without it, `final_params` and `final_fitness` are `None`.
 
-`final_shots` must be an integer `>= 1`; anything else, such as `0`, `4096.0` or `True`, raises `ValueError` before anything runs. `qml.train` takes it as a keyword argument and runs every training circuit of each candidate with those shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. It is sampled with a seed of its own, derived from the run's, so its values are independent of the training's and a seeded run still reproduces them. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises. The run logs `best_params` and `best_fitness` before the batch (at `INFO`) and again as a warning if it fails, so the optimizer's result can still be read from the log.
+`final_shots` must be an integer `>= 1`, checked before anything runs: `0` raises `ValueError`, and a value that is not an integer, such as `4096.0` or `True`, raises `TypeError`, as it does for `shots`. `qml.train` takes it as a keyword argument and runs every training circuit of each candidate with those shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. It is the run's last batch, so it gets a sampling stream of its own, like every batch (contract C-7): its values are independent of the training's, and a seeded run still reproduces them. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises. The run logs `best_params` and `best_fitness` before the batch (at `INFO`) and again as a warning if it fails, so the optimizer's result can still be read from the log.
 
 **References.**
 

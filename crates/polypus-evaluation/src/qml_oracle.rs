@@ -3,8 +3,8 @@ use crate::{
     OracleErrorSlot, SupervisedObjective,
 };
 use polypus_infrastructure::{
-    final_batch_params, BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError,
-    NativeStatevectorBackend, Planner, QiskitCircuit, QuantumBackend, RunParams,
+    BoundCircuit, CancelToken, CircuitTask, Counts, InfrastructureError, NativeStatevectorBackend,
+    Planner, QiskitCircuit, QuantumBackend, RunParams,
 };
 use polypus_optimizers::GradientOracle;
 use polypus_orchestration::{OracleFactory, Oracles, Resources};
@@ -270,12 +270,12 @@ impl EvaluationOracle for QmlOracle {
 
     /// Every circuit of the batch, each candidate on **every** training sample,
     /// runs with `shots` shots instead of the run's (`final_shots` of a
-    /// training run), and with the final batch's seed
-    /// ([`final_batch_params`]), so its shot noise is independent of the
-    /// training's. It draws no minibatch: the final batch scores the whole
-    /// training set, and a seeded run is the same up to it.
+    /// training run). The backend gives each call its own sampling stream
+    /// (contract C-7), so its shot noise is independent of the training's. It
+    /// draws no minibatch: the final batch scores the whole training set, and a
+    /// seeded run is the same up to it.
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
-        self.evaluate_batch_full(candidates, shots, &final_batch_params(&self.config))
+        self.evaluate_batch_full(candidates, shots, &self.config)
     }
 }
 
@@ -348,6 +348,13 @@ impl GradientOracle for QmlOracle {
                 Some((0.0, vec![0.0; dims]))
             }
         }
+    }
+
+    /// `true` without a minibatch, when
+    /// [`value_and_gradient`](Self::value_and_gradient) returns `θ`'s fitness,
+    /// so the walltime projection counts an Adam iteration as one call.
+    fn scores_theta(&self) -> bool {
+        self.minibatch.is_none()
     }
 }
 
@@ -855,7 +862,8 @@ impl EvaluationOracle for FullDataset {
             .evaluate_batch_full(candidates, self.0.config.shots, &self.0.config)
     }
 
-    /// As the oracle's own: every sample, `shots` shots, the final batch's seed.
+    /// As the oracle's own: every sample, `shots` shots; the backend gives the
+    /// call its own stream (C-7).
     fn evaluate_batch_with_shots(&self, candidates: &[Vec<f64>], shots: u32) -> Vec<f64> {
         self.0.evaluate_batch_with_shots(candidates, shots)
     }
@@ -1527,9 +1535,9 @@ class Bound:
     }
 
     /// `evaluate_batch_with_shots` runs every circuit, each candidate on every
-    /// training sample and in every window, with the shots it is given and the
-    /// final batch's seed, and `evaluate_batch` with the run's, with either
-    /// objective.
+    /// training sample and in every window, with the shots it is given, and
+    /// `evaluate_batch` with the run's; both send the run's seed, which the
+    /// backend derives each call's from (C-7), with either objective.
     #[test]
     fn a_batch_with_shots_puts_them_in_every_task() {
         const LABELS: [i64; 3] = [3, 1, 4];
@@ -1563,24 +1571,18 @@ class Bound:
             assert!(shots[..runs].iter().all(|&s| s == SHOTS), "{shots:?}");
             assert!(shots[runs..].iter().all(|&s| s == 4096), "{shots:?}");
             assert_eq!(backend.call_sizes().iter().sum::<usize>(), 2 * 5 * 3);
-            // The final batch's seed, derived from the run's, in every wave.
+            // The run's seed on every call: the backend derives each call's.
             let seeds = backend.call_seeds();
-            let derived = final_batch_params(&oracle.config).seed;
-            assert_ne!(derived, oracle.config.seed);
-            assert!(
-                seeds[..runs].iter().all(|&s| s == oracle.config.seed),
-                "{seeds:?}"
-            );
-            assert!(seeds[runs..].iter().all(|&s| s == derived), "{seeds:?}");
+            assert!(seeds.iter().all(|&s| s == oracle.config.seed), "{seeds:?}");
             // Windowed too: two candidates a window, every circuit at 4096.
             let windowed = Arc::new(MockBackend::recording());
             let oracle = build(Arc::clone(&windowed));
             oracle
-                .try_evaluate_windowed(&cands, 2, 4096, &final_batch_params(&oracle.config))
+                .try_evaluate_windowed(&cands, 2, 4096, &oracle.config)
                 .expect("a healthy evaluation succeeds");
             assert_eq!(windowed.call_sizes(), vec![6, 6, 3]);
             assert_eq!(windowed.call_shots(), vec![4096; 3]);
-            assert_eq!(windowed.call_seeds(), vec![derived; 3]);
+            assert_eq!(windowed.call_seeds(), vec![oracle.config.seed; 3]);
         }
     }
 
@@ -1835,6 +1837,26 @@ class Bound:
         );
     }
 
+    /// `scores_theta` tells in advance what `value_and_gradient` returns (the
+    /// walltime projection counts an Adam iteration by it): `true` on every
+    /// sample, `false` under a minibatch.
+    #[test]
+    fn the_native_gradient_declares_whether_it_scores_theta() {
+        let problem = native_problem(6);
+        let theta = &native_candidates(&problem, 1)[0];
+        let dims = problem.num_params();
+        for (minibatch, scores) in [(None, true), (Some(MinibatchConfig::new(2, 9)), false)] {
+            let label = format!("minibatch {minibatch:?}");
+            let oracle = native_oracle(&problem, true, minibatch, 0);
+            assert_eq!(oracle.scores_theta(), scores, "{label}");
+            assert_eq!(
+                oracle.value_and_gradient(theta, dims).is_some(),
+                oracle.scores_theta(),
+                "{label}"
+            );
+        }
+    }
+
     /// A native oracle's final batch (`evaluate_batch_with_shots`) scores every
     /// training sample with the shots it is given, even under a minibatch, and
     /// draws no minibatch, so a seeded run is the same up to it: the counts
@@ -1980,14 +2002,17 @@ class Bound:
         let errors = OracleErrorSlot::new();
         let cancel = CancelToken::default();
 
-        // Native, full batch: evaluation and exact gradient, no full view.
+        // Native, full batch: evaluation and exact gradient, which scores θ,
+        // no full view.
         let oracles = exact(None).build(&resources(1), &cancel, &errors);
-        assert!(oracles.gradient.is_some());
+        assert!(oracles.gradient.as_ref().is_some_and(|g| g.scores_theta()));
         assert!(oracles.full_evaluation.is_none());
 
-        // Native, minibatched: the full view scores every sample.
+        // Native, minibatched: the exact gradient does not score θ, and the
+        // full view scores every sample.
         let oracles =
             exact(Some(MinibatchConfig::new(2, 3))).build(&resources(1), &cancel, &errors);
+        assert!(oracles.gradient.as_ref().is_some_and(|g| !g.scores_theta()));
         let full = oracles
             .full_evaluation
             .expect("a minibatch comes with a full-dataset view");
