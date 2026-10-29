@@ -265,6 +265,42 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: cargo package --workspace --locked
 
+  # Compare the public API of every published crate with its latest version on
+  # crates.io (cargo-semver-checks). A breaking change needs the next minor
+  # while the version is 0.x (`0.8.1-dev` → `0.9.0-dev`, docs/CONTRIBUTING.md);
+  # a `-dev` version is judged like its release. Crates not on crates.io yet
+  # have no baseline and are skipped. Default features only: the
+  # all-features default would enable polypus-logger's mutually exclusive
+  # `*-logs` features. A rust-toolchain.toml bump can need a newer
+  # cargo-semver-checks (rustdoc JSON format).
+  semver:
+    name: semver (crates.io API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The PyO3 crates' build scripts need an interpreter.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install Rust (rust-toolchain.toml)
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: cargo semver-checks (crates on crates.io)
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          new=$(python .github/scripts/publish_crates.py --unpublished)
+          exclude=()
+          for name in $new; do
+            echo "::notice::$name is not on crates.io yet: skipped"
+            exclude+=(--exclude "$name")
+          done
+          cargo semver-checks --workspace --default-features "${exclude[@]}"
+
   test:
     name: test (Rust)
     runs-on: ubuntu-latest
