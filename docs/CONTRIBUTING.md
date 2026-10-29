@@ -188,7 +188,8 @@ rejects:
   GitHub tokens;
 - notebooks under `tutorials/` with outputs or execution counts;
 - blobs larger than 1 MiB;
-- a `CITATION.cff` version different from `Cargo.toml` (contract C-6);
+- a `CITATION.cff` version different from `Cargo.toml`, or not an earlier
+  release when `Cargo.toml` is `X.Y.Z-dev` (contract C-6);
 - submodules.
 
 Run it before pushing:
@@ -312,8 +313,15 @@ under the project license.
 
 Single source of truth: the workspace `Cargo.toml` version (SemVer). Release
 tags must match it exactly (`vX.Y.Z`), and every release updates
-[`CHANGELOG.md`](../CHANGELOG.md). The short checklist lives in
-[`docs/RELEASING.md`](RELEASING.md).
+[`CHANGELOG.md`](../CHANGELOG.md). Between releases `main` carries the next
+patch version with a `-dev` suffix (`0.8.1-dev` after 0.8.0).
+
+A pull request that breaks the public API of a crate published on crates.io
+also raises the workspace version to the next minor (`0.9.0-dev` while the
+version is `0.x`), with `cargo set-version --workspace`; the `semver` CI job
+(cargo-semver-checks against the last published version) fails otherwise.
+Mark the change **BREAKING** in `CHANGELOG.md`. The release checklist lives
+in [`docs/RELEASING.md`](RELEASING.md).
 
 ## AI-assisted development
 
