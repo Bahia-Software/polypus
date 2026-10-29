@@ -54,9 +54,8 @@ pub(crate) enum Controls {
 ///
 /// - [`CircuitError::InvalidTemplateArgument`] for more than two controls or
 ///   an empty register.
-/// - [`CircuitError::TemplateTooLarge`] above
-///   [`MAX_QFT_QUBITS`](super::MAX_QFT_QUBITS) register qubits, the limit of
-///   the QFT the adder works with.
+/// - [`CircuitError::TemplateTooLarge`] above [`MAX_QFT_QUBITS`] register
+///   qubits, the limit of the QFT the adder works with.
 pub fn phase_adder(
     num_qubits: usize,
     addend: u64,
