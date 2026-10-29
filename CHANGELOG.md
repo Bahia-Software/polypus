@@ -11,7 +11,34 @@ Entries were curated from the Conventional Commits history. Releases before
 
 ## [Unreleased]
 
-Changes on `main` since 0.7.2.
+## [0.8.0] - 2026-10-30
+
+### Upgrading from 0.7
+
+Breaking changes are marked **BREAKING** under *Changed* and *Fixed*. Where
+to look first:
+
+- **Python users.** Python 3.10 or newer (#360). Seeded results differ from
+  0.7 on every backend (#348, #401, #410, #411, `rand` 0.10): re-run stored
+  baselines instead of expecting them to replay. Arguments that were ignored
+  or silently accepted now raise: `noise_model`, `sim_method` and `backend`
+  where they do not apply (#334), non-integer counts (`TypeError`, #467),
+  `patience=0` (#467), counts that sum to zero in `expectation_value`.
+  Configuration errors are `polypus.ConfigurationError`, still a `ValueError`
+  (#418). QMIO needs `ZMQ_SERVER` or `options={"endpoint": ...}`, and
+  `run_qc_in_qpu`, `run_qcs_in_qpu` and `run_worker_qpu.py` are gone.
+- **Rust users.** The `polypus` crate has no default features (#414); the
+  circuit types' fields are private (#349); the error enums and
+  `polypus_orchestration::Method` are `#[non_exhaustive]`; the optimizer
+  argument and configuration structs have new fields (#395, #397, #410,
+  #467); `OracleFactory::build`, `templates::qft` and
+  `Statevector::expectation_z` changed their return types.
+- **Third-party backend authors.** `polypus-backend`,
+  `polypus-backend-conformance` and `polypus-subprocess-backend` are on
+  crates.io from this release; depend on `"0.8"`. Registry options are typed
+  (#293, migration in `docs/backends.md`), a backend gives each call of a run
+  its own seed (#411, contract C-7), `BackendError` is `#[non_exhaustive]`
+  and `circuits::as_qasm2` returns a `Result` (#350).
 
 ### Added
 - Native QML models in `polypus.qml`: `Model(encoder, ansatz, readout)`
@@ -354,6 +381,11 @@ Changes on `main` since 0.7.2.
   (#334).
 - **BREAKING (Rust):** `polypus_backend_conformance::circuits::as_qasm2`
   returns a `Result` instead of panicking on an unexportable circuit (#350).
+- **BREAKING (Rust):** registry options carry a string or a list of strings:
+  `BackendBuildContext::option` is removed and `options` is
+  `HashMap<String, OptionValue>`; read them with `option_str` or
+  `option_list`. The subprocess backend's `command` takes a list as the exact
+  argv; Python callers passing strings need no change (#293, ADR 0005).
 - **BREAKING:** the native backend derives each circuit's seed from the base
   seed and the circuit's index with SplitMix64 instead of `seed + index`, so
   neighbouring seeds no longer share streams shifted by one circuit (circuit
@@ -705,7 +737,8 @@ Changes on `main` since 0.7.2.
 
 Initial release.
 
-[Unreleased]: https://github.com/Bahia-Software/polypus/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/Bahia-Software/polypus/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Bahia-Software/polypus/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/Bahia-Software/polypus/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Bahia-Software/polypus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Bahia-Software/polypus/compare/v0.6.0...v0.7.0

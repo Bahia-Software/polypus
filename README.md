@@ -219,7 +219,7 @@ If Polypus is useful in your research, please cite it:
   year    = {2026},
   url     = {https://github.com/Bahia-Software/polypus},
   doi     = {10.5281/zenodo.22913065},
-  version = {0.7.2}
+  version = {0.8.0}
 }
 ```
 

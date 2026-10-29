@@ -944,7 +944,7 @@ conformance finding is open.
 third party can build against it. We treat it accordingly.
 
 - **Versioning.** `polypus-backend` inherits the unified Polypus workspace version
-  (`version.workspace = true`, currently **0.7.x**, pre-1.0). It is not versioned
+  (`version.workspace = true`, currently **0.8.x**, pre-1.0). It is not versioned
   independently: a given Polypus release and its backend contract move together, so
   `polypus-backend = "0.8"` and `polypus = "0.8"` are always compatible.
 - **Pre-1.0 semantics (SemVer).** While pre-1.0, a **minor** bump (0.7 → 0.8) may
