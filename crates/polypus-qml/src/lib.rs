@@ -64,9 +64,23 @@
 //! and 25 batches instead of 9. A model with an instruction the shift rule
 //! cannot handle has no exact gradient ([`QmlError::NoExactGradient`]) but
 //! still trains with gradient-free optimizers.
+//!
+//! ## Expectations and their Jacobian
+//!
+//! Beneath the fitness, a [`CompiledModel`] also gives the loss-free values a
+//! caller can build its own training loop on, for any readout:
+//! [`CompiledModel::expectations_from_counts`] (or its exact twin) reads every
+//! readout observable's expectation from one sample's results, and
+//! [`CompiledModel::jacobian`] builds an [`ExpectationJacobian`]: the shifted
+//! circuits and the reader of `∂⟨O_o⟩/∂θ` and, for angle and IQP encoders,
+//! `∂⟨O_o⟩/∂x` ([`JacobianWrt`]), by the same per-occurrence shift rule, block
+//! by block if the caller wants to bound how many circuits are alive
+//! ([`JacobianBlock`]). It costs `2 · shifts` circuits per sample, with no
+//! unshifted one.
 
 mod dataset;
 mod error;
+mod jacobian;
 mod layers;
 mod loss;
 mod model;
@@ -77,6 +91,7 @@ mod rng;
 
 pub use dataset::Dataset;
 pub use error::{QmlError, ValidationError};
+pub use jacobian::{ExpectationJacobian, Jacobian, JacobianBlock, JacobianWrt};
 pub use layers::{
     AmplitudeEncoder, AngleEncoder, BasisEncoder, ConvBlock, ConvLayer, Entanglement, Entangler,
     HardwareEfficientAnsatz, IqpEncoder, KeepRule, Layer, Pairing, PoolBlock, PoolLayer,

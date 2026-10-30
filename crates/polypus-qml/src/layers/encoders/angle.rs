@@ -5,7 +5,7 @@ use polypus_circuit::{Fixed, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::RotationAxis;
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// Angle encoding: each feature becomes a single-qubit rotation about a fixed
 /// axis. Consumes **no** trainable parameters — every angle is a
@@ -54,11 +54,12 @@ impl LayerOps for AngleEncoder {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
+        trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
         // One rotation per feature, on the active qubit at that logical
         // position. If `x` is shorter than the active set, the surplus qubits
@@ -73,6 +74,8 @@ impl LayerOps for AngleEncoder {
                 RotationAxis::Ry => GateInstruction::Ry { qubit, theta },
                 RotationAxis::Rz => GateInstruction::Rz { qubit, theta },
             };
+            // The angle is `x_j` itself: `∂angle/∂x_j = 1`.
+            trace.next_gate(qc, vec![(j, 1.0)]);
             qc.try_push(gate)?;
         }
         Ok(())
@@ -188,5 +191,44 @@ mod tests {
                 theta: Fixed(0.7)
             }]
         );
+    }
+
+    #[test]
+    fn trace_records_each_rotation_with_factor_one() {
+        // `Rz` prepends a Hadamard, so the rotations sit at positions 1 and 3:
+        // the trace must point at the rotation, never at the `H`.
+        let enc = AngleEncoder::new(RotationAxis::Rz);
+        let mut c = ctx(2, 2);
+        let alloc = enc.plan(&mut c).unwrap();
+        let mut qc = ParameterizedCircuit::new(2);
+        let mut trace = InputTrace::default();
+        enc.emit_traced(&mut qc, &alloc, &[0.5, 0.6], &mut trace)
+            .unwrap();
+        let positions: Vec<usize> = trace.gates.iter().map(|g| g.position).collect();
+        assert_eq!(positions, vec![1, 3]);
+        assert_eq!(trace.gates[0].features, vec![(0, 1.0)]);
+        assert_eq!(trace.gates[1].features, vec![(1, 1.0)]);
+        assert!(trace.opaque.is_empty());
+        // The traced emission is the untraced one, gate for gate.
+        let mut plain = ParameterizedCircuit::new(2);
+        enc.emit(&mut plain, &alloc, &[0.5, 0.6]).unwrap();
+        assert_eq!(qc.gates(), plain.gates());
+    }
+
+    #[test]
+    fn trace_positions_count_the_gates_already_in_the_circuit() {
+        // A re-uploading encoder lands after earlier gates: its positions are
+        // absolute in the template, not relative to the layer.
+        let enc = AngleEncoder::new(RotationAxis::Ry);
+        let mut c = ctx(2, 2);
+        let alloc = enc.plan(&mut c).unwrap();
+        let mut qc = ParameterizedCircuit::new(2);
+        qc.try_push(GateInstruction::H(0)).unwrap();
+        qc.try_push(GateInstruction::Cx(0, 1)).unwrap();
+        let mut trace = InputTrace::default();
+        enc.emit_traced(&mut qc, &alloc, &[0.1, 0.2], &mut trace)
+            .unwrap();
+        let positions: Vec<usize> = trace.gates.iter().map(|g| g.position).collect();
+        assert_eq!(positions, vec![2, 3]);
     }
 }

@@ -556,6 +556,18 @@ pub enum QmlError {
         /// Which instruction (position and gate), and why.
         reason: String,
     },
+    /// The Jacobian with respect to the inputs was asked of a model with an
+    /// encoder whose angles have no derivative in the sample: amplitude
+    /// encoding (a normalized, non-linear state preparation) or basis encoding
+    /// (binary features that select gates). Raised by
+    /// [`CompiledModel::jacobian`](crate::CompiledModel::jacobian) for
+    /// [`JacobianWrt::Inputs`](crate::JacobianWrt::Inputs) and
+    /// [`Both`](crate::JacobianWrt::Both); the Jacobian with respect to the
+    /// parameters takes any model.
+    NoInputGradient {
+        /// The encoder: `"amplitude"` or `"basis"`.
+        encoder: &'static str,
+    },
 }
 
 impl fmt::Display for QmlError {
@@ -604,6 +616,12 @@ impl fmt::Display for QmlError {
             QmlError::NoExactGradient { reason } => write!(
                 f,
                 "no exact parameter-shift gradient for this model: {reason}"
+            ),
+            QmlError::NoInputGradient { encoder } => write!(
+                f,
+                "no Jacobian with respect to the inputs for this model: its {encoder} encoder \
+                 has no derivative in the sample; differentiate with respect to the parameters \
+                 only, or encode with angle or IQP encoders"
             ),
         }
     }

@@ -6,7 +6,7 @@ use polypus_circuit::{Fixed, GateInstruction, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{entanglement_pairs, Entanglement};
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// IQP feature encoding: a layer of Hadamards, one `Rz(x_i)` per feature, and
 /// one `Rzz(x_i·x_j)` per pair — the `ZZFeatureMap` pattern, whose non-linear
@@ -81,11 +81,12 @@ impl LayerOps for IqpEncoder {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         x: &[f64],
+        trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
         // Only the qubits that carry a feature take part; the surplus ones are
         // left entirely alone (see the type docs).
@@ -97,6 +98,7 @@ impl LayerOps for IqpEncoder {
         }
         // Phase 2: Rz(x_i), the feature straight through as the angle.
         for (i, &qubit) in encoded.iter().enumerate() {
+            trace.next_gate(qc, vec![(i, 1.0)]);
             qc.try_push(GateInstruction::Rz {
                 qubit,
                 theta: Fixed(x[i]),
@@ -105,6 +107,9 @@ impl LayerOps for IqpEncoder {
         // Phase 3: Rzz(x_i · x_j) over the pattern's pairs — the non-linear
         // part of the map. Pairs are logical positions within `encoded`.
         for (i, j) in entanglement_pairs(encoded.len(), self.entanglement) {
+            // Chain rule on the product: `∂(x_i·x_j)/∂x_i = x_j` and
+            // `∂(x_i·x_j)/∂x_j = x_i`.
+            trace.next_gate(qc, vec![(i, x[j]), (j, x[i])]);
             qc.try_push(GateInstruction::Rzz {
                 q0: encoded[i],
                 q1: encoded[j],
@@ -307,5 +312,36 @@ mod tests {
                 rzz(1, 3, 0.3 * 0.5),
             ]
         );
+    }
+
+    #[test]
+    fn trace_gives_rz_factor_one_and_rzz_the_other_feature() {
+        // 3 features, Full: H×3 (positions 0..3), Rz×3 (3..6), then the pairs
+        // (0,1), (0,2), (1,2) at 6..9. `∂(x_i·x_j)/∂x_i = x_j`.
+        let enc = IqpEncoder::new();
+        let x = [0.2, 0.4, 0.8];
+        let mut c = ctx(3, 3);
+        let alloc = enc.plan(&mut c).unwrap();
+        let mut qc = ParameterizedCircuit::new(3);
+        let mut trace = InputTrace::default();
+        enc.emit_traced(&mut qc, &alloc, &x, &mut trace).unwrap();
+        let recorded: Vec<(usize, Vec<(usize, f64)>)> = trace
+            .gates
+            .iter()
+            .map(|g| (g.position, g.features.clone()))
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![
+                (3, vec![(0, 1.0)]),
+                (4, vec![(1, 1.0)]),
+                (5, vec![(2, 1.0)]),
+                (6, vec![(0, x[1]), (1, x[0])]),
+                (7, vec![(0, x[2]), (2, x[0])]),
+                (8, vec![(1, x[2]), (2, x[1])]),
+            ]
+        );
+        assert!(trace.opaque.is_empty());
+        assert_eq!(qc.gates(), emitted(&enc, 3, &x).as_slice());
     }
 }
