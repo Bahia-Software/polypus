@@ -162,6 +162,9 @@ class Model:
     def num_qubits(self) -> int: ...
     @property
     def num_params(self) -> int: ...
+    # The readout's observables: the columns of `qml.expval`.
+    @property
+    def num_observables(self) -> int: ...
     def fit(
         self,
         x: Union[_DatasetRows, Dataset],
