@@ -24,9 +24,12 @@
 
 use crate::error::OptimizerError;
 use crate::objective::EvaluationOracle;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::{OptimizationOutcome, Optimizer};
 use crate::rng::with_seeded_rng;
-use crate::util::{check_initial_point, check_oracle_len, wrap_angle, BestMeasured};
+use crate::util::{
+    check_initial_point, check_oracle_len, measure_last_point, wrap_angle, BestMeasured,
+};
 use rand::{Rng, RngExt};
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -82,7 +85,10 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 /// more batch of one candidate measures the point it reached, which competes
 /// for `best_params` like any measured point; its value joins the last entry
 /// of `fitness_history`. The stop is decided before it, so that entry can be
-/// higher than the one the stop judged.
+/// higher than the one the stop judged. It is measured within the last step,
+/// before an [`IterationObserver`] sees it; a run the
+/// observer stops on an earlier step ends without measuring the point that
+/// step reached, and reports `converged = false`.
 ///
 /// When `f₀`, `f₊`, `f₋` or the step is not finite, the coordinate is left as
 /// it is; the value of `x` is then unchanged, and a non-finite one stays until
@@ -229,6 +235,7 @@ impl AlgorithmRotosolve {
     fn run_with_rng<R: Rng>(
         args: AlgorithmRotosolveArgs,
         rng: &mut R,
+        observer: &mut dyn IterationObserver,
     ) -> Result<OptimizationOutcome, OptimizerError> {
         let AlgorithmRotosolveArgs {
             oracle,
@@ -268,7 +275,7 @@ impl AlgorithmRotosolve {
         let mut converged = false;
         let mut step = 0u64;
 
-        for sweep in 1..=sweeps {
+        'sweeps: for sweep in 1..=sweeps {
             for j in 0..dims {
                 let measured = Self::measures(step, reevaluate_every);
                 // ── 1. One batch: x when it is measured, then x ± π/2·e_j ──────
@@ -315,37 +322,57 @@ impl AlgorithmRotosolve {
                 // (C-5).
                 fitness_history.push(best.value());
                 step += 1;
-            }
 
-            // ── 3. Stop after `patience` sweeps that improved too little ───────
-            let sweep_best = best.value();
-            let improvement = sweep_best - previous_best;
-            previous_best = sweep_best;
-            log::debug!(
-                "Sweep {sweep}: best measured {sweep_best:.6}, improvement {improvement:.6}"
-            );
-            if improvement < tolerance {
-                stagnant += 1;
-            } else {
-                stagnant = 0;
-            }
-            if stagnant >= patience {
-                log::debug!(
-                    "Stopping after sweep {sweep}: {stagnant} sweeps improved by less than \
-                     {tolerance}"
-                );
-                converged = true;
-                break;
-            }
-        }
+                // ── 3. After a sweep's last step, stop after `patience` sweeps
+                // that improved too little ─────────────────────────────────────
+                let mut last = false;
+                if j + 1 == dims {
+                    let sweep_best = best.value();
+                    let improvement = sweep_best - previous_best;
+                    previous_best = sweep_best;
+                    log::debug!(
+                        "Sweep {sweep}: best measured {sweep_best:.6}, improvement \
+                         {improvement:.6}"
+                    );
+                    if improvement < tolerance {
+                        stagnant += 1;
+                    } else {
+                        stagnant = 0;
+                    }
+                    if stagnant >= patience {
+                        log::debug!(
+                            "Stopping after sweep {sweep}: {stagnant} sweeps improved by less \
+                             than {tolerance}"
+                        );
+                        converged = true;
+                    }
+                    last = converged || sweep == sweeps;
+                }
 
-        // ── 4. Measure the point the last step reached ───────────────────────
-        let fitness = oracle.evaluate_batch(std::slice::from_ref(&x));
-        check_oracle_len(1, fitness.len())?;
-        log::debug!("Final point: fitness {:.4}", fitness[0]);
-        best.offer(&x, fitness[0]);
-        if let Some(last) = fitness_history.last_mut() {
-            *last = best.value();
+                // ── 4. After the last step, measure the point it reached ───────
+                // Before the report, so the observer sees the run's final best.
+                if last {
+                    let fitness =
+                        measure_last_point(oracle.as_ref(), &x, &mut best, &mut fitness_history)?;
+                    log::debug!("Final point: fitness {fitness:.4}");
+                }
+
+                // ── 5. Report; a stop asked for here wins over the sweeps' stop ─
+                let report = IterationReport {
+                    iteration: fitness_history.len(),
+                    best_fitness: best.value(),
+                    best_params: best.params(),
+                };
+                if observer.observe(&report).is_break() {
+                    // The point this step reached stays unmeasured, unless this
+                    // was the last step anyway.
+                    converged = false;
+                    break 'sweeps;
+                }
+                if last {
+                    break 'sweeps;
+                }
+            }
         }
 
         // `sweeps >= 1`, `dimensions >= 1` and the first step measures θ₀, so
@@ -433,8 +460,12 @@ fn validate(
 impl Optimizer for AlgorithmRotosolve {
     type Args = AlgorithmRotosolveArgs;
 
-    fn optimize(&self, args: Self::Args) -> Result<OptimizationOutcome, OptimizerError> {
-        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng))
+    fn optimize_observed(
+        &self,
+        args: Self::Args,
+        observer: &mut dyn IterationObserver,
+    ) -> Result<OptimizationOutcome, OptimizerError> {
+        with_seeded_rng(args.seed, |rng| Self::run_with_rng(args, rng, observer))
     }
 }
 

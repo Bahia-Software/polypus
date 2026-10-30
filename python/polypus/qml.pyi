@@ -33,6 +33,7 @@ from . import (
     _FloatVector,
     _Method,
     _Options,
+    _TrainCallback,
 )
 
 __all__ = [
@@ -183,6 +184,11 @@ class Model:
         exact: bool = False,
         # `1 <= batch_size < number of training samples`.
         batch_size: Optional[int] = None,
+        # `num_params` finite values, e.g. a loaded `TrainedModel.params`.
+        initial_point: Optional[_FloatVector] = None,
+        # Not with `exact=True`, which uses no shots.
+        final_shots: Optional[SupportsIndex] = None,
+        callback: Optional[_TrainCallback] = None,
     ) -> TrainResult: ...
     def bind(self, params: Sequence[float]) -> TrainedModel: ...
     # The circuit for one sample, measured in the readout's basis; without
@@ -351,6 +357,7 @@ def train(
     y_train: Optional[Iterable[float]] = None,
     initial_point: Optional[_FloatVector] = None,
     final_shots: Optional[SupportsIndex] = None,
+    callback: Optional[_TrainCallback] = None,
 ) -> TrainResult: ...
 def predict(
     feature_map: QuantumCircuit,

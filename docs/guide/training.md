@@ -38,8 +38,9 @@ Optimizers **maximise** the fitness. For a minimisation problem, return the nega
 | `seed` | Optional RNG seed. Without one, a seed is drawn from OS entropy and reported in the result. |
 | `initial_point` | Optional point to start the search from, such as an earlier run's `best_params`: `dimensions` finite numbers. See [Starting point](#starting-point). |
 | `final_shots` | Optional shots per circuit for one last batch that re-evaluates the best candidates after the optimizer stops: an integer `>= 1`. See [Final re-evaluation](#final-re-evaluation). |
+| `callback` | Keyword-only. Optional callable, called once per iteration with a `polypus.TrainProgress`; returning `True` stops the run. See [Watching and stopping a run](#watching-and-stopping-a-run). |
 
-Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`. An exception raised by `expectation_function`, or by the `ask()` or `tell()` of an [external optimizer](#external-optimizers), propagates as itself.
+Ctrl+C stops the optimization promptly and raises `KeyboardInterrupt`, with or without a `callback`. An exception raised by `expectation_function`, by the `ask()` or `tell()` of an [external optimizer](#external-optimizers), or by a `callback`, propagates as itself.
 
 ## The result
 
@@ -482,7 +483,7 @@ result = polypus.train(
 
 ## Starting point
 
-By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` takes it too, as a keyword argument.
+By default every optimizer starts from random parameters. `initial_point` makes it start from a point you choose, typically the `best_params` of an earlier run. It takes `dimensions` finite numbers as a list, tuple or NumPy array; another length, a `NaN` or an infinity raises `ValueError` before anything runs. `qml.train` and `qml.Model.fit` take it too, as a keyword argument; for `fit`, `dimensions` is the model's `num_params` (see [Quantum machine learning](qml.md#training)).
 
 | Optimizer | What it does with `initial_point` |
 |---|---|
@@ -608,11 +609,67 @@ result.final_fitness  # its value with 4096 shots
 
 `final_params` is the candidate with the highest re-evaluated value, `best_params` on a tie. Re-evaluating the best few candidates of a population, as Novák et al. recommend, lets the run pick one whose value with many shots beats `best_params`, which may have come first only by its noise. `final_fitness` is then the highest of a few fresh estimates, so it is still slightly optimistic, though far less than `best_fitness`, the highest of the whole run; when `best_params` is re-evaluated alone, it has no bias. `best_params`, `best_fitness` and `fitness_history` remain what the optimizer found: a seeded run sends the same batches with and without `final_shots`, and then the final batch. Without it, `final_params` and `final_fitness` are `None`.
 
-`final_shots` must be an integer `>= 1`, checked before anything runs: `0` raises `ValueError`, and a value that is not an integer, such as `4096.0` or `True`, raises `TypeError`, as it does for `shots`. `qml.train` takes it as a keyword argument and runs every training circuit of each candidate with those shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. It is the run's last batch, so it gets a sampling stream of its own, like every batch (contract C-7): its values are independent of the training's, and a seeded run still reproduces them. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises. The run logs `best_params` and `best_fitness` before the batch (at `INFO`) and again as a warning if it fails, so the optimizer's result can still be read from the log.
+`final_shots` must be an integer `>= 1`, checked before anything runs: `0` raises `ValueError`, and a value that is not an integer, such as `4096.0` or `True`, raises `TypeError`, as it does for `shots`. `qml.train` and `qml.Model.fit` take it as a keyword argument and run every training circuit of each candidate with those shots, every training sample even with `fit`'s `batch_size`; `fit` refuses it with `exact=True`, which uses no shots. The batch holds at most five candidates, so it costs up to `5 × final_shots` shots per training circuit. It is sent once the optimizer has stopped, whether by its budget or its early stop, but not after an error or Ctrl+C. It is the run's last batch, so it gets a sampling stream of its own, like every batch (contract C-7): its values are independent of the training's, and a seeded run still reproduces them. With `infrastructure="cunqa"`, the walltime warning does not count it, so leave time for it in `walltime`; if the QPUs are released first, the batch fails like any other and `train` raises. The run logs `best_params` and `best_fitness` before the batch (at `INFO`) and again as a warning if it fails, so the optimizer's result can still be read from the log.
 
 **References.**
 
 - V. Novák, S. Illésová, T. Bezděk, I. Zelinka and M. Beseda, "Reliable Optimization Under Noise in Quantum Variational Algorithms", arXiv:2511.08289 (2025).
+
+## Watching and stopping a run
+
+`callback`, a keyword argument of `train`, `qml.train` and `qml.Model.fit`, is called once per iteration of the optimizer, so a long run, such as one in a SLURM job, can report its progress, write checkpoints, or stop on a criterion of its own. It receives a read-only `polypus.TrainProgress`:
+
+| Field | Content |
+|---|---|
+| `iteration` | Iterations completed: 1 on the first call, `iterations_run` on the last |
+| `best_fitness` | The best fitness so far: the entry this iteration leaves in `fitness_history`, so it never decreases |
+| `best_params` | `list[float]`, the parameters of `best_fitness`; a new list on every access |
+| `evaluations` | Candidates scored so far (see below) |
+
+Returning `True` stops the run after that iteration, and `train` returns the `TrainResult` reached so far: `iterations_run` is that iteration, `converged` is `False`, and `best_params` and `best_fitness` are the ones the callback saw last (with `batch_size` in `qml.Model.fit`, except for `Adam`, `best_fitness` is then re-scored on the whole training set, as after any run). Nothing more is evaluated, except the [final re-evaluation](#final-re-evaluation), which is still sent when `final_shots` is given. Returning `None` (a function without `return`) or `False` lets the run go on; a NumPy `bool_` counts as a `bool`. Any other return value, such as `1` or `0.5`, raises `TypeError`, so that a mistake does not go unnoticed.
+
+```python
+import json
+
+target = -0.05
+
+
+def checkpoint(progress):
+    with open("checkpoint.json", "w") as file:
+        json.dump(
+            {
+                "iteration": progress.iteration,
+                "best_fitness": progress.best_fitness,
+                "best_params": progress.best_params,
+                "evaluations": progress.evaluations,
+            },
+            file,
+        )
+    return progress.best_fitness >= target
+
+
+result = polypus.train(
+    qc,
+    polypus.DE(generations=200, population_size=30),
+    shots=1024,
+    n_qpus=1,
+    dimensions=dimensions,
+    expectation_function=cost,
+    infrastructure="local",
+    nodes=1,
+    cores_per_qpu=1,
+    id="checkpointed",
+    callback=checkpoint,
+)
+```
+
+A checkpoint's `best_params` can be passed back as `initial_point` to start a new run from it ([Starting point](#starting-point)).
+
+An iteration is a generation of `DE`, `PSO` and `CMAES` (counted across `CMAES` restarts), an iteration of `QNG`, `Adam` and `SPSA`, one step of `Rotosolve` (one parameter), and one batch of an [external optimizer](#external-optimizers), once its values have been told. The callback is not called after the optimizer stops, so not for the final re-evaluation. `Adam`, `SPSA` and `Rotosolve` measure the point their last step reached at the end of the run: they do it before the last call, which therefore sees the run's final `best_fitness`. A run stopped earlier does not measure the point of its last step.
+
+`evaluations` counts the candidates the optimizer has had scored, each candidate of each batch once, including the point an exact gradient measures in its own batch (`Adam` in `qml.Model.fit`). The shifted circuits of that gradient, the calls of `QNG`'s `variance_function` and the final re-evaluation are not counted. In `train` a candidate is one circuit; in `qml.train` and `qml.Model.fit` it is one circuit per training sample. With `batch_size` in `qml.Model.fit`, `best_fitness` is the minibatch estimate the optimizer steers by, except for `Adam`, which tracks its best on the whole training set.
+
+An exception raised in the callback propagates as itself, `KeyboardInterrupt` included, and the run returns no result and sends no final re-evaluation. A `callback` that is neither callable nor `None` raises `TypeError` before anything runs. A callback that never stops the run leaves its result unchanged: a seeded run returns the same `TrainResult` with and without it.
 
 ## Choosing an optimizer
 

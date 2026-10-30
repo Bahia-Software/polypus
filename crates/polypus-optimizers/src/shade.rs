@@ -33,6 +33,7 @@ use crate::differential_evolution::{
     AlgorithmDifferentialEvolution, AlgorithmDifferentialEvolutionArgs, DeStrategy,
 };
 use crate::error::OptimizerError;
+use crate::observer::{IterationObserver, IterationReport};
 use crate::outcome::OptimizationOutcome;
 use crate::util::{argmax, check_oracle_len, fitness_stagnated, wrap_angle, wrap_difference};
 use rand::{Rng, RngExt};
@@ -354,6 +355,7 @@ pub(crate) fn run_with_rng<R: Rng>(
     args: AlgorithmDifferentialEvolutionArgs,
     variant: Variant,
     rng: &mut R,
+    observer: &mut dyn IterationObserver,
 ) -> Result<OptimizationOutcome, OptimizerError> {
     let AlgorithmDifferentialEvolutionArgs {
         oracle,
@@ -490,6 +492,15 @@ pub(crate) fn run_with_rng<R: Rng>(
         // worst members, so the best fitness never falls (contract C-5).
         best = argmax(&fitness);
         fitness_history.push(fitness[best]);
+        // A stop asked for here wins over the stagnation stop below.
+        let report = IterationReport {
+            iteration: iterations_run,
+            best_fitness: fitness[best],
+            best_params: &population[best],
+        };
+        if observer.observe(&report).is_break() {
+            break;
+        }
         if fitness_stagnated(&fitness_history, tolerance, patience, generation) {
             converged = true;
             break;
