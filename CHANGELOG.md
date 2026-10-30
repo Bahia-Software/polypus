@@ -36,7 +36,9 @@ to look first:
   `polypus_orchestration::Method` are `#[non_exhaustive]`, and
   `EvaluationError` has new variants; the DE, PSO and QNG argument structs,
   `DeConfig` and `TrainFlow` have new fields and `dispatch_optimizer` a new
-  argument (#395, #397, #410); `OracleFactory::build`, `templates::qft`,
+  argument (#395, #397, #410, #500); an `Optimizer` implemented outside
+  `polypus-optimizers` implements `optimize_observed` instead of `optimize`
+  (#500); `OracleFactory::build`, `templates::qft`,
   `Statevector::expectation_z` and `polypus_sim::sample_projected` changed
   their return types; `BackendConfig::Local` and `Cunqa` have no `backend`
   field (#230); the `polypus-physics` samplers take rand 0.10's `Rng` (#273).
