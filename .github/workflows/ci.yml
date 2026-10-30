@@ -173,7 +173,7 @@ jobs:
           uv pip list --system
       # A skip outside POLYPUS_ALLOWED_SKIPS fails the run (see the
       # python-tests job). The floors include an older Qiskit than the C-10
-      # fixtures' and none of the external optimizer libraries.
+      # fixtures' and none of the external optimizer libraries, nor PyTorch.
       - name: Run Python tests
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
@@ -182,6 +182,9 @@ jobs:
             test_determinism_baseline.py::TestSameBuildStrict
             test_ask_tell_adapters.py
             test_qasm3_interop.py
+            test_torch_quantum_layer.py
+            test_typing_stubs.py::TestTorchTypes
+            test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]
         run: pytest tests/python -rs --strict-markers
 
   clippy:
@@ -500,6 +503,13 @@ jobs:
       - name: Install Optuna, Nevergrad and pycma
         if: matrix.python-version == '3.13'
         run: pip install optuna==5.0.0 nevergrad==1.0.12 cma==4.5.0
+      # PyTorch for the tests of polypus.torch
+      # (tests/python/test_torch_quantum_layer.py); POLYPUS_REQUIRE_TORCH below
+      # makes a missing one fail. The CPU wheel, pinned like the libraries
+      # above (the floor of the `torch` extra). Latest leg only.
+      - name: Install PyTorch (CPU)
+        if: matrix.python-version == '3.13'
+        run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       # Examples and benchmarks are not executed (no __main__ guards; some
       # need optional deps like cunqa), but they must at least stay valid
       # Python — this catches syntax rot without running them.
@@ -508,21 +518,26 @@ jobs:
       # -rs lists every skipped test with its reason. The POLYPUS_REQUIRE_*
       # variables turn the skips of tests that back a contract into failures:
       # a missing llvm-as, in the fixtures leg another Qiskit, and in the
-      # latest leg a missing Optuna, Nevergrad or pycma. Any other skip fails
-      # the run unless POLYPUS_ALLOWED_SKIPS lists it (tests/python/
+      # latest leg a missing Optuna, Nevergrad, pycma or PyTorch. Any other skip
+      # fails the run unless POLYPUS_ALLOWED_SKIPS lists it (tests/python/
       # skip_guard.py): the real-CUNQA tests (opt-in), the C-7 tier pinned to
       # the fixture's build (its trainings are compared across two processes
-      # instead), and per leg the C-10 fixtures and the external libraries.
+      # instead), and per leg the C-10 fixtures, the external libraries and
+      # the PyTorch layer.
       - name: Run Python tests
         env:
           POLYPUS_REQUIRE_LLVM_AS: "1"
           POLYPUS_REQUIRE_FIXTURES_QISKIT: ${{ matrix.qiskit == 'fixtures' && '1' || '' }}
           POLYPUS_REQUIRE_EXTERNAL_LIBRARIES: ${{ matrix.python-version == '3.13' && '1' || '' }}
+          POLYPUS_REQUIRE_TORCH: ${{ matrix.python-version == '3.13' && '1' || '' }}
           POLYPUS_ALLOWED_SKIPS: >-
             test_cunqa_real.py
             test_determinism_baseline.py::TestSameBuildStrict
             ${{ matrix.qiskit != 'fixtures' && 'test_qasm3_interop.py' || '' }}
             ${{ matrix.python-version != '3.13' && 'test_ask_tell_adapters.py' || '' }}
+            ${{ matrix.python-version != '3.13' && 'test_torch_quantum_layer.py' || '' }}
+            ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestTorchTypes' || '' }}
+            ${{ matrix.python-version != '3.13' && 'test_typing_stubs.py::TestStubsCoverPublicApi::test_every_exported_name_has_a_stub[polypus.torch]' || '' }}
         run: pytest tests/python -rs --strict-markers
       # The hand-written typing stubs (python/polypus/*.pyi) must match the
       # compiled extension just installed: stubtest fails on a renamed or

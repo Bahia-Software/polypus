@@ -64,6 +64,11 @@ dynamic = ["version"]
 optuna = ["optuna>=5.0.0,<6"]
 nevergrad = ["nevergrad>=1.0.12,<2"]
 cma = ["cma>=4.5.0,<5"]
+# PyTorch, for `polypus.torch`. Its floor is the CPU torch CI tests the layer
+# with (the "Install PyTorch (CPU)" steps of .github/workflows/ci.yml,
+# examples.yml and sonar.yml, which tests/python/test_torch_import.py checks);
+# the upper bound is the next major. Raise the floor together with the pins.
+torch = ["torch>=2.14.1,<3"]
 
 [project.urls]
 Homepage = "https://github.com/Bahia-Software/polypus"
