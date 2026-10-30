@@ -19,6 +19,7 @@ runs `cargo package --workspace` before it authenticates.
     python .github/scripts/publish_crates.py                       # publish with CARGO_REGISTRY_TOKEN
     python .github/scripts/publish_crates.py --trusted-publishing  # publish with a Trusted Publishing token
     python .github/scripts/publish_crates.py --plan [--trusted-publishing]  # print the order and status only
+    python .github/scripts/publish_crates.py --unpublished  # crates not on crates.io yet, one per line
 """
 
 import argparse
@@ -103,6 +104,11 @@ def published_versions(name):
     return set()
 
 
+def unpublished(packages, versions_of=published_versions):
+    """Publishable crates with no version on crates.io, in publish order."""
+    return [p["name"] for p in publish_order(packages) if not versions_of(p["name"])]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -115,7 +121,16 @@ def main():
         action="store_true",
         help="the token comes from Trusted Publishing: refuse to start if a crate is new",
     )
+    parser.add_argument(
+        "--unpublished",
+        action="store_true",
+        help="print the crates not on crates.io yet, one per line, and exit",
+    )
     args = parser.parse_args()
+
+    if args.unpublished:
+        print("\n".join(unpublished(workspace_crates())))
+        return
 
     order = publish_order(workspace_crates())
     published = {pkg["name"]: published_versions(pkg["name"]) for pkg in order}

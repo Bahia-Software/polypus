@@ -478,6 +478,9 @@ def notebook_problem(data):
 
 
 VERSION_FORMAT = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}")
+# Also in release_check.py, which needs Python 3.11 (tomllib).
+RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+DEV_VERSION = re.compile(RELEASE_VERSION.pattern + "-dev")
 TOML_HEADER = re.compile(r"\s*\[")
 TOML_TABLE = re.compile(r"\s*\[\s*([A-Za-z0-9_.\- ]+?)\s*\]\s*(?:#.*)?")
 TOML_VERSION_KEY = re.compile(r"\s*version\s*=")
@@ -522,6 +525,11 @@ def cargo_workspace_version(text):
     if len(found) != 1:
         raise HygieneError("Cargo.toml: expected exactly one workspace version")
     return found[0]
+
+
+def version_key(match):
+    """(major, minor, patch) of a RELEASE_VERSION or DEV_VERSION match."""
+    return tuple(int(part) for part in match.groups())
 
 
 CFF_VERSION_KEY = re.compile(r"version\s*:")
@@ -817,7 +825,20 @@ def analyse(args, report):
     for name, value in (("Cargo.toml", cargo), ("CITATION.cff", cff)):
         if not VERSION_FORMAT.fullmatch(value):
             raise HygieneError("{}: unsupported version format".format(name))
-    if cargo != cff:
+    dev = DEV_VERSION.fullmatch(cargo)
+    if dev:
+        # Between releases main carries `X.Y.Z-dev` and CITATION.cff keeps
+        # the last release, the one a citation can point to.
+        release = RELEASE_VERSION.fullmatch(cff)
+        if not release or version_key(release) >= version_key(dev):
+            report.violation(
+                "CITATION.cff",
+                1,
+                "version-mismatch",
+                "CITATION.cff version {} must be an earlier release than "
+                "Cargo.toml [workspace.package] version {}".format(cff, cargo),
+            )
+    elif cargo != cff:
         report.violation(
             "CITATION.cff",
             1,
