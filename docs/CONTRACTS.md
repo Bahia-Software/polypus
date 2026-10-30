@@ -24,7 +24,7 @@ Rules of the road:
 | C-2 | Gate vocabulary symmetry | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` (+ `tests/python/test_local_aer_lowering.py` and `test_cunqa_lowering.py` for the Aer and CUNQA lowerings; `polypus-qml`'s `every_instruction_kind_is_classified` in `src/problem.rs` for the gradient's gate classification) | ✅ present | the OpenQASM 2.0 export rounded angles to 12 decimals, so a Clifford circuit stopped being Clifford to Aer, which simulated it with a statevector instead of the stabilizer method (fixed: shortest round-trip angles); the Aer lowering ran the full `transpile` against Aer's target, whose layout stage rejected circuits wider than the target's qubit count (derived from the host memory) even on the stabilizer method (fixed: synthesis and translation only, same circuit) |
 | C-3 | Measurement counts format | shot-conservation + key order + last-write-wins | ✅ present | shots dropped on uneven distribution (C6); the native `polypus` backend OR-ed repeated writes to one classical bit instead of letting the last win (#205, fixed); `RunResult.counts` was a `list[dict]` for one QPU but a merged `dict` for `n_qpus > 1`, so `result.counts[0]` raised `KeyError` (#211, fixed); Aer raised `QiskitError: No counts` for a circuit without measurements instead of the full-register read-out (#218, fixed); CUNQA 3.0.0 failed such a job (`key 'counts' not found`) and split the key of a circuit with several classical registers with spaces (#253, #304, fixed in the seal); a **measured** OpenQASM program whose `creg` is wider than its highest written bit got keys as wide as the declared clbits on Aer but `max(cbit)+1` on native (#251, fixed: the declared width on both); the same program imported as a `polypus.Circuit` lost the declared width at parameter binding and at export, so it got `max(cbit)+1` on both (fixed: kept through both) |
 | C-4 | Terminal measurement placement | `polypus-circuit` + `polypus-sim` `tests/contracts.rs` | ✅ present | — |
-| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`) | ✅ present | DE `best_fitness` mismatch (C4) |
+| C-5 | Optimizer ↔ oracle | invariant test, multi-seed + `tests/python/test_oracle_contract.py` (+ `crates/polypus-optimizers/tests/initial_point.rs` and `tests/python/test_initial_point.py` for `initial_point`, `tests/python/test_final_shots.py` for `final_shots`, and `tests/python/test_qml_native_initial_point_final_shots.py` for both through `qml.Model.fit`) | ✅ present | DE `best_fitness` mismatch (C4) |
 | C-6 | Version coherence | `release.yml` gate (tag, internal pins, CHANGELOG.md, CITATION.cff ↔ Cargo.toml) + `hygiene.yml` (Cargo.toml ↔ CITATION.cff, pins) + `tests/python/test_version_coherence.py` (`polypus.__version__` ↔ Cargo.toml ↔ installed distribution) | ✅ present | tag/Cargo diverged at 0.6.0 |
 | C-7 | Seeding & run manifest | `tests/python/test_seed_reproducibility.py` (+ `test_qml_predict.py`) + bindings/native Rust tests | ✅ present | repeated runs byte-identical / `train` seed hardcoded `None` (#34); an unreadable OS entropy source panicked while drawing a default seed (#249) or the run `id`'s UUID (#264); both fixed: `polypus.BackendError` |
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
@@ -771,8 +771,9 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
   starting point: the `initial_point: Option<Vec<f64>>` field of
   `AlgorithmDifferentialEvolutionArgs`, `AlgorithmPSOArgs`, `AlgorithmQNGArgs`,
   `AlgorithmCmaEsArgs`, `AlgorithmAdamArgs`, `AlgorithmSPSAArgs` and
-  `AlgorithmRotosolveArgs`, the last argument of `dispatch_optimizer`, and `train(..., initial_point=None)` /
-  `qml.train(..., initial_point=None)` in Python.
+  `AlgorithmRotosolveArgs`, the last argument of `dispatch_optimizer`, and `train(..., initial_point=None)`,
+  `qml.train(..., initial_point=None)` and `qml.Model.fit(..., initial_point=None)`
+  (keyword-only; `dimensions` is the model's `num_params`, C-11) in Python.
   - Preconditions: exactly `dimensions` values, every one finite, and for PSO
     every value within `[bounds.0, bounds.1]` (PSO clamps positions to its
     bounds, so a point outside them would be moved). QNG and Adam take any
@@ -783,7 +784,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `initial_point`. Each optimizer's `check_preconditions` makes these checks,
     configuration and point, in that order, without running anything;
     `Method::check_preconditions` in `polypus-orchestration` calls the one the
-    method names, and `train` and `qml.train` call it before anything runs (no
+    method names, and `train`, `qml.train` and `qml.Model.fit` call it before
+    anything runs, with or without a point (no
     backend, no CUNQA allocation), raising `polypus.ConfigurationError` (a
     `ValueError`) with the optimizer's
     message, so a configuration error comes first there too.
@@ -814,8 +816,8 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `AlgorithmExternal::check_preconditions` checks the configuration only.
     `dispatch_optimizer` and `Method::check_preconditions` return
     `InvalidConfig` for `initial_point` with `Method::External`, after its
-    configuration errors and before any `ask`, and `train` and `qml.train`
-    raise `ValueError` before anything runs, in place of the length and
+    configuration errors and before any `ask`, and `train`, `qml.train` and
+    `qml.Model.fit` raise `ValueError` before anything runs, in place of the length and
     finiteness checks, pointing to the `initial_point` of the
     `polypus.ask_tell` adapters (and pycma's `x0`).
   - Enforced by `crates/polypus-optimizers/tests/initial_point.rs` (the first
@@ -838,12 +840,17 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     included, before the CUNQA seam is reached, a configuration error before
     the point's, the first candidates every optimizer sends through
     `train` and `qml.train`, and a `best_params` list, tuple or NumPy array
-    as the point). The pinned `"rand1bin"` outcome and
+    as the point), and `tests/python/test_qml_native_initial_point_final_shots.py`
+    (the same rejections and their precedence through `qml.Model.fit`, before
+    the CUNQA seam, the first candidates every optimizer sends for a native
+    model, a list, tuple or NumPy array as the point, and a model saved and
+    read back with `qml.load` trained on from its `params`). The pinned `"rand1bin"` outcome and
     `tests/python/test_determinism_baseline.py` are unchanged.
 - Postcondition of every optimizer: `best_fitness` is the oracle's value **for
   the returned `best_params`** (audit C4).
 - **Final re-evaluation (`final_shots`).** `train(..., final_shots=None)`,
-  `qml.train(..., final_shots=None)` (keyword-only) and the
+  `qml.train(..., final_shots=None)` and `qml.Model.fit(..., final_shots=None)`
+  (both keyword-only) and the
   `final_shots: Option<u32>` field of `TrainFlow` (`polypus-orchestration`)
   re-evaluate the optimizer's best candidates once it has stopped, in one
   more batch with `final_shots` shots per circuit.
@@ -860,12 +867,13 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     the training's even for a candidate re-evaluated at the position it was
     scored at, as `best_params` at index 0 is for QNG, Adam and SPSA, and a
     seeded run still reproduces it.
-  - Preconditions: an integer from 1 to 4294967295. `train` and `qml.train`
-    raise `ValueError` for an integer out of that range (0, a negative, 2³²)
-    and `TypeError` for anything that is not an integer (a `float`, a `bool`,
-    a `str`), as for `shots`, before anything runs (no backend, no CUNQA
+  - Preconditions: an integer from 1 to 4294967295. `train`, `qml.train` and
+    `qml.Model.fit` raise `ValueError` for an integer out of that range (0, a
+    negative, 2³²) and `TypeError` for anything that is not an integer (a
+    `float`, a `bool`, a `str`), as for `shots`, before anything runs (no backend, no CUNQA
     allocation), next to the `initial_point` check; a NumPy integer is
-    accepted. In Rust,
+    accepted. `qml.Model.fit` also refuses any valid value with `exact=True`,
+    which uses no shots, after this check (C-11). In Rust,
     `Some(0)` is `OptimizerError::InvalidConfig` for `final_shots` before the
     oracle is built.
   - Which candidates: during the run the optimizer scores through a
@@ -924,7 +932,14 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     entry points at the seam: its shots, its seed, its candidates, the winner and the
     unchanged batches before it; an error, an interrupt and a failing final
     batch; a real Aer run whose final batch is measured afresh; and seeded
-    native runs unchanged with a final value measured with `final_shots`).
+    native runs unchanged with a final value measured with `final_shots`),
+    and `tests/python/test_qml_native_initial_point_final_shots.py` (the same
+    through `qml.Model.fit`: the rejections before the CUNQA seam, the refusal
+    with `exact=True` and its order, the final batch at the Aer seam with its
+    shots and every sample, minibatches included, seeded native runs of every
+    optimizer unchanged by it, and a final value measured afresh with
+    `final_shots` that estimates the exact value of `final_params` within its
+    statistical error).
 - **DE early stopping — fitness stagnation.** DE stops early on *best-fitness
   stagnation*, not on population-spread collapse. With `fitness_history[g]` the
   best fitness at the end of generation `g` (0-indexed; DE maximises, so this
@@ -1474,7 +1489,11 @@ and `crates/polypus-sim/tests/contracts.rs` (simulator).
     `adam_run_shape_counts_the_batches_the_optimizer_sends` in
     `src/walltime.rs`, and the minibatch and factory tests in
     `crates/polypus-evaluation/src/qml_oracle.rs` (with
-    `a_native_final_batch_scores_every_sample_with_its_shots`).
+    `a_native_final_batch_scores_every_sample_with_its_shots`), and, through
+    `qml.Model.fit`, the minibatch cases of
+    `tests/python/test_qml_native_initial_point_final_shots.py` (Adam and DE:
+    the run unchanged, and the final value on every sample, not on a
+    minibatch).
 
 **Enforcing test:** invariant test with multiple seeds in
 `crates/polypus-optimizers/tests/` (the pure-Rust optimizer↔oracle invariant),
@@ -2284,6 +2303,17 @@ is also a `ValueError` (#418), as `train`'s do:
   not matter) and needs `infrastructure="local"` with `backend="polypus"`.
 - **`batch_size`** must satisfy `1 <= batch_size < number of samples`; the
   reported `best_fitness` is on every sample (C-5).
+- **`initial_point`** (keyword-only, default `None`) is C-5's starting point,
+  with `num_params` as `dimensions`: its checks, after the optimizer's
+  configuration (checked with or without a point), are `train`'s, with its
+  messages, and a list, tuple or NumPy array is accepted, such as the `params`
+  of a `TrainedModel` read back with `qml.load`, to train it on.
+- **`final_shots`** (keyword-only, default `None`) is C-5's final
+  re-evaluation, with `train`'s checks; its batch scores every sample, with
+  or without `batch_size`, into `final_params` and `final_fitness`. With
+  `exact=True`, which uses no shots, any valid `final_shots` is an error; a
+  malformed one fails its own check first, and `exact=True` off the local
+  native simulator fails `exact`'s.
 - **`polypus.Rotosolve`** needs what its closed-form step assumes (C-5):
   `loss="expectation"`, the one loss linear in the measured distribution
   (another is an error naming it), and every trainable parameter the
@@ -2368,7 +2398,9 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   - `a_bound_circuit_converts_gate_for_gate` and
     `an_invalid_concrete_circuit_is_an_error_not_a_panic` in
     `crates/polypus/src/bindings/qml.rs`: the bound circuit `circuit` returns
-    is, gate for gate, the one the model binds.
+    is, gate for gate, the one the model binds;
+    `final_shots_is_refused_only_with_exact` there: `fit`'s `final_shots`
+    with `exact=True`.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2381,7 +2413,14 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `ExactResult`, decision types, save/load and tampered files),
   `test_qml_native_circuit.py` (`Model.circuit` and `TrainedModel.circuit`:
   the shape and parameter names, the basis change, the drawings, counts and
-  exact probabilities identical to `run`'s, every rejection), the native
+  exact probabilities identical to `run`'s, every rejection),
+  `test_qml_native_initial_point_final_shots.py` (`fit`'s `initial_point` and
+  `final_shots`: every rejection before the CUNQA seam and their order, the
+  refusal of `final_shots` with `exact=True`, where each optimizer starts, a
+  model read back with `qml.load` trained on, and the final re-evaluation on
+  every sample, minibatches included, with its shots and every sample at the
+  seam), `test_typing_stubs.py`'s
+  `TestFitTypes` (the stub types of both), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`; the minibatch rescore
   runs with the GIL released) and `TestNativeQmlChecksRaiseIt` in
   `test_configuration_errors.py` (every check of `fit`, `predict` and `run` is a
