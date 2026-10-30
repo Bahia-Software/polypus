@@ -161,6 +161,53 @@ class TestFitTypes:
         assert status == 1 and "snippet.py:9: error" in report, report
 
 
+class TestPrimitiveTypes:
+    """`qml.expval` returns an array; `qml.jacobian` an array, or a pair of
+    them with `wrt="both"`, and only the three `wrt` values type-check."""
+
+    _MODEL = (
+        "import numpy as np\n"
+        "import numpy.typing as npt\n"
+        "from polypus import qml\n"
+        "model = qml.Model(\n"
+        '    qml.Encoder(1).angle_encoder("ry"),\n'
+        "    qml.Ansatz(1).real_amplitudes(1),\n"
+        "    qml.Readout([qml.Z(0)]),\n"
+        ")\n"
+    )
+
+    def test_each_wrt_types_its_result(self, tmp_path):
+        source = self._MODEL + (
+            "values: npt.NDArray[np.float64] = qml.expval(\n"
+            "    model, qml.Dataset([[0.1]]), np.array([0.1, 0.2]), exact=True\n"
+            ")\n"
+            "by_params: npt.NDArray[np.float64] = qml.jacobian(model, [[0.1]], [0.1, 0.2])\n"
+            "by_inputs: npt.NDArray[np.float64] = qml.jacobian(\n"
+            '    model, [[0.1]], [0.1, 0.2], wrt="inputs", shots=64, seed=1\n'
+            ")\n"
+            "pair: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] = (\n"
+            '    qml.jacobian(model, [[0.1]], (0.1, 0.2), wrt="both")\n'
+            ")\n"
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 0, report
+
+    def test_both_is_not_an_array_and_an_unknown_wrt_does_not_type_check(
+        self, tmp_path
+    ):
+        # Both are errors at run time (a tuple, a ConfigurationError).
+        source = self._MODEL + (
+            "bad: npt.NDArray[np.float64] = qml.jacobian(\n"
+            '    model, [[0.1]], [0.1, 0.2], wrt="both"\n'
+            ")\n"
+            'qml.jacobian(model, [[0.1]], [0.1, 0.2], wrt="theta")\n'
+        )
+        status, report = _mypy(source, tmp_path)
+        assert status == 1, report
+        assert "snippet.py:9: error" in report, report
+        assert "snippet.py:12: error" in report, report
+
+
 class TestAskTellTypes:
     def test_only_the_optuna_adapter_types_close(self, tmp_path):
         # `from_optuna` returns an `OptunaAskTell`, the other adapters an
