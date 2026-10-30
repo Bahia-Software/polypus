@@ -5,7 +5,7 @@
 # `[workspace.lints]` table of the root Cargo.toml (see "Lint policy" in
 # docs/CONTRIBUTING.md).
 
-# Polypus is pre-1.0 (0.7.2) and under active development: don't hold back lints
+# Polypus is pre-1.0 and under active development: don't hold back lints
 # just to preserve a frozen public API.
 avoid-breaking-exported-api = false
 

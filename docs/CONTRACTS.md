@@ -1839,7 +1839,7 @@ share shot noise, and the same seed replays the whole sequence:
 Until #411, Aer, CUNQA and the bridge received the base seed on every call,
 so batch slot `i` was sampled with the same random numbers in every
 generation, unlike the native backend; seeded results on those backends
-changed after 0.7.2. **Enforcing tests:** `tests/python/test_seed_streams.py`
+changed in 0.8.0. **Enforcing tests:** `tests/python/test_seed_streams.py`
 (the seeds Aer and the fake CUNQA receive over a `train`, read off the
 `run_qcs` seam, and their replay), `consecutive_calls_get_their_own_streams`
 in `crates/polypus-infrastructure/src/native.rs`,

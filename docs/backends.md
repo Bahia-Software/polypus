@@ -944,11 +944,11 @@ conformance finding is open.
 third party can build against it. We treat it accordingly.
 
 - **Versioning.** `polypus-backend` inherits the unified Polypus workspace version
-  (`version.workspace = true`, currently **0.7.x**, pre-1.0). It is not versioned
+  (`version.workspace = true`, currently **0.8.x**, pre-1.0). It is not versioned
   independently: a given Polypus release and its backend contract move together, so
   `polypus-backend = "0.8"` and `polypus = "0.8"` are always compatible.
 - **Pre-1.0 semantics (SemVer).** While pre-1.0, a **minor** bump (0.7 → 0.8) may
-  make breaking changes to the trait or its types; **patch** bumps (0.7.1 → 0.7.2)
+  make breaking changes to the trait or its types; **patch** bumps (0.8.0 → 0.8.1)
   will not. Pin a minor range (`polypus-backend = "0.8"`) and expect to review the
   changelog when the minor moves. We will keep additive changes additive: new trait
   methods ship with defaults (as `cancel` and `wants_cancel_watcher` did) rather than
@@ -970,9 +970,8 @@ third party can build against it. We treat it accordingly.
 - **crates.io.** `polypus-backend`, `polypus-subprocess-backend` and
   `polypus-backend-conformance` are published to crates.io with every Polypus release
   from 0.8.0 on, together with the other workspace crates
-  ([RELEASING.md](RELEASING.md#cratesio)); the snippets above assume 0.8. They are not
-  on crates.io for 0.7.x: until 0.8.0 is out, depend on them by git
-  (`polypus-backend = { git = "https://github.com/Bahia-Software/polypus" }`).
+  ([RELEASING.md](RELEASING.md#cratesio)); the snippets above assume 0.8. Releases
+  before 0.8.0 are not on crates.io.
 
 When the contract reaches 1.0, this section will state the post-1.0 SemVer guarantee
 (breaking changes only on a major bump).
