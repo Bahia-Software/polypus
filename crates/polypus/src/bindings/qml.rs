@@ -1175,6 +1175,10 @@ impl Model {
             opt_level: OptLevel::default(),
             seed: Some(effective_seed),
         });
+        // Converted before the backend exists, as in `train`, so a failure here
+        // cannot leave it (a CUNQA `qraise`) unclosed.
+        let errors = OracleErrorSlot::new();
+        let method = method_from_pyclass(method, dimensions, &errors, &effective_id)?;
         log_training_start(
             &effective_id,
             infrastructure,
@@ -1185,11 +1189,8 @@ impl Model {
         );
         let backend = Infrastructure::create_backend(&config)
             .map_err(crate::exceptions::backend_error_to_pyerr)?;
-        let errors = OracleErrorSlot::new();
-        let method = method_from_pyclass(method, dimensions, &errors, &effective_id)?;
-        let resources = Resources::new(backend, None, Arc::new(config.run_params()))
+        let scheduler = scheduler_over(backend, config.run_params())
             .map_err(crate::exceptions::infrastructure_error_to_pyerr)?;
-        let scheduler = Scheduler::ephemeral(resources);
         let flow = TrainFlow {
             factory: QmlOracleFactory {
                 source: QmlSource::Native {
@@ -1525,8 +1526,7 @@ impl TrainedModel {
             py.detach(move || -> Result<Vec<Counts>, InfrastructureError> {
                 let backend = Infrastructure::create_backend(&config)
                     .map_err(InfrastructureError::Backend)?;
-                let resources = Resources::new(backend, None, Arc::new(config.run_params()))?;
-                let scheduler = Scheduler::ephemeral(resources);
+                let scheduler = scheduler_over(backend, config.run_params())?;
                 let out = scheduler
                     .run_cancellable(RunCircuitFlow { circuits, shots }, &interruptible_token());
                 scheduler.close();
@@ -2947,6 +2947,62 @@ mod tests {
         .unwrap();
         // 5 rows in blocks of 2: three blocks, each one call on the one backend.
         assert_eq!(counters.get(), (1, 3, 1));
+    }
+
+    /// A backend whose own default planner it cannot serve (shot
+    /// distribution it does not support), so no scheduler can be built over
+    /// it; it counts its closes.
+    struct UnpairableBackend {
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl QuantumBackend for UnpairableBackend {
+        fn run_circuits(
+            &self,
+            qcs: &[BoundCircuit],
+            _params: &RunParams,
+        ) -> Result<Vec<Counts>, crate::infrastructure::BackendError> {
+            Ok(qcs.iter().map(|_| Counts::new()).collect())
+        }
+
+        fn capabilities(&self) -> crate::infrastructure::BackendCapabilities {
+            crate::infrastructure::BackendCapabilities {
+                max_concurrency: 1,
+                supports_shot_distribution: false,
+            }
+        }
+
+        fn default_planner(&self) -> Arc<dyn crate::infrastructure::Planner> {
+            Arc::new(crate::infrastructure::ShotDistributingPlanner::new(2))
+        }
+
+        fn close(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_scheduler_that_cannot_be_built_closes_its_backend() {
+        // What `run_rows` and `fit` call, and `BlockRunner::sampled` through it:
+        // each failure closes the backend exactly once and returns the error.
+        let closes = Arc::new(AtomicUsize::new(0));
+        let backend = || {
+            Arc::new(UnpairableBackend {
+                closes: Arc::clone(&closes),
+            })
+        };
+        match scheduler_over(backend(), run_params(1, 8)) {
+            Err(InfrastructureError::IncompatiblePlanner(_)) => {}
+            Err(other) => panic!("expected IncompatiblePlanner, got {other:?}"),
+            Ok(_) => panic!("the pairing must fail"),
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        match BlockRunner::sampled(backend(), run_params(1, 8), 8) {
+            Err(InfrastructureError::IncompatiblePlanner(_)) => {}
+            Err(other) => panic!("expected IncompatiblePlanner, got {other:?}"),
+            Ok(_) => panic!("the pairing must fail"),
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
     }
 
     /// Wraps a primitive: counts the blocks it builds, and cancels `token`
