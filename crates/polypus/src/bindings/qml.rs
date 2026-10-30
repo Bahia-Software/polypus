@@ -23,7 +23,7 @@ use pyo3::exceptions::{
     PyFileNotFoundError, PyOSError, PyPermissionError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyDict, PyList, PyModule, PyTuple, PyType};
 
 use polypus_circuit::{CircuitError, ConcreteCircuit, ParameterizedCircuit};
 use polypus_qml::{
@@ -931,12 +931,29 @@ fn loads_data(layer: &Layer) -> bool {
 /// when the model meets a dataset.
 ///
 /// The model holds no trained parameters: [`fit`](Self::fit) returns them in a
-/// `TrainResult`.
+/// `TrainResult`. It pickles (so `copy.deepcopy` works) as its JSON spec, the
+/// one `TrainedModel.save` writes, rebuilt through the checks `qml.load` runs.
 #[pyclass(module = "polypus.qml", name = "Model", frozen)]
 pub struct Model {
     /// Encoder layers, then ansatz layers, with the readout.
     spec: QuantumModel,
     num_params: usize,
+    num_observables: usize,
+}
+
+impl Model {
+    /// The model over `spec`, with the counts its compilation without data
+    /// gives. Zero features trips no feature-count check and changes no
+    /// parameter count (see `check_layers`), so this raises exactly the
+    /// structural errors and returns the real counts.
+    fn checked(spec: QuantumModel) -> PyResult<Self> {
+        let compiled = spec.clone().compile(0).map_err(validation_to_py_err)?;
+        Ok(Model {
+            num_params: compiled.num_params(),
+            num_observables: compiled.num_observables(),
+            spec,
+        })
+    }
 }
 
 #[pymethods]
@@ -967,15 +984,7 @@ impl Model {
             .cloned()
             .fold(QuantumModel::new(encoder.num_qubits), QuantumModel::layer)
             .readout(readout.inner.clone());
-        // Zero features trips no feature-count check and changes no parameter
-        // count (see `check_layers`), so this raises exactly the structural
-        // errors and returns the real count.
-        let num_params = spec
-            .clone()
-            .compile(0)
-            .map_err(validation_to_py_err)?
-            .num_params();
-        Ok(Model { spec, num_params })
+        Self::checked(spec)
     }
 
     #[getter]
@@ -987,6 +996,31 @@ impl Model {
     #[getter]
     fn num_params(&self) -> usize {
         self.num_params
+    }
+
+    /// The readout's observables: the columns of `qml.expval` (one per class
+    /// for an `"argmax"` readout).
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.num_observables
+    }
+
+    /// Pickle as `Model._from_spec(json)`, the JSON of the spec.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, (String,))> {
+        let json = serde_json::to_string(&slf.get().spec)
+            .map_err(|e| PyValueError::new_err(format!("cannot serialize the model: {e}")))?;
+        Ok((slf.get_type().getattr("_from_spec")?, (json,)))
+    }
+
+    /// Unpickle: rebuild the model from the JSON of its spec, checked as
+    /// `qml.load` checks a saved one, so a corrupt or edited spec is a
+    /// `ValueError` and never an inconsistent model. Parsing JSON runs no code.
+    #[classmethod]
+    fn _from_spec(_cls: &Bound<'_, PyType>, spec: &str) -> PyResult<Self> {
+        let spec = serde_json::from_str::<QuantumModel>(spec).map_err(|e| {
+            PyValueError::new_err(format!("not a valid polypus.qml.Model spec: {e}"))
+        })?;
+        Self::checked(spec)
     }
 
     fn __repr__(&self) -> String {
@@ -1560,11 +1594,11 @@ impl TrainedModel {
 
     /// The model the parameters are bound to.
     #[getter]
-    fn model(&self) -> Model {
-        Model {
-            spec: self.inner.spec().clone(),
-            num_params: self.inner.num_params(),
-        }
+    fn model(&self) -> PyResult<Model> {
+        // The counts come from compiling the spec without data (the
+        // `TrainedModel` does not keep `num_observables`); that spec was checked
+        // when the `TrainedModel` was built, so the error cannot happen.
+        Model::checked(self.inner.spec().clone())
     }
 
     fn __repr__(&self) -> String {

@@ -55,6 +55,11 @@ jobs:
           pip install dist/polypus_quantum-*.whl
       - name: Install the examples' dependencies and mypy
         run: pip install -r requirements-examples.txt mypy -c requirements-dev.txt
+      # examples/qml_torch_hybrid.py runs polypus.torch, on both legs. The CPU
+      # wheel, at the floor of the `torch` extra (pinned as in ci.yml, which
+      # tests/python/test_torch_import.py checks).
+      - name: Install PyTorch (CPU)
+        run: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       - name: Type-check examples/ against the shipped stubs
         run: mypy --config-file examples/mypy.ini examples
       # Each script with its defaults; max_cut_qaoa.py also with its other
