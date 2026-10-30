@@ -737,11 +737,14 @@ explicit error — never silently reorder, deduplicate or no-op the measurement.
 The rule is enforced at four points, which must all reject identically (same
 offending qubit, same error) even though they see the circuit differently:
 
-- **Builder** (`ParameterizedCircuit::try_push`/`push`): incremental,
-  push-time. Each push is checked against the per-circuit record of qubits
-  already measured, which the push itself then updates — the prefix is known to
-  be valid, so only the new instruction can offend. Rescanning here would make
-  building a circuit quadratic in its gate count (issue #109).
+- **Builder** (`ParameterizedCircuit::try_push`/`push` and
+  `try_compose`/`compose`): incremental, push-time. Each push is checked against
+  the per-circuit record of qubits already measured, which the push itself then
+  updates — the prefix is known to be valid, so only the new instruction can
+  offend. Rescanning here would make building a circuit quadratic in its gate
+  count (issue #109). `try_compose`/`compose` check every instruction of the
+  composed circuit against that same record, in order, before appending any,
+  so a rejected composition leaves the circuit unchanged.
 - **QASM importer**: incremental, parse-time, against the parser's own
   `measured` set (which also carries the offending line number).
 - **Simulator** (`polypus-sim`) and **QIR exporter**: a single full-sequence

@@ -820,6 +820,22 @@ fn c4_builder_rejects_two_qubit_gate_touching_measured_qubit() {
     assert_eq!(err, CircuitError::QubitAlreadyMeasured { qubit: 1 });
 }
 
+/// Composing a circuit is checked against the same record of measured qubits
+/// as pushing its instructions one by one, and fails with the same error.
+#[test]
+fn c4_compose_rejects_like_push() {
+    let target = ParameterizedCircuit::new(3).measure(2, 0);
+    let mut pushed = target.clone();
+    let push_error = pushed
+        .try_push(GateInstruction::H(1))
+        .and_then(|()| pushed.try_push(GateInstruction::Cx(1, 2)))
+        .unwrap_err();
+    let mut composed = target.clone();
+    let sub = ParameterizedCircuit::new(2).h(0).cx(0, 1);
+    assert_eq!(composed.try_compose(&sub, &[1, 2]), Err(push_error.clone()));
+    assert_eq!(push_error, CircuitError::QubitAlreadyMeasured { qubit: 2 });
+}
+
 #[test]
 #[should_panic(expected = "after it was measured")]
 fn c4_fluent_builder_panics_on_gate_after_measure() {

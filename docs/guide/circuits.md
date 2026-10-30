@@ -49,6 +49,31 @@ qaoa.to_qasm3()  # rzz(2.0*theta_0) q[0], q[1]; ...
 
 Expressions follow the same rules as those imported from OpenQASM 3 (contract C-2): a gate method rejects a `NaN` or infinite number, a constant division by zero, and an expression nested more than 64 levels deep with `ValueError`; binding evaluates the expression exactly as written, in binary64 and without reassociation, and raises `ValueError` for a division by zero or a non-finite angle. An expression without parameters (`polypus.pi / 2`) is evaluated when the gate is added. `repr` shows the expression in OpenQASM 3 syntax, with `Param(i)` for each parameter; two expressions compare equal when they are built the same way (`a + b != b + a`). The constants are expressions, not floats: use `math.pi` where a number is needed.
 
+### Composing circuits
+
+`compose` appends another circuit, placing its qubit `i` on qubit `qubits[i]` of this one (by default on qubit `i`), and returns the circuit like the gate methods. Use it to put a template on a subregister or to run one circuit after another:
+
+```python
+import polypus
+from polypus.circuits.templates import qft
+
+qc = polypus.Circuit(3).x(0)
+qc.compose(qft(2), qubits=[1, 2])  # the QFT on qubits 1 and 2
+qc.compose(polypus.Circuit(2).cx(0, 1))  # then a CNOT on qubits 0 and 1
+```
+
+Free parameters are shared by index: `Param(0)` of the composed circuit is `Param(0)` of the result, so a parameter both circuits use is bound once, and the result takes the names the composed circuit gives to parameters it does not name. Classical bits are not renumbered: a measurement keeps its bit, and `measure_all` placed on a subregister measures `qubits[i]` into bit `i`. Every instruction is checked as its gate method would check it, in order and against the qubits the circuit has already measured (contract C-4), before any is appended. A map that does not give one distinct qubit per qubit of the composed circuit, a gate on a measured qubit, or a parameter the two circuits name differently raises `ValueError` and leaves the circuit unchanged.
+
+In Rust, `compose` takes and returns the circuit like the other builders and panics on an error; `try_compose` returns the error instead:
+
+```rust
+use polypus_circuit::templates::qft;
+use polypus_circuit::ParameterizedCircuit;
+
+let mut qc = ParameterizedCircuit::new(3).x(0);
+qc.try_compose(&qft(2)?, &[1, 2])?;
+```
+
 ## Templates
 
 `polypus.circuits.templates` builds ready-made circuits in Rust, without the GIL. They are ordinary `polypus.Circuit`s with no free parameters and no measurements: keep chaining gates onto them, measure them, or export them.
