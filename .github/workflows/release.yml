@@ -390,7 +390,8 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.2, tip of release/v1
+        # Release tags of this action are cut from its release/v1 branch.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
@@ -413,7 +414,8 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.2, tip of release/v1
+        # Release tags of this action are cut from its release/v1 branch.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
