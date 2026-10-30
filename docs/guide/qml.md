@@ -238,6 +238,31 @@ c2: ═════════════════════════�
 
 `S†` then `H` rotates `Y` onto `Z`, which is what the measurement reads (`X` needs only the `H`). `model.circuit(x, params)` fixes the trainable angles too, and `trained.circuit(x)` does so with the trained model's own parameters: it is exactly the circuit `trained.run([x])` executes, so `polypus.run_quantum_circuit(trained.circuit(x), shots, "local", backend="polypus", seed=s)` gives the counts of `trained.run([x], shots=shots, seed=s)`. `x` is checked as a row of `fit` is: a feature count the encoders cannot carry or a non-finite value raises `ValueError`.
 
+### Your own training loop: `qml.expval` and `qml.jacobian`
+
+`fit` runs the whole optimization. To write the loop yourself, with a loss of your own or another framework's optimizer, two functions give you the model's raw values and their derivatives, as NumPy arrays (`float64`, one row per row of `x`):
+
+- `qml.expval(model, x, params)` returns the expectation of **every** readout observable, shape `(rows, observables)`, whatever the decision: one column per class for `"argmax"`.
+- `qml.jacobian(model, x, params, wrt="params")` returns their derivatives with respect to the parameters, shape `(rows, observables, num_params)`. `wrt="inputs"` differentiates with respect to the features instead, shape `(rows, observables, features)`, and `wrt="both"` returns the two arrays as a tuple.
+
+Both take `params` as a list or an array of `num_params` values and the execution arguments of `run` (with `exact=True`, the exact values; with shots, estimates). The Jacobian is that of the expectations, not of a loss, so the chain rule is yours. For a squared error:
+
+```python
+params = np.zeros(model.num_params)
+for _ in range(40):
+    values = qml.expval(model, X, params, exact=True)[:, 0]
+    by_params = qml.jacobian(model, X, params, exact=True)[:, 0, :]
+    gradient = 2 * (values - y) @ by_params / len(y)  # d mean((⟨O₀⟩ − y)²) / dθ
+    params = params - 0.3 * gradient
+```
+
+[`examples/qml_expval_jacobian_loop.py`](../../examples/qml_expval_jacobian_loop.py) runs this loop to the end and checks that the loss goes down.
+
+- **Inputs.** The derivative with respect to the features covers angle encoders, re-uploaded ones included, and IQP encoders (for `Rzz(x_i·x_j)` it applies the product rule). Amplitude and basis encoders have no derivative in the data: `wrt="inputs"` or `"both"` with one raises `polypus.ConfigurationError`; `wrt="params"` works with any model.
+- **Cost.** `expval` runs one circuit per row. `jacobian` runs two per shifted gate per row (`+π/2` and `−π/2`): every gate that reads a parameter (a parameter shared by several gates, as in `conv` and `pool`, counts once per gate), every encoder gate that reads the row for `"inputs"`, both for `"both"`. A `real_amplitudes(1)` over 2 qubits has 4 parameters, so 8 circuits per row.
+- **Execution.** A call opens one backend for all its rows (one allocation on CUNQA) and runs them in blocks sized from the cores and the backend, so memory stays bounded however many rows you pass; Ctrl+C stops it between blocks. The result does not depend on the blocks: a call on all the rows equals the calls on pieces of them, put together.
+- **Seeds.** The functions return bare arrays, so the seed drawn when you omit `seed` is only logged: pass `seed=` to repeat a sampled call exactly. On Aer and CUNQA, a seeded call repeats on the same machine and configuration.
+
 ### Data
 
 `qml.Dataset(x, y=None)` checks the rows once (non-empty, equal width, finite) and keeps the labels with them. It splits reproducibly and scales features:

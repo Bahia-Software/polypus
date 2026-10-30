@@ -11,7 +11,7 @@ use polypus_circuit::{GateInstruction, Param, ParameterizedCircuit};
 
 use crate::error::{QmlError, ValidationError};
 use crate::layers::{even_pairs, odd_pairs};
-use crate::model::{LayerAllocation, LayerContext, LayerOps};
+use crate::model::{InputTrace, LayerAllocation, LayerContext, LayerOps};
 
 /// The two-qubit block emitted on every pair of a [`ConvLayer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,11 +101,12 @@ impl LayerOps for ConvLayer {
         })
     }
 
-    fn emit(
+    fn emit_traced(
         &self,
         qc: &mut ParameterizedCircuit,
         alloc: &LayerAllocation,
         _x: &[f64],
+        _trace: &mut InputTrace,
     ) -> Result<(), QmlError> {
         let start = alloc.params.start;
         for (a, b) in self.pairs(alloc.active.len()) {

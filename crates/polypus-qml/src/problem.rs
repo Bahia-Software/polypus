@@ -29,7 +29,7 @@ use polypus_circuit::{
 use crate::dataset::Dataset;
 use crate::error::{QmlError, ValidationError};
 use crate::loss::{categorical_cross_entropy, categorical_cross_entropy_gradient, Loss};
-use crate::model::CompiledModel;
+use crate::model::{CompiledModel, InputGate};
 use crate::observables::BitstringWeight;
 use crate::readout::Decision;
 use crate::rng::{shuffle, SplitMix64};
@@ -841,15 +841,56 @@ fn classify(gate: &GateInstruction) -> GateClass {
 /// Anything else that could carry an angle, an expression angle, or an
 /// instruction [`classify`] does not know, is a [`QmlError::NoExactGradient`].
 fn untie(template: &ParameterizedCircuit) -> Result<(ParameterizedCircuit, Vec<usize>), QmlError> {
+    let (untied, slots) = untie_traced(template, &[])?;
+    // With no input gates every slot is a parameter occurrence.
+    let owners = slots
+        .into_iter()
+        .filter_map(|slot| match slot {
+            Slot::Param(k) => Some(k),
+            Slot::Input { .. } => None,
+        })
+        .collect();
+    Ok((untied, owners))
+}
+
+/// What occurrence `j` (`Param(j)` of an untied template) stands for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Slot {
+    /// A gate that reads trainable parameter `k`.
+    Param(usize),
+    /// A gate whose angle reads the sample: its angle in the template, and
+    /// `(f, ∂angle/∂x_f)` for each feature it reads.
+    Input {
+        angle: f64,
+        features: Vec<(usize, f64)>,
+    },
+}
+
+/// [`untie`], also giving a slot of its own to each gate in `inputs` (a
+/// template's [`InputTrace`](crate::model::InputTrace) gates, in gate order),
+/// whose fixed angle becomes a free one so it can be shifted too.
+///
+/// An `inputs` gate that is not a Pauli rotation with a fixed angle, or a
+/// position past the template, is a [`QmlError::NoExactGradient`]: the trace
+/// and the template disagree, and a wrong derivative must not follow.
+pub(crate) fn untie_traced(
+    template: &ParameterizedCircuit,
+    inputs: &[InputGate],
+) -> Result<(ParameterizedCircuit, Vec<Slot>), QmlError> {
     use GateInstruction as G;
     let mut untied = ParameterizedCircuit::new(template.num_qubits());
-    let mut owners = Vec::new();
+    let mut slots = Vec::new();
+    let mut inputs = inputs.iter().peekable();
     for (position, gate) in template.gates().iter().enumerate() {
         let rejected = |what: &str| QmlError::NoExactGradient {
             reason: format!("instruction {position} ({gate:?}) {what}"),
         };
+        let input = inputs.next_if(|input| input.position == position);
         let gate = match classify(gate) {
-            GateClass::ParameterFree => gate.clone(),
+            GateClass::ParameterFree if input.is_none() => gate.clone(),
+            GateClass::ParameterFree => {
+                return Err(rejected("reads the sample but takes no angle"));
+            }
             GateClass::OtherAngle => {
                 return Err(rejected(
                     "takes an angle but is not a Pauli rotation, the only gates the exact \
@@ -858,11 +899,21 @@ fn untie(template: &ParameterizedCircuit) -> Result<(ParameterizedCircuit, Vec<u
             }
             GateClass::Unknown => return Err(rejected("is not a known instruction kind")),
             GateClass::PauliRotation => {
-                let mut fresh = |theta: &GateParam| match theta {
-                    GateParam::Fixed(_) => Ok(*theta),
-                    GateParam::Param(k) => {
-                        owners.push(*k);
-                        Ok(GateParam::Param(owners.len() - 1))
+                let mut fresh = |theta: &GateParam| match (theta, input) {
+                    (GateParam::Fixed(_), None) => Ok(*theta),
+                    (GateParam::Fixed(angle), Some(input)) => {
+                        slots.push(Slot::Input {
+                            angle: *angle,
+                            features: input.features.clone(),
+                        });
+                        Ok(GateParam::Param(slots.len() - 1))
+                    }
+                    (GateParam::Param(_), Some(_)) => Err(rejected(
+                        "reads the sample but its angle is a trainable parameter",
+                    )),
+                    (GateParam::Param(k), None) => {
+                        slots.push(Slot::Param(*k));
+                        Ok(GateParam::Param(slots.len() - 1))
                     }
                     _ => Err(rejected(
                         "has an expression angle; the exact parameter shift needs each \
@@ -898,7 +949,16 @@ fn untie(template: &ParameterizedCircuit) -> Result<(ParameterizedCircuit, Vec<u
         };
         untied.try_push(gate)?;
     }
-    Ok((untied, owners))
+    if let Some(input) = inputs.next() {
+        return Err(QmlError::NoExactGradient {
+            reason: format!(
+                "the sample is read at instruction {}, which the template does not have in \
+                 gate order",
+                input.position
+            ),
+        });
+    }
+    Ok((untied, slots))
 }
 
 #[cfg(test)]
@@ -2061,6 +2121,99 @@ mod tests {
                 QmlError::NoExactGradient { reason } => {
                     assert!(reason.contains("instruction 0"), "{reason}");
                     assert!(reason.contains("Pauli rotation"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?}"),
+            }
+        }
+    }
+
+    fn input_gate(position: usize, features: Vec<(usize, f64)>) -> InputGate {
+        InputGate { position, features }
+    }
+
+    #[test]
+    fn untie_traced_gives_traced_gates_their_own_slot_in_gate_order() {
+        // Rz(x₀) traced, a trainable Ry(θ₁), an untraced fixed Rx, and a traced
+        // Rzz(x₀·x₁): slots in gate order, the fixed untraced angle copied.
+        let mut template = ParameterizedCircuit::new(2);
+        for gate in [
+            GateInstruction::Rz {
+                qubit: 0,
+                theta: Fixed(0.3),
+            },
+            GateInstruction::Ry {
+                qubit: 1,
+                theta: GateParam::Param(1),
+            },
+            GateInstruction::Rx {
+                qubit: 1,
+                theta: Fixed(0.9),
+            },
+            GateInstruction::Rzz {
+                q0: 0,
+                q1: 1,
+                theta: Fixed(0.06),
+            },
+        ] {
+            template.try_push(gate).unwrap();
+        }
+        let inputs = [
+            input_gate(0, vec![(0, 1.0)]),
+            input_gate(3, vec![(0, 0.2), (1, 0.3)]),
+        ];
+        let (untied, slots) = untie_traced(&template, &inputs).unwrap();
+        assert_eq!(
+            slots,
+            vec![
+                Slot::Input {
+                    angle: 0.3,
+                    features: vec![(0, 1.0)]
+                },
+                Slot::Param(1),
+                Slot::Input {
+                    angle: 0.06,
+                    features: vec![(0, 0.2), (1, 0.3)]
+                },
+            ]
+        );
+        assert_eq!(
+            untied.gates()[2],
+            GateInstruction::Rx {
+                qubit: 1,
+                theta: Fixed(0.9)
+            }
+        );
+        // Binding every slot at its unshifted value gives back the template.
+        assert_eq!(
+            untied.assign_parameters(&[0.3, 0.5, 0.06]).unwrap(),
+            template.assign_parameters(&[0.0, 0.5]).unwrap()
+        );
+        // With no trace it is `untie` exactly.
+        let (plain, owners) = untie(&template).unwrap();
+        assert_eq!(untie_traced(&template, &[]).unwrap().0, plain);
+        assert_eq!(owners, vec![1]);
+    }
+
+    #[test]
+    fn untie_traced_rejects_a_trace_the_template_does_not_match() {
+        let mut template = ParameterizedCircuit::new(1);
+        template.try_push(GateInstruction::H(0)).unwrap();
+        template
+            .try_push(GateInstruction::Ry {
+                qubit: 0,
+                theta: GateParam::Param(0),
+            })
+            .unwrap();
+        // A traced gate without an angle, a traced trainable angle, and a
+        // position past the template: each a typed error, never a silent zero.
+        for (inputs, needle) in [
+            (vec![input_gate(0, vec![(0, 1.0)])], "takes no angle"),
+            (vec![input_gate(1, vec![(0, 1.0)])], "trainable parameter"),
+            (vec![input_gate(5, vec![(0, 1.0)])], "instruction 5"),
+        ] {
+            match untie_traced(&template, &inputs).unwrap_err() {
+                QmlError::NoExactGradient { reason } => {
+                    assert!(reason.contains(needle), "{reason}");
                 }
                 other => panic!("unexpected error {other:?}"),
             }

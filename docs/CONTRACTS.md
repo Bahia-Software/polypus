@@ -30,7 +30,7 @@ Rules of the road:
 | C-8 | qml.train row/dimension/label symmetry | `tests/python/test_qml_train_validation.py` (+ `test_qml_supervised.py`, `test_qml_predict.py`) | ✅ present | silent row truncation / late Qiskit error (#79) |
 | C-9 | `id` charset (train/qml.train; Python mirror in `running_functions`) | `tests/python/test_id_validation.py`, `tests/python/test_python_helpers_hygiene.py` | ✅ present | unvalidated `id` reached SLURM `family_name` / temp files / log streams (#89) |
 | C-10 | OpenQASM 3 profile | `polypus-circuit` `tests/qasm3.rs` + `polypus-sim` `tests/qasm3_semantics.rs` + `tests/python/test_qasm3*.py` + `fuzz/fuzz_targets/from_qasm3.rs` | ✅ present | — |
-| C-11 | Native QML (problem ↔ oracle, `polypus.qml.Model`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + `tests/python/test_qml_native*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
+| C-11 | Native QML (problem ↔ oracle, expectation Jacobian, `polypus.qml.Model`, `qml.expval`/`qml.jacobian`) | `polypus-qml` `tests/contracts.rs` + `tests/gradient_exactness.rs` + `tests/jacobian.rs` + `src/model.rs` serde tests + `polypus-evaluation` `qml_oracle.rs` + the primitive tests in `crates/polypus/src/bindings/qml.rs` + `tests/python/test_qml_native*.py` | ✅ present | the parameter-shift gradient was wrong for parameters shared across gates (convolution, pooling) until it shifted each occurrence (found when the native QML was brought onto `main`) |
 
 ✅ means the listed test enforces the contract; a ⏳ contract would be
 specified but only review-enforced until its test lands (none today). Known
@@ -1693,8 +1693,8 @@ is the first release action.*
 This contract governs the outer Rust↔Python boundary of the public entry
 points `polypus.run_quantum_circuit`, `polypus.train`, `polypus.qml.train` and
 `polypus.qml.predict`, and of the native QML API's `Model.fit`,
-`TrainedModel.predict` and `TrainedModel.run` (C-11): their `seed` kwarg and
-their return shape. (It is distinct from C-1, which
+`TrainedModel.predict`, `TrainedModel.run`, `polypus.qml.expval` and
+`polypus.qml.jacobian` (C-11): their `seed` kwarg and their return shape. (It is distinct from C-1, which
 freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
 
 ### The `seed` kwarg
@@ -1802,6 +1802,17 @@ freezes the *internal* `run_qcs` seam to the `polypus_python` package.)
   seed shot sampling like `run_quantum_circuit`: an explicit seed reproduces the
   counts, `None` draws one from OS entropy, and an explicit seed on `qmio` is a
   `ValueError`. With `exact=True` nothing is sampled.
+- **`qml.expval(..., seed=None)` / `qml.jacobian(..., seed=None)`** follow
+  `TrainedModel.run`: an explicit seed reproduces the result bit for bit, `None`
+  draws one from OS entropy, an explicit seed on `qmio` is a `ValueError`, and
+  with `exact=True` nothing is sampled. They return bare arrays with no manifest,
+  so the effective seed is only logged (with the run `id`, at `info`): to replay
+  a call, pass a `seed`. A call runs its rows in blocks over one backend (C-11);
+  on the native backend the circuit counter runs on across the blocks, so a
+  seeded result does not depend on the block size. On Aer and CUNQA each block
+  is at least one call, and the block size follows the host's cores and the
+  backend's concurrency, so a seeded call replays on the same configuration, as
+  a `qml.train` does (below).
 - **OS entropy failure.** If the OS entropy source cannot be read, the entry
   point raises `polypus.BackendError` instead of panicking — whether while
   drawing a default seed (`seed=None` and, for `train`/`qml.train`, no `seed`
@@ -1818,7 +1829,8 @@ A run (one entry-point call) sends its circuits to one backend in one or more
 calls: a `train` sends the initial population and one batch per generation,
 each split into waves when it exceeds the backend's concurrency (CUNQA:
 `n_qpus`) or the memory budget, and `qml.train` also windows its candidates by
-the host's cores; the `final_shots` batch is the last call. **Every call gets
+the host's cores, and `qml.expval`/`qml.jacobian` their rows by the same rule
+(C-11); the `final_shots` batch is the last call. **Every call gets
 its own sampling stream, on every backend** (#411), so no two calls of a run
 share shot noise, and the same seed replays the whole sequence:
 
@@ -1899,7 +1911,11 @@ rejection, and the returned manifest/outcome fields), `tests/python/test_qml_pre
 (the `qml.predict` manifest, seed replay and per-row counts),
 `tests/python/test_qml_native_training.py` and `test_qml_native_inference.py`
 (`Model.fit` and `TrainedModel.run`: seed replay, exact runs independent of
-shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields), the minibatch draws in
+shots, the `qmio` rejection, the `RunResult`/`ExactResult` fields),
+`test_qml_native_expval_jacobian.py`'s `TestBlocksAndSeeds` (`qml.expval` and
+`qml.jacobian`: seed replay, another seed differs, an omitted one is drawn, the
+`qmio` rejection) and `a_seeded_native_result_does_not_depend_on_the_block_size`
+in `crates/polypus/src/bindings/qml.rs`, the minibatch draws in
 `crates/polypus-evaluation/src/qml_oracle.rs`
 (`a_minibatch_is_drawn_once_per_call_and_shared_by_the_whole_call`),
 `tests/python/test_determinism_baseline.py` (seeded results pinned bit for bit:
@@ -2273,8 +2289,9 @@ C-8, whose circuits are opaque and scored by the caller's cost. The two forms
 are separate entry points that share the oracle, the scheduler and the
 optimizers underneath (`docs/adr/0007-native-qml.md`). The contract has a
 Rust half — the seam between a `QmlProblem` and the oracle that scores it, a
-Rust-to-Rust contract like C-5 — and a Python half, the `polypus.qml.Model` API
-built on it.
+Rust-to-Rust contract like C-5, and the loss-free expectation Jacobian beneath
+it — and a Python half, the `polypus.qml.Model` API built on it and the
+`qml.expval`/`qml.jacobian` primitives.
 
 ### The problem ↔ oracle seam (Rust)
 
@@ -2336,6 +2353,47 @@ batching and distribution are the oracle's concern.
   counter, and shared by every candidate of an `evaluate_batch` and by the base
   and every shift of a gradient; `evaluate_full` scores every sample (the
   minibatch rules of C-5).
+- **(g) The expectation Jacobian (loss-free).** `CompiledModel::jacobian(samples,
+  wrt)` builds an `ExpectationJacobian`: the circuits and the reader of
+  `∂⟨O_o⟩(x_s, θ)` for **every** readout observable `O_o` and sample `x_s`,
+  with no labels and no loss, so it takes every readout (`Argmax` included,
+  which `QmlProblem` pairs only with the categorical loss). `wrt` is
+  `Params` (shape `(samples, observables, num_params)`), `Inputs` (shape
+  `(samples, observables, num_features)`) or `Both` (the two, from one set of
+  circuits); the `Jacobian` it reads is flat and row-major, a part `wrt` did
+  not ask for `None`. `CompiledModel::expectations_from_counts` /
+  `expectations_from_probabilities` read the expectations themselves, one
+  sample at a time.
+  - *Mechanics.* (e)'s, reused: every template is untied and each occurrence
+    shifted by `±π/2` on its own. A trainable gate adds
+    `(⟨O⟩(+) − ⟨O⟩(−))/2` to the parameter it reads (summed over the gates
+    that share it). The encoders record which gates read the sample and the
+    chain-rule factor of each feature they read: an angle encoder's `R(x_f)`
+    and an IQP encoder's `Rz(x_f)` have factor `1`; an IQP `Rzz(x_i·x_j)` has
+    `x_j` towards `x_i` and `x_i` towards `x_j`, and is shifted **once** for
+    both. Data re-uploading sums the gates that read a feature. Recording this
+    changes no gate: every template is, gate for gate, what it was.
+  - *Circuits and order.* `2 · shifts` circuits per sample and no unshifted
+    one, `shifts` counting the gates that read a parameter (a parameter shared
+    by `g` gates counts `g` times) for `Params`, the gates that read the sample
+    for `Inputs`, both for `Both`; sample-major, and per sample the `+π/2` then
+    the `−π/2` circuit of each shifted gate in gate order. Results come back in
+    the same order; the wrong number is `QmlError::CountsLengthMismatch`. It
+    can be bound and read block by block (`blocks`, `block(range)`), the
+    blocks' Jacobians concatenating to the whole one value for value.
+  - *Exactness.* From exact probabilities it is the Jacobian: it matches a
+    central finite difference of the expectations to near machine precision
+    for every layer and readout (and the inputs of angle and IQP encoders);
+    from counts, an unbiased estimator. The chain rule over it,
+    `−(1/n)·Σ_i Σ_o ∂loss/∂⟨O_o⟩(x_i) · J[i, o, :]`, is `QmlProblem`'s
+    gradient for every loss.
+  - *Errors, all at construction.* A sample of the wrong width or one its
+    encoder rejects is that `QmlError`; a model the shift rule cannot
+    differentiate is `QmlError::NoExactGradient`, whatever `wrt`; with
+    `Inputs` or `Both`, an amplitude or basis encoder, whose angles have no
+    derivative in the sample, is `QmlError::NoInputGradient` naming it;
+    samples that read their parameters or features through different gates are
+    `QmlError::NoExactGradient`, never a silently wrong Jacobian.
 
 ### The Python API (`polypus.qml`)
 
@@ -2393,6 +2451,7 @@ stubs spell each set as a `Literal`.
 | `pool(keep=)` | `"even_positions"`, `"odd_positions"` |
 | `Readout(decision=)` | `"raw"`, `"sign"`, `"threshold"`, `"argmax"` |
 | `fit(loss=)` | `"squared_error"`, `"binary_cross_entropy"`, `"hinge"`, `"categorical_cross_entropy"`, `"expectation"` |
+| `qml.jacobian(wrt=)` | `"params"`, `"inputs"`, `"both"` (a `polypus.ConfigurationError`, like every check of the primitives) |
 
 **Training (`Model.fit`).** `fit(x, y=None, *, method, loss=None, …)`; every
 argument after `y` is keyword-only and `method` is required. It returns a
@@ -2481,6 +2540,55 @@ builds a circuit and runs nothing, so the same row that `run` rejects with a
 `ConfigurationError` is a `ValueError` here. The model is unchanged, and each
 call returns a new `Circuit`.
 
+**Expectation and Jacobian primitives.** `qml.expval(model, x, params, *, …)`
+and `qml.jacobian(model, x, params, *, wrt="params", …)` expose (g) to Python,
+for a training loop of the caller's own:
+
+- **Arguments.** `model` is a `polypus.qml.Model` (anything else, a
+  `TrainedModel` included, is a `TypeError`); `x` is rows or a `Dataset` (its
+  labels are not used); `params` is a list, tuple or NumPy array of exactly
+  `num_params` finite values, checked as `bind` checks them. The execution
+  arguments are `TrainedModel.run`'s, keyword-only, with its rules: `exact`
+  needs `infrastructure="local"` and `backend="polypus"`, `backend=None` goes
+  by infrastructure, `seed` is drawn when omitted and refused on `qmio` (C-7).
+- **Results.** `float64` `numpy.ndarray`s, C-contiguous, rows in row order:
+  `expval` → `(rows, observables)` with every readout observable, whatever the
+  decision (one column per class for `"argmax"`, the weighted sum for an
+  `Observable`); `jacobian` → `(rows, observables, num_params)` for
+  `wrt="params"`, `(rows, observables, features)` for `"inputs"`, and the tuple
+  of both for `"both"`, each identical to its separate call. With `exact=True`
+  they are the exact values, what `run(exact=True)` and `predict(exact=True)`
+  read; with shots, unbiased estimates. No manifest: the seed and `id` are
+  logged; pass a `seed` to replay.
+- **The input Jacobian** covers angle encoders, angle re-uploading and IQP
+  encoders (re-uploaded or not), through (g)'s chain rule (`Rz(x_i)` factor `1`,
+  `Rzz(x_i·x_j)` factors `x_j` and `x_i`). An amplitude or basis encoder, in the
+  `Encoder` or the `Ansatz`, has no derivative in the sample: `wrt="inputs"` or
+  `"both"` with one is a `polypus.ConfigurationError` naming it; `"params"`
+  takes any model.
+- **Circuits.** `expval` runs one per row; `jacobian` `2 · shifts` per row
+  ((g): every gate that reads a parameter, once per gate, every encoder gate
+  that reads the row, an IQP `Rzz` once for its two features), and no
+  unshifted circuit.
+- **Execution.** One backend and one scheduler per call — one connection, one
+  `qraise` on CUNQA — closed on every way out, errors and Ctrl+C included. The
+  rows run in sequential blocks, each bound, run and dropped before the next
+  (the planner splits a block into waves), so the live circuits stay bounded.
+  Rows per block are the `QmlOracle`'s candidate window, sized by the same
+  function (`polypus_evaluation::candidate_window_size`, with rows for
+  candidates): derived from the host's cores, the backend's concurrency and
+  the circuits per row, never configured. The whole
+  block loop runs with the GIL released, and Ctrl+C raises `KeyboardInterrupt`
+  between blocks (the exact path included, which has no planner) and between
+  waves. The result does not depend on the blocks: rows come back in row
+  order, and a call on some rows equals the concatenation of calls on chunks
+  of them.
+- **Checks.** Every one runs before a backend exists and raises
+  `polypus.ConfigurationError`, in order: `wrt`; `shots` and `n_qpus`, the
+  CUNQA allocation and `exact`; the rows against the model; `params`; the
+  model and rows against `wrt` ((g)'s errors); a `seed` on `qmio`. The
+  `TypeError` for `model` comes first.
+
 **Save format.** `TrainedModel.save(path)` writes, and `polypus.qml.load(path)`
 reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
 
@@ -2509,6 +2617,11 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     zero-sample guards;
   - `crates/polypus-qml/tests/gradient_exactness.rs` and
     `every_instruction_kind_is_classified` in `src/problem.rs`: (e);
+  - `crates/polypus-qml/tests/jacobian.rs`, the `untie_traced_*` tests in
+    `src/problem.rs`, the tests in `src/jacobian.rs` (a structure other than
+    sample 0's, an angle gate that is not a Pauli rotation, an opaque encoder
+    against `wrt`), and the trace tests in `src/model.rs` and the encoders:
+    (g);
   - the `serde_tests` and `trained_model_tests` in `src/model.rs`: the save
     format, exact round-trip and revalidation on load;
   - the `native_*`, `a_minibatch_*`, `evaluate_full_*` and `the_factory_*`
@@ -2521,7 +2634,13 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
     `crates/polypus/src/bindings/qml.rs`: the bound circuit `circuit` returns
     is, gate for gate, the one the model binds;
     `final_shots_is_refused_only_with_exact` there: `fit`'s `final_shots`
-    with `exact=True`.
+    with `exact=True`; and the primitive tests there (the seeded result
+    independent of the block size, row order, one backend created and closed
+    once, a cancellation or an error between blocks, a backend closed when no
+    scheduler can be built over it, the array conversion), with the window
+    tests in `crates/polypus-evaluation/src/qml_oracle.rs`
+    (`a_backend_*`, `the_lift_*`, `many_circuits_per_item_*`,
+    `the_window_is_never_zero`): `qml.expval`/`qml.jacobian`'s execution.
 - **Python:** `tests/python/test_qml_native.py` (construction, the option
   sets, every construction check, `Dataset` splits and scaling, the
   `qml.train`/`qml.predict` rejection), `test_qml_native_layers.py` (what each
@@ -2535,18 +2654,25 @@ reads, a JSON file shared with the `polypus-qml` crate's `TrainedModel`:
   `test_qml_native_circuit.py` (`Model.circuit` and `TrainedModel.circuit`:
   the shape and parameter names, the basis change, the drawings, counts and
   exact probabilities identical to `run`'s, every rejection),
+  `test_qml_native_expval_jacobian.py` (`qml.expval` and `qml.jacobian`:
+  types, shapes and contiguity, `expval` against `run`/`predict`, the Jacobian
+  against finite differences for every layer and readout and against the
+  chain rule of a loss, chunks, seeds, shots, every rejection),
   `test_qml_native_initial_point_final_shots.py` (`fit`'s `initial_point` and
   `final_shots`: every rejection before the CUNQA seam and their order, the
   refusal of `final_shots` with `exact=True`, where each optimizer starts, a
   model read back with `qml.load` trained on, and the final re-evaluation on
   every sample, minibatches included, with its shots and every sample at the
   seam), `test_typing_stubs.py`'s
-  `TestFitTypes` (the stub types of both), the native
+  `TestFitTypes` (the stub types of both) and `TestPrimitiveTypes` (each
+  `wrt`'s result type), the native
   QML cases of `test_interrupt.py` (Ctrl+C during `fit`, with and without a
-  `callback`; the minibatch rescore runs with the GIL released),
+  `callback`, and during `qml.jacobian`, exact and sampled; the minibatch
+  rescore runs with the GIL released),
   `TestNativeQmlChecksRaiseIt` in `test_configuration_errors.py` (every check
-  of `fit`, `predict` and `run` is a `polypus.ConfigurationError` raised before
-  any CUNQA call), and the `Model.fit` cases of `test_callback.py` (its
+  of `fit`, `predict`, `run`, `qml.expval` and `qml.jacobian` is a
+  `polypus.ConfigurationError` raised before any CUNQA call, and a primitive
+  runs every block on one allocation), and the `Model.fit` cases of `test_callback.py` (its
   `callback`'s `TypeError` before the CUNQA seam and after `final_shots`, one
   call per iteration for every optimizer, Adam's `evaluations`, a stop that
   still sends the final batch, an exception raised as itself, with no call or
